@@ -1,0 +1,12 @@
+[package]
+name = "bootty-runtime"
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bootty-surface = { path = "../bootty-surface" }
+bootty-terminal = { path = "../bootty-terminal" }
+portable-pty.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
