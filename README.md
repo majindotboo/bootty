@@ -28,6 +28,18 @@ npm install
 npm run tauri -- dev
 ```
 
+
+Static GitHub Pages demo with an in-browser fake shell:
+
+```sh
+cd crates/bootty-tauri
+npm install
+npm run build:pages
+```
+
+The static build writes `crates/bootty-tauri/pages-dist`. Host that directory
+with GitHub Pages or any static file server. It does not require Tauri, a PTY,
+or a native backend.
 ## Library shape
 
 Embedders usually need:

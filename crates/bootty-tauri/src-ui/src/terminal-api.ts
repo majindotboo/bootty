@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { WebTerminalFrame } from "./terminal-types";
 
 export type TerminalResize = {
@@ -8,18 +7,20 @@ export type TerminalResize = {
   cellHeight: number;
 };
 
-export function startTerminal(): Promise<WebTerminalFrame> {
-  return invoke<WebTerminalFrame>("start_terminal");
-}
+export type TerminalBackend = {
+  label: string;
+  start(): Promise<WebTerminalFrame>;
+  readFrame(): Promise<WebTerminalFrame>;
+  resize(request: TerminalResize): Promise<WebTerminalFrame>;
+  write(input: string): Promise<void>;
+};
 
-export function readTerminalFrame(): Promise<WebTerminalFrame> {
-  return invoke<WebTerminalFrame>("terminal_frame");
-}
+export async function createTerminalBackend(): Promise<TerminalBackend> {
+  if (import.meta.env.MODE === "github-pages" || import.meta.env.VITE_TERMINAL_BACKEND === "fake") {
+    const { createFakeShellBackend } = await import("./fake-shell-backend");
+    return createFakeShellBackend();
+  }
 
-export function resizeTerminal(request: TerminalResize): Promise<WebTerminalFrame> {
-  return invoke<WebTerminalFrame>("resize_terminal", { request });
-}
-
-export function writeTerminal(input: string): Promise<void> {
-  return invoke("write_terminal", { input });
+  const { createTauriTerminalBackend } = await import("./tauri-terminal-backend");
+  return createTauriTerminalBackend();
 }

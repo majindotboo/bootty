@@ -16,15 +16,21 @@ The backend does not depend on egui.
 
 ## Frontend boundary
 
-`src-ui/src` is intentionally split into three pieces:
+`src-ui/src` is intentionally split into focused pieces:
 
-- `terminal-api.ts` wraps the Tauri commands
+- `terminal-api.ts` selects the active frontend backend
+- `tauri-terminal-backend.ts` wraps the Tauri commands
+- `fake-shell-backend.ts` provides a static, in-browser demo shell
 - `main.tsx` is the React shell and polling/input loop
 - `webgl-terminal.ts` renders terminal frames with WebGL2
 
 The WebGL renderer uses instanced quads for backgrounds, text, underlines, and
 cursor. Text glyphs are cached in a DPR-aware atlas; Canvas2D is only used when
 rasterizing a new glyph into that atlas.
+
+The default build uses the Tauri backend. `npm run build:pages` uses
+`.env.github-pages` to select the fake shell backend and writes `pages-dist`,
+which can be hosted directly by GitHub Pages.
 
 ## Run
 
@@ -37,6 +43,7 @@ npm run tauri -- dev
 
 ```sh
 npm run build
+npm run build:pages
 cargo test -p bootty-tauri
 npm run tauri -- build --no-bundle
 ```

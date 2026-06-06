@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { readTerminalFrame, resizeTerminal, startTerminal, writeTerminal } from "./terminal-api";
+import { createTerminalBackend } from "./terminal-api";
+import type { TerminalBackend } from "./terminal-api";
 import type { WebTerminalFrame } from "./terminal-types";
 import { WebGlTerminalRenderer } from "./webgl-terminal";
 import "./style.css";
@@ -12,6 +13,7 @@ function App() {
   const rendererRef = useRef<WebGlTerminalRenderer | null>(null);
   const frameRef = useRef<WebTerminalFrame | null>(null);
   const gridRef = useRef<GridSize | null>(null);
+  const backendRef = useRef<TerminalBackend | null>(null);
   const resizeInFlightRef = useRef(false);
   const [status, setStatus] = useState("starting terminal");
   const [frameCount, setFrameCount] = useState(0);
@@ -21,7 +23,7 @@ function App() {
     window.requestAnimationFrame(() => canvasRef.current?.focus());
   }, []);
 
-  const resizeToCanvas = useCallback(async (frame: WebTerminalFrame) => {
+  const resizeToCanvas = useCallback(async (backend: TerminalBackend, frame: WebTerminalFrame) => {
     const canvas = canvasRef.current;
     if (!canvas || resizeInFlightRef.current) {
       return frame;
@@ -35,7 +37,7 @@ function App() {
 
     resizeInFlightRef.current = true;
     try {
-      const resized = await resizeTerminal({
+      const resized = await backend.resize({
         cols: nextGrid.cols,
         rows: nextGrid.rows,
         cellWidth: frame.cellWidth,
@@ -62,11 +64,15 @@ function App() {
 
     async function drawNextFrame() {
       try {
-        let frame = await readTerminalFrame();
+        const backend = backendRef.current;
+        if (!backend) {
+          return;
+        }
+        let frame = await backend.readFrame();
         if (stop) {
           return;
         }
-        frame = await resizeToCanvas(frame);
+        frame = await resizeToCanvas(backend, frame);
         if (stop) {
           return;
         }
@@ -85,18 +91,20 @@ function App() {
     }
 
     async function start() {
-      let frame = await startTerminal();
+      const backend = await createTerminalBackend();
+      backendRef.current = backend;
+      let frame = await backend.start();
       if (stop) {
         return;
       }
-      frame = await resizeToCanvas(frame);
+      frame = await resizeToCanvas(backend, frame);
       if (stop) {
         return;
       }
       frameRef.current = frame;
       renderer.render(frame);
       setFrameCount((count) => count + 1);
-      setStatus("webgl2 renderer");
+      setStatus(backend.label);
       focusTerminal();
       timeout = window.setTimeout(drawNextFrame, 33);
     }
@@ -107,6 +115,7 @@ function App() {
       stop = true;
       window.clearTimeout(timeout);
       renderer.dispose();
+      backendRef.current = null;
       rendererRef.current = null;
     };
   }, [focusTerminal, resizeToCanvas]);
@@ -115,11 +124,12 @@ function App() {
     const onResize = async () => {
       const frame = frameRef.current;
       const renderer = rendererRef.current;
-      if (!frame || !renderer) {
+      const backend = backendRef.current;
+      if (!frame || !renderer || !backend) {
         return;
       }
       try {
-        const resized = await resizeToCanvas(frame);
+        const resized = await resizeToCanvas(backend, frame);
         frameRef.current = resized;
         renderer.render(resized);
       } catch (error) {
@@ -135,7 +145,12 @@ function App() {
     if (input.length === 0) {
       return;
     }
-    writeTerminal(input)
+    const backend = backendRef.current;
+    if (!backend) {
+      return;
+    }
+    backend
+      .write(input)
       .then(() => setInputCount((count) => count + input.length))
       .catch((error) => setStatus(String(error)));
   }, []);

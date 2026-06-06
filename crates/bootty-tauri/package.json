@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
+    "dev:pages": "vite --mode github-pages --host 127.0.0.1 --port 4173",
     "build": "tsc && vite build",
+    "build:pages": "tsc && vite build --mode github-pages",
+    "preview:pages": "vite preview --outDir pages-dist --host 127.0.0.1 --port 4173",
     "preview": "vite preview",
     "tauri": "tauri"
   },
