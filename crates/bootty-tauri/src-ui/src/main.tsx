@@ -107,7 +107,6 @@ function App() {
       renderer.render(frame);
       recordFrame(fpsRef, setFps);
       setStatus(backend.label);
-      focusTerminal();
       animationFrame = window.requestAnimationFrame(() => {
         void drawNextFrame();
       });
@@ -122,7 +121,7 @@ function App() {
       backendRef.current = null;
       rendererRef.current = null;
     };
-  }, [focusTerminal, resizeToCanvas]);
+  }, [resizeToCanvas]);
 
   useEffect(() => {
     const onResize = async () => {
@@ -169,24 +168,130 @@ function App() {
   );
 
   return (
-    <main>
-      <header>
-        <strong>Bootty Web Terminal</strong>
-        <span>{status}</span>
-        <span>fps: {fps.toFixed(1)}</span>
-      </header>
-      <canvas
-        ref={canvasRef}
-        className="terminal"
-        tabIndex={0}
-        onMouseDown={focusTerminal}
-        onKeyDown={onKeyDown}
-        onPaste={(event) => {
-          event.preventDefault();
-          sendInput(event.clipboardData.getData("text"));
-        }}
-      />
+    <main className="site-shell">
+      <nav className="site-nav" aria-label="Primary">
+        <a className="brand" href="#top" aria-label="Bootty home">
+          <img className="brand-logo" src="./bootty-logo.png" alt="" />
+          <span>Bootty</span>
+        </a>
+        <div className="nav-links">
+          <a href="#demo">Demo</a>
+          <a href="#stack">Stack</a>
+          <a href="https://github.com/majinboos/bootty">GitHub</a>
+        </div>
+      </nav>
+
+      <section className="hero" id="top">
+        <div className="hero-copy">
+          <div className="hero-lockup">
+            <img src="./bootty-logo.png" alt="Bootty logo" />
+            <div>
+              <strong>Bootty</strong>
+              <span>Terminal renderer</span>
+            </div>
+          </div>
+          <h1>Bootty renders terminals.</h1>
+          <p className="hero-text">A GPU renderer for terminal frames.</p>
+        </div>
+
+        <TerminalDemo
+          canvasRef={canvasRef}
+          status={status}
+          fps={fps}
+          focusTerminal={focusTerminal}
+          onKeyDown={onKeyDown}
+          sendInput={sendInput}
+        />
+      </section>
+
+      <section className="feature-grid" aria-label="Bootty highlights">
+        <article>
+          <span className="feature-kicker">Frames</span>
+          <h2>Cells in.</h2>
+          <p>Text, colors, cursor state, and images.</p>
+        </article>
+        <article>
+          <span className="feature-kicker">GPU</span>
+          <h2>Pixels out.</h2>
+          <p>Terminal frames drawn by the renderer.</p>
+        </article>
+        <article>
+          <span className="feature-kicker">Demo</span>
+          <h2>Try it.</h2>
+          <p>Click the terminal and type.</p>
+        </article>
+      </section>
+
+      <section className="stack-section" id="stack">
+        <div>
+          <p className="eyebrow">Pieces</p>
+          <h2>Small parts.</h2>
+        </div>
+        <div className="stack-list">
+          <div>
+            <strong>bootty-terminal</strong>
+            <span>frames</span>
+          </div>
+          <div>
+            <strong>bootty-render</strong>
+            <span>GPU renderer</span>
+          </div>
+          <div>
+            <strong>bootty-tauri</strong>
+            <span>app and web demo</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="demo-notes" aria-label="Demo instructions">
+        <div>
+          <p className="eyebrow">Demo</p>
+          <h2>Try it.</h2>
+        </div>
+        <p>
+          Run <code>help</code>, <code>ls</code>, or <code>vim demo.txt</code>.
+        </p>
+      </section>
     </main>
+  );
+}
+
+type TerminalDemoProps = {
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  status: string;
+  fps: number;
+  focusTerminal: () => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLCanvasElement>) => void;
+  sendInput: (input: string) => void;
+};
+
+function TerminalDemo({ canvasRef, status, fps, focusTerminal, onKeyDown, sendInput }: TerminalDemoProps) {
+  return (
+    <section className="terminal-card" id="demo" aria-labelledby="terminal-demo-title">
+      <div className="terminal-toolbar">
+        <div>
+          <p className="terminal-label" id="terminal-demo-title">
+            Live terminal
+          </p>
+          <span>{status}</span>
+        </div>
+        <span>fps {fps.toFixed(1)}</span>
+      </div>
+      <div className="terminal-pad">
+        <canvas
+          ref={canvasRef}
+          className="terminal"
+          tabIndex={0}
+          aria-label="Interactive Bootty terminal demo"
+          onMouseDown={focusTerminal}
+          onKeyDown={onKeyDown}
+          onPaste={(event) => {
+            event.preventDefault();
+            sendInput(event.clipboardData.getData("text"));
+          }}
+        />
+      </div>
+    </section>
   );
 }
 
