@@ -88,8 +88,12 @@ export class WebGlTerminalRenderer {
         continue;
       }
 
-      const glyph = this.atlas.glyph(cell.text, frame.cellWidth, frame.cellHeight, this.dpr, cell.style);
       const color = resolvedCellColors(frame, cell).foreground;
+      if (pushBoxDrawingInstance(backgroundInstances, cell, frame, rgba(color))) {
+        continue;
+      }
+
+      const glyph = this.atlas.glyph(cell.text, frame.cellWidth, frame.cellHeight, this.dpr, cell.style);
       pushTextInstance(
         textInstances,
         cell.x * frame.cellWidth,
@@ -304,8 +308,8 @@ class GlyphAtlas {
   private next = 0;
 
   private static readonly size = 2048;
-  private static readonly tileWidth = 96;
-  private static readonly tileHeight = 48;
+  private static readonly tileWidth = 128;
+  private static readonly tileHeight = 96;
 
   constructor(private readonly gl: WebGL2RenderingContext) {
     this.texture = required(gl.createTexture(), "create glyph atlas texture");
@@ -346,11 +350,10 @@ class GlyphAtlas {
     this.tileContext.textBaseline = "top";
     this.tileContext.textAlign = "left";
     this.tileContext.font = terminalFont(cellHeight * dpr, style);
-    this.tileContext.fillText(text, 0, Math.round(2 * dpr));
+    this.tileContext.fillText(text, 0, Math.round(1 * dpr));
 
-    const metrics = this.tileContext.measureText(text);
-    const glyphWidthPx = Math.min(GlyphAtlas.tileWidth, Math.max(Math.ceil(cellWidth * dpr), Math.ceil(metrics.width)));
-    const glyphHeightPx = Math.min(GlyphAtlas.tileHeight, Math.max(Math.ceil(cellHeight * dpr), Math.ceil((cellHeight + 4) * dpr)));
+    const glyphWidthPx = Math.min(GlyphAtlas.tileWidth, Math.ceil(cellWidth * dpr));
+    const glyphHeightPx = Math.min(GlyphAtlas.tileHeight, Math.ceil(cellHeight * dpr));
 
     this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
     this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
@@ -375,6 +378,47 @@ class GlyphAtlas {
 
 function pushSolidInstance(instances: number[], x: number, y: number, width: number, height: number, color: Rgba): void {
   instances.push(x, y, width, height, ...color);
+}
+
+function pushBoxDrawingInstance(instances: number[], cell: WebCell, frame: WebTerminalFrame, color: Rgba): boolean {
+  const x = cell.x * frame.cellWidth;
+  const y = cell.y * frame.cellHeight;
+  const thickness = Math.max(2, Math.ceil(frame.cellWidth * 0.18));
+  const midX = x + Math.floor(frame.cellWidth / 2);
+  const midY = y + Math.floor(frame.cellHeight / 2);
+  const horizontal = () => pushSolidInstance(instances, x - 1, midY, frame.cellWidth + 2, thickness, color);
+  const vertical = () => pushSolidInstance(instances, midX, y - 1, thickness, frame.cellHeight + 2, color);
+
+  switch (cell.text) {
+    case "─":
+      horizontal();
+      return true;
+    case "│":
+      vertical();
+      return true;
+    case "┌":
+    case "╭":
+      pushSolidInstance(instances, midX, midY, frame.cellWidth / 2 + 1, thickness, color);
+      pushSolidInstance(instances, midX, midY, thickness, frame.cellHeight / 2 + 1, color);
+      return true;
+    case "┐":
+    case "╮":
+      pushSolidInstance(instances, x, midY, frame.cellWidth / 2 + 1, thickness, color);
+      pushSolidInstance(instances, midX, midY, thickness, frame.cellHeight / 2 + 1, color);
+      return true;
+    case "└":
+    case "╰":
+      pushSolidInstance(instances, midX, midY, frame.cellWidth / 2 + 1, thickness, color);
+      pushSolidInstance(instances, midX, y, thickness, frame.cellHeight / 2 + 1, color);
+      return true;
+    case "┘":
+    case "╯":
+      pushSolidInstance(instances, x, midY, frame.cellWidth / 2 + 1, thickness, color);
+      pushSolidInstance(instances, midX, y, thickness, frame.cellHeight / 2 + 1, color);
+      return true;
+    default:
+      return false;
+  }
 }
 
 function pushTextInstance(
@@ -453,8 +497,7 @@ function resolvedCellColors(frame: WebTerminalFrame, cell: WebCell): ResolvedCel
 
 function terminalFont(cellHeight: number, style: WebCell["style"]): string {
   const slant = style.italic ? "italic " : "";
-  const weight = style.bold ? "700 " : "";
-  return `${slant}${weight}${Math.floor(cellHeight * 0.72)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+  return `${slant}${Math.floor(cellHeight * 0.78)}px "Maple Mono NF", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
 }
 
 function rgba(color: WebColor, alpha = 1): Rgba {

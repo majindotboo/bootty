@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { createTerminalBackend } from "./terminal-api";
 import type { TerminalBackend } from "./terminal-api";
@@ -15,13 +15,7 @@ function App() {
   const gridRef = useRef<GridSize | null>(null);
   const backendRef = useRef<TerminalBackend | null>(null);
   const resizeInFlightRef = useRef(false);
-  const [status, setStatus] = useState("starting terminal");
   const fpsRef = useRef({ frames: 0, startedAt: performance.now() });
-  const [fps, setFps] = useState(0);
-
-  const focusTerminal = useCallback(() => {
-    window.requestAnimationFrame(() => canvasRef.current?.focus());
-  }, []);
 
   const resizeToCanvas = useCallback(async (backend: TerminalBackend, frame: WebTerminalFrame) => {
     const canvas = canvasRef.current;
@@ -51,6 +45,53 @@ function App() {
     }
   }, []);
 
+  const draw = useCallback(async () => {
+    const backend = backendRef.current;
+    const renderer = rendererRef.current;
+    if (!backend || !renderer) {
+      return;
+    }
+
+    let frame = await resizeToCanvas(backend, await backend.readFrame());
+    frame = await publishFps(backend, frame, fpsRef.current);
+    frameRef.current = frame;
+    renderer.render(frame);
+  }, [resizeToCanvas]);
+
+  const sendInput = useCallback(
+    (input: string) => {
+      const backend = backendRef.current;
+      if (!backend || input.length === 0) {
+        return;
+      }
+      backend.write(input).then(draw).catch(reportError);
+    },
+    [draw],
+  );
+
+  const sendMouse = useCallback(
+    (kind: "move" | "down" | "up" | "leave", event: React.PointerEvent<HTMLCanvasElement>) => {
+      const backend = backendRef.current;
+      const renderer = rendererRef.current;
+      const frame = frameRef.current;
+      const canvas = canvasRef.current;
+      if (!backend?.mouse || !renderer || !frame || !canvas) {
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.max(0, Math.min(frame.cols - 1, Math.floor((event.clientX - rect.left) / frame.cellWidth)));
+      const y = Math.max(0, Math.min(frame.rows - 1, Math.floor((event.clientY - rect.top) / frame.cellHeight)));
+      backend
+        .mouse({ kind, x, y, button: event.button })
+        .then((nextFrame) => {
+          frameRef.current = nextFrame;
+          renderer.render(nextFrame);
+        })
+        .catch(reportError);
+    },
+    [],
+  );
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -62,57 +103,32 @@ function App() {
     let stop = false;
     let animationFrame = 0;
 
-    async function drawNextFrame() {
-      try {
-        const backend = backendRef.current;
-        if (!backend) {
-          return;
-        }
-        let frame = await backend.readFrame();
-        if (stop) {
-          return;
-        }
-        frame = await resizeToCanvas(backend, frame);
-        if (stop) {
-          return;
-        }
-        frameRef.current = frame;
-        renderer.render(frame);
-        recordFrame(fpsRef, setFps);
-      } catch (error) {
-        if (!stop) {
-          setStatus(String(error));
-        }
-      }
-
-      if (!stop) {
-        animationFrame = window.requestAnimationFrame(() => {
-          void drawNextFrame();
-        });
-      }
-    }
-
-    async function start() {
-      const backend = await createTerminalBackend();
-      backendRef.current = backend;
-      let frame = await backend.start();
+    async function drawLoop() {
       if (stop) {
         return;
       }
-      frame = await resizeToCanvas(backend, frame);
+      try {
+        await draw();
+      } catch (error) {
+        reportError(error);
+      }
+      animationFrame = window.requestAnimationFrame(drawLoop);
+    }
+
+    async function start() {
+      await loadTerminalFont();
+      const backend = await createTerminalBackend();
+      backendRef.current = backend;
+      const frame = await resizeToCanvas(backend, await backend.start());
       if (stop) {
         return;
       }
       frameRef.current = frame;
       renderer.render(frame);
-      recordFrame(fpsRef, setFps);
-      setStatus(backend.label);
-      animationFrame = window.requestAnimationFrame(() => {
-        void drawNextFrame();
-      });
+      animationFrame = window.requestAnimationFrame(drawLoop);
     }
 
-    start().catch((error) => setStatus(String(error)));
+    start().catch(reportError);
 
     return () => {
       stop = true;
@@ -121,201 +137,89 @@ function App() {
       backendRef.current = null;
       rendererRef.current = null;
     };
-  }, [resizeToCanvas]);
+  }, [draw, resizeToCanvas]);
 
   useEffect(() => {
-    const onResize = async () => {
-      const frame = frameRef.current;
-      const renderer = rendererRef.current;
-      const backend = backendRef.current;
-      if (!frame || !renderer || !backend) {
-        return;
-      }
-      try {
-        const resized = await resizeToCanvas(backend, frame);
-        frameRef.current = resized;
-        renderer.render(resized);
-      } catch (error) {
-        setStatus(String(error));
-      }
+    const onResize = () => {
+      gridRef.current = null;
+      draw().catch(reportError);
     };
-
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [resizeToCanvas]);
-
-  const sendInput = useCallback((input: string) => {
-    if (input.length === 0) {
-      return;
-    }
-    const backend = backendRef.current;
-    if (!backend) {
-      return;
-    }
-    backend.write(input).catch((error) => setStatus(String(error)));
-  }, []);
-
-  const onKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+    const onKeyDown = (event: KeyboardEvent) => {
       const encoded = encodeKey(event);
       if (encoded == null) {
         return;
       }
       event.preventDefault();
       sendInput(encoded);
-    },
-    [sendInput],
-  );
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      event.preventDefault();
+      sendInput(event.clipboardData?.getData("text") ?? "");
+    };
+
+    window.addEventListener("resize", onResize);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("paste", onPaste);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("paste", onPaste);
+    };
+  }, [draw, sendInput]);
 
   return (
-    <main className="site-shell">
-      <nav className="site-nav" aria-label="Primary">
-        <a className="brand" href="#top" aria-label="Bootty home">
-          <img className="brand-logo" src="./bootty-logo.png" alt="" />
-          <span>Bootty</span>
-        </a>
-        <div className="nav-links">
-          <a href="#demo">Demo</a>
-          <a href="#stack">Stack</a>
-          <a href="https://github.com/majinboos/bootty">GitHub</a>
-        </div>
-      </nav>
-
-      <section className="hero" id="top">
-        <div className="hero-copy">
-          <div className="hero-lockup">
-            <img src="./bootty-logo.png" alt="Bootty logo" />
-            <div>
-              <strong>Bootty</strong>
-              <span>Terminal renderer</span>
-            </div>
-          </div>
-          <h1>Bootty renders terminals.</h1>
-          <p className="hero-text">A GPU renderer for terminal frames.</p>
-        </div>
-
-        <TerminalDemo
-          canvasRef={canvasRef}
-          status={status}
-          fps={fps}
-          focusTerminal={focusTerminal}
-          onKeyDown={onKeyDown}
-          sendInput={sendInput}
-        />
-      </section>
-
-      <section className="feature-grid" aria-label="Bootty highlights">
-        <article>
-          <span className="feature-kicker">Frames</span>
-          <h2>Cells in.</h2>
-          <p>Text, colors, cursor state, and images.</p>
-        </article>
-        <article>
-          <span className="feature-kicker">GPU</span>
-          <h2>Pixels out.</h2>
-          <p>Terminal frames drawn by the renderer.</p>
-        </article>
-        <article>
-          <span className="feature-kicker">Demo</span>
-          <h2>Try it.</h2>
-          <p>Click the terminal and type.</p>
-        </article>
-      </section>
-
-      <section className="stack-section" id="stack">
-        <div>
-          <p className="eyebrow">Pieces</p>
-          <h2>Small parts.</h2>
-        </div>
-        <div className="stack-list">
-          <div>
-            <strong>bootty-terminal</strong>
-            <span>frames</span>
-          </div>
-          <div>
-            <strong>bootty-render</strong>
-            <span>GPU renderer</span>
-          </div>
-          <div>
-            <strong>bootty-tauri</strong>
-            <span>app and web demo</span>
-          </div>
-        </div>
-      </section>
-
-      <section className="demo-notes" aria-label="Demo instructions">
-        <div>
-          <p className="eyebrow">Demo</p>
-          <h2>Try it.</h2>
-        </div>
-        <p>
-          Run <code>help</code>, <code>ls</code>, or <code>vim demo.txt</code>.
-        </p>
-      </section>
+    <main className="terminal-site" aria-label="Bootty terminal website">
+      <canvas
+        ref={canvasRef}
+        className="terminal-site-canvas"
+        tabIndex={0}
+        aria-label="Interactive Bootty terminal website"
+        onPointerDown={(event) => {
+          event.currentTarget.focus();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          sendMouse("down", event);
+        }}
+        onPointerMove={(event) => sendMouse("move", event)}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          sendMouse("up", event);
+        }}
+        onPointerLeave={(event) => sendMouse("leave", event)}
+      />
     </main>
   );
 }
 
-type TerminalDemoProps = {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  status: string;
-  fps: number;
-  focusTerminal: () => void;
-  onKeyDown: (event: React.KeyboardEvent<HTMLCanvasElement>) => void;
-  sendInput: (input: string) => void;
-};
-
-function TerminalDemo({ canvasRef, status, fps, focusTerminal, onKeyDown, sendInput }: TerminalDemoProps) {
-  return (
-    <section className="terminal-card" id="demo" aria-labelledby="terminal-demo-title">
-      <div className="terminal-toolbar">
-        <div>
-          <p className="terminal-label" id="terminal-demo-title">
-            Live terminal
-          </p>
-          <span>{status}</span>
-        </div>
-        <span>fps {fps.toFixed(1)}</span>
-      </div>
-      <div className="terminal-pad">
-        <canvas
-          ref={canvasRef}
-          className="terminal"
-          tabIndex={0}
-          aria-label="Interactive Bootty terminal demo"
-          onMouseDown={focusTerminal}
-          onKeyDown={onKeyDown}
-          onPaste={(event) => {
-            event.preventDefault();
-            sendInput(event.clipboardData.getData("text"));
-          }}
-        />
-      </div>
-    </section>
-  );
-}
-
-function recordFrame(
-  fpsRef: React.MutableRefObject<{ frames: number; startedAt: number }>,
-  setFps: React.Dispatch<React.SetStateAction<number>>,
-): void {
-  const now = performance.now();
-  const sample = fpsRef.current;
-  sample.frames += 1;
-  const elapsed = now - sample.startedAt;
-  if (elapsed >= 1000) {
-    setFps((sample.frames * 1000) / elapsed);
-    fpsRef.current = { frames: 0, startedAt: now };
-  }
-}
 function gridForCanvas(canvas: HTMLCanvasElement, frame: WebTerminalFrame): GridSize {
+  const container = canvas.parentElement;
+  const width = container?.clientWidth || window.innerWidth;
+  const height = container?.clientHeight || window.innerHeight;
   return {
-    cols: Math.max(1, Math.floor(canvas.clientWidth / frame.cellWidth)),
-    rows: Math.max(1, Math.floor(canvas.clientHeight / frame.cellHeight)),
+    cols: Math.max(40, Math.floor(width / frame.cellWidth)),
+    rows: Math.max(18, Math.floor(height / frame.cellHeight)),
   };
 }
+async function publishFps(
+  backend: TerminalBackend,
+  frame: WebTerminalFrame,
+  fps: { frames: number; startedAt: number },
+): Promise<WebTerminalFrame> {
+  fps.frames += 1;
+  const now = performance.now();
+  const elapsed = now - fps.startedAt;
+  if (elapsed < 1000 || !backend.fps) {
+    return frame;
+  }
+  const nextFrame = await backend.fps((fps.frames * 1000) / elapsed);
+  fps.frames = 0;
+  fps.startedAt = now;
+  return nextFrame;
+}
 
-function encodeKey(event: React.KeyboardEvent): string | null {
+
+function encodeKey(event: KeyboardEvent): string | null {
   if (event.metaKey) {
     return null;
   }
@@ -342,6 +246,15 @@ function encodeKey(event: React.KeyboardEvent): string | null {
     default:
       return event.key.length === 1 ? event.key : null;
   }
+}
+
+async function loadTerminalFont(): Promise<void> {
+  await document.fonts.load('18px "Maple Mono NF"');
+  await document.fonts.ready;
+}
+
+function reportError(error: unknown): void {
+  console.error(error);
 }
 
 createRoot(required(document.getElementById("root"), "find root element")).render(

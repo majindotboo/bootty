@@ -8,8 +8,9 @@
     "dev:pages": "vite --mode github-pages --host 127.0.0.1 --port 4173",
     "build": "tsc && vite build",
     "build:pages": "tsc && vite build --mode github-pages",
-    "preview:pages": "vite preview --outDir pages-dist --host 127.0.0.1 --port 4173",
-    "preview": "vite preview",
+    "build:site-wasm": "wasm-pack build ../bootty-site --target web --out-dir ../bootty-tauri/src-ui/src/bootty-site-wasm --no-pack",
+    "preview:pages": "vite preview --outDir ../pages-dist --host 127.0.0.1 --port 4173",
+    "preview": "vite preview --outDir ../dist",
     "tauri": "tauri"
   },
   "dependencies": {

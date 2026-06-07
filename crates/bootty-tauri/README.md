@@ -20,8 +20,8 @@ The backend does not depend on egui.
 
 - `terminal-api.ts` selects the active frontend backend
 - `tauri-terminal-backend.ts` wraps the Tauri commands
-- `fake-shell-backend.ts` provides a static, in-browser demo shell
-- `main.tsx` is the React shell and polling/input loop
+- `rust-site-backend.ts` wraps the Rust/WASM ratatui + tuirealm site app
+- `main.tsx` owns only the canvas host and polling/input loop
 - `webgl-terminal.ts` renders terminal frames with WebGL2
 
 The WebGL renderer uses instanced quads for backgrounds, text, underlines, and
@@ -29,8 +29,8 @@ cursor. Text glyphs are cached in a DPR-aware atlas; Canvas2D is only used when
 rasterizing a new glyph into that atlas.
 
 The default build uses the Tauri backend. `npm run build:pages` uses
-`.env.github-pages` to select the fake shell backend and writes `pages-dist`,
-which can be hosted directly by GitHub Pages.
+`.env.github-pages` to select the Rust/WASM tuirealm site backend and writes
+`pages-dist`, which can be hosted directly by GitHub Pages.
 
 ## Run
 
