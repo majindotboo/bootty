@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -W clippy::all

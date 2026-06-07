@@ -1,0 +1,249 @@
+# Complete Bootty configuration sample.
+# Copy to $XDG_CONFIG_HOME/bootty/config.toml, usually ~/.config/bootty/config.toml.
+#
+# This file intentionally lists every currently supported top-level setting and
+# table. Unknown fields are rejected, and active keybind actions must be backed
+# by executable Bootty behavior.
+
+version = 1
+
+# Includes are applied after this file, so local overrides can replace values
+# below. The leading ? makes this include optional.
+include = [
+  "?local.toml",
+  # "shared.toml",
+]
+
+# Built-ins today:
+#   Catppuccin Mocha
+#   Catppuccin Latte
+#   TokyoNight Night
+#   Gruvbox Dark
+#
+# User themes are loaded from themes/<name>.toml or themes/<name>/theme.toml
+# next to this config file before falling back to the built-in catalog.
+theme = "Catppuccin Mocha"
+
+[window]
+# Title/fullscreen/decorations are live-reloaded where supported.
+# Width/height and macOS titlebar style are startup/new-window settings.
+title = "Bootty"
+width = 1220
+height = 760
+fullscreen = false
+window-decoration = "auto"
+macos-titlebar-style = "transparent"
+
+[font]
+# Live-reloaded terminal text metrics.
+family = [
+  "Maple Mono",
+  "Font Awesome 7 Brands",
+  "Maple Mono NF",
+  "monospace",
+]
+size = 15.666
+cell-width = 10
+cell-height = 22
+baseline-adjustment = 3
+underline-position = 2
+underline-thickness = 1
+
+[chrome]
+# Live-reloaded app chrome.
+sidebar = true
+status-bar = true
+sidebar-width = 286
+status-height = 30
+gap = 1
+
+[multiplexer]
+# native keeps mux state and terminals inside Bootty. rmux renders through
+# rmux-sdk. tmux and zellij attach through their backend UI.
+backend = "rmux"
+
+[input]
+# Active keybinds must use executable Bootty actions. Unsupported actions are
+# rejected during startup/reload instead of being silently accepted.
+#
+# Trigger syntax:
+#   modifiers: shift, ctrl/control, alt/opt/option, cmd/command/super
+#   examples: cmd+shift+,, ctrl+c, alt+ArrowUp, shift+Tab
+#   supported physical names today: KeyA, KeyB, KeyC, Digit0, ArrowUp,
+#     ArrowDown, Quote, Enter, Tab, Backspace
+#   single-character keys such as a, b, c, ,, /, = and named "space" are also accepted
+#   flags: all:, global:, unconsumed:, performable:
+#   sequences use > and chained actions use chain=
+keybind = [
+  # Common app/window actions.
+  "clear",
+  "cmd+shift+r=reload_config",
+  "cmd+-=decrease_font_size:1",
+  "cmd+==increase_font_size:1",
+  "cmd++=increase_font_size:1",
+  "cmd+0=reset_font_size",
+  "performable:cmd+v=paste_from_clipboard",
+  "shift+Enter=text:\\n",
+  "cmd+alt+n=new_window",
+  "cmd+shift+w=close_window",
+  "cmd+w=close_surface",
+  "cmd+q=quit",
+  "cmd+alt+ctrl+f=toggle_fullscreen",
+]
+
+# Optional backend-specific shards are appended only for the selected backend.
+# Modifier remaps are live-reloaded and apply to egui and direct input paths.
+# Supported sides include left/right shift, alt, ctrl, and command.
+modifier-remap = [
+  "right_alt=left_ctrl",
+  # "right_command=left_alt",
+]
+
+[input.backend-keybind]
+native = [
+  "cmd+n=new_mux_session",
+  "ctrl+space>c=new_tab",
+  "ctrl+space>v=split_right",
+  "ctrl+space>-=split_down",
+  "ctrl+space>s=new_mux_session",
+  "ctrl+space>x=ditch_session",
+  "ctrl+space>shift+x=ditch_session",
+  "ctrl+space>1=select_session:1",
+  "ctrl+space>2=select_session:2",
+  "ctrl+space>3=select_session:3",
+  "ctrl+space>4=select_session:4",
+  "ctrl+space>5=select_session:5",
+  "ctrl+space>6=select_session:6",
+  "ctrl+space>7=select_session:7",
+  "ctrl+space>8=select_session:8",
+  "ctrl+space>9=select_session:9",
+  "ctrl+space>shift+,=move_tab:-1",
+  "ctrl+space>shift+.=move_tab:1",
+  "alt+n=next_tab",
+  "alt+shift+n=next_tab",
+  "alt+p=previous_tab",
+  "alt+shift+p=previous_tab",
+  "alt+shift+]=next_tab",
+  "alt+shift+[=previous_tab",
+  "alt+Tab=last_tab",
+  "alt+1=select_tab:1",
+  "alt+2=select_tab:2",
+  "alt+3=select_tab:3",
+  "alt+4=select_tab:4",
+  "alt+5=select_tab:5",
+  "alt+6=select_tab:6",
+  "alt+7=select_tab:7",
+  "alt+8=select_tab:8",
+  "alt+9=select_tab:9",
+  "alt+shift+,=move_tab:-1",
+  "alt+shift+.=move_tab:1",
+  "alt+h=select_pane:left",
+  "alt+j=select_pane:down",
+  "alt+k=select_pane:up",
+  "alt+l=select_pane:right",
+  "alt+o=next_pane",
+  "alt+x=kill_pane",
+  "alt+z=toggle_pane_zoom",
+  "ctrl+Tab=last_session",
+  "ctrl+shift+Tab=last_session",
+  "cmd+shift+n=next_session",
+  "cmd+shift+]=next_session",
+  "cmd+shift+p=previous_session",
+  "cmd+shift+[=previous_session",
+  "cmd+shift+,=move_session:-1",
+  "cmd+shift+.=move_session:1",
+  "cmd+1=select_session:1",
+  "cmd+2=select_session:2",
+  "cmd+3=select_session:3",
+  "cmd+4=select_session:4",
+  "cmd+5=select_session:5",
+  "cmd+6=select_session:6",
+  "cmd+7=select_session:7",
+  "cmd+8=select_session:8",
+  "cmd+9=select_session:9",
+  "cmd+alt+x=ditch_session",
+  "cmd+y=scroll_page_up",
+  "cmd+shift+y=scroll_page_down",
+  "cmd+ArrowUp=scroll_page_lines:-1",
+  "cmd+ArrowDown=scroll_page_lines:1",
+]
+
+tmux = [
+  # Custom CSI relays registered as tmux user-keys in ~/.tmux.conf.
+  "ctrl+Tab=csi:60~",
+  "cmd+;=csi:61~",
+  "cmd+n=csi:62~",
+  "cmd+p=csi:63~",
+  "cmd+shift+n=csi:64~",
+  "cmd+shift+p=csi:65~",
+  "cmd+shift+,=csi:66~",
+  "cmd+shift+.=csi:67~",
+  "cmd+ctrl+n=csi:68~",
+  "ctrl+alt+[=csi:69~",
+  "cmd+shift+]=csi:70~",
+  "cmd+y=csi:71~",
+  "cmd+c=csi:72~",
+  "cmd+shift+[=csi:73~",
+  "ctrl+shift+Tab=csi:76~",
+  "alt+n=esc:N",
+  "alt+p=esc:P",
+  "alt+h=esc:H",
+  "alt+j=esc:J",
+  "alt+k=esc:K",
+  "alt+l=esc:L",
+  "alt+x=esc:X",
+  "alt+z=esc:Z",
+  "ctrl+space=text:\\x00",
+]
+
+
+[session]
+# Session settings apply to newly-created sessions; reload will not restart the
+# current shell.
+shell = "/bin/zsh"
+working-directory = "/Users/luan/src/bootty"
+env = [
+  { name = "EDITOR", value = "vim" },
+  { name = "COLORTERM_THEME", value = "catppuccin-mocha" },
+]
+term = "xterm-ghostty"
+colorterm = "truecolor"
+
+[diagnostics]
+# Live-reloaded. Set to a writable path to record frame/status stability data.
+stability-trace = "/tmp/bootty-stability.csv"
+
+[colors]
+# Terminal colors are overlaid on the selected theme and live-reloaded.
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+cursor = "#f5e0dc"
+cursor-text = "#11111b"
+selection-background = "#585b70"
+selection-foreground = "#cdd6f4"
+
+# Up to 256 palette entries are accepted. The first 16 entries are the standard
+# ANSI colors: black, red, green, yellow, blue, magenta, cyan, white, then
+# bright black through bright white.
+palette = [
+  "#45475a", # black
+  "#f38ba8", # red
+  "#a6e3a1", # green
+  "#f9e2af", # yellow
+  "#89b4fa", # blue
+  "#f5c2e7", # magenta
+  "#94e2d5", # cyan
+  "#bac2de", # white
+  "#585b70", # bright black
+  "#f38ba8", # bright red
+  "#a6e3a1", # bright green
+  "#f9e2af", # bright yellow
+  "#89b4fa", # bright blue
+  "#f5c2e7", # bright magenta
+  "#94e2d5", # bright cyan
+  "#a6adc8", # bright white
+
+  # Optional extended palette entries 16-255 can be listed here.
+  # "#f5e0dc",
+  # "#cba6f7",
+]
