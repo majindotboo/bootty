@@ -7,6 +7,13 @@ use crate::{
     worktree_catalog::{WorktreePickerEntry, discover_worktree_picker_entries},
 };
 
+mod model;
+
+use model::{
+    NewMuxSessionStep, filtered_project_entries, filtered_worktree_entries,
+    picker_selection_after_navigation,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewMuxSessionRequest {
     pub session_id: String,
@@ -22,12 +29,6 @@ pub struct NewMuxSessionDialog {
     worktrees: Vec<WorktreePickerEntry>,
     selected_project: Option<ProjectPickerEntry>,
     focus_filter: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NewMuxSessionStep {
-    Project,
-    Worktree,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,25 +244,6 @@ impl NewMuxSessionDialog {
     }
 }
 
-fn picker_selection_after_navigation(
-    selected: usize,
-    row_count: usize,
-    next: bool,
-    previous: bool,
-) -> usize {
-    if row_count == 0 {
-        return 0;
-    }
-    let mut selected = selected.min(row_count - 1);
-    if next {
-        selected = (selected + 1).min(row_count - 1);
-    }
-    if previous {
-        selected = selected.saturating_sub(1);
-    }
-    selected
-}
-
 fn picker_panel_size(ctx: &egui::Context, step: NewMuxSessionStep) -> egui::Vec2 {
     let viewport = ctx.input(|input| input.content_rect().size());
     let desired = match step {
@@ -272,35 +254,6 @@ fn picker_panel_size(ctx: &egui::Context, step: NewMuxSessionStep) -> egui::Vec2
         desired.x.min((viewport.x - 72.0).max(560.0)),
         desired.y.min((viewport.y - 96.0).max(360.0)),
     )
-}
-
-fn filtered_project_entries(
-    entries: &[ProjectPickerEntry],
-    filter: &str,
-) -> Vec<ProjectPickerEntry> {
-    let filter = filter.trim().to_ascii_lowercase();
-    entries
-        .iter()
-        .filter(|entry| {
-            filter.is_empty()
-                || display_path(&entry.path)
-                    .to_ascii_lowercase()
-                    .contains(&filter)
-        })
-        .cloned()
-        .collect()
-}
-
-fn filtered_worktree_entries(
-    entries: &[WorktreePickerEntry],
-    filter: &str,
-) -> Vec<WorktreePickerEntry> {
-    let filter = filter.trim().to_ascii_lowercase();
-    entries
-        .iter()
-        .filter(|entry| filter.is_empty() || entry.label.to_ascii_lowercase().contains(&filter))
-        .cloned()
-        .collect()
 }
 
 fn draw_project_picker_rows(
@@ -407,18 +360,4 @@ fn draw_picker_footer(ui: &egui::Ui, rect: Rect, palette: ThemePalette, step: Ne
         egui::FontId::monospace(12.0),
         palette.muted,
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn picker_navigation_moves_down_and_up_without_wrapping() {
-        assert_eq!(picker_selection_after_navigation(0, 3, true, false), 1);
-        assert_eq!(picker_selection_after_navigation(2, 3, true, false), 2);
-        assert_eq!(picker_selection_after_navigation(2, 3, false, true), 1);
-        assert_eq!(picker_selection_after_navigation(0, 3, false, true), 0);
-        assert_eq!(picker_selection_after_navigation(2, 0, true, true), 0);
-    }
 }
