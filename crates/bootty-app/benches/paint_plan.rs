@@ -2,16 +2,32 @@ use std::hint::black_box;
 
 use bootty_app::{
     geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface},
+    mux::{
+        sidebar_meta::{
+            DiffStat, ProcessStatus, SidebarMetadata, SidebarSessionMetadata,
+            sidebar_metadata_sessions,
+        },
+        snapshot::{MuxPaneAnchor, MuxSession, MuxWindow},
+    },
     paint_plan::PaintPlanner,
     terminal::{RenderFrame, TerminalEngine},
     terminal_render::TerminalRenderFrame,
     terminal_text::{TerminalTextConfig, TerminalTextContract},
     terminal_wgpu::TerminalWgpuRenderer,
+    ui::{
+        chrome::{self, SidebarModel},
+        sidebar::{build_sidebar_items, build_visible_sidebar_items},
+    },
 };
 use criterion::{Criterion, criterion_group, criterion_main};
-use eframe::{egui::Vec2, wgpu};
+use eframe::{
+    egui::{self, Pos2, Rect, Vec2},
+    wgpu,
+};
 
 type ScenarioBuilder = (&'static str, fn() -> TerminalEngine);
+
+const SIDEBAR_BENCH_SESSION_COUNTS: [usize; 3] = [24, 96, 384];
 
 struct PreparedScenario {
     name: &'static str,
@@ -113,6 +129,124 @@ fn scenario_builders() -> [ScenarioBuilder; 4] {
         ("complex_shell_180x80", complex_shell_engine),
         ("ai_agent_dashboard_220x70", ai_agent_dashboard_engine),
         ("tmux_images_truecolor_240x90", tmux_image_truecolor_engine),
+    ]
+}
+
+fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
+    (0..count)
+        .map(|index| {
+            let group = match index % 6 {
+                0 => "agents",
+                1 => "infra",
+                2 => "app",
+                3 => "research",
+                4 => "review",
+                _ => "ops",
+            };
+            let id = format!("${}", index + 1);
+            let anchor = MuxPaneAnchor {
+                session_id: id.clone(),
+                pane_id: Some(format!("%{}", index + 10)),
+                cwd: Some("/Users/luan/src/bootty".to_owned()),
+                process: Some(
+                    match index % 4 {
+                        0 => "codex",
+                        1 => "cargo",
+                        2 => "nvim",
+                        _ => "zsh",
+                    }
+                    .to_owned(),
+                ),
+            };
+            MuxSession {
+                id: id.clone(),
+                name: format!("{group}/session-{index:03}"),
+                active: index == 0,
+                anchor: anchor.clone(),
+                active_window_id: None,
+                windows: (0..3)
+                    .map(|window| MuxWindow {
+                        id: format!("@{}:{window}", index + 1),
+                        index: window,
+                        name: format!("window-{window}"),
+                        active: window == 0,
+                        anchor: anchor.clone(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn native_sidebar_sessions_without_metadata(count: usize) -> Vec<MuxSession> {
+    (0..count)
+        .map(|index| {
+            let id = format!("local-{index}");
+            let anchor = MuxPaneAnchor {
+                session_id: id.clone(),
+                pane_id: None,
+                cwd: None,
+                process: Some("zsh".to_owned()),
+            };
+            MuxSession {
+                id,
+                name: format!("native/session-{index:03}"),
+                active: index == 0,
+                anchor,
+                active_window_id: None,
+                windows: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn sidebar_metadata_for(sessions: &[MuxSession]) -> SidebarMetadata {
+    let mut metadata = SidebarMetadata::default();
+    for (index, session) in sessions.iter().enumerate() {
+        metadata.insert(
+            session.name.clone(),
+            SidebarSessionMetadata {
+                branch: Some(format!("feature/sidebar-{index:03}")),
+                diff: Some(DiffStat {
+                    added: (index as u32) % 40,
+                    removed: (index as u32) % 17,
+                }),
+                attention: index % 11 == 0,
+                status: Some(format!("working batch {}", index % 9)),
+                progress: Some(((index * 7) % 101) as u8),
+                process_cpu: Some(format!("{:.1}%", (index % 16) as f32 * 1.7)),
+                agent_status: (index % 3 == 0).then(|| "codex Working...".to_owned()),
+                processes: vec![ProcessStatus {
+                    name: session
+                        .anchor
+                        .process
+                        .clone()
+                        .unwrap_or_else(|| "shell".to_owned()),
+                    cpu_pct: (index % 16) as f32 * 1.7,
+                    mem_bytes: 128 * 1024 * 1024 + index as u64 * 1024 * 1024,
+                }],
+            },
+        );
+    }
+    metadata
+}
+
+fn usage_lines_plain() -> Vec<String> {
+    vec![
+        "terminal 5h 90% +38m".to_owned(),
+        "agent 7d 73% +1d06:20 ↺3d20:18".to_owned(),
+        "build 50m 42% +12m".to_owned(),
+        "overflow 1h 10% +1m".to_owned(),
+    ]
+}
+
+fn usage_lines_ansi() -> Vec<String> {
+    vec![
+        "\x1b[38;2;116;199;236m 5h 90% +38m\x1b[0m".to_owned(),
+        "\x1b[38;2;249;226;175m████████░░\x1b[0m".to_owned(),
+        "\x1b[38;2;166;227;161magent 7d 73% +1d06:20 ↺3d20:18\x1b[0m".to_owned(),
+        "\x1b[38;2;137;220;235mbuild 50m 42% +12m\x1b[0m".to_owned(),
+        "\x1b[38;2;243;139;168moverflow 1h 10% +1m\x1b[0m".to_owned(),
     ]
 }
 
@@ -426,6 +560,26 @@ fn bench_extract_frame_one_row_mutate(c: &mut Criterion) {
     }
 }
 
+fn bench_terminal_write_vt(c: &mut Criterion) {
+    let mut plain = terminal_engine(120, 40);
+    c.bench_function("terminal_write_vt_plain_carriage_return", |b| {
+        b.iter(|| {
+            plain.write_vt(black_box(b"plain terminal output\r"));
+            black_box(plain.grid_size())
+        })
+    });
+
+    let mut ansi = terminal_engine(120, 40);
+    c.bench_function("terminal_write_vt_ansi_csi_color", |b| {
+        b.iter(|| {
+            ansi.write_vt(black_box(
+                b"\x1b[1;1H\x1b[38;2;1;2;3mcolored terminal output\x1b[0m",
+            ));
+            black_box(ansi.grid_size())
+        })
+    });
+}
+
 fn bench_render_commands(c: &mut Criterion) {
     for scenario in prepared_scenarios() {
         let mut planner = PaintPlanner::default();
@@ -460,6 +614,163 @@ fn bench_wgpu_prepare(c: &mut Criterion) {
                     &scenario.frame,
                     1.0,
                 ))
+            })
+        });
+    }
+}
+
+fn bench_sidebar_items(c: &mut Criterion) {
+    for count in SIDEBAR_BENCH_SESSION_COUNTS {
+        let sessions = sidebar_sessions(count);
+        let metadata = sidebar_metadata_for(&sessions);
+        let selected = sessions
+            .get(count / 2)
+            .map(|session| session.id.as_str())
+            .unwrap_or("$1");
+        c.bench_function(&format!("sidebar_items_{count}_rich_sessions"), |b| {
+            b.iter(|| {
+                black_box(build_sidebar_items(
+                    black_box(&sessions),
+                    black_box(Some(selected)),
+                    black_box(&metadata),
+                ))
+                .len()
+            })
+        });
+    }
+}
+
+fn bench_visible_sidebar_items(c: &mut Criterion) {
+    const VISIBLE_ROWS: usize = 42;
+
+    for count in SIDEBAR_BENCH_SESSION_COUNTS {
+        let sessions = sidebar_sessions(count);
+        let metadata = sidebar_metadata_for(&sessions);
+        let selected = sessions
+            .get(count / 2)
+            .map(|session| session.id.as_str())
+            .unwrap_or("$1");
+        c.bench_function(
+            &format!("visible_sidebar_items_{count}_rich_sessions"),
+            |b| {
+                b.iter(|| {
+                    black_box(build_visible_sidebar_items(
+                        black_box(&sessions),
+                        black_box(Some(selected)),
+                        black_box(&metadata),
+                        black_box(VISIBLE_ROWS),
+                    ))
+                    .len()
+                })
+            },
+        );
+    }
+}
+
+fn bench_sidebar_metadata_request(c: &mut Criterion) {
+    for count in SIDEBAR_BENCH_SESSION_COUNTS {
+        let sessions = sidebar_sessions(count);
+        c.bench_function(
+            &format!("sidebar_metadata_request_{count}_rich_sessions"),
+            |b| b.iter(|| black_box(sidebar_metadata_sessions(black_box(&sessions))).len()),
+        );
+
+        let native_sessions = native_sidebar_sessions_without_metadata(count);
+        c.bench_function(
+            &format!("sidebar_metadata_request_{count}_native_no_metadata"),
+            |b| b.iter(|| black_box(sidebar_metadata_sessions(black_box(&native_sessions))).len()),
+        );
+    }
+}
+
+fn bench_sidebar_ui(c: &mut Criterion) {
+    for count in SIDEBAR_BENCH_SESSION_COUNTS {
+        let sessions = sidebar_sessions(count);
+        let metadata = sidebar_metadata_for(&sessions);
+        let selected = sessions
+            .get(count / 2)
+            .map(|session| session.id.as_str())
+            .unwrap_or("$1");
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(280.0, 900.0));
+
+        c.bench_function(&format!("sidebar_ui_{count}_rich_sessions"), |b| {
+            b.iter(|| {
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen_rect),
+                        events: vec![egui::Event::PointerMoved(Pos2::new(32.0, 180.0))],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        black_box(chrome::show_sidebar(
+                            ui,
+                            bootty_ui::ThemePalette::default(),
+                            900.0,
+                            SidebarModel {
+                                sessions: black_box(&sessions),
+                                selected_session: black_box(Some(selected)),
+                                metadata: black_box(&metadata),
+                                title_visible: true,
+                                reserve_titlebar_buttons: true,
+                                title_icon: None,
+                                top_inset: 0.0,
+                                border_visible: true,
+                                separator_visible: true,
+                            },
+                        ));
+                    },
+                );
+                black_box(output.shapes.len())
+            })
+        });
+    }
+}
+
+fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
+    let count = 96;
+    let sessions = sidebar_sessions(count);
+    let selected = sessions
+        .get(count / 2)
+        .map(|session| session.id.as_str())
+        .unwrap_or("$1");
+    let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(280.0, 900.0));
+
+    for (name, usage_lines) in [
+        ("plain_usage_footer", usage_lines_plain()),
+        ("ansi_usage_footer", usage_lines_ansi()),
+    ] {
+        let mut metadata = sidebar_metadata_for(&sessions);
+        metadata.set_usage_lines(usage_lines);
+        let context = egui::Context::default();
+        c.bench_function(&format!("sidebar_ui_96_rich_sessions_{name}"), |b| {
+            b.iter(|| {
+                let output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen_rect),
+                        events: vec![egui::Event::PointerMoved(Pos2::new(32.0, 180.0))],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        black_box(chrome::show_sidebar(
+                            ui,
+                            bootty_ui::ThemePalette::default(),
+                            900.0,
+                            SidebarModel {
+                                sessions: black_box(&sessions),
+                                selected_session: black_box(Some(selected)),
+                                metadata: black_box(&metadata),
+                                title_visible: true,
+                                reserve_titlebar_buttons: true,
+                                title_icon: None,
+                                top_inset: 0.0,
+                                border_visible: true,
+                                separator_visible: true,
+                            },
+                        ));
+                    },
+                );
+                black_box(output.shapes.len())
             })
         });
     }
@@ -526,8 +837,14 @@ criterion_group!(
         bench_paint_plan,
         bench_extract_frame,
         bench_extract_frame_one_row_mutate,
+        bench_terminal_write_vt,
         bench_render_commands,
         bench_wgpu_prepare,
+        bench_sidebar_items,
+        bench_visible_sidebar_items,
+        bench_sidebar_metadata_request,
+        bench_sidebar_ui,
+        bench_sidebar_ui_usage_footer,
         bench_animated_agent_pipeline,
         bench_animated_agent_pipeline_wgpu_prepare
 );
