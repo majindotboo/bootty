@@ -14,8 +14,14 @@ use winit::{
         ElementState, KeyEvent, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent,
     },
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, ModifiersState, PhysicalKey},
+    keyboard::{ModifiersState, PhysicalKey},
     window::{Window, WindowId},
+};
+
+pub use crate::input_keymap::{
+    bare_terminal_key_input, bare_terminal_key_input_with_remaps,
+    bare_terminal_key_input_with_sides, bare_terminal_key_input_with_sides_and_remaps,
+    bare_terminal_paste_shortcut,
 };
 
 use crate::{
@@ -25,14 +31,13 @@ use crate::{
         geometry_for_pixels,
     },
     input_keymap::{
-        key_mods_from_winit_modifiers, key_unshifted, mouse_input_from_surface,
-        mouse_wheel_button_from_delta_y, physical_key_utf8,
+        key_mods_from_winit_modifiers, mouse_input_from_surface, mouse_wheel_button_from_delta_y,
     },
     modifier_remap::ModifierRemapSet,
     renderer_frame::RendererFrame,
     terminal::{
         CellStyle, CursorSnapshot, FrameColors, FrameStats, KeyInput, MouseAction, MouseButton,
-        MouseInput, RenderCell, RenderFrame, TerminalKey, TerminalSession,
+        MouseInput, RenderCell, RenderFrame, TerminalSession,
     },
     terminal_image::{KittyImageFrame, KittyImageLayer, KittyImagePlacement},
     terminal_render::TerminalRenderFrame,
@@ -227,71 +232,6 @@ impl BareTerminalInput {
     }
 }
 
-pub fn bare_terminal_key_input(
-    code: KeyCode,
-    modifiers: ModifiersState,
-    repeat: bool,
-) -> Option<KeyInput> {
-    bare_terminal_key_input_with_remaps(code, modifiers, repeat, &ModifierRemapSet::default())
-}
-
-pub fn bare_terminal_key_input_with_remaps(
-    code: KeyCode,
-    modifiers: ModifiersState,
-    repeat: bool,
-    modifier_remaps: &ModifierRemapSet,
-) -> Option<KeyInput> {
-    bare_terminal_key_input_with_sides_and_remaps(
-        code,
-        modifiers,
-        ModifierSideState::default(),
-        repeat,
-        modifier_remaps,
-    )
-}
-
-pub fn bare_terminal_key_input_with_sides_and_remaps(
-    code: KeyCode,
-    modifiers: ModifiersState,
-    side_state: ModifierSideState,
-    repeat: bool,
-    modifier_remaps: &ModifierRemapSet,
-) -> Option<KeyInput> {
-    let mut input = bare_terminal_key_input_with_sides(code, modifiers, side_state, repeat)?;
-    input.mods = modifier_remaps.apply(input.mods);
-    Some(input)
-}
-
-pub fn bare_terminal_paste_shortcut(code: KeyCode, modifiers: ModifiersState) -> bool {
-    if code != KeyCode::KeyV {
-        return false;
-    }
-    let platform_paste = if cfg!(target_os = "macos") {
-        modifiers.super_key()
-    } else {
-        modifiers.control_key()
-    };
-    platform_paste && !modifiers.alt_key()
-}
-
-pub fn bare_terminal_key_input_with_sides(
-    code: KeyCode,
-    modifiers: ModifiersState,
-    side_state: ModifierSideState,
-    repeat: bool,
-) -> Option<KeyInput> {
-    let key = terminal_key_from_winit_code(code)?;
-    let mut input = KeyInput {
-        key,
-        mods: key_mods_from_winit_modifiers(modifiers),
-        repeat,
-        utf8: physical_key_utf8(key, modifiers.shift_key()),
-        unshifted: key_unshifted(key),
-    };
-    side_state.apply_to_key_input(&mut input);
-    Some(input)
-}
-
 pub fn bare_terminal_mouse_input(
     pos: Pos2,
     action: MouseAction,
@@ -324,103 +264,6 @@ fn bare_terminal_mouse_wheel_button(delta: MouseScrollDelta) -> Option<MouseButt
         MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
     };
     mouse_wheel_button_from_delta_y(y)
-}
-
-fn terminal_key_from_winit_code(code: KeyCode) -> Option<TerminalKey> {
-    Some(match code {
-        KeyCode::Backquote => TerminalKey::Backquote,
-        KeyCode::Backslash => TerminalKey::Backslash,
-        KeyCode::BracketLeft => TerminalKey::BracketLeft,
-        KeyCode::BracketRight => TerminalKey::BracketRight,
-        KeyCode::Comma => TerminalKey::Comma,
-        KeyCode::Digit0 => TerminalKey::Digit0,
-        KeyCode::Digit1 => TerminalKey::Digit1,
-        KeyCode::Digit2 => TerminalKey::Digit2,
-        KeyCode::Digit3 => TerminalKey::Digit3,
-        KeyCode::Digit4 => TerminalKey::Digit4,
-        KeyCode::Digit5 => TerminalKey::Digit5,
-        KeyCode::Digit6 => TerminalKey::Digit6,
-        KeyCode::Digit7 => TerminalKey::Digit7,
-        KeyCode::Digit8 => TerminalKey::Digit8,
-        KeyCode::Digit9 => TerminalKey::Digit9,
-        KeyCode::Equal => TerminalKey::Equal,
-        KeyCode::KeyA => TerminalKey::A,
-        KeyCode::KeyB => TerminalKey::B,
-        KeyCode::KeyC => TerminalKey::C,
-        KeyCode::KeyD => TerminalKey::D,
-        KeyCode::KeyE => TerminalKey::E,
-        KeyCode::KeyF => TerminalKey::F,
-        KeyCode::KeyG => TerminalKey::G,
-        KeyCode::KeyH => TerminalKey::H,
-        KeyCode::KeyI => TerminalKey::I,
-        KeyCode::KeyJ => TerminalKey::J,
-        KeyCode::KeyK => TerminalKey::K,
-        KeyCode::KeyL => TerminalKey::L,
-        KeyCode::KeyM => TerminalKey::M,
-        KeyCode::KeyN => TerminalKey::N,
-        KeyCode::KeyO => TerminalKey::O,
-        KeyCode::KeyP => TerminalKey::P,
-        KeyCode::KeyQ => TerminalKey::Q,
-        KeyCode::KeyR => TerminalKey::R,
-        KeyCode::KeyS => TerminalKey::S,
-        KeyCode::KeyT => TerminalKey::T,
-        KeyCode::KeyU => TerminalKey::U,
-        KeyCode::KeyV => TerminalKey::V,
-        KeyCode::KeyW => TerminalKey::W,
-        KeyCode::KeyX => TerminalKey::X,
-        KeyCode::KeyY => TerminalKey::Y,
-        KeyCode::KeyZ => TerminalKey::Z,
-        KeyCode::Minus => TerminalKey::Minus,
-        KeyCode::Period => TerminalKey::Period,
-        KeyCode::Quote => TerminalKey::Quote,
-        KeyCode::Semicolon => TerminalKey::Semicolon,
-        KeyCode::Slash => TerminalKey::Slash,
-        KeyCode::Enter => TerminalKey::Enter,
-        KeyCode::NumpadEnter => TerminalKey::NumpadEnter,
-        KeyCode::Tab => TerminalKey::Tab,
-        KeyCode::Backspace => TerminalKey::Backspace,
-        KeyCode::Escape => TerminalKey::Escape,
-        KeyCode::ArrowUp => TerminalKey::ArrowUp,
-        KeyCode::ArrowDown => TerminalKey::ArrowDown,
-        KeyCode::ArrowRight => TerminalKey::ArrowRight,
-        KeyCode::ArrowLeft => TerminalKey::ArrowLeft,
-        KeyCode::Delete => TerminalKey::Delete,
-        KeyCode::Home => TerminalKey::Home,
-        KeyCode::End => TerminalKey::End,
-        KeyCode::PageUp => TerminalKey::PageUp,
-        KeyCode::PageDown => TerminalKey::PageDown,
-        KeyCode::Space => TerminalKey::Space,
-        KeyCode::Insert => TerminalKey::Insert,
-        KeyCode::F1 => TerminalKey::F1,
-        KeyCode::F2 => TerminalKey::F2,
-        KeyCode::F3 => TerminalKey::F3,
-        KeyCode::F4 => TerminalKey::F4,
-        KeyCode::F5 => TerminalKey::F5,
-        KeyCode::F6 => TerminalKey::F6,
-        KeyCode::F7 => TerminalKey::F7,
-        KeyCode::F8 => TerminalKey::F8,
-        KeyCode::F9 => TerminalKey::F9,
-        KeyCode::F10 => TerminalKey::F10,
-        KeyCode::F11 => TerminalKey::F11,
-        KeyCode::F12 => TerminalKey::F12,
-        KeyCode::Numpad0 => TerminalKey::Numpad0,
-        KeyCode::Numpad1 => TerminalKey::Numpad1,
-        KeyCode::Numpad2 => TerminalKey::Numpad2,
-        KeyCode::Numpad3 => TerminalKey::Numpad3,
-        KeyCode::Numpad4 => TerminalKey::Numpad4,
-        KeyCode::Numpad5 => TerminalKey::Numpad5,
-        KeyCode::Numpad6 => TerminalKey::Numpad6,
-        KeyCode::Numpad7 => TerminalKey::Numpad7,
-        KeyCode::Numpad8 => TerminalKey::Numpad8,
-        KeyCode::Numpad9 => TerminalKey::Numpad9,
-        KeyCode::NumpadAdd => TerminalKey::NumpadAdd,
-        KeyCode::NumpadDecimal => TerminalKey::NumpadDecimal,
-        KeyCode::NumpadDivide => TerminalKey::NumpadDivide,
-        KeyCode::NumpadEqual => TerminalKey::NumpadEqual,
-        KeyCode::NumpadMultiply => TerminalKey::NumpadMultiply,
-        KeyCode::NumpadSubtract => TerminalKey::NumpadSubtract,
-        _ => return None,
-    })
 }
 
 pub fn terminal_render_frame_for_bare_host(
@@ -979,6 +822,7 @@ fn clear_color(colors: FrameColors) -> wgpu::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::keyboard::KeyCode;
 
     #[test]
     fn bare_terminal_ignores_standalone_modifier_keys() {

@@ -11,9 +11,20 @@ libghostty-vt.workspace = true
 bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
 png.workspace = true
+smallvec.workspace = true
 ttf-parser.workspace = true
 unicode-width.workspace = true
 wgpu.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+wgpu = { workspace = true, features = ["gles", "vulkan"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }
 
 [dev-dependencies]
 epaint_default_fonts.workspace = true

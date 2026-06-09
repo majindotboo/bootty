@@ -12,7 +12,7 @@ pub use bootty_render::{
 };
 pub use bootty_runtime::{scheduler, terminal_session};
 pub use bootty_terminal::{terminal_engine, terminal_frame, terminal_image, terminal_input_model};
-pub use bootty_winit::{bare_host, direct_input, input_binding, input_binding_set, modifier_remap};
+pub use bootty_winit::{direct_input, input_binding, input_binding_set, modifier_remap};
 pub mod input;
 pub mod mux;
 pub mod native_host;

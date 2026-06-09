@@ -2,18 +2,33 @@
 name = "bootty-winit"
 edition.workspace = true
 
+[features]
+default = ["bare-host"]
+bare-host = ["dep:arboard", "dep:libghostty-vt", "dep:pollster", "dep:wgpu"]
+
 [dependencies]
 anyhow.workspace = true
-arboard.workspace = true
+arboard = { workspace = true, optional = true }
 eframe.workspace = true
-libghostty-vt.workspace = true
+libghostty-vt = { workspace = true, optional = true }
 bootty-render = { path = "../bootty-render" }
 bootty-runtime = { path = "../bootty-runtime" }
 bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
-pollster.workspace = true
-wgpu.workspace = true
+pollster = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
 winit.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+wgpu = { workspace = true, features = ["gles", "vulkan"], optional = true }
+winit = { workspace = true, features = ["wayland", "x11"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"], optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

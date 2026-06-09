@@ -1,3 +1,4 @@
+#[cfg(feature = "bare-host")]
 pub mod bare_host;
 pub mod direct_input;
 pub mod input;

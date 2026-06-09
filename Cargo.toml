@@ -34,7 +34,11 @@ derive_more = { version = "2.1.1", default-features = false, features = [
   "deref",
   "deref_mut",
 ] }
-eframe = { version = "0.34", default-features = true }
+eframe = { version = "0.34", default-features = false, features = [
+  "accesskit",
+  "default_fonts",
+  "wgpu_no_default_features",
+] }
 epaint_default_fonts = "0.34"
 fontdb = "0.23"
 indoc = "2"
@@ -55,7 +59,6 @@ pollster = "0.4"
 png = "0.18"
 portable-pty = "0.9"
 proptest = "1"
-regex = "1"
 rmux-sdk = "0.5"
 rmux-ipc = "0.5"
 rmux-proto = "0.5"
@@ -63,6 +66,7 @@ rstest = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 serde_json = "1"
+smallvec = "1"
 syntect = { version = "5.3", default-features = false, features = [
   "default-fancy",
 ] }
@@ -76,8 +80,12 @@ tuirealm = { version = "4.1.0", default-features = false, features = ["derive"] 
 tui-markdown = { version = "0.3.7", default-features = false }
 unicode-width = "0.2"
 wasm-bindgen = "0.2"
-wgpu = "29"
-winit = "0.30"
+wgpu = { version = "29", default-features = false, features = [
+  "parking_lot",
+  "std",
+  "wgsl",
+] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 
 [profile.dev]
 debug = "limited"

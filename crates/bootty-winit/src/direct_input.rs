@@ -5,61 +5,15 @@ use winit::{
 };
 
 use crate::{
-    bare_host::bare_terminal_key_input, modifier_remap::ModifierRemapSet, terminal::KeyInput,
+    input_keymap::bare_terminal_key_input, modifier_remap::ModifierRemapSet, terminal::KeyInput,
 };
+
+pub use crate::input_keymap::ModifierSideState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DirectKeyInput {
     pub input: KeyInput,
     suppress_egui_key: Option<egui::Key>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ModifierSideState {
-    pub left_shift: bool,
-    pub right_shift: bool,
-    pub left_alt: bool,
-    pub right_alt: bool,
-    pub left_ctrl: bool,
-    pub right_ctrl: bool,
-    pub left_command: bool,
-    pub right_command: bool,
-}
-
-impl ModifierSideState {
-    pub fn update_key(&mut self, code: KeyCode, state: ElementState) {
-        let pressed = state == ElementState::Pressed;
-        match code {
-            KeyCode::ShiftLeft => self.left_shift = pressed,
-            KeyCode::ShiftRight => self.right_shift = pressed,
-            KeyCode::AltLeft => self.left_alt = pressed,
-            KeyCode::AltRight => self.right_alt = pressed,
-            KeyCode::ControlLeft => self.left_ctrl = pressed,
-            KeyCode::ControlRight => self.right_ctrl = pressed,
-            KeyCode::SuperLeft => self.left_command = pressed,
-            KeyCode::SuperRight => self.right_command = pressed,
-            _ => {}
-        }
-    }
-
-    pub fn apply_to_key_input(self, input: &mut KeyInput) {
-        input.mods.shift = input.mods.shift || self.left_shift || self.right_shift;
-        input.mods.alt = input.mods.alt || self.left_alt || self.right_alt;
-        input.mods.ctrl = input.mods.ctrl || self.left_ctrl || self.right_ctrl;
-        input.mods.command = input.mods.command || self.left_command || self.right_command;
-        input.mods.right_shift = input.mods.shift && self.right_shift;
-        input.mods.right_alt = input.mods.alt && self.right_alt;
-        input.mods.right_ctrl = input.mods.ctrl && self.right_ctrl;
-        input.mods.right_command = input.mods.command && self.right_command;
-    }
-
-    fn has_right_shift(self) -> bool {
-        self.right_shift
-    }
-
-    fn has_command(self) -> bool {
-        self.left_command || self.right_command
-    }
 }
 
 impl DirectKeyInput {

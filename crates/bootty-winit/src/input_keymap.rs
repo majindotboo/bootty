@@ -1,9 +1,15 @@
 use eframe::egui::{self, Pos2};
-use winit::keyboard::ModifiersState;
+use winit::{
+    event::ElementState,
+    keyboard::{KeyCode, ModifiersState},
+};
 
 use crate::{
     geometry::TerminalSurface,
-    terminal::{KeyMods, MouseAction, MouseButton, MouseEncoderSize, MouseInput, TerminalKey},
+    modifier_remap::ModifierRemapSet,
+    terminal::{
+        KeyInput, KeyMods, MouseAction, MouseButton, MouseEncoderSize, MouseInput, TerminalKey,
+    },
 };
 
 pub fn key_mods_from_egui_modifiers(modifiers: egui::Modifiers) -> KeyMods {
@@ -34,6 +40,217 @@ pub fn key_mods_from_winit_modifiers(modifiers: ModifiersState) -> KeyMods {
         command: modifiers.super_key(),
         ..Default::default()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModifierSideState {
+    pub left_shift: bool,
+    pub right_shift: bool,
+    pub left_alt: bool,
+    pub right_alt: bool,
+    pub left_ctrl: bool,
+    pub right_ctrl: bool,
+    pub left_command: bool,
+    pub right_command: bool,
+}
+
+impl ModifierSideState {
+    pub fn update_key(&mut self, code: KeyCode, state: ElementState) {
+        let pressed = state == ElementState::Pressed;
+        match code {
+            KeyCode::ShiftLeft => self.left_shift = pressed,
+            KeyCode::ShiftRight => self.right_shift = pressed,
+            KeyCode::AltLeft => self.left_alt = pressed,
+            KeyCode::AltRight => self.right_alt = pressed,
+            KeyCode::ControlLeft => self.left_ctrl = pressed,
+            KeyCode::ControlRight => self.right_ctrl = pressed,
+            KeyCode::SuperLeft => self.left_command = pressed,
+            KeyCode::SuperRight => self.right_command = pressed,
+            _ => {}
+        }
+    }
+
+    pub fn apply_to_key_input(self, input: &mut KeyInput) {
+        input.mods.shift = input.mods.shift || self.left_shift || self.right_shift;
+        input.mods.alt = input.mods.alt || self.left_alt || self.right_alt;
+        input.mods.ctrl = input.mods.ctrl || self.left_ctrl || self.right_ctrl;
+        input.mods.command = input.mods.command || self.left_command || self.right_command;
+        input.mods.right_shift = input.mods.shift && self.right_shift;
+        input.mods.right_alt = input.mods.alt && self.right_alt;
+        input.mods.right_ctrl = input.mods.ctrl && self.right_ctrl;
+        input.mods.right_command = input.mods.command && self.right_command;
+    }
+
+    pub(crate) fn has_right_shift(self) -> bool {
+        self.right_shift
+    }
+
+    pub(crate) fn has_command(self) -> bool {
+        self.left_command || self.right_command
+    }
+}
+
+pub fn bare_terminal_key_input(
+    code: KeyCode,
+    modifiers: ModifiersState,
+    repeat: bool,
+) -> Option<KeyInput> {
+    bare_terminal_key_input_with_remaps(code, modifiers, repeat, &ModifierRemapSet::default())
+}
+
+pub fn bare_terminal_key_input_with_remaps(
+    code: KeyCode,
+    modifiers: ModifiersState,
+    repeat: bool,
+    modifier_remaps: &ModifierRemapSet,
+) -> Option<KeyInput> {
+    bare_terminal_key_input_with_sides_and_remaps(
+        code,
+        modifiers,
+        ModifierSideState::default(),
+        repeat,
+        modifier_remaps,
+    )
+}
+
+pub fn bare_terminal_key_input_with_sides_and_remaps(
+    code: KeyCode,
+    modifiers: ModifiersState,
+    side_state: ModifierSideState,
+    repeat: bool,
+    modifier_remaps: &ModifierRemapSet,
+) -> Option<KeyInput> {
+    let mut input = bare_terminal_key_input_with_sides(code, modifiers, side_state, repeat)?;
+    input.mods = modifier_remaps.apply(input.mods);
+    Some(input)
+}
+
+#[cfg(any(feature = "bare-host", test))]
+pub fn bare_terminal_paste_shortcut(code: KeyCode, modifiers: ModifiersState) -> bool {
+    if code != KeyCode::KeyV {
+        return false;
+    }
+    let platform_paste = if cfg!(target_os = "macos") {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    };
+    platform_paste && !modifiers.alt_key()
+}
+
+pub fn bare_terminal_key_input_with_sides(
+    code: KeyCode,
+    modifiers: ModifiersState,
+    side_state: ModifierSideState,
+    repeat: bool,
+) -> Option<KeyInput> {
+    let key = terminal_key_from_winit_code(code)?;
+    let mut input = KeyInput {
+        key,
+        mods: key_mods_from_winit_modifiers(modifiers),
+        repeat,
+        utf8: physical_key_utf8(key, modifiers.shift_key()),
+        unshifted: key_unshifted(key),
+    };
+    side_state.apply_to_key_input(&mut input);
+    Some(input)
+}
+
+fn terminal_key_from_winit_code(code: KeyCode) -> Option<TerminalKey> {
+    Some(match code {
+        KeyCode::Backquote => TerminalKey::Backquote,
+        KeyCode::Backslash => TerminalKey::Backslash,
+        KeyCode::BracketLeft => TerminalKey::BracketLeft,
+        KeyCode::BracketRight => TerminalKey::BracketRight,
+        KeyCode::Comma => TerminalKey::Comma,
+        KeyCode::Digit0 => TerminalKey::Digit0,
+        KeyCode::Digit1 => TerminalKey::Digit1,
+        KeyCode::Digit2 => TerminalKey::Digit2,
+        KeyCode::Digit3 => TerminalKey::Digit3,
+        KeyCode::Digit4 => TerminalKey::Digit4,
+        KeyCode::Digit5 => TerminalKey::Digit5,
+        KeyCode::Digit6 => TerminalKey::Digit6,
+        KeyCode::Digit7 => TerminalKey::Digit7,
+        KeyCode::Digit8 => TerminalKey::Digit8,
+        KeyCode::Digit9 => TerminalKey::Digit9,
+        KeyCode::Equal => TerminalKey::Equal,
+        KeyCode::KeyA => TerminalKey::A,
+        KeyCode::KeyB => TerminalKey::B,
+        KeyCode::KeyC => TerminalKey::C,
+        KeyCode::KeyD => TerminalKey::D,
+        KeyCode::KeyE => TerminalKey::E,
+        KeyCode::KeyF => TerminalKey::F,
+        KeyCode::KeyG => TerminalKey::G,
+        KeyCode::KeyH => TerminalKey::H,
+        KeyCode::KeyI => TerminalKey::I,
+        KeyCode::KeyJ => TerminalKey::J,
+        KeyCode::KeyK => TerminalKey::K,
+        KeyCode::KeyL => TerminalKey::L,
+        KeyCode::KeyM => TerminalKey::M,
+        KeyCode::KeyN => TerminalKey::N,
+        KeyCode::KeyO => TerminalKey::O,
+        KeyCode::KeyP => TerminalKey::P,
+        KeyCode::KeyQ => TerminalKey::Q,
+        KeyCode::KeyR => TerminalKey::R,
+        KeyCode::KeyS => TerminalKey::S,
+        KeyCode::KeyT => TerminalKey::T,
+        KeyCode::KeyU => TerminalKey::U,
+        KeyCode::KeyV => TerminalKey::V,
+        KeyCode::KeyW => TerminalKey::W,
+        KeyCode::KeyX => TerminalKey::X,
+        KeyCode::KeyY => TerminalKey::Y,
+        KeyCode::KeyZ => TerminalKey::Z,
+        KeyCode::Minus => TerminalKey::Minus,
+        KeyCode::Period => TerminalKey::Period,
+        KeyCode::Quote => TerminalKey::Quote,
+        KeyCode::Semicolon => TerminalKey::Semicolon,
+        KeyCode::Slash => TerminalKey::Slash,
+        KeyCode::Enter => TerminalKey::Enter,
+        KeyCode::NumpadEnter => TerminalKey::NumpadEnter,
+        KeyCode::Tab => TerminalKey::Tab,
+        KeyCode::Backspace => TerminalKey::Backspace,
+        KeyCode::Escape => TerminalKey::Escape,
+        KeyCode::ArrowUp => TerminalKey::ArrowUp,
+        KeyCode::ArrowDown => TerminalKey::ArrowDown,
+        KeyCode::ArrowRight => TerminalKey::ArrowRight,
+        KeyCode::ArrowLeft => TerminalKey::ArrowLeft,
+        KeyCode::Delete => TerminalKey::Delete,
+        KeyCode::Home => TerminalKey::Home,
+        KeyCode::End => TerminalKey::End,
+        KeyCode::PageUp => TerminalKey::PageUp,
+        KeyCode::PageDown => TerminalKey::PageDown,
+        KeyCode::Space => TerminalKey::Space,
+        KeyCode::Insert => TerminalKey::Insert,
+        KeyCode::F1 => TerminalKey::F1,
+        KeyCode::F2 => TerminalKey::F2,
+        KeyCode::F3 => TerminalKey::F3,
+        KeyCode::F4 => TerminalKey::F4,
+        KeyCode::F5 => TerminalKey::F5,
+        KeyCode::F6 => TerminalKey::F6,
+        KeyCode::F7 => TerminalKey::F7,
+        KeyCode::F8 => TerminalKey::F8,
+        KeyCode::F9 => TerminalKey::F9,
+        KeyCode::F10 => TerminalKey::F10,
+        KeyCode::F11 => TerminalKey::F11,
+        KeyCode::F12 => TerminalKey::F12,
+        KeyCode::Numpad0 => TerminalKey::Numpad0,
+        KeyCode::Numpad1 => TerminalKey::Numpad1,
+        KeyCode::Numpad2 => TerminalKey::Numpad2,
+        KeyCode::Numpad3 => TerminalKey::Numpad3,
+        KeyCode::Numpad4 => TerminalKey::Numpad4,
+        KeyCode::Numpad5 => TerminalKey::Numpad5,
+        KeyCode::Numpad6 => TerminalKey::Numpad6,
+        KeyCode::Numpad7 => TerminalKey::Numpad7,
+        KeyCode::Numpad8 => TerminalKey::Numpad8,
+        KeyCode::Numpad9 => TerminalKey::Numpad9,
+        KeyCode::NumpadAdd => TerminalKey::NumpadAdd,
+        KeyCode::NumpadDecimal => TerminalKey::NumpadDecimal,
+        KeyCode::NumpadDivide => TerminalKey::NumpadDivide,
+        KeyCode::NumpadEqual => TerminalKey::NumpadEqual,
+        KeyCode::NumpadMultiply => TerminalKey::NumpadMultiply,
+        KeyCode::NumpadSubtract => TerminalKey::NumpadSubtract,
+        _ => return None,
+    })
 }
 
 pub fn mouse_input_from_surface(

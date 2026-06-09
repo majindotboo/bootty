@@ -5,12 +5,6 @@ use std::{
 };
 
 use bootty_app::{
-    bare_host::{
-        BareRendererSurfaceConfig, BareTerminalInput, BareTerminalViewport,
-        bare_terminal_key_input, bare_terminal_key_input_with_remaps,
-        bare_terminal_key_input_with_sides, bare_terminal_mouse_input,
-        bare_terminal_paste_shortcut, terminal_render_frame_for_bare_host,
-    },
     direct_input::ModifierSideState,
     geometry::{CellMetrics, SurfaceRect, TerminalGeometry, TerminalPadding},
     input_binding::{BindingKey, BindingMods, BindingTrigger},
@@ -29,6 +23,11 @@ use bootty_app::{
     terminal_text::TerminalTextConfig,
 };
 use bootty_terminal::terminal_palette::generate_256_palette;
+use bootty_winit::bare_host::{
+    BareRendererSurfaceConfig, BareTerminalInput, BareTerminalViewport, bare_terminal_key_input,
+    bare_terminal_key_input_with_remaps, bare_terminal_key_input_with_sides,
+    bare_terminal_mouse_input, bare_terminal_paste_shortcut, terminal_render_frame_for_bare_host,
+};
 use libghostty_vt::{
     kitty::graphics::SourceRect,
     render::{CursorVisualStyle, Dirty},

@@ -4,3 +4,6 @@ edition.workspace = true
 
 [dependencies]
 eframe.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
