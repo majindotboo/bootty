@@ -8,7 +8,7 @@ use crate::{
         AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction,
         TerminalScrollAction, builtin_app_action_for_direct_key, split_app_actions_for_bindings,
     },
-    config::{BoottyConfig, ConfigState, load_config_from_path},
+    config::{BoottyConfig, ConfigState, WindowConfig, load_config_from_path},
     config_reload::{ConfigHotReload, new_session_only_config_changed},
     diagnostics::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
@@ -63,6 +63,7 @@ pub struct BoottyApp {
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     app_icon_texture: Option<TextureHandle>,
     macos_app_icon_installed: bool,
+    macos_non_native_fullscreen_active: bool,
 }
 
 #[cfg(test)]
@@ -121,6 +122,7 @@ impl BoottyApp {
         let session_config = config.terminal_session_config();
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
         let _backend = selected_backend(&config.multiplexer);
+        let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
         apply_macos_non_native_fullscreen_presentation(&config.window);
 
         Ok(Self {
@@ -156,6 +158,7 @@ impl BoottyApp {
             new_mux_session_dialog: None,
             app_icon_texture: None,
             macos_app_icon_installed: false,
+            macos_non_native_fullscreen_active,
         })
     }
 }
@@ -458,6 +461,7 @@ impl BoottyApp {
         }
         if previous.window.fullscreen != next.window.fullscreen {
             apply_macos_non_native_fullscreen_presentation(&next.window);
+            self.macos_non_native_fullscreen_active = next.window.non_native_fullscreen_enabled();
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
                 next.window.native_fullscreen_enabled(),
             ));
@@ -602,11 +606,17 @@ impl BoottyApp {
             }
             KeybindAction::App(AppAction::ToggleFullscreen) => {
                 let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-                if self.config().window.native_fullscreen_enabled() {
+                if should_toggle_native_fullscreen(&self.config().window) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
                 } else {
-                    let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                    let next_maximized = !maximized;
+                    let viewport_maximized =
+                        ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                    let next_maximized = next_non_native_fullscreen_state(
+                        macos_handles_non_native_fullscreen_frame(&self.config().window),
+                        self.macos_non_native_fullscreen_active,
+                        viewport_maximized,
+                    );
+                    self.macos_non_native_fullscreen_active = next_maximized;
                     if next_maximized {
                         apply_macos_non_native_fullscreen_presentation(&self.config().window);
                     } else {
@@ -760,9 +770,53 @@ impl BoottyApp {
     }
 }
 
+fn should_toggle_native_fullscreen(window: &WindowConfig) -> bool {
+    !window.non_native_fullscreen_enabled()
+}
+
+fn next_non_native_fullscreen_state(
+    macos_handles_frame: bool,
+    tracked_active: bool,
+    viewport_maximized: bool,
+) -> bool {
+    if macos_handles_frame {
+        !tracked_active
+    } else {
+        !viewport_maximized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WindowFullscreen;
+
+    #[test]
+    fn default_fullscreen_config_toggles_native_fullscreen() {
+        let config = BoottyConfig::default();
+
+        assert!(should_toggle_native_fullscreen(&config.window));
+    }
+
+    #[test]
+    fn appkit_handled_non_native_fullscreen_toggles_tracked_state() {
+        assert!(!next_non_native_fullscreen_state(true, true, false));
+        assert!(next_non_native_fullscreen_state(true, false, false));
+    }
+
+    #[test]
+    fn viewport_handled_non_native_fullscreen_toggles_maximized_state() {
+        assert!(!next_non_native_fullscreen_state(false, false, true));
+        assert!(next_non_native_fullscreen_state(false, true, false));
+    }
+
+    #[test]
+    fn non_native_fullscreen_config_toggles_non_native_fullscreen() {
+        let mut config = BoottyConfig::default();
+        config.window.fullscreen = WindowFullscreen::NonNative;
+
+        assert!(!should_toggle_native_fullscreen(&config.window));
+    }
 
     #[test]
     fn new_mux_session_request_uses_configured_working_directory() {
