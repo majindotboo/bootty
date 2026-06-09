@@ -801,6 +801,89 @@ fn bench_animated_agent_pipeline(c: &mut Criterion) {
     });
 }
 
+fn bench_animated_agent_pipeline_stages(c: &mut Criterion) {
+    let surface = surface_for(160, 60);
+
+    {
+        let mut engine = terminal_engine(160, 60);
+        let mut tick = 0_u32;
+        c.bench_function("animated_agent_update_160x60", |b| {
+            b.iter(|| {
+                tick = tick.wrapping_add(1);
+                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
+                black_box(engine.grid_size())
+            })
+        });
+    }
+
+    {
+        let mut engine = terminal_engine(160, 60);
+        let mut tick = 0_u32;
+        c.bench_function("animated_agent_update_extract_160x60", |b| {
+            b.iter(|| {
+                tick = tick.wrapping_add(1);
+                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
+                black_box(engine.extract_frame().expect("frame").stats.dirty_rows)
+            })
+        });
+    }
+
+    {
+        let mut engine = terminal_engine(160, 60);
+        let mut planner = PaintPlanner::default();
+        let mut tick = 0_u32;
+        c.bench_function("animated_agent_update_extract_plan_160x60", |b| {
+            b.iter(|| {
+                tick = tick.wrapping_add(1);
+                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
+                let frame = engine.extract_frame().expect("frame");
+                let plan = planner.plan(surface, frame, 16.0);
+                black_box(plan.text_runs.len() + plan.backgrounds.len() + plan.decorations.len())
+            })
+        });
+    }
+
+    {
+        let mut engine = terminal_engine(160, 60);
+        let mut planner = PaintPlanner::default();
+        let mut tick = 0_u32;
+        c.bench_function("animated_agent_update_extract_plan_contract_160x60", |b| {
+            b.iter(|| {
+                tick = tick.wrapping_add(1);
+                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
+                let frame = engine.extract_frame().expect("frame");
+                let plan = planner.plan(surface, frame, 16.0);
+                let text_contract = TerminalTextContract::for_terminal_paint_plan(
+                    plan,
+                    &TerminalTextConfig::default(),
+                );
+                black_box(text_contract.config.font_size)
+            })
+        });
+    }
+
+    {
+        let mut engine = terminal_engine(160, 60);
+        let mut planner = PaintPlanner::default();
+        let plan = {
+            write_agent_dashboard_frame(&mut engine, 1, 160, 60);
+            let frame = engine.extract_frame().expect("frame");
+            planner.plan(surface, frame, 16.0).clone()
+        };
+        let text_contract =
+            TerminalTextContract::for_terminal_paint_plan(&plan, &TerminalTextConfig::default());
+        c.bench_function("animated_agent_render_frame_from_plan_160x60", |b| {
+            b.iter(|| {
+                black_box(
+                    TerminalRenderFrame::from_plan(black_box(&plan), black_box(&text_contract))
+                        .commands
+                        .len(),
+                )
+            })
+        });
+    }
+}
+
 fn bench_animated_agent_pipeline_wgpu_prepare(c: &mut Criterion) {
     let mut engine = terminal_engine(160, 60);
     let surface = surface_for(160, 60);
@@ -829,23 +912,24 @@ fn bench_animated_agent_pipeline_wgpu_prepare(c: &mut Criterion) {
 }
 
 criterion_group!(
-    name = benches;
-    // These benches include WGPU preparation and full-frame terminal workloads that
-    // vary on developer desktops under browser/GPU scheduler load.
-    config = Criterion::default().noise_threshold(0.15);
-    targets =
-        bench_paint_plan,
-        bench_extract_frame,
-        bench_extract_frame_one_row_mutate,
-        bench_terminal_write_vt,
-        bench_render_commands,
-        bench_wgpu_prepare,
-        bench_sidebar_items,
-        bench_visible_sidebar_items,
-        bench_sidebar_metadata_request,
-        bench_sidebar_ui,
-        bench_sidebar_ui_usage_footer,
-        bench_animated_agent_pipeline,
-        bench_animated_agent_pipeline_wgpu_prepare
+name = benches;
+// These benches include WGPU preparation and full-frame terminal workloads that
+// vary on developer desktops under browser/GPU scheduler load.
+config = Criterion::default().noise_threshold(0.15);
+targets =
+    bench_paint_plan,
+    bench_extract_frame,
+    bench_extract_frame_one_row_mutate,
+    bench_terminal_write_vt,
+    bench_render_commands,
+    bench_wgpu_prepare,
+    bench_sidebar_items,
+    bench_visible_sidebar_items,
+    bench_sidebar_metadata_request,
+    bench_sidebar_ui,
+    bench_sidebar_ui_usage_footer,
+    bench_animated_agent_pipeline,
+    bench_animated_agent_pipeline_stages,
+    bench_animated_agent_pipeline_wgpu_prepare
 );
 criterion_main!(benches);
