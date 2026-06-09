@@ -849,6 +849,19 @@ impl WindowConfig {
             && self.macos_titlebar_style != MacosTitlebarStyle::Hidden
             && !self.non_native_fullscreen_enabled()
     }
+
+    pub fn custom_chrome_title_visible(&self) -> bool {
+        self.macos_titlebar_style != MacosTitlebarStyle::Hidden
+    }
+
+    pub fn reserves_macos_titlebar_button_area(&self) -> bool {
+        cfg!(target_os = "macos")
+            && self.decorations_enabled()
+            && matches!(
+                self.macos_titlebar_style,
+                MacosTitlebarStyle::Transparent | MacosTitlebarStyle::Tabs
+            )
+    }
 }
 
 pub fn default_config_path() -> PathBuf {

@@ -1,7 +1,7 @@
 use std::{sync::mpsc, time::Instant};
 
 use anyhow::Result;
-use eframe::egui::{self, Pos2, Rect, UiBuilder};
+use eframe::egui::{self, Pos2, Rect, TextureHandle, UiBuilder};
 
 use crate::{
     app_actions::{
@@ -26,8 +26,9 @@ use crate::{
         terminal::ActiveTerminal,
     },
     platform::{
-        apply_macos_non_native_fullscreen_presentation, macos_handles_non_native_fullscreen_frame,
-        read_clipboard_text, restore_macos_presentation, spawn_new_window,
+        apply_macos_non_native_fullscreen_presentation, install_macos_app_icon,
+        macos_handles_non_native_fullscreen_frame, read_clipboard_text, restore_macos_presentation,
+        spawn_new_window,
     },
     renderer::TerminalWidget,
     scheduler::{RepaintScheduler, RepaintSignal},
@@ -60,6 +61,8 @@ pub struct BoottyApp {
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
+    app_icon_texture: Option<TextureHandle>,
+    macos_app_icon_installed: bool,
 }
 
 #[cfg(test)]
@@ -151,6 +154,8 @@ impl BoottyApp {
             stability_trace,
             config_hot_reload,
             new_mux_session_dialog: None,
+            app_icon_texture: None,
+            macos_app_icon_installed: false,
         })
     }
 }
@@ -162,6 +167,9 @@ impl eframe::App for BoottyApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.macos_app_icon_installed {
+            self.macos_app_icon_installed = install_macos_app_icon();
+        }
         self.last_drain = self.terminal.drain_pty();
         match self.terminal.child_exited() {
             Ok(true) => {
@@ -294,6 +302,12 @@ impl BoottyApp {
                     .max_rect(sidebar_rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
+                    let title_visible = self.config().window.custom_chrome_title_visible();
+                    let reserve_titlebar_buttons =
+                        self.config().window.reserves_macos_titlebar_button_area();
+                    let title_icon = title_visible.then(|| {
+                        chrome::load_app_icon_texture(ui.ctx(), &mut self.app_icon_texture)
+                    });
                     if let Some(session_id) = chrome::show_sidebar(
                         ui,
                         self.ui_theme().palette,
@@ -301,6 +315,9 @@ impl BoottyApp {
                         SidebarModel {
                             sessions: self.mux.sessions(),
                             selected_session: self.mux.selected_session(),
+                            title_visible,
+                            reserve_titlebar_buttons,
+                            title_icon: title_icon.as_ref(),
                         },
                     ) {
                         let mux_config = self.config().multiplexer.clone();

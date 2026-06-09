@@ -43,13 +43,16 @@ pub fn native_options_for_config(config: &BoottyConfig) -> eframe::NativeOptions
             config.window.non_native_fullscreen_enabled()
                 && !macos_handles_non_native_fullscreen_frame(&config.window),
         );
+    viewport = apply_native_icon_to_viewport(viewport);
 
     viewport = match config.window.macos_titlebar_style {
         MacosTitlebarStyle::Native => viewport,
         MacosTitlebarStyle::Transparent => viewport
+            .with_title_shown(false)
             .with_titlebar_shown(false)
             .with_fullsize_content_view(true),
         MacosTitlebarStyle::Tabs => viewport
+            .with_title_shown(false)
             .with_titlebar_shown(false)
             .with_fullsize_content_view(true),
         MacosTitlebarStyle::Hidden => viewport
@@ -64,6 +67,30 @@ pub fn native_options_for_config(config: &BoottyConfig) -> eframe::NativeOptions
         viewport,
         ..Default::default()
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_macos_app_icon() -> bool {
+    macos_app_icon::install()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install_macos_app_icon() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn apply_native_icon_to_viewport(
+    viewport: eframe::egui::ViewportBuilder,
+) -> eframe::egui::ViewportBuilder {
+    viewport
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_native_icon_to_viewport(
+    viewport: eframe::egui::ViewportBuilder,
+) -> eframe::egui::ViewportBuilder {
+    viewport.with_icon(crate::assets::native_app_icon_data())
 }
 
 #[cfg(target_os = "macos")]
@@ -205,6 +232,34 @@ mod macos_presentation {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos_app_icon {
+    use objc2::{AnyThread as _, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    use crate::assets;
+
+    pub fn install() -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let data = unsafe {
+            NSData::dataWithBytes_length(
+                assets::MACOS_DOCK_ICON_ICNS.as_ptr().cast(),
+                assets::MACOS_DOCK_ICON_ICNS.len(),
+            )
+        };
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            return false;
+        };
+        unsafe {
+            app.setApplicationIconImage(Some(&image));
+        }
+        true
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +287,31 @@ mod tests {
         assert_eq!(options.viewport.decorations, Some(false));
         assert_eq!(options.viewport.title_shown, Some(false));
         assert_eq!(options.viewport.titlebar_buttons_shown, Some(false));
+        assert_eq!(options.viewport.icon.is_some(), !cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn transparent_macos_titlebar_keeps_buttons_but_hides_native_title() {
+        let mut config = BoottyConfig::default();
+        config.window.macos_titlebar_style = MacosTitlebarStyle::Transparent;
+
+        let options = native_options_for_config(&config);
+
+        assert_eq!(options.viewport.title_shown, Some(false));
+        assert_eq!(options.viewport.titlebar_shown, Some(false));
+        assert_eq!(options.viewport.titlebar_buttons_shown, None);
+    }
+
+    #[test]
+    fn native_icon_uses_platform_specific_icon_artwork() {
+        let config = BoottyConfig::default();
+        let options = native_options_for_config(&config);
+
+        if cfg!(target_os = "macos") {
+            assert!(options.viewport.icon.is_none());
+        } else {
+            let icon = options.viewport.icon.expect("native app icon");
+            assert_eq!((icon.width, icon.height), (256, 256));
+        }
     }
 }

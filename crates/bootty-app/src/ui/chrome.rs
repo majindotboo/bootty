@@ -1,7 +1,8 @@
 use bootty_ui::ThemePalette;
-use eframe::egui::{self, Pos2, Rect, RichText, Stroke};
+use eframe::egui::{self, Pos2, Rect, RichText, Stroke, TextureHandle};
 
 use crate::{
+    assets,
     config::ChromeConfig,
     diagnostics::{StatusMetrics, us_to_ms},
     mux::{
@@ -19,10 +20,13 @@ pub struct StatusBarModel<'a> {
     pub last_error: Option<&'a str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SidebarModel<'a> {
     pub sessions: &'a [MuxSession],
     pub selected_session: Option<&'a str>,
+    pub title_visible: bool,
+    pub reserve_titlebar_buttons: bool,
+    pub title_icon: Option<&'a TextureHandle>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +79,12 @@ pub fn show_status_bar(ui: &mut egui::Ui, palette: ThemePalette, model: StatusBa
     });
 }
 
+const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
+const SIDEBAR_FOOTER_HEIGHT: f32 = 58.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 30.0;
+const SIDEBAR_PAD_X: f32 = 14.0;
+const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
+const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
 pub fn show_sidebar(
     ui: &mut egui::Ui,
     palette: ThemePalette,
@@ -92,35 +102,13 @@ pub fn show_sidebar(
         egui::StrokeKind::Inside,
     );
 
-    let header_h = 44.0;
-    let footer_h = 58.0;
-    let row_h = 30.0;
-    let pad_x = 14.0;
-
-    painter.text(
-        Pos2::new(rect.min.x + pad_x, rect.min.y + header_h * 0.5),
-        egui::Align2::LEFT_CENTER,
-        "",
-        egui::FontId::monospace(17.0),
-        palette.primary,
-    );
-    painter.text(
-        Pos2::new(rect.min.x + pad_x + 28.0, rect.min.y + header_h * 0.5),
-        egui::Align2::LEFT_CENTER,
-        "mux sessions",
-        egui::FontId::monospace(14.0),
-        palette.text,
-    );
-    painter.text(
-        Pos2::new(rect.max.x - pad_x, rect.min.y + header_h * 0.5),
-        egui::Align2::RIGHT_CENTER,
-        model.sessions.len().to_string(),
-        egui::FontId::monospace(13.0),
-        palette.muted,
-    );
+    let header_h = sidebar_header_height(model.title_visible);
+    if model.title_visible {
+        paint_sidebar_title(ui, rect, palette, &model);
+    }
 
     let list_top = rect.min.y + header_h;
-    let list_bottom = (rect.max.y - footer_h).max(list_top);
+    let list_bottom = (rect.max.y - SIDEBAR_FOOTER_HEIGHT).max(list_top);
     if model.sessions.is_empty() {
         painter.text(
             Pos2::new(rect.center().x, list_top + 42.0),
@@ -132,11 +120,13 @@ pub fn show_sidebar(
     }
 
     let mut activated = None;
-    let max_rows = ((list_bottom - list_top) / row_h).floor().max(0.0) as usize;
+    let max_rows = ((list_bottom - list_top) / SIDEBAR_ROW_HEIGHT)
+        .floor()
+        .max(0.0) as usize;
     for (index, session) in model.sessions.iter().take(max_rows).enumerate() {
         let row_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x, list_top + index as f32 * row_h),
-            egui::vec2(width, row_h),
+            Pos2::new(rect.min.x, list_top + index as f32 * SIDEBAR_ROW_HEIGHT),
+            egui::vec2(width, SIDEBAR_ROW_HEIGHT),
         );
         let is_selected = model.selected_session == Some(session.id.as_str())
             || model.selected_session == Some(session.name.as_str());
@@ -145,8 +135,87 @@ pub fn show_sidebar(
         }
     }
 
-    paint_sidebar_footer(ui, rect, footer_h, palette);
+    paint_sidebar_footer(ui, rect, SIDEBAR_FOOTER_HEIGHT, palette);
     activated
+}
+
+pub fn load_app_icon_texture(
+    ctx: &egui::Context,
+    texture: &mut Option<TextureHandle>,
+) -> TextureHandle {
+    texture
+        .get_or_insert_with(|| {
+            ctx.load_texture(
+                "bootty-app-icon",
+                assets::title_icon_color_image(),
+                egui::TextureOptions::LINEAR,
+            )
+        })
+        .clone()
+}
+
+fn paint_sidebar_title(ui: &egui::Ui, rect: Rect, palette: ThemePalette, model: &SidebarModel<'_>) {
+    let painter = ui.painter_at(rect);
+    let layout = sidebar_title_layout(rect, model.reserve_titlebar_buttons);
+    if let Some(icon) = model.title_icon {
+        painter.image(
+            icon.id(),
+            layout.icon_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
+        painter.circle_filled(layout.icon_rect.center(), 8.0, palette.primary);
+    }
+    painter.text(
+        layout.title_pos,
+        egui::Align2::LEFT_CENTER,
+        "Bootty",
+        egui::FontId::proportional(15.0),
+        palette.text,
+    );
+    painter.text(
+        Pos2::new(rect.max.x - SIDEBAR_PAD_X, layout.title_pos.y),
+        egui::Align2::RIGHT_CENTER,
+        model.sessions.len().to_string(),
+        egui::FontId::monospace(13.0),
+        palette.muted,
+    );
+}
+
+fn sidebar_header_height(title_visible: bool) -> f32 {
+    if title_visible {
+        SIDEBAR_HEADER_HEIGHT
+    } else {
+        0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SidebarTitleLayout {
+    icon_rect: Rect,
+    title_pos: Pos2,
+}
+
+fn sidebar_title_layout(rect: Rect, reserve_titlebar_buttons: bool) -> SidebarTitleLayout {
+    let (reserved, center_y) = if reserve_titlebar_buttons {
+        (
+            MACOS_TITLEBAR_BUTTON_SAFE_WIDTH,
+            rect.min.y + MACOS_TITLEBAR_BUTTON_CENTER_Y,
+        )
+    } else {
+        (0.0, rect.min.y + SIDEBAR_HEADER_HEIGHT * 0.5)
+    };
+    let icon_size = 18.0;
+    let left = rect.min.x + SIDEBAR_PAD_X + reserved;
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(left, center_y - icon_size * 0.5),
+        egui::vec2(icon_size, icon_size),
+    );
+    SidebarTitleLayout {
+        icon_rect,
+        title_pos: Pos2::new(icon_rect.max.x + 10.0, center_y),
+    }
 }
 
 pub fn sidebar_rect(rect: Rect, chrome: &ChromeConfig) -> Rect {
@@ -403,5 +472,28 @@ mod tests {
 
         chrome.sidebar = false;
         assert_eq!(sidebar_rect(rect, &chrome).width(), 0.0);
+    }
+
+    #[test]
+    fn sidebar_title_layout_reserves_macos_titlebar_button_area() {
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(286.0, 200.0));
+
+        let normal = sidebar_title_layout(rect, false);
+        let reserved = sidebar_title_layout(rect, true);
+
+        assert_eq!(normal.icon_rect.min.x, SIDEBAR_PAD_X);
+        assert_eq!(
+            reserved.icon_rect.min.x,
+            SIDEBAR_PAD_X + MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
+        );
+        assert_eq!(normal.title_pos.y, SIDEBAR_HEADER_HEIGHT * 0.5);
+        assert_eq!(reserved.title_pos.y, MACOS_TITLEBAR_BUTTON_CENTER_Y);
+        assert!(reserved.title_pos.x > reserved.icon_rect.max.x);
+    }
+
+    #[test]
+    fn sidebar_header_collapses_when_title_is_hidden() {
+        assert_eq!(sidebar_header_height(true), SIDEBAR_HEADER_HEIGHT);
+        assert_eq!(sidebar_header_height(false), 0.0);
     }
 }

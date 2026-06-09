@@ -1,5 +1,6 @@
 pub mod app;
 pub mod app_actions;
+mod assets;
 pub mod color;
 pub mod config;
 pub mod config_reload;
