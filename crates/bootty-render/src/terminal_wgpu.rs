@@ -15,17 +15,24 @@ mod font_lookup;
 mod glyph_draw;
 mod image_upload;
 mod pipelines;
+mod vertices;
 
 #[cfg(test)]
 use font_lookup::{GHOSTTY_FONT_FAMILY_PRIORITY, terminal_font_family_priority};
 use font_lookup::{ghostty_cell_metrics_from_font, terminal_font, terminal_font_for_char};
 use glyph_draw::text_glyph_draws;
-use image_upload::{image_fits_device_limits, rgba_image_pixels, source_uv_rect};
+use image_upload::{image_fits_device_limits, rgba_image_pixels};
 use pipelines::{
     background_pipeline, image_bind_group_layout, image_pipeline, text_bind_group_layout,
     text_pipeline, text_texture_format,
 };
 use std::collections::HashMap;
+#[cfg(test)]
+use vertices::color_to_float;
+use vertices::{
+    BackgroundVertex, TerminalQuadDraw, TextVertex, background_vertices, image_vertices,
+    text_vertices, vertex_bytes,
+};
 
 #[cfg(test)]
 pub(crate) use crate::terminal_text::{FontStyle, ResolvedFontFace};
@@ -844,143 +851,6 @@ fn push_text_batch(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TerminalQuadDraw {
-    rect: SurfaceRect,
-    color: PlanColor,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct BackgroundVertex {
-    position: [f32; 2],
-    color: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TextVertex {
-    position: [f32; 2],
-    uv: [f32; 2],
-    color: [f32; 4],
-}
-
-fn background_vertices(surface: SurfaceRect, draws: &[TerminalQuadDraw]) -> Vec<BackgroundVertex> {
-    let mut vertices = Vec::with_capacity(draws.len() * 6);
-    for draw in draws {
-        let min = surface_to_ndc(surface, draw.rect.min_x, draw.rect.min_y);
-        let max = surface_to_ndc(surface, draw.rect.max_x, draw.rect.max_y);
-        let top_left = [min[0], min[1]];
-        let top_right = [max[0], min[1]];
-        let bottom_right = [max[0], max[1]];
-        let bottom_left = [min[0], max[1]];
-        let color = color_to_float(draw.color);
-
-        vertices.extend([
-            BackgroundVertex {
-                position: top_left,
-                color,
-            },
-            BackgroundVertex {
-                position: bottom_left,
-                color,
-            },
-            BackgroundVertex {
-                position: bottom_right,
-                color,
-            },
-            BackgroundVertex {
-                position: top_left,
-                color,
-            },
-            BackgroundVertex {
-                position: bottom_right,
-                color,
-            },
-            BackgroundVertex {
-                position: top_right,
-                color,
-            },
-        ]);
-    }
-    vertices
-}
-
-fn text_vertices(surface: SurfaceRect, quads: &[TexturedGlyphQuad]) -> Vec<TextVertex> {
-    let mut vertices = Vec::with_capacity(quads.len() * 6);
-    for quad in quads {
-        let min = surface_to_ndc(surface, quad.rect.min_x, quad.rect.min_y);
-        let max = surface_to_ndc(surface, quad.rect.max_x, quad.rect.max_y);
-        let color = color_to_float(quad.color);
-        let top_left = TextVertex {
-            position: [min[0], min[1]],
-            uv: [quad.uv.min_x, quad.uv.min_y],
-            color,
-        };
-        let top_right = TextVertex {
-            position: [max[0], min[1]],
-            uv: [quad.uv.max_x, quad.uv.min_y],
-            color,
-        };
-        let bottom_right = TextVertex {
-            position: [max[0], max[1]],
-            uv: [quad.uv.max_x, quad.uv.max_y],
-            color,
-        };
-        let bottom_left = TextVertex {
-            position: [min[0], max[1]],
-            uv: [quad.uv.min_x, quad.uv.max_y],
-            color,
-        };
-        vertices.extend([
-            top_left,
-            bottom_left,
-            bottom_right,
-            top_left,
-            bottom_right,
-            top_right,
-        ]);
-    }
-    vertices
-}
-
-fn image_vertices(surface: SurfaceRect, image: &KittyImagePlacement) -> Vec<TextVertex> {
-    let Some(uv) = source_uv_rect(image) else {
-        return Vec::new();
-    };
-    let min = surface_to_ndc(surface, image.destination.min_x, image.destination.min_y);
-    let max = surface_to_ndc(surface, image.destination.max_x, image.destination.max_y);
-    let color = [1.0, 1.0, 1.0, 1.0];
-    let top_left = TextVertex {
-        position: [min[0], min[1]],
-        uv: [uv.min_x, uv.min_y],
-        color,
-    };
-    let top_right = TextVertex {
-        position: [max[0], min[1]],
-        uv: [uv.max_x, uv.min_y],
-        color,
-    };
-    let bottom_right = TextVertex {
-        position: [max[0], max[1]],
-        uv: [uv.max_x, uv.max_y],
-        color,
-    };
-    let bottom_left = TextVertex {
-        position: [min[0], max[1]],
-        uv: [uv.min_x, uv.max_y],
-        color,
-    };
-    vec![
-        top_left,
-        bottom_left,
-        bottom_right,
-        top_left,
-        bottom_right,
-        top_right,
-    ]
-}
-
 fn background_command_vertices(
     surface: SurfaceRect,
     command: &TerminalRenderCommand,
@@ -1180,36 +1050,6 @@ fn text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextD
         }
     });
     draws
-}
-
-fn surface_to_ndc(surface: SurfaceRect, x: f32, y: f32) -> [f32; 2] {
-    let width = surface.width().max(1.0);
-    let height = surface.height().max(1.0);
-    [
-        ((x - surface.min_x) / width) * 2.0 - 1.0,
-        1.0 - ((y - surface.min_y) / height) * 2.0,
-    ]
-}
-
-fn color_to_float(color: PlanColor) -> [f32; 4] {
-    [
-        f32::from(color.r) / 255.0,
-        f32::from(color.g) / 255.0,
-        f32::from(color.b) / 255.0,
-        f32::from(color.a) / 255.0,
-    ]
-}
-
-fn vertex_bytes<T>(vertices: &[T]) -> &[u8] {
-    // SAFETY: `BackgroundVertex` and `TextVertex` are `#[repr(C)]` aggregates composed only of
-    // `f32` arrays. Reinterpreting their contiguous slice storage as bytes is valid for upload to
-    // WGPU, and `u8` has alignment 1 so there is no stricter alignment requirement.
-    unsafe {
-        std::slice::from_raw_parts(
-            vertices.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(vertices),
-        )
-    }
 }
 
 fn egui_rect(rect: SurfaceRect) -> egui::Rect {

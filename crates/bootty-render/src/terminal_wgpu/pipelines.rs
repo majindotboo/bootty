@@ -1,4 +1,4 @@
-use super::{BackgroundVertex, TextVertex};
+use super::vertices::{BackgroundVertex, TextVertex};
 use crate::terminal_text_atlas::GlyphAtlasFormat;
 use eframe::wgpu;
 
