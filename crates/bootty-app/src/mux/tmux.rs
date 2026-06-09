@@ -174,7 +174,7 @@ fn parse_tmux_snapshot(
     })
 }
 
-fn order_tmux_sessions(sessions: &mut Vec<MuxSession>) {
+fn order_tmux_sessions(sessions: &mut [MuxSession]) {
     use std::collections::{HashMap, HashSet};
 
     let alive = sessions

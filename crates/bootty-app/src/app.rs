@@ -401,7 +401,6 @@ impl BoottyApp {
                     let title_visible = self.config().window.custom_chrome_title_visible();
                     let reserve_titlebar_buttons =
                         self.config().window.reserves_macos_titlebar_button_area();
-                    let fullscreen_chrome = fullscreen_chrome;
                     let top_inset = if fullscreen_chrome && !title_visible {
                         28.0
                     } else {

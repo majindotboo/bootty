@@ -149,7 +149,7 @@ pub fn show_sidebar(
                 egui::vec2(width, SIDEBAR_ROW_HEIGHT),
             );
             (row_rect.contains(pos))
-                .then(|| item.session_id.as_deref())
+                .then_some(item.session_id.as_deref())
                 .flatten()
         })
     });
@@ -552,7 +552,7 @@ fn format_bytes(bytes: u64) -> String {
     if bytes >= GIB {
         format!("{:.1}g", bytes as f64 / GIB as f64)
     } else {
-        format!("{}m", (bytes + MIB - 1) / MIB)
+        format!("{}m", bytes.div_ceil(MIB))
     }
 }
 
@@ -710,9 +710,9 @@ struct UsageBar {
     label: String,
     pct: u8,
     pace: String,
+    pace_marker: Option<f32>,
     color: egui::Color32,
 }
-
 fn paint_usage_bar(painter: &egui::Painter, rect: Rect, bar: &UsageBar, palette: ThemePalette) {
     painter.text(
         Pos2::new(rect.min.x, rect.min.y + 6.0),
@@ -727,22 +727,25 @@ fn paint_usage_bar(painter: &egui::Painter, rect: Rect, bar: &UsageBar, palette:
         Pos2::new(rect.min.x, rect.min.y + 17.0),
         egui::vec2(rect.width(), 4.0),
     );
-    let marker_x = track.left() + track.width() * f32::from(bar.pct) / 100.0;
+    let fill_x = track.left() + track.width() * f32::from(bar.pct) / 100.0;
     painter.rect_filled(track, 2.0, palette.surface);
     painter.line_segment(
         [
             Pos2::new(track.left(), track.center().y),
-            Pos2::new(marker_x, track.center().y),
+            Pos2::new(fill_x, track.center().y),
         ],
         Stroke::new(2.0, bar.color),
     );
-    painter.line_segment(
-        [
-            Pos2::new(marker_x, track.top() - 3.0),
-            Pos2::new(marker_x, track.bottom() + 3.0),
-        ],
-        Stroke::new(1.0, palette.subtext),
-    );
+    if let Some(marker) = bar.pace_marker {
+        let marker_x = track.left() + track.width() * marker;
+        painter.line_segment(
+            [
+                Pos2::new(marker_x, track.top() - 3.0),
+                Pos2::new(marker_x, track.bottom() + 3.0),
+            ],
+            Stroke::new(2.0, palette.success),
+        );
+    }
 }
 
 fn paint_usage_right_text(
@@ -801,22 +804,83 @@ fn parse_usage_bars(lines: &[String]) -> Vec<UsageBar> {
                 },
                 pct,
                 pace,
+                pace_marker: usage_pace_marker(&text),
                 color: first_ansi_color(line).unwrap_or(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)),
             })
         })
         .collect()
 }
 
+fn usage_pace_marker(text: &str) -> Option<f32> {
+    let total = text
+        .split_whitespace()
+        .take_while(|part| !part.ends_with('%'))
+        .filter_map(parse_duration_seconds)
+        .last()?;
+    let reset = text
+        .split_whitespace()
+        .skip_while(|part| !part.ends_with('%'))
+        .find_map(|part| part.strip_prefix('↺').and_then(parse_duration_seconds))?;
+    (total > 0).then(|| (reset as f32 / total as f32).clamp(0.0, 1.0))
+}
+
+fn parse_duration_seconds(token: &str) -> Option<u64> {
+    let token = token.trim().trim_start_matches('+').trim_start_matches('↺');
+    if token.is_empty() {
+        return None;
+    }
+    if let Some((days, rest)) = token.split_once('d') {
+        let days = days.parse::<u64>().ok()?;
+        let rest_seconds = if rest.is_empty() {
+            0
+        } else {
+            parse_clock_seconds(rest).or_else(|| parse_unit_seconds(rest))?
+        };
+        return Some(
+            days.saturating_mul(24 * 60 * 60)
+                .saturating_add(rest_seconds),
+        );
+    }
+    parse_unit_seconds(token).or_else(|| parse_clock_seconds(token))
+}
+
+fn parse_unit_seconds(token: &str) -> Option<u64> {
+    if let Some(value) = token.strip_suffix('d') {
+        return value
+            .parse::<u64>()
+            .ok()
+            .map(|value| value.saturating_mul(24 * 60 * 60));
+    }
+    if let Some(value) = token.strip_suffix('h') {
+        return value
+            .parse::<u64>()
+            .ok()
+            .map(|value| value.saturating_mul(60 * 60));
+    }
+    if let Some(value) = token.strip_suffix('m') {
+        return value
+            .parse::<u64>()
+            .ok()
+            .map(|value| value.saturating_mul(60));
+    }
+    None
+}
+fn parse_clock_seconds(token: &str) -> Option<u64> {
+    let (hours, minutes) = token.split_once(':')?;
+    let hours = hours.parse::<u64>().ok()?;
+    let minutes = minutes.parse::<u64>().ok()?;
+    (minutes < 60).then_some(hours.saturating_mul(60 * 60) + minutes * 60)
+}
+
 fn usage_pace(text: &str) -> String {
     let mut seen_pct = false;
     text.split_whitespace()
-        .filter_map(|part| {
+        .filter(|part| {
             if part.ends_with('%') {
                 seen_pct = true;
-                return None;
+                return false;
             }
-            (seen_pct && (part.starts_with('+') || part.contains(':') || part.contains('↺')))
-                .then_some(part)
+            seen_pct && (part.starts_with('+') || part.contains(':') || part.contains('↺'))
         })
         .take(3)
         .collect::<Vec<_>>()
@@ -981,6 +1045,25 @@ mod tests {
         assert_eq!(bars[0].pct, 90);
         assert!(bars[0].label.contains("5h"));
         assert_eq!(bars[0].color, egui::Color32::from_rgb(116, 199, 236));
+        assert_eq!(bars[0].pace_marker, None);
+    }
+
+    #[test]
+    fn usage_pace_marker_uses_reset_duration_not_percent() {
+        let lines = vec![
+            "\x1b[38;2;116;199;236m 5h 78% +3h03 ↺50m\x1b[0m".to_owned(),
+            "\x1b[38;2;116;199;236m 7d 73% +1d06:20 ↺3d20:18\x1b[0m".to_owned(),
+        ];
+
+        let bars = parse_usage_bars(&lines);
+
+        assert!((bars[0].pace_marker.unwrap() - (50.0 / (5.0 * 60.0))).abs() < 0.001);
+        assert!(
+            (bars[1].pace_marker.unwrap()
+                - ((3.0 * 24.0 * 60.0 + 20.0 * 60.0 + 18.0) / (7.0 * 24.0 * 60.0)))
+                .abs()
+                < 0.001
+        );
     }
 
     #[test]
