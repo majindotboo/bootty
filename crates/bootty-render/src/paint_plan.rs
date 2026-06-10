@@ -205,237 +205,262 @@ impl PaintPlanner {
     ) -> &TerminalPaintPlan {
         let default_bg = PlanColor::opaque(frame.colors.background);
         let default_fg = PlanColor::opaque(frame.colors.foreground);
-        self.clear_plan(surface.grid_rect(frame.cols, frame.rows), default_bg);
+        recycle_plan(
+            &mut self.plan,
+            &mut self.run_text_pool,
+            surface.grid_rect(frame.cols, frame.rows),
+            default_bg,
+        );
 
-        self.plan_backgrounds(surface, frame, default_fg, default_bg);
-        self.plan_text_runs(surface, frame, default_fg, default_bg, font_size);
-        self.plan_cursor(surface, frame, default_fg, default_bg, cursor_blink_phase);
+        plan_backgrounds(&mut self.plan, surface, frame, default_fg, default_bg);
+        plan_text_runs(
+            &mut self.plan,
+            &mut self.run_text_pool,
+            surface,
+            frame,
+            default_fg,
+            default_bg,
+            font_size,
+        );
+        plan_cursor(
+            &mut self.plan,
+            surface,
+            frame,
+            default_fg,
+            default_bg,
+            cursor_blink_phase,
+        );
 
         &self.plan
     }
+}
 
-    fn clear_plan(&mut self, surface: SurfaceRect, default_background: PlanColor) {
-        for run in self.plan.text_runs.drain(..) {
-            let mut text = run.text;
-            text.clear();
-            self.run_text_pool.push(text);
+fn recycle_plan(
+    plan: &mut TerminalPaintPlan,
+    pool: &mut Vec<String>,
+    surface: SurfaceRect,
+    default_background: PlanColor,
+) {
+    for run in plan.text_runs.drain(..) {
+        let mut text = run.text;
+        text.clear();
+        pool.push(text);
+    }
+    plan.surface = surface;
+    plan.default_background = default_background;
+    plan.backgrounds.clear();
+    plan.decorations.clear();
+    plan.cursor = None;
+}
+
+fn plan_backgrounds(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+    default_fg: PlanColor,
+    default_bg: PlanColor,
+) {
+    for cell in &frame.cells {
+        if !cell.style.inverse && cell.bg.is_none() {
+            continue;
         }
-        self.plan.surface = surface;
-        self.plan.default_background = default_background;
-        self.plan.backgrounds.clear();
-        self.plan.decorations.clear();
-        self.plan.cursor = None;
-    }
-
-    fn take_run_text(&mut self) -> String {
-        self.run_text_pool.pop().unwrap_or_default()
-    }
-
-    fn plan_backgrounds(
-        &mut self,
-        surface: TerminalSurface,
-        frame: &RenderFrame,
-        default_fg: PlanColor,
-        default_bg: PlanColor,
-    ) {
-        for cell in &frame.cells {
-            if !cell.style.inverse && cell.bg.is_none() {
-                continue;
-            }
-            let bg = cell_background(cell, default_fg, default_bg);
-            if bg != default_bg {
-                self.push_background(surface.cell_rect(cell.x, cell.y), bg);
-            }
+        let bg = cell_background(cell, default_fg, default_bg);
+        if bg != default_bg {
+            push_background(&mut plan.backgrounds, surface.cell_rect(cell.x, cell.y), bg);
         }
     }
+}
 
-    fn push_background(&mut self, rect: SurfaceRect, color: PlanColor) {
-        if let Some(last) = self.plan.backgrounds.last_mut()
-            && last.color == color
-            && last.rect.min_y == rect.min_y
-            && last.rect.max_y == rect.max_y
-            && (last.rect.max_x - rect.min_x).abs() <= f32::EPSILON
-        {
-            last.rect.max_x = rect.max_x;
-            return;
-        }
-
-        self.plan.backgrounds.push(BackgroundRect { rect, color });
+fn push_background(backgrounds: &mut Vec<BackgroundRect>, rect: SurfaceRect, color: PlanColor) {
+    if let Some(last) = backgrounds.last_mut()
+        && last.color == color
+        && last.rect.min_y == rect.min_y
+        && last.rect.max_y == rect.max_y
+        && (last.rect.max_x - rect.min_x).abs() <= f32::EPSILON
+    {
+        last.rect.max_x = rect.max_x;
+        return;
     }
 
-    fn plan_text_runs(
-        &mut self,
-        surface: TerminalSurface,
-        frame: &RenderFrame,
-        default_fg: PlanColor,
-        default_bg: PlanColor,
-        font_size: f32,
-    ) {
-        let mut cell_index = 0;
-        while cell_index < frame.cells.len() {
-            let first = &frame.cells[cell_index];
-            let first_text = frame.cell_text(first);
+    backgrounds.push(BackgroundRect { rect, color });
+}
 
-            if first.style.invisible || first_text.is_empty() {
-                cell_index += 1;
-                continue;
-            }
+fn plan_text_runs(
+    plan: &mut TerminalPaintPlan,
+    pool: &mut Vec<String>,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+    default_fg: PlanColor,
+    default_bg: PlanColor,
+    font_size: f32,
+) {
+    let mut cell_index = 0;
+    while cell_index < frame.cells.len() {
+        let first = &frame.cells[cell_index];
+        let first_text = frame.cell_text(first);
 
-            let attrs = paint_attrs(first, default_fg, default_bg);
-            let mut run_text = self.take_run_text();
-            run_text.clear();
-            run_text.extend(first_text);
+        if first.style.invisible || first_text.is_empty() {
+            cell_index += 1;
+            continue;
+        }
 
-            let start_x = first.x;
-            let start_y = first.y;
-            let mut end_x = first.x + cell_text_width(first_text);
-            let mut next_index = cell_index + 1;
+        let attrs = paint_attrs(first, default_fg, default_bg);
+        let mut run_text = pool.pop().unwrap_or_default();
+        run_text.clear();
+        run_text.extend(first_text);
 
-            while let Some(next) = frame.cells.get(next_index) {
-                let next_text = frame.cell_text(next);
-                if next.y != start_y
-                    || next.x != end_x
-                    || next.style.invisible
-                    || next_text.is_empty()
-                    || paint_attrs(next, default_fg, default_bg) != attrs
-                {
-                    break;
-                }
+        let start_x = first.x;
+        let start_y = first.y;
+        let mut end_x = first.x + cell_text_width(first_text);
+        let mut next_index = cell_index + 1;
 
-                run_text.extend(next_text);
-                end_x += cell_text_width(next_text);
-                next_index += 1;
+        while let Some(next) = frame.cells.get(next_index) {
+            let next_text = frame.cell_text(next);
+            if next.y != start_y
+                || next.x != end_x
+                || next.style.invisible
+                || next_text.is_empty()
+                || paint_attrs(next, default_fg, default_bg) != attrs
+            {
+                break;
             }
 
-            let rect = surface.run_rect(start_x, start_y, end_x - start_x);
-            self.plan.text_runs.push(TextRun {
-                rect,
-                cells: end_x - start_x,
-                text: run_text,
-                attrs,
-            });
+            run_text.extend(next_text);
+            end_x += cell_text_width(next_text);
+            next_index += 1;
+        }
 
-            self.plan_decorations(rect, attrs, font_size);
-            cell_index = next_index;
-        }
-    }
-
-    fn plan_decorations(&mut self, rect: SurfaceRect, attrs: TextAttrs, font_size: f32) {
-        if attrs.underline != Underline::None {
-            let style = match attrs.underline {
-                Underline::None => unreachable!("none handled above"),
-                Underline::Single => DecorationStyle::Single,
-                Underline::Double => DecorationStyle::Double,
-                Underline::Curly => DecorationStyle::Curly,
-                Underline::Dotted => DecorationStyle::Dotted,
-                Underline::Dashed => DecorationStyle::Dashed,
-                _ => DecorationStyle::Single,
-            };
-            self.plan.decorations.push(DecorationLine {
-                start_x: rect.min_x,
-                start_y: rect.min_y + font_size + 3.0,
-                end_x: rect.max_x,
-                end_y: rect.min_y + font_size + 3.0,
-                color: attrs.fg,
-                style,
-            });
-        }
-        if attrs.strikethrough {
-            self.plan.decorations.push(DecorationLine {
-                start_x: rect.min_x,
-                start_y: rect.min_y + rect.height() * 0.55,
-                end_x: rect.max_x,
-                end_y: rect.min_y + rect.height() * 0.55,
-                color: attrs.fg,
-                style: DecorationStyle::Strikethrough,
-            });
-        }
-        if attrs.overline {
-            self.plan.decorations.push(DecorationLine {
-                start_x: rect.min_x,
-                start_y: rect.min_y + TEXT_Y_OFFSET,
-                end_x: rect.max_x,
-                end_y: rect.min_y + TEXT_Y_OFFSET,
-                color: attrs.fg,
-                style: DecorationStyle::Overline,
-            });
-        }
-    }
-
-    fn plan_cursor(
-        &mut self,
-        surface: TerminalSurface,
-        frame: &RenderFrame,
-        default_fg: PlanColor,
-        default_bg: PlanColor,
-        cursor_blink_phase: CursorBlinkPhase,
-    ) {
-        let Some(cursor) = frame.cursor else {
-            return;
-        };
-        let cursor_alpha = if cursor.blinking {
-            cursor_blink_phase.alpha()
-        } else {
-            255
-        };
-        if cursor_alpha == 0 {
-            return;
-        }
-        let color = cursor
-            .color
-            .or(frame.colors.cursor)
-            .map_or(default_fg, PlanColor::opaque);
-        let color = PlanColor {
-            a: cursor_alpha,
-            ..color
-        };
-        let shape = match cursor.style {
-            CursorVisualStyle::Bar => CursorShape::Bar,
-            CursorVisualStyle::Underline => CursorShape::Underline,
-            CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
-            CursorVisualStyle::Block => CursorShape::Block,
-            _ => CursorShape::Block,
-        };
-        let cursor_x = if cursor.at_wide_tail {
-            cursor.x.saturating_sub(1)
-        } else {
-            cursor.x
-        };
-        let rect = if cursor.at_wide_tail {
-            surface.run_rect(cursor_x, cursor.y, 2)
-        } else {
-            surface.cell_rect(cursor.x, cursor.y)
-        };
-        let text_under_cursor = if shape == CursorShape::Block {
-            cursor_cell(frame, cursor_x, cursor.y).and_then(|cell| {
-                if cell.style.invisible {
-                    return None;
-                }
-                let text = frame.cell_text(cell).iter().collect::<String>();
-                let (_, cell_bg) = cell_colors(cell, default_fg, default_bg);
-                (!text.is_empty()).then_some(CursorTextPlan {
-                    rect,
-                    text,
-                    color: frame
-                        .colors
-                        .cursor_text
-                        .map(PlanColor::opaque)
-                        .unwrap_or_else(|| {
-                            cursor_text_color(cell_bg, color, default_fg, default_bg)
-                        }),
-                })
-            })
-        } else {
-            None
-        };
-
-        self.plan.cursor = Some(CursorPlan {
+        let rect = surface.run_rect(start_x, start_y, end_x - start_x);
+        plan.text_runs.push(TextRun {
             rect,
-            color,
-            shape,
-            text_under_cursor,
+            cells: end_x - start_x,
+            text: run_text,
+            attrs,
+        });
+
+        plan_decorations(&mut plan.decorations, rect, attrs, font_size);
+        cell_index = next_index;
+    }
+}
+
+fn plan_decorations(
+    decorations: &mut Vec<DecorationLine>,
+    rect: SurfaceRect,
+    attrs: TextAttrs,
+    font_size: f32,
+) {
+    if attrs.underline != Underline::None {
+        let style = match attrs.underline {
+            Underline::None => unreachable!("none handled above"),
+            Underline::Single => DecorationStyle::Single,
+            Underline::Double => DecorationStyle::Double,
+            Underline::Curly => DecorationStyle::Curly,
+            Underline::Dotted => DecorationStyle::Dotted,
+            Underline::Dashed => DecorationStyle::Dashed,
+            _ => DecorationStyle::Single,
+        };
+        decorations.push(DecorationLine {
+            start_x: rect.min_x,
+            start_y: rect.min_y + font_size + 3.0,
+            end_x: rect.max_x,
+            end_y: rect.min_y + font_size + 3.0,
+            color: attrs.fg,
+            style,
         });
     }
+    if attrs.strikethrough {
+        decorations.push(DecorationLine {
+            start_x: rect.min_x,
+            start_y: rect.min_y + rect.height() * 0.55,
+            end_x: rect.max_x,
+            end_y: rect.min_y + rect.height() * 0.55,
+            color: attrs.fg,
+            style: DecorationStyle::Strikethrough,
+        });
+    }
+    if attrs.overline {
+        decorations.push(DecorationLine {
+            start_x: rect.min_x,
+            start_y: rect.min_y + TEXT_Y_OFFSET,
+            end_x: rect.max_x,
+            end_y: rect.min_y + TEXT_Y_OFFSET,
+            color: attrs.fg,
+            style: DecorationStyle::Overline,
+        });
+    }
+}
+
+fn plan_cursor(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+    default_fg: PlanColor,
+    default_bg: PlanColor,
+    cursor_blink_phase: CursorBlinkPhase,
+) {
+    let Some(cursor) = frame.cursor else {
+        return;
+    };
+    let cursor_alpha = if cursor.blinking {
+        cursor_blink_phase.alpha()
+    } else {
+        255
+    };
+    if cursor_alpha == 0 {
+        return;
+    }
+    let color = cursor
+        .color
+        .or(frame.colors.cursor)
+        .map_or(default_fg, PlanColor::opaque);
+    let color = PlanColor {
+        a: cursor_alpha,
+        ..color
+    };
+    let shape = match cursor.style {
+        CursorVisualStyle::Bar => CursorShape::Bar,
+        CursorVisualStyle::Underline => CursorShape::Underline,
+        CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
+        CursorVisualStyle::Block => CursorShape::Block,
+        _ => CursorShape::Block,
+    };
+    let cursor_x = if cursor.at_wide_tail {
+        cursor.x.saturating_sub(1)
+    } else {
+        cursor.x
+    };
+    let rect = if cursor.at_wide_tail {
+        surface.run_rect(cursor_x, cursor.y, 2)
+    } else {
+        surface.cell_rect(cursor.x, cursor.y)
+    };
+    let text_under_cursor = if shape == CursorShape::Block {
+        cursor_cell(frame, cursor_x, cursor.y).and_then(|cell| {
+            if cell.style.invisible {
+                return None;
+            }
+            let text = frame.cell_text(cell).iter().collect::<String>();
+            let (_, cell_bg) = cell_colors(cell, default_fg, default_bg);
+            (!text.is_empty()).then_some(CursorTextPlan {
+                rect,
+                text,
+                color: frame
+                    .colors
+                    .cursor_text
+                    .map(PlanColor::opaque)
+                    .unwrap_or_else(|| cursor_text_color(cell_bg, color, default_fg, default_bg)),
+            })
+        })
+    } else {
+        None
+    };
+
+    plan.cursor = Some(CursorPlan {
+        rect,
+        color,
+        shape,
+        text_under_cursor,
+    });
 }
 
 fn cursor_cell(frame: &RenderFrame, x: u16, y: u16) -> Option<&RenderCell> {
@@ -962,7 +987,270 @@ mod tests {
         assert!(plan.surface.width() < surface().surface_rect().width());
     }
 
+    #[test]
+    fn x_adjacent_cells_on_different_rows_do_not_merge() {
+        // cell_rect(1, 0).max_x equals cell_rect(2, 1).min_x, so only the
+        // row guard keeps these from fusing into one rect spanning two rows.
+        let mut frame = frame_from_cells(vec![(1, 0, ' ', style()), (2, 1, ' ', style())]);
+        for cell in &mut frame.cells {
+            cell.bg = Some(rgb(10, 20, 30));
+        }
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 2);
+    }
+
+    #[test]
+    fn background_cells_with_a_gap_produce_separate_rects() {
+        let mut frame = frame_from_cells(vec![(0, 0, ' ', style()), (2, 0, ' ', style())]);
+        for cell in &mut frame.cells {
+            cell.bg = Some(rgb(10, 20, 30));
+        }
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 2);
+        assert_eq!(plan.backgrounds[0].rect, surface().cell_rect(0, 0));
+        assert_eq!(plan.backgrounds[1].rect, surface().cell_rect(2, 0));
+    }
+
+    #[test]
+    fn explicit_background_matching_default_is_not_planned() {
+        let mut frame = frame_from_cells(vec![(0, 0, 'a', style())]);
+        frame.cells[0].bg = Some(rgb(0, 0, 0));
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds, Vec::new());
+    }
+
+    #[test]
+    fn faint_cells_dim_run_foreground() {
+        let mut faint = style();
+        faint.faint = true;
+        let mut frame = frame_from_cells(vec![(0, 0, 'a', faint)]);
+        frame.cells[0].fg = Some(rgb(200, 100, 50));
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(
+            plan.text_runs[0].attrs.fg,
+            PlanColor {
+                r: 124,
+                g: 62,
+                b: 31,
+                a: 255
+            }
+        );
+    }
+
+    #[test]
+    fn invisible_cell_keeps_background_but_no_text_run() {
+        let mut invisible = style();
+        invisible.invisible = true;
+        let mut frame = frame_from_cells(vec![(0, 0, 'x', invisible)]);
+        frame.cells[0].bg = Some(rgb(10, 20, 30));
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 1);
+        assert_eq!(plan.text_runs, Vec::new());
+    }
+
+    #[test]
+    fn underline_styles_map_to_matching_decoration_styles() {
+        let cases = [
+            (Underline::Single, DecorationStyle::Single),
+            (Underline::Double, DecorationStyle::Double),
+            (Underline::Curly, DecorationStyle::Curly),
+            (Underline::Dotted, DecorationStyle::Dotted),
+            (Underline::Dashed, DecorationStyle::Dashed),
+        ];
+        for (underline, expected) in cases {
+            let mut underlined = style();
+            underlined.underline = underline;
+            let frame = frame_from_cells(vec![(0, 0, 'a', underlined)]);
+
+            let mut planner = PaintPlanner::default();
+            let plan = planner.plan(surface(), &frame, 16.0);
+
+            assert_eq!(plan.decorations.len(), 1, "{underline:?}");
+            assert_eq!(plan.decorations[0].style, expected, "{underline:?}");
+            assert_eq!(plan.decorations[0].start_x, plan.text_runs[0].rect.min_x);
+            assert_eq!(plan.decorations[0].end_x, plan.text_runs[0].rect.max_x);
+        }
+    }
+
+    #[test]
+    fn non_blinking_cursor_ignores_hidden_blink_phase() {
+        let mut frame = frame_from_cells(vec![(1, 0, 'x', style())]);
+        frame.cursor = Some(CursorSnapshot {
+            x: 1,
+            y: 0,
+            at_wide_tail: false,
+            style: CursorVisualStyle::Block,
+            blinking: false,
+            color: None,
+        });
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan_with_cursor_blink_phase(
+            surface(),
+            &frame,
+            16.0,
+            CursorBlinkPhase::hidden(),
+        );
+
+        assert_eq!(plan.cursor.as_ref().unwrap().color.a, 255);
+    }
+
+    #[test]
+    fn cursor_text_lookup_rejects_dense_index_mismatch() {
+        // On this sparse frame the dense index for (1, 0) lands on the cell at
+        // (3, 0); only the coordinate filter keeps its text from being
+        // redrawn under a cursor parked on an empty cell.
+        let mut frame = frame_from_cells(vec![(2, 0, 'a', style()), (3, 0, 'b', style())]);
+        frame.cursor = Some(CursorSnapshot {
+            x: 1,
+            y: 0,
+            at_wide_tail: false,
+            style: CursorVisualStyle::Block,
+            blinking: false,
+            color: None,
+        });
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.cursor.as_ref().unwrap().text_under_cursor, None);
+    }
+
+    fn rect_within(inner: SurfaceRect, outer: SurfaceRect) -> bool {
+        inner.min_x >= outer.min_x - 0.01
+            && inner.min_y >= outer.min_y - 0.01
+            && inner.max_x <= outer.max_x + 0.01
+            && inner.max_y <= outer.max_y + 0.01
+    }
+
+    type ArbCell = (u16, u16, u8, Option<(u8, u8, u8)>);
+
+    fn arb_cells() -> impl Strategy<Value = Vec<ArbCell>> {
+        proptest::collection::vec(
+            (
+                0u16..10,
+                0u16..2,
+                b'a'..=b'z',
+                proptest::option::of((any::<u8>(), any::<u8>(), any::<u8>())),
+            ),
+            1..30,
+        )
+    }
+
+    fn frame_from_arb_cells(cells: &[ArbCell]) -> RenderFrame {
+        let mut frame = frame_from_cells(
+            cells
+                .iter()
+                .map(|(x, y, ch, _)| (*x, *y, char::from(*ch), style()))
+                .collect(),
+        );
+        for (cell, (_, _, _, bg)) in frame.cells.iter_mut().zip(cells) {
+            cell.bg = bg.map(|(r, g, b)| rgb(r, g, b));
+        }
+        frame
+    }
+
     proptest! {
+        #[test]
+        fn planned_rects_stay_within_the_plan_surface(
+            cells in arb_cells(),
+            cursor_x in 0u16..10,
+            cursor_y in 0u16..2,
+        ) {
+            let mut frame = frame_from_arb_cells(&cells);
+            frame.cursor = Some(CursorSnapshot {
+                x: cursor_x,
+                y: cursor_y,
+                at_wide_tail: false,
+                style: CursorVisualStyle::Block,
+                blinking: false,
+                color: None,
+            });
+
+            let mut planner = PaintPlanner::default();
+            let plan = planner.plan(surface(), &frame, 16.0);
+            let bounds = plan.surface;
+
+            for background in &plan.backgrounds {
+                prop_assert!(rect_within(background.rect, bounds), "{:?}", background.rect);
+            }
+            for run in &plan.text_runs {
+                prop_assert!(rect_within(run.rect, bounds), "{:?}", run.rect);
+            }
+            if let Some(cursor) = &plan.cursor {
+                prop_assert!(rect_within(cursor.rect, bounds), "{:?}", cursor.rect);
+            }
+        }
+
+        #[test]
+        fn run_cell_counts_match_unicode_width_of_their_text(
+            narrow in proptest::collection::vec(proptest::char::range('a', 'z'), 1..10),
+            wide in proptest::collection::vec(proptest::char::range('一', '十'), 1..10),
+        ) {
+            let mut cells = Vec::new();
+            let mut x = 0u16;
+            for (narrow_ch, wide_ch) in narrow.iter().zip(&wide) {
+                cells.push((x, 0, *narrow_ch, style()));
+                x += 1;
+                cells.push((x, 0, *wide_ch, style()));
+                x += 2;
+            }
+            let frame = frame_from_cells(cells);
+
+            let mut planner = PaintPlanner::default();
+            let plan = planner.plan(surface(), &frame, 16.0);
+
+            for run in &plan.text_runs {
+                let width: u16 = run
+                    .text
+                    .chars()
+                    .map(|ch| (UnicodeWidthChar::width(ch).unwrap_or(0) as u16).max(1))
+                    .sum();
+                prop_assert_eq!(run.cells, width, "{}", run.text);
+            }
+        }
+
+        #[test]
+        fn planner_output_is_independent_of_prior_plans(
+            first in arb_cells(),
+            second in arb_cells(),
+        ) {
+            let first_frame = frame_from_arb_cells(&first);
+            let mut second_frame = frame_from_arb_cells(&second);
+            second_frame.cursor = Some(CursorSnapshot {
+                x: 1,
+                y: 0,
+                at_wide_tail: false,
+                style: CursorVisualStyle::Block,
+                blinking: false,
+                color: None,
+            });
+
+            let mut reused = PaintPlanner::default();
+            reused.plan(surface(), &first_frame, 16.0);
+            let reused_plan = reused.plan(surface(), &second_frame, 16.0).clone();
+
+            let mut fresh = PaintPlanner::default();
+            let fresh_plan = fresh.plan(surface(), &second_frame, 16.0).clone();
+
+            prop_assert_eq!(reused_plan, fresh_plan);
+        }
+
         #[test]
         fn same_style_contiguous_cells_create_one_run(bytes in proptest::collection::vec(b'a'..=b'z', 1..40)) {
             let chars = bytes.into_iter().map(char::from).collect::<Vec<_>>();
