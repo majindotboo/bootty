@@ -43,7 +43,7 @@ egui = "0.34"
 epaint_default_fonts = "0.34"
 fontdb = "0.23"
 indoc = "2"
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "24ea1cf3f3e829e3e66c0c211860614aa2268136", features = [
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "20edad15d7984c727acc4f4facdadf045609f543", features = [
   "png",
 ] }
 objc2 = "0.6"

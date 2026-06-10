@@ -477,6 +477,7 @@ fn alpha_sum(alpha: &[u8]) -> u64 {
     alpha.iter().map(|value| u64::from(*value)).sum()
 }
 
+#[cfg(target_os = "macos")]
 fn alpha_sum_rows(alpha: &[u8], width: u32, min_y: u32, max_y: u32) -> u64 {
     (min_y..=max_y)
         .flat_map(|y| (0..width).map(move |x| (y * width + x) as usize))
@@ -484,6 +485,7 @@ fn alpha_sum_rows(alpha: &[u8], width: u32, min_y: u32, max_y: u32) -> u64 {
         .sum()
 }
 
+#[cfg(target_os = "macos")]
 fn rgba_alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<AlphaBounds> {
     let mut alpha = vec![0; (width * height) as usize];
     for index in 0..alpha.len() {
@@ -492,6 +494,7 @@ fn rgba_alpha_bounds(rgba: &[u8], width: u32, height: u32) -> Option<AlphaBounds
     alpha_bounds(&alpha, width, height)
 }
 
+#[cfg(target_os = "macos")]
 fn rgba_color_pixel_count(rgba: &[u8]) -> usize {
     rgba.chunks_exact(4)
         .filter(|pixel| pixel[3] > 0 && (pixel[0] != pixel[1] || pixel[0] != pixel[2]))

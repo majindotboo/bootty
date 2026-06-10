@@ -158,7 +158,7 @@ fn default_device_attributes() -> DeviceAttributes {
     DeviceAttributes {
         primary: PrimaryDeviceAttributes::new(
             ConformanceLevel::VT220,
-            [DeviceAttributeFeature::ANSI_COLOR],
+            &[DeviceAttributeFeature::ANSI_COLOR],
         ),
         secondary: SecondaryDeviceAttributes {
             device_type: DeviceType::VT220,

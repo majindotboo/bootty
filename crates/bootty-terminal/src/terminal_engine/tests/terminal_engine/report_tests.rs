@@ -69,14 +69,14 @@ fn terminal_engine_reports_primary_device_attributes() -> Result<()> {
         (
             PrimaryDeviceAttributes::new(
                 ConformanceLevel::VT220,
-                [DeviceAttributeFeature::ANSI_COLOR],
+                &[DeviceAttributeFeature::ANSI_COLOR],
             ),
             b"\x1b[?62;22c".as_slice(),
         ),
         (
             PrimaryDeviceAttributes::new(
                 ConformanceLevel::VT220,
-                [
+                &[
                     DeviceAttributeFeature::ANSI_COLOR,
                     DeviceAttributeFeature::CLIPBOARD,
                 ],
@@ -86,7 +86,7 @@ fn terminal_engine_reports_primary_device_attributes() -> Result<()> {
         (
             PrimaryDeviceAttributes::new(
                 ConformanceLevel::VT420,
-                [
+                &[
                     DeviceAttributeFeature::COLUMNS_132,
                     DeviceAttributeFeature::SELECTIVE_ERASE,
                     DeviceAttributeFeature::ANSI_COLOR,
@@ -95,7 +95,7 @@ fn terminal_engine_reports_primary_device_attributes() -> Result<()> {
             b"\x1b[?64;1;6;22c".as_slice(),
         ),
         (
-            PrimaryDeviceAttributes::new(ConformanceLevel::VT100, []),
+            PrimaryDeviceAttributes::new(ConformanceLevel::VT100, &[]),
             b"\x1b[?1c".as_slice(),
         ),
     ] {

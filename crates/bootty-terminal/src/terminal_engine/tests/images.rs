@@ -149,15 +149,23 @@ impl Drop for TempFixture {
 }
 
 fn write_temp_fixture(name: &str, bytes: &[u8]) -> Result<TempFixture> {
-    let path = std::env::temp_dir().join(format!(
-        "bootty-{name}-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
-    ));
+    // Test thread names contain "::", which Windows forbids in filenames.
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("test")
+        .replace("::", "-");
+    let path = std::env::temp_dir().join(format!("bootty-{name}-{}-{thread}", std::process::id()));
     std::fs::write(&path, bytes)?;
-    Ok(TempFixture {
-        path: path.canonicalize()?,
-    })
+    // Ghostty's kitty temp-dir check prefix-matches against the TMP/TEMP env
+    // value, so keep the env-form path on Windows; canonicalize would turn it
+    // into a `\\?\` long-form path that never matches. Unix still needs
+    // canonicalization for symlinked temp dirs such as macOS /tmp.
+    let path = if cfg!(windows) {
+        path
+    } else {
+        path.canonicalize()?
+    };
+    Ok(TempFixture { path })
 }
 
 fn file_payload(path: impl AsRef<std::path::Path>) -> Result<String> {
@@ -1001,7 +1009,7 @@ fn kitty_graphics_adapter_ports_geometry_and_render_info_queries() -> Result<()>
             }
         );
         let rect = placement.rect(&image, &engine.terminal)?;
-        assert!(rect.rectangle);
+        assert!(rect.is_rectangle());
 
         let info = placement.placement_render_info(&image, &engine.terminal)?;
         assert_eq!(info.pixel_width, 50);

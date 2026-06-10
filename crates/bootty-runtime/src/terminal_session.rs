@@ -3,7 +3,6 @@ use std::{
     env,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -12,6 +11,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "macos")]
+use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -31,6 +33,9 @@ const MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
 const MAX_COLLECT_CHUNKS_PER_TICK: usize = 64;
 const MAX_READER_QUEUE_CHUNKS: usize = MAX_COLLECT_CHUNKS_PER_TICK * 2;
 const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
+#[cfg(windows)]
+const DEFAULT_SHELL: &str = "powershell.exe";
+#[cfg(not(windows))]
 const DEFAULT_SHELL: &str = "/bin/zsh";
 pub(crate) const WORKER_READY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const WORKER_IDLE_SLEEP: Duration = Duration::from_millis(4);
@@ -725,10 +730,14 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
         command.cwd(cwd);
     }
 
+    // portable-pty only exposes tty_name() on Unix; ConPTY has no tty path.
+    #[cfg(unix)]
     let tty_name = pair
         .master
         .tty_name()
         .map(|path| path.to_string_lossy().into_owned());
+    #[cfg(not(unix))]
+    let tty_name: Option<String> = None;
 
     let child = pair
         .slave
@@ -859,6 +868,7 @@ fn configured_login_shell() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn parse_user_shell_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let (_, shell) = line.split_once(':')?;
@@ -1026,43 +1036,53 @@ mod tests {
         assert_eq!(MAX_READER_QUEUE_CHUNKS, MAX_COLLECT_CHUNKS_PER_TICK * 2);
     }
 
+    /// Absolute shell path fixture that passes `normalize_shell_path` on the
+    /// running platform; `/custom/fish` is not absolute on Windows.
+    fn shell_fixture_path(suffix: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{}", suffix.replace('/', "\\"))
+        } else {
+            format!("/{suffix}")
+        }
+    }
+
     #[test]
     fn shell_selection_prefers_explicit_then_login_then_environment() {
         assert_eq!(
             select_shell_path(
-                Some("/custom/fish".to_string()),
-                Some("/configured/bash".to_string()),
-                Some("/login/fish".to_string()),
-                Some("/env/zsh".to_string()),
+                Some(shell_fixture_path("custom/fish")),
+                Some(shell_fixture_path("configured/bash")),
+                Some(shell_fixture_path("login/fish")),
+                Some(shell_fixture_path("env/zsh")),
             ),
-            "/custom/fish",
+            shell_fixture_path("custom/fish"),
         );
         assert_eq!(
             select_shell_path(
                 Some("relative".to_string()),
-                Some("/configured/bash".to_string()),
-                Some("/login/fish".to_string()),
-                Some("/env/zsh".to_string()),
+                Some(shell_fixture_path("configured/bash")),
+                Some(shell_fixture_path("login/fish")),
+                Some(shell_fixture_path("env/zsh")),
             ),
-            "/configured/bash",
+            shell_fixture_path("configured/bash"),
         );
         assert_eq!(
             select_shell_path(
                 None,
                 Some("relative".to_string()),
-                Some("/login/fish".to_string()),
-                Some("/env/zsh".to_string()),
+                Some(shell_fixture_path("login/fish")),
+                Some(shell_fixture_path("env/zsh")),
             ),
-            "/login/fish",
+            shell_fixture_path("login/fish"),
         );
         assert_eq!(
             select_shell_path(
                 None,
                 Some("".to_string()),
                 None,
-                Some("/env/zsh".to_string()),
+                Some(shell_fixture_path("env/zsh")),
             ),
-            "/env/zsh",
+            shell_fixture_path("env/zsh"),
         );
         assert_eq!(select_shell_path(None, None, None, None), DEFAULT_SHELL);
     }
@@ -1102,6 +1122,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn user_shell_output_parser_accepts_macos_dscl_format() {
         assert_eq!(

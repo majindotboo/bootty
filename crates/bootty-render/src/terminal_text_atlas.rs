@@ -1390,6 +1390,7 @@ fn alpha_to_atlas_pixels(format: GlyphAtlasFormat, alpha: Vec<u8>) -> Vec<u8> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn unpremultiply_rgba(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(4) {
         let alpha = u16::from(pixel[3]);
@@ -1502,6 +1503,7 @@ fn load_coretext_fallback_font(
     None
 }
 
+#[cfg(target_os = "macos")]
 fn font_id_for_postscript_or_family(
     database: &fontdb::Database,
     postscript: &str,
@@ -1543,6 +1545,7 @@ fn font_id_for_postscript_or_family(
         .map(|candidate| candidate.id)
 }
 
+#[cfg(target_os = "macos")]
 fn load_font_id(database: &fontdb::Database, id: fontdb::ID) -> Option<FontArc> {
     database
         .with_face_data(id, |data, face_index| {

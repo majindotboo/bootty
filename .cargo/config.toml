@@ -1,0 +1,5 @@
+[env]
+# Zig's Debug optimize mode miscompiles libghostty-vt on aarch64-windows
+# (pervasive access violations in FFI calls). ReleaseSafe keeps runtime safety
+# checks while producing a working library on every platform.
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseSafe"
