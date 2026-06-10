@@ -44,13 +44,13 @@ export class SiteBackend {
      * @param {string} kind
      * @param {number} x
      * @param {number} y
-     * @param {number} _button
+     * @param {number} button
      * @returns {any}
      */
-    mouse(kind, x, y, _button) {
+    mouse(kind, x, y, button) {
         const ptr0 = passStringToWasm0(kind, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.sitebackend_mouse(this.__wbg_ptr, ptr0, len0, x, y, _button);
+        const ret = wasm.sitebackend_mouse(this.__wbg_ptr, ptr0, len0, x, y, button);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -66,10 +66,11 @@ export class SiteBackend {
     /**
      * @param {number} cols
      * @param {number} rows
+     * @param {number} _device_pixel_ratio
      * @returns {any}
      */
-    resize(cols, rows) {
-        const ret = wasm.sitebackend_resize(this.__wbg_ptr, cols, rows);
+    resize(cols, rows, _device_pixel_ratio) {
+        const ret = wasm.sitebackend_resize(this.__wbg_ptr, cols, rows, _device_pixel_ratio);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -91,6 +92,10 @@ if (Symbol.dispose) SiteBackend.prototype[Symbol.dispose] = SiteBackend.prototyp
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_ef53bc310eb298a0: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_String_8564e559799eccda: function(arg0, arg1) {
             const ret = String(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -123,6 +128,11 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000003: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {

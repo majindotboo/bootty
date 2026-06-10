@@ -34,16 +34,9 @@ export class DoomTabOverlay {
     const panel = detailPanel(frame);
     const inner = inset(panel, frame.cellWidth, frame.cellHeight);
     const cells = frame.cells.filter((cell) => !insideCellRect(cell, panel.contentCells));
-    addText(cells, panel.contentCells.minX, panel.contentCells.minY, `DOOM: ${this.status}`, red(), null, true);
-    addText(
-      cells,
-      panel.contentCells.minX,
-      panel.contentCells.maxY - 1,
-      "WASD/arrows move  F/Ctrl fire  Space use  1-7 weapons",
-      gray(),
-      null,
-      false,
-    );
+    if (!this.ready) {
+      addText(cells, panel.contentCells.minX, panel.contentCells.minY, "Loading DOOM...", red(), null, true);
+    }
 
     const baseImages = frame.images.filter((image) => image.key !== DOOM_TAB_IMAGE_KEY);
     const images = this.ready ? [...baseImages, this.doomImage(inner)] : baseImages;
@@ -68,7 +61,7 @@ export class DoomTabOverlay {
       .init()
       .then(() => {
         this.ready = true;
-        this.status = "running as Bootty image layer";
+        this.status = "ready";
         this.lastTickAt = performance.now();
       })
       .catch((error: unknown) => {
@@ -115,25 +108,29 @@ export class DoomTabOverlay {
 }
 
 export function isDoomTab(frame: WebTerminalFrame): boolean {
-  return frameText(frame).includes("Doom runs inside this terminal frame.");
+  return frame.selected === 2;
 }
 
 function isDetailFocused(frame: WebTerminalFrame): boolean {
-  return frameText(frame).includes("Detail:");
+  return frame.focus === "detail";
 }
 
 function detailPanel(frame: WebTerminalFrame): { pixels: WebRect; contentCells: WebRect } {
-  const bodyRows = Math.max(8, frame.rows - 7);
   const vertical = frame.cols < 78;
-  const detailX = vertical ? 1 : 29;
-  const detailY = vertical ? 13 : 4;
-  const detailCols = vertical ? frame.cols - 2 : frame.cols - 30;
-  const detailRows = vertical ? bodyRows - 9 : bodyRows;
+  const headerRows = 4;
+  const footerRows = 2;
+  const sidebarRows = 20;
+  const sidebarCols = 32;
+  const bodyRows = Math.max(8, frame.rows - headerRows - footerRows);
+  const detailX = vertical ? 2 : sidebarCols + 2;
+  const detailY = vertical ? headerRows + sidebarRows + 1 : headerRows + 1;
+  const detailCols = vertical ? frame.cols - 4 : frame.cols - sidebarCols - 4;
+  const detailRows = vertical ? bodyRows - sidebarRows - 1 : bodyRows - 2;
   const contentCells = {
-    minX: detailX + 1,
-    minY: detailY + 2,
-    maxX: detailX + Math.max(1, detailCols - 1),
-    maxY: detailY + Math.max(3, detailRows - 1),
+    minX: detailX,
+    minY: detailY,
+    maxX: detailX + Math.max(1, detailCols),
+    maxY: detailY + Math.max(3, detailRows),
   };
   return {
     pixels: {
@@ -157,10 +154,6 @@ function inset(rect: { pixels: WebRect }, x: number, y: number): WebRect {
 
 function insideCellRect(cell: WebCell, rect: WebRect): boolean {
   return cell.x >= rect.minX && cell.x < rect.maxX && cell.y >= rect.minY && cell.y < rect.maxY;
-}
-
-function frameText(frame: WebTerminalFrame): string {
-  return frame.cells.map((cell) => cell.text).join("");
 }
 
 function addText(cells: WebCell[], x: number, y: number, text: string, fg: WebColor, bg: WebColor | null, bold: boolean): void {
@@ -189,8 +182,4 @@ function addText(cells: WebCell[], x: number, y: number, text: string, fg: WebCo
 
 function red(): WebColor {
   return { r: 247, g: 118, b: 142 };
-}
-
-function gray(): WebColor {
-  return { r: 169, g: 177, b: 214 };
 }

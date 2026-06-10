@@ -40,7 +40,44 @@ export type WebImage = {
   rgba: ArrayLike<number>;
 };
 
+export type WebEguiTexture = {
+  id: string;
+  width: number;
+  height: number;
+  rgba: ArrayLike<number>;
+};
+
+export type WebEguiMesh = {
+  textureId: string;
+  clip: WebRect;
+  vertices: number[];
+  indices: number[];
+};
+
+export type WebEguiLabel = {
+  x: number;
+  y: number;
+  text: string;
+  size: number;
+  color: WebColor;
+  align: "left" | "center" | "right";
+};
+
+export type WebEguiLink = {
+  rect: WebRect;
+  url: string;
+};
+
+export type WebEguiFrame = {
+  textures: WebEguiTexture[];
+  meshes: WebEguiMesh[];
+  labels: WebEguiLabel[];
+  links: WebEguiLink[];
+};
+
 export type WebTerminalFrame = {
+  selected?: number;
+  focus?: "menu" | "detail";
   cols: number;
   rows: number;
   cellWidth: number;
@@ -53,4 +90,5 @@ export type WebTerminalFrame = {
   cursor: { x: number; y: number; color: WebColor | null } | null;
   cells: WebCell[];
   images: WebImage[];
+  egui?: WebEguiFrame | null;
 };

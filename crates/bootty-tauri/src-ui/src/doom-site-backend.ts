@@ -36,7 +36,7 @@ export function createDoomSiteBackend(search: URLSearchParams): TerminalBackend 
       .init()
       .then(() => {
         ready = true;
-        status = renderMode === "halfblock" ? "running in half-block terminal mode" : "running as Bootty image layer";
+        status = "ready";
         lastTickAt = performance.now();
       })
       .catch((error: unknown) => {

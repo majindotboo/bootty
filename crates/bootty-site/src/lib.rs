@@ -1,6 +1,11 @@
 use std::io::Cursor;
 use std::sync::OnceLock;
 
+use egui::epaint::{ImageData, Primitive};
+use egui::{
+    Color32, Context as EguiContext, LayerId, Order, Pos2, RawInput, Rect as EguiRect, Stroke,
+    StrokeKind, TextureId, Vec2,
+};
 use serde::Serialize;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
@@ -15,7 +20,7 @@ use tuirealm::ratatui::buffer::{Buffer, Cell};
 use tuirealm::ratatui::layout::{Constraint, Direction as LayoutDirection, Layout, Rect, Size};
 use tuirealm::ratatui::style::{Color, Modifier, Style};
 use tuirealm::ratatui::text::{Line, Span, Text};
-use tuirealm::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use tuirealm::ratatui::widgets::{Paragraph, Wrap};
 use tuirealm::state::State;
 use tuirealm::terminal::{TerminalAdapter, TestTerminalAdapter};
 use wasm_bindgen::prelude::*;
@@ -28,6 +33,11 @@ const ICON_TEXTURE_SIZE: u32 = 96;
 const ICON_RENDER_SIZE: u32 = 48;
 const ICON_PNG: &[u8] = include_bytes!("../../bootty-tauri/src-ui/public/bootty-mascot.png");
 const SECTION_DETAIL_STATIC_ROWS: u16 = 4;
+const EGUI_SIDEBAR_TOP_PX: f32 = 70.0;
+const EGUI_SIDEBAR_ROW_HEIGHT_PX: f32 = 36.0;
+const EGUI_SIDEBAR_WIDTH_COLS: u16 = 32;
+const EGUI_HEADER_ROWS: u16 = 4;
+const EGUI_FOOTER_ROWS: u16 = 2;
 const GITHUB_URL: &str = "https://github.com/majinboos/bootty";
 const GITHUB_LINKS: &[SectionLink] = &[SectionLink {
     text: "GitHub",
@@ -201,6 +211,10 @@ impl Default for SiteBackend {
     }
 }
 
+fn new_egui_context() -> EguiContext {
+    EguiContext::default()
+}
+
 impl SiteBackend {
     fn handle_event(&mut self, event: Event<NoUserEvent>) -> Result<(), JsValue> {
         if self.focus == Focus::Detail
@@ -215,26 +229,28 @@ impl SiteBackend {
         Ok(())
     }
 
-    fn handle_mouse(&mut self, kind: &str, x: u16, y: u16) -> Result<(), JsValue> {
+    fn handle_mouse(&mut self, kind: &str, x: u16, y: u16, button: i16) -> Result<(), JsValue> {
         if kind == "leave" {
             self.hovered_menu = None;
-            self.notice = "mouse left terminal".to_owned();
             return Ok(());
         }
 
         match hit_target(self.cols, self.rows, x, y) {
+            Some(HitTarget::Detail) if kind == "wheel" => {
+                self.hovered_menu = None;
+                self.update(Msg::Focus(Focus::Detail))?;
+                self.update(Msg::Scroll(isize::from(button)))?;
+            }
             Some(HitTarget::Menu(index)) => {
                 let index = index.min(sections().len() - 1);
                 self.hovered_menu = Some(index);
                 if kind == "down" {
                     self.selected = index;
+                    self.detail_scroll = 0;
                     self.focus = Focus::Menu;
-                    self.notice = format!("{} selected", sections()[self.selected].plain_label);
                     self.menu.attr(Attribute::Focus, AttrValue::Flag(true));
                     self.detail.attr(Attribute::Focus, AttrValue::Flag(false));
                     self.update(Msg::ToggleFocus)?;
-                } else {
-                    self.notice = format!("{} hovered", sections()[index].plain_label);
                 }
             }
             Some(HitTarget::Detail) if kind == "down" => {
@@ -302,8 +318,8 @@ impl SiteBackend {
                     .to_owned(),
             ]),
             "cat demo.txt" => self.demo_lines.extend([
-                "This prompt is inside the Rust/WASM ratatui frame.".to_owned(),
-                "Keyboard and pointer events round-trip through the browser host.".to_owned(),
+                "Bootty keeps terminal input, output, and rendering in one frame.".to_owned(),
+                "Keyboard and pointer events stay attached to the active panel.".to_owned(),
             ]),
             "clear" => self.demo_lines.clear(),
             other => self.demo_lines.push(format!("unknown command: {other}")),
@@ -312,7 +328,6 @@ impl SiteBackend {
             let drain = self.demo_lines.len() - 18;
             self.demo_lines.drain(0..drain);
         }
-        self.notice = "demo shell updated".to_owned();
     }
 
     fn forward_event(&mut self, event: &Event<NoUserEvent>) -> Vec<Msg> {
@@ -328,17 +343,10 @@ impl SiteBackend {
             Msg::Move(delta) => {
                 self.selected = wrap(self.selected as isize + delta, sections().len());
                 self.hovered_menu = None;
-                self.notice = format!(
-                    "{} selected",
-                    sections()[self.selected].plain_label.to_lowercase()
-                );
+                self.detail_scroll = 0;
             }
             Msg::Focus(focus) => {
                 self.focus = focus;
-                self.notice = match focus {
-                    Focus::Menu => "menu focus".to_owned(),
-                    Focus::Detail => "detail focus".to_owned(),
-                };
                 self.menu
                     .attr(Attribute::Focus, AttrValue::Flag(focus == Focus::Menu));
                 self.detail
@@ -350,6 +358,15 @@ impl SiteBackend {
                     Focus::Detail => Focus::Menu,
                 }))?;
             }
+            Msg::Scroll(delta) => {
+                self.detail_scroll = if delta == isize::MIN {
+                    0
+                } else if delta == isize::MAX {
+                    u16::MAX
+                } else {
+                    self.detail_scroll.saturating_add_signed(delta as i16)
+                };
+            }
         }
         Ok(())
     }
@@ -360,6 +377,7 @@ enum Msg {
     Move(isize),
     Focus(Focus),
     ToggleFocus,
+    Scroll(isize),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -370,13 +388,40 @@ enum Focus {
 
 #[derive(Clone, Copy)]
 struct Section {
-    icon: &'static str,
+    icon: SectionIcon,
     label: &'static str,
     plain_label: &'static str,
     title: &'static str,
     accent: Color,
     lines: &'static [&'static str],
     links: &'static [SectionLink],
+}
+
+#[derive(Clone, Copy)]
+enum SectionIcon {
+    Frame,
+    Guide,
+    Doom,
+    Renderer,
+    Runtime,
+    Shell,
+    App,
+    Github,
+}
+
+impl SectionIcon {
+    fn glyph(self) -> &'static str {
+        match self {
+            SectionIcon::Frame => "\u{f2d0}",
+            SectionIcon::Guide => "\u{f02d}",
+            SectionIcon::Doom => "\u{f11b}",
+            SectionIcon::Renderer => "\u{f03e}",
+            SectionIcon::Runtime => "\u{f017}",
+            SectionIcon::Shell => "\u{f120}",
+            SectionIcon::App => "\u{f108}",
+            SectionIcon::Github => "\u{f09b}",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -387,11 +432,8 @@ struct SectionLink {
 
 struct SiteViewState<'a> {
     selected: usize,
-    hovered_menu: Option<usize>,
     focus: Focus,
-    notice: &'a str,
-    tick: u64,
-    fps: f64,
+    detail_scroll: u16,
     demo_lines: &'a [String],
     demo_input: &'a str,
 }
@@ -403,42 +445,7 @@ struct Menu {
 }
 
 impl Component for Menu {
-    fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = Block::default()
-            .title(" nav ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.focused {
-                Color::Magenta
-            } else {
-                Color::Gray
-            }));
-        let lines = sections()
-            .iter()
-            .enumerate()
-            .map(|(index, section)| {
-                let selected = index == self.selected;
-                let style = Style::default()
-                    .fg(if selected {
-                        section.accent
-                    } else {
-                        Color::Gray
-                    })
-                    .bg(if selected { Color::Black } else { Color::Reset })
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    });
-                Line::from(vec![
-                    Span::styled(if selected { ">  " } else { "   " }, style),
-                    Span::styled(section.icon, style),
-                    Span::styled("  ", style),
-                    Span::styled(section.label, style),
-                ])
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines).block(block), area);
-    }
+    fn view(&mut self, _frame: &mut Frame<'_>, _area: Rect) {}
 
     fn query<'a>(&'a self, _attr: Attribute) -> Option<QueryResult<'a>> {
         None
@@ -498,6 +505,7 @@ impl AppComponent<Msg, NoUserEvent> for Menu {
 struct Detail {
     section: usize,
     focused: bool,
+    scroll: u16,
     demo_lines: Vec<String>,
     demo_input: String,
 }
@@ -505,18 +513,13 @@ struct Detail {
 impl Component for Detail {
     fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let section = sections()[self.section.min(sections().len() - 1)];
-        let block = Block::default()
-            .title(" bootty ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.focused {
-                Color::Blue
-            } else {
-                Color::Gray
-            }));
         if section.plain_label == "Getting Started" {
+            let text = getting_started_text();
+            let max_scroll = max_scroll(text.lines.len(), area.height);
+            self.scroll = self.scroll.min(max_scroll);
             frame.render_widget(
-                Paragraph::new(getting_started_text())
-                    .block(block)
+                Paragraph::new(text)
+                    .scroll((self.scroll, 0))
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -539,11 +542,6 @@ impl Component for Detail {
                     Style::default()
                         .fg(section.accent)
                         .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "native terminal crates / Rust WASM site / canvas frame host",
-                    Style::default().fg(Color::Gray),
                 )),
                 Line::from(""),
             ]
@@ -573,8 +571,12 @@ impl Component for Detail {
                 ))
             }));
         }
+        let max_scroll = max_scroll(lines.len(), area.height);
+        self.scroll = self.scroll.min(max_scroll);
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+            Paragraph::new(lines)
+                .scroll((self.scroll, 0))
+                .wrap(Wrap { trim: true }),
             area,
         );
     }
@@ -611,6 +613,25 @@ impl AppComponent<Msg, NoUserEvent> for Detail {
                 ..
             }) => Some(Msg::Focus(Focus::Menu)),
             Event::Keyboard(KeyEvent {
+                code: Key::Down | Key::Char('j'),
+                ..
+            }) => Some(Msg::Scroll(1)),
+            Event::Keyboard(KeyEvent {
+                code: Key::Up | Key::Char('k'),
+                ..
+            }) => Some(Msg::Scroll(-1)),
+            Event::Keyboard(KeyEvent {
+                code: Key::PageDown,
+                ..
+            }) => Some(Msg::Scroll(8)),
+            Event::Keyboard(KeyEvent {
+                code: Key::PageUp, ..
+            }) => Some(Msg::Scroll(-8)),
+            Event::Keyboard(KeyEvent {
+                code: Key::Home, ..
+            }) => Some(Msg::Scroll(isize::MIN)),
+            Event::Keyboard(KeyEvent { code: Key::End, .. }) => Some(Msg::Scroll(isize::MAX)),
+            Event::Keyboard(KeyEvent {
                 code: Key::Enter, ..
             }) => Some(Msg::ToggleFocus),
             _ => None,
@@ -625,32 +646,18 @@ fn draw_site(
     state: SiteViewState<'_>,
 ) {
     let area = frame.area();
-    let SiteLayout {
-        header,
-        menu,
-        detail,
-        footer,
-    } = site_layout(area.width, area.height);
+    let detail = site_layout(area.width, area.height).detail;
 
-    draw_header(frame, header, state.tick, state.fps);
-    menu_component.attr(
-        Attribute::Value,
-        AttrValue::Number(state.hovered_menu.unwrap_or(state.selected) as isize),
-    );
-    menu_component.attr(
-        Attribute::Focus,
-        AttrValue::Flag(state.focus == Focus::Menu),
-    );
     detail_component.attr(Attribute::Value, AttrValue::Number(state.selected as isize));
     detail_component.attr(
         Attribute::Focus,
         AttrValue::Flag(state.focus == Focus::Detail),
     );
+    detail_component.scroll = state.detail_scroll;
     detail_component.demo_lines = state.demo_lines.to_vec();
     detail_component.demo_input = state.demo_input.to_owned();
-    menu_component.view(frame, menu);
+    let _ = menu_component;
     detail_component.view(frame, detail);
-    draw_footer(frame, footer, state.notice, state.focus);
 }
 
 fn site_layout(cols: u16, rows: u16) -> SiteLayout {
@@ -658,166 +665,110 @@ fn site_layout(cols: u16, rows: u16) -> SiteLayout {
     let [header, body, footer] = Layout::default()
         .direction(LayoutDirection::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(EGUI_HEADER_ROWS),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(EGUI_FOOTER_ROWS),
         ])
         .areas(area);
+    let narrow = body.width < 78;
+    let menu_height = egui_sidebar_rows()
+        .min(body.height.saturating_sub(8))
+        .max(egui_sidebar_rows());
     let [menu, detail] = Layout::default()
-        .direction(if body.width < 78 {
+        .direction(if narrow {
             LayoutDirection::Vertical
         } else {
             LayoutDirection::Horizontal
         })
-        .constraints(if body.width < 78 {
-            [Constraint::Length(9), Constraint::Min(8)]
+        .constraints(if narrow {
+            [Constraint::Length(menu_height), Constraint::Min(8)]
         } else {
-            [Constraint::Length(28), Constraint::Min(20)]
+            [
+                Constraint::Length(EGUI_SIDEBAR_WIDTH_COLS),
+                Constraint::Min(24),
+            ]
         })
         .areas(body);
 
     SiteLayout {
         header,
-        menu: inset(menu, 1, 0),
-        detail: inset(detail, 1, 0),
+        menu,
+        detail: inset(detail, 2, 1),
         footer,
     }
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: u64, fps_value: f64) {
-    let pulse = if tick % 90 < 45 {
-        Color::Magenta
-    } else {
-        Color::Blue
-    };
-    let fps = format!("{:05.1} fps", fps_value);
-    let line = Line::from(vec![
-        Span::raw("       "),
-        Span::styled(
-            "BOOTTY",
-            Style::default().fg(pulse).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("    bootty.org", Style::default().fg(Color::Gray)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).block(Block::default()),
-        inset(area, 2, 1),
-    );
-    let fps_x = area
-        .width
-        .saturating_sub((fps.chars().count() as u16).saturating_add(2));
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            fps,
-            Style::default().fg(Color::Green),
-        ))),
-        Rect::new(fps_x, area.y + 1, area.width.saturating_sub(fps_x), 1),
-    );
-}
-
-fn draw_footer(frame: &mut Frame<'_>, area: Rect, notice: &str, focus: Focus) {
-    let line = Line::from(vec![
-        Span::styled(
-            "tab",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" focus  "),
-        Span::styled(
-            "arrows/jk",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" move  "),
-        Span::styled(
-            "enter",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" activate  "),
-        Span::styled(
-            format!("{focus:?}: {notice}"),
-            Style::default().fg(Color::Blue),
-        ),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(Color::Black)),
-        area,
-    );
+fn egui_sidebar_rows() -> u16 {
+    ((EGUI_SIDEBAR_TOP_PX + sections().len() as f32 * EGUI_SIDEBAR_ROW_HEIGHT_PX)
+        / CELL_HEIGHT as f32)
+        .ceil() as u16
 }
 
 fn sections() -> &'static [Section] {
     &[
         Section {
-            icon: "\u{f2d0}",
+            icon: SectionIcon::Frame,
             label: "Frame",
             plain_label: "Frame",
-            title: "This website is a terminal frame.",
+            title: "A terminal UI toolkit with a real renderer.",
             accent: Color::Magenta,
             lines: &[
-                "The page is not a screenshot and not a DOM mockup.",
-                "Rust/WASM draws ratatui widgets into terminal cells.",
-                "The browser receives cells, colors, cursor state, and image layers.",
-                "The same frame contract can host demos, docs, and app surfaces.",
+                "Bootty gives Rust apps a terminal surface that feels native.",
+                "Text, sprites, images, cursor state, and links share one frame model.",
+                "Use it for dense developer tools, interactive shells, and app chrome.",
             ],
             links: &[],
         },
         Section {
-            icon: "\u{f05a9}",
+            icon: SectionIcon::Guide,
             label: "Getting Started",
             plain_label: "Getting Started",
-            title: "Build a terminal host with Bootty.",
+            title: "Build a host around Bootty frames.",
             accent: Color::Green,
             lines: &[],
             links: &[],
         },
         Section {
-            icon: "\u{f0078}",
+            icon: SectionIcon::Doom,
             label: "DOOM",
             plain_label: "DOOM",
-            title: "Doom runs inside this terminal frame.",
+            title: "Play DOOM in the terminal surface.",
             accent: Color::Red,
             lines: &[
-                "The browser runs a doomgeneric WebAssembly engine.",
-                "Bootty receives the framebuffer as an image layer in this tab.",
-                "Focus the detail panel to play; use WASD/arrows, F, Space, and 1-7.",
-                "The rest of the website remains a normal terminal frame.",
+                "Click the panel and play with WASD or arrows.",
+                "Fire with F or Control. Use Space for doors and switches.",
+                "Number keys 1-7 switch weapons.",
             ],
             links: &[],
         },
         Section {
-            icon: "\u{f03a7}",
+            icon: SectionIcon::Renderer,
             label: "Renderer",
             plain_label: "Renderer",
-            title: "Renderer seams are Bootty-owned.",
+            title: "GPU rendering for terminal UI.",
             accent: Color::Blue,
             lines: &[
-                "bootty-render plans backgrounds, text, sprites, decorations, and cursors.",
-                "bootty-surface keeps grid geometry and pointer math shared.",
-                "The native app submits WGPU terminal commands through eframe.",
-                "This site proves the terminal frame can travel outside the desktop host.",
+                "Crisp glyphs, box drawing, images, cursors, and decorations are batched.",
+                "The renderer keeps terminal geometry explicit instead of guessing from DOM layout.",
+                "The same drawing contract works in the desktop app and the browser demo.",
             ],
             links: &[],
         },
         Section {
-            icon: "\u{e795}",
+            icon: SectionIcon::Runtime,
             label: "Runtime",
             plain_label: "Runtime",
-            title: "PTY work stays out of the UI layer.",
+            title: "A runtime built for responsive terminals.",
             accent: Color::Green,
             lines: &[
-                "bootty-runtime owns PTY sessions, drain budgets, and frame publication.",
-                "bootty-terminal adapts libghostty-vt for state, colors, and encoders.",
-                "The app consumes published frames instead of parsing shell output on the UI thread.",
-                "Status metrics make latency visible while benchmarks keep regressions concrete.",
+                "PTY draining, resize handling, frame publication, and input encoding stay explicit.",
+                "The UI consumes frames instead of parsing shell output on the render path.",
+                "Backpressure and repaint cadence are part of the runtime contract.",
             ],
             links: &[],
         },
         Section {
-            icon: "\u{f489}",
+            icon: SectionIcon::Shell,
             label: "Shell",
             plain_label: "Shell",
             title: "Demo shell.",
@@ -826,21 +777,20 @@ fn sections() -> &'static [Section] {
             links: &[],
         },
         Section {
-            icon: "\u{f0222}",
+            icon: SectionIcon::App,
             label: "App",
             plain_label: "App",
-            title: "Bootty is the working terminal home.",
+            title: "The desktop app uses the same pieces.",
             accent: Color::Cyan,
             lines: &[
-                "The default binary opens tmux chrome, status metrics, and terminal glyphs.",
-                "The bare example opens a minimal native winit/WGPU terminal host.",
-                "The egui-tabs example routes tabs through the shared renderer path.",
-                "Validation covers fmt, clippy, tests, benchmark builds, and paint-plan benches.",
+                "Bootty ships a native terminal shell with sidebar chrome and shared WGPU rendering.",
+                "Examples cover the bare host and egui-tab integration paths.",
+                "The site uses the same frame model to keep docs and demos close to the app.",
             ],
             links: &[],
         },
         Section {
-            icon: "\u{f09b}",
+            icon: SectionIcon::Github,
             label: "GitHub",
             plain_label: "GitHub",
             title: "Source",
@@ -862,6 +812,10 @@ fn parse_input(input: &str) -> Vec<Event<NoUserEvent>> {
                 Some('B') => key(Key::Down),
                 Some('C') => key(Key::Right),
                 Some('D') => key(Key::Left),
+                Some('F') => key(Key::End),
+                Some('H') => key(Key::Home),
+                Some('5') if chars.next() == Some('~') => key(Key::PageUp),
+                Some('6') if chars.next() == Some('~') => key(Key::PageDown),
                 _ => key(Key::Esc),
             }
         } else {
@@ -885,7 +839,24 @@ fn key(code: Key) -> Event<NoUserEvent> {
     })
 }
 
-fn web_frame(buffer: &Buffer, selected: usize) -> WebTerminalFrame {
+#[derive(Clone, Copy)]
+struct WebFrameState {
+    selected: usize,
+    hovered_menu: Option<usize>,
+    tick: u64,
+    focus: Focus,
+    fps: f64,
+}
+
+#[derive(Clone, Copy)]
+struct EguiShellRects {
+    shell: WebRect,
+    header: WebRect,
+    sidebar: WebRect,
+    footer: WebRect,
+}
+
+fn web_frame(egui: &EguiContext, buffer: &Buffer, state: WebFrameState) -> WebTerminalFrame {
     let mut cells = Vec::with_capacity(buffer.content.len());
     for y in 0..buffer.area.height {
         for x in 0..buffer.area.width {
@@ -894,11 +865,16 @@ fn web_frame(buffer: &Buffer, selected: usize) -> WebTerminalFrame {
                 x,
                 y,
                 cell,
-                osc8_link_at(buffer.area.width, buffer.area.height, selected, x, y),
+                osc8_link_at(buffer.area.width, buffer.area.height, state.selected, x, y),
             ));
         }
     }
     WebTerminalFrame {
+        selected: state.selected,
+        focus: match state.focus {
+            Focus::Menu => "menu",
+            Focus::Detail => "detail",
+        },
         cols: buffer.area.width,
         rows: buffer.area.height,
         cell_width: CELL_WIDTH,
@@ -910,39 +886,393 @@ fn web_frame(buffer: &Buffer, selected: usize) -> WebTerminalFrame {
         },
         cursor: None,
         cells,
-        images: icon_images(buffer.area.width),
+        images: Vec::new(),
+        egui: Some(egui_shell_frame(
+            egui,
+            buffer.area.width,
+            buffer.area.height,
+            state,
+        )),
     }
 }
 
-fn icon_images(cols: u16) -> Vec<WebImage> {
-    if cols < 24 {
-        return Vec::new();
-    }
-
-    let icon = site_icon();
-    let texture_size = ICON_TEXTURE_SIZE as f32;
-    let render_size = ICON_RENDER_SIZE as f32;
-    let min_x = CELL_WIDTH as f32 * 2.0;
-    let min_y = 6.0;
-    vec![WebImage {
-        key: "bootty-mascot".to_owned(),
-        layer: WebImageLayer::AboveText,
-        image_width: ICON_TEXTURE_SIZE,
-        image_height: ICON_TEXTURE_SIZE,
-        source: WebRect {
+fn egui_shell_frame(
+    egui: &EguiContext,
+    cols: u16,
+    rows: u16,
+    state: WebFrameState,
+) -> WebEguiFrame {
+    let layout = site_layout(cols, rows);
+    let rects = EguiShellRects {
+        shell: WebRect {
             min_x: 0.0,
             min_y: 0.0,
-            max_x: texture_size,
-            max_y: texture_size,
+            max_x: cols as f32 * CELL_WIDTH as f32,
+            max_y: rows as f32 * CELL_HEIGHT as f32,
         },
-        destination: WebRect {
-            min_x,
-            min_y,
-            max_x: min_x + render_size,
-            max_y: min_y + render_size,
-        },
-        rgba: icon.rgba.clone(),
-    }]
+        header: web_rect(layout.header),
+        sidebar: web_rect(layout.menu),
+        footer: web_rect(layout.footer),
+    };
+    let shell = rects.shell;
+    let raw_input = RawInput {
+        screen_rect: Some(EguiRect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(shell.max_x, shell.max_y),
+        )),
+        max_texture_side: Some(4096),
+        time: Some(state.tick as f64 / 60.0),
+        ..Default::default()
+    };
+    let labels = egui_shell_labels(rects, state.selected, state.hovered_menu, state.fps);
+    let links = egui_shell_links(rects);
+    let output = egui.run_ui(raw_input, |ui| {
+        paint_egui_shell(ui.ctx(), rects, state.selected, state.hovered_menu);
+    });
+    let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
+    let mut textures = output
+        .textures_delta
+        .set
+        .into_iter()
+        .map(|(id, delta)| egui_texture(id, delta.image))
+        .collect::<Vec<_>>();
+    let mut meshes = primitives
+        .into_iter()
+        .filter_map(|primitive| match primitive.primitive {
+            Primitive::Mesh(mesh) => Some(WebEguiMesh {
+                texture_id: texture_id(mesh.texture_id),
+                clip: WebRect {
+                    min_x: primitive.clip_rect.min.x,
+                    min_y: primitive.clip_rect.min.y,
+                    max_x: primitive.clip_rect.max.x,
+                    max_y: primitive.clip_rect.max.y,
+                },
+                vertices: mesh
+                    .vertices
+                    .into_iter()
+                    .flat_map(|vertex| {
+                        let color = vertex.color;
+                        [
+                            vertex.pos.x,
+                            vertex.pos.y,
+                            vertex.uv.x,
+                            vertex.uv.y,
+                            f32::from(color.r()) / 255.0,
+                            f32::from(color.g()) / 255.0,
+                            f32::from(color.b()) / 255.0,
+                            f32::from(color.a()) / 255.0,
+                        ]
+                    })
+                    .collect(),
+                indices: mesh.indices,
+            }),
+            Primitive::Callback(_) => None,
+        })
+        .collect::<Vec<_>>();
+    push_egui_icon(&mut textures, &mut meshes, rects.header);
+    WebEguiFrame {
+        textures,
+        meshes,
+        labels,
+        links,
+    }
+}
+
+fn web_rect(rect: Rect) -> WebRect {
+    WebRect {
+        min_x: f32::from(rect.x) * CELL_WIDTH as f32,
+        min_y: f32::from(rect.y) * CELL_HEIGHT as f32,
+        max_x: f32::from(rect.x.saturating_add(rect.width)) * CELL_WIDTH as f32,
+        max_y: f32::from(rect.y.saturating_add(rect.height)) * CELL_HEIGHT as f32,
+    }
+}
+
+fn paint_egui_shell(
+    ctx: &EguiContext,
+    rects: EguiShellRects,
+    selected: usize,
+    hovered_menu: Option<usize>,
+) {
+    let painter = ctx.layer_painter(LayerId::new(Order::Foreground, egui::Id::new("site-shell")));
+    let base = Color32::from_rgb(15, 16, 24);
+    let border = Color32::from_rgb(34, 38, 52);
+    let hover = Color32::from_rgb(24, 27, 38);
+    let current = Color32::from_rgb(30, 34, 48);
+    let header = egui_rect(rects.header);
+    let sidebar = egui_rect(rects.sidebar);
+    let footer = egui_rect(rects.footer);
+
+    painter.line_segment(
+        [
+            Pos2::new(header.left(), header.bottom() - 0.5),
+            Pos2::new(header.right(), header.bottom() - 0.5),
+        ],
+        Stroke::new(1.0, border),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(footer.left(), footer.top() + 0.5),
+            Pos2::new(footer.right(), footer.top() + 0.5),
+        ],
+        Stroke::new(1.0, border),
+    );
+    painter.rect_filled(sidebar, 0.0, base);
+    painter.rect_stroke(sidebar, 0.0, Stroke::new(1.0, border), StrokeKind::Inside);
+
+    let mut row_y = sidebar.top() + EGUI_SIDEBAR_TOP_PX;
+    for (index, section) in sections().iter().enumerate() {
+        let row = EguiRect::from_min_size(
+            Pos2::new(sidebar.left(), row_y),
+            Vec2::new(sidebar.width(), EGUI_SIDEBAR_ROW_HEIGHT_PX),
+        );
+        let active = index == selected;
+        let hovered = hovered_menu == Some(index);
+        if hovered || active {
+            painter.rect_filled(
+                row.shrink2(Vec2::new(8.0, 2.0)),
+                4.0,
+                if active { current } else { hover },
+            );
+        }
+        if active {
+            painter.rect_filled(
+                EguiRect::from_min_size(
+                    Pos2::new(row.left() + 8.0, row.top() + 6.0),
+                    Vec2::new(3.0, row.height() - 12.0),
+                ),
+                2.0,
+                egui_accent(section.accent),
+            );
+        }
+        if active {
+            painter.rect_filled(
+                EguiRect::from_center_size(
+                    Pos2::new(row.left() + 32.0, row.center().y),
+                    Vec2::splat(24.0),
+                ),
+                5.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+            );
+        }
+        if !active {
+            painter.rect_filled(
+                EguiRect::from_center_size(
+                    Pos2::new(row.left() + 32.0, row.center().y),
+                    Vec2::splat(24.0),
+                ),
+                5.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+            );
+        }
+        row_y += EGUI_SIDEBAR_ROW_HEIGHT_PX;
+    }
+
+    painter.line_segment(
+        [
+            Pos2::new(sidebar.left(), sidebar.bottom() - 54.0),
+            Pos2::new(sidebar.right(), sidebar.bottom() - 54.0),
+        ],
+        Stroke::new(1.0, border),
+    );
+}
+
+fn egui_shell_labels(
+    rects: EguiShellRects,
+    selected: usize,
+    hovered_menu: Option<usize>,
+    fps: f64,
+) -> Vec<WebEguiLabel> {
+    let header = egui_rect(rects.header);
+    let sidebar = egui_rect(rects.sidebar);
+    let footer = egui_rect(rects.footer);
+    let mut labels = Vec::with_capacity(24);
+    let text = web_color(Color::Rgb(192, 202, 245));
+    let muted = web_color(Color::Rgb(116, 125, 156));
+    let magenta = web_color(Color::Rgb(255, 79, 176));
+
+    labels.push(WebEguiLabel::left(
+        header.left() + 72.0,
+        header.center().y,
+        "BOOTTY".to_owned(),
+        18.0,
+        magenta,
+    ));
+    labels.push(WebEguiLabel::left(
+        header.left() + 142.0,
+        header.center().y,
+        "bootty.org".to_owned(),
+        14.0,
+        text,
+    ));
+    labels.push(WebEguiLabel::right(
+        header.right() - 18.0,
+        header.center().y,
+        format!("{fps:05.1} fps"),
+        14.0,
+        web_color(Color::Rgb(158, 206, 106)),
+    ));
+
+    let mut row_y = sidebar.top() + EGUI_SIDEBAR_TOP_PX;
+    for (index, section) in sections().iter().enumerate() {
+        let row = EguiRect::from_min_size(
+            Pos2::new(sidebar.left(), row_y),
+            Vec2::new(sidebar.width(), EGUI_SIDEBAR_ROW_HEIGHT_PX),
+        );
+        let color = if index == selected {
+            web_color(section.accent)
+        } else if hovered_menu == Some(index) {
+            text
+        } else {
+            web_color(Color::Rgb(154, 163, 197))
+        };
+        labels.push(WebEguiLabel::center(
+            row.left() + 32.0,
+            row.center().y + 3.0,
+            section.icon.glyph().to_owned(),
+            18.0,
+            color,
+        ));
+        labels.push(WebEguiLabel::left(
+            row.left() + 58.0,
+            row.center().y + 3.0,
+            section.label.to_owned(),
+            15.0,
+            color,
+        ));
+        row_y += EGUI_SIDEBAR_ROW_HEIGHT_PX;
+    }
+
+    labels.push(WebEguiLabel::left(
+        sidebar.left() + 14.0,
+        sidebar.bottom() - 28.0,
+        "Open source".to_owned(),
+        12.5,
+        muted,
+    ));
+    labels.push(WebEguiLabel::left(
+        sidebar.left() + 14.0,
+        sidebar.bottom() - 13.0,
+        "github.com/majinboos/bootty".to_owned(),
+        12.5,
+        text,
+    ));
+    labels.push(WebEguiLabel::left(
+        footer.left() + 2.0,
+        footer.center().y,
+        "Bootty".to_owned(),
+        13.5,
+        magenta,
+    ));
+    labels.push(WebEguiLabel::left(
+        footer.left() + 72.0,
+        footer.center().y,
+        "native terminal UI for Rust apps".to_owned(),
+        13.5,
+        muted,
+    ));
+    labels
+}
+
+fn egui_shell_links(rects: EguiShellRects) -> Vec<WebEguiLink> {
+    let sidebar = egui_rect(rects.sidebar);
+    let mut links = Vec::new();
+    let mut row_y = sidebar.top() + EGUI_SIDEBAR_TOP_PX;
+    for section in sections() {
+        let row = EguiRect::from_min_size(
+            Pos2::new(sidebar.left(), row_y),
+            Vec2::new(sidebar.width(), EGUI_SIDEBAR_ROW_HEIGHT_PX),
+        );
+        if section.plain_label == "GitHub" {
+            links.push(WebEguiLink {
+                rect: WebRect {
+                    min_x: row.left(),
+                    min_y: row.top(),
+                    max_x: row.right(),
+                    max_y: row.bottom(),
+                },
+                url: GITHUB_URL,
+            });
+        }
+        row_y += EGUI_SIDEBAR_ROW_HEIGHT_PX;
+    }
+    links
+}
+
+fn egui_rect(rect: WebRect) -> EguiRect {
+    EguiRect::from_min_max(
+        Pos2::new(rect.min_x, rect.min_y),
+        Pos2::new(rect.max_x, rect.max_y),
+    )
+}
+
+fn push_egui_icon(
+    textures: &mut Vec<WebEguiTexture>,
+    meshes: &mut Vec<WebEguiMesh>,
+    header: WebRect,
+) {
+    let icon = site_icon();
+    let id = "user:bootty-icon".to_owned();
+    textures.push(WebEguiTexture {
+        id: id.clone(),
+        width: ICON_TEXTURE_SIZE,
+        height: ICON_TEXTURE_SIZE,
+        rgba: premultiplied_rgba(&icon.rgba),
+    });
+
+    let size = ICON_RENDER_SIZE as f32;
+    let min_x = header.min_x + 16.0;
+    let min_y = header.min_y + ((header.max_y - header.min_y - size) / 2.0).max(0.0);
+    let max_x = min_x + size;
+    let max_y = min_y + size;
+    meshes.push(WebEguiMesh {
+        texture_id: id,
+        clip: header,
+        vertices: vec![
+            min_x, min_y, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, min_x, max_y, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            max_x, max_y, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, max_x, min_y, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+}
+
+fn premultiplied_rgba(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|pixel| {
+            let alpha = u16::from(pixel[3]);
+            [
+                ((u16::from(pixel[0]) * alpha) / 255) as u8,
+                ((u16::from(pixel[1]) * alpha) / 255) as u8,
+                ((u16::from(pixel[2]) * alpha) / 255) as u8,
+                pixel[3],
+            ]
+        })
+        .collect()
+}
+
+fn egui_texture(id: TextureId, image: ImageData) -> WebEguiTexture {
+    let ImageData::Color(image) = image;
+    WebEguiTexture {
+        id: texture_id(id),
+        width: image.width() as u32,
+        height: image.height() as u32,
+        rgba: image
+            .pixels
+            .iter()
+            .flat_map(|pixel| [pixel.r(), pixel.g(), pixel.b(), pixel.a()])
+            .collect(),
+    }
+}
+
+fn texture_id(id: TextureId) -> String {
+    match id {
+        TextureId::Managed(id) => format!("managed:{id}"),
+        TextureId::User(id) => format!("user:{id}"),
+    }
+}
+
+fn egui_accent(color: Color) -> Color32 {
+    let color = web_color(color);
+    Color32::from_rgb(color.r, color.g, color.b)
 }
 
 fn site_icon() -> &'static IconImage {
@@ -1118,6 +1448,11 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
     }
 }
 
+fn max_scroll(line_count: usize, area_height: u16) -> u16 {
+    let content_height = area_height as usize;
+    line_count.saturating_sub(content_height) as u16
+}
+
 #[derive(Clone, Copy)]
 struct SiteLayout {
     header: Rect,
@@ -1138,12 +1473,16 @@ fn hit_target(cols: u16, rows: u16, x: u16, y: u16) -> Option<HitTarget> {
         return Some(HitTarget::Detail);
     }
 
-    let menu_content = inset(layout.menu, 1, 1);
-    if !contains(menu_content, x, y) {
+    if !contains(layout.menu, x, y) {
         return None;
     }
 
-    let index = y.saturating_sub(menu_content.y) as usize;
+    let pointer_y = f32::from(y) * CELL_HEIGHT as f32;
+    let first_row_y = f32::from(layout.menu.y) * CELL_HEIGHT as f32 + EGUI_SIDEBAR_TOP_PX;
+    if pointer_y < first_row_y {
+        return None;
+    }
+    let index = ((pointer_y - first_row_y) / EGUI_SIDEBAR_ROW_HEIGHT_PX) as usize;
     (index < sections().len()).then_some(HitTarget::Menu(index))
 }
 
@@ -1165,6 +1504,8 @@ struct IconImage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WebTerminalFrame {
+    selected: usize,
+    focus: &'static str,
     cols: u16,
     rows: u16,
     cell_width: u32,
@@ -1173,6 +1514,7 @@ struct WebTerminalFrame {
     cursor: Option<WebCursor>,
     cells: Vec<WebCell>,
     images: Vec<WebImage>,
+    egui: Option<WebEguiFrame>,
 }
 
 #[derive(Serialize)]
@@ -1183,7 +1525,7 @@ struct WebFrameColors {
     cursor: Option<WebColor>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WebColor {
     r: u8,
@@ -1229,7 +1571,7 @@ struct WebCursor {
 #[serde(rename_all = "camelCase")]
 struct WebImage {
     key: String,
-    layer: WebImageLayer,
+    layer: String,
     image_width: u32,
     image_height: u32,
     source: WebRect,
@@ -1237,13 +1579,7 @@ struct WebImage {
     rgba: Vec<u8>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-enum WebImageLayer {
-    AboveText,
-}
-
-#[derive(Serialize)]
+#[derive(Debug, Copy, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WebRect {
     min_x: f32,
@@ -1251,15 +1587,96 @@ struct WebRect {
     max_x: f32,
     max_y: f32,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebEguiFrame {
+    textures: Vec<WebEguiTexture>,
+    meshes: Vec<WebEguiMesh>,
+    labels: Vec<WebEguiLabel>,
+    links: Vec<WebEguiLink>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebEguiLabel {
+    x: f32,
+    y: f32,
+    text: String,
+    size: f32,
+    color: WebColor,
+    align: &'static str,
+}
+
+impl WebEguiLabel {
+    fn left(x: f32, y: f32, text: String, size: f32, color: WebColor) -> Self {
+        Self {
+            x,
+            y,
+            text,
+            size,
+            color,
+            align: "left",
+        }
+    }
+
+    fn right(x: f32, y: f32, text: String, size: f32, color: WebColor) -> Self {
+        Self {
+            x,
+            y,
+            text,
+            size,
+            color,
+            align: "right",
+        }
+    }
+
+    fn center(x: f32, y: f32, text: String, size: f32, color: WebColor) -> Self {
+        Self {
+            x,
+            y,
+            text,
+            size,
+            color,
+            align: "center",
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebEguiLink {
+    rect: WebRect,
+    url: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebEguiTexture {
+    id: String,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebEguiMesh {
+    texture_id: String,
+    clip: WebRect,
+    vertices: Vec<f32>,
+    indices: Vec<u32>,
+}
 #[wasm_bindgen]
 pub struct SiteBackend {
+    egui: EguiContext,
     menu: Menu,
     detail: Detail,
     terminal: Option<TestTerminalAdapter>,
     selected: usize,
     hovered_menu: Option<usize>,
     focus: Focus,
-    notice: String,
+    detail_scroll: u16,
     tick: u64,
     fps: f64,
     demo_input: String,
@@ -1278,6 +1695,7 @@ impl SiteBackend {
         detail.attr(Attribute::Focus, AttrValue::Flag(false));
 
         Self {
+            egui: new_egui_context(),
             menu,
             detail,
             terminal: Some(
@@ -1287,7 +1705,7 @@ impl SiteBackend {
             selected: 0,
             hovered_menu: None,
             focus: Focus::Menu,
-            notice: "Bootty terminal website".to_owned(),
+            detail_scroll: 0,
             tick: 0,
             fps: 0.0,
             demo_input: String::new(),
@@ -1301,9 +1719,15 @@ impl SiteBackend {
         }
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<JsValue, JsValue> {
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        _device_pixel_ratio: f32,
+    ) -> Result<JsValue, JsValue> {
         self.cols = cols.max(40);
         self.rows = rows.max(18);
+        self.egui = new_egui_context();
         self.terminal = Some(
             TestTerminalAdapter::new(Size::new(self.cols, self.rows))
                 .map_err(|error| JsValue::from_str(&format!("{error:?}")))?,
@@ -1318,8 +1742,8 @@ impl SiteBackend {
         self.frame()
     }
 
-    pub fn mouse(&mut self, kind: &str, x: u16, y: u16, _button: i16) -> Result<JsValue, JsValue> {
-        self.handle_mouse(kind, x, y)?;
+    pub fn mouse(&mut self, kind: &str, x: u16, y: u16, button: i16) -> Result<JsValue, JsValue> {
+        self.handle_mouse(kind, x, y, button)?;
         self.frame()
     }
 
@@ -1333,7 +1757,7 @@ impl SiteBackend {
         let selected = self.selected;
         let hovered_menu = self.hovered_menu;
         let focus = self.focus;
-        let notice = self.notice.clone();
+        let detail_scroll = self.detail_scroll;
         let tick = self.tick;
         let fps = self.fps;
         let demo_lines = self.demo_lines.clone();
@@ -1350,19 +1774,26 @@ impl SiteBackend {
                     &mut self.detail,
                     SiteViewState {
                         selected,
-                        hovered_menu,
                         focus,
-                        notice: &notice,
-                        tick,
-                        fps,
+                        detail_scroll,
                         demo_lines: &demo_lines,
                         demo_input: &demo_input,
                     },
                 );
             })
             .map_err(|error| JsValue::from_str(&format!("{error:?}")))?;
-        let value = serde_wasm_bindgen::to_value(&web_frame(completed.buffer, selected))
-            .map_err(|error| JsValue::from_str(&error.to_string()));
+        let value = serde_wasm_bindgen::to_value(&web_frame(
+            &self.egui,
+            completed.buffer,
+            WebFrameState {
+                selected,
+                hovered_menu,
+                tick,
+                focus,
+                fps,
+            },
+        ))
+        .map_err(|error| JsValue::from_str(&error.to_string()));
         self.terminal = Some(terminal);
         value
     }
@@ -1374,49 +1805,71 @@ mod tests {
 
     #[test]
     fn wide_menu_hit_tracks_drawn_menu_rows() {
-        assert_eq!(hit_target(96, 32, 2, 5), Some(HitTarget::Menu(0)));
-        assert_eq!(hit_target(96, 32, 2, 10), Some(HitTarget::Menu(5)));
+        assert_eq!(hit_target(96, 32, 2, 8), Some(HitTarget::Menu(0)));
+        assert_eq!(hit_target(96, 32, 2, 10), Some(HitTarget::Menu(1)));
+        assert_eq!(hit_target(96, 32, 2, 18), Some(HitTarget::Menu(5)));
     }
 
     #[test]
     fn wide_menu_hit_rejects_border_and_detail() {
-        assert_eq!(hit_target(96, 32, 1, 5), None);
-        assert_eq!(hit_target(96, 32, 30, 5), Some(HitTarget::Detail));
+        assert_eq!(hit_target(96, 32, 0, 5), None);
+        assert_eq!(hit_target(96, 32, 40, 5), Some(HitTarget::Detail));
     }
 
     #[test]
     fn narrow_menu_hit_uses_vertical_layout() {
-        assert_eq!(hit_target(60, 32, 2, 5), Some(HitTarget::Menu(0)));
-        assert_eq!(hit_target(60, 32, 2, 10), Some(HitTarget::Menu(5)));
-        assert_eq!(hit_target(60, 32, 2, 14), Some(HitTarget::Detail));
+        assert_eq!(hit_target(60, 32, 2, 8), Some(HitTarget::Menu(0)));
+        assert_eq!(hit_target(60, 32, 2, 18), Some(HitTarget::Menu(5)));
+        assert_eq!(hit_target(60, 32, 2, 25), Some(HitTarget::Detail));
     }
 
     #[test]
     fn menu_hover_highlights_without_changing_selected_page() {
         let mut site = SiteBackend::new();
 
-        site.handle_mouse("move", 2, 7).expect("mouse move handles");
+        site.handle_mouse("move", 2, 12, 0)
+            .expect("mouse move handles");
 
         assert_eq!(site.selected, 0);
         assert_eq!(site.hovered_menu, Some(2));
-        assert_eq!(
-            site.notice,
-            format!("{} hovered", sections()[2].plain_label)
-        );
     }
 
     #[test]
     fn menu_click_changes_selected_page() {
         let mut site = SiteBackend::new();
 
-        site.handle_mouse("down", 2, 7).expect("mouse down handles");
+        site.handle_mouse("down", 2, 12, 0)
+            .expect("mouse down handles");
 
         assert_eq!(site.selected, 2);
         assert_eq!(site.hovered_menu, Some(2));
     }
 
     #[test]
-    fn selected_menu_row_keeps_icon_in_a_stable_column() {
+    fn detail_wheel_scrolls_without_changing_selected_page() {
+        let mut site = SiteBackend::new();
+
+        site.handle_mouse("wheel", 40, 8, 3).expect("wheel handles");
+
+        assert_eq!(site.selected, 0);
+        assert_eq!(site.focus, Focus::Detail);
+        assert_eq!(site.detail_scroll, 3);
+    }
+
+    #[test]
+    fn menu_click_resets_detail_scroll() {
+        let mut site = SiteBackend::new();
+        site.detail_scroll = 12;
+
+        site.handle_mouse("down", 2, 12, 0)
+            .expect("mouse down handles");
+
+        assert_eq!(site.selected, 2);
+        assert_eq!(site.detail_scroll, 0);
+    }
+
+    #[test]
+    fn web_frame_exports_egui_sidebar_meshes() {
         let mut terminal =
             TestTerminalAdapter::new(Size::new(96, 32)).expect("test terminal starts");
         let completed = terminal
@@ -1427,20 +1880,51 @@ mod tests {
                     &mut Detail::default(),
                     SiteViewState {
                         selected: 0,
-                        hovered_menu: None,
                         focus: Focus::Menu,
-                        notice: "test",
-                        tick: 0,
-                        fps: 0.0,
+                        detail_scroll: 0,
                         demo_lines: &[],
                         demo_input: "",
                     },
                 );
             })
             .expect("site draws");
-        let row = rendered_row(completed.buffer, 5);
+        let egui = new_egui_context();
+        let frame = web_frame(
+            &egui,
+            completed.buffer,
+            WebFrameState {
+                selected: 0,
+                hovered_menu: None,
+                tick: 1,
+                focus: Focus::Menu,
+                fps: 0.0,
+            },
+        );
+        let sidebar = site_layout(96, 32).menu;
+        let sidebar_min_x = f32::from(sidebar.x) * CELL_WIDTH as f32;
+        let sidebar_max_x = f32::from(sidebar.x.saturating_add(sidebar.width)) * CELL_WIDTH as f32;
+        let egui_frame = frame.egui.expect("site frame exports egui geometry");
 
-        assert!(row.contains(">  \u{f2d0}  Frame"), "{row:?}");
+        assert!(
+            !egui_frame.meshes.is_empty(),
+            "egui sidebar produced no meshes"
+        );
+        assert!(
+            egui_frame.meshes.iter().any(|mesh| {
+                !mesh.vertices.is_empty()
+                    && mesh.clip.min_x <= sidebar_min_x
+                    && mesh.clip.max_x >= sidebar_max_x
+            }),
+            "egui sidebar meshes do not cover the menu column"
+        );
+        assert!(
+            egui_frame.links.iter().any(|link| {
+                link.url == GITHUB_URL
+                    && link.rect.min_x <= sidebar_min_x
+                    && link.rect.max_x >= sidebar_max_x
+            }),
+            "egui sidebar does not export the GitHub row link"
+        );
     }
 
     #[test]
@@ -1477,29 +1961,16 @@ mod tests {
     }
 
     #[test]
-    fn github_section_uses_nerd_font_icon_and_osc8_link() {
+    fn github_section_uses_github_icon_and_osc8_link() {
         let section = sections().last().expect("github section exists");
 
-        assert_eq!(section.icon, "\u{f09b}");
+        assert!(matches!(section.icon, SectionIcon::Github));
+        assert_eq!(section.icon.glyph(), "\u{f09b}");
         assert_eq!(section.label, "GitHub");
         assert_eq!(section.plain_label, "GitHub");
         assert_eq!(section.title, "Source");
         assert_eq!(section.links[0].text, "GitHub");
         assert_eq!(section.links[0].url, GITHUB_URL);
-    }
-
-    #[test]
-    fn every_menu_section_has_a_nerd_font_icon() {
-        for section in sections() {
-            assert!(
-                section.icon.chars().all(|ch| {
-                    ('\u{e000}'..='\u{f8ff}').contains(&ch)
-                        || ('\u{f0000}'..='\u{ffffd}').contains(&ch)
-                }),
-                "{} icon is not a Nerd Font private-use glyph",
-                section.plain_label
-            );
-        }
     }
 
     #[test]
@@ -1576,11 +2047,5 @@ mod tests {
                 .iter()
                 .any(|span| matches!(span.style.fg, Some(Color::Rgb(_, _, _))))
         );
-    }
-
-    fn rendered_row(buffer: &Buffer, y: u16) -> String {
-        (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect()
     }
 }

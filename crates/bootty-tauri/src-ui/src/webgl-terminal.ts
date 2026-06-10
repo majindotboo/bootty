@@ -1,6 +1,21 @@
-import type { WebCell, WebColor, WebImage, WebImageLayer, WebTerminalFrame } from "./terminal-types";
+import type {
+  WebCell,
+  WebColor,
+  WebEguiFrame,
+  WebEguiLabel,
+  WebEguiMesh,
+  WebEguiTexture,
+  WebImage,
+  WebImageLayer,
+  WebTerminalFrame,
+} from "./terminal-types";
 
 type Rgba = [number, number, number, number];
+
+export type TerminalSelection = {
+  anchor: { x: number; y: number };
+  focus: { x: number; y: number };
+};
 
 type ImageTexture = {
   texture: WebGLTexture;
@@ -25,11 +40,15 @@ export class WebGlTerminalRenderer {
   private readonly solidProgram: WebGLProgram;
   private readonly imageProgram: WebGLProgram;
   private readonly textProgram: WebGLProgram;
+  private readonly eguiProgram: WebGLProgram;
   private readonly solidBuffer: WebGLBuffer;
   private readonly imageBuffer: WebGLBuffer;
   private readonly textBuffer: WebGLBuffer;
+  private readonly eguiVertexBuffer: WebGLBuffer;
+  private readonly eguiIndexBuffer: WebGLBuffer;
   private readonly atlas: GlyphAtlas;
   private readonly imageTextures = new Map<string, ImageTexture>();
+  private readonly eguiTextures = new Map<string, ImageTexture>();
   private width = 0;
   private height = 0;
   private dpr = 1;
@@ -49,17 +68,21 @@ export class WebGlTerminalRenderer {
     this.solidProgram = createProgram(gl, SOLID_VERTEX_SHADER, SOLID_FRAGMENT_SHADER);
     this.imageProgram = createProgram(gl, IMAGE_VERTEX_SHADER, IMAGE_FRAGMENT_SHADER);
     this.textProgram = createProgram(gl, TEXT_VERTEX_SHADER, TEXT_FRAGMENT_SHADER);
+    this.eguiProgram = createProgram(gl, EGUI_VERTEX_SHADER, EGUI_FRAGMENT_SHADER);
     this.solidBuffer = required(gl.createBuffer(), "create solid instance buffer");
     this.imageBuffer = required(gl.createBuffer(), "create image vertex buffer");
     this.textBuffer = required(gl.createBuffer(), "create text instance buffer");
+    this.eguiVertexBuffer = required(gl.createBuffer(), "create egui vertex buffer");
+    this.eguiIndexBuffer = required(gl.createBuffer(), "create egui index buffer");
     this.atlas = new GlyphAtlas(gl);
   }
 
-  render(frame: WebTerminalFrame): void {
+  render(frame: WebTerminalFrame, selection: TerminalSelection | null = null): void {
     this.resize(frame);
 
     const surfaceInstances: number[] = [];
     const backgroundInstances: number[] = [];
+    const selectionInstances: number[] = [];
     const textInstances: number[] = [];
     const cursorInstances: number[] = [];
 
@@ -84,6 +107,10 @@ export class WebGlTerminalRenderer {
           rgba(colors.background),
         );
       }
+    }
+
+    if (selection) {
+      pushSelectionInstances(selectionInstances, frame, selection);
     }
 
     for (const cell of frame.cells) {
@@ -143,9 +170,13 @@ export class WebGlTerminalRenderer {
     this.drawSolid(surfaceInstances);
     this.drawImages(frame, "belowBackground");
     this.drawSolid(backgroundInstances);
+    this.drawSolid(selectionInstances);
     this.drawImages(frame, "belowText");
     this.drawText(textInstances);
     this.drawImages(frame, "aboveText");
+    if (frame.egui) {
+      this.drawEgui(frame.egui);
+    }
     this.drawSolid(cursorInstances);
     this.gl.flush();
   }
@@ -154,13 +185,20 @@ export class WebGlTerminalRenderer {
     this.gl.deleteBuffer(this.solidBuffer);
     this.gl.deleteBuffer(this.imageBuffer);
     this.gl.deleteBuffer(this.textBuffer);
+    this.gl.deleteBuffer(this.eguiVertexBuffer);
+    this.gl.deleteBuffer(this.eguiIndexBuffer);
     this.gl.deleteProgram(this.solidProgram);
     this.gl.deleteProgram(this.imageProgram);
     this.gl.deleteProgram(this.textProgram);
+    this.gl.deleteProgram(this.eguiProgram);
     for (const image of this.imageTextures.values()) {
       this.gl.deleteTexture(image.texture);
     }
     this.imageTextures.clear();
+    for (const texture of this.eguiTextures.values()) {
+      this.gl.deleteTexture(texture.texture);
+    }
+    this.eguiTextures.clear();
     this.atlas.dispose();
   }
 
@@ -236,6 +274,140 @@ export class WebGlTerminalRenderer {
     gl.disable(gl.BLEND);
   }
 
+  private drawEgui(frame: WebEguiFrame): void {
+    for (const texture of frame.textures) {
+      this.updateEguiTexture(texture);
+    }
+    if (frame.meshes.length === 0) {
+      return;
+    }
+
+    const gl = this.gl;
+    gl.useProgram(this.eguiProgram);
+    gl.uniform2f(
+      required(gl.getUniformLocation(this.eguiProgram, "u_resolution"), "egui resolution"),
+      this.width,
+      this.height,
+    );
+    gl.uniform1i(required(gl.getUniformLocation(this.eguiProgram, "u_texture"), "egui texture"), 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.eguiVertexBuffer);
+    bindAttribute(gl, this.eguiProgram, "a_position", 2, EGUI_VERTEX_FLOATS, 0, false);
+    bindAttribute(gl, this.eguiProgram, "a_uv", 2, EGUI_VERTEX_FLOATS, 2, false);
+    bindAttribute(gl, this.eguiProgram, "a_color", 4, EGUI_VERTEX_FLOATS, 4, false);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.eguiIndexBuffer);
+    gl.enable(gl.BLEND);
+    gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.ONE);
+    gl.enable(gl.SCISSOR_TEST);
+
+    for (const mesh of frame.meshes) {
+      this.drawEguiMesh(mesh);
+    }
+
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+
+    this.drawEguiLabels(frame.labels);
+  }
+
+  private drawEguiLabels(labels: WebEguiLabel[]): void {
+    if (labels.length === 0) {
+      return;
+    }
+    const instances: number[] = [];
+    const style = plainTextStyle();
+    for (const label of labels) {
+      const cellHeight = Math.max(10, label.size * 1.35);
+      const cellWidth = Math.max(6, label.size * 0.62);
+      const chars = Array.from(label.text);
+      const advance = cellWidth;
+      const textWidth = chars.length * advance;
+      const startX =
+        label.align === "right" ? label.x - textWidth : label.align === "center" ? label.x - textWidth / 2 : label.x;
+      const y = label.y - cellHeight / 2;
+      for (let index = 0; index < chars.length; index += 1) {
+        const glyph = this.atlas.glyph(chars[index], cellWidth, cellHeight, this.dpr, style);
+        pushTextInstance(
+          instances,
+          startX + index * advance + glyph.offsetX,
+          y + glyph.offsetY,
+          glyph.width,
+          glyph.height,
+          glyph,
+          rgba(label.color),
+        );
+      }
+    }
+    this.drawText(instances);
+  }
+
+  private drawEguiMesh(mesh: WebEguiMesh): void {
+    if (mesh.vertices.length === 0 || mesh.indices.length === 0) {
+      return;
+    }
+    const texture = this.eguiTextures.get(mesh.textureId);
+    if (!texture) {
+      return;
+    }
+    const gl = this.gl;
+    const scale = this.dpr;
+    const clipX = Math.max(0, Math.floor(mesh.clip.minX * scale));
+    const clipY = Math.max(0, Math.floor((this.height - mesh.clip.maxY) * scale));
+    const clipWidth = Math.max(0, Math.ceil((mesh.clip.maxX - mesh.clip.minX) * scale));
+    const clipHeight = Math.max(0, Math.ceil((mesh.clip.maxY - mesh.clip.minY) * scale));
+    gl.scissor(clipX, clipY, clipWidth, clipHeight);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture.texture);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.eguiVertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mesh.vertices), gl.STREAM_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.eguiIndexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(mesh.indices), gl.STREAM_DRAW);
+    gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_INT, 0);
+  }
+
+  private updateEguiTexture(texture: WebEguiTexture): void {
+    const cached = this.eguiTextures.get(texture.id);
+    if (cached && cached.width === texture.width && cached.height === texture.height) {
+      this.gl.bindTexture(this.gl.TEXTURE_2D, cached.texture);
+      this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
+      this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, false);
+      this.gl.pixelStorei(this.gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      this.gl.texSubImage2D(
+        this.gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        texture.width,
+        texture.height,
+        this.gl.RGBA,
+        this.gl.UNSIGNED_BYTE,
+        rgbaPixels(texture.rgba),
+      );
+      return;
+    }
+    if (cached) {
+      this.gl.deleteTexture(cached.texture);
+    }
+    const glTexture = required(this.gl.createTexture(), "create egui texture");
+    this.configureEguiTexture(glTexture);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, glTexture);
+    this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
+    this.gl.pixelStorei(this.gl.UNPACK_FLIP_Y_WEBGL, false);
+    this.gl.pixelStorei(this.gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    this.gl.texImage2D(
+      this.gl.TEXTURE_2D,
+      0,
+      this.gl.RGBA8,
+      texture.width,
+      texture.height,
+      0,
+      this.gl.RGBA,
+      this.gl.UNSIGNED_BYTE,
+      rgbaPixels(texture.rgba),
+    );
+    this.eguiTextures.set(texture.id, { texture: glTexture, width: texture.width, height: texture.height });
+  }
+
   private imageTexture(image: WebImage): ImageTexture {
     const cached = this.imageTextures.get(image.key);
     if (cached && cached.width === image.imageWidth && cached.height === image.imageHeight) {
@@ -261,6 +433,14 @@ export class WebGlTerminalRenderer {
     this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
     this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.NEAREST);
     this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.NEAREST);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+  }
+
+  private configureEguiTexture(texture: WebGLTexture): void {
+    this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+    this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
     this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
     this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
   }
@@ -328,6 +508,7 @@ export class WebGlTerminalRenderer {
 const SOLID_INSTANCE_FLOATS = 8;
 const IMAGE_VERTEX_FLOATS = 4;
 const TEXT_INSTANCE_FLOATS = 12;
+const EGUI_VERTEX_FLOATS = 8;
 
 class GlyphAtlas {
   readonly texture: WebGLTexture;
@@ -454,6 +635,73 @@ function pushBoxDrawingInstance(instances: number[], cell: WebCell, frame: WebTe
   }
 }
 
+function pushSelectionInstances(instances: number[], frame: WebTerminalFrame, selection: TerminalSelection): void {
+  const start = orderedSelectionStart(selection);
+  const end = orderedSelectionEnd(selection);
+  const color: Rgba = [0.24, 0.36, 0.72, 0.78];
+  for (let y = start.y; y <= end.y; y += 1) {
+    const rowBounds = visibleRowBounds(frame, y);
+    if (!rowBounds) {
+      continue;
+    }
+    const startX = Math.max(y === start.y ? start.x : 0, rowBounds.startX);
+    const endX = Math.min(y === end.y ? end.x : frame.cols - 1, rowBounds.endX);
+    if (endX < startX) {
+      continue;
+    }
+    pushSolidInstance(
+      instances,
+      startX * frame.cellWidth,
+      y * frame.cellHeight,
+      (endX - startX + 1) * frame.cellWidth,
+      frame.cellHeight,
+      color,
+    );
+  }
+}
+
+function visibleRowBounds(frame: WebTerminalFrame, y: number): { startX: number; endX: number } | null {
+  let startX = Number.POSITIVE_INFINITY;
+  let endX = Number.NEGATIVE_INFINITY;
+  for (const cell of frame.cells) {
+    if (cell.y !== y || cell.style.invisible || !isSelectableText(cell.text)) {
+      continue;
+    }
+    startX = Math.min(startX, cell.x);
+    endX = Math.max(endX, cell.x);
+  }
+  if (!Number.isFinite(startX) || !Number.isFinite(endX)) {
+    return null;
+  }
+  return { startX, endX };
+}
+
+const BOX_DRAWING_TEXT = new Set(["─", "━", "│", "┃", "┌", "┐", "└", "┘", "╭", "╮", "╰", "╯"]);
+
+function isSelectableText(text: string): boolean {
+  return text.trim().length > 0 && !BOX_DRAWING_TEXT.has(text);
+}
+
+function orderedSelectionStart(selection: TerminalSelection): { x: number; y: number } {
+  if (
+    selection.anchor.y < selection.focus.y ||
+    (selection.anchor.y === selection.focus.y && selection.anchor.x <= selection.focus.x)
+  ) {
+    return selection.anchor;
+  }
+  return selection.focus;
+}
+
+function orderedSelectionEnd(selection: TerminalSelection): { x: number; y: number } {
+  if (
+    selection.anchor.y < selection.focus.y ||
+    (selection.anchor.y === selection.focus.y && selection.anchor.x <= selection.focus.x)
+  ) {
+    return selection.focus;
+  }
+  return selection.anchor;
+}
+
 function pushTextInstance(
   instances: number[],
   x: number,
@@ -483,13 +731,17 @@ function imageVertices(image: WebImage): number[] {
 }
 
 function imagePixels(image: WebImage): Uint8Array {
-  if (image.rgba instanceof Uint8Array) {
-    return image.rgba;
+  return rgbaPixels(image.rgba);
+}
+
+function rgbaPixels(rgba: ArrayLike<number>): Uint8Array {
+  if (rgba instanceof Uint8Array) {
+    return rgba;
   }
-  if (ArrayBuffer.isView(image.rgba)) {
-    return new Uint8Array(image.rgba.buffer, image.rgba.byteOffset, image.rgba.byteLength);
+  if (ArrayBuffer.isView(rgba)) {
+    return new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
   }
-  return new Uint8Array(image.rgba);
+  return new Uint8Array(rgba);
 }
 
 function bindInstancedAttribute(
@@ -541,6 +793,20 @@ function resolvedCellColors(frame: WebTerminalFrame, cell: WebCell): ResolvedCel
 function terminalFont(cellHeight: number, style: WebCell["style"]): string {
   const slant = style.italic ? "italic " : "";
   return `${slant}${Math.floor(cellHeight * 0.78)}px "Maple Mono NF", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+}
+
+function plainTextStyle(): WebCell["style"] {
+  return {
+    bold: false,
+    italic: false,
+    faint: false,
+    blink: false,
+    inverse: false,
+    invisible: false,
+    strikethrough: false,
+    overline: false,
+    underline: false,
+  };
 }
 
 function rgba(color: WebColor, alpha = 1): Rgba {
@@ -673,4 +939,32 @@ out vec4 out_color;
 void main() {
   float alpha = texture(u_atlas, v_uv).a;
   out_color = vec4(v_color.rgb, v_color.a * alpha);
+}`;
+
+const EGUI_VERTEX_SHADER = `#version 300 es
+precision highp float;
+in vec2 a_position;
+in vec2 a_uv;
+in vec4 a_color;
+uniform vec2 u_resolution;
+out vec2 v_uv;
+out vec4 v_color;
+
+void main() {
+  vec2 clip = (a_position / u_resolution) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_uv = a_uv;
+  v_color = a_color;
+}`;
+
+const EGUI_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+uniform sampler2D u_texture;
+in vec2 v_uv;
+in vec4 v_color;
+out vec4 out_color;
+
+void main() {
+  vec4 tex = texture(u_texture, v_uv);
+  out_color = v_color * tex;
 }`;

@@ -44,6 +44,7 @@ body {
 }
 
 .terminal-site-canvas {
+  display: block;
   width: 100vw;
   height: 100vh;
   min-width: 0;
@@ -51,4 +52,6 @@ body {
   border: 0;
   outline: none;
   background: #11121a;
+  touch-action: none;
+  user-select: none;
 }

@@ -5,10 +5,11 @@ export type TerminalResize = {
   rows: number;
   cellWidth: number;
   cellHeight: number;
+  devicePixelRatio: number;
 };
 
 export type TerminalMouse = {
-  kind: "move" | "down" | "up" | "leave";
+  kind: "move" | "down" | "up" | "leave" | "wheel";
   x: number;
   y: number;
   button: number;

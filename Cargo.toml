@@ -39,6 +39,7 @@ eframe = { version = "0.34", default-features = false, features = [
   "default_fonts",
   "wgpu_no_default_features",
 ] }
+egui = "0.34"
 epaint_default_fonts = "0.34"
 fontdb = "0.23"
 indoc = "2"

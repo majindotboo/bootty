@@ -1,12 +1,19 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import { createTerminalBackend } from "./terminal-api";
 import type { TerminalBackend, TerminalKey } from "./terminal-api";
 import type { WebTerminalFrame } from "./terminal-types";
-import { WebGlTerminalRenderer } from "./webgl-terminal";
+import { type TerminalSelection, WebGlTerminalRenderer } from "./webgl-terminal";
 import "./style.css";
 
 type GridSize = { cols: number; rows: number };
+
+declare global {
+  interface Window {
+    __boottyRoot?: Root;
+  }
+}
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -14,8 +21,15 @@ function App() {
   const frameRef = useRef<WebTerminalFrame | null>(null);
   const gridRef = useRef<GridSize | null>(null);
   const backendRef = useRef<TerminalBackend | null>(null);
+  const selectionRef = useRef<TerminalSelection | null>(null);
+  const selectingRef = useRef(false);
   const resizeInFlightRef = useRef(false);
   const fpsRef = useRef({ frames: 0, startedAt: performance.now() });
+
+  const renderFrame = useCallback((frame: WebTerminalFrame) => {
+    frameRef.current = frame;
+    rendererRef.current?.render(frame, selectionRef.current);
+  }, []);
 
   const resizeToCanvas = useCallback(async (backend: TerminalBackend, frame: WebTerminalFrame) => {
     const canvas = canvasRef.current;
@@ -36,6 +50,7 @@ function App() {
         rows: nextGrid.rows,
         cellWidth: frame.cellWidth,
         cellHeight: frame.cellHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
       });
       gridRef.current = nextGrid;
       frameRef.current = resized;
@@ -54,9 +69,8 @@ function App() {
 
     let frame = await resizeToCanvas(backend, await backend.readFrame());
     frame = await publishFps(backend, frame, fpsRef.current);
-    frameRef.current = frame;
-    renderer.render(frame);
-  }, [resizeToCanvas]);
+    renderFrame(frame);
+  }, [renderFrame, resizeToCanvas]);
 
   const sendInput = useCallback(
     (input: string) => {
@@ -83,19 +97,17 @@ function App() {
           if (!nextFrame) {
             return;
           }
-          frameRef.current = nextFrame;
-          rendererRef.current?.render(nextFrame);
+          renderFrame(nextFrame);
         })
         .catch(reportError);
       return true;
     },
-    [],
+    [renderFrame],
   );
 
   const sendMouse = useCallback(
     (kind: "move" | "down" | "up" | "leave", event: React.PointerEvent<HTMLCanvasElement>) => {
       const backend = backendRef.current;
-      const renderer = rendererRef.current;
       const frame = frameRef.current;
       const canvas = canvasRef.current;
       if (!frame || !canvas) {
@@ -104,29 +116,74 @@ function App() {
       if (kind === "leave") {
         canvas.style.cursor = "default";
       }
-      const rect = canvas.getBoundingClientRect();
-      const x = Math.max(0, Math.min(frame.cols - 1, Math.floor((event.clientX - rect.left) / frame.cellWidth)));
-      const y = Math.max(0, Math.min(frame.rows - 1, Math.floor((event.clientY - rect.top) / frame.cellHeight)));
+      const { x, y } = cellForPoint(frame, canvas, event.clientX, event.clientY);
+      const eguiLink = eguiLinkAt(frame, canvas, event.clientX, event.clientY);
       const osc8 = osc8At(frame, x, y);
       if (kind !== "leave") {
-        canvas.style.cursor = osc8 ? "pointer" : "default";
+        canvas.style.cursor = eguiLink || osc8 ? "pointer" : "default";
       }
-      if (kind === "down" && osc8) {
-        window.open(osc8, "_blank", "noopener,noreferrer");
+      if (kind === "down" && eguiLink) {
+        selectionRef.current = null;
+        selectingRef.current = false;
+        window.location.assign(eguiLink);
         return;
       }
-      if (!backend?.mouse || !renderer) {
+      if (kind === "down" && osc8) {
+        selectionRef.current = null;
+        selectingRef.current = false;
+        window.location.assign(osc8);
+        return;
+      }
+      if (kind === "down") {
+        selectionRef.current = { anchor: { x, y }, focus: { x, y } };
+        selectingRef.current = true;
+        renderFrame(frame);
+      } else if (kind === "move" && selectingRef.current && selectionRef.current) {
+        selectionRef.current = { ...selectionRef.current, focus: { x, y } };
+        renderFrame(frame);
+        return;
+      } else if (kind === "up" && selectingRef.current) {
+        selectingRef.current = false;
+        if (selectionRef.current?.anchor.x === x && selectionRef.current.anchor.y === y) {
+          selectionRef.current = null;
+        } else if (selectionRef.current) {
+          selectionRef.current = { ...selectionRef.current, focus: { x, y } };
+        }
+        renderFrame(frame);
+      }
+      if (!backend?.mouse) {
         return;
       }
       backend
         .mouse({ kind, x, y, button: event.button })
         .then((nextFrame) => {
-          frameRef.current = nextFrame;
-          renderer.render(nextFrame);
+          renderFrame(nextFrame);
         })
         .catch(reportError);
     },
-    [],
+    [renderFrame],
+  );
+
+  const sendWheel = useCallback(
+    (event: React.WheelEvent<HTMLCanvasElement>) => {
+      const backend = backendRef.current;
+      const frame = frameRef.current;
+      const canvas = canvasRef.current;
+      if (!backend?.mouse || !frame || !canvas) {
+        return;
+      }
+      event.preventDefault();
+      const { x, y } = cellForPoint(frame, canvas, event.clientX, event.clientY);
+      const direction = event.deltaY < 0 ? -1 : 1;
+      const rows = Math.max(1, Math.min(8, Math.ceil(Math.abs(event.deltaY) / frame.cellHeight)));
+      backend
+        .mouse({ kind: "wheel", x, y, button: direction * rows })
+        .then((nextFrame) => {
+          renderFrame(nextFrame);
+        })
+        .catch(reportError);
+    },
+    [renderFrame],
   );
 
   useEffect(() => {
@@ -160,8 +217,7 @@ function App() {
       if (stop) {
         return;
       }
-      frameRef.current = frame;
-      renderer.render(frame);
+      renderFrame(frame);
       animationFrame = window.requestAnimationFrame(drawLoop);
     }
 
@@ -174,11 +230,13 @@ function App() {
       backendRef.current = null;
       rendererRef.current = null;
     };
-  }, [draw, resizeToCanvas]);
+  }, [draw, renderFrame, resizeToCanvas]);
 
   useEffect(() => {
     const onResize = () => {
       gridRef.current = null;
+      selectionRef.current = null;
+      selectingRef.current = false;
       draw().catch(reportError);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -199,16 +257,36 @@ function App() {
       event.preventDefault();
       sendInput(event.clipboardData?.getData("text") ?? "");
     };
+    const onCopy = (event: ClipboardEvent) => {
+      const frame = frameRef.current;
+      const selection = selectionRef.current;
+      if (!frame || !selection) {
+        return;
+      }
+      const text = selectedText(frame, selection);
+      if (text.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.clipboardData?.setData("text/plain", text);
+    };
 
     window.addEventListener("resize", onResize);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("paste", onPaste);
+    window.addEventListener("copy", onCopy);
+    const observer = new ResizeObserver(onResize);
+    if (canvasRef.current?.parentElement) {
+      observer.observe(canvasRef.current.parentElement);
+    }
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("paste", onPaste);
+      window.removeEventListener("copy", onCopy);
+      observer.disconnect();
     };
   }, [draw, sendInput, sendKey]);
 
@@ -232,6 +310,7 @@ function App() {
           sendMouse("up", event);
         }}
         onPointerLeave={(event) => sendMouse("leave", event)}
+        onWheel={sendWheel}
       />
     </main>
   );
@@ -252,6 +331,108 @@ function keyboardEvent(event: KeyboardEvent, kind: TerminalKey["kind"]): Termina
 
 function osc8At(frame: WebTerminalFrame, x: number, y: number): string | null {
   return frame.cells.find((cell) => cell.x === x && cell.y === y)?.osc8 ?? null;
+}
+
+function eguiLinkAt(
+  frame: WebTerminalFrame,
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number,
+): string | null {
+  const point = canvasPoint(canvas, clientX, clientY);
+  return (
+    frame.egui?.links.find(
+      (link) =>
+        point.x >= link.rect.minX &&
+        point.x < link.rect.maxX &&
+        point.y >= link.rect.minY &&
+        point.y < link.rect.maxY,
+    )?.url ?? null
+  );
+}
+
+function cellForPoint(
+  frame: WebTerminalFrame,
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } {
+  const point = canvasPoint(canvas, clientX, clientY);
+  return {
+    x: Math.max(0, Math.min(frame.cols - 1, Math.floor(point.x / frame.cellWidth))),
+    y: Math.max(0, Math.min(frame.rows - 1, Math.floor(point.y / frame.cellHeight))),
+  };
+}
+
+function canvasPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
+function selectedText(frame: WebTerminalFrame, selection: TerminalSelection): string {
+  const start = orderedSelectionStart(selection);
+  const end = orderedSelectionEnd(selection);
+  const cells = new Map(frame.cells.map((cell) => [`${cell.x}:${cell.y}`, cell.text]));
+  const lines: string[] = [];
+  for (let y = start.y; y <= end.y; y += 1) {
+    const rowBounds = visibleRowBounds(frame, y);
+    if (!rowBounds) {
+      continue;
+    }
+    const startX = Math.max(y === start.y ? start.x : 0, rowBounds.startX);
+    const endX = Math.min(y === end.y ? end.x : frame.cols - 1, rowBounds.endX);
+    if (endX < startX) {
+      continue;
+    }
+    let line = "";
+    for (let x = startX; x <= endX; x += 1) {
+      line += cells.get(`${x}:${y}`) ?? " ";
+    }
+    lines.push(line.replace(/\s+$/u, ""));
+  }
+  return lines.join("\n");
+}
+
+function visibleRowBounds(frame: WebTerminalFrame, y: number): { startX: number; endX: number } | null {
+  let startX = Number.POSITIVE_INFINITY;
+  let endX = Number.NEGATIVE_INFINITY;
+  for (const cell of frame.cells) {
+    if (cell.y !== y || cell.style.invisible || !isSelectableText(cell.text)) {
+      continue;
+    }
+    startX = Math.min(startX, cell.x);
+    endX = Math.max(endX, cell.x);
+  }
+  if (!Number.isFinite(startX) || !Number.isFinite(endX)) {
+    return null;
+  }
+  return { startX, endX };
+}
+
+const BOX_DRAWING_TEXT = new Set(["─", "━", "│", "┃", "┌", "┐", "└", "┘", "╭", "╮", "╰", "╯"]);
+
+function isSelectableText(text: string): boolean {
+  return text.trim().length > 0 && !BOX_DRAWING_TEXT.has(text);
+}
+
+function orderedSelectionStart(selection: TerminalSelection): { x: number; y: number } {
+  if (
+    selection.anchor.y < selection.focus.y ||
+    (selection.anchor.y === selection.focus.y && selection.anchor.x <= selection.focus.x)
+  ) {
+    return selection.anchor;
+  }
+  return selection.focus;
+}
+
+function orderedSelectionEnd(selection: TerminalSelection): { x: number; y: number } {
+  if (
+    selection.anchor.y < selection.focus.y ||
+    (selection.anchor.y === selection.focus.y && selection.anchor.x <= selection.focus.x)
+  ) {
+    return selection.focus;
+  }
+  return selection.anchor;
 }
 
 function gridForCanvas(canvas: HTMLCanvasElement, frame: WebTerminalFrame): GridSize {
@@ -305,6 +486,14 @@ function encodeKey(event: KeyboardEvent): string | null {
       return "\x1b[C";
     case "ArrowLeft":
       return "\x1b[D";
+    case "PageUp":
+      return "\x1b[5~";
+    case "PageDown":
+      return "\x1b[6~";
+    case "Home":
+      return "\x1b[H";
+    case "End":
+      return "\x1b[F";
     default:
       return event.key.length === 1 ? event.key : null;
   }
@@ -319,11 +508,9 @@ function reportError(error: unknown): void {
   console.error(error);
 }
 
-createRoot(required(document.getElementById("root"), "find root element")).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+const rootElement = required(document.getElementById("root"), "find root element");
+window.__boottyRoot ??= createRoot(rootElement);
+window.__boottyRoot.render(<App />);
 
 function required<T>(value: T | null, action: string): T {
   if (value == null) {

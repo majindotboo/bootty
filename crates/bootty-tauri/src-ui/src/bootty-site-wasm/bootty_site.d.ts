@@ -7,9 +7,9 @@ export class SiteBackend {
     [Symbol.dispose](): void;
     frame(): any;
     input(input: string): any;
-    mouse(kind: string, x: number, y: number, _button: number): any;
+    mouse(kind: string, x: number, y: number, button: number): any;
     static new(): SiteBackend;
-    resize(cols: number, rows: number): any;
+    resize(cols: number, rows: number, _device_pixel_ratio: number): any;
     set_fps(fps: number): any;
 }
 
@@ -22,7 +22,7 @@ export interface InitOutput {
     readonly sitebackend_input: (a: number, b: number, c: number) => [number, number, number];
     readonly sitebackend_mouse: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly sitebackend_new: () => number;
-    readonly sitebackend_resize: (a: number, b: number, c: number) => [number, number, number];
+    readonly sitebackend_resize: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly sitebackend_set_fps: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

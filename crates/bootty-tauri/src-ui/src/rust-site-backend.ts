@@ -31,7 +31,7 @@ export async function createRustSiteBackend(search = new URLSearchParams()): Pro
   };
 
   return {
-    label: "bootty ratatui/tuirealm site",
+    label: "bootty site",
     async start() {
       lastFrame = site.frame() as WebTerminalFrame;
       lastFrame = await render(lastFrame);
@@ -47,7 +47,7 @@ export async function createRustSiteBackend(search = new URLSearchParams()): Pro
       return lastFrame;
     },
     async resize(request: TerminalResize) {
-      lastFrame = site.resize(request.cols, request.rows) as WebTerminalFrame;
+      lastFrame = site.resize(request.cols, request.rows, request.devicePixelRatio) as WebTerminalFrame;
       lastFrame = await render(lastFrame);
       return lastFrame;
     },
@@ -82,13 +82,9 @@ export async function createRustSiteBackend(search = new URLSearchParams()): Pro
 }
 
 function isDoomFrame(frame: WebTerminalFrame): boolean {
-  return frameText(frame).includes("Doom runs inside this terminal frame.");
+  return frame.selected === 2;
 }
 
 function isDetailFocused(frame: WebTerminalFrame): boolean {
-  return frameText(frame).includes("Detail:");
-}
-
-function frameText(frame: WebTerminalFrame): string {
-  return frame.cells.map((cell) => cell.text).join("");
+  return frame.focus === "detail";
 }
