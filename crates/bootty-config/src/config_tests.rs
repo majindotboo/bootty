@@ -438,13 +438,12 @@ fn documented_sample_config_loads() {
         config
             .input
             .keybind
-            .contains(&"cmd+shift+r=reload_config".to_owned())
+            .contains(&"cmd+p=session_picker".to_owned())
     );
     assert!(
         config
             .input
-            .backend_keybinds
-            .native
+            .keybind
             .contains(&"cmd+n=new_mux_session".to_owned())
     );
     assert!(
@@ -452,7 +451,21 @@ fn documented_sample_config_loads() {
             .input
             .backend_keybinds
             .tmux
-            .contains(&"cmd+n=csi:62~".to_owned())
+            .contains(&"cmd+ctrl+n=csi:68~".to_owned())
+    );
+    assert_eq!(config.chrome.unfocused_sidebar_dim, 0.16);
+    assert_eq!(config.chrome.unfocused_terminal_dim, 0.08);
+    assert!(
+        config
+            .input
+            .sidebar_keybind
+            .contains(&"Enter=activate_session".to_owned())
+    );
+    assert!(
+        config
+            .input
+            .sidebar_keybind
+            .contains(&"ctrl+n=next_session".to_owned())
     );
     assert_eq!(config.colors.palette.len(), 16);
 }
@@ -490,6 +503,18 @@ fn keybind_clear_directive_replaces_existing_bindings() {
     "#});
 
     assert_eq!(config.input.keybind, vec!["cmd+b=esc:090;8~"]);
+}
+
+#[test]
+fn sidebar_keybind_clear_directive_replaces_existing_bindings() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        sidebar-keybind = ["clear", "space=activate_session"]
+    "#});
+
+    assert_eq!(config.input.sidebar_keybind, vec!["space=activate_session"]);
 }
 
 #[test]

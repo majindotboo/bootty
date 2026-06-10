@@ -193,6 +193,9 @@ impl BoottyApp {
                             top_inset,
                             border_visible: !fullscreen_chrome,
                             separator_visible: !fullscreen_chrome,
+                            focused: self.state.sidebar_focused(),
+                            hovered_session: self.state.sidebar_hovered_session(),
+                            unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
                         },
                     ) {
                         self.state.activate_session_from_ui(&session_id);
@@ -245,14 +248,23 @@ impl BoottyApp {
                 },
             );
         }
-
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(terminal_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                Ok(surface) => self.state.record_surface(surface),
-                Err(error) => self.state.record_render_error(error),
+            |ui| {
+                match self.terminal_widget.show(ui, self.state.terminal_mut()) {
+                    Ok(surface) => self.state.record_surface(surface),
+                    Err(error) => self.state.record_render_error(error),
+                }
+                if !self.state.terminal_focused() {
+                    let dim = self.state.config().chrome.unfocused_terminal_dim;
+                    ui.painter().rect_filled(
+                        terminal_rect,
+                        0.0,
+                        egui::Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8),
+                    );
+                }
             },
         );
     }
@@ -264,15 +276,32 @@ impl BoottyApp {
         let event = dialog.show(ctx, self.state.ui_theme());
         self.state.apply_picker_event(dialog, event);
     }
+
+    fn show_session_picker_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_session_picker_dialog() else {
+            return;
+        };
+        let sessions = self.state.mux().sessions().to_vec();
+        let selected_session = self.state.mux().selected_session().map(str::to_owned);
+        let event = dialog.show(
+            ctx,
+            self.state.ui_theme(),
+            &sessions,
+            selected_session.as_deref(),
+        );
+        self.state.apply_session_picker_event(dialog, event);
+    }
 }
 
 impl eframe::App for BoottyApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.state.drain_direct_input();
-        suppress_egui_events_for_direct_input(
-            &mut raw_input.events,
-            self.state.pending_direct_input(),
-        );
+        if self.state.direct_input_suppresses_egui_events() {
+            suppress_egui_events_for_direct_input(
+                &mut raw_input.events,
+                self.state.pending_direct_input(),
+            );
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -311,6 +340,7 @@ impl eframe::App for BoottyApp {
             self.show_fixed_layout(ui);
         });
         self.show_new_mux_session_dialog(ui.ctx());
+        self.show_session_picker_dialog(ui.ctx());
     }
 }
 

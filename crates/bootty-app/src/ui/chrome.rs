@@ -37,6 +37,9 @@ pub struct SidebarModel<'a> {
     pub top_inset: f32,
     pub border_visible: bool,
     pub separator_visible: bool,
+    pub focused: bool,
+    pub hovered_session: Option<&'a str>,
+    pub unfocused_dim: f32,
 }
 #[derive(Clone, Debug)]
 pub struct WindowTabsModel<'a> {
@@ -148,7 +151,7 @@ pub fn show_sidebar(
         max_rows,
     );
     let pointer_pos = ui.input(|input| input.pointer.hover_pos());
-    let hovered_session = pointer_pos
+    let pointer_hovered_session = pointer_pos
         .and_then(|pos| sidebar_hovered_row(pos, rect.min.x, list_top, width, max_rows))
         .and_then(|index| items.get(index))
         .and_then(|item| item.session_id);
@@ -159,11 +162,12 @@ pub fn show_sidebar(
             Pos2::new(rect.min.x, list_top + index as f32 * SIDEBAR_ROW_HEIGHT),
             egui::vec2(width, SIDEBAR_ROW_HEIGHT),
         );
-        let hovered = item
-            .session_id
-            .is_some_and(|session_id| Some(session_id) == hovered_session);
+        let hovered = item.session_id.is_some_and(|session_id| {
+            Some(session_id) == pointer_hovered_session
+                || model.focused && Some(session_id) == model.hovered_session
+        });
         let response = sidebar_item_row(ui, row_rect, item, hovered, palette);
-        if response.clicked()
+        if response.clicked_by(egui::PointerButton::Primary)
             && let Some(session_id) = &item.session_id
         {
             activated = Some((*session_id).to_owned());
@@ -178,6 +182,9 @@ pub fn show_sidebar(
         model.separator_visible,
         palette,
     );
+    if !model.focused {
+        painter.rect_filled(rect, 0.0, dim_overlay_color(model.unfocused_dim));
+    }
     activated
 }
 
@@ -237,6 +244,11 @@ fn sidebar_hovered_row(
 
 fn subtle_border(palette: ThemePalette) -> egui::Color32 {
     mix_color(palette.base, palette.text, 0.09)
+}
+
+fn dim_overlay_color(amount: f32) -> egui::Color32 {
+    let alpha = (amount.clamp(0.0, 1.0) * 255.0).round() as u8;
+    egui::Color32::from_black_alpha(alpha)
 }
 
 fn mix_color(a: egui::Color32, b: egui::Color32, amount: f32) -> egui::Color32 {
@@ -370,7 +382,9 @@ pub fn show_window_tabs(
         );
         let selected = model.selected_window == Some(window.id.as_str())
             || (model.selected_window.is_none() && window.active);
-        if window_tab(ui, tab_rect, window, &label, selected, palette).clicked() {
+        if window_tab(ui, tab_rect, window, &label, selected, palette)
+            .clicked_by(egui::PointerButton::Primary)
+        {
             activated = Some(window.id.clone());
         }
         x += width + 6.0;
@@ -1319,6 +1333,87 @@ mod tests {
     fn sidebar_header_collapses_when_title_is_hidden() {
         assert_eq!(sidebar_header_height(true), SIDEBAR_HEADER_HEIGHT);
         assert_eq!(sidebar_header_height(false), 0.0);
+    }
+
+    fn test_session(id: &str, name: &str, active: bool) -> MuxSession {
+        MuxSession {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            active,
+            anchor: crate::mux::snapshot::MuxPaneAnchor {
+                session_id: id.to_owned(),
+                ..Default::default()
+            },
+            active_window_id: None,
+            windows: Vec::new(),
+        }
+    }
+
+    fn show_test_sidebar(ui: &mut egui::Ui, sessions: &[MuxSession]) -> Option<String> {
+        show_sidebar(
+            ui,
+            ThemePalette::default(),
+            300.0,
+            SidebarModel {
+                sessions,
+                selected_session: Some("s1"),
+                metadata: &SidebarMetadata::default(),
+                title_visible: false,
+                reserve_titlebar_buttons: false,
+                title_icon: None,
+                top_inset: 0.0,
+                border_visible: false,
+                separator_visible: false,
+                focused: false,
+                hovered_session: None,
+                unfocused_dim: 0.0,
+            },
+        )
+    }
+
+    #[test]
+    fn sidebar_rows_ignore_keyboard_activation_keys() {
+        for key in [egui::Key::Enter, egui::Key::Space] {
+            let context = egui::Context::default();
+            let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
+            let sessions = vec![
+                test_session("s1", "alpha", true),
+                test_session("s2", "beta", false),
+            ];
+
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    ..Default::default()
+                },
+                |ui| {
+                    let item_id = crate::ui::sidebar::SidebarItemId::Session("s2");
+                    let id = ui.make_persistent_id(("mux-sidebar-item", &item_id));
+                    ui.memory_mut(|memory| memory.request_focus(id));
+                    show_test_sidebar(ui, &sessions);
+                },
+            );
+
+            let mut activated = None;
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| {
+                    activated = show_test_sidebar(ui, &sessions);
+                },
+            );
+
+            assert_eq!(activated, None);
+        }
     }
 
     #[test]

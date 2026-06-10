@@ -48,6 +48,8 @@ status-bar = true
 sidebar-width = 286
 status-height = 30
 gap = 1
+unfocused-sidebar-dim = 0.16
+unfocused-terminal-dim = 0.08
 
 [multiplexer]
 backend = "rmux"
@@ -57,6 +59,7 @@ backend = "rmux"
 
 [input]
 keybind = ["cmd+shift+,=reload_config"]
+sidebar-keybind = ["Enter=activate_session", "j=next_session", "k=previous_session"]
 macos-option-as-alt = "both" # none, left, right, or both
 modifier-remap = ["right_alt=left_ctrl"]
 
@@ -140,10 +143,13 @@ keybind = ["cmd+shift+,=reload_config"]
 ```
 
 Bootty parses configured keybind strings with the shared Ghostty-style binding
-parser and rejects actions that the app cannot execute. Supported app actions
-today are `reload_config`, `ignore`, `csi:...`, `esc:...`, `text:...`, font
-size changes, `copy_to_clipboard`, `paste_from_clipboard`, `new_window`,
-`close_window`, `close_surface`, `quit`, and `toggle_fullscreen`.
+parser and rejects actions that the app cannot execute. Supported global app
+actions today include reload/ignore, terminal byte writes (`csi:...`,
+`esc:...`, `text:...`), font size changes, clipboard paste/copy, window
+lifecycle, fullscreen/sidebar chrome, mux session navigation, native tab/pane
+actions, and terminal scroll actions. `[input].sidebar-keybind` is sidebar-local
+and supports `ignore`, `previous_session`, `next_session`, `activate_session`,
+and `focus_terminal`.
 
 Reload validates the full effective config first. If parsing, theme resolution,
 modifier remap parsing, keybind parsing, or live terminal color application
@@ -151,9 +157,9 @@ fails, the current in-memory config remains active.
 
 Live-applied fields:
 
-- `[chrome]` sidebar/status visibility and layout
+- `[chrome]` sidebar/status visibility, layout, and inactive panel dimming
 - `[multiplexer]` backend selection and backend UI mode
-- `[input]` modifier remaps, macOS Option-as-Meta mode, and reload keybinds
+- `[input]` modifier remaps, macOS Option-as-Meta mode, global keybinds, and sidebar keybinds
 - `[font]` terminal text metrics
 - `theme` and `[colors]` terminal defaults
 - `[window].title`

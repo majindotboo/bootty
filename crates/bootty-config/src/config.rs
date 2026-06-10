@@ -162,6 +162,8 @@ pub struct ChromeConfig {
     pub sidebar_width: f32,
     pub status_height: f32,
     pub gap: f32,
+    pub unfocused_sidebar_dim: f32,
+    pub unfocused_terminal_dim: f32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -172,6 +174,8 @@ struct ChromePatch {
     sidebar_width: Option<f32>,
     status_height: Option<f32>,
     gap: Option<f32>,
+    unfocused_sidebar_dim: Option<f32>,
+    unfocused_terminal_dim: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +204,7 @@ pub struct InputConfig {
     pub modifier_remap: Vec<String>,
     pub macos_option_as_alt: MacosOptionAsAltConfig,
     pub keybind: Vec<String>,
+    pub sidebar_keybind: Vec<String>,
     pub backend_keybinds: BackendKeybindConfig,
 }
 
@@ -240,6 +245,7 @@ struct InputPatch {
     modifier_remap: Option<Vec<String>>,
     macos_option_as_alt: Option<MacosOptionAsAltConfig>,
     keybind: Option<Vec<String>>,
+    sidebar_keybind: Option<Vec<String>>,
     backend_keybind: Option<BackendKeybindPatch>,
 }
 
@@ -383,6 +389,8 @@ impl Default for ChromeConfig {
             sidebar_width: 286.0,
             status_height: 30.0,
             gap: 1.0,
+            unfocused_sidebar_dim: 0.16,
+            unfocused_terminal_dim: 0.08,
         }
     }
 }
@@ -501,14 +509,45 @@ fn common_keybinds() -> &'static [&'static str] {
         "cmd+w=close_surface",
         "cmd+q=quit",
         "cmd+alt+ctrl+f=toggle_fullscreen",
+        "cmd+p=session_picker",
         "cmd+o=toggle_sidebar_focus",
         "cmd+shift+e=toggle_sidebar_visibility",
+        "cmd+n=new_mux_session",
+        "ctrl+Tab=last_session",
+        "ctrl+shift+Tab=last_session",
+        "cmd+shift+n=next_session",
+        "cmd+shift+]=next_session",
+        "cmd+shift+p=previous_session",
+        "cmd+shift+[=previous_session",
+        "cmd+shift+,=move_session:-1",
+        "cmd+shift+.=move_session:1",
+        "cmd+1=select_session:1",
+        "cmd+2=select_session:2",
+        "cmd+3=select_session:3",
+        "cmd+4=select_session:4",
+        "cmd+5=select_session:5",
+        "cmd+6=select_session:6",
+        "cmd+7=select_session:7",
+        "cmd+8=select_session:8",
+        "cmd+9=select_session:9",
+        "cmd+alt+x=ditch_session",
+    ]
+}
+
+fn sidebar_keybinds() -> &'static [&'static str] {
+    &[
+        "Enter=activate_session",
+        "j=next_session",
+        "ArrowDown=next_session",
+        "ctrl+n=next_session",
+        "k=previous_session",
+        "ArrowUp=previous_session",
+        "ctrl+p=previous_session",
     ]
 }
 
 fn native_keybinds() -> &'static [&'static str] {
     &[
-        "cmd+n=new_mux_session",
         "ctrl+space>c=new_tab",
         "ctrl+space>v=split_right",
         "ctrl+space>-=split_down",
@@ -551,24 +590,6 @@ fn native_keybinds() -> &'static [&'static str] {
         "alt+o=next_pane",
         "alt+x=kill_pane",
         "alt+z=toggle_pane_zoom",
-        "ctrl+Tab=last_session",
-        "ctrl+shift+Tab=last_session",
-        "cmd+shift+n=next_session",
-        "cmd+shift+]=next_session",
-        "cmd+shift+p=previous_session",
-        "cmd+shift+[=previous_session",
-        "cmd+shift+,=move_session:-1",
-        "cmd+shift+.=move_session:1",
-        "cmd+1=select_session:1",
-        "cmd+2=select_session:2",
-        "cmd+3=select_session:3",
-        "cmd+4=select_session:4",
-        "cmd+5=select_session:5",
-        "cmd+6=select_session:6",
-        "cmd+7=select_session:7",
-        "cmd+8=select_session:8",
-        "cmd+9=select_session:9",
-        "cmd+alt+x=ditch_session",
         "cmd+y=scroll_page_up",
         "cmd+shift+y=scroll_page_down",
         "cmd+ArrowUp=scroll_page_lines:-1",
@@ -578,21 +599,11 @@ fn native_keybinds() -> &'static [&'static str] {
 
 fn tmux_keybinds() -> &'static [&'static str] {
     &[
-        "ctrl+Tab=csi:60~",
         "cmd+;=csi:61~",
-        "cmd+n=csi:62~",
-        "cmd+p=csi:63~",
-        "cmd+shift+n=csi:64~",
-        "cmd+shift+p=csi:65~",
-        "cmd+shift+,=csi:66~",
-        "cmd+shift+.=csi:67~",
         "cmd+ctrl+n=csi:68~",
         "ctrl+alt+[=csi:69~",
-        "cmd+shift+]=csi:70~",
         "cmd+y=csi:71~",
         "cmd+c=csi:72~",
-        "cmd+shift+[=csi:73~",
-        "ctrl+shift+Tab=csi:76~",
         "cmd+j=csi:90;1~",
         "cmd+s=csi:90;2~",
         "cmd+shift+c=csi:90;3~",
@@ -654,6 +665,7 @@ impl Default for InputConfig {
             modifier_remap: Vec::new(),
             macos_option_as_alt: MacosOptionAsAltConfig::default(),
             keybind: owned_keybinds(common_keybinds()),
+            sidebar_keybind: owned_keybinds(sidebar_keybinds()),
             backend_keybinds: BackendKeybindConfig {
                 native: owned_keybinds(native_keybinds()),
                 rmux: Vec::new(),
@@ -1235,6 +1247,14 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_value(&mut chrome.gap, partial.gap);
+    apply_value(
+        &mut chrome.unfocused_sidebar_dim,
+        partial.unfocused_sidebar_dim,
+    );
+    apply_value(
+        &mut chrome.unfocused_terminal_dim,
+        partial.unfocused_terminal_dim,
+    );
 }
 
 fn apply_partial_multiplexer(multiplexer: &mut MultiplexerConfig, partial: MultiplexerPatch) {
@@ -1246,6 +1266,9 @@ fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
     apply_value(&mut input.macos_option_as_alt, partial.macos_option_as_alt);
     if let Some(value) = partial.keybind {
         input.keybind = apply_keybind_entries(value);
+    }
+    if let Some(value) = partial.sidebar_keybind {
+        input.sidebar_keybind = apply_keybind_entries(value);
     }
     if let Some(value) = partial.backend_keybind {
         apply_partial_backend_keybind(&mut input.backend_keybinds, value);

@@ -51,6 +51,9 @@ status-bar = true
 sidebar-width = 286
 status-height = 30
 gap = 1
+# Dim inactive panes by overlay opacity in the 0.0-1.0 range.
+unfocused-sidebar-dim = 0.16
+unfocused-terminal-dim = 0.08
 
 [multiplexer]
 # native keeps mux state and terminals inside Bootty. rmux renders through
@@ -84,6 +87,40 @@ keybind = [
   "cmd+w=close_surface",
   "cmd+q=quit",
   "cmd+alt+ctrl+f=toggle_fullscreen",
+  "cmd+n=new_mux_session",
+  "cmd+p=session_picker",
+  "cmd+o=toggle_sidebar_focus",
+  "cmd+shift+e=toggle_sidebar_visibility",
+  "ctrl+tab=last_session",
+  "ctrl+shift+Tab=last_session",
+  "cmd+shift+n=next_session",
+  "cmd+shift+]=next_session",
+  "cmd+shift+p=previous_session",
+  "cmd+shift+[=previous_session",
+  "cmd+shift+,=move_session:-1",
+  "cmd+shift+.=move_session:1",
+  "cmd+1=select_session:1",
+  "cmd+2=select_session:2",
+  "cmd+3=select_session:3",
+  "cmd+4=select_session:4",
+  "cmd+5=select_session:5",
+  "cmd+6=select_session:6",
+  "cmd+7=select_session:7",
+  "cmd+8=select_session:8",
+  "cmd+9=select_session:9",
+  "cmd+alt+x=ditch_session",
+]
+
+# Sidebar-local keybinds apply only while the sidebar owns keyboard focus.
+# Enter activates the hovered session and returns focus to the terminal.
+sidebar-keybind = [
+  "Enter=activate_session",
+  "j=next_session",
+  "ArrowDown=next_session",
+  "ctrl+n=next_session",
+  "k=previous_session",
+  "ArrowUp=previous_session",
+  "ctrl+p=previous_session",
 ]
 
 # macOS Option-as-Meta behavior. Values: none, left, right, both.
@@ -98,8 +135,25 @@ modifier-remap = [
 ]
 
 [input.backend-keybind]
+tmux = [
+  # Custom CSI relays registered as tmux user-keys in ~/.tmux.conf.
+  "cmd+;=csi:61~",
+  "cmd+ctrl+n=csi:68~",
+  "ctrl+alt+[=csi:69~",
+  "cmd+y=csi:71~",
+  "cmd+c=csi:72~",
+  "alt+n=esc:N",
+  "alt+p=esc:P",
+  "alt+h=esc:H",
+  "alt+j=esc:J",
+  "alt+k=esc:K",
+  "alt+l=esc:L",
+  "alt+x=esc:X",
+  "alt+z=esc:Z",
+  "ctrl+space=text:\\x00",
+]
+
 native = [
-  "cmd+n=new_mux_session",
   "ctrl+space>c=new_tab",
   "ctrl+space>v=split_right",
   "ctrl+space>-=split_down",
@@ -142,56 +196,10 @@ native = [
   "alt+o=next_pane",
   "alt+x=kill_pane",
   "alt+z=toggle_pane_zoom",
-  "ctrl+Tab=last_session",
-  "ctrl+shift+Tab=last_session",
-  "cmd+shift+n=next_session",
-  "cmd+shift+]=next_session",
-  "cmd+shift+p=previous_session",
-  "cmd+shift+[=previous_session",
-  "cmd+shift+,=move_session:-1",
-  "cmd+shift+.=move_session:1",
-  "cmd+1=select_session:1",
-  "cmd+2=select_session:2",
-  "cmd+3=select_session:3",
-  "cmd+4=select_session:4",
-  "cmd+5=select_session:5",
-  "cmd+6=select_session:6",
-  "cmd+7=select_session:7",
-  "cmd+8=select_session:8",
-  "cmd+9=select_session:9",
-  "cmd+alt+x=ditch_session",
   "cmd+y=scroll_page_up",
   "cmd+shift+y=scroll_page_down",
   "cmd+ArrowUp=scroll_page_lines:-1",
   "cmd+ArrowDown=scroll_page_lines:1",
-]
-
-tmux = [
-  # Custom CSI relays registered as tmux user-keys in ~/.tmux.conf.
-  "ctrl+Tab=csi:60~",
-  "cmd+;=csi:61~",
-  "cmd+n=csi:62~",
-  "cmd+p=csi:63~",
-  "cmd+shift+n=csi:64~",
-  "cmd+shift+p=csi:65~",
-  "cmd+shift+,=csi:66~",
-  "cmd+shift+.=csi:67~",
-  "cmd+ctrl+n=csi:68~",
-  "ctrl+alt+[=csi:69~",
-  "cmd+shift+]=csi:70~",
-  "cmd+y=csi:71~",
-  "cmd+c=csi:72~",
-  "cmd+shift+[=csi:73~",
-  "ctrl+shift+Tab=csi:76~",
-  "alt+n=esc:N",
-  "alt+p=esc:P",
-  "alt+h=esc:H",
-  "alt+j=esc:J",
-  "alt+k=esc:K",
-  "alt+l=esc:L",
-  "alt+x=esc:X",
-  "alt+z=esc:Z",
-  "ctrl+space=text:\\x00",
 ]
 
 

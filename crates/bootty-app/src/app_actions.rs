@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use anyhow::Result;
 use eframe::egui;
 
@@ -18,6 +20,7 @@ pub enum AppAction {
     Ignore,
     NewWindow,
     NewMuxSession,
+    SessionPicker,
     Close,
     ToggleFullscreen,
     ToggleSidebarFocus,
@@ -85,6 +88,26 @@ pub struct AppKeyBindings {
     bindings: Vec<AppKeyBinding>,
     leaders: Vec<BindingTrigger>,
     active_leader: Option<BindingTrigger>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarAction {
+    Ignore,
+    PreviousSession,
+    NextSession,
+    ActivateSession,
+    FocusTerminal,
+}
+
+#[derive(Clone, Debug)]
+struct SidebarKeyBinding {
+    trigger: BindingTrigger,
+    action: SidebarAction,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SidebarKeyBindings {
+    bindings: Vec<SidebarKeyBinding>,
 }
 
 impl AppKeyBindings {
@@ -177,6 +200,64 @@ impl AppKeyBindings {
         })
     }
 }
+
+impl SidebarKeyBindings {
+    pub fn from_keybinds(keybinds: &[String]) -> Result<Self> {
+        let mut bindings = Vec::new();
+        for entry in keybinds {
+            let (trigger, action) = split_sidebar_binding(entry)
+                .ok_or_else(|| anyhow::anyhow!("invalid sidebar keybind {entry:?}"))?;
+            bindings.push(SidebarKeyBinding {
+                trigger: BindingTrigger::from_str(trigger).map_err(|error| {
+                    anyhow::anyhow!("invalid sidebar keybind {entry:?}: {error:?}")
+                })?,
+                action: sidebar_action(action).map_err(|error| {
+                    anyhow::anyhow!("unsupported sidebar keybind {entry:?}: {error}")
+                })?,
+            });
+        }
+        Ok(Self { bindings })
+    }
+
+    pub fn action_for_key(
+        &self,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> Option<SidebarAction> {
+        let candidates = binding_triggers_for_egui_key(key, modifiers);
+        self.bindings.iter().find_map(|binding| {
+            candidates
+                .iter()
+                .any(|candidate| candidate == &binding.trigger)
+                .then_some(binding.action)
+        })
+    }
+}
+
+fn split_sidebar_binding(input: &str) -> Option<(&str, &str)> {
+    let mut offset = 0;
+    while let Some(index) = input[offset..].find('=') {
+        let index = offset + index;
+        if index + 1 < input.len() && matches!(input.as_bytes()[index + 1], b'+' | b'=') {
+            offset = index + 1;
+            continue;
+        }
+        return Some((&input[..index], &input[index + 1..]));
+    }
+    None
+}
+
+fn sidebar_action(input: &str) -> Result<SidebarAction> {
+    match input {
+        "ignore" => Ok(SidebarAction::Ignore),
+        "previous_session" => Ok(SidebarAction::PreviousSession),
+        "next_session" => Ok(SidebarAction::NextSession),
+        "activate_session" => Ok(SidebarAction::ActivateSession),
+        "focus_terminal" => Ok(SidebarAction::FocusTerminal),
+        _ => anyhow::bail!("{input} has no Bootty sidebar behavior"),
+    }
+}
+
 pub fn split_app_actions_for_bindings(
     app_key_bindings: &mut AppKeyBindings,
     events: Vec<egui::Event>,
@@ -250,6 +331,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::Ignore => Ok(KeybindAction::App(AppAction::Ignore)),
         BindingAction::NewWindow => Ok(KeybindAction::App(AppAction::NewWindow)),
         BindingAction::NewMuxSession => Ok(KeybindAction::App(AppAction::NewMuxSession)),
+        BindingAction::SessionPicker => Ok(KeybindAction::App(AppAction::SessionPicker)),
         BindingAction::CloseWindow | BindingAction::CloseSurface | BindingAction::Quit => {
             Ok(KeybindAction::App(AppAction::Close))
         }
@@ -488,7 +570,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_keybindings_route_default_reload_shortcut() {
+    fn app_keybindings_route_default_app_shortcuts() {
         let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
         let action = bindings.action_for_key(
             egui::Key::R,
@@ -500,6 +582,17 @@ mod tests {
         );
 
         assert_eq!(action, Some(KeybindAction::App(AppAction::ReloadConfig)));
+
+        assert_eq!(
+            bindings.action_for_key(
+                egui::Key::P,
+                egui::Modifiers {
+                    command: true,
+                    ..Default::default()
+                }
+            ),
+            Some(KeybindAction::App(AppAction::SessionPicker))
+        );
     }
 
     #[test]

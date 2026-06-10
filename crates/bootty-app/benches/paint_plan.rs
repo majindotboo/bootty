@@ -730,6 +730,9 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                                 top_inset: 0.0,
                                 border_visible: true,
                                 separator_visible: true,
+                                focused: false,
+                                hovered_session: None,
+                                unfocused_dim: 0.0,
                             },
                         ));
                     },
@@ -779,6 +782,9 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                                 top_inset: 0.0,
                                 border_visible: true,
                                 separator_visible: true,
+                                focused: false,
+                                hovered_session: None,
+                                unfocused_dim: 0.0,
                             },
                         ));
                     },

@@ -8,8 +8,9 @@ use eframe::egui::{self, Pos2};
 
 use crate::{
     app_actions::{
-        AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction,
-        TerminalScrollAction, builtin_app_action_for_direct_key, split_app_actions_for_bindings,
+        AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction, SidebarAction,
+        SidebarKeyBindings, TerminalScrollAction, builtin_app_action_for_direct_key,
+        split_app_actions_for_bindings,
     },
     config::{BoottyConfig, ConfigState, WindowConfig, load_config_from_path},
     config_reload::{CONFIG_HOT_RELOAD_INTERVAL, ConfigHotReload, new_session_only_config_changed},
@@ -47,6 +48,7 @@ use crate::{
     ui::{
         chrome,
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
+        session_picker::{SessionPickerDialog, SessionPickerEvent},
     },
 };
 
@@ -102,6 +104,7 @@ pub struct AppState {
     config_state: ConfigState,
     input_focus: InputFocus,
     app_key_bindings: AppKeyBindings,
+    sidebar_key_bindings: SidebarKeyBindings,
     has_new_session_config_changes: bool,
     mux: MuxController,
     repaint: RepaintHandle,
@@ -120,6 +123,8 @@ pub struct AppState {
     sidebar_metadata_rx: Option<mpsc::Receiver<SidebarMetadata>>,
     sidebar_metadata_pending: bool,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
+    sidebar_hovered_session: Option<String>,
+    session_picker_dialog: Option<SessionPickerDialog>,
     macos_app_icon_installed: bool,
     next_macos_app_icon_install: Instant,
     macos_non_native_fullscreen_active: bool,
@@ -193,6 +198,8 @@ impl AppState {
             .input
             .keybinds_for_backend(config.multiplexer.backend);
         let app_key_bindings = AppKeyBindings::from_keybinds(&keybinds)?;
+        let sidebar_key_bindings =
+            SidebarKeyBindings::from_keybinds(&config.input.sidebar_keybind)?;
         let stability_trace = StabilityTrace::from_config(&config);
         let session_config = config.terminal_session_config();
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
@@ -216,6 +223,7 @@ impl AppState {
             config_state: ConfigState::new(config),
             input_focus: InputFocus::Terminal,
             app_key_bindings,
+            sidebar_key_bindings,
             has_new_session_config_changes: false,
             mux: MuxController::new(),
             repaint,
@@ -234,6 +242,8 @@ impl AppState {
             sidebar_metadata_rx: None,
             sidebar_metadata_pending: false,
             new_mux_session_dialog: None,
+            sidebar_hovered_session: None,
+            session_picker_dialog: None,
             macos_app_icon_installed: false,
             next_macos_app_icon_install: initial_macos_app_icon_install_after(Instant::now()),
             macos_non_native_fullscreen_active,
@@ -264,6 +274,21 @@ impl AppState {
         &self.sidebar_metadata
     }
 
+    pub fn sidebar_focused(&self) -> bool {
+        self.input_focus == InputFocus::Sidebar
+    }
+
+    pub fn terminal_focused(&self) -> bool {
+        self.direct_terminal_input_enabled()
+    }
+
+    pub fn sidebar_hovered_session(&self) -> Option<&str> {
+        self.sidebar_hovered_session.as_deref()
+    }
+    pub fn direct_input_suppresses_egui_events(&self) -> bool {
+        self.direct_terminal_input_enabled()
+    }
+
     pub fn macos_non_native_fullscreen_active(&self) -> bool {
         self.macos_non_native_fullscreen_active
     }
@@ -284,6 +309,7 @@ impl AppState {
         let mux_config = self.config().multiplexer.clone();
         self.mux
             .activate_session(session_id, &self.repaint, &mux_config);
+        self.sidebar_hovered_session = Some(session_id.to_owned());
     }
 
     pub fn activate_window_from_ui(&mut self, session_id: &str, window_id: &str) {
@@ -296,6 +322,29 @@ impl AppState {
         self.new_mux_session_dialog.take()
     }
 
+    pub fn take_session_picker_dialog(&mut self) -> Option<SessionPickerDialog> {
+        self.session_picker_dialog.take()
+    }
+
+    pub fn apply_session_picker_event(
+        &mut self,
+        dialog: SessionPickerDialog,
+        event: SessionPickerEvent,
+    ) {
+        match event {
+            SessionPickerEvent::None => {
+                self.session_picker_dialog = Some(dialog);
+            }
+            SessionPickerEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+            SessionPickerEvent::ActivateSession(session_id) => {
+                self.input_focus = InputFocus::Terminal;
+                self.activate_session_from_ui(&session_id);
+            }
+        }
+    }
+
     pub fn apply_picker_event(
         &mut self,
         dialog: NewMuxSessionDialog,
@@ -305,7 +354,9 @@ impl AppState {
             NewSessionPickerEvent::None => {
                 self.new_mux_session_dialog = Some(dialog);
             }
-            NewSessionPickerEvent::Close => {}
+            NewSessionPickerEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
             NewSessionPickerEvent::NewWorktreeUnavailable => {
                 self.last_error = Some("new worktree creation is not wired yet".to_owned());
                 self.new_mux_session_dialog = Some(dialog);
@@ -314,6 +365,7 @@ impl AppState {
                 let mux_config = self.config().multiplexer.clone();
                 self.mux
                     .create_project_session(request, &self.repaint, &mux_config);
+                self.input_focus = InputFocus::Terminal;
             }
         }
     }
@@ -518,7 +570,26 @@ impl AppState {
     }
 
     fn open_new_mux_session_dialog(&mut self) {
+        self.session_picker_dialog = None;
         self.new_mux_session_dialog = Some(NewMuxSessionDialog::open());
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn toggle_session_picker_dialog(&mut self) {
+        self.new_mux_session_dialog = None;
+        if self.session_picker_dialog.is_some() {
+            self.session_picker_dialog = None;
+            self.input_focus = InputFocus::Terminal;
+        } else {
+            self.session_picker_dialog = Some(SessionPickerDialog::open());
+            self.input_focus = InputFocus::Picker;
+        }
+    }
+
+    fn direct_terminal_input_enabled(&self) -> bool {
+        self.input_focus.terminal_owns_input()
+            && self.new_mux_session_dialog.is_none()
+            && self.session_picker_dialog.is_none()
     }
 
     fn reload_config(&mut self, effects: &mut Vec<AppEffect>) -> bool {
@@ -549,6 +620,15 @@ impl AppState {
                 return false;
             }
         };
+        let sidebar_key_bindings =
+            match SidebarKeyBindings::from_keybinds(&next.input.sidebar_keybind) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    self.config_state.reject(error.to_string());
+                    self.last_error = self.config_state.last_error().map(str::to_owned);
+                    return false;
+                }
+            };
 
         if previous.colors != next.colors
             && let Err(error) = self
@@ -589,6 +669,7 @@ impl AppState {
         self.modifier_remaps = modifier_remaps;
         self.macos_option_as_alt = next.input.macos_option_as_alt.into();
         self.app_key_bindings = app_key_bindings;
+        self.sidebar_key_bindings = sidebar_key_bindings;
         self.terminal
             .set_terminal_config(next.terminal_session_config());
         self.has_new_session_config_changes = new_session_only_config_changed(&previous, &next)
@@ -636,10 +717,11 @@ impl AppState {
         }
         let (events, actions) = self.split_app_actions(events);
         let routed = route_events(self.input_focus, events);
-        let events = if self.new_mux_session_dialog.is_some() {
-            Vec::new()
-        } else {
+        let sidebar_count = self.handle_sidebar_input(routed.ui_events);
+        let events = if self.direct_terminal_input_enabled() {
             routed.terminal_events
+        } else {
+            Vec::new()
         };
         let snapshot = InputSnapshot {
             events,
@@ -657,7 +739,7 @@ impl AppState {
             &self.modifier_remaps,
             self.macos_option_as_alt,
         );
-        let count = commands.len() + actions.len();
+        let count = commands.len() + actions.len() + sidebar_count;
 
         for action in actions {
             self.apply_keybind_action(action, viewport, effects);
@@ -677,12 +759,12 @@ impl AppState {
     ) -> usize {
         let inputs = std::mem::take(&mut self.pending_direct_input);
         let count = inputs.len();
+        if !self.direct_terminal_input_enabled() {
+            return count;
+        }
         for input in inputs {
             let mut input = input.input();
             input.mods = self.modifier_remaps.apply(input.mods);
-            if self.new_mux_session_dialog.is_some() {
-                continue;
-            }
             if let Some(action) = self.app_key_bindings.action_for_input(input) {
                 if matches!(action, KeybindAction::PasteFromClipboard) {
                     self.suppress_next_egui_paste = true;
@@ -700,6 +782,46 @@ impl AppState {
                 continue;
             }
             self.apply_terminal_input(TerminalInputCommand::Key(input));
+        }
+        count
+    }
+
+    fn handle_sidebar_input(&mut self, events: Vec<egui::Event>) -> usize {
+        if self.input_focus != InputFocus::Sidebar {
+            return 0;
+        }
+        self.ensure_sidebar_hovered_session();
+        let mut count = 0;
+        for event in events {
+            count += 1;
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let Some(action) = self.sidebar_key_bindings.action_for_key(key, modifiers) else {
+                continue;
+            };
+            match action {
+                SidebarAction::Ignore => {}
+                SidebarAction::PreviousSession => {
+                    self.move_sidebar_hover(-1);
+                }
+                SidebarAction::NextSession => {
+                    self.move_sidebar_hover(1);
+                }
+                SidebarAction::ActivateSession => {
+                    self.activate_sidebar_hovered_session();
+                }
+                SidebarAction::FocusTerminal => {
+                    self.input_focus = InputFocus::Terminal;
+                }
+            }
         }
         count
     }
@@ -726,6 +848,10 @@ impl AppState {
             KeybindAction::App(AppAction::NewMuxSession) => {
                 self.open_new_mux_session_dialog();
             }
+            KeybindAction::App(AppAction::SessionPicker) => {
+                self.toggle_session_picker_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
             KeybindAction::App(AppAction::Close) => {
                 effects.push(AppEffect::CloseWindow);
             }
@@ -751,11 +877,23 @@ impl AppState {
                 }
             }
             KeybindAction::App(AppAction::ToggleSidebarFocus) => {
+                self.session_picker_dialog = None;
+                self.new_mux_session_dialog = None;
                 if self.input_focus == InputFocus::Sidebar {
                     self.input_focus = InputFocus::Terminal;
                 } else {
                     self.config_state.current_mut().chrome.sidebar = true;
                     self.input_focus = InputFocus::Sidebar;
+                    self.sidebar_hovered_session = self
+                        .mux
+                        .selected_session()
+                        .and_then(|selected| self.session_id_matching(selected))
+                        .or_else(|| {
+                            self.mux
+                                .sessions()
+                                .first()
+                                .map(|session| session.id.clone())
+                        });
                 }
                 effects.push(AppEffect::RequestRepaint);
             }
@@ -844,6 +982,56 @@ impl AppState {
         let mux_config = self.config().multiplexer.clone();
         self.mux
             .execute_command(&self.repaint, &mux_config, command);
+    }
+
+    fn ensure_sidebar_hovered_session(&mut self) {
+        if self.sidebar_hovered_index().is_some() {
+            return;
+        }
+        self.sidebar_hovered_session = self
+            .mux
+            .selected_session()
+            .and_then(|selected| self.session_id_matching(selected))
+            .or_else(|| {
+                self.mux
+                    .sessions()
+                    .first()
+                    .map(|session| session.id.clone())
+            });
+    }
+
+    fn move_sidebar_hover(&mut self, delta: isize) {
+        self.ensure_sidebar_hovered_session();
+        let Some(current) = self.sidebar_hovered_index() else {
+            return;
+        };
+        let sessions = self.mux.sessions();
+        let next = (current as isize + delta).rem_euclid(sessions.len() as isize) as usize;
+        self.sidebar_hovered_session = sessions.get(next).map(|session| session.id.clone());
+    }
+
+    fn activate_sidebar_hovered_session(&mut self) {
+        self.ensure_sidebar_hovered_session();
+        if let Some(session_id) = self.sidebar_hovered_session.clone() {
+            self.activate_session_from_ui(&session_id);
+        }
+        self.input_focus = InputFocus::Terminal;
+    }
+
+    fn sidebar_hovered_index(&self) -> Option<usize> {
+        let hovered = self.sidebar_hovered_session.as_deref()?;
+        self.mux
+            .sessions()
+            .iter()
+            .position(|session| session.id == hovered || session.name == hovered)
+    }
+
+    fn session_id_matching(&self, value: &str) -> Option<String> {
+        self.mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == value || session.name == value)
+            .map(|session| session.id.clone())
     }
 
     fn apply_session_navigation_action(&mut self, action: MuxKeyAction) -> bool {
@@ -1090,6 +1278,98 @@ mod tests {
     fn test_state() -> AppState {
         let repaint: RepaintHandle = std::sync::Arc::new(|| {});
         AppState::new(BoottyConfig::default(), repaint, None, None).expect("state")
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn sidebar_keybinds_map_configured_navigation_without_default_escape() {
+        let bindings =
+            SidebarKeyBindings::from_keybinds(&BoottyConfig::default().input.sidebar_keybind)
+                .expect("default sidebar keybinds");
+
+        assert_eq!(
+            bindings.action_for_key(egui::Key::J, egui::Modifiers::NONE),
+            Some(SidebarAction::NextSession)
+        );
+        assert_eq!(
+            bindings.action_for_key(egui::Key::ArrowUp, egui::Modifiers::NONE),
+            Some(SidebarAction::PreviousSession)
+        );
+        assert_eq!(
+            bindings.action_for_key(
+                egui::Key::N,
+                egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                }
+            ),
+            Some(SidebarAction::NextSession)
+        );
+        assert_eq!(
+            bindings.action_for_key(egui::Key::Enter, egui::Modifiers::NONE),
+            Some(SidebarAction::ActivateSession)
+        );
+        assert_eq!(
+            bindings.action_for_key(egui::Key::Escape, egui::Modifiers::NONE),
+            None
+        );
+    }
+
+    #[test]
+    fn sidebar_focus_consumes_keys_and_enter_returns_terminal_focus() {
+        let mut state = test_state();
+        state.input_focus = InputFocus::Sidebar;
+
+        assert_eq!(
+            state.handle_sidebar_input(vec![
+                key_event(egui::Key::J, egui::Modifiers::NONE),
+                egui::Event::Text("j".to_owned()),
+            ]),
+            2
+        );
+        assert_eq!(state.input_focus, InputFocus::Sidebar);
+
+        assert_eq!(
+            state.handle_sidebar_input(vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)]),
+            1
+        );
+        assert_eq!(state.input_focus, InputFocus::Sidebar);
+
+        assert_eq!(
+            state.handle_sidebar_input(vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)]),
+            1
+        );
+        assert_eq!(state.input_focus, InputFocus::Terminal);
+    }
+
+    #[test]
+    fn direct_input_suppression_tracks_terminal_ownership() {
+        let mut state = test_state();
+
+        assert!(state.direct_input_suppresses_egui_events());
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::ToggleSidebarFocus),
+            ViewportSnapshot::default(),
+            &mut Vec::new(),
+        );
+        assert!(!state.direct_input_suppresses_egui_events());
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::SessionPicker),
+            ViewportSnapshot::default(),
+            &mut Vec::new(),
+        );
+        assert!(!state.direct_input_suppresses_egui_events());
     }
 
     #[test]
