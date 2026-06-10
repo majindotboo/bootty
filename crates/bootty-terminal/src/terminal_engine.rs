@@ -56,6 +56,8 @@ pub struct TerminalColorConfig {
     pub selection_background: Option<RgbColor>,
     pub selection_foreground: Option<RgbColor>,
     pub palette: Vec<RgbColor>,
+    pub palette_generate: bool,
+    pub palette_harmonious: bool,
 }
 
 impl Default for TerminalColorConfig {
@@ -68,12 +70,15 @@ impl Default for TerminalColorConfig {
             selection_background: None,
             selection_foreground: None,
             palette: default_palette16().into(),
+            palette_generate: false,
+            palette_harmonious: false,
         }
     }
 }
 
 pub struct TerminalEngine {
     terminal: Terminal<'static, 'static>,
+    base_color_palette: crate::terminal_palette::Palette,
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -100,19 +105,24 @@ pub struct TerminalEngine {
 
 fn configure_default_colors(
     terminal: &mut Terminal<'static, 'static>,
+    base_color_palette: &crate::terminal_palette::Palette,
     config: &TerminalColorConfig,
 ) -> Result<()> {
-    let mut base = terminal.default_color_palette()?;
+    let mut palette = *base_color_palette;
+    let mut explicit = [false; 256];
     for (index, color) in config.palette.iter().take(256).copied().enumerate() {
-        base[index] = color;
+        palette[index] = color;
+        explicit[index] = true;
     }
-    let palette = generate_256_palette(
-        &base,
-        &[false; 256],
-        config.background,
-        config.foreground,
-        false,
-    );
+    if config.palette_generate {
+        palette = generate_256_palette(
+            &palette,
+            &explicit,
+            config.background,
+            config.foreground,
+            config.palette_harmonious,
+        );
+    }
     terminal.set_default_color_palette(Some(palette))?;
     terminal
         .set_default_bg_color(Some(config.background))?
@@ -369,7 +379,8 @@ impl TerminalEngine {
             rows: geometry.rows,
             max_scrollback,
         })?;
-        configure_default_colors(&mut terminal, &colors)?;
+        let base_color_palette = terminal.default_color_palette()?;
+        configure_default_colors(&mut terminal, &base_color_palette, &colors)?;
         let size_report_geometry = Arc::new(Mutex::new(geometry));
         let report_geometry = size_report_geometry.clone();
         terminal.on_size(move |_terminal| {
@@ -395,6 +406,7 @@ impl TerminalEngine {
 
         let mut engine = Self {
             terminal,
+            base_color_palette,
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
@@ -459,7 +471,7 @@ impl TerminalEngine {
     }
 
     pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
-        configure_default_colors(&mut self.terminal, &colors)?;
+        configure_default_colors(&mut self.terminal, &self.base_color_palette, &colors)?;
         self.colors = colors;
         self.mark_content_changed();
         Ok(())

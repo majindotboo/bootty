@@ -1,5 +1,9 @@
 use std::{ffi::c_void, ptr};
 
+use libghostty_vt::style::RgbColor;
+
+use crate::terminal_palette::{Palette, generate_256_palette};
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct ColorRgb {
@@ -16,22 +20,26 @@ pub unsafe extern "C" fn ghostty_color_palette_generate_256(
     skip: *const bool,
     bg: *const ColorRgb,
     fg: *const ColorRgb,
-    _harmonious: bool,
+    harmonious: bool,
     out: *mut ColorRgb,
 ) {
     if base.is_null() || out.is_null() {
         return;
     }
 
+    let mut base_palette = [RgbColor { r: 0, g: 0, b: 0 }; 256];
+    let mut skip_palette = [false; 256];
     for index in 0..256 {
-        let keep = !skip.is_null() && unsafe { *skip.add(index) };
-        let color = if keep || index < 16 {
-            unsafe { *base.add(index) }
-        } else {
-            ansi_cube_color(index, bg, fg)
-        };
-        unsafe { ptr::write(out.add(index), color) };
+        base_palette[index] = unsafe { (*base.add(index)).into() };
+        if !skip.is_null() {
+            skip_palette[index] = unsafe { *skip.add(index) };
+        }
     }
+
+    let bg = pointed_color_or(bg, base_palette[0]);
+    let fg = pointed_color_or(fg, base_palette[7]);
+    let palette = generate_256_palette(&base_palette, &skip_palette, bg, fg, harmonious);
+    write_palette(out, &palette);
 }
 
 #[unsafe(no_mangle)]
@@ -47,35 +55,36 @@ pub unsafe extern "C" fn ghostty_osc_semantic_prompt_write_command_line(
     GHOSTTY_NO_VALUE
 }
 
-fn ansi_cube_color(index: usize, bg: *const ColorRgb, fg: *const ColorRgb) -> ColorRgb {
-    if index == 16 && !bg.is_null() {
-        return unsafe { *bg };
+fn pointed_color_or(color: *const ColorRgb, fallback: RgbColor) -> RgbColor {
+    if color.is_null() {
+        fallback
+    } else {
+        unsafe { (*color).into() }
     }
-    if index == 231 && !fg.is_null() {
-        return unsafe { *fg };
-    }
-    if (16..=231).contains(&index) {
-        let value = index - 16;
-        let r = value / 36;
-        let g = (value / 6) % 6;
-        let b = value % 6;
-        return ColorRgb {
-            r: cube_component(r),
-            g: cube_component(g),
-            b: cube_component(b),
-        };
-    }
-    if (232..=255).contains(&index) {
-        let gray = 8 + ((index - 232) as u8) * 10;
-        return ColorRgb {
-            r: gray,
-            g: gray,
-            b: gray,
-        };
-    }
-    ColorRgb::default()
 }
 
-fn cube_component(value: usize) -> u8 {
-    if value == 0 { 0 } else { 55 + value as u8 * 40 }
+fn write_palette(out: *mut ColorRgb, palette: &Palette) {
+    for (index, color) in palette.iter().copied().enumerate() {
+        unsafe { ptr::write(out.add(index), color.into()) };
+    }
+}
+
+impl From<ColorRgb> for RgbColor {
+    fn from(color: ColorRgb) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        }
+    }
+}
+
+impl From<RgbColor> for ColorRgb {
+    fn from(color: RgbColor) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        }
+    }
 }

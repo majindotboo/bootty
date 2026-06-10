@@ -60,7 +60,7 @@ gap = 1
 [multiplexer]
 # native keeps mux state and terminals inside Bootty. rmux renders through
 # rmux-sdk. tmux and zellij attach through their backend UI.
-backend = "rmux"
+backend = "native"
 
 [input]
 # Active keybinds must use executable Bootty actions. Unsupported actions are
@@ -221,6 +221,12 @@ cursor = "#f5e0dc"
 cursor-text = "#11111b"
 selection-background = "#585b70"
 selection-foreground = "#cdd6f4"
+
+# Extended palette generation. When enabled, entries 16-255
+# are generated from the base colors using CIELAB interpolation;
+# explicitly listed palette entries are preserved.
+palette-generate = false
+palette-harmonious = false
 
 # Up to 256 palette entries are accepted. The first 16 entries are the standard
 # ANSI colors: black, red, green, yellow, blue, magenta, cyan, white, then

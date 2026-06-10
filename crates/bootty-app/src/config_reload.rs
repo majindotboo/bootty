@@ -5,7 +5,7 @@ use std::{
 
 use crate::config::{BoottyConfig, ConfigFileSnapshot, config_file_snapshot};
 
-const CONFIG_HOT_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
+pub const CONFIG_HOT_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct ConfigHotReload {

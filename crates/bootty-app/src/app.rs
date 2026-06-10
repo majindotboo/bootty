@@ -14,7 +14,7 @@ use crate::{
         TerminalScrollAction, builtin_app_action_for_direct_key, split_app_actions_for_bindings,
     },
     config::{BoottyConfig, ConfigState, WindowConfig, load_config_from_path},
-    config_reload::{ConfigHotReload, new_session_only_config_changed},
+    config_reload::{CONFIG_HOT_RELOAD_INTERVAL, ConfigHotReload, new_session_only_config_changed},
     diagnostics::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
         should_sample_status_metrics,
@@ -295,7 +295,7 @@ impl eframe::App for BoottyApp {
             cursor_blinking: metrics.cursor_blinking,
             input_commands,
         });
-        ctx.request_repaint_after(repaint.after);
+        ctx.request_repaint_after(repaint.after.min(CONFIG_HOT_RELOAD_INTERVAL));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

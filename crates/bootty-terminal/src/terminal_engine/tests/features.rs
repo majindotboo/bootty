@@ -175,6 +175,8 @@ fn terminal_engine_applies_configured_default_colors_to_frame() -> Result<()> {
                 b: 0x62,
             }),
             palette: vec![RgbColor { r: 0, g: 1, b: 2 }, RgbColor { r: 3, g: 4, b: 5 }],
+            palette_generate: false,
+            palette_harmonious: false,
         },
     )?;
 
@@ -267,6 +269,8 @@ fn terminal_engine_updates_default_colors_live() -> Result<()> {
             g: 11,
             b: 12,
         }],
+        palette_generate: false,
+        palette_harmonious: false,
     })?;
     let frame = engine.extract_frame()?;
 
@@ -632,6 +636,142 @@ fn terminal_engine_supports_generated_256_color_palette() -> Result<()> {
                 })
             ),
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_regenerates_palette_from_pristine_base_on_color_reload() -> Result<()> {
+    let pristine_index_17 = TerminalEngine::new(test_geometry(8, 1))?.default_color_palette()?[17];
+    let mut colors = TerminalColorConfig {
+        palette_generate: true,
+        ..Default::default()
+    };
+    let mut engine = TerminalEngine::new_with_colors(test_geometry(8, 1), colors.clone())?;
+
+    assert_ne!(engine.default_color_palette()?[17], pristine_index_17);
+
+    colors.palette_generate = false;
+    engine.set_colors(colors)?;
+
+    assert_eq!(engine.default_color_palette()?[17], pristine_index_17);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_generates_palette_from_color_config() -> Result<()> {
+    let colors = TerminalColorConfig {
+        background: RgbColor {
+            r: 0x1e,
+            g: 0x1e,
+            b: 0x2e,
+        },
+        foreground: RgbColor {
+            r: 0xcd,
+            g: 0xd6,
+            b: 0xf4,
+        },
+        palette: vec![
+            RgbColor {
+                r: 0x45,
+                g: 0x45,
+                b: 0x5a,
+            },
+            RgbColor {
+                r: 0xf3,
+                g: 0x8b,
+                b: 0xa8,
+            },
+            RgbColor {
+                r: 0xa6,
+                g: 0xe3,
+                b: 0xa1,
+            },
+            RgbColor {
+                r: 0xf9,
+                g: 0xe2,
+                b: 0xaf,
+            },
+            RgbColor {
+                r: 0x89,
+                g: 0xb4,
+                b: 0xfa,
+            },
+            RgbColor {
+                r: 0xf5,
+                g: 0xc2,
+                b: 0xe7,
+            },
+            RgbColor {
+                r: 0x94,
+                g: 0xe2,
+                b: 0xd5,
+            },
+            RgbColor {
+                r: 0xba,
+                g: 0xc2,
+                b: 0xde,
+            },
+            RgbColor {
+                r: 0x58,
+                g: 0x5b,
+                b: 0x70,
+            },
+            RgbColor {
+                r: 0xf3,
+                g: 0x8b,
+                b: 0xa8,
+            },
+            RgbColor {
+                r: 0xa6,
+                g: 0xe3,
+                b: 0xa1,
+            },
+            RgbColor {
+                r: 0xf9,
+                g: 0xe2,
+                b: 0xaf,
+            },
+            RgbColor {
+                r: 0x89,
+                g: 0xb4,
+                b: 0xfa,
+            },
+            RgbColor {
+                r: 0xf5,
+                g: 0xc2,
+                b: 0xe7,
+            },
+            RgbColor {
+                r: 0x94,
+                g: 0xe2,
+                b: 0xd5,
+            },
+            RgbColor {
+                r: 0xa6,
+                g: 0xad,
+                b: 0xcb,
+            },
+        ],
+        palette_generate: true,
+        ..Default::default()
+    };
+    let mut engine = TerminalEngine::new_with_colors(test_geometry(2, 1), colors)?;
+
+    engine.write_vt(b"\x1b[38;5;17mG");
+    let frame = engine.extract_frame()?;
+    let colored_cells = collect_visible_cells(frame, |text, cell| (text, cell.fg));
+
+    assert_eq!(
+        colored_cells,
+        [(
+            'G',
+            Some(RgbColor {
+                r: 0x32,
+                g: 0x38,
+                b: 0x52
+            })
+        )]
     );
     Ok(())
 }

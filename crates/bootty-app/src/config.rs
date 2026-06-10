@@ -187,8 +187,8 @@ struct MultiplexerPatch {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum MultiplexerBackendConfig {
-    #[default]
     Rmux,
+    #[default]
     Native,
     Tmux,
     Zellij,
@@ -272,6 +272,8 @@ pub struct ColorConfig {
     pub selection_background: Option<Color>,
     pub selection_foreground: Option<Color>,
     pub palette: Vec<Color>,
+    pub palette_generate: bool,
+    pub palette_harmonious: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,6 +292,8 @@ struct ColorPatch {
     selection_background: Option<Color>,
     selection_foreground: Option<Color>,
     palette: Option<Vec<Color>>,
+    palette_generate: Option<bool>,
+    palette_harmonious: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -360,7 +364,7 @@ impl Default for ChromeConfig {
 impl Default for MultiplexerConfig {
     fn default() -> Self {
         Self {
-            backend: MultiplexerBackendConfig::Rmux,
+            backend: MultiplexerBackendConfig::Native,
         }
     }
 }
@@ -425,6 +429,8 @@ impl ColorConfig {
                 .map(Into::into)
                 .collect();
         }
+        terminal.palette_generate = self.palette_generate;
+        terminal.palette_harmonious = self.palette_harmonious;
         terminal
     }
 }
@@ -1273,6 +1279,8 @@ fn apply_partial_colors(colors: &mut ColorConfig, partial: ColorPatch) {
         partial.selection_foreground,
     );
     apply_value(&mut colors.palette, partial.palette);
+    apply_value(&mut colors.palette_generate, partial.palette_generate);
+    apply_value(&mut colors.palette_harmonious, partial.palette_harmonious);
 }
 
 fn resolve_theme_colors(theme: &str, config_dir: &Path) -> ConfigResult<ColorConfig> {

@@ -149,6 +149,7 @@ fn missing_config_file_loads_current_defaults() {
     assert_eq!(config.window.title, "Bootty");
     assert_eq!(config.window.width, 1220.0);
     assert_eq!(config.window.height, 760.0);
+    assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Native);
     assert_eq!(config.config_path, sandbox.path);
 }
 
@@ -240,6 +241,25 @@ fn config_resolves_theme_and_color_overrides(
     assert_eq!(config.colors.background, background);
     assert_eq!(config.colors.foreground, foreground);
     assert_eq!(config.colors.palette.len(), palette_len);
+}
+
+#[test]
+fn config_accepts_ghostty_palette_generation_settings() {
+    let config = load_config_source(indoc! {r##"
+        [colors]
+        background = "#ffffff"
+        foreground = "#000000"
+        palette = ["#000000", "#111111"]
+        palette-generate = true
+        palette-harmonious = true
+    "##});
+
+    assert!(config.colors.palette_generate);
+    assert!(config.colors.palette_harmonious);
+
+    let terminal_colors = config.colors.terminal_color_config();
+    assert!(terminal_colors.palette_generate);
+    assert!(terminal_colors.palette_harmonious);
 }
 
 #[test]
