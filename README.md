@@ -29,6 +29,20 @@ same renderer path as the main app.
 - `bootty` - convenience re-export crate for embedders.
 - `bootty-tauri` - Tauri + React + WebGL2 embedding demo and static website.
 
+## Native app bundles
+
+Native Bootty app bundles are built from `bootty-app --bin bootty`, not from the
+Tauri demo crate.
+
+```sh
+./scripts/package-bootty-unix.sh          # macOS .app zip or Linux tarball
+pwsh ./scripts/package-bootty-windows.ps1 # Windows zip
+```
+
+The CI workflow runs full Rust validation on pull requests and pushes, then
+uploads native macOS, Windows, and Linux app artifacts for pushes to `main` and
+manual workflow runs.
+
 ## Tauri and website
 
 ```sh
