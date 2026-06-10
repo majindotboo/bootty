@@ -70,6 +70,29 @@ impl ModifierSideState {
         }
     }
 
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn retain_active_modifiers(&mut self, modifiers: ModifiersState) {
+        if !modifiers.shift_key() {
+            self.left_shift = false;
+            self.right_shift = false;
+        }
+        if !modifiers.alt_key() {
+            self.left_alt = false;
+            self.right_alt = false;
+        }
+        if !modifiers.control_key() {
+            self.left_ctrl = false;
+            self.right_ctrl = false;
+        }
+        if !modifiers.super_key() {
+            self.left_command = false;
+            self.right_command = false;
+        }
+    }
+
     pub fn apply_to_key_input(self, input: &mut KeyInput) {
         input.mods.shift = input.mods.shift || self.left_shift || self.right_shift;
         input.mods.alt = input.mods.alt || self.left_alt || self.right_alt;
@@ -445,5 +468,32 @@ fn letter_text(
         unshifted_utf8,
         shifted_utf8: Some(shifted_utf8),
         shifted_letter_utf8: Some(shifted_utf8),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifier_side_state_drops_sides_when_aggregate_modifier_is_released() {
+        let mut state = ModifierSideState {
+            left_shift: true,
+            right_alt: true,
+            left_ctrl: true,
+            left_command: true,
+            right_command: true,
+            ..Default::default()
+        };
+
+        state.retain_active_modifiers(ModifiersState::ALT);
+
+        assert_eq!(
+            state,
+            ModifierSideState {
+                right_alt: true,
+                ..Default::default()
+            }
+        );
     }
 }

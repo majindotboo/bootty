@@ -75,6 +75,7 @@ pub struct BoottyApp {
     modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     modifier_sides: ModifierSideState,
     pending_direct_input: Vec<DirectKeyInput>,
+    suppress_next_egui_paste: bool,
     modifier_remaps: ModifierRemapSet,
     macos_option_as_alt: crate::terminal::MacosOptionAsAlt,
     stability_trace: Option<StabilityTrace>,
@@ -109,6 +110,18 @@ fn macos_app_icon_install_due(installed: bool, next_attempt: Instant, now: Insta
 
 fn next_macos_app_icon_retry(now: Instant) -> Instant {
     now + MACOS_APP_ICON_RETRY_INTERVAL
+}
+
+fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
+    if let Some(index) = events
+        .iter()
+        .position(|event| matches!(event, egui::Event::Paste(_)))
+    {
+        events.remove(index);
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +216,7 @@ impl BoottyApp {
             modifier_side_rx,
             modifier_sides: ModifierSideState::default(),
             pending_direct_input: Vec::new(),
+            suppress_next_egui_paste: false,
             modifier_remaps,
             macos_option_as_alt,
             stability_trace,
@@ -732,8 +746,13 @@ impl BoottyApp {
     }
 
     fn handle_egui_input(&mut self, ctx: &egui::Context) -> usize {
+        let suppress_next_egui_paste = std::mem::take(&mut self.suppress_next_egui_paste);
         let (snapshot, actions) = ctx.input(|input| {
-            let (events, actions) = self.split_app_actions(input.events.clone());
+            let mut events = input.events.clone();
+            if suppress_next_egui_paste {
+                remove_first_paste_event(&mut events);
+            }
+            let (events, actions) = self.split_app_actions(events);
             let routed = route_events(self.input_focus, events);
             let events = if self.new_mux_session_dialog.is_some() {
                 Vec::new()
@@ -775,16 +794,10 @@ impl BoottyApp {
         count
     }
     fn drain_direct_input(&mut self) {
-        if let Some(rx) = &self.modifier_side_rx {
-            let mut latest = self.modifier_sides;
-            let mut latest_alt = None;
-            for side_state in rx.try_iter() {
-                if side_state.left_alt || side_state.right_alt {
-                    latest_alt = Some(side_state);
-                }
-                latest = side_state;
-            }
-            self.modifier_sides = latest_alt.unwrap_or(latest);
+        if let Some(rx) = &self.modifier_side_rx
+            && let Some(latest) = rx.try_iter().last()
+        {
+            self.modifier_sides = latest;
         }
         let Some(rx) = &self.direct_input_rx else {
             return;
@@ -802,6 +815,9 @@ impl BoottyApp {
                 continue;
             }
             if let Some(action) = self.app_key_bindings.action_for_input(input) {
+                if matches!(action, KeybindAction::PasteFromClipboard) {
+                    self.suppress_next_egui_paste = true;
+                }
                 self.apply_keybind_action(ctx, action);
                 continue;
             }
@@ -1084,6 +1100,25 @@ fn next_non_native_fullscreen_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_first_paste_event_removes_only_one_paste_event() {
+        let mut events = vec![
+            egui::Event::Text("before".to_owned()),
+            egui::Event::Paste("first".to_owned()),
+            egui::Event::Paste("second".to_owned()),
+        ];
+
+        assert!(remove_first_paste_event(&mut events));
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Text("before".to_owned()),
+                egui::Event::Paste("second".to_owned())
+            ]
+        );
+    }
+
     use crate::config::WindowFullscreen;
 
     #[test]

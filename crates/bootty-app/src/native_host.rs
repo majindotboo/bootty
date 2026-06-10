@@ -38,6 +38,7 @@ pub fn run(options: eframe::NativeOptions, config: BoottyConfig) -> Result<()> {
         modifier_side_tx,
         modifiers: ModifiersState::empty(),
         side_state: ModifierSideState::default(),
+        modifiers_reset_on_focus: false,
     };
 
     event_loop.run_app(&mut app).context("run bootty")
@@ -49,6 +50,7 @@ struct BoottyNativeHost<'app> {
     modifier_side_tx: mpsc::Sender<ModifierSideState>,
     modifiers: ModifiersState,
     side_state: ModifierSideState,
+    modifiers_reset_on_focus: bool,
 }
 
 impl ApplicationHandler<UserEvent> for BoottyNativeHost<'_> {
@@ -64,13 +66,27 @@ impl ApplicationHandler<UserEvent> for BoottyNativeHost<'_> {
     ) {
         match &event {
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers.state();
+                let next = modifiers.state();
+                if self.modifiers_reset_on_focus && next != ModifiersState::empty() {
+                    return;
+                }
+                self.modifiers_reset_on_focus = false;
+                self.modifiers = next;
+                self.side_state.retain_active_modifiers(self.modifiers);
+                let _ = self.modifier_side_tx.send(self.side_state);
+            }
+            WindowEvent::Focused(_) => {
+                self.modifiers = ModifiersState::empty();
+                self.side_state.clear();
+                self.modifiers_reset_on_focus = true;
+                let _ = self.modifier_side_tx.send(self.side_state);
             }
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,
                 ..
             } => {
+                self.modifiers_reset_on_focus = false;
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
                     self.side_state.update_key(code, event.state);
                     let _ = self.modifier_side_tx.send(self.side_state);

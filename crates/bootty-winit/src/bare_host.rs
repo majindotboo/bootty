@@ -139,6 +139,7 @@ impl BareRendererSurfaceConfig {
 pub struct BareTerminalInput {
     modifiers: ModifiersState,
     side_state: ModifierSideState,
+    ignore_focus_modifier_change: bool,
     modifier_remaps: ModifierRemapSet,
     cursor_pos: Option<Pos2>,
     pressed_mouse_button: Option<MouseButton>,
@@ -146,7 +147,18 @@ pub struct BareTerminalInput {
 
 impl BareTerminalInput {
     pub fn set_modifiers(&mut self, modifiers: ModifiersState) {
+        if self.ignore_focus_modifier_change && modifiers != ModifiersState::empty() {
+            return;
+        }
+        self.ignore_focus_modifier_change = false;
         self.modifiers = modifiers;
+        self.side_state.retain_active_modifiers(modifiers);
+    }
+
+    pub fn clear_modifiers(&mut self) {
+        self.modifiers = ModifiersState::empty();
+        self.side_state.clear();
+        self.ignore_focus_modifier_change = true;
     }
 
     pub fn set_cursor_position(&mut self, x: f32, y: f32) {
@@ -172,12 +184,8 @@ impl BareTerminalInput {
         self.key_input_after_side_state(event)
     }
 
-    pub fn paste_shortcut(&mut self, event: &KeyEvent) -> bool {
-        self.update_key_side_state(event);
-        self.paste_shortcut_after_side_state(event)
-    }
-
     fn update_key_side_state(&mut self, event: &KeyEvent) {
+        self.ignore_focus_modifier_change = false;
         if let PhysicalKey::Code(code) = event.physical_key {
             self.side_state.update_key(code, event.state);
         }
@@ -438,6 +446,10 @@ impl ApplicationHandler for BareTerminalApp {
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::ModifiersChanged(modifiers) => {
                 state.set_modifiers(modifiers.state());
+                Ok(())
+            }
+            WindowEvent::Focused(_) => {
+                state.input.clear_modifiers();
                 Ok(())
             }
             WindowEvent::KeyboardInput {
@@ -823,6 +835,21 @@ fn clear_color(colors: FrameColors) -> wgpu::Color {
 mod tests {
     use super::*;
     use winit::keyboard::KeyCode;
+
+    #[test]
+    fn bare_terminal_ignores_non_empty_modifier_change_after_focus_reset() {
+        let mut input = BareTerminalInput::default();
+        input.set_modifiers(ModifiersState::SUPER);
+        assert_eq!(input.modifiers, ModifiersState::SUPER);
+
+        input.clear_modifiers();
+        input.set_modifiers(ModifiersState::SUPER);
+        assert_eq!(input.modifiers, ModifiersState::empty());
+
+        input.set_modifiers(ModifiersState::empty());
+        input.set_modifiers(ModifiersState::SUPER);
+        assert_eq!(input.modifiers, ModifiersState::SUPER);
+    }
 
     #[test]
     fn bare_terminal_ignores_standalone_modifier_keys() {

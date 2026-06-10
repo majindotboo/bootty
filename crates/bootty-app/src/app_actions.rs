@@ -184,12 +184,18 @@ pub fn split_app_actions_for_bindings(
     let mut terminal_events = Vec::with_capacity(events.len());
     let mut actions = Vec::new();
     let mut suppress_next_text = false;
+    let mut suppress_next_paste = false;
     for event in events {
         if suppress_next_text && matches!(event, egui::Event::Text(_)) {
             continue;
         }
+        if suppress_next_paste && matches!(event, egui::Event::Paste(_)) {
+            suppress_next_paste = false;
+            continue;
+        }
         if matches!(event, egui::Event::Key { pressed: false, .. }) {
             suppress_next_text = false;
+            suppress_next_paste = false;
         }
 
         let action = match &event {
@@ -207,6 +213,7 @@ pub fn split_app_actions_for_bindings(
         if let Some(action) = action {
             if matches!(event, egui::Event::Key { .. }) {
                 suppress_next_text = true;
+                suppress_next_paste = matches!(action, KeybindAction::PasteFromClipboard);
             }
             actions.push(action);
         } else {
@@ -568,6 +575,49 @@ mod tests {
                 .any(|event| matches!(event, egui::Event::Text(_)))
         );
         assert_eq!(actions, vec![KeybindAction::App(AppAction::NewMuxSession)]);
+    }
+
+    #[test]
+    fn split_app_actions_consumes_paste_event_paired_with_paste_binding() {
+        let mut bindings = AppKeyBindings::from_config(&InputConfig {
+            keybind: vec!["performable:cmd+v=paste_from_clipboard".to_owned()],
+            ..Default::default()
+        })
+        .unwrap();
+        let (terminal_events, actions) = split_app_actions_for_bindings(
+            &mut bindings,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        command: true,
+                        ..Default::default()
+                    },
+                },
+                egui::Event::Paste("clipboard".to_owned()),
+            ],
+        );
+
+        assert!(terminal_events.is_empty());
+        assert_eq!(actions, vec![KeybindAction::PasteFromClipboard]);
+    }
+
+    #[test]
+    fn split_app_actions_keeps_plain_paste_event_without_paste_binding() {
+        let mut bindings = AppKeyBindings::default();
+        let (terminal_events, actions) = split_app_actions_for_bindings(
+            &mut bindings,
+            vec![egui::Event::Paste("clipboard".to_owned())],
+        );
+
+        assert_eq!(
+            terminal_events,
+            vec![egui::Event::Paste("clipboard".to_owned())]
+        );
+        assert!(actions.is_empty());
     }
 
     #[test]
