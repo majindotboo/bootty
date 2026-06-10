@@ -85,8 +85,13 @@ render frames.
 
 ## Module map
 
-- `app.rs` owns app-level orchestration, status metrics, repaint/runtime
-  lifecycle, and terminal command application.
+- `app/state.rs` owns `AppState`, the egui-Context-free application state
+  machine: per-frame orchestration (`update_frame(FrameInputs) -> Vec<AppEffect>`),
+  status metrics, input application, config reload, and terminal command
+  application. It is unit-testable without a window.
+- `app/mod.rs` owns the thin eframe adapter `BoottyApp`: it snapshots egui
+  input into `FrameInputs`, applies returned `AppEffect`s to the context, and
+  renders chrome from `AppState` accessors.
 - `bootty-config::config` owns the Bootty TOML schema, XDG config path
   resolution, includes, restricted theme resolution, reload state, and
   round-trip TOML writeback. `bootty-config::config_reload` owns hot-reload

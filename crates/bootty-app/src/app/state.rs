@@ -4,9 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use eframe::egui::{
-    self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder,
-};
+use eframe::egui::{self, Pos2};
 
 use crate::{
     app_actions::{
@@ -19,7 +17,7 @@ use crate::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
         should_sample_status_metrics,
     },
-    direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
+    direct_input::{DirectKeyInput, ModifierSideState},
     geometry::TerminalSurface,
     input::{
         InputSnapshot, TerminalInputCommand, focus::InputFocus, router::route_events,
@@ -27,8 +25,8 @@ use crate::{
     },
     modifier_remap::ModifierRemapSet,
     mux::{
+        RepaintHandle,
         command::MuxCommand,
-        config::selected_backend,
         controller::MuxController,
         sidebar_meta::{
             SidebarMetadata, SidebarMetadataSession, collect_sidebar_metadata,
@@ -41,12 +39,13 @@ use crate::{
         macos_handles_non_native_fullscreen_frame, read_clipboard_text, restore_macos_presentation,
         spawn_new_window,
     },
-    renderer::TerminalWidget,
+    renderer::{RendererMetrics, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
-    terminal::DrainStats,
-    theme::{theme_from_config, theme_palette_from_config},
+    terminal::{DrainStats, MouseButton},
+    terminal_text::TerminalTextConfig,
+    theme::theme_from_config,
     ui::{
-        chrome::{self, SidebarModel, StatusBarModel},
+        chrome,
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
     },
 };
@@ -56,9 +55,43 @@ const SIDEBAR_METADATA_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const MACOS_APP_ICON_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const MACOS_APP_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-pub struct BoottyApp {
+/// Per-frame snapshot of everything the state machine needs from the host.
+/// Captured once at frame start; `egui::Context` never enters this module.
+#[derive(Clone, Debug)]
+pub struct FrameInputs {
+    pub now: Instant,
+    pub stable_dt_ms: f32,
+    pub events: Vec<egui::Event>,
+    pub modifiers: egui::Modifiers,
+    pub hover_pos: Option<Pos2>,
+    pub pressed_mouse_button: Option<MouseButton>,
+    pub viewport: ViewportSnapshot,
+    pub renderer_metrics: RendererMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ViewportSnapshot {
+    pub fullscreen: bool,
+    pub maximized: bool,
+    pub content_height: f32,
+}
+
+/// Host actions requested by a frame update, applied by the eframe adapter.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AppEffect {
+    CloseWindow,
+    SetWindowTitle(String),
+    SetFullscreen(bool),
+    SetMaximized(bool),
+    SetDecorations(bool),
+    RequestCopy,
+    RequestRepaint,
+    RepaintAfter(Duration),
+    SetTerminalTextConfig(TerminalTextConfig),
+}
+
+pub struct AppState {
     terminal: ActiveTerminal,
-    terminal_widget: TerminalWidget,
     repaint_scheduler: RepaintScheduler,
     last_error: Option<String>,
     last_drain: DrainStats,
@@ -71,7 +104,7 @@ pub struct BoottyApp {
     app_key_bindings: AppKeyBindings,
     has_new_session_config_changes: bool,
     mux: MuxController,
-    repaint: crate::mux::RepaintHandle,
+    repaint: RepaintHandle,
     direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
     modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     modifier_sides: ModifierSideState,
@@ -87,7 +120,6 @@ pub struct BoottyApp {
     sidebar_metadata_rx: Option<mpsc::Receiver<SidebarMetadata>>,
     sidebar_metadata_pending: bool,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
-    app_icon_texture: Option<TextureHandle>,
     macos_app_icon_installed: bool,
     next_macos_app_icon_install: Instant,
     macos_non_native_fullscreen_active: bool,
@@ -148,34 +180,13 @@ fn new_mux_session_request_with_name(
     }
 }
 
-impl BoottyApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
-        Self::new_with_config(cc, BoottyConfig::default())
-    }
-
-    pub fn new_with_config(cc: &eframe::CreationContext<'_>, config: BoottyConfig) -> Result<Self> {
-        Self::new_inner(cc, config, None, None)
-    }
-
-    pub fn new_with_direct_input(
-        cc: &eframe::CreationContext<'_>,
+impl AppState {
+    pub fn new(
         config: BoottyConfig,
-        direct_input_rx: mpsc::Receiver<DirectKeyInput>,
-        modifier_side_rx: mpsc::Receiver<ModifierSideState>,
-    ) -> Result<Self> {
-        Self::new_inner(cc, config, Some(direct_input_rx), Some(modifier_side_rx))
-    }
-
-    fn new_inner(
-        cc: &eframe::CreationContext<'_>,
-        config: BoottyConfig,
+        repaint: RepaintHandle,
         direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     ) -> Result<Self> {
-        configure_egui_fonts(&cc.egui_ctx, &config.font.family);
-        let repaint_ctx = cc.egui_ctx.clone();
-        let repaint: crate::mux::RepaintHandle =
-            std::sync::Arc::new(move || repaint_ctx.request_repaint());
         let modifier_remaps = config.input.modifier_remaps()?;
         let macos_option_as_alt = config.input.macos_option_as_alt.into();
         let keybinds = config
@@ -183,10 +194,8 @@ impl BoottyApp {
             .keybinds_for_backend(config.multiplexer.backend);
         let app_key_bindings = AppKeyBindings::from_keybinds(&keybinds)?;
         let stability_trace = StabilityTrace::from_config(&config);
-        let text_config = config.font.terminal_text_config();
         let session_config = config.terminal_session_config();
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
-        let _backend = selected_backend(&config.multiplexer);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
         apply_macos_non_native_fullscreen_presentation(&config.window);
 
@@ -197,12 +206,6 @@ impl BoottyApp {
                 session_config,
                 repaint.clone(),
             ),
-            terminal_widget: TerminalWidget::new(
-                cc.wgpu_render_state
-                    .as_ref()
-                    .map(|render_state| render_state.target_format),
-            )
-            .with_text_config(text_config),
             repaint_scheduler: RepaintScheduler::default(),
             last_error: None,
             last_drain: DrainStats::default(),
@@ -231,22 +234,119 @@ impl BoottyApp {
             sidebar_metadata_rx: None,
             sidebar_metadata_pending: false,
             new_mux_session_dialog: None,
-            app_icon_texture: None,
             macos_app_icon_installed: false,
             next_macos_app_icon_install: initial_macos_app_icon_install_after(Instant::now()),
             macos_non_native_fullscreen_active,
         })
     }
-}
 
-impl eframe::App for BoottyApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        self.drain_direct_input();
-        suppress_egui_events_for_direct_input(&mut raw_input.events, &self.pending_direct_input);
+    pub fn config(&self) -> &BoottyConfig {
+        self.config_state.current()
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let now = Instant::now();
+    pub fn ui_theme(&self) -> bootty_ui::Theme {
+        theme_from_config(self.config())
+    }
+
+    pub fn mux(&self) -> &MuxController {
+        &self.mux
+    }
+
+    pub fn status_metrics(&self) -> StatusMetrics {
+        self.status_metrics
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn sidebar_metadata(&self) -> &SidebarMetadata {
+        &self.sidebar_metadata
+    }
+
+    pub fn macos_non_native_fullscreen_active(&self) -> bool {
+        self.macos_non_native_fullscreen_active
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut ActiveTerminal {
+        &mut self.terminal
+    }
+
+    pub fn record_surface(&mut self, surface: TerminalSurface) {
+        self.terminal_surface = Some(surface);
+    }
+
+    pub fn record_render_error(&mut self, error: impl ToString) {
+        self.last_error = Some(error.to_string());
+    }
+
+    pub fn activate_session_from_ui(&mut self, session_id: &str) {
+        let mux_config = self.config().multiplexer.clone();
+        self.mux
+            .activate_session(session_id, &self.repaint, &mux_config);
+    }
+
+    pub fn activate_window_from_ui(&mut self, session_id: &str, window_id: &str) {
+        let mux_config = self.config().multiplexer.clone();
+        self.mux
+            .activate_window(session_id, window_id, &self.repaint, &mux_config);
+    }
+
+    pub fn take_dialog(&mut self) -> Option<NewMuxSessionDialog> {
+        self.new_mux_session_dialog.take()
+    }
+
+    pub fn apply_picker_event(
+        &mut self,
+        dialog: NewMuxSessionDialog,
+        event: NewSessionPickerEvent,
+    ) {
+        match event {
+            NewSessionPickerEvent::None => {
+                self.new_mux_session_dialog = Some(dialog);
+            }
+            NewSessionPickerEvent::Close => {}
+            NewSessionPickerEvent::NewWorktreeUnavailable => {
+                self.last_error = Some("new worktree creation is not wired yet".to_owned());
+                self.new_mux_session_dialog = Some(dialog);
+            }
+            NewSessionPickerEvent::CreateSession(request) => {
+                let mux_config = self.config().multiplexer.clone();
+                self.mux
+                    .create_project_session(request, &self.repaint, &mux_config);
+            }
+        }
+    }
+
+    pub fn drain_direct_input(&mut self) {
+        if let Some(rx) = &self.modifier_side_rx
+            && let Some(latest) = rx.try_iter().last()
+        {
+            self.modifier_sides = latest;
+        }
+        let Some(rx) = &self.direct_input_rx else {
+            return;
+        };
+        self.pending_direct_input.extend(rx.try_iter());
+    }
+
+    pub fn pending_direct_input(&self) -> &[DirectKeyInput] {
+        &self.pending_direct_input
+    }
+
+    pub fn update_frame(&mut self, inputs: FrameInputs) -> Vec<AppEffect> {
+        let FrameInputs {
+            now,
+            stable_dt_ms,
+            events,
+            modifiers,
+            hover_pos,
+            pressed_mouse_button,
+            viewport,
+            renderer_metrics,
+        } = inputs;
+        let mut effects = Vec::new();
+
         if macos_app_icon_install_due(
             self.macos_app_icon_installed,
             self.next_macos_app_icon_install,
@@ -260,8 +360,8 @@ impl eframe::App for BoottyApp {
         self.last_drain = self.terminal.drain_pty();
         match self.terminal.child_exited() {
             Ok(true) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
+                effects.push(AppEffect::CloseWindow);
+                return effects;
             }
             Ok(false) => {}
             Err(error) => self.last_error = Some(error.to_string()),
@@ -277,7 +377,7 @@ impl eframe::App for BoottyApp {
             self.last_error = result.err();
         }
         if self.config_state.current().chrome.sidebar {
-            self.refresh_sidebar_metadata(ctx);
+            self.refresh_sidebar_metadata(viewport);
         }
         if let Err(error) = self.terminal.sync_mux_anchor(
             &self.config_state.current().multiplexer,
@@ -285,11 +385,18 @@ impl eframe::App for BoottyApp {
         ) {
             self.last_error = Some(error.to_string());
         }
-        self.hot_reload_config_if_changed(ctx);
-        let input_commands = self.handle_direct_input(ctx) + self.handle_egui_input(ctx);
-        self.last_frame_dt_ms = ctx.input(|input| input.stable_dt) * 1000.0;
+        self.hot_reload_config_if_changed(&mut effects);
+        let input_commands = self.handle_direct_input(viewport, &mut effects)
+            + self.handle_egui_input(
+                events,
+                modifiers,
+                hover_pos,
+                pressed_mouse_button,
+                viewport,
+                &mut effects,
+            );
+        self.last_frame_dt_ms = stable_dt_ms;
 
-        let metrics = self.terminal_widget.metrics();
         let pending_pty_bytes = self.terminal.pending_pty_len();
         let (cols, rows) = self.terminal.grid_size();
         if let Some(trace) = &mut self.stability_trace {
@@ -301,14 +408,14 @@ impl eframe::App for BoottyApp {
                 pending_pty_bytes,
                 drain_bytes: self.last_drain.bytes,
                 drain_elapsed_us: self.last_drain.elapsed_us,
-                text_runs: metrics.text_runs,
+                text_runs: renderer_metrics.text_runs,
                 last_error: self.last_error.as_deref(),
             });
         }
         if should_sample_status_metrics(self.last_status_metrics_sample.elapsed()) {
             self.status_metrics = StatusMetrics {
                 drain: self.last_drain,
-                renderer: metrics,
+                renderer: renderer_metrics,
                 cols,
                 rows,
             };
@@ -318,68 +425,17 @@ impl eframe::App for BoottyApp {
             drained_bytes: self.last_drain.bytes,
             drain_elapsed_us: self.last_drain.elapsed_us,
             pending_bytes: pending_pty_bytes,
-            dirty_rows: metrics.dirty_rows,
-            cursor_blinking: metrics.cursor_blinking,
+            dirty_rows: renderer_metrics.dirty_rows,
+            cursor_blinking: renderer_metrics.cursor_blinking,
             input_commands,
         });
-        ctx.request_repaint_after(repaint.after.min(CONFIG_HOT_RELOAD_INTERVAL));
+        effects.push(AppEffect::RepaintAfter(
+            repaint.after.min(CONFIG_HOT_RELOAD_INTERVAL),
+        ));
+        effects
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let palette = self.ui_theme().palette;
-        egui::Frame::NONE.fill(palette.mantle).show(ui, |ui| {
-            self.show_fixed_layout(ui);
-        });
-        self.show_new_mux_session_dialog(ui.ctx());
-    }
-}
-
-fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {
-    let db = bootty_render::font_database::system_font_database();
-    let mut fonts = FontDefinitions::default();
-    for family in families.iter().rev() {
-        let query_families = [fontdb::Family::Name(family)];
-        let query = fontdb::Query {
-            families: &query_families,
-            ..fontdb::Query::default()
-        };
-        let Some(id) = db.query(&query) else {
-            continue;
-        };
-        let Some((bytes, index)) = db.with_face_data(id, |data, index| (data.to_vec(), index))
-        else {
-            continue;
-        };
-        let name = format!("bootty-ui-{family}");
-        let mut font_data = FontData::from_owned(bytes);
-        font_data.index = index;
-        fonts
-            .font_data
-            .insert(name.clone(), std::sync::Arc::new(font_data));
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .insert(0, name.clone());
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, name);
-    }
-
-    ctx.set_fonts(fonts);
-}
-impl BoottyApp {
-    fn config(&self) -> &BoottyConfig {
-        self.config_state.current()
-    }
-
-    fn ui_theme(&self) -> bootty_ui::Theme {
-        theme_from_config(self.config())
-    }
-
-    fn refresh_sidebar_metadata(&mut self, ctx: &egui::Context) {
+    fn refresh_sidebar_metadata(&mut self, viewport: ViewportSnapshot) {
         if let Some(rx) = &self.sidebar_metadata_rx {
             match rx.try_recv() {
                 Ok(metadata) => {
@@ -403,11 +459,11 @@ impl BoottyApp {
             return;
         }
 
-        self.ensure_sidebar_metadata_worker(ctx);
+        self.ensure_sidebar_metadata_worker();
         let Some(tx) = &self.sidebar_metadata_tx else {
             return;
         };
-        let max_sessions = self.sidebar_metadata_session_budget(ctx);
+        let max_sessions = self.sidebar_metadata_session_budget(viewport);
         match tx.send(sidebar_metadata_sessions_for_prefix(
             self.mux.sessions(),
             max_sessions,
@@ -424,10 +480,8 @@ impl BoottyApp {
         }
     }
 
-    fn sidebar_metadata_session_budget(&self, ctx: &egui::Context) -> usize {
-        let height = ctx.input(|input| input.content_rect().height());
-        let fullscreen_chrome = self.macos_non_native_fullscreen_active
-            || ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+    fn sidebar_metadata_session_budget(&self, viewport: ViewportSnapshot) -> usize {
+        let fullscreen_chrome = self.macos_non_native_fullscreen_active || viewport.fullscreen;
         let title_visible = self.config().window.custom_chrome_title_visible();
         let top_inset = if fullscreen_chrome && !title_visible {
             28.0
@@ -435,226 +489,39 @@ impl BoottyApp {
             0.0
         };
         chrome::sidebar_metadata_session_budget(
-            height,
+            viewport.content_height,
             top_inset,
             title_visible,
             self.sidebar_metadata.usage_lines(),
         )
     }
 
-    fn ensure_sidebar_metadata_worker(&mut self, ctx: &egui::Context) {
+    fn ensure_sidebar_metadata_worker(&mut self) {
         if self.sidebar_metadata_tx.is_some() && self.sidebar_metadata_rx.is_some() {
             return;
         }
 
         let (request_tx, request_rx) = mpsc::channel::<Vec<SidebarMetadataSession>>();
         let (result_tx, result_rx) = mpsc::channel::<SidebarMetadata>();
-        let repaint = ctx.clone();
+        let repaint = self.repaint.clone();
         std::thread::spawn(move || {
             while let Ok(sessions) = request_rx.recv() {
                 let metadata = collect_sidebar_metadata(&sessions);
                 if result_tx.send(metadata).is_err() {
                     break;
                 }
-                repaint.request_repaint();
+                repaint();
             }
         });
         self.sidebar_metadata_tx = Some(request_tx);
         self.sidebar_metadata_rx = Some(result_rx);
     }
 
-    fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
-        let rect = ui.max_rect();
-        let palette = theme_palette_from_config(self.config());
-        let chrome = &self.config().chrome;
-        let sidebar = chrome.sidebar;
-        let status_bar = chrome.status_bar;
-        let configured_sidebar_width = chrome.sidebar_width;
-        let status_height_config = chrome.status_height;
-        let chrome_gap = chrome.gap;
-        let fullscreen_chrome = self.macos_non_native_fullscreen_active
-            || ui
-                .ctx()
-                .input(|input| input.viewport().fullscreen.unwrap_or(false));
-        let sidebar_width = if sidebar {
-            configured_sidebar_width
-        } else {
-            0.0
-        };
-        let gap = if sidebar && sidebar_width > 0.0 && !fullscreen_chrome {
-            chrome_gap
-        } else {
-            0.0
-        };
-        let status_height = if status_bar {
-            status_height_config
-        } else {
-            0.0
-        };
-        let show_window_tabs = matches!(
-            self.config().multiplexer.backend,
-            crate::config::MultiplexerBackendConfig::Rmux
-                | crate::config::MultiplexerBackendConfig::Native
-        ) && !self.mux.selected_session_windows().is_empty();
-        let window_tabs_height = if show_window_tabs { 34.0 } else { 0.0 };
-        let sidebar_rect = if sidebar {
-            Rect::from_min_size(
-                rect.min,
-                egui::vec2(sidebar_width.min(rect.width()), rect.height()),
-            )
-        } else {
-            Rect::from_min_size(rect.min, egui::vec2(0.0, rect.height()))
-        };
-        let right_rect = Rect::from_min_max(
-            Pos2::new((sidebar_rect.max.x + gap).min(rect.max.x), rect.min.y),
-            rect.max,
-        );
-        let status_rect = Rect::from_min_size(
-            right_rect.min,
-            egui::vec2(right_rect.width(), status_height.min(right_rect.height())),
-        );
-        let window_tabs_rect = Rect::from_min_max(
-            Pos2::new(right_rect.min.x, status_rect.max.y),
-            Pos2::new(
-                right_rect.max.x,
-                (status_rect.max.y + window_tabs_height).min(right_rect.max.y),
-            ),
-        );
-        let terminal_rect = Rect::from_min_max(
-            Pos2::new(right_rect.min.x, window_tabs_rect.max.y),
-            right_rect.max,
-        );
-
-        if sidebar {
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(sidebar_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| {
-                    let title_visible = self.config().window.custom_chrome_title_visible();
-                    let reserve_titlebar_buttons =
-                        self.config().window.reserves_macos_titlebar_button_area();
-                    let top_inset = if fullscreen_chrome && !title_visible {
-                        28.0
-                    } else {
-                        0.0
-                    };
-                    let title_icon = title_visible.then(|| {
-                        chrome::load_app_icon_texture(ui.ctx(), &mut self.app_icon_texture)
-                    });
-                    if let Some(session_id) = chrome::show_sidebar(
-                        ui,
-                        palette,
-                        sidebar_rect.height(),
-                        SidebarModel {
-                            sessions: self.mux.sessions(),
-                            selected_session: self.mux.selected_session(),
-                            metadata: &self.sidebar_metadata,
-                            title_visible,
-                            reserve_titlebar_buttons,
-                            title_icon: title_icon.as_ref(),
-                            top_inset,
-                            border_visible: !fullscreen_chrome,
-                            separator_visible: !fullscreen_chrome,
-                        },
-                    ) {
-                        let mux_config = self.config().multiplexer.clone();
-                        self.mux
-                            .activate_session(&session_id, &self.repaint, &mux_config);
-                    }
-                },
-            );
-        }
-
-        if status_bar {
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(status_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    chrome::show_status_bar(
-                        ui,
-                        palette,
-                        StatusBarModel {
-                            backend: selected_backend(&self.config().multiplexer),
-                            selected_session_name: chrome::selected_session_name(
-                                self.mux.sessions(),
-                                self.mux.selected_session(),
-                            ),
-                            metrics: self.status_metrics,
-                            last_error: self.last_error.as_deref(),
-                        },
-                    );
-                },
-            );
-        }
-
-        if show_window_tabs {
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(window_tabs_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    if let Some(window_id) = chrome::show_window_tabs(
-                        ui,
-                        palette,
-                        chrome::WindowTabsModel {
-                            windows: self.mux.selected_session_windows(),
-                            selected_window: self.mux.selected_window(),
-                        },
-                    ) && let Some(session_id) = self.mux.selected_session().map(str::to_owned)
-                    {
-                        let mux_config = self.config().multiplexer.clone();
-                        self.mux.activate_window(
-                            &session_id,
-                            &window_id,
-                            &self.repaint,
-                            &mux_config,
-                        );
-                    }
-                },
-            );
-        }
-
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(terminal_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| match self.terminal_widget.show(ui, &mut self.terminal) {
-                Ok(surface) => {
-                    self.terminal_surface = Some(surface);
-                }
-                Err(error) => self.last_error = Some(error.to_string()),
-            },
-        );
-    }
-
     fn open_new_mux_session_dialog(&mut self) {
         self.new_mux_session_dialog = Some(NewMuxSessionDialog::open());
     }
 
-    fn show_new_mux_session_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.new_mux_session_dialog.take() else {
-            return;
-        };
-        match dialog.show(ctx, self.ui_theme()) {
-            NewSessionPickerEvent::None => {
-                self.new_mux_session_dialog = Some(dialog);
-            }
-            NewSessionPickerEvent::Close => {}
-            NewSessionPickerEvent::NewWorktreeUnavailable => {
-                self.last_error = Some("new worktree creation is not wired yet".to_owned());
-                self.new_mux_session_dialog = Some(dialog);
-            }
-            NewSessionPickerEvent::CreateSession(request) => {
-                let mux_config = self.config().multiplexer.clone();
-                self.mux
-                    .create_project_session(request, &self.repaint, &mux_config);
-            }
-        }
-    }
-
-    fn reload_config(&mut self, ctx: &egui::Context) -> bool {
+    fn reload_config(&mut self, effects: &mut Vec<AppEffect>) -> bool {
         let previous = self.config().clone();
         let path = previous.config_path.clone();
         let next = match load_config_from_path(&path) {
@@ -693,28 +560,27 @@ impl BoottyApp {
             return false;
         }
         if previous.font != next.font {
-            self.terminal_widget
-                .set_text_config(next.font.terminal_text_config());
+            effects.push(AppEffect::SetTerminalTextConfig(
+                next.font.terminal_text_config(),
+            ));
         }
         if previous.window.title != next.window.title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(next.window.title.clone()));
+            effects.push(AppEffect::SetWindowTitle(next.window.title.clone()));
         }
         if previous.window.fullscreen != next.window.fullscreen {
             apply_macos_non_native_fullscreen_presentation(&next.window);
             self.macos_non_native_fullscreen_active = next.window.non_native_fullscreen_enabled();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+            effects.push(AppEffect::SetFullscreen(
                 next.window.native_fullscreen_enabled(),
             ));
             if !macos_handles_non_native_fullscreen_frame(&next.window) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(
+                effects.push(AppEffect::SetMaximized(
                     next.window.non_native_fullscreen_enabled(),
                 ));
             }
         }
         if previous.window.decorations_enabled() != next.window.decorations_enabled() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
-                next.window.decorations_enabled(),
-            ));
+            effects.push(AppEffect::SetDecorations(next.window.decorations_enabled()));
         }
         if previous.diagnostics != next.diagnostics {
             self.stability_trace = StabilityTrace::from_config(&next);
@@ -733,16 +599,16 @@ impl BoottyApp {
         } else {
             None
         };
-        ctx.request_repaint();
+        effects.push(AppEffect::RequestRepaint);
         true
     }
 
-    fn hot_reload_config_if_changed(&mut self, ctx: &egui::Context) {
+    fn hot_reload_config_if_changed(&mut self, effects: &mut Vec<AppEffect>) {
         if !self.config_hot_reload.changed(Instant::now()) {
             return;
         }
         let path = self.config().config_path.clone();
-        if self.reload_config(ctx) {
+        if self.reload_config(effects) {
             self.config_hot_reload.refresh_after_reload(&path);
         }
     }
@@ -754,37 +620,38 @@ impl BoottyApp {
         split_app_actions_for_bindings(&mut self.app_key_bindings, events)
     }
 
-    fn handle_egui_input(&mut self, ctx: &egui::Context) -> usize {
+    fn handle_egui_input(
+        &mut self,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+        hover_pos: Option<Pos2>,
+        pressed_mouse_button: Option<MouseButton>,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+    ) -> usize {
         let suppress_next_egui_paste = std::mem::take(&mut self.suppress_next_egui_paste);
-        let (snapshot, actions) = ctx.input(|input| {
-            let mut events = input.events.clone();
-            if suppress_next_egui_paste {
-                remove_first_paste_event(&mut events);
-            }
-            let (events, actions) = self.split_app_actions(events);
-            let routed = route_events(self.input_focus, events);
-            let events = if self.new_mux_session_dialog.is_some() {
-                Vec::new()
-            } else {
-                routed.terminal_events
-            };
-            (
-                InputSnapshot {
-                    events,
-                    modifiers: input.modifiers,
-                    modifier_sides: self.modifier_sides,
-                    hover_pos: input.pointer.hover_pos(),
-                    pressed_mouse_button: crate::input::pressed_mouse_button_from_egui(
-                        &input.pointer,
-                    ),
-                    surface: self.terminal_surface,
-                    mouse_exclusion: self
-                        .terminal_surface
-                        .map(crate::renderer::scrollbar_hit_rect),
-                },
-                actions,
-            )
-        });
+        let mut events = events;
+        if suppress_next_egui_paste {
+            remove_first_paste_event(&mut events);
+        }
+        let (events, actions) = self.split_app_actions(events);
+        let routed = route_events(self.input_focus, events);
+        let events = if self.new_mux_session_dialog.is_some() {
+            Vec::new()
+        } else {
+            routed.terminal_events
+        };
+        let snapshot = InputSnapshot {
+            events,
+            modifiers,
+            modifier_sides: self.modifier_sides,
+            hover_pos,
+            pressed_mouse_button,
+            surface: self.terminal_surface,
+            mouse_exclusion: self
+                .terminal_surface
+                .map(crate::renderer::scrollbar_hit_rect),
+        };
         let commands = terminal_input_commands_with_options(
             snapshot,
             &self.modifier_remaps,
@@ -793,7 +660,7 @@ impl BoottyApp {
         let count = commands.len() + actions.len();
 
         for action in actions {
-            self.apply_keybind_action(ctx, action);
+            self.apply_keybind_action(action, viewport, effects);
         }
 
         for command in commands {
@@ -802,19 +669,12 @@ impl BoottyApp {
 
         count
     }
-    fn drain_direct_input(&mut self) {
-        if let Some(rx) = &self.modifier_side_rx
-            && let Some(latest) = rx.try_iter().last()
-        {
-            self.modifier_sides = latest;
-        }
-        let Some(rx) = &self.direct_input_rx else {
-            return;
-        };
-        self.pending_direct_input.extend(rx.try_iter());
-    }
 
-    fn handle_direct_input(&mut self, ctx: &egui::Context) -> usize {
+    fn handle_direct_input(
+        &mut self,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+    ) -> usize {
         let inputs = std::mem::take(&mut self.pending_direct_input);
         let count = inputs.len();
         for input in inputs {
@@ -827,7 +687,7 @@ impl BoottyApp {
                 if matches!(action, KeybindAction::PasteFromClipboard) {
                     self.suppress_next_egui_paste = true;
                 }
-                self.apply_keybind_action(ctx, action);
+                self.apply_keybind_action(action, viewport, effects);
                 continue;
             }
             if let Some(KeybindAction::App(AppAction::NewMuxSession)) =
@@ -844,10 +704,15 @@ impl BoottyApp {
         count
     }
 
-    fn apply_keybind_action(&mut self, ctx: &egui::Context, action: KeybindAction) {
+    fn apply_keybind_action(
+        &mut self,
+        action: KeybindAction,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+    ) {
         match action {
             KeybindAction::App(AppAction::ReloadConfig) => {
-                if self.reload_config(ctx) {
+                if self.reload_config(effects) {
                     let path = self.config().config_path.clone();
                     self.config_hot_reload.refresh_after_reload(&path);
                 }
@@ -862,19 +727,16 @@ impl BoottyApp {
                 self.open_new_mux_session_dialog();
             }
             KeybindAction::App(AppAction::Close) => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                effects.push(AppEffect::CloseWindow);
             }
             KeybindAction::App(AppAction::ToggleFullscreen) => {
-                let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
                 if should_toggle_native_fullscreen(&self.config().window) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                    effects.push(AppEffect::SetFullscreen(!viewport.fullscreen));
                 } else {
-                    let viewport_maximized =
-                        ctx.input(|input| input.viewport().maximized.unwrap_or(false));
                     let next_maximized = next_non_native_fullscreen_state(
                         macos_handles_non_native_fullscreen_frame(&self.config().window),
                         self.macos_non_native_fullscreen_active,
-                        viewport_maximized,
+                        viewport.maximized,
                     );
                     self.macos_non_native_fullscreen_active = next_maximized;
                     if next_maximized {
@@ -882,9 +744,9 @@ impl BoottyApp {
                     } else {
                         restore_macos_presentation();
                     }
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    effects.push(AppEffect::SetFullscreen(false));
                     if !macos_handles_non_native_fullscreen_frame(&self.config().window) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(next_maximized));
+                        effects.push(AppEffect::SetMaximized(next_maximized));
                     }
                 }
             }
@@ -895,7 +757,7 @@ impl BoottyApp {
                     self.config_state.current_mut().chrome.sidebar = true;
                     self.input_focus = InputFocus::Sidebar;
                 }
-                ctx.request_repaint();
+                effects.push(AppEffect::RequestRepaint);
             }
             KeybindAction::App(AppAction::ToggleSidebarVisibility) => {
                 let chrome = &mut self.config_state.current_mut().chrome;
@@ -903,7 +765,7 @@ impl BoottyApp {
                 if !chrome.sidebar {
                     self.input_focus = InputFocus::Terminal;
                 }
-                ctx.request_repaint();
+                effects.push(AppEffect::RequestRepaint);
             }
             KeybindAction::Mux(action) => self.apply_mux_key_action(action),
             KeybindAction::Scroll(action) => self.apply_terminal_scroll_action(action),
@@ -912,9 +774,9 @@ impl BoottyApp {
                     self.last_error = Some(error.to_string());
                 }
             }
-            KeybindAction::Font(action) => self.apply_font_size_action(action),
+            KeybindAction::Font(action) => self.apply_font_size_action(action, effects),
             KeybindAction::CopyToClipboard => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy);
+                effects.push(AppEffect::RequestCopy);
             }
             KeybindAction::PasteFromClipboard => match read_clipboard_text() {
                 Ok(Some(text)) => {
@@ -1072,7 +934,7 @@ impl BoottyApp {
         }
     }
 
-    fn apply_font_size_action(&mut self, action: FontSizeAction) {
+    fn apply_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {
         let default_size = BoottyConfig::default().font.size;
         let current_size = self.config().font.size;
         let next_size = match action {
@@ -1083,8 +945,9 @@ impl BoottyApp {
         }
         .max(1.0);
         self.config_state.current_mut().font.size = next_size;
-        self.terminal_widget
-            .set_text_config(self.config().font.terminal_text_config());
+        effects.push(AppEffect::SetTerminalTextConfig(
+            self.config().font.terminal_text_config(),
+        ));
     }
 }
 
@@ -1107,6 +970,7 @@ fn next_non_native_fullscreen_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WindowFullscreen;
 
     #[test]
     fn remove_first_paste_event_removes_only_one_paste_event() {
@@ -1125,8 +989,6 @@ mod tests {
             ]
         );
     }
-
-    use crate::config::WindowFullscreen;
 
     #[test]
     fn default_fullscreen_config_toggles_native_fullscreen() {
@@ -1223,5 +1085,117 @@ mod tests {
 
         assert_eq!(request.session_id, "review-session");
         assert_eq!(request.cwd, "/tmp/bootty-project");
+    }
+
+    fn test_state() -> AppState {
+        let repaint: RepaintHandle = std::sync::Arc::new(|| {});
+        AppState::new(BoottyConfig::default(), repaint, None, None).expect("state")
+    }
+
+    #[test]
+    fn close_action_emits_close_window_effect() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::Close),
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+
+        assert_eq!(effects, vec![AppEffect::CloseWindow]);
+    }
+
+    #[test]
+    fn copy_action_emits_request_copy_effect() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::CopyToClipboard,
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+
+        assert_eq!(effects, vec![AppEffect::RequestCopy]);
+    }
+
+    #[test]
+    fn toggle_sidebar_visibility_flips_config_and_requests_repaint() {
+        let mut state = test_state();
+        let before = state.config().chrome.sidebar;
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::ToggleSidebarVisibility),
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+
+        assert_eq!(state.config().chrome.sidebar, !before);
+        assert_eq!(effects, vec![AppEffect::RequestRepaint]);
+    }
+
+    #[test]
+    fn font_size_decrease_clamps_at_one_and_emits_text_config() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::Font(FontSizeAction::Decrease(10_000.0)),
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+
+        assert_eq!(state.config().font.size, 1.0);
+        assert!(matches!(
+            effects.as_slice(),
+            [AppEffect::SetTerminalTextConfig(_)]
+        ));
+    }
+
+    #[test]
+    fn reload_with_unreadable_config_rejects_and_keeps_previous_config() {
+        let mut state = test_state();
+        let previous_title = state.config().window.title.clone();
+        let mut effects = Vec::new();
+
+        // Default config_path points at a location the test never writes, so
+        // the reload must take the rejection path.
+        let reloaded = state.reload_config(&mut effects);
+
+        if reloaded {
+            // A real user config exists on this machine; the reload accepting
+            // it is correct behavior, nothing to assert against.
+            return;
+        }
+        assert!(state.last_error().is_some());
+        assert_eq!(state.config().window.title, previous_title);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn reload_applies_window_title_change_as_effect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").expect("write empty config");
+
+        let config = BoottyConfig {
+            config_path: path.clone(),
+            ..BoottyConfig::default()
+        };
+        let repaint: RepaintHandle = std::sync::Arc::new(|| {});
+        let mut state = AppState::new(config, repaint, None, None).expect("state");
+
+        std::fs::write(&path, "[window]\ntitle = \"renamed\"\n").expect("write config");
+        let mut effects = Vec::new();
+        let reloaded = state.reload_config(&mut effects);
+
+        assert!(reloaded);
+        assert!(
+            effects.contains(&AppEffect::SetWindowTitle("renamed".to_owned())),
+            "{effects:?}"
+        );
+        assert_eq!(state.config().window.title, "renamed");
     }
 }
