@@ -21,7 +21,9 @@ bootty-runtime = { path = "../bootty-runtime" }
 bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
 png.workspace = true
+resvg.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 

@@ -13,8 +13,11 @@ use crate::{
         snapshot::{MuxSession, MuxWindow},
     },
     strings::{push_truncated_label, truncate_label},
-    ui::sidebar::{
-        SidebarItem, SidebarItemKind, build_visible_sidebar_items, item_label, push_prefixed_label,
+    ui::{
+        icons::{Icon, paint_icon},
+        sidebar::{
+            SidebarDisplay, SidebarItem, SidebarItemKind, SidebarTree, build_visible_sidebar_items,
+        },
     },
 };
 
@@ -93,7 +96,7 @@ pub fn show_status_bar(ui: &mut egui::Ui, palette: ThemePalette, model: StatusBa
 
 const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
 const SIDEBAR_FOOTER_BASE_HEIGHT: f32 = 44.0;
-const SIDEBAR_MAX_USAGE_BARS: usize = 3;
+const SIDEBAR_MAX_USAGE_BARS: usize = 4;
 const SIDEBAR_ROW_HEIGHT: f32 = 24.0;
 const SIDEBAR_PAD_X: f32 = 14.0;
 const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
@@ -435,6 +438,8 @@ fn sidebar_item_row(
             painter.rect_filled(bar, 0.0, item.color);
         }
 
+        paint_tree_guide(&painter, rect, item);
+
         match &item.kind {
             SidebarItemKind::Group => paint_group_item(&painter, rect, item, palette),
             SidebarItemKind::Session {
@@ -468,16 +473,45 @@ fn sidebar_item_row(
     }
     response
 }
+const SIDEBAR_INDENT_PX: f32 = 7.0;
+
+fn item_text_x(rect: Rect, item: &SidebarItem<'_>) -> f32 {
+    rect.min.x + 12.0 + f32::from(item.indent) * SIDEBAR_INDENT_PX
+}
+
+fn paint_tree_guide(painter: &egui::Painter, rect: Rect, item: &SidebarItem<'_>) {
+    let x = rect.min.x + 15.5;
+    let cy = rect.center().y;
+    let stroke = Stroke::new(1.0, item.dim_color.gamma_multiply(0.8));
+    match item.tree {
+        SidebarTree::None | SidebarTree::Blank => {}
+        SidebarTree::Middle => {
+            painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], stroke);
+            painter.line_segment([Pos2::new(x, cy), Pos2::new(x + 5.0, cy)], stroke);
+        }
+        SidebarTree::Last => {
+            painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, cy)], stroke);
+            painter.line_segment([Pos2::new(x, cy), Pos2::new(x + 5.0, cy)], stroke);
+        }
+        SidebarTree::Pipe => {
+            painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], stroke);
+        }
+    }
+}
+
 fn paint_group_item(
     painter: &egui::Painter,
     rect: Rect,
     item: &SidebarItem<'_>,
     palette: ThemePalette,
 ) {
+    let SidebarDisplay::Text(text) = item.display else {
+        return;
+    };
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(item_text_x(rect, item), rect.center().y),
         egui::Align2::LEFT_CENTER,
-        item_label(item, 30),
+        truncate_label(text, 28),
         egui::FontId::monospace(12.0),
         palette.border,
     );
@@ -493,11 +527,39 @@ fn paint_session_item(
     palette: ThemePalette,
 ) {
     let label_color = if active { item.color } else { item.dim_color };
-    let label = item_label(item, 24);
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
+    let (number, name) = match item.display {
+        SidebarDisplay::Numbered { number, label } => (Some(number), label),
+        SidebarDisplay::Text(text) => (None, text),
+        SidebarDisplay::Progress(_) => (None, ""),
+    };
+    let mut text_x = x;
+    if let Some(number) = number {
+        let badge = Rect::from_center_size(Pos2::new(x + 7.0, cy), egui::vec2(14.0, 14.0));
+        if active {
+            painter.rect_filled(badge, 3.0, item.color);
+        } else {
+            painter.rect_stroke(
+                badge,
+                3.0,
+                Stroke::new(1.0, item.dim_color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        painter.text(
+            badge.center(),
+            egui::Align2::CENTER_CENTER,
+            (number % 100).to_string(),
+            egui::FontId::monospace(10.0),
+            if active { palette.base } else { item.dim_color },
+        );
+        text_x = badge.max.x + 6.0;
+    }
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(text_x, cy),
         egui::Align2::LEFT_CENTER,
-        label,
+        truncate_label(name, 20),
         egui::FontId::monospace(13.0),
         label_color,
     );
@@ -543,13 +605,20 @@ fn paint_process_item(
     mem_bytes: Option<u64>,
     palette: ThemePalette,
 ) {
-    let (icon, color) = process_style(name, palette);
+    let color = process_color(name, palette);
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
+    paint_icon(
+        painter,
+        process_icon(name),
+        Pos2::new(x + 6.0, cy),
+        12.0,
+        color,
+    );
     let mut label = String::new();
-    push_prefixed_label(&mut label, item.tree, item.indent, icon);
-    label.push(' ');
     push_truncated_label(&mut label, name, 16);
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(x + 16.0, cy),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(11.0),
@@ -577,15 +646,25 @@ fn paint_process_item(
     }
 }
 
-fn process_style(name: &str, palette: ThemePalette) -> (&'static str, egui::Color32) {
+fn process_color(name: &str, palette: ThemePalette) -> egui::Color32 {
     match name {
-        "node" | "bun" | "deno" => ("󰎙", palette.success),
-        "nvim" | "vim" => ("", palette.accent),
-        "fish" | "zsh" | "bash" | "sh" => ("", palette.subtext),
-        "cargo" | "rustc" | "rust-analyzer" => ("", palette.warning),
-        "git" => ("", palette.destructive),
-        "python" | "python3" => ("", palette.warning),
-        _ => ("", palette.muted),
+        "node" | "bun" | "deno" => palette.success,
+        "nvim" | "vim" => palette.accent,
+        "fish" | "zsh" | "bash" | "sh" => palette.subtext,
+        "cargo" | "rustc" | "rust-analyzer" | "python" | "python3" => palette.warning,
+        "git" => palette.destructive,
+        _ => palette.muted,
+    }
+}
+
+fn process_icon(name: &str) -> Icon {
+    match name {
+        "nvim" | "vim" => Icon::Editor,
+        "git" => Icon::GitBranch,
+        "node" | "bun" | "deno" | "cargo" | "rustc" | "rust-analyzer" | "python" | "python3" => {
+            Icon::Package
+        }
+        _ => Icon::Terminal,
     }
 }
 
@@ -609,15 +688,19 @@ fn paint_agent_item(
     palette: ThemePalette,
 ) {
     let (name, detail) = text.split_once(' ').unwrap_or((text, ""));
-    let (icon, color) = agent_style(name, palette);
-    let mut label = String::new();
-    push_prefixed_label(&mut label, item.tree, item.indent, icon);
-    label.push(' ');
-    label.push_str(name);
+    let color = agent_color(name, palette);
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
+    let icon = if name == "claude" {
+        Icon::Sparkles
+    } else {
+        Icon::Bot
+    };
+    paint_icon(painter, icon, Pos2::new(x + 6.0, cy), 12.0, color);
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(x + 16.0, cy),
         egui::Align2::LEFT_CENTER,
-        label,
+        name,
         egui::FontId::monospace(11.0),
         color,
     );
@@ -660,12 +743,12 @@ fn agent_detail_label(detail: &str, active: bool, time: f64) -> String {
     label
 }
 
-fn agent_style(name: &str, palette: ThemePalette) -> (&'static str, egui::Color32) {
+fn agent_color(name: &str, palette: ThemePalette) -> egui::Color32 {
     match name {
-        "claude" => ("\u{e861}", palette.warning),
-        "codex" => ("\u{e7cf}", egui::Color32::from_rgb(0x74, 0xc7, 0xec)),
-        "opencode" => ("\u{f0b16}", egui::Color32::from_rgb(0x9a, 0x8f, 0xbf)),
-        _ => ("", palette.subtext),
+        "claude" => palette.warning,
+        "codex" => egui::Color32::from_rgb(0x74, 0xc7, 0xec),
+        "opencode" => egui::Color32::from_rgb(0x9a, 0x8f, 0xbf),
+        _ => palette.subtext,
     }
 }
 
@@ -677,17 +760,27 @@ fn paint_detail_item(
     text: &str,
     palette: ThemePalette,
 ) {
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
     let mut display = String::new();
-    if kind.is_empty() {
-        push_prefixed_label(&mut display, item.tree, item.indent, "");
-        push_truncated_label(&mut display, text, 26);
+    let text_x = if kind.is_empty() {
+        paint_icon(
+            painter,
+            Icon::GitBranch,
+            Pos2::new(x + 6.0, cy),
+            11.0,
+            palette.muted,
+        );
+        push_truncated_label(&mut display, text, 24);
+        x + 16.0
     } else {
-        push_prefixed_label(&mut display, item.tree, item.indent, kind);
+        display.push_str(kind);
         display.push(' ');
         push_truncated_label(&mut display, text, 22);
-    }
+        x
+    };
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(text_x, cy),
         egui::Align2::LEFT_CENTER,
         display,
         egui::FontId::monospace(11.0),
@@ -702,24 +795,32 @@ fn paint_progress_item(
     pct: u8,
     palette: ThemePalette,
 ) {
-    let bar_cells = 12usize;
-    let filled = (pct as usize * bar_cells) / 100;
-    let empty = bar_cells.saturating_sub(filled);
-    let mut label = String::new();
-    push_prefixed_label(&mut label, item.tree, item.indent, "");
-    label.extend(std::iter::repeat_n('█', filled));
-    label.extend(std::iter::repeat_n('░', empty));
-    let _ = write!(label, " {pct}%");
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
+    let color = if pct >= 100 {
+        palette.success
+    } else {
+        item.dim_color
+    };
+    let track = Rect::from_min_size(
+        Pos2::new(x, cy - 2.0),
+        egui::vec2((rect.max.x - 52.0 - x).max(20.0), 4.0),
+    );
+    painter.rect_filled(track, 2.0, palette.surface);
+    let fill_w = track.width() * f32::from(pct.min(100)) / 100.0;
+    if fill_w > 0.0 {
+        painter.rect_filled(
+            Rect::from_min_size(track.min, egui::vec2(fill_w, 4.0)),
+            2.0,
+            color,
+        );
+    }
     painter.text(
-        Pos2::new(rect.min.x + 12.0, rect.center().y),
+        Pos2::new(track.max.x + 8.0, cy),
         egui::Align2::LEFT_CENTER,
-        label,
+        format!("{pct}%"),
         egui::FontId::monospace(11.0),
-        if pct >= 100 {
-            palette.success
-        } else {
-            item.dim_color
-        },
+        color,
     );
 }
 
@@ -768,12 +869,18 @@ fn paint_sidebar_footer(
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UsageMarker {
+    pos: f32,
+    color: egui::Color32,
+}
+
 #[derive(Clone, Debug)]
 struct UsageBar<'a> {
     label: Cow<'a, str>,
     pct: u8,
     pace: Cow<'a, str>,
-    pace_marker: Option<f32>,
+    marker: Option<UsageMarker>,
     color: egui::Color32,
 }
 
@@ -841,14 +948,14 @@ fn paint_usage_bar(painter: &egui::Painter, rect: Rect, bar: &UsageBar<'_>, pale
         ],
         Stroke::new(2.0, bar.color),
     );
-    if let Some(marker) = bar.pace_marker {
-        let marker_x = track.left() + track.width() * marker;
+    if let Some(marker) = bar.marker {
+        let marker_x = track.left() + track.width() * marker.pos;
         painter.line_segment(
             [
                 Pos2::new(marker_x, track.top() - 3.0),
                 Pos2::new(marker_x, track.bottom() + 3.0),
             ],
-            Stroke::new(2.0, palette.success),
+            Stroke::new(2.0, marker.color),
         );
     }
 }
@@ -888,18 +995,16 @@ fn paint_usage_right_text(
 }
 fn parse_usage_bars(lines: &[String]) -> UsageBars<'_> {
     let mut bars = UsageBars::new();
-    for line in lines {
-        let (pct, label, pace, pace_marker) = match strip_ansi(line) {
+    let mut index = 0;
+    while index < lines.len() {
+        let line = &lines[index];
+        index += 1;
+        let (pct, label, pace) = match strip_ansi(line) {
             Cow::Borrowed(text) => {
                 let Some(pct) = parse_percent(text) else {
                     continue;
                 };
-                (
-                    pct,
-                    usage_label(text, true),
-                    usage_pace(text, true),
-                    usage_pace_marker(text),
-                )
+                (pct, usage_label(text, true), usage_pace(text, true))
             }
             Cow::Owned(text) => {
                 let Some(pct) = parse_percent(&text) else {
@@ -909,9 +1014,17 @@ fn parse_usage_bars(lines: &[String]) -> UsageBars<'_> {
                     pct,
                     Cow::Owned(usage_label(&text, true).into_owned()),
                     Cow::Owned(usage_pace(&text, true).into_owned()),
-                    usage_pace_marker(&text),
                 )
             }
+        };
+        // A label line may be followed by its painted bar line, which carries
+        // the pace marker (`│`) position and over/under-pace color.
+        let marker = match lines.get(index) {
+            Some(next) if is_bar_line(next) => {
+                index += 1;
+                bar_line_marker(next)
+            }
+            _ => None,
         };
         if !bars.push(UsageBar {
             label: if label.is_empty() {
@@ -921,7 +1034,7 @@ fn parse_usage_bars(lines: &[String]) -> UsageBars<'_> {
             },
             pct,
             pace,
-            pace_marker,
+            marker,
             color: first_ansi_color(line).unwrap_or(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)),
         }) {
             break;
@@ -994,69 +1107,42 @@ fn usage_pace<'a>(text: &'a str, borrow_single_part: bool) -> Cow<'a, str> {
     }
 }
 
-fn usage_pace_marker(text: &str) -> Option<f32> {
-    if !text.contains('↺') {
-        return None;
-    }
-
-    let total = text
-        .split_whitespace()
-        .take_while(|part| !part.ends_with('%'))
-        .filter_map(parse_duration_seconds)
-        .last()?;
-    let reset = text
-        .split_whitespace()
-        .skip_while(|part| !part.ends_with('%'))
-        .find_map(|part| part.strip_prefix('↺').and_then(parse_duration_seconds))?;
-    (total > 0).then(|| (reset as f32 / total as f32).clamp(0.0, 1.0))
+fn is_bar_line(line: &str) -> bool {
+    line.contains(['█', '▓', '▒', '░']) && parse_percent(&strip_ansi(line)).is_none()
 }
 
-fn parse_duration_seconds(token: &str) -> Option<u64> {
-    let token = token.trim().trim_start_matches('+').trim_start_matches('↺');
-    if token.is_empty() {
-        return None;
+/// Extract the pace marker (`│` cell) from a painted usage bar line:
+/// fractional position across the bar cells and its ANSI color.
+fn bar_line_marker(line: &str) -> Option<UsageMarker> {
+    let mut color = None;
+    let mut cells = 0usize;
+    let mut marker = None;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            let mut code = String::new();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    if c == 'm' {
+                        color = sgr_color(&code);
+                    }
+                    break;
+                }
+                code.push(c);
+            }
+        } else if matches!(ch, '█' | '▓' | '▒' | '░') {
+            cells += 1;
+        } else if ch == '│' {
+            marker = Some((cells, color));
+            cells += 1;
+        }
     }
-    if let Some((days, rest)) = token.split_once('d') {
-        let days = days.parse::<u64>().ok()?;
-        let rest_seconds = if rest.is_empty() {
-            0
-        } else {
-            parse_clock_seconds(rest).or_else(|| parse_unit_seconds(rest))?
-        };
-        return Some(
-            days.saturating_mul(24 * 60 * 60)
-                .saturating_add(rest_seconds),
-        );
-    }
-    parse_unit_seconds(token).or_else(|| parse_clock_seconds(token))
-}
-
-fn parse_unit_seconds(token: &str) -> Option<u64> {
-    if let Some(value) = token.strip_suffix('d') {
-        return value
-            .parse::<u64>()
-            .ok()
-            .map(|value| value.saturating_mul(24 * 60 * 60));
-    }
-    if let Some(value) = token.strip_suffix('h') {
-        return value
-            .parse::<u64>()
-            .ok()
-            .map(|value| value.saturating_mul(60 * 60));
-    }
-    if let Some(value) = token.strip_suffix('m') {
-        return value
-            .parse::<u64>()
-            .ok()
-            .map(|value| value.saturating_mul(60));
-    }
-    None
-}
-fn parse_clock_seconds(token: &str) -> Option<u64> {
-    let (hours, minutes) = token.split_once(':')?;
-    let hours = hours.parse::<u64>().ok()?;
-    let minutes = minutes.parse::<u64>().ok()?;
-    (minutes < 60).then_some(hours.saturating_mul(60 * 60) + minutes * 60)
+    let (index, marker_color) = marker?;
+    (cells > 1).then(|| UsageMarker {
+        pos: (index as f32 + 0.5) / cells as f32,
+        color: marker_color.unwrap_or(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)),
+    })
 }
 
 fn parse_percent(text: &str) -> Option<u8> {
@@ -1224,7 +1310,7 @@ mod tests {
         assert_eq!(bars[0].label, "5h");
         assert_eq!(bars[0].pace, "+38m");
         assert_eq!(bars[0].color, egui::Color32::from_rgb(116, 199, 236));
-        assert_eq!(bars[0].pace_marker, None);
+        assert_eq!(bars[0].marker, None);
     }
 
     #[test]
@@ -1243,26 +1329,47 @@ mod tests {
         assert_eq!(bars[0].label, "first");
         assert_eq!(bars[1].label, "second");
         assert_eq!(bars[2].label, "third");
+        assert_eq!(bars[3].label, "fourth");
     }
 
     #[test]
-    fn usage_pace_marker_uses_reset_duration_not_percent() {
+    fn usage_marker_comes_from_bar_line_position_and_color() {
+        let cell = |color: &str, ch: &str| format!("\x1b[38;2;{color}m{ch}\x1b[39m");
+        let mut bar_line = String::new();
+        bar_line.push_str(&cell("232;150;103", "\u{2593}"));
+        bar_line.push_str(&cell("232;150;103", "\u{2593}"));
+        bar_line.push_str(&cell("58;61;78", "\u{2591}"));
+        bar_line.push_str(&cell("239;68;68", "\u{2502}"));
+        for _ in 0..6 {
+            bar_line.push_str(&cell("58;61;78", "\u{2591}"));
+        }
         let lines = vec![
-            "\x1b[38;2;116;199;236m 5h 78% +3h03 ↺50m\x1b[0m".to_owned(),
-            "\x1b[38;2;116;199;236m 7d 73% +1d06:20 ↺3d20:18\x1b[0m".to_owned(),
+            "\x1b[38;2;116;199;236m 5h 78% +3h03 \u{21ba}50m\x1b[0m".to_owned(),
+            bar_line,
         ];
 
         let bars = parse_usage_bars(&lines);
 
-        assert_eq!(bars[0].pace, "+3h03 ↺50m");
-        assert_eq!(bars[1].pace, "+1d06:20 ↺3d20:18");
-        assert!((bars[0].pace_marker.unwrap() - (50.0 / (5.0 * 60.0))).abs() < 0.001);
-        assert!(
-            (bars[1].pace_marker.unwrap()
-                - ((3.0 * 24.0 * 60.0 + 20.0 * 60.0 + 18.0) / (7.0 * 24.0 * 60.0)))
-                .abs()
-                < 0.001
-        );
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].pace, "+3h03 \u{21ba}50m");
+        let marker = bars[0].marker.unwrap();
+        assert!((marker.pos - 0.35).abs() < 0.001);
+        assert_eq!(marker.color, egui::Color32::from_rgb(239, 68, 68));
+    }
+
+    #[test]
+    fn bar_line_without_marker_yields_no_marker() {
+        let lines = vec![
+            "\x1b[38;2;116;199;236m 5h 90% +38m\x1b[0m".to_owned(),
+            "\x1b[38;2;116;199;236m\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\x1b[0m".to_owned(),
+            "\x1b[38;2;116;199;236m 7d 10% +1h\x1b[0m".to_owned(),
+        ];
+
+        let bars = parse_usage_bars(&lines);
+
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].marker, None);
+        assert_eq!(bars[1].label, "7d");
     }
 
     #[test]

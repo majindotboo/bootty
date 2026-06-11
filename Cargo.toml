@@ -60,6 +60,7 @@ pollster = "0.4"
 png = "0.18"
 portable-pty = "0.9"
 proptest = "1"
+resvg = { version = "0.47", default-features = false }
 rmux-sdk = "0.5"
 rmux-ipc = "0.5"
 rmux-proto = "0.5"

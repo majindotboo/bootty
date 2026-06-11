@@ -1,13 +1,10 @@
-use std::{collections::HashMap, fmt::Write as _};
+use std::collections::HashMap;
 
 use eframe::egui::Color32;
 
-use crate::{
-    mux::{
-        sidebar_meta::{DiffStat, SidebarMetadata},
-        snapshot::MuxSession,
-    },
-    strings::push_truncated_label,
+use crate::mux::{
+    sidebar_meta::{DiffStat, SidebarMetadata},
+    snapshot::MuxSession,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,7 +53,7 @@ pub enum SidebarItemId<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarDisplay<'a> {
     Text(&'a str),
-    Numbered { glyph: char, label: &'a str },
+    Numbered { number: usize, label: &'a str },
     Progress(u8),
 }
 
@@ -81,40 +78,6 @@ pub struct SidebarItem<'a> {
     pub dim_color: Color32,
     pub kind: SidebarItemKind<'a>,
     pub current: bool,
-}
-
-const NUM_SELECTED: &[char] = &[
-    '\u{F03A4}',
-    '\u{F03A7}',
-    '\u{F03AA}',
-    '\u{F03AD}',
-    '\u{F03B1}',
-    '\u{F03B3}',
-    '\u{F03B6}',
-    '\u{F03B9}',
-    '\u{F03BC}',
-    '\u{F03BF}',
-];
-const NUM_UNSELECTED: &[char] = &[
-    '\u{F03A6}',
-    '\u{F03A9}',
-    '\u{F03AC}',
-    '\u{F03AE}',
-    '\u{F03B0}',
-    '\u{F03B5}',
-    '\u{F03B8}',
-    '\u{F03BB}',
-    '\u{F03BE}',
-    '\u{F03C1}',
-];
-
-fn num_glyph(index: usize, selected: bool) -> char {
-    let table = if selected {
-        NUM_SELECTED
-    } else {
-        NUM_UNSELECTED
-    };
-    *table.get(index).unwrap_or(&table[table.len() - 1])
 }
 
 pub fn build_sidebar_items<'a>(
@@ -208,7 +171,7 @@ fn build_sidebar_items_inner<'a>(
             let suffix = session_suffix(&session.name);
             let label = if suffix.is_empty() { group } else { suffix };
             let display = SidebarDisplay::Numbered {
-                glyph: num_glyph(ordinal, selected),
+                number: ordinal + 1,
                 label,
             };
             ordinal += 1;
@@ -220,7 +183,7 @@ fn build_sidebar_items_inner<'a>(
                 group
             };
             let display = SidebarDisplay::Numbered {
-                glyph: num_glyph(ordinal, selected),
+                number: ordinal + 1,
                 label,
             };
             ordinal += 1;
@@ -382,133 +345,6 @@ pub fn session_group(name: &str) -> &str {
 
 pub fn session_suffix(name: &str) -> &str {
     name.split_once('/').map_or("", |(_, suffix)| suffix)
-}
-
-pub fn tree_prefix(tree: SidebarTree, indent: u16) -> String {
-    let mut prefix = String::new();
-    push_tree_prefix(&mut prefix, tree, indent);
-    prefix
-}
-
-fn tree_prefix_chars(tree: SidebarTree, indent: u16) -> usize {
-    match tree {
-        SidebarTree::None | SidebarTree::Blank => indent as usize,
-        SidebarTree::Middle | SidebarTree::Last | SidebarTree::Pipe => {
-            1 + indent.saturating_sub(1) as usize
-        }
-    }
-}
-
-fn push_tree_prefix(out: &mut String, tree: SidebarTree, indent: u16) {
-    match tree {
-        SidebarTree::None | SidebarTree::Blank => {
-            out.extend(std::iter::repeat_n(' ', indent as usize));
-        }
-        SidebarTree::Middle => {
-            out.push('├');
-            out.extend(std::iter::repeat_n(' ', indent.saturating_sub(1) as usize));
-        }
-        SidebarTree::Last => {
-            out.push('└');
-            out.extend(std::iter::repeat_n(' ', indent.saturating_sub(1) as usize));
-        }
-        SidebarTree::Pipe => {
-            out.push('│');
-            out.extend(std::iter::repeat_n(' ', indent.saturating_sub(1) as usize));
-        }
-    }
-}
-
-pub fn push_prefixed_label(out: &mut String, tree: SidebarTree, indent: u16, text: &str) {
-    push_tree_prefix(out, tree, indent);
-    out.push_str(text);
-}
-
-fn display_len(display: SidebarDisplay<'_>) -> usize {
-    match display {
-        SidebarDisplay::Text(text) => text.len(),
-        SidebarDisplay::Numbered { glyph, label } => glyph.len_utf8() + 1 + label.len(),
-        SidebarDisplay::Progress(pct) => {
-            if pct >= 100 {
-                4
-            } else if pct >= 10 {
-                3
-            } else {
-                2
-            }
-        }
-    }
-}
-
-fn push_display(out: &mut String, display: SidebarDisplay<'_>) {
-    match display {
-        SidebarDisplay::Text(text) => out.push_str(text),
-        SidebarDisplay::Numbered { glyph, label } => {
-            out.push(glyph);
-            out.push(' ');
-            out.push_str(label);
-        }
-        SidebarDisplay::Progress(pct) => {
-            let _ = write!(out, "{pct}%");
-        }
-    }
-}
-
-fn push_truncated_display(out: &mut String, display: SidebarDisplay<'_>, max_chars: usize) {
-    match display {
-        SidebarDisplay::Text(text) => push_truncated_label(out, text, max_chars),
-        SidebarDisplay::Numbered { glyph, label } => {
-            push_truncated_chars(
-                out,
-                std::iter::once(glyph)
-                    .chain(" ".chars())
-                    .chain(label.chars()),
-                max_chars,
-            );
-        }
-        SidebarDisplay::Progress(pct) => {
-            let mut text = String::new();
-            let _ = write!(text, "{pct}%");
-            push_truncated_label(out, &text, max_chars);
-        }
-    }
-}
-
-fn push_truncated_chars<I>(out: &mut String, chars: I, max_chars: usize)
-where
-    I: IntoIterator<Item = char>,
-{
-    if max_chars == 0 {
-        return;
-    }
-
-    let mut chars = chars.into_iter();
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return;
-        };
-        out.push(ch);
-    }
-    if chars.next().is_some() {
-        out.pop();
-        out.push('…');
-    }
-}
-
-pub fn item_label(item: &SidebarItem<'_>, width: usize) -> String {
-    let prefix_chars = tree_prefix_chars(item.tree, item.indent);
-    let mut out = String::with_capacity(item.indent as usize + display_len(item.display));
-    if width > prefix_chars {
-        push_prefixed_label(&mut out, item.tree, item.indent, "");
-        push_truncated_display(&mut out, item.display, width - prefix_chars);
-        return out;
-    }
-    push_prefixed_label(&mut out, item.tree, item.indent, "");
-    push_display(&mut out, item.display);
-    let full = out;
-    let mut out = String::new();
-    push_truncated_label(&mut out, &full, width);
-    out
 }
 
 #[derive(Debug)]
@@ -687,9 +523,13 @@ mod tests {
         );
 
         let items = build_sidebar_items(&sessions, Some("$1"), &metadata);
-        assert_ne!(item_label(&items[1], 80), "1 api");
-
-        assert!(item_label(&items[1], 80).ends_with(" api"));
+        assert_eq!(
+            items[1].display,
+            SidebarDisplay::Numbered {
+                number: 1,
+                label: "api"
+            }
+        );
         assert!(matches!(items[1].kind, SidebarItemKind::Session { .. }));
         assert!(matches!(items[2].kind, SidebarItemKind::Process { .. }));
         assert!(matches!(items[3].kind, SidebarItemKind::Branch { .. }));
@@ -698,7 +538,13 @@ mod tests {
             items[5].kind,
             SidebarItemKind::Progress { pct: 42 }
         ));
-        assert!(item_label(&items[6], 80).ends_with(" ui"));
+        assert_eq!(
+            items[6].display,
+            SidebarDisplay::Numbered {
+                number: 2,
+                label: "ui"
+            }
+        );
         assert_eq!(items[1].tree, SidebarTree::Middle);
         assert_eq!(items[6].tree, SidebarTree::Last);
     }
