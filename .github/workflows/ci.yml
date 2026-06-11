@@ -26,6 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            fonts-dejavu-core \
             libayatana-appindicator3-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
