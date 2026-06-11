@@ -77,13 +77,14 @@ fn terminal_font_priority_uses_text_command_face_before_fallbacks() {
 }
 
 #[test]
-fn terminal_text_cell_metrics_follow_ghostty_primary_face_rounding() {
+fn terminal_text_cell_metrics_follow_ghostty_primary_face_rounding_when_font_resolves() {
     let config = crate::terminal_text::TerminalTextConfig {
         font_size: 30.0,
         cell_width: 1.0,
         cell_height: 1.0,
         ..Default::default()
     };
+    let configured = CellMetrics::new(config.cell_width, config.cell_height);
     let face = crate::terminal_text::FontResolver::new(config.clone()).resolve_face(
         &crate::paint_plan::TextAttrs {
             fg: PlanColor {
@@ -99,15 +100,17 @@ fn terminal_text_cell_metrics_follow_ghostty_primary_face_rounding() {
             overline: false,
         },
     );
-    let font = terminal_font(&face).expect("system monospace font resolves");
-    let expected = ghostty_cell_metrics_from_font(&font, config.font_size);
     let metrics = terminal_text_cell_metrics(&config);
 
-    assert_eq!(metrics, expected);
-    assert_ne!(
-        metrics,
-        CellMetrics::new(config.cell_width, config.cell_height)
-    );
+    if let Some(font) = terminal_font(&face) {
+        assert_eq!(
+            metrics,
+            ghostty_cell_metrics_from_font(&font, config.font_size)
+        );
+        assert_ne!(metrics, configured);
+    } else {
+        assert_eq!(metrics, configured);
+    }
 }
 
 #[test]
