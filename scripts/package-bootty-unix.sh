@@ -6,6 +6,8 @@ BINARY_NAME="bootty"
 PACKAGE_NAME="bootty-app"
 DIST_DIR="${BOOTTY_DIST_DIR:-dist}"
 TARGET_ROOT="${CARGO_TARGET_DIR:-target}"
+MACOS_ICON_NAME="bootty"
+MACOS_ICON_SOURCE="crates/bootty-app/assets/$MACOS_ICON_NAME.icon"
 VERSION="${BOOTTY_VERSION:-$(awk '
   $0 == "[workspace.package]" { in_workspace_package = 1; next }
   /^\[/ { in_workspace_package = 0 }
@@ -28,7 +30,26 @@ case "$(uname -s)" in
 
     mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
     cp "$TARGET_ROOT/release/$BINARY_NAME" "$MACOS_DIR/$BINARY_NAME"
-    cp "crates/bootty-app/assets/bootty-icon-macos-dock.icns" "$RESOURCES_DIR/bootty.icns"
+    ACTOOL="$(xcrun --find actool 2>/dev/null || true)"
+    if [[ -z "$ACTOOL" ]]; then
+      echo "Xcode 26 actool is required to package the macOS Liquid Glass app icon" >&2
+      exit 1
+    fi
+
+    ICON_PARTIAL_INFO="$CONTENTS_DIR/assetcatalog-info.plist"
+    "$ACTOOL" "$MACOS_ICON_SOURCE" \
+      --compile "$RESOURCES_DIR" \
+      --app-icon "$MACOS_ICON_NAME" \
+      --enable-on-demand-resources NO \
+      --development-region en \
+      --target-device mac \
+      --platform macosx \
+      --enable-icon-stack-fallback-generation=enabled \
+      --include-all-app-icons \
+      --minimum-deployment-target 13.0 \
+      --output-partial-info-plist "$ICON_PARTIAL_INFO" \
+      >/dev/null
+    rm -f "$ICON_PARTIAL_INFO"
     chmod +x "$MACOS_DIR/$BINARY_NAME"
 
     cat > "$CONTENTS_DIR/Info.plist" <<PLIST
@@ -44,6 +65,8 @@ case "$(uname -s)" in
   <string>$BINARY_NAME</string>
   <key>CFBundleIconFile</key>
   <string>bootty</string>
+  <key>CFBundleIconName</key>
+  <string>$MACOS_ICON_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>dev.bootty.desktop</string>
   <key>CFBundleInfoDictionaryVersion</key>

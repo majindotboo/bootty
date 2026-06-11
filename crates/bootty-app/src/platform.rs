@@ -234,6 +234,8 @@ mod macos_presentation {
 
 #[cfg(target_os = "macos")]
 mod macos_app_icon {
+    use std::path::{Path, PathBuf};
+
     use objc2::{AnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
@@ -241,6 +243,10 @@ mod macos_app_icon {
     use crate::assets;
 
     pub fn install() -> bool {
+        if bundled_liquid_glass_asset_catalog().is_some() {
+            return true;
+        }
+
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
@@ -258,6 +264,43 @@ mod macos_app_icon {
             app.setApplicationIconImage(Some(&image));
         }
         true
+    }
+
+    fn bundled_liquid_glass_asset_catalog() -> Option<PathBuf> {
+        let executable = std::env::current_exe().ok()?;
+        bundle_asset_catalog_path(&executable).filter(|path| path.is_file())
+    }
+
+    fn bundle_asset_catalog_path(executable: &Path) -> Option<PathBuf> {
+        let macos_dir = executable.parent()?;
+        let contents_dir = macos_dir.parent()?;
+        if macos_dir.file_name()? != "MacOS" || contents_dir.file_name()? != "Contents" {
+            return None;
+        }
+
+        Some(contents_dir.join("Resources").join("Assets.car"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn bundle_asset_catalog_path_resolves_app_bundle_resources() {
+            let path = Path::new("/tmp/Bootty.app/Contents/MacOS/bootty");
+
+            assert_eq!(
+                bundle_asset_catalog_path(path).as_deref(),
+                Some(Path::new("/tmp/Bootty.app/Contents/Resources/Assets.car"))
+            );
+        }
+
+        #[test]
+        fn bundle_asset_catalog_path_ignores_unbundled_executables() {
+            let path = Path::new("/tmp/target/release/bootty");
+
+            assert_eq!(bundle_asset_catalog_path(path), None);
+        }
     }
 }
 #[cfg(test)]
