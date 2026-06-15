@@ -54,3 +54,91 @@ tempfile.workspace = true
 [[bench]]
 name = "paint_plan"
 harness = false
+
+[[bench]]
+name = "paint_plan_wgpu"
+harness = false
+
+[[bench]]
+name = "startup_config"
+harness = false
+
+[[bench]]
+name = "kitty_image"
+harness = false
+
+[[bench]]
+name = "app_frame"
+harness = false
+
+[[bench]]
+name = "text_atlas"
+harness = false
+
+[[bench]]
+name = "hostile_input"
+harness = false
+
+[[bench]]
+name = "panes_multiwindow"
+harness = false
+
+[[bench]]
+name = "remote_session"
+harness = false
+
+[[bench]]
+name = "real_app_replay"
+harness = false
+
+[[bench]]
+name = "startup_milestones"
+harness = false
+
+[[bench]]
+name = "resize_reflow"
+harness = false
+
+[[bench]]
+name = "scrollback"
+harness = false
+
+[[bench]]
+name = "parser_control"
+harness = false
+
+[[bench]]
+name = "render_pacing"
+harness = false
+
+[[bench]]
+name = "input_latency"
+harness = false
+
+[[bench]]
+name = "idle_overhead"
+harness = false
+
+[[bench]]
+name = "input_protocols"
+harness = false
+
+[[bench]]
+name = "graphics_protocols"
+harness = false
+
+[[bench]]
+name = "vt_correctness"
+harness = false
+
+[[bench]]
+name = "multiplexer"
+harness = false
+
+[[bench]]
+name = "power_thermal"
+harness = false
+
+[[bench]]
+name = "cell_diff"
+harness = false
