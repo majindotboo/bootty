@@ -14,6 +14,7 @@ use crate::{
     app::BoottyApp,
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, direct_key_input_from_winit_event},
+    platform::install_macos_app_icon,
 };
 
 pub fn run(options: eframe::NativeOptions, config: BoottyConfig) -> Result<()> {
@@ -56,6 +57,7 @@ struct BoottyNativeHost<'app> {
 impl ApplicationHandler<UserEvent> for BoottyNativeHost<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.inner.resumed(event_loop);
+        install_macos_app_icon();
     }
 
     fn window_event(

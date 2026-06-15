@@ -17,7 +17,7 @@ pub mod native_host;
 pub mod platform;
 pub mod project_catalog;
 pub mod renderer;
-mod session_order;
+pub mod session_order;
 pub mod shell_env;
 pub mod strings;
 pub mod terminal;

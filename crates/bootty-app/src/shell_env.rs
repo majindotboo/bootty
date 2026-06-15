@@ -35,10 +35,19 @@ pub fn hydrate_from_login_shell() {}
 
 #[cfg(target_os = "macos")]
 fn login_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| std::path::Path::new(s).is_absolute())
-        .unwrap_or_else(|| "/bin/zsh".to_string())
+    login_shell_from(
+        bootty_runtime::terminal_session::configured_user_shell(),
+        std::env::var("SHELL").ok(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn login_shell_from(configured: Option<String>, inherited: Option<String>) -> String {
+    [configured, inherited]
+        .into_iter()
+        .flatten()
+        .find(|shell| std::path::Path::new(shell).is_absolute())
+        .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
 /// Run `<shell> -l -c env` and parse its output. A login shell sources the
@@ -97,7 +106,23 @@ fn apply_env(vars: Vec<(String, String)>) {
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
-    use super::parse_null_delimited_env;
+    use super::{login_shell_from, parse_null_delimited_env};
+
+    #[test]
+    fn login_shell_prefers_configured_user_shell_over_inherited_shell() {
+        assert_eq!(
+            login_shell_from(
+                Some("/opt/homebrew/bin/fish".to_string()),
+                Some("/bin/zsh".to_string()),
+            ),
+            "/opt/homebrew/bin/fish"
+        );
+    }
+
+    #[test]
+    fn login_shell_falls_back_to_portable_unix_shell() {
+        assert_eq!(login_shell_from(None, Some("zsh".to_string())), "/bin/sh");
+    }
 
     #[test]
     fn parses_entries_and_preserves_multiline_values() {

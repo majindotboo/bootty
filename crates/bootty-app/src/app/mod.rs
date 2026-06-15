@@ -1,6 +1,6 @@
 mod state;
 
-use std::{sync::mpsc, time::Instant};
+use std::{path::PathBuf, sync::mpsc, time::Instant};
 
 use anyhow::Result;
 use eframe::egui::{
@@ -48,7 +48,9 @@ impl BoottyApp {
         direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     ) -> Result<Self> {
-        configure_egui_fonts(&cc.egui_ctx, &config.font.family);
+        if uses_custom_egui_fonts(&config) {
+            configure_egui_fonts(&cc.egui_ctx, &config.font.family);
+        }
         let repaint_ctx = cc.egui_ctx.clone();
         let repaint: crate::mux::RepaintHandle =
             std::sync::Arc::new(move || repaint_ctx.request_repaint());
@@ -89,9 +91,23 @@ impl BoottyApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy);
                 }
                 AppEffect::RequestRepaint => ctx.request_repaint(),
+                AppEffect::Bell => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                        egui::UserAttentionType::Informational,
+                    ));
+                }
                 AppEffect::RepaintAfter(after) => ctx.request_repaint_after(after),
                 AppEffect::SetTerminalTextConfig(text_config) => {
                     self.terminal_widget.set_text_config(text_config);
+                }
+                AppEffect::SetTerminalCursorIcon(icon) => {
+                    self.terminal_widget.set_terminal_cursor_icon(icon);
+                }
+                AppEffect::SetWindowFocus => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                AppEffect::OpenUrl(url) => {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
             }
         }
@@ -125,11 +141,13 @@ impl BoottyApp {
         } else {
             0.0
         };
-        let show_window_tabs = matches!(
-            self.state.config().multiplexer.backend,
-            crate::config::MultiplexerBackendConfig::Rmux
-                | crate::config::MultiplexerBackendConfig::Native
-        ) && !self.state.mux().selected_session_windows().is_empty();
+        let show_window_tabs = chrome_config.window_tabs
+            && matches!(
+                self.state.config().multiplexer.backend,
+                crate::config::MultiplexerBackendConfig::Rmux
+                    | crate::config::MultiplexerBackendConfig::Native
+            )
+            && !self.state.mux().selected_session_windows().is_empty();
         let window_tabs_height = if show_window_tabs { 34.0 } else { 0.0 };
         let sidebar_rect = if sidebar {
             Rect::from_min_size(
@@ -313,30 +331,48 @@ impl eframe::App for BoottyApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let (events, modifiers, hover_pos, pressed_mouse_button, stable_dt, viewport) =
-            ctx.input(|input| {
-                (
-                    input.events.clone(),
-                    input.modifiers,
-                    input.pointer.hover_pos(),
-                    crate::input::pressed_mouse_button_from_egui(&input.pointer),
-                    input.stable_dt,
-                    ViewportSnapshot {
-                        fullscreen: input.viewport().fullscreen.unwrap_or(false),
-                        maximized: input.viewport().maximized.unwrap_or(false),
-                        content_height: input.content_rect().height(),
-                    },
-                )
-            });
+        let (
+            events,
+            dropped_file_paths,
+            modifiers,
+            hover_pos,
+            pressed_mouse_button,
+            stable_dt,
+            viewport,
+        ) = ctx.input(|input| {
+            (
+                input.events.clone(),
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect::<Vec<PathBuf>>(),
+                input.modifiers,
+                input.pointer.hover_pos(),
+                crate::input::pressed_mouse_button_from_egui(&input.pointer),
+                input.stable_dt,
+                ViewportSnapshot {
+                    fullscreen: input.viewport().fullscreen.unwrap_or(false),
+                    maximized: input.viewport().maximized.unwrap_or(false),
+                    content_height: input.content_rect().height(),
+                },
+            )
+        });
+        let (terminal_cell_width, terminal_cell_height) = self.terminal_widget.cell_dimensions();
         let inputs = FrameInputs {
             now: Instant::now(),
             stable_dt_ms: stable_dt * 1000.0,
             events,
+            dropped_file_paths,
             modifiers,
             hover_pos,
             pressed_mouse_button,
             viewport,
             renderer_metrics: self.terminal_widget.metrics(),
+            terminal_cell_width,
+            terminal_cell_height,
+            terminal_scale_factor: ctx.pixels_per_point(),
         };
         let effects = self.state.update_frame(inputs);
         self.apply_effects(ctx, effects);
@@ -350,6 +386,10 @@ impl eframe::App for BoottyApp {
         self.show_new_mux_session_dialog(ui.ctx());
         self.show_session_picker_dialog(ui.ctx());
     }
+}
+
+fn uses_custom_egui_fonts(config: &BoottyConfig) -> bool {
+    config.chrome.sidebar || config.chrome.status_bar || config.chrome.window_tabs
 }
 
 fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {
@@ -387,4 +427,23 @@ fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {
     }
 
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_egui_fonts_only_load_for_visible_chrome() {
+        let mut config = BoottyConfig::default();
+        assert!(uses_custom_egui_fonts(&config));
+
+        config.chrome.sidebar = false;
+        config.chrome.status_bar = false;
+        config.chrome.window_tabs = false;
+        assert!(!uses_custom_egui_fonts(&config));
+
+        config.chrome.status_bar = true;
+        assert!(uses_custom_egui_fonts(&config));
+    }
 }

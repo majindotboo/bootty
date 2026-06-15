@@ -160,6 +160,7 @@ struct FontPatch {
 pub struct ChromeConfig {
     pub sidebar: bool,
     pub status_bar: bool,
+    pub window_tabs: bool,
     pub sidebar_width: f32,
     pub status_height: f32,
     pub gap: f32,
@@ -172,6 +173,7 @@ pub struct ChromeConfig {
 struct ChromePatch {
     sidebar: Option<bool>,
     status_bar: Option<bool>,
+    window_tabs: Option<bool>,
     sidebar_width: Option<f32>,
     status_height: Option<f32>,
     gap: Option<f32>,
@@ -389,6 +391,7 @@ impl Default for ChromeConfig {
         Self {
             sidebar: true,
             status_bar: true,
+            window_tabs: true,
             sidebar_width: 286.0,
             status_height: 30.0,
             gap: 1.0,
@@ -1250,6 +1253,7 @@ fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) {
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.sidebar, partial.sidebar);
     apply_value(&mut chrome.status_bar, partial.status_bar);
+    apply_value(&mut chrome.window_tabs, partial.window_tabs);
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_value(&mut chrome.gap, partial.gap);

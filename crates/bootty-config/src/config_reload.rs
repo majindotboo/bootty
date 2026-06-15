@@ -43,6 +43,8 @@ pub fn new_session_only_config_changed(previous: &BoottyConfig, next: &BoottyCon
     previous.session != next.session
         || previous.window.width != next.window.width
         || previous.window.height != next.window.height
+        || previous.window.fullscreen != next.window.fullscreen
+        || previous.window.window_decoration != next.window.window_decoration
         || previous.window.macos_titlebar_style != next.window.macos_titlebar_style
 }
 
@@ -54,7 +56,7 @@ fn snapshot_for_config_path(path: &Path) -> ConfigFileSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ChromeConfig, MacosTitlebarStyle};
+    use crate::config::{ChromeConfig, MacosTitlebarStyle, WindowDecoration, WindowFullscreen};
 
     #[test]
     fn reload_scope_treats_session_and_window_size_as_new_session_only() {
@@ -73,6 +75,13 @@ mod tests {
         next.window.width = 900.0;
         assert!(new_session_only_config_changed(&previous, &next));
 
+        let mut next = previous.clone();
+        next.window.fullscreen = WindowFullscreen::NonNative;
+        assert!(new_session_only_config_changed(&previous, &next));
+
+        let mut next = previous.clone();
+        next.window.window_decoration = WindowDecoration::None;
+        assert!(new_session_only_config_changed(&previous, &next));
         let mut next = previous.clone();
         next.window.macos_titlebar_style = MacosTitlebarStyle::Hidden;
         assert!(new_session_only_config_changed(&previous, &next));

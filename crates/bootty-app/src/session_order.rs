@@ -1,22 +1,14 @@
 use std::{
     collections::HashSet,
     fs,
-    io::Write,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, params};
 
 fn session_group(name: &str) -> &str {
     name.split_once('/').map_or("", |(group, _)| group)
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("tmp");
-    path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()))
 }
 
 fn load_lines(path: &Path) -> Vec<String> {
@@ -38,27 +30,78 @@ fn legacy_order_paths(config_path: &Path) -> [PathBuf; 2] {
     [bootty_legacy, tmux_legacy]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+fn sqlite_order_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("session-order.sqlite3")
+}
+
+fn open_session_order_db(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_millis(250))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_groups (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            name TEXT PRIMARY KEY,
+            group_id INTEGER NOT NULL REFERENCES session_groups(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL
+        );",
+    )?;
+    Ok(conn)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionGroup {
     name: String,
     sessions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SessionStore {
     entries: Vec<SessionGroup>,
 }
 
 impl SessionStore {
-    fn load(path: &Path) -> Self {
-        if let Ok(data) = fs::read_to_string(path)
-            && let Ok(mut store) = serde_json::from_str::<SessionStore>(&data)
-        {
-            store.normalize_groups();
-            return store;
-        }
+    fn load_sqlite(path: &Path) -> rusqlite::Result<Self> {
+        let conn = open_session_order_db(path)?;
+        let mut stmt = conn.prepare(
+            "SELECT g.id, g.name, s.name
+             FROM session_groups g
+             JOIN sessions s ON s.group_id = g.id
+             ORDER BY g.position, s.position",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
 
-        Self::default()
+        let mut store = Self::default();
+        let mut current_group_id = None;
+        for row in rows {
+            let (group_id, group_name, session_name) = row?;
+            if current_group_id != Some(group_id) {
+                store.entries.push(SessionGroup {
+                    name: group_name,
+                    sessions: Vec::new(),
+                });
+                current_group_id = Some(group_id);
+            }
+            if let Some(group) = store.entries.last_mut() {
+                group.sessions.push(session_name);
+            }
+        }
+        Ok(store)
     }
 
     fn from_flat_list(names: &[String]) -> Self {
@@ -66,7 +109,7 @@ impl SessionStore {
         let mut seen = HashSet::new();
         for name in names {
             if seen.insert(name.clone()) {
-                store.insert(name);
+                store.insert_unique(name);
             }
         }
         store
@@ -79,11 +122,14 @@ impl SessionStore {
             .collect()
     }
 
-    fn insert(&mut self, name: &str) {
-        if self.contains(name) {
-            return;
-        }
+    fn existing_names(&self) -> HashSet<String> {
+        self.entries
+            .iter()
+            .flat_map(|group| group.sessions.iter().cloned())
+            .collect()
+    }
 
+    fn insert_unique(&mut self, name: &str) {
         let group = session_group(name);
         if group.is_empty() {
             self.entries.push(SessionGroup {
@@ -110,44 +156,18 @@ impl SessionStore {
         }
     }
 
-    fn normalize_groups(&mut self) {
-        let mut merged = Vec::<SessionGroup>::new();
-        for entry in self.entries.drain(..) {
-            for session in &entry.sessions {
-                let group = session_group(session);
-                if group.is_empty() {
-                    merged.push(SessionGroup {
-                        name: String::new(),
-                        sessions: vec![session.clone()],
-                    });
-                    continue;
-                }
-                if let Some(target) = merged.iter_mut().find(|entry| entry.name == group) {
-                    if !target.sessions.contains(session) {
-                        target.sessions.push(session.clone());
-                    }
-                } else {
-                    merged.push(SessionGroup {
-                        name: group.to_owned(),
-                        sessions: vec![session.clone()],
-                    });
-                }
-            }
-        }
-        self.entries = merged;
-    }
-
-    fn prune(&mut self, alive: &HashSet<String>) {
+    fn prune(&mut self, alive: &HashSet<&str>) -> bool {
+        let mut changed = false;
         for entry in &mut self.entries {
-            entry.sessions.retain(|session| alive.contains(session));
+            let before = entry.sessions.len();
+            entry
+                .sessions
+                .retain(|session| alive.contains(session.as_str()));
+            changed |= entry.sessions.len() != before;
         }
+        let before = self.entries.len();
         self.entries.retain(|entry| !entry.sessions.is_empty());
-    }
-
-    fn contains(&self, name: &str) -> bool {
-        self.entries
-            .iter()
-            .any(|group| group.sessions.iter().any(|session| session == name))
+        changed || self.entries.len() != before
     }
 
     fn move_session(&mut self, name: &str, delta: i32) -> bool {
@@ -228,51 +248,116 @@ impl SessionStore {
                     .map(|session_idx| (entry_idx, session_idx))
             })
     }
+
+    fn save_sqlite(&self, path: &Path) -> rusqlite::Result<()> {
+        let mut conn = open_session_order_db(path)?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM sessions", [])?;
+        tx.execute("DELETE FROM session_groups", [])?;
+        {
+            let mut insert_group =
+                tx.prepare("INSERT INTO session_groups (name, position) VALUES (?1, ?2)")?;
+            let mut insert_session =
+                tx.prepare("INSERT INTO sessions (name, group_id, position) VALUES (?1, ?2, ?3)")?;
+            for (group_position, group) in self.entries.iter().enumerate() {
+                insert_group.execute(params![group.name, group_position as i64])?;
+                let group_id = tx.last_insert_rowid();
+                for (session_position, session) in group.sessions.iter().enumerate() {
+                    insert_session.execute(params![session, group_id, session_position as i64])?;
+                }
+            }
+        }
+        tx.commit()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionOrderStore {
+    config_path: PathBuf,
     path: PathBuf,
     store: SessionStore,
+    loaded: bool,
 }
 
 impl SessionOrderStore {
     pub fn for_config_path(config_path: &Path) -> Self {
-        let path = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("session-order.json");
-        let mut store = SessionStore::load(&path);
+        let path = sqlite_order_path(config_path);
+        let store = Self::load_store(config_path, &path);
+        Self {
+            config_path: config_path.to_path_buf(),
+            path,
+            store,
+            loaded: true,
+        }
+    }
+
+    pub fn lazy_for_config_path(config_path: &Path) -> Self {
+        Self {
+            config_path: config_path.to_path_buf(),
+            path: sqlite_order_path(config_path),
+            store: SessionStore::default(),
+            loaded: false,
+        }
+    }
+
+    fn load_store(config_path: &Path, path: &Path) -> SessionStore {
+        let mut store = SessionStore::load_sqlite(path).unwrap_or_default();
         if store == SessionStore::default() {
-            for legacy in legacy_order_paths(config_path) {
-                if !legacy.exists() {
-                    continue;
-                }
-                store = SessionStore::from_flat_list(&load_lines(&legacy));
-                break;
+            store = Self::load_legacy_store(config_path);
+            if store != SessionStore::default() {
+                let _ = store.save_sqlite(path);
             }
         }
-        Self { path, store }
+        store
+    }
+
+    fn ensure_loaded(&mut self) {
+        if self.loaded {
+            return;
+        }
+        self.store = Self::load_store(&self.config_path, &self.path);
+        self.loaded = true;
+    }
+
+    fn load_legacy_store(config_path: &Path) -> SessionStore {
+        for legacy in legacy_order_paths(config_path) {
+            if !legacy.exists() {
+                continue;
+            }
+            return SessionStore::from_flat_list(&load_lines(&legacy));
+        }
+        SessionStore::default()
     }
 
     pub fn sync_sessions<'a>(
         &mut self,
         sessions: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
+        self.ensure_loaded();
         let ordered_alive = sessions.into_iter().map(str::to_owned).collect::<Vec<_>>();
-        let alive = ordered_alive.iter().cloned().collect::<HashSet<_>>();
-        let previous = self.store.clone();
-        for session in ordered_alive {
-            self.store.insert(&session);
+        if ordered_alive.is_empty() {
+            return Vec::new();
         }
-        self.store.prune(&alive);
-        if self.store != previous {
+        let alive = ordered_alive
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut existing = self.store.existing_names();
+        let mut changed = false;
+        for session in &ordered_alive {
+            if existing.insert(session.clone()) {
+                self.store.insert_unique(session);
+                changed = true;
+            }
+        }
+        changed |= self.store.prune(&alive);
+        if changed {
             self.save();
         }
         self.store
             .ordered_names()
             .into_iter()
-            .filter(|session| alive.contains(session))
+            .filter(|session| alive.contains(session.as_str()))
             .collect()
     }
 
@@ -305,22 +390,12 @@ impl SessionOrderStore {
     }
 
     fn save(&self) {
-        let Some(parent) = self.path.parent() else {
-            return;
-        };
-        if fs::create_dir_all(parent).is_err() {
-            return;
-        }
-
-        let tmp = temp_path(&self.path);
-        let json = serde_json::to_string_pretty(&self.store).unwrap_or_default();
-        if fs::File::create(&tmp)
-            .and_then(|mut file| file.write_all(json.as_bytes()))
-            .is_err()
+        if let Some(parent) = self.path.parent()
+            && fs::create_dir_all(parent).is_err()
         {
             return;
         }
-        let _ = fs::rename(&tmp, &self.path);
+        let _ = self.store.save_sqlite(&self.path);
     }
 }
 
@@ -336,6 +411,50 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bootty-session-order-{name}-{unique}"));
         fs::create_dir_all(&dir).expect("create temp session order dir");
         dir.join("config.toml")
+    }
+
+    #[test]
+    fn sync_sessions_persists_order_in_sqlite_wal_database() {
+        let path = temp_config_path("sqlite");
+        let mut store = SessionOrderStore::for_config_path(&path);
+        store.sync_sessions(["arc/migrations", "arc/readiness", "agents", "bootty"]);
+        assert!(store.move_block_before(
+            "agents",
+            Some("arc/migrations"),
+            ["arc/migrations", "arc/readiness", "agents", "bootty"],
+        ));
+
+        let mut reloaded = SessionOrderStore::for_config_path(&path);
+        assert_eq!(
+            reloaded.sync_sessions(["arc/migrations", "arc/readiness", "agents", "bootty"]),
+            vec!["agents", "arc/migrations", "arc/readiness", "bootty"]
+        );
+
+        let conn = open_session_order_db(&sqlite_order_path(&path)).expect("open session order db");
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("query journal mode");
+        assert_eq!(journal_mode, "wal");
+    }
+
+    #[test]
+    fn sync_sessions_does_not_overwrite_persisted_order_when_refresh_has_no_sessions() {
+        let path = temp_config_path("empty-refresh");
+        let mut store = SessionOrderStore::for_config_path(&path);
+        store.sync_sessions(["arc/migrations", "arc/readiness", "agents", "bootty"]);
+        assert!(store.move_block_before(
+            "agents",
+            Some("arc/migrations"),
+            ["arc/migrations", "arc/readiness", "agents", "bootty"],
+        ));
+
+        assert!(store.sync_sessions(std::iter::empty()).is_empty());
+
+        let mut reloaded = SessionOrderStore::for_config_path(&path);
+        assert_eq!(
+            reloaded.sync_sessions(["arc/migrations", "arc/readiness", "agents", "bootty"]),
+            vec!["agents", "arc/migrations", "arc/readiness", "bootty"]
+        );
     }
 
     #[test]

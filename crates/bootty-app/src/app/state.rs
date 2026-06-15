@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -16,13 +17,12 @@ use crate::{
     config_reload::{CONFIG_HOT_RELOAD_INTERVAL, ConfigHotReload, new_session_only_config_changed},
     diagnostics::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
-        should_sample_status_metrics,
     },
     direct_input::{DirectKeyInput, ModifierSideState},
     geometry::TerminalSurface,
     input::{
-        InputSnapshot, TerminalInputCommand, focus::InputFocus, router::route_events,
-        terminal_input_commands_with_options,
+        InputSnapshot, TerminalInputCommand, WheelScrollState, focus::InputFocus,
+        router::route_events, terminal_input_commands_with_wheel_state,
     },
     modifier_remap::ModifierRemapSet,
     mux::{
@@ -36,14 +36,14 @@ use crate::{
         terminal::ActiveTerminal,
     },
     platform::{
-        apply_macos_non_native_fullscreen_presentation,
-        macos_handles_non_native_fullscreen_frame, read_clipboard_text, restore_macos_presentation,
-        spawn_new_window,
+        apply_macos_non_native_fullscreen_presentation, macos_handles_non_native_fullscreen_frame,
+        read_clipboard_text, restore_macos_presentation, show_desktop_notification,
+        spawn_new_window, write_clipboard_text,
     },
     renderer::{RendererMetrics, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
     session_order::SessionOrderStore,
-    terminal::{DrainStats, MouseButton},
+    terminal::{DrainStats, MouseButton, TerminalSessionConfig},
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
@@ -51,6 +51,10 @@ use crate::{
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
     },
+};
+use bootty_terminal::terminal_engine::{
+    TerminalSideEffect, encode_iterm2_report_cell_size, encode_iterm2_report_variable,
+    encode_osc52_response,
 };
 
 const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -63,11 +67,15 @@ pub struct FrameInputs {
     pub now: Instant,
     pub stable_dt_ms: f32,
     pub events: Vec<egui::Event>,
+    pub dropped_file_paths: Vec<PathBuf>,
     pub modifiers: egui::Modifiers,
     pub hover_pos: Option<Pos2>,
     pub pressed_mouse_button: Option<MouseButton>,
     pub viewport: ViewportSnapshot,
     pub renderer_metrics: RendererMetrics,
+    pub terminal_cell_width: f32,
+    pub terminal_cell_height: f32,
+    pub terminal_scale_factor: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,8 +95,12 @@ pub enum AppEffect {
     SetDecorations(bool),
     RequestCopy,
     RequestRepaint,
+    Bell,
     RepaintAfter(Duration),
     SetTerminalTextConfig(TerminalTextConfig),
+    SetTerminalCursorIcon(egui::CursorIcon),
+    SetWindowFocus,
+    OpenUrl(String),
 }
 
 pub struct AppState {
@@ -107,12 +119,16 @@ pub struct AppState {
     has_new_session_config_changes: bool,
     mux: MuxController,
     repaint: RepaintHandle,
+    terminal_side_effect_tx: mpsc::Sender<TerminalSideEffect>,
+    terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffect>,
     direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
     modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     modifier_sides: ModifierSideState,
     pending_direct_input: Vec<DirectKeyInput>,
     suppress_next_egui_paste: bool,
+    wheel_scroll_state: WheelScrollState,
     modifier_remaps: ModifierRemapSet,
+    terminal_cursor_icon: egui::CursorIcon,
     macos_option_as_alt: crate::terminal::MacosOptionAsAlt,
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
@@ -126,6 +142,16 @@ pub struct AppState {
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
     macos_non_native_fullscreen_active: bool,
+    macos_non_native_fullscreen_pending_apply: bool,
+}
+
+fn terminal_session_config_with_side_effects(
+    config: &BoottyConfig,
+    side_effect_tx: &mpsc::Sender<TerminalSideEffect>,
+) -> TerminalSessionConfig {
+    let mut session_config = config.terminal_session_config();
+    session_config.side_effect_tx = Some(side_effect_tx.clone());
+    session_config
 }
 
 fn initial_sidebar_metadata_refresh_mark(started_at: Instant) -> Instant {
@@ -145,6 +171,59 @@ fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
         true
     } else {
         false
+    }
+}
+
+fn terminal_cursor_icon_for_mouse_shape(shape: &str) -> Option<egui::CursorIcon> {
+    let normalized = shape.to_ascii_lowercase().replace('_', "-");
+    for token in normalized
+        .split([';', ',', ':', '=', ' '])
+        .filter(|token| !token.is_empty())
+    {
+        let icon = match token {
+            "default" | "reset" | "arrow" => egui::CursorIcon::Default,
+            "none" | "hidden" => egui::CursorIcon::None,
+            "pointer" | "hand" | "pointing-hand" => egui::CursorIcon::PointingHand,
+            "text" | "ibeam" | "i-beam" => egui::CursorIcon::Text,
+            "vertical-text" => egui::CursorIcon::VerticalText,
+            "crosshair" => egui::CursorIcon::Crosshair,
+            "help" => egui::CursorIcon::Help,
+            "wait" => egui::CursorIcon::Wait,
+            "progress" => egui::CursorIcon::Progress,
+            "cell" => egui::CursorIcon::Cell,
+            "copy" => egui::CursorIcon::Copy,
+            "alias" => egui::CursorIcon::Alias,
+            "move" => egui::CursorIcon::Move,
+            "no-drop" => egui::CursorIcon::NoDrop,
+            "not-allowed" | "forbidden" => egui::CursorIcon::NotAllowed,
+            "grab" => egui::CursorIcon::Grab,
+            "grabbing" => egui::CursorIcon::Grabbing,
+            "all-scroll" => egui::CursorIcon::AllScroll,
+            "ew-resize" | "col-resize" | "resize-horizontal" => egui::CursorIcon::ResizeHorizontal,
+            "ns-resize" | "row-resize" | "resize-vertical" => egui::CursorIcon::ResizeVertical,
+            "nesw-resize" | "resize-nesw" => egui::CursorIcon::ResizeNeSw,
+            "nwse-resize" | "resize-nwse" => egui::CursorIcon::ResizeNwSe,
+            "e-resize" | "resize-east" => egui::CursorIcon::ResizeEast,
+            "s-resize" | "resize-south" => egui::CursorIcon::ResizeSouth,
+            "w-resize" | "resize-west" => egui::CursorIcon::ResizeWest,
+            "n-resize" | "resize-north" => egui::CursorIcon::ResizeNorth,
+            "ne-resize" | "resize-north-east" => egui::CursorIcon::ResizeNorthEast,
+            "nw-resize" | "resize-north-west" => egui::CursorIcon::ResizeNorthWest,
+            "se-resize" | "resize-south-east" => egui::CursorIcon::ResizeSouthEast,
+            "sw-resize" | "resize-south-west" => egui::CursorIcon::ResizeSouthWest,
+            "zoom-in" => egui::CursorIcon::ZoomIn,
+            "zoom-out" => egui::CursorIcon::ZoomOut,
+            _ => continue,
+        };
+        return Some(icon);
+    }
+    None
+}
+
+fn terminal_report_variable_response(name: &str, session_name: Option<&str>) -> Option<Vec<u8>> {
+    match name {
+        "session.name" => session_name.map(encode_iterm2_report_variable),
+        _ => None,
     }
 }
 
@@ -187,11 +266,16 @@ impl AppState {
         let sidebar_key_bindings =
             SidebarKeyBindings::from_keybinds(&config.input.sidebar_keybind)?;
         let stability_trace = StabilityTrace::from_config(&config);
-        let session_config = config.terminal_session_config();
+        let (terminal_side_effect_tx, terminal_side_effect_rx) = mpsc::channel();
+        let session_config =
+            terminal_session_config_with_side_effects(&config, &terminal_side_effect_tx);
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
-        let session_order = SessionOrderStore::for_config_path(&config.config_path);
+        let session_order = SessionOrderStore::lazy_for_config_path(&config.config_path);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
-        apply_macos_non_native_fullscreen_presentation(&config.window);
+        let macos_non_native_fullscreen_applied =
+            apply_macos_non_native_fullscreen_presentation(&config.window);
+        let macos_non_native_fullscreen_pending_apply =
+            macos_non_native_fullscreen_active && !macos_non_native_fullscreen_applied;
 
         Ok(Self {
             terminal: ActiveTerminal::new(
@@ -213,13 +297,17 @@ impl AppState {
             sidebar_key_bindings,
             has_new_session_config_changes: false,
             mux: MuxController::new(),
+            terminal_side_effect_tx,
+            terminal_side_effect_rx,
             repaint,
             direct_input_rx,
             modifier_side_rx,
             modifier_sides: ModifierSideState::default(),
             pending_direct_input: Vec::new(),
             suppress_next_egui_paste: false,
+            wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
+            terminal_cursor_icon: egui::CursorIcon::Default,
             macos_option_as_alt,
             stability_trace,
             config_hot_reload,
@@ -233,6 +321,7 @@ impl AppState {
             sidebar_hovered_session: None,
             session_picker_dialog: None,
             macos_non_native_fullscreen_active,
+            macos_non_native_fullscreen_pending_apply,
         })
     }
 
@@ -277,6 +366,15 @@ impl AppState {
 
     pub fn macos_non_native_fullscreen_active(&self) -> bool {
         self.macos_non_native_fullscreen_active
+    }
+
+    fn sync_macos_non_native_fullscreen_presentation(&mut self) {
+        if !self.macos_non_native_fullscreen_pending_apply {
+            return;
+        }
+        if apply_macos_non_native_fullscreen_presentation(&self.config().window) {
+            self.macos_non_native_fullscreen_pending_apply = false;
+        }
     }
 
     pub fn terminal_mut(&mut self) -> &mut ActiveTerminal {
@@ -418,6 +516,97 @@ impl AppState {
         self.pending_direct_input.extend(rx.try_iter());
     }
 
+    fn drain_terminal_side_effects(
+        &mut self,
+        effects: &mut Vec<AppEffect>,
+        terminal_cell_width: f32,
+        terminal_cell_height: f32,
+        terminal_scale_factor: f32,
+    ) {
+        let side_effects = self.terminal_side_effect_rx.try_iter().collect::<Vec<_>>();
+        for side_effect in side_effects {
+            self.apply_terminal_side_effect(
+                side_effect,
+                effects,
+                terminal_cell_width,
+                terminal_cell_height,
+                terminal_scale_factor,
+            );
+        }
+    }
+
+    fn apply_terminal_side_effect(
+        &mut self,
+        side_effect: TerminalSideEffect,
+        effects: &mut Vec<AppEffect>,
+        terminal_cell_width: f32,
+        terminal_cell_height: f32,
+        terminal_scale_factor: f32,
+    ) {
+        match side_effect {
+            TerminalSideEffect::Bell => effects.push(AppEffect::Bell),
+            TerminalSideEffect::ClipboardWrite(text) => {
+                if let Err(error) = write_clipboard_text(&text) {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            TerminalSideEffect::ClipboardQuery { selection } => match read_clipboard_text() {
+                Ok(Some(text)) => {
+                    if let Err(error) = self
+                        .terminal
+                        .write_input(&encode_osc52_response(&selection, &text))
+                    {
+                        self.last_error = Some(error.to_string());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => self.last_error = Some(error.to_string()),
+            },
+            TerminalSideEffect::WindowTitle(title) => {
+                effects.push(AppEffect::SetWindowTitle(title));
+            }
+            TerminalSideEffect::WindowIcon(_) => {}
+            TerminalSideEffect::DesktopNotification { title, body } => {
+                if let Err(error) = show_desktop_notification(&title, &body) {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            TerminalSideEffect::MouseShape(shape) => {
+                if let Some(icon) = terminal_cursor_icon_for_mouse_shape(&shape) {
+                    self.terminal_cursor_icon = icon;
+                    effects.push(AppEffect::SetTerminalCursorIcon(icon));
+                }
+            }
+            TerminalSideEffect::OpenUrl(url) => effects.push(AppEffect::OpenUrl(url)),
+            TerminalSideEffect::FocusWindow => effects.push(AppEffect::SetWindowFocus),
+            TerminalSideEffect::ReportCellSize => {
+                let response = encode_iterm2_report_cell_size(
+                    terminal_cell_width,
+                    terminal_cell_height,
+                    terminal_scale_factor,
+                );
+                if let Err(error) = self.terminal.write_input(&response) {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            TerminalSideEffect::ReportVariable(name) => {
+                if let Some(response) =
+                    terminal_report_variable_response(&name, self.mux.selected_session())
+                    && let Err(error) = self.terminal.write_input(&response)
+                {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            TerminalSideEffect::ConEmuProgress { .. } => {}
+            TerminalSideEffect::SemanticPrompt(_)
+            | TerminalSideEffect::KittyTextSizing(_)
+            | TerminalSideEffect::ConEmuControl(_)
+            | TerminalSideEffect::Iterm2Control(_)
+            | TerminalSideEffect::Iterm2File(_)
+            | TerminalSideEffect::UnsupportedHostCommand { .. } => {}
+        }
+    }
+
     pub fn pending_direct_input(&self) -> &[DirectKeyInput] {
         &self.pending_direct_input
     }
@@ -427,16 +616,26 @@ impl AppState {
             now,
             stable_dt_ms,
             events,
+            dropped_file_paths,
             modifiers,
             hover_pos,
             pressed_mouse_button,
             viewport,
             renderer_metrics,
+            terminal_cell_width,
+            terminal_cell_height,
+            terminal_scale_factor,
         } = inputs;
         let mut effects = Vec::new();
 
         self.sync_macos_non_native_fullscreen_presentation();
         self.last_drain = self.terminal.drain_pty();
+        self.drain_terminal_side_effects(
+            &mut effects,
+            terminal_cell_width,
+            terminal_cell_height,
+            terminal_scale_factor,
+        );
         match self.terminal.child_exited() {
             Ok(true) => {
                 effects.push(AppEffect::CloseWindow);
@@ -457,7 +656,7 @@ impl AppState {
         }
         self.sync_session_order();
         if self.config_state.current().chrome.sidebar {
-            self.refresh_sidebar_metadata(viewport);
+            self.refresh_sidebar_metadata(viewport, now);
         }
         if let Err(error) = self.terminal.sync_mux_anchor(
             &self.config_state.current().multiplexer,
@@ -465,7 +664,7 @@ impl AppState {
         ) {
             self.last_error = Some(error.to_string());
         }
-        self.hot_reload_config_if_changed(&mut effects);
+        self.hot_reload_config_if_changed(&mut effects, now);
         let input_commands = self.handle_direct_input(viewport, &mut effects)
             + self.handle_egui_input(
                 events,
@@ -474,7 +673,8 @@ impl AppState {
                 pressed_mouse_button,
                 viewport,
                 &mut effects,
-            );
+            )
+            + self.handle_dropped_file_paths(dropped_file_paths);
         self.last_frame_dt_ms = stable_dt_ms;
 
         let pending_pty_bytes = self.terminal.pending_pty_len();
@@ -492,14 +692,14 @@ impl AppState {
                 last_error: self.last_error.as_deref(),
             });
         }
-        if should_sample_status_metrics(self.last_status_metrics_sample.elapsed()) {
+        if now.duration_since(self.last_status_metrics_sample) >= STATUS_METRICS_SAMPLE_INTERVAL {
             self.status_metrics = StatusMetrics {
                 drain: self.last_drain,
                 renderer: renderer_metrics,
                 cols,
                 rows,
             };
-            self.last_status_metrics_sample = Instant::now();
+            self.last_status_metrics_sample = now;
         }
         let repaint = self.repaint_scheduler.recommend(RepaintSignal {
             drained_bytes: self.last_drain.bytes,
@@ -515,7 +715,7 @@ impl AppState {
         effects
     }
 
-    fn refresh_sidebar_metadata(&mut self, viewport: ViewportSnapshot) {
+    fn refresh_sidebar_metadata(&mut self, viewport: ViewportSnapshot, now: Instant) {
         if let Some(rx) = &self.sidebar_metadata_rx {
             match rx.try_recv() {
                 Ok(metadata) => {
@@ -533,7 +733,7 @@ impl AppState {
 
         if !sidebar_metadata_refresh_due(
             self.last_sidebar_metadata_refresh,
-            Instant::now(),
+            now,
             self.sidebar_metadata_pending,
         ) {
             return;
@@ -549,7 +749,7 @@ impl AppState {
             max_sessions,
         )) {
             Ok(()) => {
-                self.last_sidebar_metadata_refresh = Instant::now();
+                self.last_sidebar_metadata_refresh = now;
                 self.sidebar_metadata_pending = true;
             }
             Err(_) => {
@@ -675,21 +875,6 @@ impl AppState {
         if previous.window.title != next.window.title {
             effects.push(AppEffect::SetWindowTitle(next.window.title.clone()));
         }
-        if previous.window.fullscreen != next.window.fullscreen {
-            apply_macos_non_native_fullscreen_presentation(&next.window);
-            self.macos_non_native_fullscreen_active = next.window.non_native_fullscreen_enabled();
-            effects.push(AppEffect::SetFullscreen(
-                next.window.native_fullscreen_enabled(),
-            ));
-            if !macos_handles_non_native_fullscreen_frame(&next.window) {
-                effects.push(AppEffect::SetMaximized(
-                    next.window.non_native_fullscreen_enabled(),
-                ));
-            }
-        }
-        if previous.window.decorations_enabled() != next.window.decorations_enabled() {
-            effects.push(AppEffect::SetDecorations(next.window.decorations_enabled()));
-        }
         if previous.diagnostics != next.diagnostics {
             self.stability_trace = StabilityTrace::from_config(&next);
         }
@@ -698,15 +883,19 @@ impl AppState {
         self.macos_option_as_alt = next.input.macos_option_as_alt.into();
         self.app_key_bindings = app_key_bindings;
         self.sidebar_key_bindings = sidebar_key_bindings;
-        self.terminal
-            .set_terminal_config(next.terminal_session_config());
+        let session_config =
+            terminal_session_config_with_side_effects(&next, &self.terminal_side_effect_tx);
+        self.terminal.set_terminal_config(session_config);
         self.has_new_session_config_changes = new_session_only_config_changed(&previous, &next)
             || self.has_new_session_config_changes;
         self.config_state.accept(next);
-        self.session_order = SessionOrderStore::for_config_path(&self.config().config_path);
+        self.session_order = SessionOrderStore::lazy_for_config_path(&self.config().config_path);
         self.sync_session_order();
         self.last_error = if self.has_new_session_config_changes {
-            Some("config reloaded; session/window creation changes apply next time".to_owned())
+            Some(
+                "config reloaded; session/window settings require a new window or restart"
+                    .to_owned(),
+            )
         } else {
             None
         };
@@ -714,8 +903,8 @@ impl AppState {
         true
     }
 
-    fn hot_reload_config_if_changed(&mut self, effects: &mut Vec<AppEffect>) {
-        if !self.config_hot_reload.changed(Instant::now()) {
+    fn hot_reload_config_if_changed(&mut self, effects: &mut Vec<AppEffect>, now: Instant) {
+        if !self.config_hot_reload.changed(now) {
             return;
         }
         let path = self.config().config_path.clone();
@@ -764,10 +953,11 @@ impl AppState {
                 .terminal_surface
                 .map(crate::renderer::scrollbar_hit_rect),
         };
-        let commands = terminal_input_commands_with_options(
+        let commands = terminal_input_commands_with_wheel_state(
             snapshot,
             &self.modifier_remaps,
             self.macos_option_as_alt,
+            &mut self.wheel_scroll_state,
         );
         let count = commands.len() + actions.len() + sidebar_count;
 
@@ -780,6 +970,22 @@ impl AppState {
         }
 
         count
+    }
+
+    fn handle_dropped_file_paths(&mut self, paths: Vec<PathBuf>) -> usize {
+        if !self.direct_terminal_input_enabled() {
+            return 0;
+        }
+        let Some(text) = bootty_winit::file_paths::format_file_paths_for_paste(
+            paths.iter().map(PathBuf::as_path),
+        ) else {
+            return 0;
+        };
+        if let Err(error) = self.terminal.write_paste(&text) {
+            self.last_error = Some(error.to_string());
+            return 0;
+        }
+        1
     }
 
     fn handle_direct_input(
@@ -896,9 +1102,11 @@ impl AppState {
                     );
                     self.macos_non_native_fullscreen_active = next_maximized;
                     if next_maximized {
-                        apply_macos_non_native_fullscreen_presentation(&self.config().window);
+                        self.macos_non_native_fullscreen_pending_apply =
+                            !apply_macos_non_native_fullscreen_presentation(&self.config().window);
                     } else {
                         restore_macos_presentation();
+                        self.macos_non_native_fullscreen_pending_apply = false;
                     }
                     effects.push(AppEffect::SetFullscreen(false));
                     if !macos_handles_non_native_fullscreen_frame(&self.config().window) {
@@ -1194,6 +1402,18 @@ fn next_non_native_fullscreen_state(
 mod tests {
     use super::*;
     use crate::config::WindowFullscreen;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_id() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let sequence = TEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{nanos}-{sequence}")
+    }
 
     #[test]
     fn remove_first_paste_event_removes_only_one_paste_event() {
@@ -1210,6 +1430,48 @@ mod tests {
                 egui::Event::Text("before".to_owned()),
                 egui::Event::Paste("second".to_owned())
             ]
+        );
+    }
+
+    #[test]
+    fn mouse_shape_side_effect_maps_common_cursor_names() {
+        assert_eq!(
+            terminal_cursor_icon_for_mouse_shape("shape=pointing_hand"),
+            Some(egui::CursorIcon::PointingHand)
+        );
+        assert_eq!(
+            terminal_cursor_icon_for_mouse_shape("ew-resize"),
+            Some(egui::CursorIcon::ResizeHorizontal)
+        );
+        assert_eq!(
+            terminal_cursor_icon_for_mouse_shape("not-a-known-cursor"),
+            None
+        );
+    }
+
+    #[test]
+    fn bell_side_effect_requests_host_bell() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_terminal_side_effect(TerminalSideEffect::Bell, &mut effects, 10.0, 20.0, 1.0);
+
+        assert_eq!(effects, vec![AppEffect::Bell]);
+    }
+
+    #[test]
+    fn report_variable_response_returns_selected_session_name() {
+        assert_eq!(
+            terminal_report_variable_response("session.name", Some("local")),
+            Some(encode_iterm2_report_variable("local"))
+        );
+    }
+
+    #[test]
+    fn report_variable_response_ignores_unknown_variables() {
+        assert_eq!(
+            terminal_report_variable_response("user.missing", Some("local")),
+            None
         );
     }
 
@@ -1278,12 +1540,11 @@ mod tests {
 
     fn test_state() -> AppState {
         let repaint: RepaintHandle = std::sync::Arc::new(|| {});
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
+        let unique = unique_test_id();
+        let config_dir = std::env::temp_dir().join(format!("bootty-test-{unique}"));
+        std::fs::create_dir_all(&config_dir).expect("create app state test config dir");
         let config = BoottyConfig {
-            config_path: std::env::temp_dir().join(format!("bootty-test-{unique}.toml")),
+            config_path: config_dir.join("config.toml"),
             ..BoottyConfig::default()
         };
         AppState::new(config, repaint, None, None).expect("state")
@@ -1407,10 +1668,7 @@ mod tests {
     fn move_session_reorders_bootty_owned_session_order() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
+        let unique = unique_test_id();
         let alpha = format!("alpha-{unique}");
         let beta = format!("beta-{unique}");
         state.mux.create_project_session(
@@ -1430,28 +1688,16 @@ mod tests {
             &mux_config,
         );
 
-        state.sync_session_order();
-        assert!(state.session_order.move_session(
-            &beta,
-            -1,
-            state.mux.sessions().iter().map(|session| session.name.as_str()),
-        ));
-        state.sync_session_order();
+        assert!(
+            state
+                .session_order
+                .move_session(&beta, -1, [alpha.as_str(), beta.as_str()],)
+        );
         let ordered = state
-            .mux
-            .sessions()
-            .iter()
-            .map(|session| session.name.as_str())
-            .collect::<Vec<_>>();
-        let beta_index = ordered
-            .iter()
-            .position(|name| *name == beta)
-            .expect("beta present");
-        let alpha_index = ordered
-            .iter()
-            .position(|name| *name == alpha)
-            .expect("alpha present");
-        assert!(beta_index < alpha_index, "{ordered:?}");
+            .session_order
+            .sync_sessions([alpha.as_str(), beta.as_str()]);
+
+        assert_eq!(ordered, vec![beta, alpha]);
     }
 
     #[test]

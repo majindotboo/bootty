@@ -60,47 +60,53 @@ pub struct WindowTabsModel<'a> {
 }
 
 pub fn show_status_bar(ui: &mut egui::Ui, palette: ThemePalette, model: StatusBarModel<'_>) {
-    egui::Frame::NONE.fill(palette.base).show(ui, |ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 30.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Bootty").color(palette.text).strong());
+    let height = 30.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click_and_drag(),
+    );
+    start_window_drag_on_primary_press(&response);
+
+    ui.painter().rect_filled(rect, 0.0, palette.base);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Bootty").color(palette.text).strong());
+            ui.separator();
+            ui.label(
+                RichText::new(format!("backend: {}", backend_label(model.backend)))
+                    .color(palette.subtext),
+            );
+            ui.separator();
+            let target = model.selected_session_name.unwrap_or("no mux session");
+            ui.label(RichText::new(format!("active: {target}")).color(palette.subtext));
+            ui.separator();
+            let metrics = model.metrics;
+            ui.label(
+                RichText::new(format!("{}×{}", metrics.cols, metrics.rows)).color(palette.muted),
+            );
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "drain {:.2}ms/{}b · update {:.2}ms · extract {:.2}ms · paint {:.2}ms · {} runs",
+                    us_to_ms(metrics.drain.elapsed_us),
+                    metrics.drain.bytes,
+                    us_to_ms(metrics.renderer.render_state_update_us),
+                    us_to_ms(metrics.renderer.frame_extraction_us),
+                    us_to_ms(metrics.renderer.paint_us),
+                    metrics.renderer.text_runs
+                ))
+                .color(palette.muted),
+            );
+            if let Some(error) = model.last_error {
                 ui.separator();
-                ui.label(
-                    RichText::new(format!("backend: {}", backend_label(model.backend)))
-                        .color(palette.subtext),
-                );
-                ui.separator();
-                let target = model.selected_session_name.unwrap_or("no mux session");
-                ui.label(RichText::new(format!("active: {target}")).color(palette.subtext));
-                ui.separator();
-                let metrics = model.metrics;
-                ui.label(
-                    RichText::new(format!("{}×{}", metrics.cols, metrics.rows))
-                        .color(palette.muted),
-                );
-                ui.separator();
-                ui.label(
-                    RichText::new(format!(
-                        "drain {:.2}ms/{}b · update {:.2}ms · extract {:.2}ms · paint {:.2}ms · {} runs",
-                        us_to_ms(metrics.drain.elapsed_us),
-                        metrics.drain.bytes,
-                        us_to_ms(metrics.renderer.render_state_update_us),
-                        us_to_ms(metrics.renderer.frame_extraction_us),
-                        us_to_ms(metrics.renderer.paint_us),
-                        metrics.renderer.text_runs
-                    ))
-                    .color(palette.muted),
-                );
-                if let Some(error) = model.last_error {
-                    ui.separator();
-                    ui.colored_label(palette.warning, truncate_label(error, 80));
-                }
-            },
-        );
-    });
+                ui.colored_label(palette.warning, truncate_label(error, 80));
+            }
+        },
+    );
 }
 
 const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
@@ -111,6 +117,33 @@ const SIDEBAR_PAD_X: f32 = 14.0;
 const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
 const AGENT_DETAIL_MAX_CHARS: usize = 18;
 const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
+
+fn start_window_drag_on_primary_press(response: &egui::Response) {
+    let primary_press_pos = response.ctx.input(|input| {
+        input
+            .pointer
+            .button_pressed(egui::PointerButton::Primary)
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+    });
+    if primary_press_pos.is_some_and(|pos| response.rect.contains(pos)) {
+        response
+            .ctx
+            .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+fn sidebar_title_drag_rect(rect: Rect, reserve_titlebar_buttons: bool) -> Rect {
+    let reserved = if reserve_titlebar_buttons {
+        MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
+    } else {
+        0.0
+    };
+    Rect::from_min_max(
+        Pos2::new((rect.min.x + reserved).min(rect.max.x), rect.min.y),
+        rect.max,
+    )
+}
 
 pub fn show_sidebar(
     ui: &mut egui::Ui,
@@ -140,6 +173,13 @@ pub fn show_sidebar(
     );
     if model.title_visible {
         paint_sidebar_title(ui, title_rect, palette, &model);
+        let drag_rect = sidebar_title_drag_rect(title_rect, model.reserve_titlebar_buttons);
+        let response = ui.interact(
+            drag_rect,
+            ui.id().with("sidebar-titlebar-drag"),
+            egui::Sense::click_and_drag(),
+        );
+        start_window_drag_on_primary_press(&response);
     }
 
     let list_top = content_top + header_h;
@@ -1647,6 +1687,17 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_title_drag_rect_reserves_macos_titlebar_button_area() {
+        let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(286.0, SIDEBAR_HEADER_HEIGHT));
+
+        assert_eq!(sidebar_title_drag_rect(rect, false), rect);
+        assert_eq!(
+            sidebar_title_drag_rect(rect, true).min.x,
+            MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
+        );
+    }
+
+    #[test]
     fn sidebar_hovered_row_maps_pointer_to_visible_rows() {
         assert_eq!(
             sidebar_hovered_row(Pos2::new(20.0, 10.0), 10.0, 10.0, 100.0, 3),
@@ -1682,6 +1733,57 @@ mod tests {
     fn sidebar_header_collapses_when_title_is_hidden() {
         assert_eq!(sidebar_header_height(true), SIDEBAR_HEADER_HEIGHT);
         assert_eq!(sidebar_header_height(false), 0.0);
+    }
+
+    #[test]
+    fn status_bar_primary_press_starts_window_drag() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
+        let show = |ui: &mut egui::Ui| {
+            show_status_bar(
+                ui,
+                ThemePalette::default(),
+                StatusBarModel {
+                    backend: MuxBackendKind::Native,
+                    selected_session_name: Some("alpha"),
+                    metrics: StatusMetrics::default(),
+                    last_error: None,
+                },
+            );
+        };
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(Pos2::new(20.0, 15.0))],
+                ..Default::default()
+            },
+            show,
+        );
+
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerButton {
+                    pos: Pos2::new(20.0, 15.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            show,
+        );
+
+        let root_output = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output");
+        assert!(
+            root_output
+                .commands
+                .contains(&egui::ViewportCommand::StartDrag)
+        );
     }
 
     fn test_session(id: &str, name: &str, active: bool) -> MuxSession {

@@ -511,6 +511,17 @@ fn config_maps_session_scrollback_to_terminal_session_config() {
 }
 
 #[test]
+fn chrome_window_tabs_can_be_disabled() {
+    let config = load_config_source(indoc! {r#"
+        [chrome]
+        window-tabs = false
+    "#});
+
+    assert!(!config.chrome.window_tabs);
+    assert!(BoottyConfig::default().chrome.window_tabs);
+}
+
+#[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
         version = 1
