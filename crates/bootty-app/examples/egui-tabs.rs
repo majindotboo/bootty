@@ -1,8 +1,8 @@
 use bootty_app::{
     geometry::TerminalSurface,
     input::{
-        InputSnapshot, TerminalInputCommand, pressed_mouse_button_from_egui,
-        terminal_input_commands,
+        InputSnapshot, TerminalInputCommand, WheelScrollState, pressed_mouse_button_from_egui,
+        terminal_input_commands_with_wheel_state,
     },
     renderer::TerminalWidget,
     scheduler::{RepaintScheduler, RepaintSignal},
@@ -115,7 +115,12 @@ impl TabsExample {
             mouse_exclusion: None,
         });
         let mut last_error = None;
-        let commands = terminal_input_commands(snapshot);
+        let commands = terminal_input_commands_with_wheel_state(
+            snapshot,
+            &Default::default(),
+            Default::default(),
+            &mut tab.wheel_scroll_state,
+        );
         let input_commands = commands.len();
         for command in commands {
             let result = match command {
@@ -216,6 +221,7 @@ struct TerminalTab {
     terminal: TerminalSession,
     widget: TerminalWidget,
     surface: Option<TerminalSurface>,
+    wheel_scroll_state: WheelScrollState,
 }
 
 impl TerminalTab {
@@ -233,6 +239,7 @@ impl TerminalTab {
             terminal,
             widget: TerminalWidget::new(target_format),
             surface: None,
+            wheel_scroll_state: WheelScrollState::default(),
         })
     }
 }

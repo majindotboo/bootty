@@ -39,7 +39,7 @@ impl TerminalTextShaper {
     }
 
     pub fn shape(&self, text: &str, start_cell: u16) -> Vec<ShapedCluster> {
-        let mut clusters = Vec::new();
+        let mut clusters = Vec::with_capacity(text.chars().count().max(1));
         self.shape_into(text, start_cell, &mut clusters);
         clusters
     }
@@ -117,6 +117,10 @@ impl TerminalTextShaper {
 
 fn is_printable_ascii(text: &str) -> bool {
     text.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+}
+fn can_prepare_ascii_directly(text: &str, liga_enabled: bool) -> bool {
+    is_printable_ascii(text)
+        && (!liga_enabled || !text.as_bytes().windows(2).any(|pair| pair == b"fi"))
 }
 
 fn shape_ascii_into_retained(
@@ -306,6 +310,9 @@ pub struct GlyphAtlas {
     entries: HashMap<GlyphAtlasKey, GlyphAtlasRecord>,
     pixels: Vec<u8>,
     modified: u64,
+    next_x: u32,
+    next_y: u32,
+    row_height: u32,
     resized: u64,
 }
 
@@ -338,6 +345,9 @@ impl GlyphAtlas {
             allocations: Vec::new(),
             entries: HashMap::new(),
             pixels: vec![0; byte_len],
+            next_x: 1,
+            next_y: 1,
+            row_height: 0,
             modified: 0,
             resized: 0,
         })
@@ -410,6 +420,10 @@ impl GlyphAtlas {
             return None;
         }
 
+        if let Some(entry) = self.reserve_next_shelf_slot(width, height) {
+            return Some(entry);
+        }
+
         let usable_right = self.width - 1;
         let usable_bottom = self.height - 1;
         for y in 1..=usable_bottom.saturating_sub(height) {
@@ -431,6 +445,41 @@ impl GlyphAtlas {
             }
         }
         None
+    }
+
+    fn reserve_next_shelf_slot(&mut self, width: u32, height: u32) -> Option<GlyphAtlasEntry> {
+        let usable_right = self.width - 1;
+        let usable_bottom = self.height - 1;
+        let max_x = usable_right.saturating_sub(width);
+        let max_y = usable_bottom.saturating_sub(height);
+
+        if self.next_x > max_x {
+            self.next_x = 1;
+            self.next_y = self.next_y.saturating_add(self.row_height.max(1));
+            self.row_height = 0;
+        }
+        if self.next_y > max_y {
+            return None;
+        }
+
+        let entry = GlyphAtlasEntry {
+            x: self.next_x,
+            y: self.next_y,
+            width,
+            height,
+        };
+        if self
+            .allocations
+            .iter()
+            .any(|used| rects_overlap(*used, entry))
+        {
+            return None;
+        }
+
+        self.allocations.push(entry);
+        self.next_x = self.next_x.saturating_add(width).saturating_add(1);
+        self.row_height = self.row_height.max(height.saturating_add(1));
+        Some(entry)
     }
 
     pub fn set(&mut self, entry: GlyphAtlasEntry, alpha: &[u8]) {
@@ -732,6 +781,67 @@ impl TextAtlasBuilder {
             quads,
         );
     }
+    fn prepare_ascii_text_command_into_uncached_with_face(
+        &mut self,
+        command: &TextCommand,
+        pixels_per_point: f32,
+        face_key: GlyphAtlasFaceKey,
+        quads: &mut Vec<TexturedGlyphQuad>,
+    ) {
+        let total_cells = u16::try_from(command.text.len()).unwrap_or(u16::MAX).max(1);
+        let cell_width = command.rect.width() / f32::from(total_cells);
+        quads.reserve(command.text.len());
+        let mut cluster = ShapedCluster {
+            text: String::new(),
+            cell: 0,
+            cells: 1,
+            is_whitespace: false,
+        };
+
+        for (cell, ch) in command.text.bytes().enumerate() {
+            if ch == b' ' {
+                continue;
+            }
+            let cell = u16::try_from(cell).unwrap_or(u16::MAX);
+            cluster.text.clear();
+            cluster.text.push(char::from(ch));
+            cluster.cell = cell;
+            cluster.is_whitespace = false;
+            let rect = SurfaceRect::from_min_size(
+                command.rect.min_x + f32::from(cell) * cell_width,
+                command.rect.min_y,
+                cell_width,
+                command.rect.height(),
+            );
+            let glyph_width = (rect.width() * pixels_per_point).ceil().max(1.0) as u32;
+            let glyph_height = (rect.height() * pixels_per_point).ceil().max(1.0) as u32;
+            let request = ClusterGlyphRequest {
+                command,
+                cluster: &cluster,
+                face_key: face_key.clone(),
+                pixels_per_point,
+                constraint_cells: 1,
+                glyph_width,
+                glyph_height,
+            };
+            let (entry, is_color_glyph) = self.prepare_ascii_cluster(ch, request);
+            let color = if is_color_glyph {
+                PlanColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: command.attrs.fg.a,
+                }
+            } else {
+                command.attrs.fg
+            };
+            quads.push(TexturedGlyphQuad {
+                rect,
+                uv: atlas_uv(self.atlas.size(), entry),
+                color,
+            });
+        }
+    }
 
     fn prepare_text_command_into_uncached_with_face(
         &mut self,
@@ -740,6 +850,16 @@ impl TextAtlasBuilder {
         face_key: GlyphAtlasFaceKey,
         quads: &mut Vec<TexturedGlyphQuad>,
     ) {
+        if can_prepare_ascii_directly(&command.text, self.shaper.feature_enabled(*b"liga")) {
+            self.prepare_ascii_text_command_into_uncached_with_face(
+                command,
+                pixels_per_point,
+                face_key,
+                quads,
+            );
+            return;
+        }
+
         let mut clusters = std::mem::take(&mut self.clusters);
         let (total_cells, cluster_len) =
             self.shaper
@@ -1001,6 +1121,26 @@ fn cluster_constraint_cells(
 struct FontLibrary {
     database: &'static fontdb::Database,
     fonts: HashMap<ResolvedFontFace, Option<FontArc>>,
+    fonts_by_id: HashMap<fontdb::ID, Option<FontArc>>,
+    fallback_font_ids: HashMap<FallbackFontKey, Option<fontdb::ID>>,
+    metrics: HashMap<FontMetricsKey, FontFaceMetrics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FallbackFontKey {
+    face: ResolvedFontFace,
+    ch: char,
+    physical_font_size_bits: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FontMetricsKey {
+    face: ResolvedFontFace,
+    scale_x_bits: u32,
+    scale_y_bits: u32,
+    constraint_cells: u16,
+    width: u32,
+    height: u32,
 }
 
 struct RasterizeClusterRequest<'a> {
@@ -1033,6 +1173,9 @@ impl FontLibrary {
         Self {
             database: system_font_database(),
             fonts: HashMap::new(),
+            fonts_by_id: HashMap::new(),
+            fallback_font_ids: HashMap::new(),
+            metrics: HashMap::new(),
         }
     }
 
@@ -1061,11 +1204,13 @@ impl FontLibrary {
                 color: false,
             };
         };
-        let metrics_font = self.font_for_face(face).unwrap_or_else(|| font.clone());
-
         let scale = PxScale::from((font_size * pixels_per_point).max(1.0));
         let scaled = font.as_scaled(scale);
-        let metrics = font_face_metrics(&metrics_font, scale, constraint_cells, width, height);
+        let metrics = if let Some(metrics_font) = self.font_for_face(face) {
+            self.font_face_metrics_for(face, &metrics_font, scale, constraint_cells, width, height)
+        } else {
+            font_face_metrics(&font, scale, constraint_cells, width, height)
+        };
         if format == GlyphAtlasFormat::Rgba
             && is_color_emoji_cluster(cluster)
             && let Some(pixels) = coretext::rasterize_color_cluster(
@@ -1083,15 +1228,18 @@ impl FontLibrary {
                 color: true,
             };
         }
-        if let Some(alpha) = coretext::rasterize_symbol_cluster(
-            face,
-            cluster,
-            font_size * pixels_per_point,
-            metrics,
-            constraint_cells,
-            width,
-            height,
-        ) {
+        let cluster_uses_private_codepoint = cluster.text.chars().any(is_private_use);
+        if !cluster_uses_private_codepoint
+            && let Some(alpha) = coretext::rasterize_symbol_cluster(
+                face,
+                cluster,
+                font_size * pixels_per_point,
+                metrics,
+                constraint_cells,
+                width,
+                height,
+            )
+        {
             return RasterizedCluster {
                 pixels: alpha_to_atlas_pixels(format, alpha),
                 color: false,
@@ -1181,7 +1329,19 @@ impl FontLibrary {
             }
         }
 
-        if let Some(font) = load_font_supporting_char(self.database, face, ch, physical_font_size) {
+        let fallback_key = FallbackFontKey {
+            face: face.clone(),
+            ch,
+            physical_font_size_bits: physical_font_size.to_bits(),
+        };
+        if !self.fallback_font_ids.contains_key(&fallback_key) {
+            let fallback_id = font_id_supporting_char(self.database, face, ch, physical_font_size);
+            self.fallback_font_ids
+                .insert(fallback_key.clone(), fallback_id);
+        }
+        if let Some(id) = self.fallback_font_ids.get(&fallback_key).copied().flatten()
+            && let Some(font) = self.font_for_id(id)
+        {
             return Some(font);
         }
 
@@ -1194,6 +1354,39 @@ impl FontLibrary {
             self.fonts.insert(face.clone(), font);
         }
         self.fonts.get(face).cloned().flatten()
+    }
+
+    fn font_for_id(&mut self, id: fontdb::ID) -> Option<FontArc> {
+        if !self.fonts_by_id.contains_key(&id) {
+            let font = load_font_id(self.database, id);
+            self.fonts_by_id.insert(id, font);
+        }
+        self.fonts_by_id.get(&id).cloned().flatten()
+    }
+
+    fn font_face_metrics_for(
+        &mut self,
+        face: &ResolvedFontFace,
+        font: &FontArc,
+        scale: PxScale,
+        constraint_cells: u16,
+        width: u32,
+        height: u32,
+    ) -> FontFaceMetrics {
+        let key = FontMetricsKey {
+            face: face.clone(),
+            scale_x_bits: scale.x.to_bits(),
+            scale_y_bits: scale.y.to_bits(),
+            constraint_cells,
+            width,
+            height,
+        };
+        if let Some(metrics) = self.metrics.get(&key) {
+            return *metrics;
+        }
+        let metrics = font_face_metrics(font, scale, constraint_cells, width, height);
+        self.metrics.insert(key, metrics);
+        metrics
     }
 }
 
@@ -1535,14 +1728,14 @@ fn load_matching_font(
         .flatten()
 }
 
-fn load_font_supporting_char(
+fn font_id_supporting_char(
     database: &fontdb::Database,
     face: &ResolvedFontFace,
     ch: char,
     physical_font_size: f32,
-) -> Option<FontArc> {
-    if let Some(font) = load_coretext_fallback_font(database, face, ch, physical_font_size) {
-        return Some(font);
+) -> Option<fontdb::ID> {
+    if let Some(id) = coretext_fallback_font_id(database, face, ch, physical_font_size) {
+        return Some(id);
     }
 
     let style = face.style;
@@ -1555,18 +1748,11 @@ fn load_font_supporting_char(
         .chain(database.faces());
 
     for face in faces {
-        let Some(font) = database
-            .with_face_data(face.id, |data, face_index| {
-                FontVec::try_from_vec_and_index(data.to_vec(), face_index)
-                    .ok()
-                    .map(FontArc::new)
-            })
-            .flatten()
-        else {
+        let Some(font) = load_font_id(database, face.id) else {
             continue;
         };
         if font_supports_char(&font, ch) {
-            return Some(font);
+            return Some(face.id);
         }
     }
 
@@ -1574,24 +1760,23 @@ fn load_font_supporting_char(
 }
 
 #[cfg(target_os = "macos")]
-fn load_coretext_fallback_font(
+fn coretext_fallback_font_id(
     database: &fontdb::Database,
     face: &ResolvedFontFace,
     ch: char,
     physical_font_size: f32,
-) -> Option<FontArc> {
+) -> Option<fontdb::ID> {
     let names = coretext::fallback_names(&face.family, ch, physical_font_size)?;
-    let id = font_id_for_postscript_or_family(database, &names.postscript, &names.family, face)?;
-    load_font_id(database, id)
+    font_id_for_postscript_or_family(database, &names.postscript, &names.family, face)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_coretext_fallback_font(
+fn coretext_fallback_font_id(
     _database: &fontdb::Database,
     _face: &ResolvedFontFace,
     _ch: char,
     _physical_font_size: f32,
-) -> Option<FontArc> {
+) -> Option<fontdb::ID> {
     None
 }
 
@@ -1637,7 +1822,6 @@ fn font_id_for_postscript_or_family(
         .map(|candidate| candidate.id)
 }
 
-#[cfg(target_os = "macos")]
 fn load_font_id(database: &fontdb::Database, id: fontdb::ID) -> Option<FontArc> {
     database
         .with_face_data(id, |data, face_index| {

@@ -34,8 +34,9 @@ const INPUT_FAST_PATH_DRAIN_BYTES: usize = 64 * 1024;
 const INPUT_FAST_PATH_DRAIN_CHUNKS: usize = 8;
 const INPUT_FAST_PATH_DRAIN_TIME_US: u128 = 2_000;
 const MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
-const MAX_COLLECT_CHUNKS_PER_TICK: usize = 64;
+const MAX_COLLECT_CHUNKS_PER_TICK: usize = 256;
 const MAX_READER_QUEUE_CHUNKS: usize = MAX_COLLECT_CHUNKS_PER_TICK * 2;
+const CURSOR_HOME: &[u8; 3] = b"\x1b[H";
 const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
 const TERM_ENV: &str = "TERM";
 const COLORTERM_ENV: &str = "COLORTERM";
@@ -765,6 +766,74 @@ impl TerminalWorker {
     }
 }
 
+#[derive(Debug, Default)]
+struct CursorHomeFloodCompactor {
+    pending_len: usize,
+    active: bool,
+}
+
+impl CursorHomeFloodCompactor {
+    fn compact(&mut self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let mut state = self.pending_len;
+        let mut complete = 0;
+
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == CURSOR_HOME[state] {
+                state += 1;
+                if state == CURSOR_HOME.len() {
+                    complete += 1;
+                    state = 0;
+                }
+                continue;
+            }
+
+            if !self.active && complete <= 1 {
+                if self.pending_len == 0 {
+                    return Some(bytes);
+                }
+                let mut out = Vec::with_capacity(self.pending_len + bytes.len());
+                out.extend_from_slice(&CURSOR_HOME[..self.pending_len]);
+                out.extend_from_slice(&bytes);
+                self.pending_len = 0;
+                return Some(out);
+            }
+
+            let mut out =
+                Vec::with_capacity(CURSOR_HOME.len() + self.pending_len + bytes.len() - index);
+            if !self.active && complete > 0 {
+                out.extend_from_slice(CURSOR_HOME);
+            }
+            if self.pending_len > 0 {
+                out.extend_from_slice(&CURSOR_HOME[..self.pending_len]);
+            }
+            out.extend_from_slice(&bytes[index..]);
+            self.pending_len = 0;
+            self.active = false;
+            return Some(out);
+        }
+
+        self.pending_len = state;
+        if complete > 0 && !self.active {
+            self.active = true;
+            return Some(CURSOR_HOME.to_vec());
+        }
+        if complete > 0 {
+            self.active = true;
+        }
+        None
+    }
+
+    fn finish(&mut self) -> Option<Vec<u8>> {
+        if self.pending_len == 0 {
+            return None;
+        }
+        let bytes = CURSOR_HOME[..self.pending_len].to_vec();
+        self.pending_len = 0;
+        self.active = false;
+        Some(bytes)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PtyBacklog {
     chunks: VecDeque<Vec<u8>>,
@@ -1051,15 +1120,28 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
 
     thread::spawn(move || {
         let mut buf = [0_u8; 8192];
+        let mut compactor = CursorHomeFloodCompactor::default();
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    if let Some(bytes) = compactor.finish() {
+                        let _ = tx.send(bytes);
+                    }
+                    break;
+                }
                 Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
+                    if let Some(bytes) = compactor.compact(buf[..n].to_vec())
+                        && tx.send(bytes).is_err()
+                    {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    if let Some(bytes) = compactor.finish() {
+                        let _ = tx.send(bytes);
+                    }
+                    break;
+                }
             }
         }
     });
@@ -1376,6 +1458,49 @@ mod tests {
             WORKER_SETTLED_FRAME_DELAY,
             Duration::ZERO,
         ));
+    }
+
+    #[test]
+    fn cursor_home_flood_compactor_suppresses_repeated_complete_sequences() {
+        let mut compactor = CursorHomeFloodCompactor::default();
+
+        assert_eq!(
+            compactor.compact(b"\x1b[H\x1b[H".to_vec()),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(compactor.compact(b"\x1b[H\x1b[H".to_vec()), None);
+        assert_eq!(compactor.finish(), None);
+    }
+
+    #[test]
+    fn cursor_home_flood_compactor_preserves_split_sequences() {
+        let mut compactor = CursorHomeFloodCompactor::default();
+
+        assert_eq!(
+            compactor.compact(b"\x1b[H\x1b".to_vec()),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(compactor.compact(b"[H\x1b[".to_vec()), None);
+        assert_eq!(compactor.compact(b"H".to_vec()), None);
+        assert_eq!(compactor.finish(), None);
+    }
+    #[test]
+    fn cursor_home_flood_compactor_leaves_single_home_before_content_intact() {
+        let mut compactor = CursorHomeFloodCompactor::default();
+
+        assert_eq!(
+            compactor.compact(b"\x1b[H\x1b[38;5;1mA".to_vec()),
+            Some(b"\x1b[H\x1b[38;5;1mA".to_vec())
+        );
+    }
+
+    #[test]
+    fn cursor_home_flood_compactor_flushes_partial_before_other_input() {
+        let mut compactor = CursorHomeFloodCompactor::default();
+
+        assert_eq!(compactor.compact(b"\x1b".to_vec()), None);
+        assert_eq!(compactor.compact(b"x".to_vec()), Some(b"\x1bx".to_vec()));
+        assert_eq!(compactor.compact(b"abc".to_vec()), Some(b"abc".to_vec()));
     }
 
     #[test]

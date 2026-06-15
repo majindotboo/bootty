@@ -113,7 +113,7 @@ impl TerminalRenderFrame {
 
     fn push_text_run(&mut self, run: &TextRun, text_contract: &TerminalTextContract) {
         let cell_width = run.rect.width() / f32::from(run.cells.max(1));
-        if run.text.is_ascii() {
+        if run.text.is_ascii() || !text_contract.has_native_symbol_fragments(&run.text) {
             let face = text_contract.resolve_face_handle_for_run(run);
             self.push_text_fragment(
                 run,

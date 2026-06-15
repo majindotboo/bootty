@@ -26,6 +26,7 @@ use libghostty_vt::{
         SizeReportSize, TertiaryDeviceAttributes,
     },
 };
+use memchr::memchr3_iter;
 
 use crate::terminal_frame::{
     CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, FrameStats, RenderCell, RenderFrame,
@@ -219,6 +220,8 @@ pub struct TerminalEngine {
     osc_pwd_pending: Vec<u8>,
     osc_side_effect_pending: Vec<u8>,
     terminal_write_pending: Vec<u8>,
+    cursor_home_pending_len: usize,
+    sgr_optimizer: SgrOptimizer,
     side_effects: Vec<TerminalSideEffect>,
     callback_side_effects: Arc<Mutex<Vec<TerminalSideEffect>>>,
     iterm_copy_capture: Option<Vec<u8>>,
@@ -347,6 +350,138 @@ impl TerminalWriteFeatures {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct SgrOptimizer {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    scratch: Vec<u8>,
+}
+
+impl SgrOptimizer {
+    fn reset(&mut self) {
+        self.bold = false;
+        self.italic = false;
+        self.underline = false;
+        self.scratch.clear();
+    }
+
+    fn optimize<'a>(&'a mut self, data: &'a [u8]) -> &'a [u8] {
+        let mut cursor = 0;
+        let mut changed = false;
+        self.scratch.clear();
+
+        while let Some(relative_start) = data[cursor..].iter().position(|byte| *byte == 0x1b) {
+            let start = cursor + relative_start;
+            if data.get(start + 1) != Some(&b'[') {
+                cursor = start + 1;
+                continue;
+            }
+            let params_start = start + 2;
+            let Some(relative_end) = data[params_start..].iter().position(|byte| *byte == b'm')
+            else {
+                break;
+            };
+            let end = params_start + relative_end;
+            let Some(optimized) = self.optimize_sgr_params(&data[params_start..end]) else {
+                cursor = end + 1;
+                continue;
+            };
+            if changed {
+                self.scratch.extend_from_slice(&data[cursor..start]);
+            } else {
+                self.scratch.extend_from_slice(&data[..start]);
+                changed = true;
+            }
+            if !optimized.is_empty() {
+                self.scratch.extend_from_slice(b"\x1b[");
+                self.scratch.extend_from_slice(optimized);
+                self.scratch.push(b'm');
+            }
+            cursor = end + 1;
+        }
+
+        if changed {
+            self.scratch.extend_from_slice(&data[cursor..]);
+            &self.scratch
+        } else {
+            data
+        }
+    }
+
+    fn optimize_sgr_params<'a>(&mut self, params: &'a [u8]) -> Option<&'a [u8]> {
+        let active = self.bold && self.italic && self.underline;
+        let optimized = active
+            .then(|| redundant_style_suffix_prefix(params))
+            .flatten();
+        self.update_state(params);
+        optimized
+    }
+
+    fn update_state(&mut self, params: &[u8]) {
+        if params.is_empty() || params == b"0" {
+            self.reset();
+            return;
+        }
+        for param in params.split(|byte| *byte == b';') {
+            match param {
+                b"0" => self.reset(),
+                b"1" => self.bold = true,
+                b"3" => self.italic = true,
+                b"4" => self.underline = true,
+                b"22" => self.bold = false,
+                b"23" => self.italic = false,
+                b"24" => self.underline = false,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn redundant_style_suffix_prefix(params: &[u8]) -> Option<&[u8]> {
+    if params == b"1;3;4" {
+        return Some(&[]);
+    }
+    let prefix_len = params.strip_suffix(b";1;3;4")?.len();
+    let prefix = &params[..prefix_len];
+    color_only_sgr_params(prefix).then_some(prefix)
+}
+
+fn color_only_sgr_params(params: &[u8]) -> bool {
+    if params.is_empty() {
+        return false;
+    }
+    let mut parts = params.split(|byte| *byte == b';').peekable();
+    while let Some(part) = parts.next() {
+        match part {
+            b"30" | b"31" | b"32" | b"33" | b"34" | b"35" | b"36" | b"37" | b"39" | b"40"
+            | b"41" | b"42" | b"43" | b"44" | b"45" | b"46" | b"47" | b"49" | b"90" | b"91"
+            | b"92" | b"93" | b"94" | b"95" | b"96" | b"97" | b"100" | b"101" | b"102" | b"103"
+            | b"104" | b"105" | b"106" | b"107" => {}
+            b"38" | b"48" => match parts.next() {
+                Some(b"5") => {
+                    if !parts.next().is_some_and(decimal_param) {
+                        return false;
+                    }
+                }
+                Some(b"2") => {
+                    for _ in 0..3 {
+                        if !parts.next().is_some_and(decimal_param) {
+                            return false;
+                        }
+                    }
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn decimal_param(param: &[u8]) -> bool {
+    !param.is_empty() && param.iter().all(u8::is_ascii_digit)
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StreamingControlState {
     Complete(usize),
@@ -385,6 +520,50 @@ fn complete_streaming_control_prefix_len(data: &[u8]) -> usize {
         }
     }
     data.len()
+}
+
+fn contains_tracked_streaming_control(data: &[u8]) -> bool {
+    if data.last() == Some(&0x1b) {
+        return true;
+    }
+
+    for marker in memchr3_iter(b']', b'_', b'P', data) {
+        if marker == 0 || data[marker - 1] != 0x1b {
+            continue;
+        }
+
+        match data[marker] {
+            b']' => return true,
+            b'_' if data.get(marker + 1).is_none_or(|byte| *byte == b'G') => return true,
+            b'P' => {
+                let start = marker - 1;
+                if b"\x1bPtmux;".starts_with(&data[start..data.len().min(start + 7)]) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+const CURSOR_HOME: &[u8; 3] = b"\x1b[H";
+
+fn repeated_cursor_home_prefix_len(data: &[u8], pending_len: usize) -> Option<(usize, usize)> {
+    let mut state = pending_len;
+    let mut complete = 0;
+    for byte in data {
+        if *byte != CURSOR_HOME[state] {
+            return None;
+        }
+        state += 1;
+        if state == CURSOR_HOME.len() {
+            complete += 1;
+            state = 0;
+        }
+    }
+    Some((complete, state))
 }
 
 fn streaming_control_state(data: &[u8]) -> StreamingControlState {
@@ -874,6 +1053,8 @@ impl TerminalEngine {
             osc_pwd_pending: Vec::new(),
             osc_side_effect_pending: Vec::new(),
             terminal_write_pending: Vec::new(),
+            cursor_home_pending_len: 0,
+            sgr_optimizer: SgrOptimizer::default(),
             side_effects: Vec::new(),
             callback_side_effects,
             iterm_copy_capture: None,
@@ -988,20 +1169,53 @@ impl TerminalEngine {
         Cow::Owned(joined)
     }
 
+    fn try_write_repeated_cursor_home(&mut self, bytes: &[u8]) -> bool {
+        let Some((complete, pending_len)) =
+            repeated_cursor_home_prefix_len(bytes, self.cursor_home_pending_len)
+        else {
+            if self.cursor_home_pending_len > 0 {
+                self.terminal
+                    .vt_write(&CURSOR_HOME[..self.cursor_home_pending_len]);
+                self.cursor_home_pending_len = 0;
+            }
+            return false;
+        };
+
+        if complete > 0 {
+            self.terminal.vt_write(CURSOR_HOME);
+        }
+        self.cursor_home_pending_len = pending_len;
+        true
+    }
+
     pub fn write_vt(&mut self, bytes: &[u8]) {
-        let write_bytes = self.complete_streaming_terminal_write(bytes);
-        if write_bytes.is_empty() {
+        let can_fast_write = self.terminal_write_pending.is_empty()
+            && self.osc_pwd_pending.is_empty()
+            && self.osc_side_effect_pending.is_empty()
+            && !contains_tracked_streaming_control(bytes);
+
+        if can_fast_write && self.try_write_repeated_cursor_home(bytes) {
+            self.mouse_encoder_options_dirty = true;
+            self.mark_content_changed();
             return;
         }
 
-        if self.osc_pwd_pending.is_empty()
-            && self.osc_side_effect_pending.is_empty()
-            && !write_bytes.contains(&0x1b)
-        {
-            self.terminal.vt_write(write_bytes.as_ref());
-            self.drain_callback_side_effects();
+        if self.cursor_home_pending_len > 0 {
+            self.terminal
+                .vt_write(&CURSOR_HOME[..self.cursor_home_pending_len]);
+            self.cursor_home_pending_len = 0;
+        }
+
+        if can_fast_write {
+            let optimized = self.sgr_optimizer.optimize(bytes);
+            self.terminal.vt_write(optimized);
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
+            return;
+        }
+
+        let write_bytes = self.complete_streaming_terminal_write(bytes);
+        if write_bytes.is_empty() {
             return;
         }
 
@@ -1013,8 +1227,8 @@ impl TerminalEngine {
             features.osc_side_effect = true;
         }
         if !features.needs_sanitizing() {
+            self.sgr_optimizer.reset();
             self.terminal.vt_write(write_bytes.as_ref());
-            self.drain_callback_side_effects();
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
             return;
@@ -1045,8 +1259,8 @@ impl TerminalEngine {
         if sanitized.touched {
             self.kitty_graphics_touched = true;
         }
+        self.sgr_optimizer.reset();
         self.terminal.vt_write(sanitized.bytes.as_ref());
-        self.drain_callback_side_effects();
         if features.osc_pwd {
             self.apply_osc_pwd_updates(sanitized.bytes.as_ref());
         }
@@ -1068,10 +1282,12 @@ impl TerminalEngine {
     }
 
     pub fn drain_side_effects(&mut self) -> Vec<TerminalSideEffect> {
+        self.drain_callback_side_effects();
         std::mem::take(&mut self.side_effects)
     }
 
     pub fn drain_clipboard_texts(&mut self) -> Vec<String> {
+        self.drain_callback_side_effects();
         let mut clipboard_texts = Vec::new();
         let mut remaining = Vec::new();
         for effect in std::mem::take(&mut self.side_effects) {

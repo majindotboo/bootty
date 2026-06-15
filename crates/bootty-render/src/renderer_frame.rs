@@ -169,6 +169,7 @@ impl RendererFrame {
                     cell.fg,
                     cell.bg,
                     cell.style,
+                    cell.hyperlink.clone(),
                     metrics.cell_rect(cell.x, cell.y),
                 ));
                 cell_index += 1;
@@ -424,9 +425,11 @@ pub struct RendererCell {
     pub graphics: RendererCellGraphics,
     pub minimum_contrast_policy: MinimumContrastPolicy,
     pub invisible: bool,
+    pub hyperlink: Option<String>,
 }
 
 impl RendererCell {
+    #[allow(clippy::too_many_arguments)]
     fn from_terminal(
         x: u16,
         y: u16,
@@ -434,6 +437,7 @@ impl RendererCell {
         foreground: Option<RgbColor>,
         background: Option<RgbColor>,
         style: CellStyle,
+        hyperlink: Option<String>,
         rect: SurfaceRect,
     ) -> Self {
         let graphics = RendererCellGraphics::classify(&text);
@@ -450,6 +454,7 @@ impl RendererCell {
             minimum_contrast_policy: MinimumContrastPolicy::for_graphics(graphics),
             graphics,
             invisible: style.invisible,
+            hyperlink,
         }
     }
 }

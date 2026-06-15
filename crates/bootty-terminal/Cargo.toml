@@ -6,6 +6,7 @@ edition.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 libghostty-vt.workspace = true
+memchr.workspace = true
 bootty-surface = { path = "../bootty-surface" }
 png.workspace = true
 

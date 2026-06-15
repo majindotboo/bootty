@@ -494,6 +494,23 @@ fn config_maps_macos_option_as_alt_to_terminal_session_config() {
 }
 
 #[test]
+fn config_maps_session_scrollback_to_terminal_session_config() {
+    let config = load_config_source(indoc! {r#"
+        [session]
+        max-scrollback = 0
+    "#});
+
+    assert_eq!(config.session.max_scrollback, 0);
+    assert_eq!(config.terminal_session_config().max_scrollback, 0);
+    assert_eq!(
+        BoottyConfig::default()
+            .terminal_session_config()
+            .max_scrollback,
+        NATIVE_MAX_SCROLLBACK
+    );
+}
+
+#[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
         version = 1

@@ -36,7 +36,7 @@ use crate::{
         terminal::ActiveTerminal,
     },
     platform::{
-        apply_macos_non_native_fullscreen_presentation, install_macos_app_icon,
+        apply_macos_non_native_fullscreen_presentation,
         macos_handles_non_native_fullscreen_frame, read_clipboard_text, restore_macos_presentation,
         spawn_new_window,
     },
@@ -55,8 +55,6 @@ use crate::{
 
 const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const SIDEBAR_METADATA_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const MACOS_APP_ICON_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const MACOS_APP_ICON_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Per-frame snapshot of everything the state machine needs from the host.
 /// Captured once at frame start; `egui::Context` never enters this module.
@@ -127,8 +125,6 @@ pub struct AppState {
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
-    macos_app_icon_installed: bool,
-    next_macos_app_icon_install: Instant,
     macos_non_native_fullscreen_active: bool,
 }
 
@@ -138,18 +134,6 @@ fn initial_sidebar_metadata_refresh_mark(started_at: Instant) -> Instant {
 
 fn sidebar_metadata_refresh_due(last_refresh: Instant, now: Instant, pending: bool) -> bool {
     !pending && now.duration_since(last_refresh) >= SIDEBAR_METADATA_REFRESH_INTERVAL
-}
-
-fn initial_macos_app_icon_install_after(started_at: Instant) -> Instant {
-    started_at + MACOS_APP_ICON_INITIAL_DELAY
-}
-
-fn macos_app_icon_install_due(installed: bool, next_attempt: Instant, now: Instant) -> bool {
-    !installed && now >= next_attempt
-}
-
-fn next_macos_app_icon_retry(now: Instant) -> Instant {
-    now + MACOS_APP_ICON_RETRY_INTERVAL
 }
 
 fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
@@ -248,8 +232,6 @@ impl AppState {
             new_mux_session_dialog: None,
             sidebar_hovered_session: None,
             session_picker_dialog: None,
-            macos_app_icon_installed: false,
-            next_macos_app_icon_install: initial_macos_app_icon_install_after(Instant::now()),
             macos_non_native_fullscreen_active,
         })
     }
@@ -453,16 +435,7 @@ impl AppState {
         } = inputs;
         let mut effects = Vec::new();
 
-        if macos_app_icon_install_due(
-            self.macos_app_icon_installed,
-            self.next_macos_app_icon_install,
-            now,
-        ) {
-            self.macos_app_icon_installed = install_macos_app_icon();
-            if !self.macos_app_icon_installed {
-                self.next_macos_app_icon_install = next_macos_app_icon_retry(now);
-            }
-        }
+        self.sync_macos_non_native_fullscreen_presentation();
         self.last_drain = self.terminal.drain_pty();
         match self.terminal.child_exited() {
             Ok(true) => {
@@ -1293,40 +1266,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_macos_app_icon_install_is_deferred() {
-        let started_at = Instant::now();
-        let next_attempt = initial_macos_app_icon_install_after(started_at);
-
-        assert!(!macos_app_icon_install_due(false, next_attempt, started_at));
-        assert!(macos_app_icon_install_due(
-            false,
-            next_attempt,
-            started_at + MACOS_APP_ICON_INITIAL_DELAY
-        ));
-    }
-
-    #[test]
-    fn macos_app_icon_install_does_not_retry_when_installed() {
-        let now = Instant::now();
-        let next_attempt = now - MACOS_APP_ICON_INITIAL_DELAY;
-
-        assert!(!macos_app_icon_install_due(true, next_attempt, now));
-    }
-
-    #[test]
-    fn failed_macos_app_icon_install_retries_later() {
-        let now = Instant::now();
-        let next_attempt = next_macos_app_icon_retry(now);
-
-        assert!(!macos_app_icon_install_due(false, next_attempt, now));
-        assert!(macos_app_icon_install_due(
-            false,
-            next_attempt,
-            now + MACOS_APP_ICON_RETRY_INTERVAL
-        ));
-    }
-
-    #[test]
     fn new_mux_session_request_uses_configured_working_directory() {
         let mut config = BoottyConfig::default();
         config.session.working_directory = Some("/tmp/bootty-project".into());
@@ -1491,9 +1430,13 @@ mod tests {
             &mux_config,
         );
 
-        state.apply_mux_key_action(MuxKeyAction::MoveSession(-1));
-
-        assert_eq!(state.mux.selected_session(), Some(beta.as_str()));
+        state.sync_session_order();
+        assert!(state.session_order.move_session(
+            &beta,
+            -1,
+            state.mux.sessions().iter().map(|session| session.name.as_str()),
+        ));
+        state.sync_session_order();
         let ordered = state
             .mux
             .sessions()

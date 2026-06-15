@@ -248,7 +248,6 @@ impl BackendPaneTerminal {
             }
             let mut config = self.terminal_config.clone();
             config.launch.working_directory = target.cwd().map(Path::new).map(Path::to_path_buf);
-            config.max_scrollback = bootty_terminal::terminal_engine::NATIVE_MAX_SCROLLBACK;
             Ok(ActiveTerminalRuntime(Box::new(
                 TerminalSession::new_with_config(
                     self.geometry,

@@ -20,7 +20,7 @@ mod vertices;
 #[cfg(test)]
 use font_lookup::{GHOSTTY_FONT_FAMILY_PRIORITY, terminal_font_family_priority};
 use font_lookup::{ghostty_cell_metrics_from_font, terminal_font, terminal_font_for_char};
-use glyph_draw::text_glyph_draws;
+use glyph_draw::push_text_glyph_draws;
 use image_upload::{image_fits_device_limits, rgba_image_pixels};
 use pipelines::{
     background_pipeline, image_bind_group_layout, image_pipeline, text_bind_group_layout,
@@ -360,6 +360,13 @@ enum TerminalPreparedLayer {
     Image(usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveTerminalPipeline {
+    Background,
+    Text,
+    Image,
+}
+
 struct PreparedTerminalFrameCache {
     frame: TerminalRenderFrame,
     pixels_per_point_bits: u32,
@@ -570,6 +577,7 @@ impl TerminalWgpuRenderer {
     }
 
     pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+        let mut active_pipeline = None;
         for layer in &self.layers {
             match layer {
                 TerminalPreparedLayer::Background(index) => {
@@ -579,7 +587,10 @@ impl TerminalWgpuRenderer {
                     if resources.vertex_count == 0 {
                         continue;
                     }
-                    render_pass.set_pipeline(&self.pipeline);
+                    if active_pipeline != Some(ActiveTerminalPipeline::Background) {
+                        render_pass.set_pipeline(&self.pipeline);
+                        active_pipeline = Some(ActiveTerminalPipeline::Background);
+                    }
                     render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
                     render_pass.draw(0..resources.vertex_count, 0..1);
                 }
@@ -596,7 +607,10 @@ impl TerminalWgpuRenderer {
                     let Some(texture) = &self.text_texture else {
                         continue;
                     };
-                    render_pass.set_pipeline(&self.text_pipeline);
+                    if active_pipeline != Some(ActiveTerminalPipeline::Text) {
+                        render_pass.set_pipeline(&self.text_pipeline);
+                        active_pipeline = Some(ActiveTerminalPipeline::Text);
+                    }
                     render_pass.set_bind_group(0, &texture.bind_group, &[]);
                     render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
                     render_pass.draw(0..layer.vertex_count, 0..1);
@@ -608,7 +622,10 @@ impl TerminalWgpuRenderer {
                     if resources.vertex_count == 0 {
                         continue;
                     }
-                    render_pass.set_pipeline(&self.image_pipeline);
+                    if active_pipeline != Some(ActiveTerminalPipeline::Image) {
+                        render_pass.set_pipeline(&self.image_pipeline);
+                        active_pipeline = Some(ActiveTerminalPipeline::Image);
+                    }
                     render_pass.set_bind_group(0, &resources.bind_group, &[]);
                     render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
                     render_pass.draw(0..resources.vertex_count, 0..1);
@@ -1293,12 +1310,45 @@ fn sprite_draw(command: &SpriteCommandBatch) -> TerminalSpriteDraw {
     }
 }
 
+fn ascii_text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextDraw> {
+    let cell_width = command.rect.width() / command.text.len().max(1) as f32;
+    let font = terminal_font(&command.face);
+    let mut draws = Vec::new();
+
+    for (cell, byte) in command.text.bytes().enumerate() {
+        if byte == b' ' {
+            continue;
+        }
+        let cell_rect = SurfaceRect::from_min_size(
+            command.rect.min_x + cell as f32 * cell_width,
+            command.rect.min_y,
+            cell_width,
+            command.rect.height(),
+        );
+        push_text_glyph_draws(
+            &mut draws,
+            byte as char,
+            cell_rect,
+            command.attrs.fg,
+            command.font_size,
+            pixels_per_point,
+            font.as_ref(),
+        );
+    }
+
+    draws
+}
+
 fn text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextDraw> {
     let mut draws = Vec::new();
     let pixels_per_point = pixels_per_point.max(1.0);
     if command.text.is_empty() {
         return draws;
     }
+    if command.text.is_ascii() {
+        return ascii_text_draws(command, pixels_per_point);
+    }
+
     let total_cells = command
         .text
         .chars()
@@ -1324,19 +1374,19 @@ fn text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextD
                 continue;
             }
             let font = terminal_font_for_char(&command.face, ch);
-            draws.extend(text_glyph_draws(
+            push_text_glyph_draws(
+                &mut draws,
                 ch,
                 cell_rect,
                 command.attrs.fg,
                 command.font_size,
                 pixels_per_point,
                 font.as_ref(),
-            ));
+            );
         }
     });
     draws
 }
-
 fn egui_rect(rect: SurfaceRect) -> egui::Rect {
     egui::Rect::from_min_max(
         egui::Pos2::new(rect.min_x, rect.min_y),

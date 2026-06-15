@@ -20,6 +20,9 @@ fn font_library_from_paths(paths: impl IntoIterator<Item = std::path::PathBuf>) 
     FontLibrary {
         database: Box::leak(Box::new(database)),
         fonts: HashMap::new(),
+        fonts_by_id: HashMap::new(),
+        fallback_font_ids: HashMap::new(),
+        metrics: HashMap::new(),
     }
 }
 
@@ -215,6 +218,37 @@ fn atlas_rasterizer_matches_maple_nerd_font_icon_pixels() {
 
     assert_eq!(bounds.width(), 20, "{bounds:?}");
     assert_eq!(bounds.height(), 17, "{bounds:?}");
+}
+
+#[test]
+fn atlas_rasterizer_uses_database_fallback_for_private_use_icon_without_face_fallbacks() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf", "MapleMono-NF-Regular.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let clusters = TerminalTextShaper::default().shape("\u{f0770}", 0);
+    let alpha = rasterize_cluster_for_test(&mut library, &face, &clusters[0], 15.0, 2.0, 1, 20, 44);
+    let bounds = alpha_bounds_at(&alpha, 20, 44, 128).expect("icon has ink");
+
+    assert!(bounds.width() > 6, "{bounds:?}");
+    assert!(bounds.height() > 6, "{bounds:?}");
+}
+
+#[test]
+fn atlas_rasterizer_shares_loaded_font_for_multiple_database_fallback_chars() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf", "MapleMono-NF-Regular.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let clusters = [
+        TerminalTextShaper::default().shape("\u{f06ca}", 0),
+        TerminalTextShaper::default().shape("\u{f0770}", 0),
+    ];
+
+    for cluster in &clusters {
+        let alpha =
+            rasterize_cluster_for_test(&mut library, &face, &cluster[0], 15.0, 2.0, 1, 20, 44);
+        assert!(alpha_bounds_at(&alpha, 20, 44, 128).is_some());
+    }
+
+    assert_eq!(library.fallback_font_ids.len(), 2);
+    assert_eq!(library.fonts_by_id.len(), 1);
 }
 
 #[test]

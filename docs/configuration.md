@@ -69,6 +69,7 @@ working-directory = "/Users/example/src"
 env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
 colorterm = "truecolor"
+max-scrollback = 320000000
 
 [diagnostics]
 stability-trace = "/tmp/bootty-stability.csv"
@@ -167,7 +168,7 @@ Live-applied fields:
 
 New-session/new-window-only fields:
 
-- `[session]` shell, working directory, environment, `TERM`, and `COLORTERM`
+- `[session]` shell, working directory, environment, `TERM`, `COLORTERM`, and max scrollback
 - `[window].width` and `[window].height`
 - `[window].fullscreen`
 - `[window].window-decoration`

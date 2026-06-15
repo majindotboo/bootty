@@ -756,6 +756,7 @@ dependencies = [
  "base64 0.22.1",
  "bootty-surface",
  "libghostty-vt",
+ "memchr",
  "png 0.18.1",
  "proptest",
  "rstest",

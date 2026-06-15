@@ -2,32 +2,35 @@ use super::TerminalTextDraw;
 use crate::{geometry::SurfaceRect, paint_plan::PlanColor};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 
-pub(super) fn text_glyph_draws(
+pub(super) fn push_text_glyph_draws(
+    draws: &mut Vec<TerminalTextDraw>,
     ch: char,
     rect: SurfaceRect,
     color: PlanColor,
     font_size: f32,
     pixels_per_point: f32,
     font: Option<&FontArc>,
-) -> Vec<TerminalTextDraw> {
+) {
     if let Some(font) = font {
-        let draws = font_glyph_draws(font, ch, rect, color, font_size, pixels_per_point);
-        if !draws.is_empty() {
-            return draws;
+        let start_len = draws.len();
+        push_font_glyph_draws(draws, font, ch, rect, color, font_size, pixels_per_point);
+        if draws.len() > start_len {
+            return;
         }
     }
 
-    bitmap_glyph_draws(ch, rect, color, pixels_per_point)
+    push_bitmap_glyph_draws(draws, ch, rect, color, pixels_per_point);
 }
 
-fn font_glyph_draws(
+fn push_font_glyph_draws(
+    draws: &mut Vec<TerminalTextDraw>,
     font: &FontArc,
     ch: char,
     rect: SurfaceRect,
     color: PlanColor,
     font_size: f32,
     pixels_per_point: f32,
-) -> Vec<TerminalTextDraw> {
+) {
     let physical_rect = SurfaceRect {
         min_x: rect.min_x * pixels_per_point,
         min_y: rect.min_y * pixels_per_point,
@@ -43,10 +46,9 @@ fn font_glyph_draws(
     let left = physical_rect.min_x + ((physical_rect.width() - advance) * 0.5).max(0.0);
     let glyph = glyph_id.with_scale_and_position(scale, point(left, baseline));
     let Some(outlined) = scaled.outline_glyph(glyph) else {
-        return Vec::new();
+        return;
     };
     let bounds = outlined.px_bounds();
-    let mut draws = Vec::new();
 
     outlined.draw(|x, y, coverage| {
         if coverage <= 0.15 {
@@ -75,22 +77,20 @@ fn font_glyph_draws(
             },
         });
     });
-
-    draws
 }
 
-fn bitmap_glyph_draws(
+fn push_bitmap_glyph_draws(
+    draws: &mut Vec<TerminalTextDraw>,
     ch: char,
     rect: SurfaceRect,
     color: PlanColor,
     pixels_per_point: f32,
-) -> Vec<TerminalTextDraw> {
+) {
     let pattern = ascii_glyph_pattern(ch);
     let margin_x = rect.width() * 0.10;
     let margin_y = rect.height() * 0.14;
     let pixel_w = ((rect.width() - margin_x * 2.0) / 5.0).max(1.0 / pixels_per_point);
     let pixel_h = ((rect.height() - margin_y * 2.0) / 7.0).max(1.0 / pixels_per_point);
-    let mut draws = Vec::new();
 
     for (row, bits) in pattern.iter().enumerate() {
         for (col, pixel) in bits.bytes().enumerate() {
@@ -109,8 +109,6 @@ fn bitmap_glyph_draws(
             });
         }
     }
-
-    draws
 }
 
 fn ascii_glyph_pattern(ch: char) -> [&'static str; 7] {

@@ -167,6 +167,7 @@ fn cell(x: u16, y: u16, text_start: usize, text_len: usize, style: CellStyle) ->
         fg: None,
         bg: None,
         style,
+        hyperlink: None,
     }
 }
 

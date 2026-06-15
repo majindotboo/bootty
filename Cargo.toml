@@ -47,6 +47,7 @@ indoc = "2"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "20edad15d7984c727acc4f4facdadf045609f543", features = [
   "png",
 ] }
+memchr = "2.8"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",

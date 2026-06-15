@@ -10,7 +10,10 @@ use eframe::{
 };
 
 use crate::{
-    geometry::{CellMetrics, SurfaceRect, TerminalSurface},
+    geometry::{
+        CellMetrics, CoordinateSpace, SurfacePoint, SurfaceRect, TerminalCoordinate,
+        TerminalSurface,
+    },
     paint_plan::{CursorBlinkPhase, PaintPlanner},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
     terminal::{CursorSnapshot, RenderFrame},
@@ -29,6 +32,7 @@ pub struct TerminalWidget {
     scrollbar: ScrollbarVisibility,
     target_format: Option<wgpu::TextureFormat>,
     render_cache: TerminalRenderCache,
+    terminal_cursor_icon: egui::CursorIcon,
 }
 
 pub use bootty_runtime::render_source::TerminalRenderSource;
@@ -50,6 +54,10 @@ impl TerminalWidget {
         self.text_config = text_config;
         self.update_cell_metrics();
         self.render_cache.clear();
+    }
+
+    pub fn set_terminal_cursor_icon(&mut self, icon: egui::CursorIcon) {
+        self.terminal_cursor_icon = icon;
     }
 
     pub fn initial_geometry() -> crate::geometry::TerminalGeometry {
@@ -74,6 +82,7 @@ impl TerminalWidget {
         let extract_start = Instant::now();
         let frame = terminal.extract_frame()?;
         self.metrics.extract_total_us = extract_start.elapsed().as_micros() as u64;
+        self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.handle_scrollbar_interaction(ui, surface, frame.as_ref(), terminal)?;
         self.paint(ui, surface, &frame)?;
         self.metrics.render_state_update_us = frame.stats.render_state_update_us;
@@ -92,6 +101,32 @@ impl TerminalWidget {
 
     pub fn cell_size(&self) -> (u32, u32) {
         self.cell.rounded_size()
+    }
+    pub fn cell_dimensions(&self) -> (f32, f32) {
+        (self.cell.width, self.cell.height)
+    }
+
+    fn handle_hyperlink_interaction(
+        &self,
+        ui: &mut egui::Ui,
+        surface: TerminalSurface,
+        frame: &RenderFrame,
+        response: &egui::Response,
+    ) {
+        let hovered_link = response
+            .hovered()
+            .then(|| ui.input(|input| input.pointer.hover_pos()))
+            .flatten()
+            .and_then(|pos| hyperlink_at(frame, surface, pos));
+
+        if let Some(url) = hovered_link {
+            ui.set_cursor_icon(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        } else if response.hovered() {
+            ui.set_cursor_icon(self.terminal_cursor_icon);
+        }
     }
 
     fn update_cell_metrics(&mut self) {
@@ -386,6 +421,26 @@ impl ScrollbarVisibility {
     }
 }
 
+fn hyperlink_at(frame: &RenderFrame, surface: TerminalSurface, pos: Pos2) -> Option<String> {
+    if !surface.rect.contains(pos) {
+        return None;
+    }
+    let TerminalCoordinate::Grid(point) = surface.convert_coordinate(
+        TerminalCoordinate::Surface(SurfacePoint { x: pos.x, y: pos.y }),
+        CoordinateSpace::Grid,
+    ) else {
+        return None;
+    };
+    if point.x >= frame.cols || point.y >= frame.rows {
+        return None;
+    }
+    frame
+        .cells
+        .iter()
+        .find(|cell| cell.x == point.x && cell.y == point.y)
+        .and_then(|cell| cell.hyperlink.clone())
+}
+
 #[derive(Default)]
 struct CursorBlinkClock {
     started_at: Option<Instant>,
@@ -535,7 +590,9 @@ mod tests {
     use crate::{
         geometry::{CellMetrics, DEFAULT_FONT_SIZE, TerminalGeometry, TerminalPadding},
         paint_plan::{CursorShape, PlanColor, TerminalPaintPlan},
-        terminal::{CursorSnapshot, FrameColors, RenderFrame, TerminalEngine},
+        terminal::{
+            CellStyle, CursorSnapshot, FrameColors, RenderCell, RenderFrame, TerminalEngine,
+        },
         terminal_image::{KittyImageFrame, KittyImageLayer, KittyImagePlacement},
         terminal_render::{CursorCommand, FillCommand, FillRole, TerminalRenderCommand},
         terminal_text::terminal_text_config_for_plan,
@@ -559,6 +616,37 @@ mod tests {
             blinking,
             color: None,
         }
+    }
+
+    #[test]
+    fn hyperlink_at_maps_pointer_to_osc8_cell_uri() {
+        let surface = TerminalSurface::for_size(
+            Vec2::new(40.0, 20.0),
+            CellMetrics::new(10.0, 20.0),
+            TerminalPadding::default(),
+        );
+        let frame = RenderFrame {
+            cols: 4,
+            rows: 1,
+            cells: vec![RenderCell {
+                x: 1,
+                y: 0,
+                text_start: 0,
+                text_len: 1,
+                fg: None,
+                bg: None,
+                style: CellStyle::default(),
+                hyperlink: Some("https://example.com".to_owned()),
+            }],
+            text: vec!['x'],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            hyperlink_at(&frame, surface, Pos2::new(15.0, 10.0)).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(hyperlink_at(&frame, surface, Pos2::new(5.0, 10.0)), None);
     }
 
     #[test]

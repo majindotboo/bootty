@@ -11,7 +11,7 @@ use toml_edit::{DocumentMut, Item, Table, TableLike};
 use bootty_render::terminal_text::TerminalTextConfig;
 use bootty_runtime::{SessionLaunchConfig, TerminalSessionConfig};
 use bootty_terminal::{
-    terminal_engine::{TERMINAL_TERM, TerminalColorConfig},
+    terminal_engine::{NATIVE_MAX_SCROLLBACK, TERMINAL_TERM, TerminalColorConfig},
     terminal_input_model::MacosOptionAsAlt,
 };
 use bootty_winit::modifier_remap::ModifierRemapSet;
@@ -266,6 +266,7 @@ pub struct SessionConfig {
     pub env: Vec<(String, String)>,
     pub term: String,
     pub colorterm: String,
+    pub max_scrollback: usize,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -276,6 +277,7 @@ struct SessionPatch {
     env: Option<Vec<EnvConfigEntry>>,
     term: Option<String>,
     colorterm: Option<String>,
+    max_scrollback: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -412,6 +414,7 @@ impl Default for SessionConfig {
             env: Vec::new(),
             term: TERMINAL_TERM.to_owned(),
             colorterm: "truecolor".to_owned(),
+            max_scrollback: NATIVE_MAX_SCROLLBACK,
         }
     }
 }
@@ -435,7 +438,7 @@ impl BoottyConfig {
         TerminalSessionConfig {
             launch: self.session.launch_config(),
             colors: self.colors.terminal_color_config(),
-            max_scrollback: 0,
+            max_scrollback: self.session.max_scrollback,
             macos_option_as_alt: self.input.macos_option_as_alt.into(),
             side_effect_tx: None,
             benchmark_trace: None,
@@ -1314,6 +1317,7 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
     }
     apply_value(&mut session.term, partial.term);
     apply_value(&mut session.colorterm, partial.colorterm);
+    apply_value(&mut session.max_scrollback, partial.max_scrollback);
 }
 
 fn apply_partial_diagnostics(diagnostics: &mut DiagnosticsConfig, partial: DiagnosticsPatch) {

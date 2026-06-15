@@ -75,6 +75,123 @@ fn terminal_write_feature_detection_ignores_plain_and_ansi_csi_output() {
 }
 
 #[test]
+fn tracked_streaming_control_detection_ignores_plain_ansi_csi_output() {
+    assert!(!contains_tracked_streaming_control(
+        b"plain terminal output"
+    ));
+    assert!(!contains_tracked_streaming_control(
+        b"\x1b[38;2;1;2;3mcolored\x1b[0m"
+    ));
+    assert!(!contains_tracked_streaming_control(
+        b"printable markers ] _ P and dense \x1b[31mCSI\x1b[0m output"
+    ));
+}
+
+#[test]
+fn tracked_streaming_control_detection_keeps_split_protocols_on_slow_path() {
+    assert!(contains_tracked_streaming_control(b"\x1b"));
+    assert!(contains_tracked_streaming_control(b"\x1b]"));
+    assert!(contains_tracked_streaming_control(b"\x1bPtm"));
+    assert!(contains_tracked_streaming_control(b"\x1b_"));
+    assert!(contains_tracked_streaming_control(
+        b"\x1b_Ga=T,i=1;AAAA\x1b\\"
+    ));
+    assert!(contains_tracked_streaming_control(
+        b"\x1b]52;c;aGVsbG8=\x07"
+    ));
+}
+
+#[test]
+fn repeated_cursor_home_prefix_detection_allows_split_sequences() {
+    assert_eq!(
+        repeated_cursor_home_prefix_len(b"\x1b[H\x1b[H", 0),
+        Some((2, 0))
+    );
+    assert_eq!(
+        repeated_cursor_home_prefix_len(b"\x1b[H\x1b", 0),
+        Some((1, 1))
+    );
+    assert_eq!(repeated_cursor_home_prefix_len(b"[H\x1b[", 1), Some((1, 2)));
+    assert_eq!(repeated_cursor_home_prefix_len(b"H", 2), Some((1, 0)));
+    assert_eq!(repeated_cursor_home_prefix_len(b"\x1b[2H", 0), None);
+}
+
+#[test]
+fn sgr_optimizer_removes_redundant_active_style_enables() {
+    let mut optimizer = SgrOptimizer::default();
+
+    let first = optimizer.optimize(b"\x1b[38;5;101;48;5;202;1;3;4mA");
+    assert_eq!(first, b"\x1b[38;5;101;48;5;202;1;3;4mA");
+
+    let second = optimizer.optimize(b"\x1b[38;5;102;48;5;201;1;3;4mB");
+    assert_eq!(second, b"\x1b[38;5;102;48;5;201mB");
+}
+
+#[test]
+fn sgr_optimizer_keeps_text_before_first_optimized_sequence_once() {
+    let mut optimizer = SgrOptimizer::default();
+
+    let frame = optimizer.optimize(b"\x1b[38;5;101;48;5;202;1;3;4mA\x1b[38;5;102;48;5;201;1;3;4mB");
+
+    assert_eq!(
+        frame,
+        b"\x1b[38;5;101;48;5;202;1;3;4mA\x1b[38;5;102;48;5;201mB"
+    );
+}
+
+#[test]
+fn sgr_optimizer_respects_resets_and_style_disable_codes() {
+    let mut optimizer = SgrOptimizer::default();
+
+    optimizer.optimize(b"\x1b[1;3;4mA");
+    assert_eq!(optimizer.optimize(b"\x1b[1;3;4mB"), b"B");
+    optimizer.optimize(b"\x1b[22;23;24mC");
+    assert_eq!(optimizer.optimize(b"\x1b[1;3;4mD"), b"\x1b[1;3;4mD");
+    optimizer.optimize(b"\x1b[0mE");
+    assert_eq!(optimizer.optimize(b"\x1b[1mF"), b"\x1b[1mF");
+}
+
+#[test]
+fn terminal_engine_sgr_optimizer_preserves_dense_cell_frame() -> Result<()> {
+    fn cells(input: &[u8]) -> Result<Vec<(Vec<char>, libghostty_vt::style::Style)>> {
+        let mut terminal = libghostty_vt::Terminal::new(libghostty_vt::TerminalOptions {
+            cols: 4,
+            rows: 1,
+            max_scrollback: 0,
+        })?;
+        terminal.vt_write(input);
+        let mut cells = Vec::new();
+        for x in 0..2 {
+            let grid_ref = terminal.grid_ref(Point::Viewport(PointCoordinate { x, y: 0 }))?;
+            let mut graphemes = ['\0'; 4];
+            let len = grid_ref.graphemes(&mut graphemes)?;
+            cells.push((graphemes[..len].to_vec(), grid_ref.style()?));
+        }
+        Ok(cells)
+    }
+
+    let original = b"\x1b[H\x1b[38;5;101;48;5;202;1;3;4mA\x1b[38;5;102;48;5;201;1;3;4mB";
+    let optimized = b"\x1b[H\x1b[38;5;101;48;5;202;1;3;4mA\x1b[38;5;102;48;5;201mB";
+
+    assert_eq!(cells(original)?, cells(optimized)?);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collapses_split_repeated_cursor_home_controls() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(4, 1))?;
+
+    engine.write_vt(b"abcd");
+    engine.write_vt(b"\x1b[H\x1b");
+    engine.write_vt(b"[H\x1b[");
+    engine.write_vt(b"HZ");
+
+    let frame = engine.extract_frame()?;
+    assert_eq!(visible_text_rows(frame), vec!["Zbcd".to_owned()]);
+    Ok(())
+}
+
+#[test]
 fn terminal_write_feature_detection_finds_expensive_protocols() {
     assert_eq!(
         terminal_write_features(b"\x1bPtmux;\x1b\x1b]7;file:///tmp\x1b\\"),

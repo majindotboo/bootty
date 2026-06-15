@@ -537,10 +537,16 @@ fn paint_attrs(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanColor) 
 }
 
 fn cell_text_width(text: &[char]) -> u16 {
-    text.iter()
-        .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0) as u16)
-        .sum::<u16>()
-        .max(1)
+    match text {
+        [] => 1,
+        [ch] if ch.is_ascii() => 1,
+        [ch] => UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16,
+        _ => text
+            .iter()
+            .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0) as u16)
+            .sum::<u16>()
+            .max(1),
+    }
 }
 
 #[cfg(test)]
@@ -603,6 +609,7 @@ mod tests {
                 fg: None,
                 bg: None,
                 style,
+                hyperlink: None,
             });
         }
 

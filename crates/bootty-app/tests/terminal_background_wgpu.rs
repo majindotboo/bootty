@@ -15,7 +15,7 @@ use bootty_app::{
     },
 };
 use bootty_winit::bare_host::{BareTerminalViewport, terminal_render_frame_for_bare_host};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn color(r: u8, g: u8, b: u8) -> PlanColor {
     PlanColor { r, g, b, a: 255 }
@@ -204,24 +204,45 @@ fn mixed_background_image_text_cursor_frame() -> TerminalRenderFrame {
     TerminalRenderFrame::from_plan_and_images(&plan, &contract, &images)
 }
 
-async fn render_frame_to_pixels(frame: &TerminalRenderFrame, width: u32, height: u32) -> Vec<u8> {
-    let instance = eframe::wgpu::Instance::default();
-    let adapter = instance
-        .request_adapter(&eframe::wgpu::RequestAdapterOptions {
-            power_preference: eframe::wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })
-        .await
+struct OffscreenWgpuContext {
+    device: eframe::wgpu::Device,
+    queue: eframe::wgpu::Queue,
+    format: eframe::wgpu::TextureFormat,
+}
+
+fn offscreen_wgpu_context() -> &'static Mutex<OffscreenWgpuContext> {
+    static CONTEXT: OnceLock<Mutex<OffscreenWgpuContext>> = OnceLock::new();
+    CONTEXT.get_or_init(|| {
+        let instance = eframe::wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(
+            &eframe::wgpu::RequestAdapterOptions {
+                power_preference: eframe::wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ))
         .expect("request WGPU adapter");
-    let (device, queue) = adapter
-        .request_device(&eframe::wgpu::DeviceDescriptor {
-            label: Some("bootty terminal offscreen test device"),
-            ..Default::default()
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&eframe::wgpu::DeviceDescriptor {
+                label: Some("bootty terminal offscreen test device"),
+                ..Default::default()
+            }))
+            .expect("request WGPU device");
+        Mutex::new(OffscreenWgpuContext {
+            device,
+            queue,
+            format: eframe::wgpu::TextureFormat::Rgba8UnormSrgb,
         })
-        .await
-        .expect("request WGPU device");
-    let format = eframe::wgpu::TextureFormat::Rgba8UnormSrgb;
+    })
+}
+
+fn render_frame_to_pixels(frame: &TerminalRenderFrame, width: u32, height: u32) -> Vec<u8> {
+    let context = offscreen_wgpu_context()
+        .lock()
+        .expect("offscreen WGPU context lock");
+    let device = &context.device;
+    let queue = &context.queue;
+    let format = context.format;
     let texture = device.create_texture(&eframe::wgpu::TextureDescriptor {
         label: Some("bootty terminal offscreen target"),
         size: eframe::wgpu::Extent3d {
@@ -248,8 +269,8 @@ async fn render_frame_to_pixels(frame: &TerminalRenderFrame, width: u32, height:
         usage: eframe::wgpu::BufferUsages::COPY_DST | eframe::wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut renderer = TerminalWgpuRenderer::new(&device, format);
-    renderer.prepare_terminal_frame(&device, &queue, frame, 1.0);
+    let mut renderer = TerminalWgpuRenderer::new(device, format);
+    renderer.prepare_terminal_frame(device, queue, frame, 1.0);
     let mut encoder = device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
         label: Some("bootty terminal offscreen encoder"),
     });
@@ -320,33 +341,22 @@ async fn render_frame_to_pixels(frame: &TerminalRenderFrame, width: u32, height:
     pixels
 }
 
-async fn render_frames_with_reused_renderer(
+fn render_frames_with_reused_renderer(
     frames: &[TerminalRenderFrame],
     width: u32,
     height: u32,
 ) -> Vec<Vec<u8>> {
-    let instance = eframe::wgpu::Instance::default();
-    let adapter = instance
-        .request_adapter(&eframe::wgpu::RequestAdapterOptions {
-            power_preference: eframe::wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })
-        .await
-        .expect("request WGPU adapter");
-    let (device, queue) = adapter
-        .request_device(&eframe::wgpu::DeviceDescriptor {
-            label: Some("bootty terminal offscreen test device"),
-            ..Default::default()
-        })
-        .await
-        .expect("request WGPU device");
-    let format = eframe::wgpu::TextureFormat::Rgba8UnormSrgb;
+    let context = offscreen_wgpu_context()
+        .lock()
+        .expect("offscreen WGPU context lock");
+    let device = &context.device;
+    let queue = &context.queue;
+    let format = context.format;
     let bytes_per_pixel = 4_u32;
     let unpadded_bytes_per_row = width * bytes_per_pixel;
     let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
     let output_size = u64::from(padded_bytes_per_row) * u64::from(height);
-    let mut renderer = TerminalWgpuRenderer::new(&device, format);
+    let mut renderer = TerminalWgpuRenderer::new(device, format);
     let mut outputs = Vec::with_capacity(frames.len());
 
     for frame in frames {
@@ -372,7 +382,7 @@ async fn render_frames_with_reused_renderer(
             usage: eframe::wgpu::BufferUsages::COPY_DST | eframe::wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        renderer.prepare_terminal_frame(&device, &queue, frame, 1.0);
+        renderer.prepare_terminal_frame(device, queue, frame, 1.0);
         let mut encoder = device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
             label: Some("bootty terminal offscreen encoder"),
         });
@@ -668,6 +678,7 @@ fn image_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
 }
 
 #[test]
+#[ignore = "requires WGPU offscreen readback; run `mise run test:wgpu`"]
 fn kitty_apc_image_renders_visible_pixels_through_bare_host_wgpu_path() {
     let viewport = BareTerminalViewport::new(
         10,
@@ -722,7 +733,7 @@ fn kitty_apc_image_renders_visible_pixels_through_bare_host_wgpu_path() {
     assert_eq!(image.source.height, 1);
     assert_eq!(image.source.x, 0);
     assert_eq!(image.source.y, 0);
-    let pixels = pollster::block_on(render_frame_to_pixels(&render_frame, 200, 80));
+    let pixels = render_frame_to_pixels(&render_frame, 200, 80);
     let max_pixel = pixels
         .chunks_exact(4)
         .max_by_key(|rgba| u16::from(rgba[0]) + u16::from(rgba[1]) + u16::from(rgba[2]))
@@ -737,8 +748,9 @@ fn kitty_apc_image_renders_visible_pixels_through_bare_host_wgpu_path() {
 }
 
 #[test]
+#[ignore = "requires WGPU offscreen readback; run `mise run test:wgpu`"]
 fn image_only_frame_renders_visible_pixels_offscreen() {
-    let pixels = pollster::block_on(render_frame_to_pixels(&image_only_frame(), 10, 10));
+    let pixels = render_frame_to_pixels(&image_only_frame(), 10, 10);
 
     assert!(
         pixels
@@ -749,12 +761,9 @@ fn image_only_frame_renders_visible_pixels_offscreen() {
 }
 
 #[test]
+#[ignore = "requires WGPU offscreen readback; run `mise run test:wgpu`"]
 fn image_after_surface_background_renders_visible_pixels_offscreen() {
-    let pixels = pollster::block_on(render_frame_to_pixels(
-        &background_then_image_frame(),
-        10,
-        10,
-    ));
+    let pixels = render_frame_to_pixels(&background_then_image_frame(), 10, 10);
 
     assert!(
         pixels
@@ -765,25 +774,19 @@ fn image_after_surface_background_renders_visible_pixels_offscreen() {
 }
 
 #[test]
+#[ignore = "requires WGPU offscreen readback; run `mise run test:wgpu`"]
 fn reused_renderer_prepares_same_frame_without_pixel_drift() {
     let frame = background_then_image_frame();
-    let pixels = pollster::block_on(render_frames_with_reused_renderer(
-        &[frame.clone(), frame],
-        10,
-        10,
-    ));
+    let pixels = render_frames_with_reused_renderer(&[frame.clone(), frame], 10, 10);
     assert_eq!(pixels.len(), 2);
     assert_eq!(pixels[0], pixels[1]);
 }
 
 #[test]
+#[ignore = "requires WGPU offscreen readback; run `mise run test:wgpu`"]
 fn reused_renderer_preserves_mixed_layer_order_without_pixel_drift() {
     let frame = mixed_background_image_text_cursor_frame();
-    let pixels = pollster::block_on(render_frames_with_reused_renderer(
-        &[frame.clone(), frame],
-        40,
-        20,
-    ));
+    let pixels = render_frames_with_reused_renderer(&[frame.clone(), frame], 40, 20);
     assert_eq!(pixels.len(), 2);
     assert_eq!(pixels[0], pixels[1]);
     assert!(
