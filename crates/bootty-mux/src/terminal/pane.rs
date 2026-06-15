@@ -25,6 +25,9 @@ use crate::{
 
 use super::{rmux_native::RmuxNativeTerminal, tmux_control::TmuxControlTerminal};
 
+pub(super) const TMUX_CLIENT_FEATURES: &str =
+    "256,RGB,clipboard,focus,hyperlinks,overline,strikethrough,sync,title";
+
 #[derive(Deref, DerefMut)]
 pub struct BackendPaneTerminal {
     backend: MuxBackendKind,
@@ -280,6 +283,7 @@ impl BackendPaneTerminal {
                 self.geometry,
                 self.terminal_config.colors.clone(),
                 self.terminal_config.macos_option_as_alt,
+                self.terminal_config.side_effect_tx.clone(),
                 Arc::clone(&self.repaint_wakeup),
             )?)))
         }
@@ -432,13 +436,13 @@ pub(super) fn backend_attach_launch(
     let session = target.session_id().to_owned();
     match backend {
         // -T declares outer-terminal features tmux cannot learn from the
-        // forced xterm-256color terminfo; "sync" makes tmux wrap redraws in
-        // DEC 2026 so layout changes repaint without a blank flash.
+        // forced xterm-256color terminfo; "clipboard" enables OSC 52 and
+        // "sync" wraps redraws in DEC 2026 to avoid blank layout flashes.
         MuxBackendKind::Tmux => (
             "tmux".to_owned(),
             vec![
                 "-T".to_owned(),
-                "256,RGB,sync".to_owned(),
+                TMUX_CLIENT_FEATURES.to_owned(),
                 "attach-session".to_owned(),
                 "-t".to_owned(),
                 session,
@@ -466,18 +470,17 @@ fn backend_attach_session_config(
     mut config: TerminalSessionConfig,
     backend: MuxBackendKind,
     target: &MuxPaneTarget,
-    ghostty_terminfo_available: bool,
+    bootty_terminfo_available: bool,
 ) -> Result<TerminalSessionConfig> {
     let (program, args) = backend_attach_launch(backend, target);
     config.launch.shell = Some(resolve_launch_program(&program)?);
     config.launch.args = args;
     config.launch.env_remove = backend_attach_env_remove(backend);
-    // The attach client hard-fails on a TERM it cannot resolve. xterm-ghostty
+    // The attach client hard-fails on a TERM it cannot resolve. xterm-bootty
     // only resolves through Bootty's vendored terminfo; anything else falls
     // back to the universally installed xterm-256color, with required
     // features pinned via the -T attach flag either way.
-    if config.launch.term != bootty_runtime::terminfo::XTERM_GHOSTTY || !ghostty_terminfo_available
-    {
+    if config.launch.term != bootty_runtime::terminfo::XTERM_BOOTTY || !bootty_terminfo_available {
         config.launch.term = "xterm-256color".to_owned();
     }
     Ok(config)
@@ -516,6 +519,8 @@ mod tests {
             colors: TerminalColorConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            benchmark_trace: None,
         }
     }
 
@@ -670,7 +675,8 @@ mod tests {
                 "tmux".to_owned(),
                 vec![
                     "-T".to_owned(),
-                    "256,RGB,sync".to_owned(),
+                    "256,RGB,clipboard,focus,hyperlinks,overline,strikethrough,sync,title"
+                        .to_owned(),
                     "attach-session".to_owned(),
                     "-t".to_owned(),
                     "agents".to_owned()
@@ -703,15 +709,17 @@ mod tests {
     }
 
     #[test]
-    fn attach_keeps_ghostty_term_only_when_vendored_terminfo_resolves() {
+    fn attach_keeps_bootty_term_only_when_vendored_terminfo_resolves() {
         let config = TerminalSessionConfig {
             launch: bootty_runtime::SessionLaunchConfig {
-                term: "xterm-ghostty".to_owned(),
+                term: "xterm-bootty".to_owned(),
                 ..Default::default()
             },
             colors: TerminalColorConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            benchmark_trace: None,
         };
 
         let with_terminfo = backend_attach_session_config(
@@ -721,7 +729,7 @@ mod tests {
             true,
         )
         .expect("attach config");
-        assert_eq!(with_terminfo.launch.term, "xterm-ghostty");
+        assert_eq!(with_terminfo.launch.term, "xterm-bootty");
 
         let without_terminfo =
             backend_attach_session_config(config, MuxBackendKind::Tmux, &target("agents"), false)
@@ -739,6 +747,8 @@ mod tests {
             colors: TerminalColorConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            benchmark_trace: None,
         };
 
         let attach =
@@ -751,12 +761,14 @@ mod tests {
     fn backend_owned_ui_uses_tmux_compatible_term() {
         let mut config = TerminalSessionConfig {
             launch: bootty_runtime::SessionLaunchConfig {
-                term: "xterm-ghostty".to_owned(),
+                term: "xterm-bootty".to_owned(),
                 ..Default::default()
             },
             colors: TerminalColorConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            benchmark_trace: None,
         };
         let (program, args) = backend_attach_launch(MuxBackendKind::Tmux, &target("agents"));
         config.launch.shell = Some(program);

@@ -192,6 +192,7 @@ pub(super) fn render_frame_from_snapshot(
             fg: pane_color(cell.foreground, colors, true),
             bg: pane_color(cell.background, colors, false),
             style: cell_style(cell.attributes),
+            hyperlink: None,
         });
     }
 

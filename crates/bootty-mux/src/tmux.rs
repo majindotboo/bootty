@@ -8,6 +8,8 @@ use super::{
     snapshot::{MuxPaneAnchor, MuxSession, MuxSnapshot, MuxWindow},
 };
 
+const TMUX_FIELD_SEPARATOR: char = '\x1f';
+
 #[derive(Clone, Debug)]
 pub struct TmuxBackend<R = SystemCommandRunner> {
     program: String,
@@ -57,13 +59,13 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
         let sessions = self.run(&[
             "list-sessions",
             "-F",
-            "#{session_id}\t#{session_name}\t#{session_attached}\t#{session_windows}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{session_id}\x1f#{session_name}\x1f#{session_attached}\x1f#{session_windows}\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_current_command}",
         ])?;
         let panes = self.run(&[
             "list-panes",
             "-a",
             "-F",
-            "#{session_id}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{pane_active}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_current_command}",
         ])?;
         parse_tmux_snapshot(&sessions, &panes)
     }
@@ -111,31 +113,67 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
     }
 }
 
+fn tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
+    if line.contains(TMUX_FIELD_SEPARATOR) {
+        return line
+            .split(TMUX_FIELD_SEPARATOR)
+            .map(str::to_owned)
+            .collect();
+    }
+    if line.contains('\t') {
+        return line.split('\t').map(str::to_owned).collect();
+    }
+    if line.contains("\\t") {
+        return line.split("\\t").map(str::to_owned).collect();
+    }
+    underscore_joined_tmux_fields(line, fixed_fields_before_tail)
+}
+
+fn underscore_joined_tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
+    let mut parts = line
+        .splitn(fixed_fields_before_tail + 1, '_')
+        .collect::<Vec<_>>();
+    if parts.len() <= fixed_fields_before_tail {
+        return vec![line.to_owned()];
+    }
+    let Some(tail) = parts.pop() else {
+        return vec![line.to_owned()];
+    };
+    let Some((cwd, process)) = tail.rsplit_once('_') else {
+        return vec![line.to_owned()];
+    };
+    let mut fields = parts.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    fields.push(cwd.to_owned());
+    fields.push(process.to_owned());
+    fields
+}
+
 fn parse_tmux_snapshot(sessions_output: &str, panes_output: &str) -> Result<MuxSnapshot> {
     let mut sessions = Vec::new();
     for line in sessions_output
         .lines()
         .filter(|line| !line.trim().is_empty())
     {
-        let mut fields = line.split('\t');
+        let mut fields = tmux_fields(line, 5).into_iter();
         let id = fields.next().context("tmux snapshot missing session id")?;
         let name = fields
             .next()
-            .context("tmux snapshot missing session name")?;
-        let attached = fields.next().unwrap_or("0") != "0";
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| id.clone());
+        let attached = fields.next().is_some_and(|value| value != "0");
         let _windows = fields.next();
         let pane_id = fields.next().filter(|value| !value.is_empty());
         let cwd = fields.next().filter(|value| !value.is_empty());
         let process = fields.next().filter(|value| !value.is_empty());
         sessions.push(MuxSession {
-            id: id.to_owned(),
-            name: name.to_owned(),
+            id: id.clone(),
+            name: name.clone(),
             active: attached,
             anchor: MuxPaneAnchor {
-                session_id: id.to_owned(),
-                pane_id: pane_id.map(str::to_owned),
-                cwd: cwd.map(str::to_owned),
-                process: process.map(str::to_owned),
+                session_id: id,
+                pane_id,
+                cwd,
+                process,
             },
             active_window_id: None,
             windows: Vec::new(),
@@ -154,17 +192,21 @@ fn parse_tmux_snapshot(sessions_output: &str, panes_output: &str) -> Result<MuxS
 
 fn add_tmux_windows(sessions: &mut [MuxSession], panes_output: &str) -> Result<()> {
     for line in panes_output.lines().filter(|line| !line.trim().is_empty()) {
-        let mut fields = line.split('\t');
-        let session_id = fields.next().context("tmux pane missing session id")?;
-        let window_id = fields.next().context("tmux pane missing window id")?;
-        let window_index = fields
-            .next()
-            .context("tmux pane missing window index")?
-            .parse()
-            .context("tmux pane window index is not a number")?;
-        let window_name = fields.next().context("tmux pane missing window name")?;
-        let window_active = fields.next().unwrap_or("0") != "0";
-        let pane_active = fields.next().unwrap_or("0") != "0";
+        let mut fields = tmux_fields(line, 7).into_iter();
+        let Some(session_id) = fields.next().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(window_id) = fields.next().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(window_index) = fields.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(window_name) = fields.next() else {
+            continue;
+        };
+        let window_active = fields.next().is_some_and(|value| value != "0");
+        let pane_active = fields.next().is_some_and(|value| value != "0");
         let pane_id = fields.next().filter(|value| !value.is_empty());
         let cwd = fields.next().filter(|value| !value.is_empty());
         let process = fields.next().filter(|value| !value.is_empty());
@@ -182,24 +224,24 @@ fn add_tmux_windows(sessions: &mut [MuxSession], panes_output: &str) -> Result<(
         {
             if pane_active || window.anchor.pane_id.is_none() {
                 window.anchor = MuxPaneAnchor {
-                    session_id: session_id.to_owned(),
-                    pane_id: pane_id.map(str::to_owned),
-                    cwd: cwd.map(str::to_owned),
-                    process: process.map(str::to_owned),
+                    session_id: session_id.clone(),
+                    pane_id: pane_id.clone(),
+                    cwd: cwd.clone(),
+                    process: process.clone(),
                 };
             }
             continue;
         }
         session.windows.push(MuxWindow {
-            id: window_id.to_owned(),
+            id: window_id,
             index: window_index,
-            name: window_name.to_owned(),
+            name: window_name,
             active: window_active,
             anchor: MuxPaneAnchor {
-                session_id: session_id.to_owned(),
-                pane_id: pane_id.map(str::to_owned),
-                cwd: cwd.map(str::to_owned),
-                process: process.map(str::to_owned),
+                session_id,
+                pane_id,
+                cwd,
+                process,
             },
         });
     }
@@ -308,5 +350,76 @@ mod tests {
             Some("%3")
         );
         assert_eq!(snapshot.sessions[0].windows[1].name, "shell");
+    }
+
+    #[test]
+    fn tmux_snapshot_falls_back_to_id_when_session_name_is_missing() {
+        let snapshot = parse_tmux_snapshot("$1\n", "").unwrap();
+
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].id, "$1");
+        assert_eq!(snapshot.sessions[0].name, "$1");
+    }
+
+    #[test]
+    fn tmux_snapshot_accepts_unit_separator_delimiters() {
+        let snapshot = parse_tmux_snapshot(
+            "$1\x1fboo\x1f1\x1f5\x1f%3\x1f/Users/luan/src/boo\x1fnode\n",
+            "$1\x1f@3\x1f1\x1fai\x1f1\x1f1\x1f%3\x1f/Users/luan/src/boo\x1fnode\n",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.active_session_id.as_deref(), Some("$1"));
+        assert_eq!(snapshot.sessions[0].id, "$1");
+        assert_eq!(snapshot.sessions[0].name, "boo");
+        assert_eq!(snapshot.sessions[0].anchor.pane_id.as_deref(), Some("%3"));
+        assert_eq!(snapshot.sessions[0].active_window_id.as_deref(), Some("@3"));
+    }
+
+    #[test]
+    fn tmux_snapshot_recovers_underscore_joined_rows() {
+        let snapshot = parse_tmux_snapshot(
+            "$2_agents_0_3_%34_/Users/luan/src/agents_node\n",
+            "$2_@28_1_ai_1_1_%34_/Users/luan/src/agents_node\n",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.active_session_id, None);
+        assert_eq!(snapshot.sessions[0].id, "$2");
+        assert_eq!(snapshot.sessions[0].name, "agents");
+        assert_eq!(snapshot.sessions[0].anchor.pane_id.as_deref(), Some("%34"));
+        assert_eq!(
+            snapshot.sessions[0].anchor.cwd.as_deref(),
+            Some("/Users/luan/src/agents")
+        );
+        assert_eq!(snapshot.sessions[0].anchor.process.as_deref(), Some("node"));
+        assert_eq!(
+            snapshot.sessions[0].active_window_id.as_deref(),
+            Some("@28")
+        );
+        assert_eq!(snapshot.sessions[0].windows[0].name, "ai");
+    }
+
+    #[test]
+    fn tmux_snapshot_accepts_literal_backslash_t_delimiters() {
+        let snapshot = parse_tmux_snapshot(
+            "$1\\tboo\\t1\\t5\\t%3\\t/Users/luan/src/boo\\tnode\n",
+            "$1\\t@3\\t1\\tai\\t1\\t1\\t%3\\t/Users/luan/src/boo\\tnode\n",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.active_session_id.as_deref(), Some("$1"));
+        assert_eq!(snapshot.sessions[0].id, "$1");
+        assert_eq!(snapshot.sessions[0].name, "boo");
+        assert_eq!(snapshot.sessions[0].anchor.pane_id.as_deref(), Some("%3"));
+        assert_eq!(snapshot.sessions[0].active_window_id.as_deref(), Some("@3"));
+    }
+
+    #[test]
+    fn tmux_snapshot_skips_incomplete_pane_rows() {
+        let snapshot = parse_tmux_snapshot("$1\talpha\t1\t1\n", "$1\n").unwrap();
+
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(snapshot.sessions[0].windows.is_empty());
     }
 }

@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Result, bail};
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
-    terminal_engine::{TerminalColorConfig, TerminalEngine},
+    terminal_engine::{TerminalColorConfig, TerminalEngine, TerminalSideEffect},
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
 };
@@ -26,12 +26,16 @@ use crate::{
 };
 
 use super::{
-    pane::{MuxPaneTarget, TerminalRuntime},
+    pane::{MuxPaneTarget, TMUX_CLIENT_FEATURES, TerminalRuntime},
     tmux_codec::{
         TmuxPassthroughDecoder, decode_tmux_control_output, send_tmux_hex_input,
         target_input_selector,
     },
 };
+
+const TMUX_CONTROL_READY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const TMUX_CONTROL_BACKLOG_FRAME_INTERVAL: Duration = Duration::from_millis(64);
+const TMUX_CONTROL_SYNC_OUTPUT_MAX_SUPPRESS: Duration = Duration::from_secs(1);
 
 pub(super) struct TmuxControlTerminal {
     geometry: TerminalGeometry,
@@ -49,6 +53,7 @@ impl TmuxControlTerminal {
         geometry: TerminalGeometry,
         colors: TerminalColorConfig,
         macos_option_as_alt: MacosOptionAsAlt,
+        side_effect_tx: Option<mpsc::Sender<TerminalSideEffect>>,
         repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<Self> {
         let program = native_control_program(backend)?;
@@ -100,6 +105,7 @@ impl TmuxControlTerminal {
             latest_frame,
             latest_drain,
             pending_output_len,
+            side_effect_tx,
         })?;
         Ok(terminal)
     }
@@ -178,8 +184,13 @@ impl TerminalRuntime for TmuxControlTerminal {
             .map_err(|_| anyhow::anyhow!("native mux control worker stopped"))
     }
 
-    fn handle_mouse_wheel(&mut self, input: MouseInput, _scroll_delta: isize) -> Result<()> {
-        self.encode_mouse(input)
+    fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()> {
+        self.command_tx
+            .send(TmuxControlCommand::MouseWheel {
+                input,
+                scroll_delta,
+            })
+            .map_err(|_| anyhow::anyhow!("native mux control worker stopped"))
     }
 }
 
@@ -189,6 +200,10 @@ enum TmuxControlCommand {
     Key(KeyInput),
     Focus(bool),
     Mouse(MouseInput),
+    MouseWheel {
+        input: MouseInput,
+        scroll_delta: isize,
+    },
     Paste(String),
     RawInput(Vec<u8>),
 }
@@ -233,8 +248,10 @@ struct TmuxControlWorker {
     latest_frame: Arc<PublishedMuxFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
+    sync_output_since: Option<Instant>,
     control_parser: TmuxControlParser,
     passthrough_decoder: TmuxPassthroughDecoder,
+    side_effect_tx: Option<mpsc::Sender<TerminalSideEffect>>,
 }
 
 struct TmuxControlWorkerConfig {
@@ -249,6 +266,7 @@ struct TmuxControlWorkerConfig {
     latest_frame: Arc<PublishedMuxFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
+    side_effect_tx: Option<mpsc::Sender<TerminalSideEffect>>,
 }
 
 fn spawn_tmux_control_worker(config: TmuxControlWorkerConfig) -> Result<()> {
@@ -289,6 +307,8 @@ impl TmuxControlWorker {
             latest_frame: config.latest_frame,
             latest_drain: config.latest_drain,
             pending_output_len: config.pending_output_len,
+            sync_output_since: None,
+            side_effect_tx: config.side_effect_tx,
             control_parser: TmuxControlParser::default(),
             passthrough_decoder: TmuxPassthroughDecoder::default(),
         };
@@ -301,7 +321,7 @@ impl TmuxControlWorker {
 
     fn run(&mut self) {
         let mut unpublished_frame = true;
-        let mut last_publish = Instant::now() - Duration::from_millis(16);
+        let mut last_publish = Instant::now() - TMUX_CONTROL_READY_FRAME_INTERVAL;
         loop {
             let (command_work, commands_disconnected) = self.process_commands();
             if commands_disconnected {
@@ -315,7 +335,7 @@ impl TmuxControlWorker {
             if command_work {
                 unpublished_frame = true;
             }
-            if unpublished_frame && last_publish.elapsed() >= Duration::from_millis(16) {
+            if self.should_publish_frame(unpublished_frame, last_publish.elapsed()) {
                 if let Ok(frame) = self.engine.extract_frame()
                     && self.latest_frame.publish(frame).is_ok()
                 {
@@ -330,13 +350,34 @@ impl TmuxControlWorker {
         }
     }
 
+    fn should_publish_frame(
+        &mut self,
+        unpublished_frame: bool,
+        elapsed_since_last_publish: Duration,
+    ) -> bool {
+        should_publish_tmux_control_frame(
+            unpublished_frame,
+            self.sync_output_suppressed(),
+            self.pending_output_len.load(Ordering::Relaxed),
+            elapsed_since_last_publish,
+        )
+    }
+
+    fn sync_output_suppressed(&mut self) -> bool {
+        if !self.engine.is_synchronized_output().unwrap_or(false) {
+            self.sync_output_since = None;
+            return false;
+        }
+        let since = *self.sync_output_since.get_or_insert_with(Instant::now);
+        since.elapsed() < TMUX_CONTROL_SYNC_OUTPUT_MAX_SUPPRESS
+    }
+
     fn process_commands(&mut self) -> (bool, bool) {
         let mut did_work = false;
         loop {
             match self.command_rx.try_recv() {
                 Ok(command) => {
-                    did_work = true;
-                    let _ = self.process_command(command);
+                    did_work |= self.process_command(command).unwrap_or(true);
                 }
                 Err(mpsc::TryRecvError::Empty) => return (did_work, false),
                 Err(mpsc::TryRecvError::Disconnected) => return (did_work, true),
@@ -344,7 +385,7 @@ impl TmuxControlWorker {
         }
     }
 
-    fn process_command(&mut self, command: TmuxControlCommand) -> Result<()> {
+    fn process_command(&mut self, command: TmuxControlCommand) -> Result<bool> {
         match command {
             TmuxControlCommand::Resize(geometry) => {
                 if self.geometry != geometry {
@@ -372,6 +413,20 @@ impl TmuxControlWorker {
                 self.engine.encode_mouse_to_vec(input, &mut bytes)?;
                 self.send_input(&bytes)?;
             }
+            TmuxControlCommand::MouseWheel {
+                input,
+                scroll_delta,
+            } => match tmux_control_mouse_wheel_action(self.engine.is_mouse_tracking()?) {
+                TmuxControlMouseWheelAction::EncodeMouse => {
+                    let mut bytes = Vec::new();
+                    self.engine.encode_mouse_to_vec(input, &mut bytes)?;
+                    self.send_input(&bytes)?;
+                }
+                TmuxControlMouseWheelAction::ScrollViewport if scroll_delta != 0 => {
+                    self.engine.scroll_viewport_delta(scroll_delta);
+                }
+                TmuxControlMouseWheelAction::ScrollViewport => return Ok(false),
+            },
             TmuxControlCommand::Paste(text) => {
                 let mut bytes = Vec::new();
                 self.engine.encode_paste_to_vec(&text, &mut bytes)?;
@@ -379,7 +434,7 @@ impl TmuxControlWorker {
             }
             TmuxControlCommand::RawInput(bytes) => self.send_input(&bytes)?,
         }
-        Ok(())
+        Ok(true)
     }
 
     fn drain_output(&mut self) -> DrainStats {
@@ -404,6 +459,7 @@ impl TmuxControlWorker {
                         let bytes = self.passthrough_decoder.push(&bytes);
                         if !bytes.is_empty() {
                             self.engine.write_vt(&bytes);
+                            self.forward_side_effects();
                         }
                     }
                 }
@@ -411,6 +467,22 @@ impl TmuxControlWorker {
         }
         stats.elapsed_us = start.elapsed().as_micros() as u64;
         stats
+    }
+
+    fn forward_side_effects(&mut self) {
+        let Some(tx) = self.side_effect_tx.as_ref() else {
+            return;
+        };
+        let mut disconnected = false;
+        for effect in self.engine.drain_side_effects() {
+            if tx.send(effect).is_err() {
+                disconnected = true;
+                break;
+            }
+        }
+        if disconnected {
+            self.side_effect_tx = None;
+        }
     }
 
     fn publish_drain(&self, stats: DrainStats) {
@@ -440,6 +512,35 @@ impl TmuxControlWorker {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TmuxControlMouseWheelAction {
+    EncodeMouse,
+    ScrollViewport,
+}
+
+fn tmux_control_mouse_wheel_action(mouse_tracking: bool) -> TmuxControlMouseWheelAction {
+    if mouse_tracking {
+        TmuxControlMouseWheelAction::EncodeMouse
+    } else {
+        TmuxControlMouseWheelAction::ScrollViewport
+    }
+}
+
+fn should_publish_tmux_control_frame(
+    unpublished_frame: bool,
+    sync_output_suppressed: bool,
+    pending_output_bytes: usize,
+    elapsed_since_last_publish: Duration,
+) -> bool {
+    if !unpublished_frame || sync_output_suppressed {
+        return false;
+    }
+    if pending_output_bytes > 0 {
+        return elapsed_since_last_publish >= TMUX_CONTROL_BACKLOG_FRAME_INTERVAL;
+    }
+    elapsed_since_last_publish >= TMUX_CONTROL_READY_FRAME_INTERVAL
+}
+
 fn native_control_program(backend: MuxBackendKind) -> Result<&'static str> {
     match backend {
         MuxBackendKind::Tmux => Ok("tmux"),
@@ -451,7 +552,14 @@ fn native_control_program(backend: MuxBackendKind) -> Result<&'static str> {
 
 fn configure_native_control_command(command: &mut Command, target: &MuxPaneTarget) {
     command
-        .args(["-C", "attach-session", "-t", target.session_id()])
+        .args([
+            "-C",
+            "-T",
+            TMUX_CLIENT_FEATURES,
+            "attach-session",
+            "-t",
+            target.session_id(),
+        ])
         .env_remove("TMUX")
         .env_remove("ZELLIJ")
         .stdin(Stdio::piped())
@@ -462,6 +570,22 @@ fn configure_native_control_command(command: &mut Command, target: &MuxPaneTarge
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_control_mouse_wheel_scrolls_viewport_when_mouse_tracking_is_off() {
+        assert_eq!(
+            tmux_control_mouse_wheel_action(false),
+            TmuxControlMouseWheelAction::ScrollViewport
+        );
+    }
+
+    #[test]
+    fn tmux_control_mouse_wheel_encodes_mouse_when_mouse_tracking_is_on() {
+        assert_eq!(
+            tmux_control_mouse_wheel_action(true),
+            TmuxControlMouseWheelAction::EncodeMouse
+        );
+    }
 
     #[test]
     fn native_control_command_removes_nested_mux_environment() {
@@ -479,5 +603,68 @@ mod tests {
 
         assert!(removals.iter().any(|(key, _)| *key == "TMUX"));
         assert!(removals.iter().any(|(key, _)| *key == "ZELLIJ"));
+    }
+
+    #[test]
+    fn native_control_command_declares_tmux_client_features() {
+        let target = MuxPaneTarget::Session {
+            session_id: "bootty-session".to_owned(),
+            cwd: None,
+        };
+        let mut command = Command::new("tmux");
+        configure_native_control_command(&mut command, &target);
+
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "-C",
+                "-T",
+                TMUX_CLIENT_FEATURES,
+                "attach-session",
+                "-t",
+                "bootty-session",
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_control_publish_policy_suppresses_synchronized_output() {
+        assert!(!should_publish_tmux_control_frame(
+            true,
+            true,
+            0,
+            TMUX_CONTROL_BACKLOG_FRAME_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn tmux_control_publish_policy_delays_backlogged_partial_frames() {
+        assert!(!should_publish_tmux_control_frame(
+            true,
+            false,
+            4096,
+            TMUX_CONTROL_READY_FRAME_INTERVAL,
+        ));
+        assert!(should_publish_tmux_control_frame(
+            true,
+            false,
+            4096,
+            TMUX_CONTROL_BACKLOG_FRAME_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn tmux_control_publish_policy_keeps_ready_cadence_without_backlog() {
+        assert!(should_publish_tmux_control_frame(
+            true,
+            false,
+            0,
+            TMUX_CONTROL_READY_FRAME_INTERVAL,
+        ));
     }
 }
