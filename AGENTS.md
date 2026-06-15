@@ -11,12 +11,52 @@ only when a smoke test needs an explicit shell override.
 
 ## Validation
 
+Default correctness gate for code changes:
+
 ```bash
 cargo fmt --check
-cargo clippy
-cargo test
-cargo bench --no-run
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --lib --tests
+cargo test -p bootty-app --bench paint_plan --no-run
+```
+
+Run doc-tests, WGPU offscreen readback tests, or Cargo's complete default test
+suite only when those surfaces changed or when explicitly validating the full
+Cargo test shape:
+
+```bash
+cargo test --workspace --doc
+cargo test -p bootty-app --test terminal_background_wgpu -- --ignored
+cargo test --workspace
+```
+
+Use targeted tests first while iterating, for example
+`cargo test -p bootty-terminal <test-name> --lib`. Do not run independent
+Cargo commands in parallel; concurrent Rust builds compete for CPU, memory, disk,
+and Cargo locks.
+
+For non-performance chores that need benchmark smoke coverage, use the fast
+CPU/egui benchmark harness:
+
+```bash
+cargo test -p bootty-app --bench paint_plan
+```
+
+Compile release-profile or workspace benchmarks only when a change needs those
+broad bench gates:
+
+```bash
+cargo bench -p bootty-app --bench paint_plan --no-run
+cargo bench -p bootty-app --bench paint_plan_wgpu --no-run
+cargo bench --workspace --no-run
+```
+
+Run full Criterion measurement suites only for performance/rendering changes or
+when explicitly requested:
+
+```bash
 cargo bench -p bootty-app --bench paint_plan -- --noplot
+cargo bench -p bootty-app --bench paint_plan_wgpu -- --noplot
 ```
 
 Use `cargo run` directly. If `cargo` does not resolve through mise shims, fix
@@ -30,7 +70,7 @@ git config core.hooksPath .githooks
 ```
 
 The pre-commit hook runs `cargo fmt --check` and
-`cargo clippy --workspace --all-targets -- -W clippy::all`.
+`cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## Manual Verification
 
@@ -58,5 +98,6 @@ cargo --version
 - Architecture: `docs/architecture.md`
 - Egui oracle inventory: `docs/current-egui-behavior.md`
 - Input encoders: `docs/input-encoders.md`
-- Performance notes: `docs/performance.md`
+- Benchmark process and performance guardrails: `docs/benchmarking.md`
+- Benchmark reports: `docs/benchmark-report.md`
 - `libghostty-rs` dependency boundary: `docs/libghostty-rs.md`

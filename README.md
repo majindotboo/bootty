@@ -71,6 +71,7 @@ cargo bench -p bootty-app --bench paint_plan -- --noplot
 - Configuration path, schema, reload, and writeback: `docs/configuration.md`
 - Egui oracle behavior inventory: `docs/current-egui-behavior.md`
 - Input encoder contracts: `docs/input-encoders.md`
-- Performance guardrails and benchmark seams: `docs/performance.md`
+- Benchmark process and performance guardrails: `docs/benchmarking.md`
+- Benchmark reports and measured findings: `docs/benchmark-report.md`
 - Built-in theme provenance: `docs/built-in-themes.md`
 - `libghostty-rs` dependency boundary: `docs/libghostty-rs.md`
