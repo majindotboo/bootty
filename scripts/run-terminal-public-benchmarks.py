@@ -357,6 +357,33 @@ def cargo_package_benchmarks(package: str, version: str) -> Path | None:
     return None
 
 
+def selected_benchmark_paths(root: Path, fixtures: list[str] | None) -> list[Path]:
+    if not fixtures:
+        return [root]
+
+    paths: list[Path] = []
+    for fixture in fixtures:
+        candidate = root / fixture
+        if candidate.is_dir():
+            paths.append(candidate)
+    return paths
+
+
+def materialize_benchmark_paths(paths: list[Path], temp: Path) -> Path:
+    if len(paths) == 1:
+        return paths[0]
+
+    selected = temp / "selected-benchmarks"
+    selected.mkdir()
+    for path in paths:
+        target = selected / path.name
+        try:
+            target.symlink_to(path, target_is_directory=True)
+        except OSError:
+            shutil.copytree(path, target)
+    return selected
+
+
 def bootty_executable() -> str | None:
     path_bootty = shutil.which("bootty")
     if path_bootty:
@@ -909,7 +936,8 @@ def run_one(
 
     tool_binary = shutil.which(tool.binary)
     benchmark_dir = cargo_package_benchmarks(tool.package, tool.version)
-    if not tool_binary or benchmark_dir is None:
+    benchmark_paths = selected_benchmark_paths(benchmark_dir, args.fixture) if benchmark_dir else []
+    if not tool_binary or not benchmark_paths:
         emit(
             output,
             {
@@ -943,11 +971,13 @@ def run_one(
         stale.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="bootty-terminal-bench-") as temp:
-        wrapper = Path(temp) / "run-benchmark.sh"
+        temp_path = Path(temp)
+        wrapper = temp_path / "run-benchmark.sh"
+        benchmark_path = materialize_benchmark_paths(benchmark_paths, temp_path)
         benchmark_command = [
             tool_binary,
             "--benchmarks",
-            str(benchmark_dir),
+            str(benchmark_path),
             "--max-samples",
             str(args.max_samples),
             "--max-secs",
@@ -1109,6 +1139,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output", default="artifacts/external-benchmarks/terminal-public.jsonl")
     parser.add_argument("--terminal", action="append", choices=["bootty", "kitty", "alacritty", "wezterm", "ghostty"])
     parser.add_argument("--tool", action="append", choices=["vtebench", "termbench"])
+    parser.add_argument("--fixture", action="append", help="limit public tools to a fixture directory name")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--max-samples", type=int, default=3)
     parser.add_argument("--max-secs", type=int, default=3)
