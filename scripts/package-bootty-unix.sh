@@ -15,6 +15,30 @@ VERSION="${BOOTTY_VERSION:-$(awk '
 ' Cargo.toml)}"
 VERSION="${VERSION:-0.0.0}"
 
+ensure_project_zig() {
+  local required_zig zig_path zig_version
+  required_zig="$(awk -F'"' '$1 ~ /^zig[[:space:]]*=/ { print $2; exit }' mise.toml)"
+
+  if command -v mise >/dev/null 2>&1; then
+    zig_path="$(mise which zig 2>/dev/null || true)"
+    if [[ -n "$zig_path" && -x "$zig_path" ]]; then
+      export PATH="$(dirname "$zig_path"):$PATH"
+    fi
+  fi
+
+  if ! zig_version="$(zig version 2>/dev/null)"; then
+    echo "Zig $required_zig is required to package $APP_NAME; install it with mise" >&2
+    exit 1
+  fi
+
+  if [[ -n "$required_zig" && "$zig_version" != "$required_zig" ]]; then
+    echo "Zig $required_zig is required to package $APP_NAME; found $zig_version at $(command -v zig)" >&2
+    exit 1
+  fi
+}
+
+ensure_project_zig
+
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 

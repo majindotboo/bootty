@@ -29,6 +29,7 @@ too_many_lines = "allow"
 ab_glyph = "0.2"
 anyhow = "1"
 arboard = "3"
+base64 = "0.22"
 criterion = "0.8"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "deref",
@@ -50,6 +51,8 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",
   "NSScreen",
+  "NSPasteboard",
+  "NSPasteboardItem",
   "NSWindow",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
@@ -65,6 +68,7 @@ rmux-sdk = "0.5"
 rmux-ipc = "0.5"
 rmux-proto = "0.5"
 rstest = "0.26"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 serde_json = "1"

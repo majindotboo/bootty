@@ -7,7 +7,19 @@ description = "Build the bootty app in release mode"
 run = "cargo build --release -p bootty-app --bin bootty"
 
 [tasks.test]
-description = "Run the workspace test suite"
+description = "Run workspace lib and integration tests"
+run = "cargo test --workspace --lib --tests"
+
+[tasks."test:doc"]
+description = "Run workspace doc-tests"
+run = "cargo test --workspace --doc"
+
+[tasks."test:wgpu"]
+description = "Run WGPU offscreen pixel readback tests"
+run = "cargo test -p bootty-app --test terminal_background_wgpu -- --ignored"
+
+[tasks."test:full"]
+description = "Run the full Cargo test suite including doc-tests"
 run = "cargo test --workspace"
 
 [tasks.fmt]
@@ -16,15 +28,35 @@ run = "cargo fmt --all -- --check"
 
 [tasks.clippy]
 description = "Run clippy on the workspace"
-run = "cargo clippy --workspace --all-targets -- -W clippy::all"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
 
 [tasks."bench:build"]
-description = "Compile benchmarks without running them"
+description = "Compile the fast CPU/egui paint plan benchmark smoke"
+run = "cargo test -p bootty-app --bench paint_plan --no-run"
+
+[tasks."bench:build:release"]
+description = "Compile the CPU/egui paint plan benchmark in bench profile"
+run = "cargo bench -p bootty-app --bench paint_plan --no-run"
+
+[tasks."bench:build:wgpu"]
+description = "Compile the WGPU paint plan benchmark"
+run = "cargo bench -p bootty-app --bench paint_plan_wgpu --no-run"
+
+[tasks."bench:build:workspace"]
+description = "Compile all workspace benchmarks without running them"
 run = "cargo bench --workspace --no-run"
 
 [tasks."bench:smoke"]
-description = "Run each paint plan benchmark once to prove it works"
-run = "cargo bench -p bootty-app --bench paint_plan -- --test"
+description = "Run the fast CPU/egui paint plan benchmark smoke"
+run = "cargo test -p bootty-app --bench paint_plan"
+
+[tasks."bench:perf"]
+description = "Run CPU/egui paint plan Criterion measurements"
+run = "cargo bench -p bootty-app --bench paint_plan -- --noplot"
+
+[tasks."bench:perf:wgpu"]
+description = "Run WGPU paint plan Criterion measurements"
+run = "cargo bench -p bootty-app --bench paint_plan_wgpu -- --noplot"
 
 [tasks.package]
 description = "Package the app bundle (macOS .app zip or Linux tarball)"
