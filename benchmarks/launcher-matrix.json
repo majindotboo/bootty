@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "description": "Optional competitive terminal launcher matrix. Placeholders are resolved by external harnesses, not routine validation.",
+  "placeholders": {
+    "cmd": "benchmark command argv joined for terminals that accept shell-like command strings",
+    "cmd_argv": "benchmark command argv for harnesses that can splice arrays",
+    "config": "profile-specific terminal config path",
+    "bootty_bin": "Bootty binary path, normally target/release/bootty",
+    "workdir": "benchmark working directory"
+  },
+  "run_policy": {
+    "fresh_process_per_run": true,
+    "randomize_terminal_order": true,
+    "warmup_runs": 5,
+    "measured_runs": 30,
+    "grids": ["80x24", "120x40", "160x48", "240x80"],
+    "required_metadata": [
+      "benchmark_git_commit",
+      "terminal_version",
+      "config_hash",
+      "profile",
+      "platform",
+      "display_server",
+      "font",
+      "font_size",
+      "grid",
+      "term",
+      "shell",
+      "monitor_hz",
+      "dpi_scale",
+      "power_mode"
+    ]
+  },
+  "terminals": {
+    "bootty": {
+      "tags": ["candidate", "gpu", "bootty"],
+      "version_argv": ["{bootty_bin}", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["{bootty_bin}", "-e", "{cmd}"]},
+        "linux_x11": {"argv": ["{bootty_bin}", "-e", "{cmd}"]},
+        "macos": {"argv": ["{bootty_bin}", "-e", "{cmd}"]}
+      }
+    },
+    "ghostty": {
+      "tags": ["gpu", "modern", "high-performance"],
+      "version_argv": ["ghostty", "+version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["ghostty", "--config-file={config}", "-e", "{cmd}"]},
+        "linux_x11": {"argv": ["ghostty", "--config-file={config}", "-e", "{cmd}"]},
+        "macos": {"argv": ["ghostty", "--config-file={config}", "-e", "{cmd}"]}
+      }
+    },
+    "kitty": {
+      "tags": ["gpu", "popular", "graphics-protocol"],
+      "version_argv": ["kitty", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["kitty", "--config", "{config}", "{cmd}"]},
+        "linux_x11": {"argv": ["kitty", "--config", "{config}", "{cmd}"]},
+        "macos": {"argv": ["kitty", "--config", "{config}", "{cmd}"]}
+      }
+    },
+    "wezterm": {
+      "tags": ["gpu", "popular", "mux"],
+      "version_argv": ["wezterm", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["wezterm", "start", "--", "{cmd}"]},
+        "linux_x11": {"argv": ["wezterm", "start", "--", "{cmd}"]},
+        "macos": {"argv": ["wezterm", "start", "--", "{cmd}"]},
+        "windows": {"argv": ["wezterm.exe", "start", "--", "{cmd}"]}
+      },
+      "variants": ["OpenGL", "WebGpu", "Software"]
+    },
+    "alacritty": {
+      "tags": ["gpu", "popular", "low-latency"],
+      "version_argv": ["alacritty", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["alacritty", "--config-file", "{config}", "-e", "{cmd}"]},
+        "linux_x11": {"argv": ["alacritty", "--config-file", "{config}", "-e", "{cmd}"]},
+        "macos": {"argv": ["alacritty", "--config-file", "{config}", "-e", "{cmd}"]},
+        "windows": {"argv": ["alacritty.exe", "--config-file", "{config}", "-e", "{cmd}"]}
+      }
+    },
+    "foot": {
+      "tags": ["wayland", "lightweight"],
+      "version_argv": ["foot", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["foot", "--config={config}", "{cmd}"]}
+      }
+    },
+    "rio": {
+      "tags": ["gpu", "modern"],
+      "version_argv": ["rio", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["rio", "-e", "{cmd}"]},
+        "linux_x11": {"argv": ["rio", "-e", "{cmd}"]},
+        "macos": {"argv": ["rio", "-e", "{cmd}"]},
+        "windows": {"argv": ["rio.exe", "-e", "{cmd}"]}
+      }
+    },
+    "contour": {
+      "tags": ["gpu", "modern"],
+      "version_argv": ["contour", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["contour", "--config", "{config}", "spawn", "{cmd}"]},
+        "linux_x11": {"argv": ["contour", "--config", "{config}", "spawn", "{cmd}"]}
+      }
+    },
+    "gnome-terminal": {
+      "tags": ["desktop-integrated", "vte"],
+      "version_argv": ["gnome-terminal", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["gnome-terminal", "--", "{cmd}"]},
+        "linux_x11": {"argv": ["gnome-terminal", "--", "{cmd}"]}
+      }
+    },
+    "konsole": {
+      "tags": ["desktop-integrated", "graphics-protocol"],
+      "version_argv": ["konsole", "--version"],
+      "platforms": {
+        "linux_wayland": {"argv": ["konsole", "--workdir", "{workdir}", "-e", "{cmd}"]},
+        "linux_x11": {"argv": ["konsole", "--workdir", "{workdir}", "-e", "{cmd}"]}
+      }
+    },
+    "xterm": {
+      "tags": ["classic", "baseline", "low-latency"],
+      "version_argv": ["xterm", "-version"],
+      "platforms": {
+        "linux_x11": {"argv": ["xterm", "-e", "{cmd}"]}
+      }
+    },
+    "st": {
+      "tags": ["classic", "baseline", "low-latency"],
+      "version_argv": ["st", "-v"],
+      "platforms": {
+        "linux_x11": {"argv": ["st", "-e", "{cmd}"]}
+      }
+    },
+    "iterm2": {
+      "tags": ["macos", "popular", "graphics-protocol"],
+      "version_argv": ["osascript", "-e", "tell application \"iTerm2\" to version"],
+      "platforms": {
+        "macos": {"argv": ["open", "-a", "iTerm", "--args", "{cmd}"]}
+      }
+    },
+    "terminal-app": {
+      "tags": ["macos", "native", "baseline"],
+      "version_argv": ["osascript", "-e", "tell application \"Terminal\" to version"],
+      "platforms": {
+        "macos": {"argv": ["open", "-a", "Terminal", "--args", "{cmd}"]}
+      }
+    },
+    "windows-terminal": {
+      "tags": ["windows", "native", "popular"],
+      "version_argv": ["wt.exe", "--version"],
+      "platforms": {
+        "windows": {"argv": ["wt.exe", "--", "{cmd}"]}
+      }
+    },
+    "conhost": {
+      "tags": ["windows", "native", "baseline"],
+      "version_argv": ["cmd.exe", "/c", "ver"],
+      "platforms": {
+        "windows": {"argv": ["cmd.exe", "/c", "{cmd}"]}
+      }
+    }
+  }
+}

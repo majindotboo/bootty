@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "description": "Benchmark profile definitions used to label competitive runs and prevent tuned-vs-default comparisons.",
+  "shared_normalization": {
+    "font_family": "JetBrains Mono",
+    "font_size_pt": 12,
+    "grids": ["80x24", "120x40", "160x48", "240x80"],
+    "scrollback_lines": 100000,
+    "opacity": 1.0,
+    "blur": false,
+    "decorations": true,
+    "cursor_blink": false,
+    "theme": "bootty-benchmark-dark",
+    "shell": "posix sh unless platform profile overrides",
+    "env": {
+      "COLORTERM": "truecolor",
+      "LANG": "en_US.UTF-8",
+      "LC_ALL": "en_US.UTF-8"
+    },
+    "machine_state": [
+      "record display server and compositor",
+      "record monitor refresh rate and DPI scale",
+      "record AC/battery state and power profile",
+      "record CPU governor or equivalent",
+      "record GPU driver and renderer",
+      "allow thermal cooldown between long measured suites"
+    ]
+  },
+  "sampling": {
+    "warmup_runs": 5,
+    "measured_runs": 30,
+    "order": "randomized terminals inside a fixed workload/profile/platform block",
+    "fresh_process_per_run": true,
+    "outlier_policy": "predeclare before running; report max and p99 even when outliers are excluded from confidence intervals"
+  },
+  "profiles": {
+    "default": {
+      "label": "default",
+      "purpose": "out-of-box terminal behavior",
+      "normalization": "only grid, workload command, platform metadata, and run count are forced",
+      "term_policy": "terminal default",
+      "config_policy": "no generated config unless the terminal requires one to launch"
+    },
+    "normalized": {
+      "label": "normalized",
+      "purpose": "apples-to-apples competitive baseline",
+      "normalization": "use every shared_normalization setting that the terminal supports",
+      "term_policy": "compatibility TERM unless a native-terminfo comparison is explicitly selected",
+      "config_policy": "generated benchmark config with config hash recorded",
+      "required_labels": ["font", "grid", "scrollback", "opacity", "cursor_blink", "shell", "term", "power_mode"]
+    },
+    "native_fast": {
+      "label": "native-fast",
+      "purpose": "terminal's documented performance-oriented settings",
+      "normalization": "start from normalized, then apply documented speed settings and label every deviation",
+      "term_policy": "native TERM when it is part of the terminal's fast path",
+      "config_policy": "generated config plus a deviation list"
+    },
+    "low_latency": {
+      "label": "low-latency",
+      "purpose": "key-to-visible-pixel and responsiveness tuning",
+      "normalization": "start from normalized, then minimize repaint/input delay knobs where supported",
+      "term_policy": "native or compatibility TERM must be labeled",
+      "config_policy": "generated config plus latency-specific deviations"
+    },
+    "feature_heavy": {
+      "label": "feature-heavy",
+      "purpose": "performance with common expensive features enabled",
+      "normalization": "start from normalized with ligatures, shell integration, hyperlinks, tabs/splits, image support, and IME enabled when supported",
+      "term_policy": "native TERM preferred for feature enablement",
+      "config_policy": "generated config plus unsupported-feature list"
+    },
+    "compatibility": {
+      "label": "compatibility",
+      "purpose": "conservative xterm-like behavior for cross-terminal comparability",
+      "normalization": "start from normalized with advanced protocols disabled where possible",
+      "term_policy": "TERM=xterm-256color",
+      "env": {"TERM": "xterm-256color"},
+      "config_policy": "generated config with native protocols disabled where supported"
+    },
+    "native_terminfo": {
+      "label": "native-terminfo",
+      "purpose": "terminal-specific TERM and feature path",
+      "normalization": "start from normalized but use each terminal's native TERM and terminfo package",
+      "term_policy": "xterm-ghostty, xterm-kitty, wezterm, alacritty, foot, or the closest documented native TERM",
+      "config_policy": "generated config plus exact TERM value and terminfo source"
+    }
+  }
+}
