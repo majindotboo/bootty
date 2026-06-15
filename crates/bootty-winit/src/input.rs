@@ -4,8 +4,8 @@ use crate::{
     geometry::TerminalSurface,
     input_keymap::{
         ModifierSideState, egui_key_utf8, is_control_key, key_mods_from_egui_modifiers,
-        key_unshifted, mouse_input_from_surface, mouse_mods_from_egui_modifiers,
-        mouse_wheel_button_from_delta_y,
+        key_unshifted, mouse_input_from_surface, mouse_input_from_surface_clamped,
+        mouse_mods_from_egui_modifiers, mouse_wheel_button_from_delta_y,
     },
     modifier_remap::ModifierRemapSet,
     terminal::{KeyInput, MacosOptionAsAlt, MouseAction, MouseButton, MouseInput, TerminalKey},
@@ -35,6 +35,12 @@ pub enum TerminalInputCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelScrollState {
+    point_remainder_y: f32,
+    line_remainder_y: f32,
+}
+
 pub fn terminal_input_commands(snapshot: InputSnapshot) -> Vec<TerminalInputCommand> {
     terminal_input_commands_with_modifier_remaps(snapshot, &ModifierRemapSet::default())
 }
@@ -50,6 +56,21 @@ pub fn terminal_input_commands_with_options(
     snapshot: InputSnapshot,
     modifier_remaps: &ModifierRemapSet,
     macos_option_as_alt: MacosOptionAsAlt,
+) -> Vec<TerminalInputCommand> {
+    let mut wheel_state = WheelScrollState::default();
+    terminal_input_commands_with_wheel_state(
+        snapshot,
+        modifier_remaps,
+        macos_option_as_alt,
+        &mut wheel_state,
+    )
+}
+
+pub fn terminal_input_commands_with_wheel_state(
+    snapshot: InputSnapshot,
+    modifier_remaps: &ModifierRemapSet,
+    macos_option_as_alt: MacosOptionAsAlt,
+    wheel_state: &mut WheelScrollState,
 ) -> Vec<TerminalInputCommand> {
     let mut commands = Vec::with_capacity(snapshot.events.len());
     let suppress_modified_text = text_modifiers_are_suppressed(
@@ -102,39 +123,51 @@ pub fn terminal_input_commands_with_options(
                 pressed,
                 modifiers,
             } => {
-                if !mouse_excluded(pos, snapshot.mouse_exclusion)
-                    && let Some(button) = terminal_mouse_button(button)
-                {
+                if let Some(button) = terminal_mouse_button(button) {
                     let action = if pressed {
                         MouseAction::Press
                     } else {
                         MouseAction::Release
                     };
-                    if let Some(input) =
+                    let input = if !pressed && snapshot.pressed_mouse_button == Some(button) {
+                        mouse_input_clamped(pos, action, Some(button), modifiers, snapshot.surface)
+                    } else if !mouse_excluded(pos, snapshot.mouse_exclusion) {
                         mouse_input(pos, action, Some(button), modifiers, snapshot.surface)
-                    {
+                    } else {
+                        None
+                    };
+                    if let Some(input) = input {
                         commands.push(TerminalInputCommand::Mouse(input));
                     }
                 }
             }
             egui::Event::MouseWheel {
-                delta, modifiers, ..
+                unit,
+                delta,
+                modifiers,
+                ..
             } => {
                 if let (Some(pos), Some(button)) =
                     (snapshot.hover_pos, terminal_mouse_wheel_button(delta.y))
                     && !mouse_excluded(pos, snapshot.mouse_exclusion)
-                    && let Some(input) = mouse_input(
+                {
+                    let scroll_delta =
+                        mouse_wheel_scroll_delta(delta.y, unit, snapshot.surface, wheel_state);
+                    if scroll_delta == 0 {
+                        continue;
+                    }
+                    if let Some(input) = mouse_input(
                         pos,
                         MouseAction::Press,
                         Some(button),
                         modifiers,
                         snapshot.surface,
-                    )
-                {
-                    commands.push(TerminalInputCommand::MouseWheel {
-                        input,
-                        scroll_delta: mouse_wheel_scroll_delta(delta.y),
-                    });
+                    ) {
+                        commands.push(TerminalInputCommand::MouseWheel {
+                            input,
+                            scroll_delta,
+                        });
+                    }
                 }
             }
             egui::Event::Key {
@@ -319,12 +352,62 @@ fn mouse_input(
     )
 }
 
+fn mouse_input_clamped(
+    pos: Pos2,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    modifiers: egui::Modifiers,
+    surface: Option<TerminalSurface>,
+) -> Option<MouseInput> {
+    Some(mouse_input_from_surface_clamped(
+        pos,
+        action,
+        button,
+        mouse_mods_from_egui_modifiers(modifiers),
+        surface?,
+    ))
+}
+
 fn terminal_mouse_wheel_button(delta_y: f32) -> Option<MouseButton> {
     mouse_wheel_button_from_delta_y(delta_y)
 }
 
-fn mouse_wheel_scroll_delta(delta_y: f32) -> isize {
-    if delta_y > 0.0 { -3 } else { 3 }
+fn mouse_wheel_scroll_delta(
+    delta_y: f32,
+    unit: egui::MouseWheelUnit,
+    surface: Option<TerminalSurface>,
+    wheel_state: &mut WheelScrollState,
+) -> isize {
+    match unit {
+        egui::MouseWheelUnit::Point => {
+            let cell_height = surface
+                .map(|surface| surface.cell.height)
+                .unwrap_or(crate::geometry::CellMetrics::default().height)
+                .max(1.0);
+            wheel_state.point_remainder_y += delta_y;
+            let whole_rows = (wheel_state.point_remainder_y / cell_height).trunc();
+            if whole_rows == 0.0 {
+                return 0;
+            }
+            wheel_state.point_remainder_y -= whole_rows * cell_height;
+            -(whole_rows as isize)
+        }
+        egui::MouseWheelUnit::Line => {
+            wheel_state.line_remainder_y += delta_y;
+            let whole_lines = wheel_state.line_remainder_y.trunc();
+            if whole_lines == 0.0 {
+                return 0;
+            }
+            wheel_state.line_remainder_y -= whole_lines;
+            -(whole_lines as isize)
+        }
+        egui::MouseWheelUnit::Page => {
+            let rows = surface
+                .map(|surface| isize::try_from(surface.geometry().rows).unwrap_or(isize::MAX))
+                .unwrap_or(24);
+            if delta_y > 0.0 { -rows } else { rows }
+        }
+    }
 }
 
 fn terminal_mouse_button(button: egui::PointerButton) -> Option<MouseButton> {
@@ -353,6 +436,13 @@ mod tests {
             alt,
             command,
             ..Default::default()
+        }
+    }
+
+    fn mouse_wheel_scroll_delta_for(command: &TerminalInputCommand) -> isize {
+        match command {
+            TerminalInputCommand::MouseWheel { scroll_delta, .. } => *scroll_delta,
+            other => panic!("expected mouse wheel command, got {other:?}"),
         }
     }
 
@@ -818,19 +908,19 @@ mod tests {
         let commands = terminal_input_commands(InputSnapshot {
             events: vec![
                 egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
+                    unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::new(0.0, 1.0),
                     phase: egui::TouchPhase::Move,
                     modifiers: modifiers(false, true, false),
                 },
                 egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
+                    unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::new(0.0, -1.0),
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
                 },
                 egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
+                    unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::ZERO,
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
@@ -870,7 +960,7 @@ mod tests {
                         y: 30.0,
                         size,
                     },
-                    scroll_delta: -3,
+                    scroll_delta: -1,
                 },
                 TerminalInputCommand::MouseWheel {
                     input: MouseInput {
@@ -881,10 +971,141 @@ mod tests {
                         y: 30.0,
                         size,
                     },
-                    scroll_delta: 3,
+                    scroll_delta: 1,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn mouse_wheel_line_units_use_line_magnitude() {
+        let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 2.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            }],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: Some(Pos2::new(35.0, 70.0)),
+            pressed_mouse_button: None,
+            surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+            mouse_exclusion: None,
+        });
+
+        assert_eq!(mouse_wheel_scroll_delta_for(&commands[0]), -2);
+    }
+
+    #[test]
+    fn mouse_wheel_point_units_emit_only_after_cell_threshold() {
+        let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
+        let surface = TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0));
+        let mut wheel_state = WheelScrollState::default();
+
+        let first = terminal_input_commands_with_wheel_state(
+            InputSnapshot {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, 11.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                modifiers: egui::Modifiers::default(),
+                modifier_sides: ModifierSideState::default(),
+                hover_pos: Some(Pos2::new(35.0, 70.0)),
+                pressed_mouse_button: None,
+                surface: Some(surface),
+                mouse_exclusion: None,
+            },
+            &ModifierRemapSet::default(),
+            MacosOptionAsAlt::default(),
+            &mut wheel_state,
+        );
+        let second = terminal_input_commands_with_wheel_state(
+            InputSnapshot {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, 11.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                modifiers: egui::Modifiers::default(),
+                modifier_sides: ModifierSideState::default(),
+                hover_pos: Some(Pos2::new(35.0, 70.0)),
+                pressed_mouse_button: None,
+                surface: Some(surface),
+                mouse_exclusion: None,
+            },
+            &ModifierRemapSet::default(),
+            MacosOptionAsAlt::default(),
+            &mut wheel_state,
+        );
+
+        assert!(first.is_empty());
+        assert_eq!(mouse_wheel_scroll_delta_for(&second[0]), -1);
+    }
+
+    #[test]
+    fn pointer_release_outside_terminal_rect_is_preserved() {
+        let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![egui::Event::PointerButton {
+                pos: Pos2::new(260.0, 170.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: None,
+            pressed_mouse_button: Some(MouseButton::Left),
+            surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+            mouse_exclusion: None,
+        });
+
+        assert_eq!(
+            commands,
+            vec![TerminalInputCommand::Mouse(MouseInput {
+                action: MouseAction::Release,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 200.0,
+                y: 100.0,
+                size: MouseEncoderSize {
+                    screen_width: 200,
+                    screen_height: 100,
+                    cell_width: 9,
+                    cell_height: 22,
+                    padding_left: 0,
+                    padding_top: 0,
+                    padding_right: 0,
+                    padding_bottom: 0,
+                },
+            })]
+        );
+    }
+
+    #[test]
+    fn pointer_release_outside_terminal_rect_without_pressed_button_is_ignored() {
+        let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![egui::Event::PointerButton {
+                pos: Pos2::new(260.0, 170.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: None,
+            pressed_mouse_button: None,
+            surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+            mouse_exclusion: None,
+        });
+
+        assert!(commands.is_empty());
     }
 
     #[test]

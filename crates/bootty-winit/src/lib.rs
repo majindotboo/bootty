@@ -1,6 +1,7 @@
 #[cfg(feature = "bare-host")]
 pub mod bare_host;
 pub mod direct_input;
+pub mod file_paths;
 pub mod input;
 pub mod input_binding;
 pub mod input_binding_set;

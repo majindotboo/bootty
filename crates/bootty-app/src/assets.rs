@@ -1,5 +1,8 @@
 use std::io::Cursor;
 
+#[cfg(not(target_os = "macos"))]
+use std::sync::OnceLock;
+
 use eframe::egui;
 
 #[cfg(not(target_os = "macos"))]
@@ -22,13 +25,18 @@ const NATIVE_APP_ICON_SIZE: u32 = 256;
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn native_app_icon_data() -> egui::IconData {
-    let icon = decode_png(NATIVE_APP_ICON_PNG);
-    let rgba = downscale_rgba_to_square(&icon.rgba, icon.width, icon.height, NATIVE_APP_ICON_SIZE);
-    egui::IconData {
-        rgba,
-        width: NATIVE_APP_ICON_SIZE,
-        height: NATIVE_APP_ICON_SIZE,
-    }
+    static ICON: OnceLock<egui::IconData> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let icon = decode_png(NATIVE_APP_ICON_PNG);
+        let rgba =
+            downscale_rgba_to_square(&icon.rgba, icon.width, icon.height, NATIVE_APP_ICON_SIZE);
+        egui::IconData {
+            rgba,
+            width: NATIVE_APP_ICON_SIZE,
+            height: NATIVE_APP_ICON_SIZE,
+        }
+    })
+    .clone()
 }
 
 /// Box-filter downscale with alpha-weighted color averaging, so transparent

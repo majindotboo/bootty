@@ -1057,6 +1057,7 @@ fn render_frame_with_text(ch: char) -> RenderFrame {
             fg: None,
             bg: None,
             style: cell_style(),
+            hyperlink: None,
         }],
         text: vec![ch],
         images: Default::default(),

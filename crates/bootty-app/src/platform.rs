@@ -1,8 +1,18 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 
 use crate::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig};
 
 pub fn read_clipboard_text() -> Result<Option<String>> {
+    if let Some(paths) = read_clipboard_file_paths()
+        && let Some(text) = bootty_winit::file_paths::format_file_paths_for_paste(
+            paths.iter().map(PathBuf::as_path),
+        )
+    {
+        return Ok(Some(text));
+    }
+
     let mut clipboard = arboard::Clipboard::new()?;
     match clipboard.get_text() {
         Ok(text) if !text.is_empty() => Ok(Some(text)),
@@ -11,20 +21,72 @@ pub fn read_clipboard_text() -> Result<Option<String>> {
     }
 }
 
+pub fn write_clipboard_text(text: &str) -> Result<()> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text.to_owned())?;
+    Ok(())
+}
+
+pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
+    platform_show_desktop_notification(title, body)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_show_desktop_notification(title: &str, body: &str) -> Result<()> {
+    let script = format!(
+        "display notification {} with title {}",
+        osascript_quote(body),
+        osascript_quote(title)
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_show_desktop_notification(title: &str, body: &str) -> Result<()> {
+    std::process::Command::new("notify-send")
+        .args([title, body])
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn platform_show_desktop_notification(_title: &str, _body: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn osascript_quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
+    macos_clipboard::read_file_paths()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
+    None
+}
+
 pub fn spawn_new_window() -> Result<()> {
     std::process::Command::new(std::env::current_exe()?).spawn()?;
     Ok(())
 }
 
-pub fn apply_macos_non_native_fullscreen_presentation(window: &WindowConfig) {
+pub fn apply_macos_non_native_fullscreen_presentation(window: &WindowConfig) -> bool {
     set_macos_non_native_fullscreen_presentation(
         window.non_native_fullscreen_enabled()
             && window.hides_macos_menu_bar_in_non_native_fullscreen(),
-    );
+    )
 }
 
-pub fn restore_macos_presentation() {
-    set_macos_non_native_fullscreen_presentation(false);
+pub fn restore_macos_presentation() -> bool {
+    set_macos_non_native_fullscreen_presentation(false)
 }
 
 pub fn macos_handles_non_native_fullscreen_frame(window: &WindowConfig) -> bool {
@@ -104,12 +166,98 @@ fn platform_handles_macos_non_native_fullscreen_frame() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn set_macos_non_native_fullscreen_presentation(enabled: bool) {
-    macos_presentation::set_non_native_fullscreen(enabled);
+mod macos_clipboard {
+    use std::path::PathBuf;
+
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
+
+    pub fn read_file_paths() -> Option<Vec<PathBuf>> {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let items = pasteboard.pasteboardItems()?;
+        let mut paths = Vec::new();
+        for index in 0..items.count() {
+            let item = items.objectAtIndex(index);
+            if let Some(url) = item.stringForType(unsafe { NSPasteboardTypeFileURL })
+                && let Some(path) = path_from_file_url(&url.to_string())
+            {
+                paths.push(path);
+            }
+        }
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    fn path_from_file_url(url: &str) -> Option<PathBuf> {
+        let rest = url.strip_prefix("file://")?;
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !rest.starts_with('/') {
+            return None;
+        }
+        Some(PathBuf::from(percent_decode(rest)?))
+    }
+
+    fn percent_decode(input: &str) -> Option<String> {
+        let bytes = input.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hi = hex_value(*bytes.get(index + 1)?)?;
+                let lo = hex_value(*bytes.get(index + 2)?)?;
+                decoded.push((hi << 4) | lo);
+                index += 3;
+            } else {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(decoded).ok()
+    }
+
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn file_url_paths_are_percent_decoded() {
+            assert_eq!(
+                path_from_file_url("file:///Users/me/Screen%20Shot%201.png"),
+                Some(PathBuf::from("/Users/me/Screen Shot 1.png"))
+            );
+        }
+
+        #[test]
+        fn file_url_localhost_paths_are_supported() {
+            assert_eq!(
+                path_from_file_url("file://localhost/tmp/a%27b.png"),
+                Some(PathBuf::from("/tmp/a'b.png"))
+            );
+        }
+
+        #[test]
+        fn non_file_urls_are_ignored() {
+            assert_eq!(path_from_file_url("https://example.com/image.png"), None);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_non_native_fullscreen_presentation(enabled: bool) -> bool {
+    macos_presentation::set_non_native_fullscreen(enabled)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn set_macos_non_native_fullscreen_presentation(_enabled: bool) {}
+fn set_macos_non_native_fullscreen_presentation(_enabled: bool) -> bool {
+    true
+}
 
 #[cfg(target_os = "macos")]
 mod macos_presentation {
@@ -139,9 +287,9 @@ mod macos_presentation {
         height: f64,
     }
 
-    pub fn set_non_native_fullscreen(enabled: bool) {
+    pub fn set_non_native_fullscreen(enabled: bool) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
-            return;
+            return false;
         };
         let app = NSApplication::sharedApplication(mtm);
 
@@ -153,8 +301,8 @@ mod macos_presentation {
                 *saved = Some(app.presentationOptions().bits());
             }
             app.setPresentationOptions(
-                NSApplicationPresentationOptions::HideDock
-                    | NSApplicationPresentationOptions::HideMenuBar,
+                NSApplicationPresentationOptions::AutoHideDock
+                    | NSApplicationPresentationOptions::AutoHideMenuBar,
             );
             if let Some(window) = active_window(&app) {
                 let mut saved_state = SAVED_WINDOW_STATE.lock().expect("lock window state");
@@ -169,8 +317,9 @@ mod macos_presentation {
                 if let Some(screen) = window.screen() {
                     window.setFrame_display(screen.frame(), true);
                 }
+                return true;
             }
-            return;
+            return false;
         }
 
         if let Some(options) = SAVED_PRESENTATION_OPTIONS
@@ -185,6 +334,7 @@ mod macos_presentation {
         {
             state.restore(&window);
         }
+        true
     }
 
     fn active_window(app: &NSApplication) -> Option<objc2::rc::Retained<NSWindow>> {
@@ -234,8 +384,6 @@ mod macos_presentation {
 
 #[cfg(target_os = "macos")]
 mod macos_app_icon {
-    use std::path::{Path, PathBuf};
-
     use objc2::{AnyThread as _, MainThreadMarker};
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
@@ -243,10 +391,6 @@ mod macos_app_icon {
     use crate::assets;
 
     pub fn install() -> bool {
-        if bundled_liquid_glass_asset_catalog().is_some() {
-            return true;
-        }
-
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
@@ -264,43 +408,6 @@ mod macos_app_icon {
             app.setApplicationIconImage(Some(&image));
         }
         true
-    }
-
-    fn bundled_liquid_glass_asset_catalog() -> Option<PathBuf> {
-        let executable = std::env::current_exe().ok()?;
-        bundle_asset_catalog_path(&executable).filter(|path| path.is_file())
-    }
-
-    fn bundle_asset_catalog_path(executable: &Path) -> Option<PathBuf> {
-        let macos_dir = executable.parent()?;
-        let contents_dir = macos_dir.parent()?;
-        if macos_dir.file_name()? != "MacOS" || contents_dir.file_name()? != "Contents" {
-            return None;
-        }
-
-        Some(contents_dir.join("Resources").join("Assets.car"))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn bundle_asset_catalog_path_resolves_app_bundle_resources() {
-            let path = Path::new("/tmp/Bootty.app/Contents/MacOS/bootty");
-
-            assert_eq!(
-                bundle_asset_catalog_path(path).as_deref(),
-                Some(Path::new("/tmp/Bootty.app/Contents/Resources/Assets.car"))
-            );
-        }
-
-        #[test]
-        fn bundle_asset_catalog_path_ignores_unbundled_executables() {
-            let path = Path::new("/tmp/target/release/bootty");
-
-            assert_eq!(bundle_asset_catalog_path(path), None);
-        }
     }
 }
 #[cfg(test)]

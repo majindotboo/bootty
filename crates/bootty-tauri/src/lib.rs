@@ -489,6 +489,7 @@ mod tests {
                 fg: Some(rgb(0xff, 0xee, 0xdd)),
                 bg: None,
                 style,
+                hyperlink: None,
             }],
             text: vec!['h', 'i'],
             images: KittyImageFrame {

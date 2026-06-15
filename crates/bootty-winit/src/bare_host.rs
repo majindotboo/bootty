@@ -26,12 +26,14 @@ pub use crate::input_keymap::{
 
 use crate::{
     direct_input::ModifierSideState,
+    file_paths::format_file_paths_for_paste,
     geometry::{
         CellMetrics, SurfaceRect, TerminalGeometry, TerminalPadding, TerminalSurface,
         geometry_for_pixels,
     },
     input_keymap::{
-        key_mods_from_winit_modifiers, mouse_input_from_surface, mouse_wheel_button_from_delta_y,
+        key_mods_from_winit_modifiers, mouse_input_from_surface, mouse_input_from_surface_clamped,
+        mouse_wheel_button_from_delta_y,
     },
     modifier_remap::ModifierRemapSet,
     renderer_frame::RendererFrame,
@@ -223,7 +225,18 @@ impl BareTerminalInput {
         button: Option<MouseButton>,
         viewport: BareTerminalViewport,
     ) -> Option<MouseInput> {
-        bare_terminal_mouse_input(self.cursor_pos?, action, button, self.modifiers, viewport)
+        let pos = self.cursor_pos?;
+        if action == MouseAction::Release && button.is_some() && self.pressed_mouse_button == button
+        {
+            return bare_terminal_mouse_input_clamped(
+                pos,
+                action,
+                button,
+                self.modifiers,
+                viewport,
+            );
+        }
+        bare_terminal_mouse_input(pos, action, button, self.modifiers, viewport)
     }
 
     pub fn mouse_wheel(
@@ -255,6 +268,22 @@ pub fn bare_terminal_mouse_input(
         key_mods_from_winit_modifiers(modifiers),
         surface,
     )
+}
+
+fn bare_terminal_mouse_input_clamped(
+    pos: Pos2,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    modifiers: ModifiersState,
+    viewport: BareTerminalViewport,
+) -> Option<MouseInput> {
+    Some(mouse_input_from_surface_clamped(
+        pos,
+        action,
+        button,
+        key_mods_from_winit_modifiers(modifiers),
+        viewport.terminal_surface(),
+    ))
 }
 
 fn bare_terminal_mouse_button(button: WinitMouseButton) -> Option<MouseButton> {
@@ -354,6 +383,7 @@ pub fn renderer_parity_gallery_frame() -> RendererFrame {
                 fg: Some(rgb(10, 10, 10)),
                 bg: Some(rgb(12, 12, 12)),
                 style: CellStyle::default(),
+                hyperlink: None,
             },
         ],
         text: vec!['A', '█', 'B', 'C', 'D', 'E'],
@@ -467,6 +497,7 @@ impl ApplicationHandler for BareTerminalApp {
                 button,
                 ..
             } => state.handle_mouse_button(button_state, button),
+            WindowEvent::DroppedFile(path) => state.handle_dropped_file(path),
             WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
             WindowEvent::RedrawRequested => state.redraw(),
             WindowEvent::ScaleFactorChanged { .. } => state.resize(state.window.inner_size()),
@@ -571,6 +602,14 @@ impl BareTerminalState {
         Ok(())
     }
 
+    fn handle_dropped_file(&mut self, path: std::path::PathBuf) -> Result<()> {
+        if let Some(text) = format_file_paths_for_paste([path.as_path()]) {
+            self.terminal.write_paste(&text)?;
+            self.window.request_redraw();
+        }
+        Ok(())
+    }
+
     fn handle_mouse_motion(&mut self) -> Result<()> {
         if let Some(input) = self.input.mouse_motion(self.viewport) {
             self.terminal.encode_mouse(input)?;
@@ -631,6 +670,7 @@ fn gallery_cell(
         fg: None,
         bg: None,
         style,
+        hyperlink: None,
     }
 }
 
@@ -834,6 +874,7 @@ fn clear_color(colors: FrameColors) -> wgpu::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::{KeyMods, MouseEncoderSize};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -861,6 +902,40 @@ mod tests {
                 .is_none()
         );
         assert!(bare_terminal_key_input(KeyCode::AltRight, ModifiersState::ALT, false).is_none());
+    }
+
+    #[test]
+    fn bare_terminal_preserves_release_after_cursor_leaves_viewport() {
+        let viewport = BareTerminalViewport::from_logical_size(
+            200.0,
+            100.0,
+            CellMetrics::new(9.0, 22.0),
+            TerminalPadding::default(),
+        );
+        let mut input = BareTerminalInput::default();
+        input.set_cursor_position(260.0, 170.0);
+        input.set_mouse_button_state(MouseButton::Left, ElementState::Pressed);
+
+        assert_eq!(
+            input.mouse_input(MouseAction::Release, Some(MouseButton::Left), viewport),
+            Some(MouseInput {
+                action: MouseAction::Release,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 200.0,
+                y: 100.0,
+                size: MouseEncoderSize {
+                    screen_width: 200,
+                    screen_height: 100,
+                    cell_width: 9,
+                    cell_height: 22,
+                    padding_left: 0,
+                    padding_top: 0,
+                    padding_right: 0,
+                    padding_bottom: 0,
+                },
+            })
+        );
     }
 
     #[test]

@@ -297,6 +297,25 @@ pub fn mouse_input_from_surface(
     })
 }
 
+pub fn mouse_input_from_surface_clamped(
+    pos: Pos2,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    mods: KeyMods,
+    surface: TerminalSurface,
+) -> MouseInput {
+    let x = pos.x.clamp(surface.rect.min.x, surface.rect.max.x) - surface.rect.min.x;
+    let y = pos.y.clamp(surface.rect.min.y, surface.rect.max.y) - surface.rect.min.y;
+    MouseInput {
+        action,
+        button,
+        mods,
+        x,
+        y,
+        size: surface.mouse_metrics().into(),
+    }
+}
+
 pub fn is_control_key(key: TerminalKey) -> bool {
     matches!(
         key,
