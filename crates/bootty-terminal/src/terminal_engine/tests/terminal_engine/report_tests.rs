@@ -62,6 +62,16 @@ fn captured_device_attributes_engine() -> Result<CapturedDeviceAttributesEngine>
 }
 
 #[test]
+fn terminal_engine_reports_clipboard_in_production_primary_device_attributes() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b[c");
+
+    assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_reports_primary_device_attributes() -> Result<()> {
     let (mut engine, output, attributes) = captured_device_attributes_engine()?;
 
@@ -146,6 +156,11 @@ fn terminal_engine_reports_mode_query_status() -> Result<()> {
     for (input, expected) in [
         (b"\x1b[?7$p".as_slice(), b"\x1b[?7;1$y".as_slice()),
         (b"\x1b[?7l\x1b[?7$p".as_slice(), b"\x1b[?7;2$y".as_slice()),
+        (b"\x1b[?2026$p".as_slice(), b"\x1b[?2026;2$y".as_slice()),
+        (
+            b"\x1b[?2026h\x1b[?2026$p".as_slice(),
+            b"\x1b[?2026;1$y".as_slice(),
+        ),
         (b"\x1b[?9999$p".as_slice(), b"\x1b[?9999;0$y".as_slice()),
         (
             b"\x1b[?7l\x1b[?7s\x1b[?7h\x1b[?7r\x1b[?7$p".as_slice(),
@@ -192,14 +207,40 @@ fn terminal_engine_reports_color_scheme_when_requested() -> Result<()> {
     ] {
         let (mut engine, output) = captured_pty_engine()?;
         engine.write_vt(b"\x1b[?2031h");
-        if let Some(scheme) = scheme {
-            engine
-                .terminal
-                .on_color_scheme(move |_terminal| Some(scheme))?;
+        match scheme {
+            Some(scheme) => {
+                engine
+                    .terminal
+                    .on_color_scheme(move |_terminal| Some(scheme))?;
+            }
+            None => {
+                engine.terminal.on_color_scheme(|_terminal| None)?;
+            }
         }
         engine.write_vt(b"\x1b[?996n");
         assert_eq!(take_pty_output(&output), expected);
     }
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_production_color_scheme_from_active_background() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b[?2031h\x1b[?996n");
+    assert_eq!(take_pty_output(&output), b"\x1b[?997;1n");
+
+    let light_colors = TerminalColorConfig {
+        background: RgbColor {
+            r: 0xf8,
+            g: 0xf8,
+            b: 0xf2,
+        },
+        ..Default::default()
+    };
+    engine.set_colors(light_colors)?;
+    engine.write_vt(b"\x1b[?996n");
+    assert_eq!(take_pty_output(&output), b"\x1b[?997;2n");
     Ok(())
 }
 
@@ -224,6 +265,30 @@ fn terminal_engine_ignores_invalid_titles_and_malformed_sequences() -> Result<()
     engine.write_vt(b"\x1bP6;;;;;;;;;;;;;;;;;;pignored\x1b\\");
     assert_eq!(take_pty_output(&output), b"");
 
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_production_xtversion() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b[>q");
+
+    assert_eq!(
+        take_pty_output(&output),
+        format!("\x1bP>|Bootty {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes()
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_emits_bell_side_effect_for_bel() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x07");
+
+    assert_eq!(take_pty_output(&output), b"");
+    assert_eq!(engine.drain_side_effects(), vec![TerminalSideEffect::Bell]);
     Ok(())
 }
 

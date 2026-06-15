@@ -7,43 +7,31 @@ use std::{
 
 use anyhow::{Context, Result};
 
-const XTERM_GHOSTTY_TERMINFO_SRC: &str = include_str!("../assets/xterm-ghostty.terminfo");
-pub const XTERM_GHOSTTY: &str = "xterm-ghostty";
+const XTERM_BOOTTY_TERMINFO_SRC: &str = include_str!("../assets/xterm-bootty.terminfo");
+pub const XTERM_BOOTTY: &str = "xterm-bootty";
 
-/// The vendored xterm-ghostty terminfo database, compiled on demand into
+/// The vendored xterm-bootty terminfo database, compiled on demand into
 /// Bootty's state directory. Sessions resolve it through the TERMINFO
-/// environment variable, mirroring how Ghostty ships its own entry inside
-/// the app bundle instead of installing into the system database.
+/// environment variable.
 pub fn vendored_terminfo_dir() -> Option<&'static Path> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
         let state_dir = bootty_state_dir()?;
-        ensure_xterm_ghostty_terminfo_in(&state_dir).ok()
+        ensure_xterm_bootty_terminfo_in(&state_dir).ok()
     })
     .as_deref()
 }
 
-pub fn terminfo_env_entry(term: &str, env: &[(String, String)]) -> Option<(String, String)> {
-    if term != XTERM_GHOSTTY {
-        return None;
-    }
-    if env.iter().any(|(name, _)| name == "TERMINFO") {
-        return None;
-    }
-    let dir = vendored_terminfo_dir()?;
-    Some(("TERMINFO".to_owned(), dir.to_string_lossy().into_owned()))
-}
-
-pub fn ensure_xterm_ghostty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
+pub fn ensure_xterm_bootty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
     let db_dir = state_dir.join("terminfo");
-    if compiled_entry_exists(&db_dir) {
+    let source_path = state_dir.join("xterm-bootty.terminfo");
+    if compiled_entry_exists(&db_dir) && vendored_source_current(&source_path) {
         return Ok(db_dir);
     }
 
     fs::create_dir_all(state_dir)
         .with_context(|| format!("create bootty state dir {}", state_dir.display()))?;
-    let source_path = state_dir.join("xterm-ghostty.terminfo");
-    fs::write(&source_path, XTERM_GHOSTTY_TERMINFO_SRC)
+    fs::write(&source_path, XTERM_BOOTTY_TERMINFO_SRC)
         .with_context(|| format!("write terminfo source {}", source_path.display()))?;
 
     let output = Command::new("tic")
@@ -52,7 +40,7 @@ pub fn ensure_xterm_ghostty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
         .arg(&db_dir)
         .arg(&source_path)
         .output()
-        .context("run tic to compile xterm-ghostty terminfo")?;
+        .context("run tic to compile xterm-bootty terminfo")?;
     anyhow::ensure!(
         output.status.success(),
         "tic failed: {}",
@@ -60,7 +48,7 @@ pub fn ensure_xterm_ghostty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
     );
     anyhow::ensure!(
         compiled_entry_exists(&db_dir),
-        "tic reported success but produced no xterm-ghostty entry in {}",
+        "tic reported success but produced no xterm-bootty entry in {}",
         db_dir.display()
     );
     Ok(db_dir)
@@ -69,10 +57,12 @@ pub fn ensure_xterm_ghostty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
 fn compiled_entry_exists(db_dir: &Path) -> bool {
     // ncurses stores entries under a first-letter dir on Linux and a hex
     // dir ("78" for 'x') on macOS.
-    db_dir.join("78").join(XTERM_GHOSTTY).is_file()
-        || db_dir.join("x").join(XTERM_GHOSTTY).is_file()
+    db_dir.join("78").join(XTERM_BOOTTY).is_file() || db_dir.join("x").join(XTERM_BOOTTY).is_file()
 }
 
+fn vendored_source_current(source_path: &Path) -> bool {
+    fs::read_to_string(source_path).is_ok_and(|source| source == XTERM_BOOTTY_TERMINFO_SRC)
+}
 fn bootty_state_dir() -> Option<PathBuf> {
     if let Some(xdg_state) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(xdg_state).join("bootty"));
@@ -88,32 +78,107 @@ mod tests {
     #[test]
     fn vendored_terminfo_compiles_and_resolves_via_terminfo_env() -> Result<()> {
         let state = tempfile::tempdir()?;
-        let db_dir = ensure_xterm_ghostty_terminfo_in(state.path())?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
 
         let resolved = Command::new("infocmp")
             .env("TERMINFO", &db_dir)
-            .arg(XTERM_GHOSTTY)
+            .arg(XTERM_BOOTTY)
             .output()?;
         assert!(
             resolved.status.success(),
-            "infocmp could not resolve xterm-ghostty: {}",
+            "infocmp could not resolve xterm-bootty: {}",
             String::from_utf8_lossy(&resolved.stderr)
         );
         Ok(())
     }
 
     #[test]
+    fn vendored_terminfo_uses_bootty_identity_without_ghostty_aliases() -> Result<()> {
+        let state = tempfile::tempdir()?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
+
+        let resolved = Command::new("infocmp")
+            .env("TERMINFO", &db_dir)
+            .arg(XTERM_BOOTTY)
+            .output()?;
+        assert!(
+            resolved.status.success(),
+            "infocmp could not resolve xterm-bootty: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        let entry = String::from_utf8_lossy(&resolved.stdout);
+
+        assert!(entry.contains("xterm-bootty|bootty|Bootty"));
+        assert!(!entry.contains("xterm-ghostty"));
+        assert!(!entry.contains("|ghostty|"));
+        assert!(!entry.contains("|Ghostty"));
+        Ok(())
+    }
+
+    #[test]
+    fn vendored_terminfo_advertises_synchronized_output_caps() -> Result<()> {
+        let state = tempfile::tempdir()?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
+
+        let resolved = Command::new("infocmp")
+            .arg("-x")
+            .env("TERMINFO", &db_dir)
+            .arg(XTERM_BOOTTY)
+            .output()?;
+        assert!(
+            resolved.status.success(),
+            "infocmp could not resolve xterm-bootty: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        let entry = String::from_utf8_lossy(&resolved.stdout);
+
+        assert!(entry.contains("BSU=\\E[?2026h"));
+        assert!(entry.contains("ESU=\\E[?2026l"));
+        assert!(entry.contains("Sync=\\E[?2026"));
+        Ok(())
+    }
+
+    #[test]
+    fn vendored_terminfo_advertises_only_supported_function_keys() -> Result<()> {
+        let state = tempfile::tempdir()?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
+
+        let resolved = Command::new("infocmp")
+            .arg("-x")
+            .env("TERMINFO", &db_dir)
+            .arg(XTERM_BOOTTY)
+            .output()?;
+        assert!(
+            resolved.status.success(),
+            "infocmp could not resolve xterm-bootty: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        let entry = String::from_utf8_lossy(&resolved.stdout);
+
+        for key in 1..=12 {
+            assert!(entry.contains(&format!("kf{key}=")), "missing kf{key}");
+        }
+        for key in 13..=63 {
+            assert!(
+                !entry.contains(&format!("kf{key}=")),
+                "unsupported kf{key} is advertised"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ensure_reuses_existing_compiled_entry() -> Result<()> {
         let state = tempfile::tempdir()?;
-        let db_dir = ensure_xterm_ghostty_terminfo_in(state.path())?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
         let entry = ["78", "x"]
             .iter()
-            .map(|prefix| db_dir.join(prefix).join(XTERM_GHOSTTY))
+            .map(|prefix| db_dir.join(prefix).join(XTERM_BOOTTY))
             .find(|path| path.is_file())
             .expect("compiled entry");
         let compiled_at = entry.metadata()?.modified()?;
 
-        let again = ensure_xterm_ghostty_terminfo_in(state.path())?;
+        let again = ensure_xterm_bootty_terminfo_in(state.path())?;
 
         assert_eq!(again, db_dir);
         assert_eq!(entry.metadata()?.modified()?, compiled_at);
@@ -121,9 +186,16 @@ mod tests {
     }
 
     #[test]
-    fn terminfo_env_entry_respects_user_override_and_foreign_terms() {
-        let user_env = vec![("TERMINFO".to_owned(), "/custom".to_owned())];
-        assert_eq!(terminfo_env_entry(XTERM_GHOSTTY, &user_env), None);
-        assert_eq!(terminfo_env_entry("xterm-256color", &[]), None);
+    fn ensure_rewrites_stale_vendored_terminfo_source() -> Result<()> {
+        let state = tempfile::tempdir()?;
+        let db_dir = ensure_xterm_bootty_terminfo_in(state.path())?;
+        let source_path = state.path().join("xterm-bootty.terminfo");
+        fs::write(&source_path, "xterm-bootty|stale,\n\tam,\n")?;
+
+        let again = ensure_xterm_bootty_terminfo_in(state.path())?;
+
+        assert_eq!(again, db_dir);
+        assert_eq!(fs::read_to_string(source_path)?, XTERM_BOOTTY_TERMINFO_SRC);
+        Ok(())
     }
 }

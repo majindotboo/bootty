@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use libghostty_vt::{
@@ -27,9 +31,7 @@ struct KittyImageFingerprint {
     width: u32,
     height: u32,
     format: ImageFormat,
-    len: usize,
-    first: Option<u8>,
-    last: Option<u8>,
+    payload_hash: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -109,7 +111,7 @@ pub fn collect_kitty_image_frame(
 ) -> Result<KittyImageFrame> {
     let graphics = terminal.kitty_graphics()?;
     let mut frame = KittyImageFrame::default();
-    let mut visible_images = HashMap::<u32, ()>::new();
+    let mut visible_images = HashSet::<u32>::new();
 
     for layer in KittyImageLayer::ordered() {
         let mut placements = placement_iterator.update(&graphics)?;
@@ -139,15 +141,13 @@ pub fn collect_kitty_image_frame(
                 width,
                 height,
                 format,
-                len: image_bytes.len(),
-                first: image_bytes.first().copied(),
-                last: image_bytes.last().copied(),
+                payload_hash: kitty_image_payload_hash(image_bytes),
             };
             let render_info = placement.placement_render_info(&image, terminal)?;
             if !render_info.viewport_visible {
                 continue;
             }
-            visible_images.insert(image_id, ());
+            visible_images.insert(image_id);
             let data = image_cache.data_for(image_id, fingerprint, image_bytes);
             frame.placements.push(KittyImagePlacement {
                 image_id,
@@ -177,6 +177,12 @@ pub fn collect_kitty_image_frame(
     Ok(frame)
 }
 
+fn kitty_image_payload_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl KittyImageDataCache {
     fn data_for(
         &mut self,
@@ -201,9 +207,9 @@ impl KittyImageDataCache {
         data
     }
 
-    fn retain_visible(&mut self, visible_images: &HashMap<u32, ()>) {
+    fn retain_visible(&mut self, visible_images: &HashSet<u32>) {
         self.images
-            .retain(|image_id, _| visible_images.contains_key(image_id));
+            .retain(|image_id, _| visible_images.contains(image_id));
     }
 }
 

@@ -11,7 +11,8 @@ use toml_edit::{DocumentMut, Item, Table, TableLike};
 use bootty_render::terminal_text::TerminalTextConfig;
 use bootty_runtime::{SessionLaunchConfig, TerminalSessionConfig};
 use bootty_terminal::{
-    terminal_engine::TerminalColorConfig, terminal_input_model::MacosOptionAsAlt,
+    terminal_engine::{TERMINAL_TERM, TerminalColorConfig},
+    terminal_input_model::MacosOptionAsAlt,
 };
 use bootty_winit::modifier_remap::ModifierRemapSet;
 
@@ -409,7 +410,7 @@ impl Default for SessionConfig {
             shell: None,
             working_directory: None,
             env: Vec::new(),
-            term: "xterm-ghostty".to_owned(),
+            term: TERMINAL_TERM.to_owned(),
             colorterm: "truecolor".to_owned(),
         }
     }
@@ -436,6 +437,8 @@ impl BoottyConfig {
             colors: self.colors.terminal_color_config(),
             max_scrollback: 0,
             macos_option_as_alt: self.input.macos_option_as_alt.into(),
+            side_effect_tx: None,
+            benchmark_trace: None,
         }
     }
 }

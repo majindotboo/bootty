@@ -84,7 +84,7 @@ pub struct CursorSnapshot {
     pub color: Option<RgbColor>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RenderCell {
     pub x: u16,
     pub y: u16,
@@ -93,6 +93,7 @@ pub struct RenderCell {
     pub fg: Option<RgbColor>,
     pub bg: Option<RgbColor>,
     pub style: CellStyle,
+    pub hyperlink: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

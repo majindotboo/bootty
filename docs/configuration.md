@@ -67,7 +67,7 @@ modifier-remap = ["right_alt=left_ctrl"]
 shell = "/bin/zsh"
 working-directory = "/Users/example/src"
 env = [{ name = "EDITOR", value = "vim" }]
-term = "xterm-ghostty"
+term = "xterm-bootty"
 colorterm = "truecolor"
 
 [diagnostics]
@@ -169,11 +169,13 @@ New-session/new-window-only fields:
 
 - `[session]` shell, working directory, environment, `TERM`, and `COLORTERM`
 - `[window].width` and `[window].height`
+- `[window].fullscreen`
+- `[window].window-decoration`
 - `[window].macos-titlebar-style`
 
 When a reload includes new-session/new-window-only changes, Bootty keeps the
-current terminal session alive and shows a status message that those settings
-apply next time.
+current terminal session alive and shows a status message. Open a new Bootty
+window, or restart Bootty, for those settings to take effect.
 
 ## Window chrome and fullscreen
 
@@ -184,9 +186,10 @@ decorations.
 `[window].fullscreen` accepts `false`, `true`/`"native"`, `"non-native"`,
 `"non-native-visible-menu"`, or `"non-native-padded-notch"`. Native fullscreen
 uses the platform fullscreen path. Non-native modes create a borderless
-maximized window and are also used by `toggle_fullscreen` when configured. On
-macOS, `"non-native"` hides the menu bar and Dock so the window covers that
-space; `"non-native-visible-menu"` intentionally leaves the menu bar available.
+fullscreen-style window and are also used by `toggle_fullscreen` when configured.
+On macOS, `"non-native"` and `"non-native-padded-notch"` auto-hide the menu bar
+and Dock so they reappear when the pointer reaches the screen edge;
+`"non-native-visible-menu"` intentionally leaves the menu bar visible.
 
 ## Preference writeback
 

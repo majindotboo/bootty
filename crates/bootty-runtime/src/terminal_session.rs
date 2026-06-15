@@ -15,29 +15,37 @@ use std::{
 #[cfg(target_os = "macos")]
 use std::process::Command as ProcessCommand;
 
+use crate::benchmark_trace::{BenchmarkTrace, TraceValue};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
-    terminal_engine::{TERMINAL_TERM, TerminalColorConfig, TerminalEngine},
+    terminal_engine::{TERMINAL_TERM, TerminalColorConfig, TerminalEngine, TerminalSideEffect},
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
 };
 
 pub(crate) const MAX_DRAIN_BYTES_PER_FRAME: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_DRAIN_CHUNKS_PER_FRAME: usize = 32;
-pub(crate) const MAX_DRAIN_SLICE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_DRAIN_SLICE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_DRAIN_TIME_US: u128 = 20_000;
+const INPUT_FAST_PATH_DRAIN_BYTES: usize = 64 * 1024;
+const INPUT_FAST_PATH_DRAIN_CHUNKS: usize = 8;
+const INPUT_FAST_PATH_DRAIN_TIME_US: u128 = 2_000;
 const MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
 const MAX_COLLECT_CHUNKS_PER_TICK: usize = 64;
 const MAX_READER_QUEUE_CHUNKS: usize = MAX_COLLECT_CHUNKS_PER_TICK * 2;
 const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
+const TERM_ENV: &str = "TERM";
+const COLORTERM_ENV: &str = "COLORTERM";
+const TERMINFO_ENV: &str = "TERMINFO";
 #[cfg(windows)]
 const DEFAULT_SHELL: &str = "powershell.exe";
 #[cfg(not(windows))]
-const DEFAULT_SHELL: &str = "/bin/zsh";
+const DEFAULT_SHELL: &str = "/bin/sh";
 pub(crate) const WORKER_READY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const WORKER_BACKLOG_FRAME_INTERVAL: Duration = Duration::from_millis(64);
 pub(crate) const WORKER_IDLE_SLEEP: Duration = Duration::from_millis(4);
 pub(crate) const WORKER_SETTLED_FRAME_DELAY: Duration = Duration::from_millis(16);
 pub(crate) const SYNC_OUTPUT_MAX_SUPPRESS: Duration = Duration::from_secs(1);
@@ -48,6 +56,8 @@ pub struct TerminalSessionConfig {
     pub colors: TerminalColorConfig,
     pub max_scrollback: usize,
     pub macos_option_as_alt: MacosOptionAsAlt,
+    pub side_effect_tx: Option<Sender<TerminalSideEffect>>,
+    pub benchmark_trace: Option<BenchmarkTrace>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionLaunchConfig {
@@ -162,6 +172,10 @@ impl TerminalSession {
         let latest_frame = Arc::new(PublishedFrame::new());
         let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
         let pending_pty_len = Arc::new(AtomicUsize::new(0));
+        let benchmark_trace = match config.benchmark_trace.clone() {
+            Some(trace) => Some(trace),
+            None => BenchmarkTrace::from_env().context("open benchmark trace")?,
+        };
         spawn_terminal_worker(TerminalWorkerConfig {
             geometry,
             colors: config.colors,
@@ -174,6 +188,8 @@ impl TerminalSession {
             latest_drain: latest_drain.clone(),
             pending_pty_len: pending_pty_len.clone(),
             repaint_wakeup,
+            side_effect_tx: config.side_effect_tx,
+            benchmark_trace,
         })?;
 
         Ok(Self {
@@ -291,6 +307,8 @@ struct TerminalWorkerConfig {
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_pty_len: Arc<AtomicUsize>,
     repaint_wakeup: RepaintWakeup,
+    side_effect_tx: Option<Sender<TerminalSideEffect>>,
+    benchmark_trace: Option<BenchmarkTrace>,
 }
 
 fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
@@ -325,10 +343,10 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             latest_drain: config.latest_drain,
             pending_pty_len: config.pending_pty_len,
             repaint_wakeup: config.repaint_wakeup,
+            side_effect_tx: config.side_effect_tx,
+            benchmark_trace: config.benchmark_trace,
             output_buf: Vec::with_capacity(1024),
-            pending_pty: VecDeque::new(),
-            pending_pty_bytes: 0,
-            pending_front_offset: 0,
+            pending_pty: PtyBacklog::with_capacity(MAX_COLLECT_CHUNKS_PER_TICK),
             last_frame_publish: Instant::now() - WORKER_READY_FRAME_INTERVAL,
             has_unpublished_frame: false,
             sync_output_since: None,
@@ -337,6 +355,13 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             command_disconnected: false,
             pty_disconnected: false,
         };
+        worker.trace_event(
+            "worker_start",
+            &[
+                ("cols", TraceValue::U64(u64::from(config.geometry.cols))),
+                ("rows", TraceValue::U64(u64::from(config.geometry.rows))),
+            ],
+        );
         worker.run();
     });
 
@@ -355,10 +380,9 @@ struct TerminalWorker {
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_pty_len: Arc<AtomicUsize>,
     repaint_wakeup: RepaintWakeup,
+    side_effect_tx: Option<Sender<TerminalSideEffect>>,
     output_buf: Vec<u8>,
-    pending_pty: VecDeque<Vec<u8>>,
-    pending_pty_bytes: usize,
-    pending_front_offset: usize,
+    pending_pty: PtyBacklog,
     last_frame_publish: Instant,
     has_unpublished_frame: bool,
     sync_output_since: Option<Instant>,
@@ -366,12 +390,14 @@ struct TerminalWorker {
     force_next_frame_publish: bool,
     command_disconnected: bool,
     pty_disconnected: bool,
+    benchmark_trace: Option<BenchmarkTrace>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct WorkerCommandStats {
     did_work: bool,
     terminal_changed: bool,
+    commands: usize,
 }
 
 impl TerminalWorker {
@@ -406,10 +432,11 @@ impl TerminalWorker {
                 thread::sleep(WORKER_IDLE_SLEEP);
             }
         }
+        self.trace_event("worker_stop", &[]);
     }
 
     fn should_stop(&self) -> bool {
-        self.command_disconnected && self.pty_disconnected && self.pending_pty_bytes == 0
+        self.command_disconnected && self.pty_disconnected && self.pending_pty.is_empty()
     }
 
     fn should_publish_frame(&mut self) -> bool {
@@ -418,7 +445,7 @@ impl TerminalWorker {
             self.has_unpublished_frame,
             self.force_next_frame_publish,
             sync_output_suppressed,
-            self.pending_pty_bytes,
+            self.pending_pty.len(),
             self.last_terminal_change
                 .map(|instant| instant.elapsed())
                 .unwrap_or(Duration::ZERO),
@@ -456,6 +483,7 @@ impl TerminalWorker {
                 }
             };
             stats.did_work = true;
+            stats.commands += 1;
             match command {
                 TerminalCommand::Resize(geometry) => {
                     self.mark_input_fast_path();
@@ -503,25 +531,25 @@ impl TerminalWorker {
                 TerminalCommand::MouseWheel {
                     input,
                     scroll_delta,
-                } => {
-                    self.mark_input_fast_path();
-                    match self.engine.is_mouse_tracking() {
-                        Ok(true) => {
-                            if self
-                                .engine
-                                .encode_mouse_to_vec(input, &mut self.output_buf)
-                                .is_ok()
-                            {
-                                self.write_output_buf();
-                            }
+                } => match self.engine.is_mouse_tracking() {
+                    Ok(true) => {
+                        self.mark_input_fast_path();
+                        if self
+                            .engine
+                            .encode_mouse_to_vec(input, &mut self.output_buf)
+                            .is_ok()
+                        {
+                            self.write_output_buf();
                         }
-                        Ok(false) => {
-                            self.engine.scroll_viewport_delta(scroll_delta);
-                            stats.terminal_changed = true;
-                        }
-                        Err(_) => {}
                     }
-                }
+                    Ok(false) if scroll_delta != 0 => {
+                        self.mark_input_fast_path();
+                        self.engine.scroll_viewport_delta(scroll_delta);
+                        stats.terminal_changed = true;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {}
+                },
                 TerminalCommand::Paste(text) => {
                     self.mark_input_fast_path();
                     self.engine.scroll_viewport_bottom();
@@ -547,6 +575,15 @@ impl TerminalWorker {
                 }
             }
         }
+        if stats.commands > 0 {
+            self.trace_event(
+                "input_commands",
+                &[
+                    ("commands", TraceValue::Usize(stats.commands)),
+                    ("terminal_changed", TraceValue::Bool(stats.terminal_changed)),
+                ],
+            );
+        }
         stats
     }
 
@@ -565,72 +602,96 @@ impl TerminalWorker {
                     break;
                 }
             };
+            let bytes_len = bytes.len();
             did_work = true;
-            collected_bytes += bytes.len();
+            collected_bytes += bytes_len;
             collected_chunks += 1;
-            self.pending_pty_bytes += bytes.len();
             self.pending_pty.push_back(bytes);
+            self.trace_event(
+                "pty_read",
+                &[
+                    ("bytes", TraceValue::Usize(bytes_len)),
+                    (
+                        "pending_pty_bytes",
+                        TraceValue::Usize(self.pending_pty.len()),
+                    ),
+                ],
+            );
         }
         if did_work {
             self.pending_pty_len
-                .store(self.pending_pty_bytes, Ordering::Relaxed);
+                .store(self.pending_pty.len(), Ordering::Relaxed);
+            self.trace_event(
+                "pty_collect_done",
+                &[
+                    ("bytes", TraceValue::Usize(collected_bytes)),
+                    ("chunks", TraceValue::Usize(collected_chunks)),
+                    (
+                        "pending_pty_bytes",
+                        TraceValue::Usize(self.pending_pty.len()),
+                    ),
+                ],
+            );
         }
         did_work
     }
 
     fn drain_pty(&mut self) -> DrainStats {
-        let start = Instant::now();
-        let mut stats = DrainStats::default();
-        let pending_before = self.pending_pty_bytes;
-
-        while self.pending_pty_bytes > 0
-            && !drain_budget_exhausted(stats)
-            && !drain_time_exhausted(start)
-        {
-            let Some(available) = self.front_pending_len() else {
-                self.pending_pty_bytes = 0;
-                self.pending_front_offset = 0;
-                break;
-            };
-            let consumed = drain_slice_len(stats, available);
-            if consumed == 0 {
-                break;
-            }
-
-            stats.chunks += 1;
-            self.write_pending_front(consumed);
-            stats.bytes += consumed;
+        let pending_before = self.pending_pty.len();
+        if pending_before > 0 {
+            self.trace_event(
+                "parse_start",
+                &[("pending_pty_bytes", TraceValue::Usize(pending_before))],
+            );
         }
+        let engine = &mut self.engine;
+        let stats = if self.force_next_frame_publish {
+            drain_pty_backlog_with_limits(
+                &mut self.pending_pty,
+                INPUT_FAST_PATH_DRAIN_BYTES,
+                INPUT_FAST_PATH_DRAIN_CHUNKS,
+                INPUT_FAST_PATH_DRAIN_TIME_US,
+                |bytes| engine.write_vt(bytes),
+            )
+        } else {
+            drain_pty_backlog(&mut self.pending_pty, |bytes| engine.write_vt(bytes))
+        };
+        if stats.bytes > 0 {
+            self.trace_event(
+                "parse_done",
+                &[
+                    ("bytes", TraceValue::Usize(stats.bytes)),
+                    ("chunks", TraceValue::Usize(stats.chunks)),
+                    ("elapsed_us", TraceValue::U64(stats.elapsed_us)),
+                    (
+                        "pending_pty_bytes",
+                        TraceValue::Usize(self.pending_pty.len()),
+                    ),
+                ],
+            );
+        }
+        self.forward_side_effects();
 
-        if self.pending_pty_bytes != pending_before {
+        if self.pending_pty.len() != pending_before {
             self.pending_pty_len
-                .store(self.pending_pty_bytes, Ordering::Relaxed);
+                .store(self.pending_pty.len(), Ordering::Relaxed);
         }
-        stats.elapsed_us = start.elapsed().as_micros() as u64;
         stats
     }
 
-    fn front_pending_len(&self) -> Option<usize> {
-        self.pending_pty
-            .front()
-            .map(|front| front.len().saturating_sub(self.pending_front_offset))
-    }
-
-    fn write_pending_front(&mut self, len: usize) {
-        let end = self.pending_front_offset + len;
-        if let Some(front) = self.pending_pty.front() {
-            self.engine.write_vt(&front[self.pending_front_offset..end]);
+    fn forward_side_effects(&mut self) {
+        let Some(tx) = self.side_effect_tx.as_ref() else {
+            return;
+        };
+        let mut disconnected = false;
+        for effect in self.engine.drain_side_effects() {
+            if tx.send(effect).is_err() {
+                disconnected = true;
+                break;
+            }
         }
-
-        self.pending_front_offset = end;
-        self.pending_pty_bytes = self.pending_pty_bytes.saturating_sub(len);
-        if self
-            .pending_pty
-            .front()
-            .is_some_and(|front| self.pending_front_offset >= front.len())
-        {
-            self.pending_pty.pop_front();
-            self.pending_front_offset = 0;
+        if disconnected {
+            self.side_effect_tx = None;
         }
     }
 
@@ -643,12 +704,57 @@ impl TerminalWorker {
     }
 
     fn publish_frame(&mut self) {
-        if let Ok(frame) = self.engine.extract_frame()
-            && self.latest_frame.publish(frame).is_ok()
-        {
+        let trace = self.benchmark_trace.clone();
+        let extract_start = Instant::now();
+        let Ok(frame) = self.engine.extract_frame() else {
+            return;
+        };
+        let extract_elapsed_us = extract_start.elapsed().as_micros() as u64;
+        if let Some(trace) = &trace {
+            trace.emit(
+                "frame_submitted",
+                &[
+                    ("cols", TraceValue::U64(u64::from(frame.cols))),
+                    ("rows", TraceValue::U64(u64::from(frame.rows))),
+                    ("cells", TraceValue::Usize(frame.stats.cells)),
+                    ("chars", TraceValue::Usize(frame.stats.chars)),
+                    ("dirty_rows", TraceValue::Usize(frame.stats.dirty_rows)),
+                    ("extract_us", TraceValue::U64(extract_elapsed_us)),
+                    (
+                        "render_state_update_us",
+                        TraceValue::U64(frame.stats.render_state_update_us),
+                    ),
+                    (
+                        "frame_extraction_us",
+                        TraceValue::U64(frame.stats.extraction_us),
+                    ),
+                    (
+                        "image_placements",
+                        TraceValue::Usize(frame.images.placements.len()),
+                    ),
+                    (
+                        "virtual_placements",
+                        TraceValue::Usize(frame.images.virtual_placements.len()),
+                    ),
+                ],
+            );
+        }
+        if self.latest_frame.publish(frame).is_ok() {
+            if let Some(trace) = &trace {
+                trace.emit(
+                    "frame_presented",
+                    &[("presenter", TraceValue::Str("published_frame"))],
+                );
+            }
             self.force_next_frame_publish = false;
             self.has_unpublished_frame = false;
             (self.repaint_wakeup)();
+        }
+    }
+
+    fn trace_event(&self, event: &str, fields: &[(&str, TraceValue<'_>)]) {
+        if let Some(trace) = &self.benchmark_trace {
+            trace.emit(event, fields);
         }
     }
 
@@ -657,6 +763,112 @@ impl TerminalWorker {
             write_pty(&self.pty_writer, &self.output_buf);
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PtyBacklog {
+    chunks: VecDeque<Vec<u8>>,
+    bytes: usize,
+    front_offset: usize,
+}
+
+impl PtyBacklog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            chunks: VecDeque::with_capacity(capacity),
+            bytes: 0,
+            front_offset: 0,
+        }
+    }
+
+    pub fn push_back(&mut self, bytes: Vec<u8>) {
+        self.bytes = self.bytes.saturating_add(bytes.len());
+        self.chunks.push_back(bytes);
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes == 0
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.chunks.clear();
+        self.bytes = 0;
+        self.front_offset = 0;
+    }
+
+    pub(crate) fn front_len(&self) -> Option<usize> {
+        self.chunks
+            .front()
+            .map(|front| front.len().saturating_sub(self.front_offset))
+    }
+
+    pub(crate) fn consume_front(&mut self, len: usize, mut consume: impl FnMut(&[u8])) {
+        let end = self.front_offset + len;
+        if let Some(front) = self.chunks.front() {
+            consume(&front[self.front_offset..end]);
+        }
+
+        self.front_offset = end;
+        self.bytes = self.bytes.saturating_sub(len);
+        if self
+            .chunks
+            .front()
+            .is_some_and(|front| self.front_offset >= front.len())
+        {
+            self.chunks.pop_front();
+            self.front_offset = 0;
+        }
+    }
+}
+
+pub fn drain_pty_backlog(backlog: &mut PtyBacklog, write: impl FnMut(&[u8])) -> DrainStats {
+    drain_pty_backlog_with_limits(
+        backlog,
+        MAX_DRAIN_BYTES_PER_FRAME,
+        MAX_DRAIN_CHUNKS_PER_FRAME,
+        MAX_DRAIN_TIME_US,
+        write,
+    )
+}
+
+fn drain_pty_backlog_with_limits(
+    backlog: &mut PtyBacklog,
+    max_bytes: usize,
+    max_chunks: usize,
+    max_time_us: u128,
+    mut write: impl FnMut(&[u8]),
+) -> DrainStats {
+    let start = Instant::now();
+    let mut stats = DrainStats::default();
+
+    while !backlog.is_empty()
+        && !drain_budget_exhausted_with_limits(stats, max_bytes, max_chunks)
+        && !drain_time_exhausted(start, max_time_us)
+    {
+        let Some(available) = backlog.front_len() else {
+            backlog.clear();
+            break;
+        };
+        let consumed = drain_slice_len_with_limit(stats, max_bytes, available);
+        if consumed == 0 {
+            break;
+        }
+
+        stats.chunks += 1;
+        backlog.consume_front(consumed, |bytes| write(bytes));
+        stats.bytes += consumed;
+    }
+
+    stats.elapsed_us = start.elapsed().as_micros() as u64;
+    stats
 }
 
 fn write_pty(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) {
@@ -673,36 +885,55 @@ pub struct DrainStats {
     pub elapsed_us: u64,
 }
 
+#[cfg(test)]
 pub(crate) fn drain_bytes_remaining(stats: DrainStats) -> usize {
     MAX_DRAIN_BYTES_PER_FRAME.saturating_sub(stats.bytes)
 }
 
+fn drain_bytes_remaining_with_limit(stats: DrainStats, max_bytes: usize) -> usize {
+    max_bytes.saturating_sub(stats.bytes)
+}
+
+#[cfg(test)]
 pub(crate) fn drain_slice_len(stats: DrainStats, available: usize) -> usize {
-    drain_bytes_remaining(stats)
+    drain_slice_len_with_limit(stats, MAX_DRAIN_BYTES_PER_FRAME, available)
+}
+
+fn drain_slice_len_with_limit(stats: DrainStats, max_bytes: usize, available: usize) -> usize {
+    drain_bytes_remaining_with_limit(stats, max_bytes)
         .min(MAX_DRAIN_SLICE_BYTES)
         .min(available)
 }
 
-fn drain_time_exhausted(start: Instant) -> bool {
-    start.elapsed().as_micros() >= MAX_DRAIN_TIME_US
+fn drain_time_exhausted(start: Instant, max_time_us: u128) -> bool {
+    start.elapsed().as_micros() >= max_time_us
 }
 
+#[cfg(test)]
 pub(crate) fn drain_budget_exhausted(stats: DrainStats) -> bool {
-    stats.bytes >= MAX_DRAIN_BYTES_PER_FRAME || stats.chunks >= MAX_DRAIN_CHUNKS_PER_FRAME
+    drain_budget_exhausted_with_limits(stats, MAX_DRAIN_BYTES_PER_FRAME, MAX_DRAIN_CHUNKS_PER_FRAME)
+}
+
+fn drain_budget_exhausted_with_limits(
+    stats: DrainStats,
+    max_bytes: usize,
+    max_chunks: usize,
+) -> bool {
+    stats.bytes >= max_bytes || stats.chunks >= max_chunks
 }
 
 // DEC mode 2026 (synchronized output): applications wrap multi-step redraws
 // in BSU/ESU so intermediate states (e.g. a cleared screen before a tmux
 // layout repaint) never reach the display. The grace period bounds a client
 // that sets the mode and dies without clearing it.
-pub(crate) fn sync_output_suppresses_publish(
+pub fn sync_output_suppresses_publish(
     sync_output_active: bool,
     elapsed_since_sync_start: Duration,
 ) -> bool {
     sync_output_active && elapsed_since_sync_start < SYNC_OUTPUT_MAX_SUPPRESS
 }
 
-pub(crate) fn should_publish_frame_after_work(
+pub fn should_publish_frame_after_work(
     unpublished_frame: bool,
     force_next_frame_publish: bool,
     sync_output_suppressed: bool,
@@ -719,15 +950,54 @@ pub(crate) fn should_publish_frame_after_work(
     if force_next_frame_publish {
         return true;
     }
-    // Sustained output never settles, so a settle-only policy starves the UI
-    // down to a heartbeat. Publish on a display-rate cadence instead.
+    if pending_pty_bytes > 0 {
+        return elapsed_since_last_publish >= WORKER_BACKLOG_FRAME_INTERVAL;
+    }
+    // Sustained output that fits in the current worker slice still needs a
+    // display-rate cadence instead of waiting for the quiet-settle path.
     if elapsed_since_last_publish >= WORKER_READY_FRAME_INTERVAL {
         return true;
     }
-    if pending_pty_bytes > 0 {
-        return false;
-    }
     elapsed_since_last_terminal_change >= WORKER_SETTLED_FRAME_DELAY
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedLaunchEnvironment {
+    term: String,
+    colorterm: String,
+    terminfo: Option<PathBuf>,
+    env: Vec<(String, String)>,
+}
+
+fn resolve_launch_environment(
+    config: &SessionLaunchConfig,
+    bootty_terminfo_dir: Option<&Path>,
+) -> ResolvedLaunchEnvironment {
+    let (term, terminfo) = if config.term == crate::terminfo::XTERM_BOOTTY {
+        match bootty_terminfo_dir {
+            Some(dir) => (config.term.clone(), Some(dir.to_path_buf())),
+            None => ("xterm-256color".to_owned(), None),
+        }
+    } else {
+        (config.term.clone(), None)
+    };
+    let env = config
+        .env
+        .iter()
+        .filter(|(name, _)| !is_managed_launch_env(name))
+        .cloned()
+        .collect();
+
+    ResolvedLaunchEnvironment {
+        term,
+        colorterm: config.colorterm.clone(),
+        terminfo,
+        env,
+    }
+}
+
+fn is_managed_launch_env(name: &str) -> bool {
+    matches!(name, TERM_ENV | COLORTERM_ENV | TERMINFO_ENV)
 }
 
 fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Result<SpawnedPty> {
@@ -740,18 +1010,22 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
     })?;
 
     let shell = shell_command_path(config.shell.clone());
+    let launch_env = resolve_launch_environment(config, crate::terminfo::vendored_terminfo_dir());
     let mut command = CommandBuilder::new(shell);
     command.args(&config.args);
-    command.env("TERM", &config.term);
-    command.env("COLORTERM", &config.colorterm);
-    for (name, value) in &config.env {
+    for (name, value) in locale_env_entries() {
         command.env(name, value);
     }
-    if let Some((name, value)) = crate::terminfo::terminfo_env_entry(&config.term, &config.env) {
+    for (name, value) in &launch_env.env {
         command.env(name, value);
     }
     for name in &config.env_remove {
         command.env_remove(name);
+    }
+    command.env(TERM_ENV, &launch_env.term);
+    command.env(COLORTERM_ENV, &launch_env.colorterm);
+    if let Some(terminfo) = &launch_env.terminfo {
+        command.env(TERMINFO_ENV, terminfo.to_string_lossy().into_owned());
     }
     if let Some(cwd) = &config.working_directory {
         command.cwd(cwd);
@@ -793,11 +1067,63 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
     Ok((pair.master, writer, rx, child, tty_name))
 }
 
+pub fn configured_user_shell() -> Option<String> {
+    configured_login_shell()
+}
+
+fn locale_env_entries() -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for key in ["LANG", "LC_ALL", "LC_CTYPE"] {
+        push_env_if_present(&mut entries, key);
+    }
+    for (key, value) in env::vars() {
+        if key.starts_with("LC_") && !entries.iter().any(|(existing, _)| existing == &key) {
+            entries.push((key, value));
+        }
+    }
+    if !entries.iter().any(|(key, _)| key == "LC_CTYPE")
+        && let Some((_, lang)) = entries.iter().find(|(key, _)| key == "LANG")
+    {
+        entries.push(("LC_CTYPE".to_owned(), lang.clone()));
+    }
+    normalize_locale_entries(&mut entries);
+    entries
+}
+
+fn push_env_if_present(entries: &mut Vec<(String, String)>, key: &str) {
+    if let Ok(value) = env::var(key) {
+        entries.push((key.to_owned(), value));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_locale_entries(entries: &mut Vec<(String, String)>) {
+    for (_, value) in entries.iter_mut() {
+        if is_macos_c_locale(value) {
+            *value = "en_US.UTF-8".to_owned();
+        }
+    }
+    if !entries.iter().any(|(key, _)| key == "LANG") {
+        entries.push(("LANG".to_owned(), "en_US.UTF-8".to_owned()));
+    }
+    if !entries.iter().any(|(key, _)| key == "LC_CTYPE") {
+        entries.push(("LC_CTYPE".to_owned(), "en_US.UTF-8".to_owned()));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_c_locale(value: &str) -> bool {
+    matches!(value, "C" | "POSIX" | "C.UTF-8" | "C.utf8")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalize_locale_entries(_entries: &mut Vec<(String, String)>) {}
+
 fn shell_command_path(configured: Option<String>) -> String {
     select_shell_path(
         env::var(BOOTTY_SHELL_ENV).ok(),
         configured,
-        configured_login_shell(),
+        configured_user_shell(),
         env::var("SHELL").ok(),
     )
 }
@@ -935,6 +1261,42 @@ mod tests {
     }
 
     #[test]
+    fn input_fast_path_drain_limit_is_smaller_than_backlog_catchup_budget() {
+        let input_bytes = std::hint::black_box(INPUT_FAST_PATH_DRAIN_BYTES);
+        let input_chunks = std::hint::black_box(INPUT_FAST_PATH_DRAIN_CHUNKS);
+        let input_time = std::hint::black_box(INPUT_FAST_PATH_DRAIN_TIME_US);
+        let max_bytes = std::hint::black_box(MAX_DRAIN_BYTES_PER_FRAME);
+        let max_chunks = std::hint::black_box(MAX_DRAIN_CHUNKS_PER_FRAME);
+        let max_time = std::hint::black_box(MAX_DRAIN_TIME_US);
+        let slice = std::hint::black_box(MAX_DRAIN_SLICE_BYTES);
+
+        assert!(input_bytes < max_bytes);
+        assert!(input_chunks < max_chunks);
+        assert!(input_time < max_time);
+        assert!(input_bytes >= slice);
+    }
+
+    #[test]
+    fn limited_drain_stops_at_input_fast_path_budget() {
+        let mut backlog = PtyBacklog::with_capacity(32);
+        for _ in 0..32 {
+            backlog.push_back(vec![b'x'; MAX_DRAIN_SLICE_BYTES]);
+        }
+
+        let stats = drain_pty_backlog_with_limits(
+            &mut backlog,
+            INPUT_FAST_PATH_DRAIN_BYTES,
+            INPUT_FAST_PATH_DRAIN_CHUNKS,
+            INPUT_FAST_PATH_DRAIN_TIME_US,
+            |_| {},
+        );
+
+        assert_eq!(stats.bytes, INPUT_FAST_PATH_DRAIN_BYTES);
+        assert_eq!(stats.chunks, INPUT_FAST_PATH_DRAIN_CHUNKS);
+        assert!(!backlog.is_empty());
+    }
+
+    #[test]
     fn backlog_catchup_budget_is_large_enough_for_history_bursts() {
         let max_bytes = std::hint::black_box(MAX_DRAIN_BYTES_PER_FRAME);
         let max_slice = std::hint::black_box(MAX_DRAIN_SLICE_BYTES);
@@ -942,7 +1304,7 @@ mod tests {
         let max_time = std::hint::black_box(MAX_DRAIN_TIME_US);
 
         assert!(max_bytes >= 4 * 1024 * 1024);
-        assert!(max_slice >= 256 * 1024);
+        assert!(max_slice >= 8 * 1024);
         assert!(max_chunks >= 32);
         assert!(max_time >= 20_000);
     }
@@ -984,14 +1346,23 @@ mod tests {
     }
 
     #[test]
-    fn sustained_output_publishes_at_ready_interval_cadence() {
-        assert!(should_publish_frame_after_work(
+    fn sustained_backlog_waits_for_backlog_interval_before_publishing_partial_frame() {
+        assert!(!should_publish_frame_after_work(
             true,
             false,
             false,
             4096,
             Duration::ZERO,
             WORKER_READY_FRAME_INTERVAL,
+        ));
+
+        assert!(should_publish_frame_after_work(
+            true,
+            false,
+            false,
+            4096,
+            Duration::ZERO,
+            WORKER_BACKLOG_FRAME_INTERVAL,
         ));
     }
 
@@ -1085,6 +1456,38 @@ mod tests {
         assert_eq!(MAX_READER_QUEUE_CHUNKS, MAX_COLLECT_CHUNKS_PER_TICK * 2);
     }
 
+    #[test]
+    fn launch_environment_ignores_managed_env_overrides() {
+        let config = SessionLaunchConfig {
+            env: vec![
+                ("TERM".to_owned(), "xterm-256color".to_owned()),
+                ("COLORTERM".to_owned(), "false".to_owned()),
+                ("TERMINFO".to_owned(), "/wrong".to_owned()),
+                ("EDITOR".to_owned(), "nvim".to_owned()),
+            ],
+            ..Default::default()
+        };
+
+        let resolved = resolve_launch_environment(&config, Some(Path::new("/bootty/terminfo")));
+
+        assert_eq!(resolved.term, TERMINAL_TERM);
+        assert_eq!(resolved.colorterm, "truecolor");
+        assert_eq!(
+            resolved.terminfo.as_deref(),
+            Some(Path::new("/bootty/terminfo"))
+        );
+        assert_eq!(resolved.env, [("EDITOR".to_owned(), "nvim".to_owned())]);
+    }
+
+    #[test]
+    fn launch_environment_falls_back_when_bootty_terminfo_is_unavailable() {
+        let resolved = resolve_launch_environment(&SessionLaunchConfig::default(), None);
+
+        assert_eq!(resolved.term, "xterm-256color");
+        assert_eq!(resolved.colorterm, "truecolor");
+        assert_eq!(resolved.terminfo, None);
+    }
+
     /// Absolute shell path fixture that passes `normalize_shell_path` on the
     /// running platform; `/custom/fish` is not absolute on Windows.
     fn shell_fixture_path(suffix: &str) -> String {
@@ -1133,7 +1536,21 @@ mod tests {
             ),
             shell_fixture_path("env/zsh"),
         );
-        assert_eq!(select_shell_path(None, None, None, None), DEFAULT_SHELL);
+        assert_eq!(
+            select_shell_path(None, None, None, None),
+            shell_fixture_path("bin/sh")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn locale_entries_default_macos_pty_clients_to_utf8() {
+        let mut entries = vec![("LANG".to_owned(), "C.UTF-8".to_owned())];
+
+        normalize_locale_entries(&mut entries);
+
+        assert!(entries.contains(&("LANG".to_owned(), "en_US.UTF-8".to_owned())));
+        assert!(entries.contains(&("LC_CTYPE".to_owned(), "en_US.UTF-8".to_owned())));
     }
 
     #[cfg(target_os = "macos")]
@@ -1233,16 +1650,25 @@ mod tests {
             if unpublished
                 && !sync_suppressed
                 && !force
+                && pending_pty_bytes == 0
                 && elapsed_publish >= WORKER_READY_FRAME_INTERVAL
             {
                 prop_assert!(should_publish);
             }
             if unpublished
                 && !force
-                && elapsed_publish < WORKER_READY_FRAME_INTERVAL
                 && pending_pty_bytes > 0
+                && elapsed_publish < WORKER_BACKLOG_FRAME_INTERVAL
             {
                 prop_assert!(!should_publish);
+            }
+            if unpublished
+                && !sync_suppressed
+                && !force
+                && pending_pty_bytes > 0
+                && elapsed_publish >= WORKER_BACKLOG_FRAME_INTERVAL
+            {
+                prop_assert!(should_publish);
             }
             if unpublished
                 && !sync_suppressed

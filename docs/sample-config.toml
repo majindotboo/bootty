@@ -205,15 +205,15 @@ native = [
 
 [session]
 # Session settings apply to newly-created sessions; reload will not restart the
-# current shell.
-shell = "/bin/zsh"
-working-directory = "/Users/luan/src/bootty"
-env = [
-  { name = "EDITOR", value = "vim" },
-  { name = "COLORTERM_THEME", value = "catppuccin-mocha" },
-]
-term = "xterm-ghostty"
-colorterm = "truecolor"
+# current shell. Leave these unset unless you intentionally want Bootty to
+# override the account login shell, inherited working directory, or environment.
+# shell = "/opt/homebrew/bin/fish"
+# working-directory = "/Users/alice/src/project"
+# env = [
+#   { name = "EDITOR", value = "nvim" },
+# ]
+# term = "xterm-bootty"
+# colorterm = "truecolor"
 
 [diagnostics]
 # Live-reloaded. Set to a writable path to record frame/status stability data.

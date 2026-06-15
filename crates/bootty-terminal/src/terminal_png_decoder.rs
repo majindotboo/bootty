@@ -17,11 +17,19 @@ impl DecodePng for BoottyPngDecoder {
         let mut reader = decoder.read_info().ok()?;
         let mut buffer = vec![0; reader.output_buffer_size()?];
         let info = reader.next_frame(&mut buffer).ok()?;
-        let rgba = png_frame_to_rgba8(
-            &buffer[..info.buffer_size()],
-            info.color_type,
-            info.bit_depth,
-        )?;
+        let decoded = &buffer[..info.buffer_size()];
+        let rgba = if matches!(
+            (info.color_type, info.bit_depth),
+            (png::ColorType::Rgba, png::BitDepth::Eight)
+        ) {
+            std::borrow::Cow::Borrowed(decoded)
+        } else {
+            std::borrow::Cow::Owned(png_frame_to_rgba8(
+                decoded,
+                info.color_type,
+                info.bit_depth,
+            )?)
+        };
         let mut bytes = Bytes::new_with_alloc(alloc, rgba.len()).ok()?;
         bytes.copy_from_slice(&rgba);
         Some(DecodedImage {

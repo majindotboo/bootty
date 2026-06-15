@@ -13,16 +13,17 @@ use crate::{
     terminal_png_decoder::BoottyPngDecoder,
 };
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose};
 use libghostty_vt::{
     Terminal, TerminalOptions, focus, key,
     kitty::graphics::set_png_decoder,
     mouse, paste,
-    render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
+    render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIteration, RowIterator},
     style::RgbColor,
     terminal::{
-        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
-        PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
-        TertiaryDeviceAttributes,
+        ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
+        Point, PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
+        SizeReportSize, TertiaryDeviceAttributes,
     },
 };
 
@@ -45,7 +46,7 @@ pub const NATIVE_SCROLLBACK_TARGET_ROWS: usize = 1_000_000;
 pub const NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE: usize = 320;
 pub const NATIVE_MAX_SCROLLBACK: usize =
     NATIVE_SCROLLBACK_TARGET_ROWS * NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE;
-pub const TERMINAL_TERM: &str = "xterm-ghostty";
+pub const TERMINAL_TERM: &str = "xterm-bootty";
 pub const TERMINAL_BACKGROUND: (u8, u8, u8) = (0x1a, 0x1b, 0x25);
 pub const TERMINAL_FOREGROUND: (u8, u8, u8) = (0xc0, 0xca, 0xf5);
 
@@ -78,6 +79,122 @@ impl Default for TerminalColorConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalSideEffect {
+    Bell,
+    ClipboardWrite(String),
+    ClipboardQuery { selection: String },
+    WindowTitle(String),
+    WindowIcon(String),
+    DesktopNotification { title: String, body: String },
+    MouseShape(String),
+    SemanticPrompt(String),
+    KittyTextSizing(String),
+    ConEmuControl(String),
+    ConEmuProgress { state: String, value: Option<u8> },
+    Iterm2Control(String),
+    Iterm2File(String),
+    OpenUrl(String),
+    FocusWindow,
+    ReportCellSize,
+    ReportVariable(String),
+    UnsupportedHostCommand { protocol: String, command: String },
+}
+
+#[derive(Default)]
+struct CachedRenderRow {
+    cells: Vec<RenderCell>,
+    text: Vec<char>,
+    virtual_cells: Vec<KittyVirtualCell>,
+    has_virtual_placeholder: bool,
+}
+
+impl CachedRenderRow {
+    fn clear(&mut self) {
+        self.cells.clear();
+        self.text.clear();
+        self.virtual_cells.clear();
+        self.has_virtual_placeholder = false;
+    }
+}
+
+fn extract_render_row(
+    terminal: &Terminal<'static, 'static>,
+    cell_iterator: &mut CellIterator<'static>,
+    grapheme_scratch: &mut Vec<char>,
+    hyperlink_scratch: &mut Vec<u8>,
+    row: &RowIteration<'static, '_>,
+    row_index: u16,
+    out: &mut CachedRenderRow,
+) -> Result<()> {
+    out.clear();
+    let raw_row = row.raw_row()?;
+    let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
+    out.has_virtual_placeholder = raw_row.has_kitty_virtual_placeholder()?;
+
+    let mut cell_iter = cell_iterator.update(row)?;
+    let mut col_index = 0_u16;
+    while let Some(cell) = cell_iter.next() {
+        let style = cell.style()?;
+        let grapheme_len = cell.graphemes_len()?;
+        grapheme_scratch.resize(grapheme_len, '\0');
+        if grapheme_len > 0 {
+            cell.graphemes_buf(grapheme_scratch)?;
+        }
+
+        let is_virtual_placeholder = grapheme_scratch.first() == Some(&'\u{10EEEE}');
+        if is_virtual_placeholder {
+            out.virtual_cells.push(KittyVirtualCell {
+                x: col_index,
+                y: row_index,
+                grapheme: grapheme_scratch[..grapheme_len].to_vec(),
+                foreground: style.fg_color,
+                underline_color: style.underline_color,
+            });
+        }
+
+        let text_start = out.text.len();
+        let text_len = if is_virtual_placeholder {
+            0
+        } else {
+            out.text
+                .extend_from_slice(&grapheme_scratch[..grapheme_len]);
+            grapheme_len
+        };
+
+        let hyperlink = if row_has_hyperlink {
+            hyperlink_uri_at(terminal, col_index, row_index, hyperlink_scratch)
+        } else {
+            None
+        };
+
+        out.cells.push(RenderCell {
+            x: col_index,
+            y: row_index,
+            text_start,
+            text_len,
+            fg: cell.fg_color()?,
+            bg: cell.bg_color()?,
+            style: CellStyle {
+                bold: style.bold,
+                italic: style.italic,
+                faint: style.faint,
+                blink: style.blink,
+                inverse: style.inverse,
+                invisible: style.invisible,
+                strikethrough: style.strikethrough,
+                overline: style.overline,
+                underline: style.underline,
+            },
+            hyperlink,
+        });
+
+        col_index += 1;
+    }
+
+    Ok(())
+}
+
 pub struct TerminalEngine {
     terminal: Terminal<'static, 'static>,
     base_color_palette: crate::terminal_palette::Palette,
@@ -87,6 +204,7 @@ pub struct TerminalEngine {
     image_placements: libghostty_vt::kitty::graphics::PlacementIterator<'static>,
     image_data_cache: KittyImageDataCache,
     frame: RenderFrame,
+    row_cache: Vec<CachedRenderRow>,
     grapheme_scratch: Vec<char>,
     key_encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
@@ -99,8 +217,14 @@ pub struct TerminalEngine {
     geometry: TerminalGeometry,
     size_report_geometry: Arc<Mutex<TerminalGeometry>>,
     osc_pwd_pending: Vec<u8>,
+    osc_side_effect_pending: Vec<u8>,
+    terminal_write_pending: Vec<u8>,
+    side_effects: Vec<TerminalSideEffect>,
+    callback_side_effects: Arc<Mutex<Vec<TerminalSideEffect>>>,
+    iterm_copy_capture: Option<Vec<u8>>,
     current_working_directory: String,
     colors: TerminalColorConfig,
+    color_scheme: Arc<Mutex<ColorScheme>>,
     content_epoch: u64,
     extracted_content_epoch: u64,
     kitty_graphics_touched: bool,
@@ -137,6 +261,14 @@ fn configure_default_colors(
 fn rgb((r, g, b): (u8, u8, u8)) -> RgbColor {
     RgbColor { r, g, b }
 }
+fn color_scheme_for_background(color: RgbColor) -> ColorScheme {
+    let luma = u32::from(color.r) * 299 + u32::from(color.g) * 587 + u32::from(color.b) * 114;
+    if luma < 128_000 {
+        ColorScheme::Dark
+    } else {
+        ColorScheme::Light
+    }
+}
 
 fn rgb_hex(value: u32) -> RgbColor {
     RgbColor {
@@ -158,7 +290,10 @@ fn default_device_attributes() -> DeviceAttributes {
     DeviceAttributes {
         primary: PrimaryDeviceAttributes::new(
             ConformanceLevel::VT220,
-            &[DeviceAttributeFeature::ANSI_COLOR],
+            &[
+                DeviceAttributeFeature::ANSI_COLOR,
+                DeviceAttributeFeature::CLIPBOARD,
+            ],
         ),
         secondary: SecondaryDeviceAttributes {
             device_type: DeviceType::VT220,
@@ -203,12 +338,120 @@ struct TerminalWriteFeatures {
     tmux_passthrough: bool,
     kitty_graphics: bool,
     osc_pwd: bool,
+    osc_side_effect: bool,
 }
 
 impl TerminalWriteFeatures {
     fn needs_sanitizing(self) -> bool {
-        self.tmux_passthrough || self.kitty_graphics || self.osc_pwd
+        self.tmux_passthrough || self.kitty_graphics || self.osc_pwd || self.osc_side_effect
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamingControlState {
+    Complete(usize),
+    Incomplete,
+    Unrecognized,
+}
+
+const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
+    b"\x1bPtmux;",
+    b"\x1b_G",
+    b"\x1b]0;",
+    b"\x1b]1;",
+    b"\x1b]2;",
+    b"\x1b]7;",
+    b"\x1b]9;",
+    b"\x1b]22;",
+    b"\x1b]52;",
+    b"\x1b]66;",
+    b"\x1b]133;",
+    b"\x1b]777;",
+    b"\x1b]1337;",
+];
+
+const SIDE_EFFECT_OSC_PREFIXES: &[&[u8]] = &[
+    b"0;", b"1;", b"2;", b"9;", b"22;", b"52;", b"66;", b"133;", b"777;", b"1337;",
+];
+
+fn complete_streaming_control_prefix_len(data: &[u8]) -> usize {
+    let mut index = 0;
+    while let Some(relative_start) = data[index..].iter().position(|byte| *byte == 0x1b) {
+        let start = index + relative_start;
+        match streaming_control_state(&data[start..]) {
+            StreamingControlState::Complete(len) => index = start + len,
+            StreamingControlState::Incomplete => return start,
+            StreamingControlState::Unrecognized => index = start + 1,
+        }
+    }
+    data.len()
+}
+
+fn streaming_control_state(data: &[u8]) -> StreamingControlState {
+    if STREAMING_CONTROL_PREFIXES
+        .iter()
+        .any(|prefix| data.len() < prefix.len() && prefix.starts_with(data))
+    {
+        return StreamingControlState::Incomplete;
+    }
+
+    if data.starts_with(b"\x1bPtmux;") {
+        return find_tmux_passthrough_end(data)
+            .map(StreamingControlState::Complete)
+            .unwrap_or(StreamingControlState::Incomplete);
+    }
+    if data.starts_with(b"\x1b_G") {
+        return find_osc_terminator(&data[3..])
+            .map(|(payload_len, terminator_len)| {
+                StreamingControlState::Complete(3 + payload_len + terminator_len)
+            })
+            .unwrap_or(StreamingControlState::Incomplete);
+    }
+    if data.starts_with(b"\x1b]") {
+        return match osc_streaming_prefix_state(&data[2..]) {
+            StreamingControlState::Complete(_) => find_osc_terminator(&data[2..])
+                .map(|(payload_len, terminator_len)| {
+                    StreamingControlState::Complete(2 + payload_len + terminator_len)
+                })
+                .unwrap_or(StreamingControlState::Incomplete),
+            state => state,
+        };
+    }
+
+    StreamingControlState::Unrecognized
+}
+
+fn osc_streaming_prefix_state(data: &[u8]) -> StreamingControlState {
+    if data.starts_with(b"7;")
+        || SIDE_EFFECT_OSC_PREFIXES
+            .iter()
+            .any(|prefix| data.starts_with(prefix))
+    {
+        return StreamingControlState::Complete(0);
+    }
+    if SIDE_EFFECT_OSC_PREFIXES
+        .iter()
+        .chain(std::iter::once(&b"7;".as_slice()))
+        .any(|prefix| data.len() < prefix.len() && prefix.starts_with(data))
+    {
+        return StreamingControlState::Incomplete;
+    }
+    StreamingControlState::Unrecognized
+}
+
+fn find_tmux_passthrough_end(data: &[u8]) -> Option<usize> {
+    let mut cursor = 7;
+    while cursor < data.len() {
+        if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&0x1b) {
+            cursor += 2;
+            continue;
+        }
+        if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&b'\\') {
+            return Some(cursor + 2);
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
@@ -226,9 +469,16 @@ fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
             Some(b']') if data.get(start + 2..start + 4) == Some(b"7;") => {
                 features.osc_pwd = true;
             }
+            Some(b']') if is_side_effect_osc_prefix(data.get(start + 2..).unwrap_or_default()) => {
+                features.osc_side_effect = true;
+            }
             _ => {}
         }
-        if features.tmux_passthrough && features.kitty_graphics && features.osc_pwd {
+        if features.tmux_passthrough
+            && features.kitty_graphics
+            && features.osc_pwd
+            && features.osc_side_effect
+        {
             break;
         }
         index = start + 1;
@@ -243,32 +493,44 @@ fn unwrap_tmux_passthrough_commands(data: &[u8]) -> Cow<'_, [u8]> {
         let start = read_start + relative_start;
         let payload_start = start + 7;
         let mut cursor = payload_start;
-        let mut payload = Vec::new();
-        let mut end = None;
+        let mut payload_end = None;
+        let mut has_escaped_escape = false;
 
         while cursor < data.len() {
             if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&0x1b) {
-                payload.push(0x1b);
+                has_escaped_escape = true;
                 cursor += 2;
                 continue;
             }
             if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&b'\\') {
-                end = Some(cursor + 2);
+                payload_end = Some(cursor);
                 break;
             }
-            payload.push(data[cursor]);
             cursor += 1;
         }
 
-        let Some(end) = end else {
+        let Some(payload_end) = payload_end else {
             read_start = payload_start;
             continue;
         };
 
         let out = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
         out.extend_from_slice(&data[read_start..start]);
-        out.extend_from_slice(&payload);
-        read_start = end;
+        if has_escaped_escape {
+            let mut cursor = payload_start;
+            while cursor < payload_end {
+                if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&0x1b) {
+                    out.push(0x1b);
+                    cursor += 2;
+                } else {
+                    out.push(data[cursor]);
+                    cursor += 1;
+                }
+            }
+        } else {
+            out.extend_from_slice(&data[payload_start..payload_end]);
+        }
+        read_start = payload_end + 2;
     }
 
     match out {
@@ -335,6 +597,21 @@ fn sanitize_kitty_graphics_commands(data: &[u8]) -> SanitizedKittyGraphics<'_> {
 
 fn sanitize_kitty_graphics_control(control: &[u8]) -> Option<Vec<u8>> {
     let mut changed = false;
+    for field in control.split(|byte| *byte == b',') {
+        let Some(separator) = field.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let key = &field[..separator];
+        let value = &field[separator + 1..];
+        if key.len() != 1 || value.len() > 11 {
+            changed = true;
+            break;
+        }
+    }
+    if !changed {
+        return None;
+    }
+
     let mut sanitized = Vec::with_capacity(control.len());
     for field in control.split(|byte| *byte == b',') {
         let Some(separator) = field.iter().position(|byte| *byte == b'=') else {
@@ -343,14 +620,11 @@ fn sanitize_kitty_graphics_control(control: &[u8]) -> Option<Vec<u8>> {
         };
         let key = &field[..separator];
         let value = &field[separator + 1..];
-        if key.len() != 1 || value.len() > 11 {
-            changed = true;
-            continue;
+        if key.len() == 1 && value.len() <= 11 {
+            append_kitty_graphics_field(&mut sanitized, field);
         }
-        append_kitty_graphics_field(&mut sanitized, field);
     }
-
-    changed.then_some(sanitized)
+    Some(sanitized)
 }
 
 fn append_kitty_graphics_field(out: &mut Vec<u8>, field: &[u8]) {
@@ -358,6 +632,141 @@ fn append_kitty_graphics_field(out: &mut Vec<u8>, field: &[u8]) {
         out.push(b',');
     }
     out.extend_from_slice(field);
+}
+
+fn is_side_effect_osc_prefix(data: &[u8]) -> bool {
+    data.starts_with(b"0;")
+        || data.starts_with(b"1;")
+        || data.starts_with(b"2;")
+        || data.starts_with(b"9;")
+        || data.starts_with(b"22;")
+        || data.starts_with(b"52;")
+        || data.starts_with(b"66;")
+        || data.starts_with(b"133;")
+        || data.starts_with(b"777;")
+        || data.starts_with(b"1337;")
+}
+
+fn osc52_payload_text(payload: &[u8]) -> Option<Result<String, String>> {
+    let separator = payload.iter().position(|byte| *byte == b';')?;
+    let selection = String::from_utf8_lossy(&payload[..separator]).into_owned();
+    let encoded = &payload[separator + 1..];
+    if encoded == b"?" {
+        return Some(Err(selection));
+    }
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(encoded))
+        .ok()?;
+    String::from_utf8(bytes).ok().map(Ok)
+}
+
+fn split_osc_payload(payload: &[u8]) -> Option<(&[u8], &[u8])> {
+    let separator = payload.iter().position(|byte| *byte == b';')?;
+    Some((&payload[..separator], &payload[separator + 1..]))
+}
+
+fn conemu_osc9_kind(data: &str) -> Option<&str> {
+    let kind = data.split(';').next().unwrap_or_default();
+    (!kind.is_empty() && kind.bytes().all(|byte| byte.is_ascii_digit())).then_some(kind)
+}
+
+fn conemu_progress_state(state: &str) -> &'static str {
+    match state {
+        "0" | "" => "inactive",
+        "1" => "normal",
+        "2" => "error",
+        "3" => "indeterminate",
+        "4" => "warning",
+        _ => "unknown",
+    }
+}
+
+fn iterm_cursor_shape_sequence(shape: &str) -> Option<&'static [u8]> {
+    match shape {
+        "0" => Some(b"\x1b[2 q"),
+        "1" => Some(b"\x1b[6 q"),
+        "2" => Some(b"\x1b[4 q"),
+        _ => None,
+    }
+}
+
+fn append_plain_text_bytes(out: &mut Vec<u8>, data: &[u8]) {
+    let mut index = 0;
+    while index < data.len() {
+        match data[index] {
+            0x1b => index = skip_escape_sequence(data, index),
+            b'\r' => {
+                out.push(b'\n');
+                index += 1;
+            }
+            byte if byte >= 0x20 || byte == b'\n' || byte == b'\t' => {
+                out.push(byte);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+fn skip_escape_sequence(data: &[u8], start: usize) -> usize {
+    match data.get(start + 1).copied() {
+        Some(b'[') => data[start + 2..]
+            .iter()
+            .position(|byte| (0x40..=0x7e).contains(byte))
+            .map_or(data.len(), |end| start + 3 + end),
+        Some(b']' | b'P' | b'_') => find_osc_terminator(&data[start + 2..])
+            .map_or(data.len(), |(len, term)| start + 2 + len + term),
+        Some(_) => (start + 2).min(data.len()),
+        None => data.len(),
+    }
+}
+
+pub fn encode_iterm2_report_cell_size(cell_width: f32, cell_height: f32, scale: f32) -> Vec<u8> {
+    format!(
+        "\x1b]1337;ReportCellSize={:.4};{:.4};{:.4}\x1b\\",
+        cell_height.max(1.0),
+        cell_width.max(1.0),
+        scale.max(1.0)
+    )
+    .into_bytes()
+}
+
+pub fn encode_iterm2_report_variable(value: &str) -> Vec<u8> {
+    format!(
+        "\x1b]1337;ReportVariable={}\x1b\\",
+        general_purpose::STANDARD.encode(value.as_bytes())
+    )
+    .into_bytes()
+}
+
+pub fn encode_osc52_response(selection: &str, text: &str) -> Vec<u8> {
+    format!(
+        "\x1b]52;{};{}\x1b\\",
+        selection,
+        general_purpose::STANDARD.encode(text.as_bytes())
+    )
+    .into_bytes()
+}
+
+fn hyperlink_uri_at(
+    terminal: &Terminal<'static, 'static>,
+    x: u16,
+    y: u16,
+    scratch: &mut Vec<u8>,
+) -> Option<String> {
+    let grid_ref = terminal
+        .grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) }))
+        .ok()?;
+    scratch.resize(256, 0);
+    loop {
+        match grid_ref.hyperlink_uri(scratch) {
+            Ok(0) => return None,
+            Ok(len) => return String::from_utf8(scratch[..len].to_vec()).ok(),
+            Err(libghostty_vt::Error::OutOfSpace { required }) => scratch.resize(required, 0),
+            Err(_) => return None,
+        }
+    }
 }
 
 impl TerminalEngine {
@@ -419,6 +828,17 @@ impl TerminalEngine {
             })
         })?;
         terminal.on_device_attributes(|_terminal| Some(default_device_attributes()))?;
+        let color_scheme = Arc::new(Mutex::new(color_scheme_for_background(colors.background)));
+        let report_color_scheme = color_scheme.clone();
+        terminal.on_color_scheme(move |_terminal| report_color_scheme.lock().ok().map(|s| *s))?;
+        terminal.on_xtversion(|_terminal| Some(concat!("Bootty ", env!("CARGO_PKG_VERSION"))))?;
+        let callback_side_effects = Arc::new(Mutex::new(Vec::new()));
+        let bell_side_effects = callback_side_effects.clone();
+        terminal.on_bell(move |_terminal| {
+            if let Ok(mut effects) = bell_side_effects.lock() {
+                effects.push(TerminalSideEffect::Bell);
+            }
+        })?;
         terminal.resize(
             geometry.cols,
             geometry.rows,
@@ -439,6 +859,7 @@ impl TerminalEngine {
             image_placements: libghostty_vt::kitty::graphics::PlacementIterator::new()?,
             image_data_cache: KittyImageDataCache::default(),
             frame: RenderFrame::default(),
+            row_cache: Vec::new(),
             grapheme_scratch: Vec::new(),
             key_encoder: key::Encoder::new()?,
             key_event: key::Event::new()?,
@@ -451,7 +872,13 @@ impl TerminalEngine {
             geometry,
             size_report_geometry,
             osc_pwd_pending: Vec::new(),
+            osc_side_effect_pending: Vec::new(),
+            terminal_write_pending: Vec::new(),
+            side_effects: Vec::new(),
+            callback_side_effects,
+            iterm_copy_capture: None,
             current_working_directory: String::new(),
+            color_scheme,
             colors,
             content_epoch: 0,
             extracted_content_epoch: u64::MAX,
@@ -499,6 +926,8 @@ impl TerminalEngine {
 
     pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
         configure_default_colors(&mut self.terminal, &self.base_color_palette, &colors)?;
+        *self.color_scheme.lock().expect("color scheme lock") =
+            color_scheme_for_background(colors.background);
         self.colors = colors;
         self.mark_content_changed();
         Ok(())
@@ -509,9 +938,19 @@ impl TerminalEngine {
             return Ok(());
         }
 
+        let previous = self.geometry;
         self.geometry = geometry;
         if let Ok(mut report_geometry) = self.size_report_geometry.lock() {
             *report_geometry = geometry;
+        }
+
+        if geometry.cols != previous.cols && geometry.rows < previous.rows {
+            self.terminal.resize(
+                geometry.cols,
+                previous.rows,
+                geometry.cell_width,
+                geometry.cell_height,
+            )?;
         }
         self.terminal.resize(
             geometry.cols,
@@ -524,27 +963,75 @@ impl TerminalEngine {
         Ok(())
     }
 
+    fn complete_streaming_terminal_write<'a>(&mut self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
+        if self.terminal_write_pending.is_empty() {
+            let complete_len = complete_streaming_control_prefix_len(bytes);
+            if complete_len == bytes.len() {
+                return Cow::Borrowed(bytes);
+            }
+            self.terminal_write_pending
+                .extend_from_slice(&bytes[complete_len..]);
+            return Cow::Borrowed(&bytes[..complete_len]);
+        }
+
+        let mut joined = Vec::with_capacity(self.terminal_write_pending.len() + bytes.len());
+        joined.extend_from_slice(&self.terminal_write_pending);
+        joined.extend_from_slice(bytes);
+        self.terminal_write_pending.clear();
+
+        let complete_len = complete_streaming_control_prefix_len(&joined);
+        if complete_len < joined.len() {
+            self.terminal_write_pending
+                .extend_from_slice(&joined[complete_len..]);
+            joined.truncate(complete_len);
+        }
+        Cow::Owned(joined)
+    }
+
     pub fn write_vt(&mut self, bytes: &[u8]) {
-        let mut features = terminal_write_features(bytes);
+        let write_bytes = self.complete_streaming_terminal_write(bytes);
+        if write_bytes.is_empty() {
+            return;
+        }
+
+        if self.osc_pwd_pending.is_empty()
+            && self.osc_side_effect_pending.is_empty()
+            && !write_bytes.contains(&0x1b)
+        {
+            self.terminal.vt_write(write_bytes.as_ref());
+            self.drain_callback_side_effects();
+            self.mouse_encoder_options_dirty = true;
+            self.mark_content_changed();
+            return;
+        }
+
+        let mut features = terminal_write_features(write_bytes.as_ref());
         if !self.osc_pwd_pending.is_empty() {
             features.osc_pwd = true;
         }
+        if !self.osc_side_effect_pending.is_empty() {
+            features.osc_side_effect = true;
+        }
         if !features.needs_sanitizing() {
-            self.terminal.vt_write(bytes);
+            self.terminal.vt_write(write_bytes.as_ref());
+            self.drain_callback_side_effects();
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
             return;
         }
 
         let bytes = if features.tmux_passthrough {
-            let unwrapped = unwrap_tmux_passthrough_commands(bytes);
+            let unwrapped = unwrap_tmux_passthrough_commands(write_bytes.as_ref());
             features = terminal_write_features(unwrapped.as_ref());
             if !self.osc_pwd_pending.is_empty() {
                 features.osc_pwd = true;
             }
+            if !self.osc_side_effect_pending.is_empty() {
+                features.osc_side_effect = true;
+            }
             unwrapped
         } else {
-            Cow::Borrowed(bytes)
+            write_bytes
         };
 
         let sanitized = if features.kitty_graphics {
@@ -559,15 +1046,42 @@ impl TerminalEngine {
             self.kitty_graphics_touched = true;
         }
         self.terminal.vt_write(sanitized.bytes.as_ref());
+        self.drain_callback_side_effects();
         if features.osc_pwd {
             self.apply_osc_pwd_updates(sanitized.bytes.as_ref());
+        }
+        if features.osc_side_effect {
+            self.apply_osc_side_effects(sanitized.bytes.as_ref());
         }
         self.mouse_encoder_options_dirty = true;
         self.mark_content_changed();
     }
 
+    fn drain_callback_side_effects(&mut self) {
+        if let Ok(mut effects) = self.callback_side_effects.lock() {
+            self.side_effects.extend(effects.drain(..));
+        }
+    }
+
     pub fn current_working_directory(&self) -> &str {
         &self.current_working_directory
+    }
+
+    pub fn drain_side_effects(&mut self) -> Vec<TerminalSideEffect> {
+        std::mem::take(&mut self.side_effects)
+    }
+
+    pub fn drain_clipboard_texts(&mut self) -> Vec<String> {
+        let mut clipboard_texts = Vec::new();
+        let mut remaining = Vec::new();
+        for effect in std::mem::take(&mut self.side_effects) {
+            match effect {
+                TerminalSideEffect::ClipboardWrite(text) => clipboard_texts.push(text),
+                effect => remaining.push(effect),
+            }
+        }
+        self.side_effects = remaining;
+        clipboard_texts
     }
 
     fn apply_osc_pwd_updates(&mut self, data: &[u8]) {
@@ -595,6 +1109,255 @@ impl TerminalEngine {
                 }
             }
         }
+    }
+
+    fn apply_osc_side_effects(&mut self, data: &[u8]) {
+        let mut bytes = Vec::with_capacity(self.osc_side_effect_pending.len() + data.len());
+        bytes.extend_from_slice(&self.osc_side_effect_pending);
+        bytes.extend_from_slice(data);
+        self.osc_side_effect_pending.clear();
+
+        let mut search_start = 0;
+        while let Some(relative_start) = find_subslice(&bytes[search_start..], b"\x1b]") {
+            let start = search_start + relative_start;
+            if start > search_start {
+                self.append_iterm_copy_text(&bytes[search_start..start]);
+            }
+            let payload_start = start + 2;
+            match find_osc_terminator(&bytes[payload_start..]) {
+                Some((payload_len, terminator_len)) => {
+                    let payload = &bytes[payload_start..payload_start + payload_len];
+                    self.push_osc_side_effect(payload);
+                    search_start = payload_start + payload_len + terminator_len;
+                }
+                None => {
+                    self.osc_side_effect_pending
+                        .extend_from_slice(&bytes[start..]);
+                    return;
+                }
+            }
+        }
+        if search_start < bytes.len() {
+            self.append_iterm_copy_text(&bytes[search_start..]);
+        }
+    }
+
+    fn push_osc_side_effect(&mut self, payload: &[u8]) {
+        let Some((command, rest)) = split_osc_payload(payload) else {
+            return;
+        };
+        match command {
+            b"0" | b"2" => {
+                if let Ok(title) = std::str::from_utf8(rest) {
+                    self.side_effects
+                        .push(TerminalSideEffect::WindowTitle(title.to_owned()));
+                }
+            }
+            b"1" => {
+                if let Ok(icon) = std::str::from_utf8(rest) {
+                    self.side_effects
+                        .push(TerminalSideEffect::WindowIcon(icon.to_owned()));
+                }
+            }
+            b"9" => {
+                if let Ok(data) = std::str::from_utf8(rest) {
+                    if conemu_osc9_kind(data).is_some() {
+                        self.push_conemu_side_effect(data);
+                    } else {
+                        self.side_effects
+                            .push(TerminalSideEffect::DesktopNotification {
+                                title: String::new(),
+                                body: data.to_owned(),
+                            });
+                    }
+                }
+            }
+            b"22" => {
+                if let Ok(shape) = std::str::from_utf8(rest) {
+                    self.side_effects
+                        .push(TerminalSideEffect::MouseShape(shape.to_owned()));
+                }
+            }
+            b"52" => match osc52_payload_text(rest) {
+                Some(Ok(text)) => self
+                    .side_effects
+                    .push(TerminalSideEffect::ClipboardWrite(text)),
+                Some(Err(selection)) => self
+                    .side_effects
+                    .push(TerminalSideEffect::ClipboardQuery { selection }),
+                None => {}
+            },
+            b"133" => {
+                if let Ok(data) = std::str::from_utf8(rest) {
+                    self.side_effects
+                        .push(TerminalSideEffect::SemanticPrompt(data.to_owned()));
+                }
+            }
+            b"66" => {
+                if let Ok(data) = std::str::from_utf8(rest) {
+                    self.side_effects
+                        .push(TerminalSideEffect::KittyTextSizing(data.to_owned()));
+                }
+            }
+            b"777" => self.push_osc777_side_effect(rest),
+            b"1337" => {
+                if let Ok(data) = std::str::from_utf8(rest) {
+                    self.push_iterm2_side_effect(data);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn append_iterm_copy_text(&mut self, data: &[u8]) {
+        let Some(capture) = self.iterm_copy_capture.as_mut() else {
+            return;
+        };
+        append_plain_text_bytes(capture, data);
+    }
+
+    fn push_conemu_side_effect(&mut self, data: &str) {
+        let mut parts = data.split(';');
+        let kind = parts.next().unwrap_or_default();
+        match kind {
+            "2" => self.side_effects.push(TerminalSideEffect::WindowTitle(
+                parts.collect::<Vec<_>>().join(";"),
+            )),
+            "4" => {
+                let first = parts.next().unwrap_or_default();
+                let second = parts.next();
+                let (state, value) = match second {
+                    Some(value) => (conemu_progress_state(first), value.parse::<u8>().ok()),
+                    None => ("normal", first.parse::<u8>().ok()),
+                };
+                self.side_effects.push(TerminalSideEffect::ConEmuProgress {
+                    state: state.to_owned(),
+                    value: value.map(|value| value.min(100)),
+                });
+            }
+            "6" => self.side_effects.push(TerminalSideEffect::SemanticPrompt(
+                "conemu-prompt".to_owned(),
+            )),
+            "0" | "1" | "3" | "5" | "7" => {
+                self.side_effects
+                    .push(TerminalSideEffect::UnsupportedHostCommand {
+                        protocol: "conemu".to_owned(),
+                        command: data.to_owned(),
+                    });
+            }
+            "8" | "9" => self
+                .side_effects
+                .push(TerminalSideEffect::ConEmuControl(data.to_owned())),
+            _ => self
+                .side_effects
+                .push(TerminalSideEffect::ConEmuControl(data.to_owned())),
+        }
+    }
+
+    fn push_iterm2_side_effect(&mut self, data: &str) {
+        match data {
+            "ClearScrollback" => {
+                self.terminal.vt_write(b"\x1b[3J");
+                self.mark_content_changed();
+                self.side_effects
+                    .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
+            }
+            "SetMark" => self.side_effects.push(TerminalSideEffect::SemanticPrompt(
+                "iterm2-set-mark".to_owned(),
+            )),
+            "StealFocus" => self.side_effects.push(TerminalSideEffect::FocusWindow),
+            "ReportCellSize" => self.side_effects.push(TerminalSideEffect::ReportCellSize),
+            "EndCopy" => {
+                if let Some(capture) = self.iterm_copy_capture.take() {
+                    self.side_effects.push(TerminalSideEffect::ClipboardWrite(
+                        String::from_utf8_lossy(&capture).into_owned(),
+                    ));
+                }
+            }
+            _ => self.push_iterm2_assignment_side_effect(data),
+        }
+    }
+
+    fn push_iterm2_assignment_side_effect(&mut self, data: &str) {
+        let Some((key, value)) = data.split_once('=') else {
+            self.side_effects
+                .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
+            return;
+        };
+        match key {
+            "CurrentDir" => {
+                self.current_working_directory.clear();
+                self.current_working_directory.push_str(value);
+                self.side_effects
+                    .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
+            }
+            "CursorShape" => {
+                if let Some(sequence) = iterm_cursor_shape_sequence(value) {
+                    self.terminal.vt_write(sequence);
+                    self.mark_content_changed();
+                }
+                self.side_effects
+                    .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
+            }
+            "Copy" => {
+                if let Ok(bytes) = general_purpose::STANDARD.decode(value) {
+                    self.side_effects.push(TerminalSideEffect::ClipboardWrite(
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ));
+                }
+            }
+            "CopyToClipboard" => {
+                self.iterm_copy_capture = Some(Vec::new());
+                self.side_effects
+                    .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
+            }
+            "OpenURL" => match general_purpose::STANDARD.decode(value) {
+                Ok(bytes) => self.side_effects.push(TerminalSideEffect::OpenUrl(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )),
+                Err(_) => self
+                    .side_effects
+                    .push(TerminalSideEffect::OpenUrl(value.to_owned())),
+            },
+            "File" => self
+                .side_effects
+                .push(TerminalSideEffect::Iterm2File(data.to_owned())),
+            "ReportVariable" => match general_purpose::STANDARD.decode(value) {
+                Ok(bytes) => self.side_effects.push(TerminalSideEffect::ReportVariable(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )),
+                Err(_) => self
+                    .side_effects
+                    .push(TerminalSideEffect::Iterm2Control(data.to_owned())),
+            },
+            "SetBadgeFormat"
+            | "SetProfile"
+            | "SetKeyLabel"
+            | "SetUserVar"
+            | "RemoteHost"
+            | "ShellIntegrationVersion"
+            | "SetColors"
+            | "AddAnnotation"
+            | "AddHiddenAnnotation"
+            | "HighlightCursorLine" => self
+                .side_effects
+                .push(TerminalSideEffect::Iterm2Control(data.to_owned())),
+            _ => self
+                .side_effects
+                .push(TerminalSideEffect::Iterm2Control(data.to_owned())),
+        }
+    }
+
+    fn push_osc777_side_effect(&mut self, payload: &[u8]) {
+        let text = String::from_utf8_lossy(payload);
+        let mut parts = text.splitn(3, ';');
+        if parts.next() != Some("notify") {
+            return;
+        }
+        let title = parts.next().unwrap_or_default().to_owned();
+        let body = parts.next().unwrap_or_default().to_owned();
+        self.side_effects
+            .push(TerminalSideEffect::DesktopNotification { title, body });
     }
 
     pub fn encode_paste_to_vec(&mut self, text: &str, out: &mut Vec<u8>) -> Result<()> {
@@ -724,6 +1487,68 @@ impl TerminalEngine {
         self.terminal.mode(Mode::SYNC_OUTPUT).map_err(Into::into)
     }
 
+    fn assemble_cached_frame(
+        &mut self,
+        extract_start: Instant,
+        render_state_update_us: u64,
+        row_dirty: Vec<bool>,
+    ) -> Result<&RenderFrame> {
+        self.frame.row_dirty = row_dirty;
+        self.frame.cells.clear();
+        self.frame.text.clear();
+        self.frame.images = KittyImageFrame::default();
+        self.frame.stats = FrameStats {
+            render_state_update_us,
+            ..FrameStats::default()
+        };
+
+        let mut virtual_placeholder_rows = Vec::new();
+        let mut virtual_cells = Vec::new();
+        for (row_index, row) in self.row_cache.iter().enumerate() {
+            if row.has_virtual_placeholder {
+                virtual_placeholder_rows.push(row_index as u16);
+            }
+            virtual_cells.extend(row.virtual_cells.iter().cloned());
+            let text_offset = self.frame.text.len();
+            self.frame.text.extend_from_slice(&row.text);
+            self.frame.stats.chars += row.text.len();
+            self.frame.stats.cells += row.cells.len();
+            self.frame
+                .cells
+                .extend(row.cells.iter().cloned().map(|mut cell| {
+                    cell.text_start += text_offset;
+                    cell
+                }));
+        }
+        self.frame.stats.dirty_rows = self.frame.row_dirty.iter().filter(|dirty| **dirty).count();
+
+        if self.kitty_graphics_touched || !virtual_cells.is_empty() {
+            let surface = TerminalSurface::for_logical_size(
+                f32::from(self.geometry.pixel_width()),
+                f32::from(self.geometry.pixel_height()),
+                CellMetrics::new(
+                    self.geometry.cell_width as f32,
+                    self.geometry.cell_height as f32,
+                ),
+                TerminalPadding::default(),
+            );
+            let mut images = collect_kitty_image_frame(
+                &self.terminal,
+                surface,
+                &mut self.image_placements,
+                &mut self.image_data_cache,
+            )
+            .unwrap_or_default();
+            append_virtual_image_placements(&self.terminal, surface, &mut images, &virtual_cells)?;
+            images.virtual_placeholder_rows = virtual_placeholder_rows;
+            self.frame.images = images;
+        }
+
+        self.frame.stats.extraction_us = extract_start.elapsed().as_micros() as u64;
+        self.extracted_content_epoch = self.content_epoch;
+        Ok(&self.frame)
+    }
+
     pub fn extract_frame(&mut self) -> Result<&RenderFrame> {
         let extract_start = Instant::now();
         let update_start = Instant::now();
@@ -737,6 +1562,9 @@ impl TerminalEngine {
             && self.frame.cols == cols
             && self.frame.rows == rows
             && !self.frame.cells.is_empty();
+        let cache_matches_frame = self.frame.cols == cols
+            && self.frame.rows == rows
+            && self.row_cache.len() == usize::from(rows);
 
         self.frame.cols = cols;
         self.frame.rows = rows;
@@ -788,6 +1616,50 @@ impl TerminalEngine {
             return Ok(&self.frame);
         }
 
+        if dirty == Dirty::Partial {
+            let mut row_dirty = Vec::with_capacity(usize::from(rows));
+            let mut dirty_rows = 0_usize;
+            let mut row_iter = self.rows.update(&snapshot)?;
+            while let Some(row) = row_iter.next() {
+                let is_dirty = row.dirty()?;
+                if is_dirty {
+                    dirty_rows += 1;
+                }
+                row_dirty.push(is_dirty);
+            }
+
+            if cache_matches_frame || dirty_rows.saturating_mul(2) <= usize::from(rows) {
+                self.row_cache
+                    .resize_with(usize::from(rows), CachedRenderRow::default);
+                let update_all_rows = !cache_matches_frame;
+                let mut row_iter = self.rows.update(&snapshot)?;
+                let mut row_index = 0_u16;
+                let mut hyperlink_scratch = Vec::new();
+                while let Some(row) = row_iter.next() {
+                    let index = usize::from(row_index);
+                    if update_all_rows || row_dirty.get(index).copied().unwrap_or(false) {
+                        extract_render_row(
+                            &self.terminal,
+                            &mut self.cells,
+                            &mut self.grapheme_scratch,
+                            &mut hyperlink_scratch,
+                            row,
+                            row_index,
+                            &mut self.row_cache[index],
+                        )?;
+                    }
+                    row_index += 1;
+                }
+                return self.assemble_cached_frame(
+                    extract_start,
+                    render_state_update_us,
+                    row_dirty,
+                );
+            }
+        }
+
+        self.row_cache.clear();
+
         self.frame.row_dirty.clear();
         self.frame.cells.clear();
         self.frame.text.clear();
@@ -798,6 +1670,7 @@ impl TerminalEngine {
         let mut row_index = 0_u16;
         let mut virtual_placeholder_rows = Vec::new();
         let mut virtual_cells = Vec::new();
+        let mut hyperlink_scratch = Vec::new();
 
         while let Some(row) = row_iter.next() {
             let row_dirty = row.dirty()?;
@@ -805,7 +1678,9 @@ impl TerminalEngine {
                 self.frame.stats.dirty_rows += 1;
             }
             self.frame.row_dirty.push(row_dirty);
-            if row.raw_row()?.has_kitty_virtual_placeholder()? {
+            let raw_row = row.raw_row()?;
+            let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
+            if raw_row.has_kitty_virtual_placeholder()? {
                 virtual_placeholder_rows.push(row_index);
             }
             let mut cell_iter = self.cells.update(row)?;
@@ -841,6 +1716,12 @@ impl TerminalEngine {
                     grapheme_len
                 };
 
+                let hyperlink = if row_has_hyperlink {
+                    hyperlink_uri_at(&self.terminal, col_index, row_index, &mut hyperlink_scratch)
+                } else {
+                    None
+                };
+
                 self.frame.stats.cells += 1;
                 self.frame.cells.push(RenderCell {
                     x: col_index,
@@ -860,6 +1741,7 @@ impl TerminalEngine {
                         overline: style.overline,
                         underline: style.underline,
                     },
+                    hyperlink,
                 });
 
                 col_index += 1;

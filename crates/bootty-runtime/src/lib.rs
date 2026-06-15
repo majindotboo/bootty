@@ -1,10 +1,13 @@
+pub mod benchmark_trace;
 pub mod render_source;
 pub mod scheduler;
 pub mod terminal_session;
 pub mod terminfo;
 
+pub use benchmark_trace::{BenchmarkTrace, TraceValue};
 pub use terminal_session::{
-    DrainStats, SessionLaunchConfig, TerminalSession, TerminalSessionConfig,
+    DrainStats, PtyBacklog, SessionLaunchConfig, TerminalSession, TerminalSessionConfig,
+    drain_pty_backlog,
 };
 
 pub mod geometry {

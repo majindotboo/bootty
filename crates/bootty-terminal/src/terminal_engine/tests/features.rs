@@ -82,6 +82,7 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             tmux_passthrough: true,
             kitty_graphics: false,
             osc_pwd: true,
+            osc_side_effect: false,
         }
     );
     assert_eq!(
@@ -90,6 +91,7 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             tmux_passthrough: false,
             kitty_graphics: true,
             osc_pwd: false,
+            osc_side_effect: false,
         }
     );
     assert_eq!(
@@ -98,8 +100,244 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             tmux_passthrough: false,
             kitty_graphics: false,
             osc_pwd: true,
+            osc_side_effect: false,
         }
     );
+    assert_eq!(
+        terminal_write_features(b"\x1b]52;c;aGVsbG8=\x07"),
+        TerminalWriteFeatures {
+            tmux_passthrough: false,
+            kitty_graphics: false,
+            osc_pwd: false,
+            osc_side_effect: true,
+        }
+    );
+}
+
+#[test]
+fn terminal_engine_collects_osc52_clipboard_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]52;c;aGVsbG8gdG11eA==\x07");
+
+    assert_eq!(
+        engine.drain_clipboard_texts(),
+        vec!["hello tmux".to_owned()]
+    );
+    assert!(engine.drain_clipboard_texts().is_empty());
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_split_prefix_osc52_clipboard_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]");
+    assert!(engine.drain_clipboard_texts().is_empty());
+
+    engine.write_vt(b"52;c;aGVsbG8gdG11eA==\x07");
+
+    assert_eq!(
+        engine.drain_clipboard_texts(),
+        vec!["hello tmux".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_split_prefix_iterm2_report_cell_size() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]133");
+    assert!(engine.drain_side_effects().is_empty());
+
+    engine.write_vt(b"7;ReportCellSize\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::ReportCellSize]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_split_terminator_iterm2_report_cell_size() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]1337;ReportCellSize\x1b");
+    assert!(engine.drain_side_effects().is_empty());
+
+    engine.write_vt(b"\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::ReportCellSize]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_split_tmux_passthrough_osc52_clipboard_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1bPtm");
+    assert!(engine.drain_clipboard_texts().is_empty());
+
+    engine.write_vt(b"ux;\x1b\x1b]52;c;aGVsbG8gdG11eA==\x07\x1b");
+    assert!(engine.drain_clipboard_texts().is_empty());
+
+    engine.write_vt(b"\\");
+
+    assert_eq!(
+        engine.drain_clipboard_texts(),
+        vec!["hello tmux".to_owned()]
+    );
+    Ok(())
+}
+#[test]
+fn terminal_engine_collects_tmux_passthrough_osc52_clipboard_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1bPtmux;\x1b\x1b]52;c;aGVsbG8gdG11eA==\x07\x1b\\");
+
+    assert_eq!(
+        engine.drain_clipboard_texts(),
+        vec!["hello tmux".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_split_osc52_clipboard_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]52;c;c3Bs");
+    assert!(engine.drain_clipboard_texts().is_empty());
+    engine.write_vt(b"aXQ=\x1b\\");
+
+    assert_eq!(engine.drain_clipboard_texts(), vec!["split".to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_osc52_clipboard_query() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]52;c;?\x07");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::ClipboardQuery {
+            selection: "c".to_owned()
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_window_title_side_effect() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]2;bootty title\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::WindowTitle("bootty title".to_owned())]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_desktop_notification_side_effect() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]777;notify;Build;Done\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::DesktopNotification {
+            title: "Build".to_owned(),
+            body: "Done".to_owned()
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_collects_raw_protocol_side_effects() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]1;bootty icon\x1b\\\x1b]9;4;50\x1b\\\x1b]66;s=2;big\x1b\\\x1b]133;A\x1b\\\x1b]1337;File=name\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![
+            TerminalSideEffect::WindowIcon("bootty icon".to_owned()),
+            TerminalSideEffect::ConEmuProgress {
+                state: "normal".to_owned(),
+                value: Some(50),
+            },
+            TerminalSideEffect::KittyTextSizing("s=2;big".to_owned()),
+            TerminalSideEffect::SemanticPrompt("A".to_owned()),
+            TerminalSideEffect::Iterm2File("File=name".to_owned()),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_handles_iterm2_copy_open_and_reports() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]1337;Copy=aGVsbG8=\x1b\\");
+    engine.write_vt(
+        b"\x1b]1337;CopyToClipboard=clipboard\x1b\\copied\x1b[31m text\x1b]1337;EndCopy\x1b\\",
+    );
+    engine.write_vt(b"\x1b]1337;OpenURL=aHR0cHM6Ly9leGFtcGxlLmNvbQ==\x1b\\");
+    engine.write_vt(b"\x1b]1337;ReportCellSize\x1b\\");
+    engine.write_vt(b"\x1b]1337;ReportVariable=c2Vzc2lvbi5uYW1l\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![
+            TerminalSideEffect::ClipboardWrite("hello".to_owned()),
+            TerminalSideEffect::Iterm2Control("CopyToClipboard=clipboard".to_owned()),
+            TerminalSideEffect::ClipboardWrite("copied text".to_owned()),
+            TerminalSideEffect::OpenUrl("https://example.com".to_owned()),
+            TerminalSideEffect::ReportCellSize,
+            TerminalSideEffect::ReportVariable("session.name".to_owned()),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_preserves_malformed_iterm_report_variable_as_control() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]1337;ReportVariable=not base64!\x1b\\");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::Iterm2Control(
+            "ReportVariable=not base64!".to_owned()
+        )]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_extracts_osc8_hyperlink_uri() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(4, 1))?;
+
+    engine.write_vt(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+    let frame = engine.extract_frame()?;
+
+    assert_eq!(
+        frame.cells[0].hyperlink.as_deref(),
+        Some("https://example.com")
+    );
+    Ok(())
 }
 
 fn test_geometry(cols: u16, rows: u16) -> TerminalGeometry {
@@ -1565,6 +1803,24 @@ fn terminal_engine_supports_terminal_resize_reflow_visible_content() -> Result<(
     shrink_cols.resize(test_geometry(3, 3))?;
     assert_visible_text_rows(shrink_cols.extract_frame()?, &["1AB", "CD"]);
 
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_resizes_main_screen_after_many_lines_without_overflow() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(120, 40))?;
+    let mut payload = Vec::new();
+    for index in 0..24 {
+        payload.extend_from_slice(
+            format!("normal line {index:06} {}\r\n", "payload ".repeat(6)).as_bytes(),
+        );
+    }
+    engine.write_vt(&payload);
+
+    engine.resize(test_geometry(80, 24))?;
+
+    let frame = engine.extract_frame()?;
+    assert_eq!((frame.cols, frame.rows), (80, 24));
     Ok(())
 }
 

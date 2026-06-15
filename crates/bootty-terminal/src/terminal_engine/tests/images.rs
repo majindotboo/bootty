@@ -259,7 +259,7 @@ fn assert_kitty_response(output: &Arc<Mutex<Vec<u8>>>, image_id: u32, status: &s
 fn terminal_engine_advertises_and_accepts_kitty_file_images() -> Result<()> {
     let engine = test_terminal_engine()?;
 
-    assert_eq!(TERMINAL_TERM, "xterm-ghostty");
+    assert_eq!(TERMINAL_TERM, "xterm-bootty");
     assert!(engine.terminal.kitty_image_storage_limit()? > 0);
     assert!(engine.terminal.is_kitty_image_from_file_allowed()?);
     assert!(engine.terminal.is_kitty_image_from_temp_file_allowed()?);
@@ -307,6 +307,23 @@ fn terminal_engine_decodes_kitty_png_payloads_into_image_frame() -> Result<()> {
         b"\x1b_Ga=T,f=100,q=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA\
           DUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\",
     );
+    let frame = engine.extract_frame()?;
+
+    assert_eq!(frame.images.placements.len(), 1);
+    assert_eq!(frame.images.placements[0].image_width, 1);
+    assert_eq!(frame.images.placements[0].image_height, 1);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_decodes_split_prefix_kitty_png_payload() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+    let split_at = 2;
+
+    engine.write_vt(&ONE_PIXEL_PNG_APC.as_bytes()[..split_at]);
+    assert!(engine.extract_frame()?.images.placements.is_empty());
+
+    engine.write_vt(&ONE_PIXEL_PNG_APC.as_bytes()[split_at..]);
     let frame = engine.extract_frame()?;
 
     assert_eq!(frame.images.placements.len(), 1);
@@ -1564,5 +1581,35 @@ fn terminal_engine_reuses_kitty_image_payload_across_frame_extraction() -> Resul
         Arc::ptr_eq(&first, &second),
         "unchanged Kitty image payload should not be copied every frame"
     );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_refreshes_reused_kitty_image_id_when_middle_bytes_change() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+    let first_bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    let second_bytes = [0, 1, 2, 90, 91, 92, 6, 7, 8];
+
+    engine.write_vt(
+        format!(
+            "\x1b_Ga=T,t=d,f=24,i=82,p=1,s=3,v=1;{}\x1b\\",
+            base64_encode_bytes(&first_bytes)
+        )
+        .as_bytes(),
+    );
+    let first = engine.extract_frame()?.images.placements[0].data.clone();
+
+    engine.write_vt(
+        format!(
+            "\x1b_Ga=T,t=d,f=24,i=82,p=1,s=3,v=1;{}\x1b\\",
+            base64_encode_bytes(&second_bytes)
+        )
+        .as_bytes(),
+    );
+    let second = engine.extract_frame()?.images.placements[0].data.clone();
+
+    assert_eq!(first.as_slice(), first_bytes);
+    assert_eq!(second.as_slice(), second_bytes);
+    assert!(!Arc::ptr_eq(&first, &second));
     Ok(())
 }

@@ -8,6 +8,15 @@ bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
 portable-pty.workspace = true
 
+[[bench]]
+name = "pty_drain"
+harness = false
+
+[[bench]]
+name = "flood_response"
+harness = false
+
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
 tempfile.workspace = true
