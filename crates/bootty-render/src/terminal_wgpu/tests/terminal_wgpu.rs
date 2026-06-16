@@ -224,7 +224,14 @@ fn virtual_placements_without_drawable_layers_do_not_schedule_wgpu_callback() {
         )],
     };
 
-    assert!(terminal_render_callback(&frame, wgpu::TextureFormat::Rgba8Unorm).is_none());
+    assert!(
+        terminal_render_callback(
+            &frame,
+            wgpu::TextureFormat::Rgba8Unorm,
+            ViewTransform::IDENTITY
+        )
+        .is_none()
+    );
 }
 
 #[test]

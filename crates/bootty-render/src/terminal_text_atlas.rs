@@ -424,10 +424,16 @@ impl GlyphAtlas {
             return Some(entry);
         }
 
+        // Step by glyph size, not per pixel: a per-pixel scan is O(width * height * allocations) and
+        // stalls the frame when oversized (zoomed) glyphs overflow the shelves.
         let usable_right = self.width - 1;
         let usable_bottom = self.height - 1;
-        for y in 1..=usable_bottom.saturating_sub(height) {
-            for x in 1..=usable_right.saturating_sub(width) {
+        let step_x = width.max(1);
+        let step_y = height.max(1);
+        let mut y = 1;
+        while y <= usable_bottom.saturating_sub(height) {
+            let mut x = 1;
+            while x <= usable_right.saturating_sub(width) {
                 let entry = GlyphAtlasEntry {
                     x,
                     y,
@@ -442,7 +448,9 @@ impl GlyphAtlas {
                     self.allocations.push(entry);
                     return Some(entry);
                 }
+                x += step_x;
             }
+            y += step_y;
         }
         None
     }

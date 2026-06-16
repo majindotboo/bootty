@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::mpsc, time::Instant};
 
 use anyhow::Result;
 use eframe::egui::{
-    self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder,
+    self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder, Vec2,
 };
 
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
@@ -339,13 +339,14 @@ impl eframe::App for BoottyApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let (
-            events,
+            mut events,
             dropped_file_paths,
             modifiers,
             hover_pos,
             pressed_mouse_button,
             stable_dt,
             viewport,
+            zoom_delta,
         ) = ctx.input(|input| {
             (
                 input.events.clone(),
@@ -364,9 +365,21 @@ impl eframe::App for BoottyApp {
                     maximized: input.viewport().maximized.unwrap_or(false),
                     content_height: input.content_rect().height(),
                 },
+                input.zoom_delta(),
             )
         });
         let (terminal_cell_width, terminal_cell_height) = self.terminal_widget.cell_dimensions();
+
+        if (zoom_delta - 1.0).abs() > f32::EPSILON {
+            self.terminal_widget.apply_pinch(zoom_delta, hover_pos);
+        }
+        if self.terminal_widget.is_zoomed() {
+            let pan = take_scroll_for_pan(&mut events, terminal_cell_height);
+            if pan != Vec2::ZERO {
+                self.terminal_widget.apply_pan(pan);
+            }
+        }
+
         let inputs = FrameInputs {
             now: Instant::now(),
             stable_dt_ms: stable_dt * 1000.0,
@@ -397,6 +410,24 @@ impl eframe::App for BoottyApp {
 
 fn uses_custom_egui_fonts(config: &BoottyConfig) -> bool {
     config.chrome.sidebar || config.chrome.status_bar || config.chrome.window_tabs
+}
+
+// egui's wheel `delta` already points the way content should move, so it is the pan delta as-is.
+fn take_scroll_for_pan(events: &mut Vec<egui::Event>, line_height: f32) -> Vec2 {
+    let mut pan = Vec2::ZERO;
+    events.retain(|event| {
+        let egui::Event::MouseWheel { unit, delta, .. } = event else {
+            return true;
+        };
+        let scale = match unit {
+            egui::MouseWheelUnit::Point => 1.0,
+            egui::MouseWheelUnit::Line => line_height,
+            egui::MouseWheelUnit::Page => line_height * 20.0,
+        };
+        pan += *delta * scale;
+        false
+    });
+    pan
 }
 
 fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {

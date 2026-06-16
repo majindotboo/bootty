@@ -3,7 +3,7 @@ use std::hint::black_box;
 mod paint_plan_fixtures;
 
 use bootty_app::{
-    geometry::SurfaceRect,
+    geometry::{SurfaceRect, ViewTransform},
     paint_plan::{
         BackgroundRect, CursorPlan, CursorShape, DecorationLine, DecorationStyle, PaintPlanner,
         PlanColor, TerminalPaintPlan, TextAttrs, TextRun,
@@ -351,7 +351,13 @@ fn warm_wgpu_renderer(
     renderer: &mut TerminalWgpuRenderer,
     frame: &TerminalRenderFrame,
 ) {
-    black_box(renderer.prepare_terminal_frame(&context.device, &context.queue, frame, 1.0));
+    black_box(renderer.prepare_terminal_frame(
+        &context.device,
+        &context.queue,
+        frame,
+        1.0,
+        ViewTransform::IDENTITY,
+    ));
 }
 
 fn bench_wgpu_prepare(c: &mut Criterion) {
@@ -366,6 +372,7 @@ fn bench_wgpu_prepare(c: &mut Criterion) {
                     &context.queue,
                     &scenario.frame,
                     1.0,
+                    ViewTransform::IDENTITY,
                 ))
             })
         });
@@ -382,7 +389,13 @@ fn bench_wgpu_dirty_text_prepare(c: &mut Criterion) {
         b.iter(|| {
             tick = tick.wrapping_add(1);
             let frame = &frames[tick % frames.len()];
-            black_box(renderer.prepare_terminal_frame(&context.device, &context.queue, frame, 1.0))
+            black_box(renderer.prepare_terminal_frame(
+                &context.device,
+                &context.queue,
+                frame,
+                1.0,
+                ViewTransform::IDENTITY,
+            ))
         })
     });
 }
@@ -440,6 +453,7 @@ fn bench_animated_agent_pipeline_wgpu_prepare(c: &mut Criterion) {
                     &context.queue,
                     &render_frame,
                     1.0,
+                    ViewTransform::IDENTITY,
                 ))
             })
         },
@@ -491,6 +505,7 @@ fn bench_wgpu_first_frame_upload(c: &mut Criterion) {
                         &context.queue,
                         &frame,
                         1.0,
+                        ViewTransform::IDENTITY,
                     ));
                     submit_prepared_render_pass(&context, black_box(&renderer), black_box(&target));
                 },

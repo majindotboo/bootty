@@ -12,7 +12,7 @@ use eframe::{
 use crate::{
     geometry::{
         CellMetrics, CoordinateSpace, SurfacePoint, SurfaceRect, TerminalCoordinate,
-        TerminalSurface,
+        TerminalSurface, ViewTransform,
     },
     paint_plan::{CursorBlinkPhase, PaintPlanner},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
@@ -35,6 +35,8 @@ pub struct TerminalWidget {
     terminal_cursor_icon: egui::CursorIcon,
     transition_key: Option<String>,
     transition_pending: bool,
+    view: ViewTransform,
+    last_surface: Option<SurfaceRect>,
 }
 
 pub use bootty_runtime::render_source::TerminalRenderSource;
@@ -60,6 +62,33 @@ impl TerminalWidget {
 
     pub fn set_terminal_cursor_icon(&mut self, icon: egui::CursorIcon) {
         self.terminal_cursor_icon = icon;
+    }
+
+    pub fn is_zoomed(&self) -> bool {
+        self.view.is_zoomed()
+    }
+
+    pub fn apply_pinch(&mut self, factor: f32, focal: Option<Pos2>) {
+        let Some(surface) = self.last_surface else {
+            return;
+        };
+        let center = Pos2::new(
+            (surface.min_x + surface.max_x) * 0.5,
+            (surface.min_y + surface.max_y) * 0.5,
+        );
+        let focal = focal.unwrap_or(center);
+        let focal = Pos2::new(
+            focal.x.clamp(surface.min_x, surface.max_x),
+            focal.y.clamp(surface.min_y, surface.max_y),
+        );
+        self.view = self.view.pinched(factor, focal, surface);
+    }
+
+    pub fn apply_pan(&mut self, delta: Vec2) {
+        let Some(surface) = self.last_surface else {
+            return;
+        };
+        self.view = self.view.panned(delta, surface);
     }
 
     pub fn set_transition_key(&mut self, key: Option<String>) {
@@ -92,6 +121,8 @@ impl TerminalWidget {
         let extract_start = Instant::now();
         let frame = terminal.extract_frame()?;
         self.metrics.extract_total_us = extract_start.elapsed().as_micros() as u64;
+        // Match the grid rect the renderer projects through, so pinch/pan math agrees with it.
+        self.last_surface = Some(surface.grid_rect(frame.cols, frame.rows));
         self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.handle_scrollbar_interaction(ui, surface, frame.as_ref(), terminal)?;
         self.paint(ui, surface, &frame)?;
@@ -127,7 +158,7 @@ impl TerminalWidget {
             .hovered()
             .then(|| ui.input(|input| input.pointer.hover_pos()))
             .flatten()
-            .and_then(|pos| hyperlink_at(frame, surface, pos));
+            .and_then(|pos| hyperlink_at(frame, surface, self.view.inverse_point(pos)));
 
         if let Some(url) = hovered_link {
             ui.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -178,7 +209,12 @@ impl TerminalWidget {
                 .store(surface, &frame, render_frame, text_runs);
         }
         self.render_cache.apply_cursor_phase(cursor_blink_phase);
-        paint_terminal_content(ui, self.render_cache.render_frame(), self.target_format);
+        paint_terminal_content(
+            ui,
+            self.render_cache.render_frame(),
+            self.target_format,
+            self.view,
+        );
         self.metrics.cursor_blinking = cursor_blinking;
         self.metrics.text_runs = self.render_cache.text_runs();
         self.paint_scrollbar(ui, surface, frame.as_ref());
@@ -610,8 +646,9 @@ fn paint_terminal_content(
     ui: &mut egui::Ui,
     frame: &TerminalRenderFrame,
     target_format: Option<wgpu::TextureFormat>,
+    view: ViewTransform,
 ) {
-    let Some(callback) = terminal_render_shape(frame, target_format) else {
+    let Some(callback) = terminal_render_shape(frame, target_format, view) else {
         return;
     };
     ui.painter_at(egui_rect(frame.surface)).add(callback);
@@ -620,9 +657,10 @@ fn paint_terminal_content(
 fn terminal_render_shape(
     frame: &TerminalRenderFrame,
     target_format: Option<wgpu::TextureFormat>,
+    view: ViewTransform,
 ) -> Option<egui::Shape> {
     let target_format = target_format?;
-    terminal_render_callback(frame, target_format)
+    terminal_render_callback(frame, target_format, view)
 }
 
 fn egui_rect(rect: SurfaceRect) -> Rect {
@@ -1051,8 +1089,15 @@ mod tests {
         };
         let frame = TerminalRenderFrame::background_from_plan(&plan);
 
-        assert!(terminal_render_shape(&frame, None).is_none());
-        assert!(terminal_render_shape(&frame, Some(wgpu::TextureFormat::Rgba8Unorm)).is_some());
+        assert!(terminal_render_shape(&frame, None, ViewTransform::IDENTITY).is_none());
+        assert!(
+            terminal_render_shape(
+                &frame,
+                Some(wgpu::TextureFormat::Rgba8Unorm),
+                ViewTransform::IDENTITY
+            )
+            .is_some()
+        );
     }
 
     #[test]

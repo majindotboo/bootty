@@ -1,5 +1,5 @@
 use bootty_app::{
-    geometry::{CellMetrics, SurfaceRect, TerminalPadding},
+    geometry::{CellMetrics, SurfaceRect, TerminalPadding, ViewTransform},
     paint_plan::{
         BackgroundRect, CursorPlan, CursorShape, CursorTextPlan, DecorationLine, DecorationStyle,
         PlanColor, TerminalPaintPlan, TextAttrs, TextRun,
@@ -270,7 +270,7 @@ fn render_frame_to_pixels(frame: &TerminalRenderFrame, width: u32, height: u32) 
         mapped_at_creation: false,
     });
     let mut renderer = TerminalWgpuRenderer::new(device, format);
-    renderer.prepare_terminal_frame(device, queue, frame, 1.0);
+    renderer.prepare_terminal_frame(device, queue, frame, 1.0, ViewTransform::IDENTITY);
     let mut encoder = device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
         label: Some("bootty terminal offscreen encoder"),
     });
@@ -382,7 +382,7 @@ fn render_frames_with_reused_renderer(
             usage: eframe::wgpu::BufferUsages::COPY_DST | eframe::wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        renderer.prepare_terminal_frame(device, queue, frame, 1.0);
+        renderer.prepare_terminal_frame(device, queue, frame, 1.0, ViewTransform::IDENTITY);
         let mut encoder = device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
             label: Some("bootty terminal offscreen encoder"),
         });
@@ -564,9 +564,12 @@ fn background_callback_input_uses_terminal_render_fill_commands() {
 
 #[test]
 fn background_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape =
-        terminal_render_callback(&background_frame(), eframe::wgpu::TextureFormat::Rgba8Unorm)
-            .expect("background callback shape");
+    let shape = terminal_render_callback(
+        &background_frame(),
+        eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
+    )
+    .expect("background callback shape");
 
     assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }
@@ -662,17 +665,24 @@ fn prompt_sprite_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
         .commands
         .retain(|command| matches!(command, TerminalRenderCommand::Sprite(_)));
 
-    let shape = terminal_render_callback(&frame, eframe::wgpu::TextureFormat::Rgba8Unorm)
-        .expect("sprite callback shape");
+    let shape = terminal_render_callback(
+        &frame,
+        eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
+    )
+    .expect("sprite callback shape");
 
     assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }
 
 #[test]
 fn image_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape =
-        terminal_render_callback(&image_only_frame(), eframe::wgpu::TextureFormat::Rgba8Unorm)
-            .expect("image callback shape");
+    let shape = terminal_render_callback(
+        &image_only_frame(),
+        eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
+    )
+    .expect("image callback shape");
 
     assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }
@@ -862,6 +872,7 @@ fn progress_row_frame_is_enqueueable_as_terminal_wgpu_callback() {
     let shape = terminal_render_callback(
         &progress_row_frame(),
         eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
     )
     .expect("progress row callback shape");
 
@@ -903,9 +914,12 @@ fn border_box_neighbors_remain_in_terminal_text_batch() {
 
 #[test]
 fn border_box_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape =
-        terminal_render_callback(&border_box_frame(), eframe::wgpu::TextureFormat::Rgba8Unorm)
-            .expect("border box callback shape");
+    let shape = terminal_render_callback(
+        &border_box_frame(),
+        eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
+    )
+    .expect("border box callback shape");
 
     assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }
@@ -967,8 +981,12 @@ fn cursor_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
         .commands
         .retain(|command| matches!(command, TerminalRenderCommand::Cursor(_)));
 
-    let shape = terminal_render_callback(&frame, eframe::wgpu::TextureFormat::Rgba8Unorm)
-        .expect("cursor callback shape");
+    let shape = terminal_render_callback(
+        &frame,
+        eframe::wgpu::TextureFormat::Rgba8Unorm,
+        ViewTransform::IDENTITY,
+    )
+    .expect("cursor callback shape");
 
     assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }

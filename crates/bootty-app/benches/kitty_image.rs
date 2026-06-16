@@ -1,7 +1,7 @@
 use std::{hint::black_box, io::Cursor};
 
 use bootty_app::{
-    geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface},
+    geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface, ViewTransform},
     paint_plan::PaintPlanner,
     terminal::TerminalEngine,
     terminal_render::TerminalRenderFrame,
@@ -321,6 +321,7 @@ fn bench_kitty_wgpu_upload(c: &mut Criterion) {
                     &context.queue,
                     &frame,
                     1.0,
+                    ViewTransform::IDENTITY,
                 ));
             },
             BatchSize::SmallInput,

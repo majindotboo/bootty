@@ -29,7 +29,7 @@ use crate::{
     file_paths::format_file_paths_for_paste,
     geometry::{
         CellMetrics, SurfaceRect, TerminalGeometry, TerminalPadding, TerminalSurface,
-        geometry_for_pixels,
+        ViewTransform, geometry_for_pixels,
     },
     input_keymap::{
         key_mods_from_winit_modifiers, mouse_input_from_surface, mouse_input_from_surface_clamped,
@@ -807,6 +807,7 @@ impl BareTerminalGpu {
             &self.queue,
             frame,
             self.window.scale_factor() as f32,
+            ViewTransform::IDENTITY,
         );
         let mut encoder = self
             .device

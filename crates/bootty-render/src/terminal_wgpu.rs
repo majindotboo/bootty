@@ -1,5 +1,5 @@
 use crate::{
-    geometry::{CellMetrics, SurfaceRect},
+    geometry::{CellMetrics, SurfaceRect, ViewTransform},
     paint_plan::{DecorationStyle, PlanColor},
     terminal_image::KittyImagePlacement,
     terminal_render::{
@@ -185,6 +185,7 @@ pub fn terminal_decoration_draws(frame: &TerminalRenderFrame) -> Vec<TerminalBac
 pub fn terminal_render_callback(
     frame: &TerminalRenderFrame,
     target_format: wgpu::TextureFormat,
+    view: ViewTransform,
 ) -> Option<egui::Shape> {
     if !has_wgpu_draw_commands(&frame.commands) {
         return None;
@@ -197,6 +198,7 @@ pub fn terminal_render_callback(
                 target_format,
                 key: terminal_callback_key(frame.surface, target_format),
                 frame: frame.clone(),
+                view,
             },
         )
         .into(),
@@ -221,6 +223,7 @@ struct TerminalRenderCallback {
     target_format: wgpu::TextureFormat,
     key: TerminalCallbackKey,
     frame: TerminalRenderFrame,
+    view: ViewTransform,
 }
 
 impl egui_wgpu::CallbackTrait for TerminalRenderCallback {
@@ -250,6 +253,7 @@ impl egui_wgpu::CallbackTrait for TerminalRenderCallback {
                 queue,
                 &self.frame,
                 screen_descriptor.pixels_per_point,
+                self.view,
             );
         Vec::new()
     }
@@ -370,6 +374,7 @@ enum ActiveTerminalPipeline {
 struct PreparedTerminalFrameCache {
     frame: TerminalRenderFrame,
     pixels_per_point_bits: u32,
+    view_bits: [u32; 3],
     vertex_count: u32,
 }
 
@@ -382,6 +387,7 @@ pub struct TerminalWgpuRenderer {
     text_bind_group_layout: wgpu::BindGroupLayout,
     image_bind_group_layout: wgpu::BindGroupLayout,
     text_sampler: wgpu::Sampler,
+    text_sampler_linear: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
     text_builder: TextAtlasBuilder,
     text_texture: Option<TerminalTextAtlasTexture>,
@@ -395,6 +401,7 @@ pub struct TerminalWgpuRenderer {
     image_resources: Vec<Option<TerminalImageFrameResources>>,
     prepared_frame_cache: Option<PreparedTerminalFrameCache>,
     prepared_frame_cache_cooldown: u8,
+    text_zoomed: bool,
 }
 
 impl TerminalWgpuRenderer {
@@ -411,6 +418,14 @@ impl TerminalWgpuRenderer {
                 address_mode_v: wgpu::AddressMode::ClampToEdge,
                 mag_filter: wgpu::FilterMode::Nearest,
                 min_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            }),
+            text_sampler_linear: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("bootty_terminal_text_sampler_linear"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
             image_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -435,6 +450,7 @@ impl TerminalWgpuRenderer {
             image_resources: Vec::new(),
             prepared_frame_cache: None,
             prepared_frame_cache_cooldown: 0,
+            text_zoomed: false,
         }
     }
 
@@ -444,14 +460,27 @@ impl TerminalWgpuRenderer {
         queue: &wgpu::Queue,
         frame: &TerminalRenderFrame,
         pixels_per_point: f32,
+        view: ViewTransform,
     ) -> u32 {
-        let pixels_per_point_bits = pixels_per_point.to_bits();
+        // Set before the cache early-return so `paint` always picks the right sampler.
+        self.text_zoomed = view.is_zoomed();
+        let render_surface = view.applied_to(frame.surface);
+        let raster_ppp = pixels_per_point * view.raster_supersample();
+        let pixels_per_point_bits = raster_ppp.to_bits();
+        let view_bits = [
+            view.zoom.to_bits(),
+            view.pan_x.to_bits(),
+            view.pan_y.to_bits(),
+        ];
         let mut update_frame_cache = true;
         if self.prepared_frame_cache_cooldown > 0 {
             self.prepared_frame_cache_cooldown -= 1;
             update_frame_cache = self.prepared_frame_cache_cooldown == 0;
         } else if let Some(cache) = &self.prepared_frame_cache {
-            if cache.pixels_per_point_bits == pixels_per_point_bits && cache.frame == *frame {
+            if cache.pixels_per_point_bits == pixels_per_point_bits
+                && cache.view_bits == view_bits
+                && cache.frame == *frame
+            {
                 return cache.vertex_count;
             }
             self.prepared_frame_cache_cooldown = PREPARED_FRAME_CACHE_MISS_COOLDOWN;
@@ -482,13 +511,11 @@ impl TerminalWgpuRenderer {
                         &mut text_batch_count,
                         &mut self.text_builder,
                         text,
-                        pixels_per_point,
+                        raster_ppp,
                     );
                 }
                 TerminalRenderCommand::Sprite(sprite) => {
-                    let quad = self
-                        .text_builder
-                        .prepare_sprite_command(sprite, pixels_per_point);
+                    let quad = self.text_builder.prepare_sprite_command(sprite, raster_ppp);
                     push_text_quad(
                         &mut self.layers,
                         &mut text_batches,
@@ -502,7 +529,7 @@ impl TerminalWgpuRenderer {
                         &mut self.layers,
                         &mut background_batches,
                         &mut background_batch_count,
-                        frame.surface,
+                        render_surface,
                         TerminalQuadDraw {
                             rect: fill.rect,
                             color: fill.color,
@@ -514,7 +541,7 @@ impl TerminalWgpuRenderer {
                         &mut self.layers,
                         &mut background_batches,
                         &mut background_batch_count,
-                        frame.surface,
+                        render_surface,
                         line,
                     );
                 }
@@ -522,7 +549,7 @@ impl TerminalWgpuRenderer {
                     &mut self.layers,
                     &mut background_batches,
                     &mut background_batch_count,
-                    frame.surface,
+                    render_surface,
                     cursor,
                 ),
                 TerminalRenderCommand::Image(image) => {
@@ -530,7 +557,7 @@ impl TerminalWgpuRenderer {
                     let resources = prepare_image_resource(
                         device,
                         queue,
-                        frame.surface,
+                        render_surface,
                         image,
                         &self.image_bind_group_layout,
                         &self.image_sampler,
@@ -557,7 +584,7 @@ impl TerminalWgpuRenderer {
         let text_vertex_count = self.prepare_text_resources(
             device,
             queue,
-            frame.surface,
+            render_surface,
             text_batches[..text_batch_count].iter().map(Vec::as_slice),
             &text_batch_dirty[..text_batch_count],
         );
@@ -570,6 +597,7 @@ impl TerminalWgpuRenderer {
             self.prepared_frame_cache = Some(PreparedTerminalFrameCache {
                 frame: frame.clone(),
                 pixels_per_point_bits,
+                view_bits,
                 vertex_count,
             });
         }
@@ -611,7 +639,12 @@ impl TerminalWgpuRenderer {
                         render_pass.set_pipeline(&self.text_pipeline);
                         active_pipeline = Some(ActiveTerminalPipeline::Text);
                     }
-                    render_pass.set_bind_group(0, &texture.bind_group, &[]);
+                    let bind_group = if self.text_zoomed {
+                        &texture.bind_group_linear
+                    } else {
+                        &texture.bind_group
+                    };
+                    render_pass.set_bind_group(0, bind_group, &[]);
                     render_pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
                     render_pass.draw(0..layer.vertex_count, 0..1);
                 }
@@ -718,7 +751,7 @@ impl TerminalWgpuRenderer {
             self.text_texture = Some(TerminalTextAtlasTexture::new(
                 device,
                 &self.text_bind_group_layout,
-                &self.text_sampler,
+                (&self.text_sampler, &self.text_sampler_linear),
                 width,
                 height,
                 format,
@@ -766,6 +799,7 @@ struct TerminalTextAtlasTexture {
     texture: wgpu::Texture,
     _view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
+    bind_group_linear: wgpu::BindGroup,
     width: u32,
     height: u32,
     format: GlyphAtlasFormat,
@@ -777,12 +811,13 @@ impl TerminalTextAtlasTexture {
     fn new(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
+        samplers: (&wgpu::Sampler, &wgpu::Sampler),
         width: u32,
         height: u32,
         format: GlyphAtlasFormat,
         resized_count: u64,
     ) -> Self {
+        let (sampler, sampler_linear) = samplers;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("bootty_terminal_text_atlas"),
             size: wgpu::Extent3d {
@@ -798,25 +833,31 @@ impl TerminalTextAtlasTexture {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bootty_terminal_text_bind_group"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        });
+        let text_bind_group = |label, sampler| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            })
+        };
+        let bind_group = text_bind_group("bootty_terminal_text_bind_group", sampler);
+        let bind_group_linear =
+            text_bind_group("bootty_terminal_text_bind_group_linear", sampler_linear);
 
         Self {
             texture,
             _view: view,
             bind_group,
+            bind_group_linear,
             width,
             height,
             format,

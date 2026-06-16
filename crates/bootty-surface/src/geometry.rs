@@ -249,6 +249,94 @@ impl SurfaceRect {
     }
 }
 
+/// Render-level magnification for pinch-to-zoom; scales geometry without reflowing the grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewTransform {
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl ViewTransform {
+    pub const IDENTITY: Self = Self {
+        zoom: 1.0,
+        pan_x: 0.0,
+        pan_y: 0.0,
+    };
+    pub const MAX_ZOOM: f32 = 5.0;
+    pub const MAX_SUPERSAMPLE: f32 = 2.0;
+
+    pub fn is_zoomed(self) -> bool {
+        self.zoom > 1.0 + f32::EPSILON
+    }
+
+    // Quantized so the pixel-size-keyed glyph atlas re-rasterizes at most once per zoom direction;
+    // a smoothly-varying factor would mint a fresh glyph set every frame and overflow it.
+    pub fn raster_supersample(self) -> f32 {
+        self.zoom.ceil().clamp(1.0, Self::MAX_SUPERSAMPLE)
+    }
+
+    pub fn applied_to(self, surface: SurfaceRect) -> SurfaceRect {
+        if !self.is_zoomed() && self.pan_x == 0.0 && self.pan_y == 0.0 {
+            return surface;
+        }
+        let inv = 1.0 / self.zoom;
+        SurfaceRect::from_min_size(
+            (surface.min_x - self.pan_x) * inv,
+            (surface.min_y - self.pan_y) * inv,
+            surface.width() * inv,
+            surface.height() * inv,
+        )
+    }
+
+    pub fn pinched(self, factor: f32, focal: Pos2, surface: SurfaceRect) -> Self {
+        let new_zoom = (self.zoom * factor).clamp(1.0, Self::MAX_ZOOM);
+        if new_zoom == self.zoom {
+            return self;
+        }
+        let ratio = new_zoom / self.zoom;
+        Self {
+            zoom: new_zoom,
+            pan_x: focal.x - (focal.x - self.pan_x) * ratio,
+            pan_y: focal.y - (focal.y - self.pan_y) * ratio,
+        }
+        .clamped(surface)
+    }
+
+    pub fn panned(self, delta: Vec2, surface: SurfaceRect) -> Self {
+        Self {
+            zoom: self.zoom,
+            pan_x: self.pan_x + delta.x,
+            pan_y: self.pan_y + delta.y,
+        }
+        .clamped(surface)
+    }
+
+    pub fn inverse_point(self, point: Pos2) -> Pos2 {
+        Pos2::new(
+            (point.x - self.pan_x) / self.zoom,
+            (point.y - self.pan_y) / self.zoom,
+        )
+    }
+
+    fn clamped(self, surface: SurfaceRect) -> Self {
+        let span = 1.0 - self.zoom;
+        let (lo_x, hi_x) = (surface.max_x * span, surface.min_x * span);
+        let (lo_y, hi_y) = (surface.max_y * span, surface.min_y * span);
+        Self {
+            zoom: self.zoom,
+            pan_x: self.pan_x.clamp(lo_x.min(hi_x), lo_x.max(hi_x)),
+            pan_y: self.pan_y.clamp(lo_y.min(hi_y), lo_y.max(hi_y)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MouseSurfaceMetrics {
     pub screen_width: u32,
@@ -707,5 +795,87 @@ mod tests {
             prop_assert_eq!(geometry.cell_width, cell_width);
             prop_assert_eq!(geometry.cell_height, cell_height);
         }
+    }
+
+    #[test]
+    fn view_transform_identity_leaves_surface_untouched() {
+        let surface = SurfaceRect::from_min_size(10.0, 20.0, 800.0, 600.0);
+        assert_eq!(ViewTransform::IDENTITY.applied_to(surface), surface);
+    }
+
+    #[test]
+    fn view_transform_at_2x_halves_the_projection_rect() {
+        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
+        let adjusted = ViewTransform {
+            zoom: 2.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+        .applied_to(surface);
+        assert_eq!(adjusted.width(), 400.0);
+        assert_eq!(adjusted.height(), 300.0);
+    }
+
+    #[test]
+    fn pinch_keeps_the_surface_point_under_the_cursor_anchored() {
+        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
+        let focal = Pos2::new(200.0, 150.0);
+        let before = ViewTransform::IDENTITY;
+        let under_cursor = before.inverse_point(focal);
+        let after = before.pinched(2.0, focal, surface);
+        let redisplayed = Pos2::new(
+            under_cursor.x * after.zoom + after.pan_x,
+            under_cursor.y * after.zoom + after.pan_y,
+        );
+        assert!((redisplayed.x - focal.x).abs() < 1e-3);
+        assert!((redisplayed.y - focal.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pinch_clamps_zoom_to_the_maximum() {
+        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
+        let view = ViewTransform::IDENTITY.pinched(100.0, Pos2::new(400.0, 300.0), surface);
+        assert_eq!(view.zoom, ViewTransform::MAX_ZOOM);
+    }
+
+    #[test]
+    fn pan_clamps_so_magnified_content_keeps_covering_the_viewport() {
+        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
+        let zoomed = ViewTransform {
+            zoom: 2.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        };
+        let forward = zoomed.panned(Vec2::new(10_000.0, 10_000.0), surface);
+        assert_eq!((forward.pan_x, forward.pan_y), (0.0, 0.0));
+        let backward = zoomed.panned(Vec2::new(-10_000.0, -10_000.0), surface);
+        assert_eq!((backward.pan_x, backward.pan_y), (-800.0, -600.0));
+    }
+
+    #[test]
+    fn raster_supersample_is_quantized_and_capped() {
+        assert_eq!(ViewTransform::IDENTITY.raster_supersample(), 1.0);
+        let slight = ViewTransform {
+            zoom: 1.2,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        };
+        assert_eq!(slight.raster_supersample(), 2.0);
+        let extreme = ViewTransform {
+            zoom: 5.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        };
+        assert_eq!(extreme.raster_supersample(), ViewTransform::MAX_SUPERSAMPLE);
+    }
+
+    #[test]
+    fn pinching_back_to_1x_recenters_the_view() {
+        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
+        let zoomed = ViewTransform::IDENTITY.pinched(3.0, Pos2::new(600.0, 400.0), surface);
+        assert!(zoomed.is_zoomed());
+        let reset = zoomed.pinched(0.01, Pos2::new(600.0, 400.0), surface);
+        assert_eq!(reset.zoom, 1.0);
+        assert_eq!((reset.pan_x, reset.pan_y), (0.0, 0.0));
     }
 }
