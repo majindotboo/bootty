@@ -33,6 +33,8 @@ pub struct TerminalWidget {
     target_format: Option<wgpu::TextureFormat>,
     render_cache: TerminalRenderCache,
     terminal_cursor_icon: egui::CursorIcon,
+    transition_key: Option<String>,
+    transition_pending: bool,
 }
 
 pub use bootty_runtime::render_source::TerminalRenderSource;
@@ -58,6 +60,14 @@ impl TerminalWidget {
 
     pub fn set_terminal_cursor_icon(&mut self, icon: egui::CursorIcon) {
         self.terminal_cursor_icon = icon;
+    }
+
+    pub fn set_transition_key(&mut self, key: Option<String>) {
+        if self.transition_key == key {
+            return;
+        }
+        self.transition_key = key;
+        self.transition_pending = true;
     }
 
     pub fn initial_geometry() -> crate::geometry::TerminalGeometry {
@@ -143,12 +153,19 @@ impl TerminalWidget {
             self.target_format.is_some(),
             "terminal renderer requires an eframe WGPU target format"
         );
+        let transition_ready = !is_transition_placeholder_frame(frame);
+        let frame = self
+            .render_cache
+            .frame_for_paint(frame, self.transition_pending);
+        if transition_ready {
+            self.transition_pending = false;
+        }
         let cursor_blinking = frame.cursor.is_some_and(|cursor| cursor.blinking);
         let cursor_blink_phase = self.cursor_blink.phase(Instant::now(), frame.cursor);
-        if !self.render_cache.matches(surface, frame) {
+        if !self.render_cache.matches(surface, &frame) {
             let plan = self.planner.plan_with_cursor_blink_phase(
                 surface,
-                frame,
+                &frame,
                 self.text_config.font_size,
                 CursorBlinkPhase::visible(),
             );
@@ -158,7 +175,7 @@ impl TerminalWidget {
             let render_frame =
                 TerminalRenderFrame::from_plan_and_images(plan, &text_contract, &frame.images);
             self.render_cache
-                .store(surface, frame, render_frame, text_runs);
+                .store(surface, &frame, render_frame, text_runs);
         }
         self.render_cache.apply_cursor_phase(cursor_blink_phase);
         paint_terminal_content(ui, self.render_cache.render_frame(), self.target_format);
@@ -324,6 +341,24 @@ impl TerminalRenderCache {
                 .is_some_and(|cached| Arc::ptr_eq(cached, frame))
     }
 
+    fn frame_for_paint(
+        &self,
+        incoming: &Arc<RenderFrame>,
+        hold_transition_placeholder: bool,
+    ) -> Arc<RenderFrame> {
+        if is_uninitialized_frame(incoming)
+            || (hold_transition_placeholder && is_transition_placeholder_frame(incoming))
+        {
+            self.frame
+                .as_ref()
+                .filter(|cached| !is_transition_placeholder_frame(cached))
+                .map(Arc::clone)
+                .unwrap_or_else(|| Arc::clone(incoming))
+        } else {
+            Arc::clone(incoming)
+        }
+    }
+
     fn store(
         &mut self,
         surface: TerminalSurface,
@@ -374,6 +409,19 @@ impl TerminalRenderCache {
     fn text_runs(&self) -> usize {
         self.text_runs
     }
+}
+
+fn is_uninitialized_frame(frame: &RenderFrame) -> bool {
+    frame.cols == 0 || frame.rows == 0
+}
+
+fn is_transition_placeholder_frame(frame: &RenderFrame) -> bool {
+    is_uninitialized_frame(frame)
+        || (frame.cells.is_empty()
+            && frame.text.is_empty()
+            && frame.images.placements.is_empty()
+            && frame.images.virtual_placements.is_empty()
+            && frame.images.virtual_placeholder_rows.is_empty())
 }
 
 fn cursor_tail_command_with_alpha(
@@ -903,6 +951,87 @@ mod tests {
                 TerminalRenderCommand::Cursor(cursor)
             ] if cursor.color.a == 128
         ));
+    }
+
+    #[test]
+    fn render_cache_holds_previous_visible_frame_for_transition_placeholders() {
+        let surface = TerminalSurface::for_size(
+            Vec2::new(80.0, 40.0),
+            CellMetrics::new(10.0, 20.0),
+            TerminalPadding::default(),
+        );
+        let visible_frame = |ch| {
+            Arc::new(RenderFrame {
+                cols: 8,
+                rows: 2,
+                cells: vec![RenderCell {
+                    x: 0,
+                    y: 0,
+                    text_start: 0,
+                    text_len: 1,
+                    fg: None,
+                    bg: None,
+                    style: CellStyle::default(),
+                    hyperlink: None,
+                }],
+                text: vec![ch],
+                ..Default::default()
+            })
+        };
+        let previous = visible_frame('x');
+        let next_uninitialized = Arc::new(RenderFrame::default());
+        let next_empty_initialized = Arc::new(RenderFrame {
+            cols: 8,
+            rows: 2,
+            cursor: Some(cursor_at(0, 1, false)),
+            ..Default::default()
+        });
+        let next_ready = visible_frame('y');
+        let rect = SurfaceRect::from_min_size(0.0, 0.0, 10.0, 20.0);
+        let mut cache = TerminalRenderCache::default();
+
+        let frame = cache.frame_for_paint(&next_uninitialized, true);
+        assert!(Arc::ptr_eq(&frame, &next_uninitialized));
+
+        cache.store(
+            surface,
+            &next_uninitialized,
+            TerminalRenderFrame {
+                surface: rect,
+                commands: Vec::new(),
+            },
+            0,
+        );
+        let frame = cache.frame_for_paint(&next_uninitialized, true);
+        assert!(Arc::ptr_eq(&frame, &next_uninitialized));
+
+        cache.store(
+            surface,
+            &previous,
+            TerminalRenderFrame {
+                surface: rect,
+                commands: vec![TerminalRenderCommand::FillRect(FillCommand {
+                    rect,
+                    color: PlanColor {
+                        r: 1,
+                        g: 2,
+                        b: 3,
+                        a: 255,
+                    },
+                    role: FillRole::SurfaceBackground,
+                })],
+            },
+            1,
+        );
+
+        let frame = cache.frame_for_paint(&next_uninitialized, true);
+        assert!(Arc::ptr_eq(&frame, &previous));
+        let frame = cache.frame_for_paint(&next_empty_initialized, true);
+        assert!(Arc::ptr_eq(&frame, &previous));
+        let frame = cache.frame_for_paint(&next_empty_initialized, false);
+        assert!(Arc::ptr_eq(&frame, &next_empty_initialized));
+        let frame = cache.frame_for_paint(&next_ready, true);
+        assert!(Arc::ptr_eq(&frame, &next_ready));
     }
 
     #[test]

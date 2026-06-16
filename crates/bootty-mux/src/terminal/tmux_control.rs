@@ -35,6 +35,7 @@ use super::{
 
 const TMUX_CONTROL_READY_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const TMUX_CONTROL_BACKLOG_FRAME_INTERVAL: Duration = Duration::from_millis(64);
+const TMUX_CONTROL_SETTLED_FRAME_DELAY: Duration = Duration::from_millis(16);
 const TMUX_CONTROL_SYNC_OUTPUT_MAX_SUPPRESS: Duration = Duration::from_secs(1);
 
 pub(super) struct TmuxControlTerminal {
@@ -322,6 +323,7 @@ impl TmuxControlWorker {
     fn run(&mut self) {
         let mut unpublished_frame = true;
         let mut last_publish = Instant::now() - TMUX_CONTROL_READY_FRAME_INTERVAL;
+        let mut last_terminal_change = Instant::now();
         loop {
             let (command_work, commands_disconnected) = self.process_commands();
             if commands_disconnected {
@@ -331,11 +333,17 @@ impl TmuxControlWorker {
             if drain.bytes > 0 {
                 self.publish_drain(drain);
                 unpublished_frame = true;
+                last_terminal_change = Instant::now();
             }
             if command_work {
                 unpublished_frame = true;
+                last_terminal_change = Instant::now();
             }
-            if self.should_publish_frame(unpublished_frame, last_publish.elapsed()) {
+            if self.should_publish_frame(
+                unpublished_frame,
+                last_terminal_change.elapsed(),
+                last_publish.elapsed(),
+            ) {
                 if let Ok(frame) = self.engine.extract_frame()
                     && self.latest_frame.publish(frame).is_ok()
                 {
@@ -353,12 +361,14 @@ impl TmuxControlWorker {
     fn should_publish_frame(
         &mut self,
         unpublished_frame: bool,
+        elapsed_since_last_terminal_change: Duration,
         elapsed_since_last_publish: Duration,
     ) -> bool {
         should_publish_tmux_control_frame(
             unpublished_frame,
             self.sync_output_suppressed(),
             self.pending_output_len.load(Ordering::Relaxed),
+            elapsed_since_last_terminal_change,
             elapsed_since_last_publish,
         )
     }
@@ -530,6 +540,7 @@ fn should_publish_tmux_control_frame(
     unpublished_frame: bool,
     sync_output_suppressed: bool,
     pending_output_bytes: usize,
+    elapsed_since_last_terminal_change: Duration,
     elapsed_since_last_publish: Duration,
 ) -> bool {
     if !unpublished_frame || sync_output_suppressed {
@@ -538,7 +549,7 @@ fn should_publish_tmux_control_frame(
     if pending_output_bytes > 0 {
         return elapsed_since_last_publish >= TMUX_CONTROL_BACKLOG_FRAME_INTERVAL;
     }
-    elapsed_since_last_publish >= TMUX_CONTROL_READY_FRAME_INTERVAL
+    elapsed_since_last_terminal_change >= TMUX_CONTROL_SETTLED_FRAME_DELAY
 }
 
 fn native_control_program(backend: MuxBackendKind) -> Result<&'static str> {
@@ -638,6 +649,7 @@ mod tests {
             true,
             true,
             0,
+            TMUX_CONTROL_SETTLED_FRAME_DELAY,
             TMUX_CONTROL_BACKLOG_FRAME_INTERVAL,
         ));
     }
@@ -648,23 +660,33 @@ mod tests {
             true,
             false,
             4096,
+            Duration::ZERO,
             TMUX_CONTROL_READY_FRAME_INTERVAL,
         ));
         assert!(should_publish_tmux_control_frame(
             true,
             false,
             4096,
+            Duration::ZERO,
             TMUX_CONTROL_BACKLOG_FRAME_INTERVAL,
         ));
     }
 
     #[test]
-    fn tmux_control_publish_policy_keeps_ready_cadence_without_backlog() {
+    fn tmux_control_publish_policy_waits_for_quiet_settle_without_backlog() {
+        assert!(!should_publish_tmux_control_frame(
+            true,
+            false,
+            0,
+            Duration::ZERO,
+            TMUX_CONTROL_READY_FRAME_INTERVAL,
+        ));
         assert!(should_publish_tmux_control_frame(
             true,
             false,
             0,
             TMUX_CONTROL_READY_FRAME_INTERVAL,
+            Duration::ZERO,
         ));
     }
 }

@@ -1022,11 +1022,6 @@ pub fn should_publish_frame_after_work(
     if pending_pty_bytes > 0 {
         return elapsed_since_last_publish >= WORKER_BACKLOG_FRAME_INTERVAL;
     }
-    // Sustained output that fits in the current worker slice still needs a
-    // display-rate cadence instead of waiting for the quiet-settle path.
-    if elapsed_since_last_publish >= WORKER_READY_FRAME_INTERVAL {
-        return true;
-    }
     elapsed_since_last_terminal_change >= WORKER_SETTLED_FRAME_DELAY
 }
 
@@ -1461,6 +1456,18 @@ mod tests {
     }
 
     #[test]
+    fn non_input_output_waits_for_quiet_settle_even_when_display_interval_elapsed() {
+        assert!(!should_publish_frame_after_work(
+            true,
+            false,
+            false,
+            0,
+            Duration::ZERO,
+            WORKER_READY_FRAME_INTERVAL,
+        ));
+    }
+
+    #[test]
     fn cursor_home_flood_compactor_suppresses_repeated_complete_sequences() {
         let mut compactor = CursorHomeFloodCompactor::default();
 
@@ -1776,9 +1783,9 @@ mod tests {
                 && !sync_suppressed
                 && !force
                 && pending_pty_bytes == 0
-                && elapsed_publish >= WORKER_READY_FRAME_INTERVAL
+                && elapsed_change < WORKER_SETTLED_FRAME_DELAY
             {
-                prop_assert!(should_publish);
+                prop_assert!(!should_publish);
             }
             if unpublished
                 && !force

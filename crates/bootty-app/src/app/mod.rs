@@ -274,6 +274,13 @@ impl BoottyApp {
                 },
             );
         }
+        let terminal_backend = selected_backend(&self.state.config().multiplexer);
+        let terminal_transition_key = self.state.mux().selected_session_anchor().map(|anchor| {
+            let pane_id = anchor.pane_id.as_deref().unwrap_or_default();
+            format!("{terminal_backend:?}:{}:{pane_id}", anchor.session_id)
+        });
+        self.terminal_widget
+            .set_transition_key(terminal_transition_key);
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(terminal_rect)
