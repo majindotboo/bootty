@@ -96,6 +96,22 @@ pub struct TerminalSession {
     tty_name: Option<String>,
 }
 
+impl Drop for TerminalSession {
+    // portable-pty does not kill the child on drop, and the master fd stays open
+    // through the writer shared with the worker thread, so dropping a session never
+    // delivers SIGHUP to the child. For the tmux/zellij backends the child is an
+    // `attach-session` client; leaking it leaves a phantom client attached to the
+    // session at its last size, and under tmux's `window-size smallest` the
+    // smallest stale client pins the window so the live terminal can no longer grow
+    // it. Switching sessions drops a fresh session every time, so these accumulate.
+    // Kill the child on drop to detach the client (the tmux session itself
+    // survives) and to reap the native shell when a terminal is closed.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 type SpawnedPty = (
     Box<dyn MasterPty + Send>,
     Arc<Mutex<Box<dyn Write + Send>>>,
@@ -1811,5 +1827,41 @@ mod tests {
                 prop_assert!(should_publish);
             }
         }
+    }
+
+    // A shell on a fresh PTY blocks waiting for input, so it stays alive until the
+    // session is dropped. The drop must kill it: for the tmux/zellij backends the
+    // child is an `attach-session` client, and a leaked client pins the window
+    // under `window-size smallest` so later resizes are silently ignored.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_session_kills_pty_child() {
+        let session = TerminalSession::new(TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        })
+        .expect("spawn terminal session");
+        let pid = session.child.process_id().expect("pty child pid");
+        assert!(
+            process_alive(pid),
+            "child should run before the session is dropped"
+        );
+
+        drop(session);
+
+        assert!(
+            !process_alive(pid),
+            "dropping the session must kill its PTY child to avoid leaking a mux client"
+        );
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
