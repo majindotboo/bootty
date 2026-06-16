@@ -78,6 +78,67 @@ jobs:
       - name: Run paint plan benchmark smoke
         run: mise run bench:smoke
 
+  github-pages:
+    name: GitHub Pages
+    needs: rust-validation
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/bootty-tauri/package-lock.json
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: github-pages
+
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Install website dependencies
+        working-directory: crates/bootty-tauri
+        run: npm ci
+
+      - name: Build website WASM package
+        working-directory: crates/bootty-tauri
+        run: npm run build:site-wasm
+
+      - name: Build GitHub Pages site
+        working-directory: crates/bootty-tauri
+        run: npm run build:pages
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: crates/bootty-tauri/pages-dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
   native-app-bundles:
     name: Native app bundle (${{ matrix.name }})
     needs: rust-validation
