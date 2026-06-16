@@ -279,6 +279,35 @@ fn glyph_atlas_lazy_insert_skips_pixel_generation_for_cached_glyphs() {
 }
 
 #[test]
+fn glyph_atlas_grows_to_fit_instead_of_dropping_glyphs() {
+    // Far more glyphs than a 64x64 atlas holds. Each must get a real slot by growing the atlas;
+    // the 1x1 fallback would render as missing characters or black boxes (the regression hit when
+    // supersampled zoom glyphs overflowed the fixed atlas).
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let face = GlyphAtlasFaceKey::new(regular_face("Maple Mono", &[]));
+    for i in 0..40 {
+        let key = GlyphAtlasKey {
+            face: face.clone(),
+            text: GlyphAtlasTextKey::new(format!("g{i}")),
+            font_size_bits: 16.0_f32.to_bits(),
+            pixels_per_point_bits: 2.0_f32.to_bits(),
+            width: 16,
+            height: 24,
+        };
+        let entry = atlas.insert_or_get_with(key, 16, 24, || vec![255; 16 * 24]);
+        assert_eq!(
+            (entry.width, entry.height),
+            (16, 24),
+            "glyph {i} was dropped to the 1x1 fallback instead of growing the atlas"
+        );
+    }
+    assert!(
+        atlas.resized_count() > 0,
+        "atlas should have grown to fit the glyphs"
+    );
+}
+
+#[test]
 fn prepared_text_frame_cache_refreshes_uvs_after_atlas_resize() {
     let mut builder = TextAtlasBuilder::new(64, 64);
     let command = text_command("A");

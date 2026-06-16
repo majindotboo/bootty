@@ -375,6 +375,8 @@ struct PreparedTerminalFrameCache {
     frame: TerminalRenderFrame,
     pixels_per_point_bits: u32,
     view_bits: [u32; 3],
+    // Atlas growth shifts every glyph's UVs, so a stale count must invalidate the cached vertices.
+    atlas_resized_count: u64,
     vertex_count: u32,
 }
 
@@ -465,6 +467,7 @@ impl TerminalWgpuRenderer {
         // Set before the cache early-return so `paint` always picks the right sampler.
         self.text_zoomed = view.is_zoomed();
         let render_surface = view.applied_to(frame.surface);
+        // Glyphs rasterize at a quantized supersample of the base scale so zoomed text stays sharp.
         let raster_ppp = pixels_per_point * view.raster_supersample();
         let pixels_per_point_bits = raster_ppp.to_bits();
         let view_bits = [
@@ -472,6 +475,7 @@ impl TerminalWgpuRenderer {
             view.pan_x.to_bits(),
             view.pan_y.to_bits(),
         ];
+        let atlas_resized_count = self.text_builder.atlas_resized_count();
         let mut update_frame_cache = true;
         if self.prepared_frame_cache_cooldown > 0 {
             self.prepared_frame_cache_cooldown -= 1;
@@ -479,6 +483,7 @@ impl TerminalWgpuRenderer {
         } else if let Some(cache) = &self.prepared_frame_cache {
             if cache.pixels_per_point_bits == pixels_per_point_bits
                 && cache.view_bits == view_bits
+                && cache.atlas_resized_count == atlas_resized_count
                 && cache.frame == *frame
             {
                 return cache.vertex_count;
@@ -593,11 +598,15 @@ impl TerminalWgpuRenderer {
         self.text_batch_dirty_scratch = text_batch_dirty;
 
         let vertex_count = image_vertex_count + background_vertex_count + text_vertex_count;
-        if update_frame_cache {
+        // If the atlas grew mid-build, glyphs reserved before the grow carry pre-grow UVs; skip
+        // caching so the next frame rebuilds them all against the final atlas size.
+        let grew_during_build = self.text_builder.atlas_resized_count() != atlas_resized_count;
+        if update_frame_cache && !grew_during_build {
             self.prepared_frame_cache = Some(PreparedTerminalFrameCache {
                 frame: frame.clone(),
                 pixels_per_point_bits,
                 view_bits,
+                atlas_resized_count,
                 vertex_count,
             });
         }

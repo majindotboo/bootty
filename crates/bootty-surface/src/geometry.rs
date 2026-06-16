@@ -270,14 +270,14 @@ impl ViewTransform {
         pan_y: 0.0,
     };
     pub const MAX_ZOOM: f32 = 5.0;
-    pub const MAX_SUPERSAMPLE: f32 = 2.0;
+    pub const MAX_SUPERSAMPLE: f32 = 3.0;
 
     pub fn is_zoomed(self) -> bool {
         self.zoom > 1.0 + f32::EPSILON
     }
 
-    // Quantized so the pixel-size-keyed glyph atlas re-rasterizes at most once per zoom direction;
-    // a smoothly-varying factor would mint a fresh glyph set every frame and overflow it.
+    // Quantized to whole steps so the glyph atlas re-rasterizes only at integer zoom crossings,
+    // not every frame of a pinch.
     pub fn raster_supersample(self) -> f32 {
         self.zoom.ceil().clamp(1.0, Self::MAX_SUPERSAMPLE)
     }
@@ -855,12 +855,12 @@ mod tests {
     #[test]
     fn raster_supersample_is_quantized_and_capped() {
         assert_eq!(ViewTransform::IDENTITY.raster_supersample(), 1.0);
-        let slight = ViewTransform {
+        let zoomed = ViewTransform {
             zoom: 1.2,
             pan_x: 0.0,
             pan_y: 0.0,
         };
-        assert_eq!(slight.raster_supersample(), 2.0);
+        assert_eq!(zoomed.raster_supersample(), 2.0);
         let extreme = ViewTransform {
             zoom: 5.0,
             pan_x: 0.0,

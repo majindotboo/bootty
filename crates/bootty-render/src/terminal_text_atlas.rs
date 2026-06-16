@@ -316,6 +316,9 @@ pub struct GlyphAtlas {
     resized: u64,
 }
 
+// Upper bound on atlas growth, well under every backend's max texture dimension.
+const MAX_ATLAS_DIM: u32 = 4096;
+
 impl GlyphAtlas {
     pub fn new(width: u32, height: u32) -> Self {
         Self::with_format(width, height, GlyphAtlasFormat::Alpha)
@@ -387,7 +390,13 @@ impl GlyphAtlas {
 
         let width = width.max(1);
         let height = height.max(1);
-        let mut entry = self.reserve(width, height).unwrap_or(GlyphAtlasEntry {
+        // Grow rather than drop: the atlas never evicts, so a glyph that no longer fits (common once
+        // zoomed glyphs are supersampled) would otherwise be lost to the 1x1 fallback below.
+        let mut reserved = self.reserve(width, height);
+        while reserved.is_none() && self.grow_for_glyph(width, height) {
+            reserved = self.reserve(width, height);
+        }
+        let mut entry = reserved.unwrap_or(GlyphAtlasEntry {
             x: 0,
             y: 0,
             width: 1,
@@ -413,6 +422,29 @@ impl GlyphAtlas {
         self.entries.get(key).map(|record| record.entry)
     }
 
+    // Enlarge the atlas to make room for a glyph that did not fit. Returns false at the size cap.
+    fn grow_for_glyph(&mut self, width: u32, height: u32) -> bool {
+        let target_width = if width + 2 > self.width {
+            (width + 2).max(self.width)
+        } else {
+            self.width
+        }
+        .min(MAX_ATLAS_DIM);
+        // A glyph that fits dimensionally but still failed to reserve means the shelves are full,
+        // so add height; otherwise grow to fit the oversized glyph itself.
+        let target_height = if height + 2 > self.height {
+            (height + 2).max(self.height)
+        } else {
+            self.height.saturating_mul(2)
+        }
+        .min(MAX_ATLAS_DIM);
+        if target_width == self.width && target_height == self.height {
+            return false;
+        }
+        self.grow(target_width, target_height);
+        true
+    }
+
     pub fn reserve(&mut self, width: u32, height: u32) -> Option<GlyphAtlasEntry> {
         let width = width.max(1);
         let height = height.max(1);
@@ -424,16 +456,10 @@ impl GlyphAtlas {
             return Some(entry);
         }
 
-        // Step by glyph size, not per pixel: a per-pixel scan is O(width * height * allocations) and
-        // stalls the frame when oversized (zoomed) glyphs overflow the shelves.
         let usable_right = self.width - 1;
         let usable_bottom = self.height - 1;
-        let step_x = width.max(1);
-        let step_y = height.max(1);
-        let mut y = 1;
-        while y <= usable_bottom.saturating_sub(height) {
-            let mut x = 1;
-            while x <= usable_right.saturating_sub(width) {
+        for y in 1..=usable_bottom.saturating_sub(height) {
+            for x in 1..=usable_right.saturating_sub(width) {
                 let entry = GlyphAtlasEntry {
                     x,
                     y,
@@ -448,9 +474,7 @@ impl GlyphAtlas {
                     self.allocations.push(entry);
                     return Some(entry);
                 }
-                x += step_x;
             }
-            y += step_y;
         }
         None
     }
