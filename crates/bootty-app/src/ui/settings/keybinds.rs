@@ -3,7 +3,8 @@ use eframe::egui;
 use super::SettingsWindow;
 use crate::config::load_or_create_config_document;
 
-/// Which keybind list is being edited: the global list or one of the per-backend lists.
+/// Which keybind list is being edited: the global list, one of the per-backend lists, or the
+/// sidebar navigation list (which has its own action vocabulary).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeybindScope {
     Global,
@@ -11,15 +12,17 @@ pub(super) enum KeybindScope {
     Rmux,
     Tmux,
     Zellij,
+    Sidebar,
 }
 
 impl KeybindScope {
-    const ALL: [(KeybindScope, &'static str); 5] = [
+    const ALL: [(KeybindScope, &'static str); 6] = [
         (Self::Global, "Global"),
         (Self::Native, "Native"),
         (Self::Rmux, "Rmux"),
         (Self::Tmux, "Tmux"),
         (Self::Zellij, "Zellij"),
+        (Self::Sidebar, "Sidebar"),
     ];
 
     fn path(self) -> &'static [&'static str] {
@@ -29,6 +32,28 @@ impl KeybindScope {
             Self::Rmux => &["input", "backend-keybind", "rmux"],
             Self::Tmux => &["input", "backend-keybind", "tmux"],
             Self::Zellij => &["input", "backend-keybind", "zellij"],
+            Self::Sidebar => &["input", "sidebar-keybind"],
+        }
+    }
+
+    /// Action vocabulary offered for this list. The sidebar list maps to a small, distinct set.
+    fn actions(self) -> &'static [&'static str] {
+        match self {
+            Self::Sidebar => SIDEBAR_ACTIONS,
+            _ => ACTIONS,
+        }
+    }
+
+    /// Whether `entry` (`trigger=action`) is a valid binding for this list. The sidebar list uses
+    /// its own trigger/action grammar rather than the app-level binding parser.
+    fn entry_is_valid(self, trigger: &str, action: &str) -> bool {
+        if self == Self::Sidebar {
+            trigger
+                .parse::<crate::input_binding::BindingTrigger>()
+                .is_ok()
+                && SIDEBAR_ACTIONS.contains(&action)
+        } else {
+            crate::input_binding::parse_binding_elements(&format!("{trigger}={action}")).is_ok()
         }
     }
 }
@@ -99,8 +124,36 @@ const ACTIONS: &[&str] = &[
     "text",
 ];
 
+/// Actions accepted in the sidebar navigation list (see `sidebar_action` in `app_actions`).
+const SIDEBAR_ACTIONS: &[&str] = &[
+    "ignore",
+    "previous_session",
+    "next_session",
+    "activate_session",
+    "focus_terminal",
+];
+
+/// Modifier tokens accepted by the modifier-remap parser, both unsided and per-side.
+const MODIFIER_TOKENS: &[&str] = &[
+    "ctrl",
+    "alt",
+    "shift",
+    "super",
+    "left_ctrl",
+    "left_alt",
+    "left_shift",
+    "left_super",
+    "right_ctrl",
+    "right_alt",
+    "right_shift",
+    "right_super",
+];
+
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
+
+    modifiers_section(win, ui);
+
     super::section(ui, palette, "KEYBINDINGS");
     ui.label(
         egui::RichText::new(
@@ -206,17 +259,18 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             } else {
                 base.clone()
             };
-            let current_index = ACTIONS.iter().position(|name| *name == base);
+            let actions = scope.actions();
+            let current_index = actions.iter().position(|name| *name == base);
             if let Some(choice) = super::searchable_combo(
                 ui,
                 palette,
                 &format!("kb_action_{index}"),
                 &base_label,
                 150.0,
-                ACTIONS,
+                actions,
                 current_index,
             ) {
-                let chosen = ACTIONS[choice];
+                let chosen = actions[choice];
                 row.action = if params.trim().is_empty() {
                     chosen.to_owned()
                 } else {
@@ -245,9 +299,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             let action = row.action.trim();
             if trigger.is_empty() || action.is_empty() {
                 ui.colored_label(palette.muted, "incomplete");
-            } else if crate::input_binding::parse_binding_elements(&format!("{trigger}={action}"))
-                .is_ok()
-            {
+            } else if scope.entry_is_valid(trigger, action) {
                 ui.colored_label(palette.success, "✓");
             } else {
                 ui.colored_label(palette.destructive, "invalid");
@@ -315,6 +367,153 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             );
         }
     });
+}
+
+/// Modifier-level input settings that sit above the keybind lists: the macOS Option-as-Alt mode
+/// and the modifier-remap table.
+fn modifiers_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+    let palette = win.palette;
+    super::section(ui, palette, "MODIFIERS");
+
+    egui::Grid::new("settings_modifiers_grid")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Option as Alt (macOS)");
+            let tokens = ["none", "left", "right", "both"];
+            let current = match win.config.input.macos_option_as_alt {
+                crate::config::MacosOptionAsAltConfig::None => 0,
+                crate::config::MacosOptionAsAltConfig::Left => 1,
+                crate::config::MacosOptionAsAltConfig::Right => 2,
+                crate::config::MacosOptionAsAltConfig::Both => 3,
+            };
+            if let Some(index) = super::searchable_combo(
+                ui,
+                palette,
+                "opt_as_alt",
+                tokens[current],
+                160.0,
+                &tokens,
+                Some(current),
+            ) {
+                win.config.input.macos_option_as_alt = match index {
+                    0 => crate::config::MacosOptionAsAltConfig::None,
+                    1 => crate::config::MacosOptionAsAltConfig::Left,
+                    2 => crate::config::MacosOptionAsAltConfig::Right,
+                    _ => crate::config::MacosOptionAsAltConfig::Both,
+                };
+                win.set_str(&["input", "macos-option-as-alt"], tokens[index]);
+            }
+            ui.end_row();
+        });
+
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Rewrite one physical modifier to another (e.g. left_alt → ctrl).")
+            .color(palette.muted)
+            .size(12.0),
+    );
+    ui.add_space(6.0);
+
+    if win.modifier_rows.is_none() {
+        let rows = win
+            .config
+            .input
+            .modifier_remap
+            .iter()
+            .map(|entry| match entry.split_once('=') {
+                Some((from, to)) => (from.trim().to_owned(), to.trim().to_owned()),
+                None => (entry.clone(), String::new()),
+            })
+            .collect();
+        win.modifier_rows = Some(rows);
+    }
+    let mut rows = win.modifier_rows.take().unwrap_or_default();
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    for (index, (from, to)) in rows.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let from_index = MODIFIER_TOKENS
+                .iter()
+                .position(|&token| token == from.as_str());
+            let from_label = if from.is_empty() {
+                "from"
+            } else {
+                from.as_str()
+            };
+            if let Some(choice) = super::searchable_combo(
+                ui,
+                palette,
+                &format!("mod_remap_from_{index}"),
+                from_label,
+                150.0,
+                MODIFIER_TOKENS,
+                from_index,
+            ) {
+                *from = MODIFIER_TOKENS[choice].to_owned();
+                changed = true;
+            }
+            ui.label("→");
+            let to_index = MODIFIER_TOKENS
+                .iter()
+                .position(|&token| token == to.as_str());
+            let to_label = if to.is_empty() { "to" } else { to.as_str() };
+            if let Some(choice) = super::searchable_combo(
+                ui,
+                palette,
+                &format!("mod_remap_to_{index}"),
+                to_label,
+                150.0,
+                MODIFIER_TOKENS,
+                to_index,
+            ) {
+                *to = MODIFIER_TOKENS[choice].to_owned();
+                changed = true;
+            }
+            if from.is_empty() || to.is_empty() {
+                ui.colored_label(palette.muted, "incomplete");
+            } else if remap_is_valid(from, to) {
+                ui.colored_label(palette.success, "✓");
+            } else {
+                ui.colored_label(palette.destructive, "invalid");
+            }
+            if ui.small_button("✕").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        rows.remove(index);
+        changed = true;
+    }
+    ui.add_space(4.0);
+    if ui.button("+ Add remap").clicked() {
+        rows.push((String::new(), String::new()));
+        changed = true;
+    }
+    if changed {
+        // Skip incomplete or invalid rows so a half-edited remap never breaks the reload.
+        let entries: Vec<String> = rows
+            .iter()
+            .filter(|(from, to)| remap_is_valid(from, to))
+            .map(|(from, to)| format!("{from}={to}"))
+            .collect();
+        win.config.input.modifier_remap = entries.clone();
+        if entries.is_empty() {
+            win.remove(&["input", "modifier-remap"]);
+        } else {
+            win.set_strings(&["input", "modifier-remap"], &entries);
+        }
+    }
+    win.modifier_rows = Some(rows);
+}
+
+fn remap_is_valid(from: &str, to: &str) -> bool {
+    if from.is_empty() || to.is_empty() {
+        return false;
+    }
+    let mut set = crate::modifier_remap::ModifierRemapSet::default();
+    set.parse(&format!("{from}={to}")).is_ok()
 }
 
 fn handle_capture(
@@ -446,10 +645,9 @@ fn write_scope(win: &mut SettingsWindow, scope: KeybindScope, clear: bool, rows:
         if trigger.is_empty() || action.is_empty() {
             continue;
         }
-        let entry = format!("{trigger}={action}");
         // Skip invalid rows so a half-typed binding never makes the whole config fail to reload.
-        if crate::input_binding::parse_binding_elements(&entry).is_ok() {
-            entries.push(entry);
+        if scope.entry_is_valid(trigger, action) {
+            entries.push(format!("{trigger}={action}"));
         }
     }
     win.set_strings(scope.path(), &entries);
@@ -479,6 +677,7 @@ fn effective_bindings(win: &SettingsWindow, scope: KeybindScope) -> Vec<String> 
         KeybindScope::Rmux => input.backend_keybinds.rmux.clone(),
         KeybindScope::Tmux => input.backend_keybinds.tmux.clone(),
         KeybindScope::Zellij => input.backend_keybinds.zellij.clone(),
+        KeybindScope::Sidebar => input.sidebar_keybind.clone(),
     }
 }
 

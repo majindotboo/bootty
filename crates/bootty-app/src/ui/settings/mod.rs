@@ -8,6 +8,7 @@
 mod appearance;
 mod font;
 mod keybinds;
+mod session;
 mod window;
 
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ enum SettingsTab {
     Font,
     Appearance,
     Window,
+    Session,
     Keybindings,
 }
 
@@ -40,10 +42,11 @@ pub fn viewport_id() -> egui::ViewportId {
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 4] = [
+    const ALL: [(SettingsTab, &'static str); 5] = [
         (SettingsTab::Font, "Font"),
         (SettingsTab::Appearance, "Appearance"),
         (SettingsTab::Window, "Window"),
+        (SettingsTab::Session, "Session"),
         (SettingsTab::Keybindings, "Keybindings"),
     ];
 }
@@ -65,6 +68,8 @@ pub struct SettingsWindow {
     keybind_loaded_scope: Option<keybinds::KeybindScope>,
     /// In-progress chord capture, if any.
     keybind_capture: Option<keybinds::ChordCapture>,
+    /// Editable modifier-remap rows (`from`, `to`); loaded lazily so incomplete rows persist.
+    modifier_rows: Option<Vec<(String, String)>>,
     last_write_error: Option<String>,
 }
 
@@ -83,6 +88,7 @@ impl SettingsWindow {
             keybind_clear: false,
             keybind_loaded_scope: None,
             keybind_capture: None,
+            modifier_rows: None,
             last_write_error: None,
         }
     }
@@ -155,6 +161,7 @@ impl SettingsWindow {
                             SettingsTab::Font => font::ui(self, ui),
                             SettingsTab::Appearance => appearance::ui(self, ui),
                             SettingsTab::Window => window::ui(self, ui),
+                            SettingsTab::Session => session::ui(self, ui),
                             SettingsTab::Keybindings => keybinds::ui(self, ui),
                         });
                 });
@@ -214,6 +221,25 @@ impl SettingsWindow {
 
     fn set_str(&mut self, path: &[&str], value: &str) {
         self.write(|document| document.set_item(path, bootty_config::toml_edit::value(value)));
+    }
+
+    fn set_i64(&mut self, path: &[&str], value: i64) {
+        self.write(|document| document.set_item(path, bootty_config::toml_edit::value(value)));
+    }
+
+    /// Write an array of `{ name, value }` inline tables (the `[session].env` shape).
+    fn set_env(&mut self, path: &[&str], entries: &[(String, String)]) {
+        let mut array = bootty_config::toml_edit::Array::new();
+        for (name, value) in entries {
+            let mut table = bootty_config::toml_edit::InlineTable::new();
+            table.insert("name", bootty_config::toml_edit::Value::from(name.as_str()));
+            table.insert(
+                "value",
+                bootty_config::toml_edit::Value::from(value.as_str()),
+            );
+            array.push(table);
+        }
+        self.write(move |document| document.set_item(path, bootty_config::toml_edit::value(array)));
     }
 
     fn set_color(&mut self, path: &[&str], rgb: [u8; 3]) {

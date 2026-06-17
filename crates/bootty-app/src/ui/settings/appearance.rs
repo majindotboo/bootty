@@ -3,6 +3,27 @@ use std::path::Path;
 use eframe::egui;
 
 use super::{SettingsWindow, color_row};
+use crate::color::Color;
+
+/// Standard xterm ANSI 16-color palette, used to seed the palette editor.
+const ANSI_16: [[u8; 3]; 16] = [
+    [0x00, 0x00, 0x00],
+    [0x80, 0x00, 0x00],
+    [0x00, 0x80, 0x00],
+    [0x80, 0x80, 0x00],
+    [0x00, 0x00, 0x80],
+    [0x80, 0x00, 0x80],
+    [0x00, 0x80, 0x80],
+    [0xc0, 0xc0, 0xc0],
+    [0x80, 0x80, 0x80],
+    [0xff, 0x00, 0x00],
+    [0x00, 0xff, 0x00],
+    [0xff, 0xff, 0x00],
+    [0x00, 0x00, 0xff],
+    [0xff, 0x00, 0xff],
+    [0x00, 0xff, 0xff],
+    [0xff, 0xff, 0xff],
+];
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
@@ -95,6 +116,14 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             color_row(
                 win,
                 ui,
+                "Cursor text",
+                &["colors", "cursor-text"],
+                palette.base,
+                |colors| &mut colors.cursor_text,
+            );
+            color_row(
+                win,
+                ui,
                 "Selection background",
                 &["colors", "selection-background"],
                 palette.hover,
@@ -108,7 +137,170 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 palette.subtext,
                 |colors| &mut colors.selection_foreground,
             );
+            color_row(
+                win,
+                ui,
+                "Highlight background",
+                &["colors", "highlight-background"],
+                palette.hover,
+                |colors| &mut colors.highlight_background,
+            );
+            color_row(
+                win,
+                ui,
+                "Highlight foreground",
+                &["colors", "highlight-foreground"],
+                palette.text,
+                |colors| &mut colors.highlight_foreground,
+            );
+            color_row(
+                win,
+                ui,
+                "Pointer foreground",
+                &["colors", "pointer-foreground"],
+                palette.base,
+                |colors| &mut colors.pointer_foreground,
+            );
+            color_row(
+                win,
+                ui,
+                "Pointer background",
+                &["colors", "pointer-background"],
+                palette.text,
+                |colors| &mut colors.pointer_background,
+            );
+            color_row(
+                win,
+                ui,
+                "Tektronix foreground",
+                &["colors", "tektronix-foreground"],
+                palette.text,
+                |colors| &mut colors.tektronix_foreground,
+            );
+            color_row(
+                win,
+                ui,
+                "Tektronix background",
+                &["colors", "tektronix-background"],
+                palette.base,
+                |colors| &mut colors.tektronix_background,
+            );
+            color_row(
+                win,
+                ui,
+                "Tektronix cursor",
+                &["colors", "tektronix-cursor"],
+                palette.primary,
+                |colors| &mut colors.tektronix_cursor,
+            );
         });
+
+    palette_section(win, ui);
+}
+
+/// The ANSI palette editor: optional `palette-generate`/`palette-harmonious` toggles plus an
+/// editable list of color slots that override ANSI indices 0..N.
+fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+    let palette = win.palette;
+    super::section(ui, palette, "ANSI PALETTE");
+    ui.label(
+        egui::RichText::new(
+            "Override the 16 ANSI colors. Generate fills the 256-color cube from these; \
+             harmonious blends them toward the theme.",
+        )
+        .color(palette.muted)
+        .size(12.0),
+    );
+    ui.add_space(6.0);
+
+    egui::Grid::new("settings_palette_flags")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Generate 256-color cube");
+            let mut generate = win.config.colors.palette_generate;
+            if ui.checkbox(&mut generate, "").changed() {
+                win.config.colors.palette_generate = generate;
+                win.set_bool(&["colors", "palette-generate"], generate);
+            }
+            ui.end_row();
+
+            ui.label("Harmonious blend");
+            let mut harmonious = win.config.colors.palette_harmonious;
+            if ui.checkbox(&mut harmonious, "").changed() {
+                win.config.colors.palette_harmonious = harmonious;
+                win.set_bool(&["colors", "palette-harmonious"], harmonious);
+            }
+            ui.end_row();
+        });
+
+    ui.add_space(8.0);
+
+    let mut colors = win.config.colors.palette.clone();
+    let mut changed = false;
+    if colors.is_empty() {
+        ui.label(
+            egui::RichText::new("No palette override set; ANSI colors come from the theme.")
+                .color(palette.muted)
+                .size(12.0),
+        );
+        ui.add_space(4.0);
+        if ui.button("Populate 16 ANSI colors").clicked() {
+            colors = ANSI_16
+                .iter()
+                .map(|[r, g, b]| Color {
+                    r: *r,
+                    g: *g,
+                    b: *b,
+                })
+                .collect();
+            changed = true;
+        }
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for (index, color) in colors.iter_mut().enumerate() {
+                let mut rgb = [color.r, color.g, color.b];
+                let response = egui::color_picker::color_edit_button_srgb(ui, &mut rgb)
+                    .on_hover_text(format!("ANSI {index}"));
+                if response.changed() {
+                    *color = Color {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                    };
+                    changed = true;
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("+ Add color").clicked() {
+                colors.push(Color { r: 0, g: 0, b: 0 });
+                changed = true;
+            }
+            if ui.button("Remove last").clicked() {
+                colors.pop();
+                changed = true;
+            }
+            if ui.button("Clear palette").clicked() {
+                colors.clear();
+                changed = true;
+            }
+        });
+    }
+
+    if changed {
+        win.config.colors.palette = colors.clone();
+        if colors.is_empty() {
+            win.remove(&["colors", "palette"]);
+        } else {
+            let hex: Vec<String> = colors
+                .iter()
+                .map(|color| format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b))
+                .collect();
+            win.set_strings(&["colors", "palette"], &hex);
+        }
+    }
 }
 
 fn available_themes(config_path: &Path) -> Vec<String> {
