@@ -1,5 +1,8 @@
 use std::{
     borrow::Cow,
+    cell::RefCell,
+    io::Write as _,
+    rc::Rc,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -57,6 +60,13 @@ pub struct TerminalColorConfig {
     pub foreground: RgbColor,
     pub cursor: Option<RgbColor>,
     pub cursor_text: Option<RgbColor>,
+    pub pointer_foreground: Option<RgbColor>,
+    pub pointer_background: Option<RgbColor>,
+    pub tektronix_foreground: Option<RgbColor>,
+    pub tektronix_background: Option<RgbColor>,
+    pub highlight_background: Option<RgbColor>,
+    pub tektronix_cursor: Option<RgbColor>,
+    pub highlight_foreground: Option<RgbColor>,
     pub selection_background: Option<RgbColor>,
     pub selection_foreground: Option<RgbColor>,
     pub palette: Vec<RgbColor>,
@@ -71,6 +81,13 @@ impl Default for TerminalColorConfig {
             foreground: rgb(TERMINAL_FOREGROUND),
             cursor: None,
             cursor_text: None,
+            pointer_foreground: None,
+            pointer_background: None,
+            tektronix_foreground: None,
+            tektronix_background: None,
+            highlight_background: None,
+            tektronix_cursor: None,
+            highlight_foreground: None,
             selection_background: None,
             selection_foreground: None,
             palette: default_palette16().into(),
@@ -196,6 +213,54 @@ fn extract_render_row(
     Ok(())
 }
 
+type PtyWriteCallback =
+    Rc<RefCell<Option<Box<dyn libghostty_vt::terminal::PtyWriteFn<'static, 'static>>>>>;
+
+#[derive(Clone, Debug, Default)]
+struct XtermColorOverrides {
+    pointer_foreground: Option<RgbColor>,
+    pointer_background: Option<RgbColor>,
+    tektronix_foreground: Option<RgbColor>,
+    tektronix_background: Option<RgbColor>,
+    highlight_background: Option<RgbColor>,
+    tektronix_cursor: Option<RgbColor>,
+    highlight_foreground: Option<RgbColor>,
+}
+
+impl XtermColorOverrides {
+    fn set(&mut self, code: u8, color: RgbColor) -> bool {
+        let slot = match code {
+            13 => &mut self.pointer_foreground,
+            14 => &mut self.pointer_background,
+            15 => &mut self.tektronix_foreground,
+            16 => &mut self.tektronix_background,
+            17 => &mut self.highlight_background,
+            18 => &mut self.tektronix_cursor,
+            19 => &mut self.highlight_foreground,
+            _ => return false,
+        };
+        if *slot == Some(color) {
+            false
+        } else {
+            *slot = Some(color);
+            true
+        }
+    }
+
+    fn reset(&mut self, code: u8) -> bool {
+        let slot = match code {
+            13 => &mut self.pointer_foreground,
+            14 => &mut self.pointer_background,
+            15 => &mut self.tektronix_foreground,
+            16 => &mut self.tektronix_background,
+            17 => &mut self.highlight_background,
+            18 => &mut self.tektronix_cursor,
+            19 => &mut self.highlight_foreground,
+            _ => return false,
+        };
+        slot.take().is_some()
+    }
+}
 pub struct TerminalEngine {
     terminal: Terminal<'static, 'static>,
     base_color_palette: crate::terminal_palette::Palette,
@@ -222,11 +287,13 @@ pub struct TerminalEngine {
     terminal_write_pending: Vec<u8>,
     cursor_home_pending_len: usize,
     sgr_optimizer: SgrOptimizer,
+    pty_write_callback: PtyWriteCallback,
     side_effects: Vec<TerminalSideEffect>,
     callback_side_effects: Arc<Mutex<Vec<TerminalSideEffect>>>,
     iterm_copy_capture: Option<Vec<u8>>,
     current_working_directory: String,
     colors: TerminalColorConfig,
+    xterm_color_overrides: XtermColorOverrides,
     color_scheme: Arc<Mutex<ColorScheme>>,
     content_epoch: u64,
     extracted_content_epoch: u64,
@@ -342,11 +409,16 @@ struct TerminalWriteFeatures {
     kitty_graphics: bool,
     osc_pwd: bool,
     osc_side_effect: bool,
+    osc_color: bool,
 }
 
 impl TerminalWriteFeatures {
     fn needs_sanitizing(self) -> bool {
-        self.tmux_passthrough || self.kitty_graphics || self.osc_pwd || self.osc_side_effect
+        self.tmux_passthrough
+            || self.kitty_graphics
+            || self.osc_pwd
+            || self.osc_side_effect
+            || self.osc_color
     }
 }
 
@@ -496,6 +568,9 @@ const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
     b"\x1b]1;",
     b"\x1b]2;",
     b"\x1b]7;",
+    b"\x1b]4;",
+    b"\x1b]10;",
+    b"\x1b]11;",
     b"\x1b]9;",
     b"\x1b]22;",
     b"\x1b]52;",
@@ -507,6 +582,11 @@ const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
 
 const SIDE_EFFECT_OSC_PREFIXES: &[&[u8]] = &[
     b"0;", b"1;", b"2;", b"9;", b"22;", b"52;", b"66;", b"133;", b"777;", b"1337;",
+];
+
+const COLOR_OSC_PREFIXES: &[&[u8]] = &[
+    b"4;", b"10;", b"11;", b"12;", b"13;", b"14;", b"15;", b"16;", b"17;", b"18;", b"19;", b"110",
+    b"111", b"112", b"113", b"114", b"115", b"116", b"117", b"118", b"119",
 ];
 
 fn complete_streaming_control_prefix_len(data: &[u8]) -> usize {
@@ -605,12 +685,17 @@ fn osc_streaming_prefix_state(data: &[u8]) -> StreamingControlState {
         || SIDE_EFFECT_OSC_PREFIXES
             .iter()
             .any(|prefix| data.starts_with(prefix))
+        || COLOR_OSC_PREFIXES
+            .iter()
+            .any(|prefix| data.starts_with(prefix))
     {
         return StreamingControlState::Complete(0);
     }
     if SIDE_EFFECT_OSC_PREFIXES
         .iter()
-        .chain(std::iter::once(&b"7;".as_slice()))
+        .copied()
+        .chain(COLOR_OSC_PREFIXES.iter().copied())
+        .chain(std::iter::once(b"7;".as_slice()))
         .any(|prefix| data.len() < prefix.len() && prefix.starts_with(data))
     {
         return StreamingControlState::Incomplete;
@@ -648,6 +733,9 @@ fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
             Some(b']') if data.get(start + 2..start + 4) == Some(b"7;") => {
                 features.osc_pwd = true;
             }
+            Some(b']') if is_color_osc_prefix(data.get(start + 2..).unwrap_or_default()) => {
+                features.osc_color = true;
+            }
             Some(b']') if is_side_effect_osc_prefix(data.get(start + 2..).unwrap_or_default()) => {
                 features.osc_side_effect = true;
             }
@@ -657,6 +745,7 @@ fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
             && features.kitty_graphics
             && features.osc_pwd
             && features.osc_side_effect
+            && features.osc_color
         {
             break;
         }
@@ -826,6 +915,12 @@ fn is_side_effect_osc_prefix(data: &[u8]) -> bool {
         || data.starts_with(b"1337;")
 }
 
+fn is_color_osc_prefix(data: &[u8]) -> bool {
+    COLOR_OSC_PREFIXES
+        .iter()
+        .any(|prefix| data.starts_with(prefix))
+}
+
 fn osc52_payload_text(payload: &[u8]) -> Option<Result<String, String>> {
     let separator = payload.iter().position(|byte| *byte == b';')?;
     let selection = String::from_utf8_lossy(&payload[..separator]).into_owned();
@@ -843,6 +938,61 @@ fn osc52_payload_text(payload: &[u8]) -> Option<Result<String, String>> {
 fn split_osc_payload(payload: &[u8]) -> Option<(&[u8], &[u8])> {
     let separator = payload.iter().position(|byte| *byte == b';')?;
     Some((&payload[..separator], &payload[separator + 1..]))
+}
+
+fn parse_palette_index(bytes: &[u8]) -> Option<u8> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
+}
+
+fn parse_osc_number(bytes: &[u8]) -> Option<u16> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
+}
+
+fn parse_color_channel(s: &str) -> Option<u8> {
+    let value = u16::from_str_radix(s, 16).ok()?;
+    Some(match s.len() {
+        1 => (value as u8) * 0x11,
+        2 => value as u8,
+        _ => (value >> 8) as u8,
+    })
+}
+
+fn parse_rgb_color_spec(bytes: &[u8]) -> Option<RgbColor> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    if let Some(rgb) = text.strip_prefix("rgb:") {
+        let mut parts = rgb.split('/');
+        let r = parse_color_channel(parts.next()?)?;
+        let g = parse_color_channel(parts.next()?)?;
+        let b = parse_color_channel(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        return Some(RgbColor { r, g, b });
+    }
+    let hex = text.strip_prefix('#')?;
+    if hex.len() % 3 != 0 {
+        return None;
+    }
+    let channel_len = hex.len() / 3;
+    if !(1..=4).contains(&channel_len) {
+        return None;
+    }
+    let channel =
+        |index: usize| parse_color_channel(&hex[index * channel_len..(index + 1) * channel_len]);
+    Some(RgbColor {
+        r: channel(0)?,
+        g: channel(1)?,
+        b: channel(2)?,
+    })
+}
+
+fn rgb_spec(color: RgbColor) -> String {
+    format!(
+        "rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}",
+        color.r, color.r, color.g, color.g, color.b, color.b
+    )
 }
 
 fn conemu_osc9_kind(data: &str) -> Option<&str> {
@@ -1018,6 +1168,13 @@ impl TerminalEngine {
                 effects.push(TerminalSideEffect::Bell);
             }
         })?;
+        let pty_write_callback: PtyWriteCallback = Rc::new(RefCell::new(None));
+        let terminal_pty_write_callback = pty_write_callback.clone();
+        terminal.on_pty_write(move |terminal, bytes| {
+            if let Some(callback) = terminal_pty_write_callback.borrow_mut().as_deref_mut() {
+                callback(terminal, bytes);
+            }
+        })?;
         terminal.resize(
             geometry.cols,
             geometry.rows,
@@ -1055,12 +1212,14 @@ impl TerminalEngine {
             terminal_write_pending: Vec::new(),
             cursor_home_pending_len: 0,
             sgr_optimizer: SgrOptimizer::default(),
+            pty_write_callback,
             side_effects: Vec::new(),
             callback_side_effects,
             iterm_copy_capture: None,
             current_working_directory: String::new(),
             color_scheme,
             colors,
+            xterm_color_overrides: XtermColorOverrides::default(),
             content_epoch: 0,
             extracted_content_epoch: u64::MAX,
             kitty_graphics_touched: false,
@@ -1083,8 +1242,159 @@ impl TerminalEngine {
         &mut self,
         f: impl libghostty_vt::terminal::PtyWriteFn<'static, 'static>,
     ) -> Result<()> {
-        self.terminal.on_pty_write(f)?;
+        *self.pty_write_callback.borrow_mut() = Some(Box::new(f));
         Ok(())
+    }
+
+    fn write_pty_response(&self, bytes: &[u8]) {
+        if let Some(callback) = self.pty_write_callback.borrow_mut().as_deref_mut() {
+            callback(&self.terminal, bytes);
+        }
+    }
+
+    fn apply_osc_color_responses_and_state(&mut self, data: &[u8]) {
+        let mut search_start = 0;
+        while let Some(relative_start) = find_subslice(&data[search_start..], b"\x1b]") {
+            let start = search_start + relative_start;
+            let payload_start = start + 2;
+            let Some((payload_len, terminator_len)) = find_osc_terminator(&data[payload_start..])
+            else {
+                return;
+            };
+            let payload_end = payload_start + payload_len;
+            let terminator_end = payload_end + terminator_len;
+            self.apply_osc_color_state(&data[payload_start..payload_end]);
+            if let Some(response) = self.osc_color_query_response(
+                &data[payload_start..payload_end],
+                &data[payload_end..terminator_end],
+            ) {
+                self.write_pty_response(&response);
+            }
+            search_start = terminator_end;
+        }
+    }
+
+    fn apply_osc_color_state(&mut self, payload: &[u8]) {
+        let Some((command, rest)) = split_osc_payload(payload) else {
+            if let Some(reset_code) = parse_osc_number(payload)
+                && (113..=119).contains(&reset_code)
+                && self.xterm_color_overrides.reset((reset_code - 100) as u8)
+            {
+                self.mark_content_changed();
+            }
+            return;
+        };
+        let Some(start_code) = parse_osc_number(command) else {
+            return;
+        };
+        if !(13..=19).contains(&start_code) {
+            return;
+        }
+        let mut changed = false;
+        for (offset, spec) in rest.split(|byte| *byte == b';').enumerate() {
+            let code = start_code + offset as u16;
+            if code > 19 || spec == b"?" {
+                break;
+            }
+            if let Some(color) = parse_rgb_color_spec(spec) {
+                changed |= self.xterm_color_overrides.set(code as u8, color);
+            }
+        }
+        if changed {
+            self.mark_content_changed();
+        }
+    }
+
+    fn xterm_dynamic_color(&self, code: u8) -> Option<RgbColor> {
+        match code {
+            10 => self.terminal.fg_color().ok().flatten(),
+            11 => self.terminal.bg_color().ok().flatten(),
+            12 => self
+                .terminal
+                .cursor_color()
+                .ok()
+                .flatten()
+                .or(self.colors.cursor)
+                .or(Some(self.colors.foreground)),
+            13 => self
+                .xterm_color_overrides
+                .pointer_foreground
+                .or(self.colors.pointer_foreground)
+                .or(Some(self.colors.foreground)),
+            14 => self
+                .xterm_color_overrides
+                .pointer_background
+                .or(self.colors.pointer_background)
+                .or(Some(self.colors.background)),
+            15 => self
+                .xterm_color_overrides
+                .tektronix_foreground
+                .or(self.colors.tektronix_foreground)
+                .or(Some(self.colors.foreground)),
+            16 => self
+                .xterm_color_overrides
+                .tektronix_background
+                .or(self.colors.tektronix_background)
+                .or(Some(self.colors.background)),
+            17 => self
+                .xterm_color_overrides
+                .highlight_background
+                .or(self.colors.highlight_background)
+                .or(self.colors.selection_background)
+                .or(Some(self.colors.foreground)),
+            18 => self
+                .xterm_color_overrides
+                .tektronix_cursor
+                .or(self.colors.tektronix_cursor)
+                .or(self.colors.cursor)
+                .or(Some(self.colors.foreground)),
+            19 => self
+                .xterm_color_overrides
+                .highlight_foreground
+                .or(self.colors.highlight_foreground)
+                .or(self.colors.selection_foreground)
+                .or(Some(self.colors.background)),
+            _ => None,
+        }
+    }
+
+    fn osc_color_query_response(&self, payload: &[u8], terminator: &[u8]) -> Option<Vec<u8>> {
+        let (command, rest) = split_osc_payload(payload)?;
+        let mut response = Vec::new();
+        match command {
+            b"4" => {
+                let palette = self.terminal.color_palette().ok()?;
+                let mut parts = rest.split(|byte| *byte == b';');
+                while let Some(index_bytes) = parts.next() {
+                    let operation = parts.next()?;
+                    if operation != b"?" {
+                        return None;
+                    }
+                    let index = parse_palette_index(index_bytes)?;
+                    write!(
+                        response,
+                        "\x1b]4;{};{}",
+                        index,
+                        rgb_spec(palette[usize::from(index)])
+                    )
+                    .ok()?;
+                    response.extend_from_slice(terminator);
+                }
+            }
+            b"10" | b"11" | b"12" | b"13" | b"14" | b"15" | b"16" | b"17" | b"18" | b"19" => {
+                let start_code = parse_osc_number(command)? as u8;
+                for (code, operation) in (start_code..=19).zip(rest.split(|byte| *byte == b';')) {
+                    if operation != b"?" {
+                        return None;
+                    }
+                    let color = self.xterm_dynamic_color(code)?;
+                    write!(response, "\x1b]{};{}", code, rgb_spec(color)).ok()?;
+                    response.extend_from_slice(terminator);
+                }
+            }
+            _ => return None,
+        }
+        (!response.is_empty()).then_some(response)
     }
 
     pub fn grid_size(&self) -> (u16, u16) {
@@ -1261,6 +1571,9 @@ impl TerminalEngine {
         }
         self.sgr_optimizer.reset();
         self.terminal.vt_write(sanitized.bytes.as_ref());
+        if features.osc_color {
+            self.apply_osc_color_responses_and_state(sanitized.bytes.as_ref());
+        }
         if features.osc_pwd {
             self.apply_osc_pwd_updates(sanitized.bytes.as_ref());
         }
@@ -1794,8 +2107,16 @@ impl TerminalEngine {
             foreground: colors.foreground,
             cursor: colors.cursor,
             cursor_text: self.colors.cursor_text,
-            selection_background: self.colors.selection_background,
-            selection_foreground: self.colors.selection_foreground,
+            selection_background: self
+                .xterm_color_overrides
+                .highlight_background
+                .or(self.colors.highlight_background)
+                .or(self.colors.selection_background),
+            selection_foreground: self
+                .xterm_color_overrides
+                .highlight_foreground
+                .or(self.colors.highlight_foreground)
+                .or(self.colors.selection_foreground),
         };
         self.frame.cursor = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?.map(|cursor| CursorSnapshot {

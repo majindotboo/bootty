@@ -268,6 +268,39 @@ fn config_accepts_ghostty_palette_generation_settings() {
 }
 
 #[test]
+fn config_accepts_xterm_dynamic_color_slots() {
+    let config = load_config_source(indoc! {r##"
+        [colors]
+        pointer-foreground = "#010203"
+        pointer-background = "#040506"
+        tektronix-foreground = "#070809"
+        tektronix-background = "#0a0b0c"
+        highlight-background = "#0d0e0f"
+        tektronix-cursor = "#101112"
+        highlight-foreground = "#131415"
+    "##});
+
+    assert_eq!(
+        config.colors.pointer_foreground,
+        Some(Color::from_hex("#010203").unwrap())
+    );
+    assert_eq!(
+        config.colors.highlight_foreground,
+        Some(Color::from_hex("#131415").unwrap())
+    );
+
+    let terminal_colors = config.colors.terminal_color_config();
+    assert_eq!(
+        terminal_colors.pointer_background,
+        Some(Color::from_hex("#040506").unwrap().into())
+    );
+    assert_eq!(
+        terminal_colors.tektronix_cursor,
+        Some(Color::from_hex("#101112").unwrap().into())
+    );
+}
+
+#[test]
 fn user_theme_shadows_builtin_theme_name() {
     let sandbox = ConfigSandbox::with_config(indoc! {r#"
         theme = "Catppuccin Mocha"

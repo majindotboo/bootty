@@ -193,6 +193,189 @@ fn terminal_engine_answers_status_queries() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_answers_color_queries_from_active_palette() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b]10;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]10;rgb:c0c0/caca/f5f5\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]11;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]11;rgb:1a1a/1b1b/2525\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]10;#123456;#223344;#334455\x1b\\");
+    for (code, expected) in [
+        (10, b"\x1b]10;rgb:1212/3434/5656\x1b\\".as_slice()),
+        (11, b"\x1b]11;rgb:2222/3333/4444\x1b\\".as_slice()),
+        (12, b"\x1b]12;rgb:3333/4444/5555\x1b\\".as_slice()),
+    ] {
+        engine.write_vt(format!("\x1b]{code};?\x1b\\").as_bytes());
+        assert_eq!(take_pty_output(&output), expected, "OSC {code} override");
+    }
+
+    engine.write_vt(b"\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\");
+    engine.write_vt(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]12;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]10;rgb:c0c0/caca/f5f5\x1b\\\x1b]11;rgb:1a1a/1b1b/2525\x1b\\\x1b]12;rgb:c0c0/caca/f5f5\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]10;?;?;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]10;rgb:c0c0/caca/f5f5\x1b\\\x1b]11;rgb:1a1a/1b1b/2525\x1b\\\x1b]12;rgb:c0c0/caca/f5f5\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]4;232;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]4;232;rgb:0808/0808/0808\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]4;0;?;232;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]4;0;rgb:1515/1616/1e1e\x1b\\\x1b]4;232;rgb:0808/0808/0808\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]4;1;#123456\x1b\\\x1b]4;1;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]4;1;rgb:1212/3434/5656\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b]104;1\x1b\\\x1b]4;1;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]4;1;rgb:f7f7/7676/8e8e\x1b\\"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_answers_xterm_dynamic_color_queries_from_config() -> Result<()> {
+    let colors = TerminalColorConfig {
+        background: RgbColor { r: 1, g: 2, b: 3 },
+        foreground: RgbColor { r: 4, g: 5, b: 6 },
+        cursor: Some(RgbColor { r: 7, g: 8, b: 9 }),
+        pointer_foreground: Some(RgbColor {
+            r: 10,
+            g: 11,
+            b: 12,
+        }),
+        pointer_background: Some(RgbColor {
+            r: 13,
+            g: 14,
+            b: 15,
+        }),
+        tektronix_foreground: Some(RgbColor {
+            r: 16,
+            g: 17,
+            b: 18,
+        }),
+        tektronix_background: Some(RgbColor {
+            r: 19,
+            g: 20,
+            b: 21,
+        }),
+        highlight_background: Some(RgbColor {
+            r: 22,
+            g: 23,
+            b: 24,
+        }),
+        tektronix_cursor: Some(RgbColor {
+            r: 25,
+            g: 26,
+            b: 27,
+        }),
+        highlight_foreground: Some(RgbColor {
+            r: 28,
+            g: 29,
+            b: 30,
+        }),
+        ..Default::default()
+    };
+    let mut engine = TerminalEngine::new_with_colors(
+        TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        colors,
+    )?;
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let capture = output.clone();
+    engine.on_pty_write(move |_terminal, bytes| {
+        capture
+            .lock()
+            .expect("pty output lock")
+            .extend_from_slice(bytes);
+    })?;
+
+    for (code, expected) in [
+        (10, b"\x1b]10;rgb:0404/0505/0606\x1b\\".as_slice()),
+        (11, b"\x1b]11;rgb:0101/0202/0303\x1b\\".as_slice()),
+        (12, b"\x1b]12;rgb:0707/0808/0909\x1b\\".as_slice()),
+        (13, b"\x1b]13;rgb:0a0a/0b0b/0c0c\x1b\\".as_slice()),
+        (14, b"\x1b]14;rgb:0d0d/0e0e/0f0f\x1b\\".as_slice()),
+        (15, b"\x1b]15;rgb:1010/1111/1212\x1b\\".as_slice()),
+        (16, b"\x1b]16;rgb:1313/1414/1515\x1b\\".as_slice()),
+        (17, b"\x1b]17;rgb:1616/1717/1818\x1b\\".as_slice()),
+        (18, b"\x1b]18;rgb:1919/1a1a/1b1b\x1b\\".as_slice()),
+        (19, b"\x1b]19;rgb:1c1c/1d1d/1e1e\x1b\\".as_slice()),
+    ] {
+        engine.write_vt(format!("\x1b]{code};?\x1b\\").as_bytes());
+        assert_eq!(take_pty_output(&output), expected, "OSC {code} reply");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_tracks_non_rendered_xterm_dynamic_color_overrides() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b]13;rgb:01/02/03;rgb:04/05/06;rgb:07/08/09;rgb:0a/0b/0c;rgb:0d/0e/0f;rgb:10/11/12;rgb:13/14/15\x1b\\");
+
+    for (code, expected) in [
+        (13, b"\x1b]13;rgb:0101/0202/0303\x1b\\".as_slice()),
+        (14, b"\x1b]14;rgb:0404/0505/0606\x1b\\".as_slice()),
+        (15, b"\x1b]15;rgb:0707/0808/0909\x1b\\".as_slice()),
+        (16, b"\x1b]16;rgb:0a0a/0b0b/0c0c\x1b\\".as_slice()),
+        (17, b"\x1b]17;rgb:0d0d/0e0e/0f0f\x1b\\".as_slice()),
+        (18, b"\x1b]18;rgb:1010/1111/1212\x1b\\".as_slice()),
+        (19, b"\x1b]19;rgb:1313/1414/1515\x1b\\".as_slice()),
+    ] {
+        engine.write_vt(format!("\x1b]{code};?\x1b\\").as_bytes());
+        assert_eq!(
+            take_pty_output(&output),
+            expected,
+            "OSC {code} override reply"
+        );
+    }
+
+    engine.write_vt(b"\x1b]113\x1b\\\x1b]119\x1b\\");
+    engine.write_vt(b"\x1b]13;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]13;rgb:c0c0/caca/f5f5\x1b\\"
+    );
+    engine.write_vt(b"\x1b]19;?\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]19;rgb:1a1a/1b1b/2525\x1b\\"
+    );
+
+    Ok(())
+}
+#[test]
 fn terminal_engine_reports_color_scheme_when_requested() -> Result<()> {
     for (scheme, expected) in [
         (None, b"".as_slice()),

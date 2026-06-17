@@ -200,6 +200,7 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             kitty_graphics: false,
             osc_pwd: true,
             osc_side_effect: false,
+            osc_color: false,
         }
     );
     assert_eq!(
@@ -209,6 +210,7 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             kitty_graphics: true,
             osc_pwd: false,
             osc_side_effect: false,
+            osc_color: false,
         }
     );
     assert_eq!(
@@ -218,6 +220,7 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             kitty_graphics: false,
             osc_pwd: true,
             osc_side_effect: false,
+            osc_color: false,
         }
     );
     assert_eq!(
@@ -227,6 +230,17 @@ fn terminal_write_feature_detection_finds_expensive_protocols() {
             kitty_graphics: false,
             osc_pwd: false,
             osc_side_effect: true,
+            osc_color: false,
+        }
+    );
+    assert_eq!(
+        terminal_write_features(b"\x1b]4;10;?\x1b\\\x1b]10;?\x1b\\\x1b]11;?\x1b\\"),
+        TerminalWriteFeatures {
+            tmux_passthrough: false,
+            kitty_graphics: false,
+            osc_pwd: false,
+            osc_side_effect: false,
+            osc_color: true,
         }
     );
 }
@@ -519,6 +533,13 @@ fn terminal_engine_applies_configured_default_colors_to_frame() -> Result<()> {
                 g: 0x41,
                 b: 0x42,
             }),
+            pointer_foreground: None,
+            pointer_background: None,
+            tektronix_foreground: None,
+            tektronix_background: None,
+            highlight_background: None,
+            tektronix_cursor: None,
+            highlight_foreground: None,
             selection_background: Some(RgbColor {
                 r: 0x50,
                 g: 0x51,
@@ -609,6 +630,13 @@ fn terminal_engine_updates_default_colors_live() -> Result<()> {
             g: 14,
             b: 15,
         }),
+        pointer_foreground: None,
+        pointer_background: None,
+        tektronix_foreground: None,
+        tektronix_background: None,
+        highlight_background: None,
+        tektronix_cursor: None,
+        highlight_foreground: None,
         selection_background: Some(RgbColor {
             r: 16,
             g: 17,
@@ -647,6 +675,93 @@ fn terminal_engine_updates_default_colors_live() -> Result<()> {
             g: 11,
             b: 12
         }
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_applies_xterm_highlight_colors_to_frame_selection() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_colors(
+        test_geometry(8, 2),
+        TerminalColorConfig {
+            highlight_background: Some(RgbColor {
+                r: 0x20,
+                g: 0x21,
+                b: 0x22,
+            }),
+            highlight_foreground: Some(RgbColor {
+                r: 0x30,
+                g: 0x31,
+                b: 0x32,
+            }),
+            selection_background: Some(RgbColor {
+                r: 0x40,
+                g: 0x41,
+                b: 0x42,
+            }),
+            selection_foreground: Some(RgbColor {
+                r: 0x50,
+                g: 0x51,
+                b: 0x52,
+            }),
+            ..Default::default()
+        },
+    )?;
+
+    let frame = engine.extract_frame()?;
+    assert_eq!(
+        frame.colors.selection_background,
+        Some(RgbColor {
+            r: 0x20,
+            g: 0x21,
+            b: 0x22
+        })
+    );
+    assert_eq!(
+        frame.colors.selection_foreground,
+        Some(RgbColor {
+            r: 0x30,
+            g: 0x31,
+            b: 0x32
+        })
+    );
+
+    engine.write_vt(b"\x1b]17;#123;#456;#abc\x1b\\");
+    let frame = engine.extract_frame()?;
+    assert_eq!(
+        frame.colors.selection_background,
+        Some(RgbColor {
+            r: 0x11,
+            g: 0x22,
+            b: 0x33
+        })
+    );
+    assert_eq!(
+        frame.colors.selection_foreground,
+        Some(RgbColor {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc
+        })
+    );
+
+    engine.write_vt(b"\x1b]117\x1b\\\x1b]119\x1b\\");
+    let frame = engine.extract_frame()?;
+    assert_eq!(
+        frame.colors.selection_background,
+        Some(RgbColor {
+            r: 0x20,
+            g: 0x21,
+            b: 0x22
+        })
+    );
+    assert_eq!(
+        frame.colors.selection_foreground,
+        Some(RgbColor {
+            r: 0x30,
+            g: 0x31,
+            b: 0x32
+        })
     );
     Ok(())
 }

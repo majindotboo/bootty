@@ -306,6 +306,13 @@ pub struct ColorConfig {
     pub foreground: Option<Color>,
     pub cursor: Option<Color>,
     pub cursor_text: Option<Color>,
+    pub pointer_foreground: Option<Color>,
+    pub pointer_background: Option<Color>,
+    pub tektronix_foreground: Option<Color>,
+    pub tektronix_background: Option<Color>,
+    pub highlight_background: Option<Color>,
+    pub tektronix_cursor: Option<Color>,
+    pub highlight_foreground: Option<Color>,
     pub selection_background: Option<Color>,
     pub selection_foreground: Option<Color>,
     pub palette: Vec<Color>,
@@ -326,6 +333,13 @@ struct ColorPatch {
     foreground: Option<Color>,
     cursor: Option<Color>,
     cursor_text: Option<Color>,
+    pointer_foreground: Option<Color>,
+    pointer_background: Option<Color>,
+    tektronix_foreground: Option<Color>,
+    tektronix_background: Option<Color>,
+    highlight_background: Option<Color>,
+    tektronix_cursor: Option<Color>,
+    highlight_foreground: Option<Color>,
     selection_background: Option<Color>,
     selection_foreground: Option<Color>,
     palette: Option<Vec<Color>>,
@@ -462,6 +476,13 @@ impl ColorConfig {
             terminal.cursor = Some(cursor.into());
         }
         terminal.cursor_text = self.cursor_text.map(Into::into);
+        terminal.pointer_foreground = self.pointer_foreground.map(Into::into);
+        terminal.pointer_background = self.pointer_background.map(Into::into);
+        terminal.tektronix_foreground = self.tektronix_foreground.map(Into::into);
+        terminal.tektronix_background = self.tektronix_background.map(Into::into);
+        terminal.highlight_background = self.highlight_background.map(Into::into);
+        terminal.tektronix_cursor = self.tektronix_cursor.map(Into::into);
+        terminal.highlight_foreground = self.highlight_foreground.map(Into::into);
         terminal.selection_background = self.selection_background.map(Into::into);
         terminal.selection_foreground = self.selection_foreground.map(Into::into);
         if !self.palette.is_empty() {
@@ -1422,6 +1443,25 @@ fn apply_partial_colors(colors: &mut ColorConfig, partial: ColorPatch) {
     apply_present(&mut colors.foreground, partial.foreground);
     apply_present(&mut colors.cursor, partial.cursor);
     apply_present(&mut colors.cursor_text, partial.cursor_text);
+    apply_present(&mut colors.pointer_foreground, partial.pointer_foreground);
+    apply_present(&mut colors.pointer_background, partial.pointer_background);
+    apply_present(
+        &mut colors.tektronix_foreground,
+        partial.tektronix_foreground,
+    );
+    apply_present(
+        &mut colors.tektronix_background,
+        partial.tektronix_background,
+    );
+    apply_present(
+        &mut colors.highlight_background,
+        partial.highlight_background,
+    );
+    apply_present(&mut colors.tektronix_cursor, partial.tektronix_cursor);
+    apply_present(
+        &mut colors.highlight_foreground,
+        partial.highlight_foreground,
+    );
     apply_present(
         &mut colors.selection_background,
         partial.selection_background,
