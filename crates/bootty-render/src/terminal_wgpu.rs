@@ -475,7 +475,7 @@ impl TerminalWgpuRenderer {
             view.pan_x.to_bits(),
             view.pan_y.to_bits(),
         ];
-        let atlas_resized_count = self.text_builder.atlas_resized_count();
+        let mut atlas_resized_count = self.text_builder.atlas_resized_count();
         let mut update_frame_cache = true;
         if self.prepared_frame_cache_cooldown > 0 {
             self.prepared_frame_cache_cooldown -= 1;
@@ -492,125 +492,137 @@ impl TerminalWgpuRenderer {
             update_frame_cache = false;
         }
 
-        self.layers.clear();
-        let mut previous_image_resources = std::mem::take(&mut self.image_resources).into_iter();
+        // If the atlas grows mid-build (a new glyph forces a resize), quads cached before the grow
+        // keep pre-resize UVs and would render existing glyphs against the larger atlas, some
+        // sampling empty space and vanishing until the next repaint. The atlas now fits every
+        // glyph, so rebuild once against the final size: cache entries from before the grow miss on
+        // the changed resize count and re-emit correct UVs.
+        let mut build_attempt = 0;
+        loop {
+            build_attempt += 1;
+            self.layers.clear();
+            let mut previous_image_resources =
+                std::mem::take(&mut self.image_resources).into_iter();
 
-        let mut background_batches = std::mem::take(&mut self.background_batch_scratch);
-        let mut text_batches = std::mem::take(&mut self.text_batch_scratch);
-        let mut text_batch_dirty = std::mem::take(&mut self.text_batch_dirty_scratch);
-        background_batches.iter_mut().for_each(Vec::clear);
-        text_batches.iter_mut().for_each(Vec::clear);
-        text_batch_dirty.clear();
-        let mut background_batch_count = 0;
-        let mut text_batch_count = 0;
-        let mut image_vertex_count = 0;
+            let mut background_batches = std::mem::take(&mut self.background_batch_scratch);
+            let mut text_batches = std::mem::take(&mut self.text_batch_scratch);
+            let mut text_batch_dirty = std::mem::take(&mut self.text_batch_dirty_scratch);
+            background_batches.iter_mut().for_each(Vec::clear);
+            text_batches.iter_mut().for_each(Vec::clear);
+            text_batch_dirty.clear();
+            let mut background_batch_count = 0;
+            let mut text_batch_count = 0;
+            let mut image_vertex_count = 0;
 
-        self.text_builder.begin_text_frame();
-        for command in &frame.commands {
-            match command {
-                TerminalRenderCommand::Text(text) => {
-                    push_text_command(
-                        &mut self.layers,
-                        &mut text_batches,
-                        &mut text_batch_dirty,
-                        &mut text_batch_count,
-                        &mut self.text_builder,
-                        text,
-                        raster_ppp,
-                    );
-                }
-                TerminalRenderCommand::Sprite(sprite) => {
-                    let quad = self.text_builder.prepare_sprite_command(sprite, raster_ppp);
-                    push_text_quad(
-                        &mut self.layers,
-                        &mut text_batches,
-                        &mut text_batch_dirty,
-                        &mut text_batch_count,
-                        quad,
-                    );
-                }
-                TerminalRenderCommand::FillRect(fill) => {
-                    push_background_quad(
+            self.text_builder.begin_text_frame();
+            for command in &frame.commands {
+                match command {
+                    TerminalRenderCommand::Text(text) => {
+                        push_text_command(
+                            &mut self.layers,
+                            &mut text_batches,
+                            &mut text_batch_dirty,
+                            &mut text_batch_count,
+                            &mut self.text_builder,
+                            text,
+                            raster_ppp,
+                        );
+                    }
+                    TerminalRenderCommand::Sprite(sprite) => {
+                        let quad = self.text_builder.prepare_sprite_command(sprite, raster_ppp);
+                        push_text_quad(
+                            &mut self.layers,
+                            &mut text_batches,
+                            &mut text_batch_dirty,
+                            &mut text_batch_count,
+                            quad,
+                        );
+                    }
+                    TerminalRenderCommand::FillRect(fill) => {
+                        push_background_quad(
+                            &mut self.layers,
+                            &mut background_batches,
+                            &mut background_batch_count,
+                            render_surface,
+                            TerminalQuadDraw {
+                                rect: fill.rect,
+                                color: fill.color,
+                            },
+                        );
+                    }
+                    TerminalRenderCommand::Decoration(line) => {
+                        push_decoration_command(
+                            &mut self.layers,
+                            &mut background_batches,
+                            &mut background_batch_count,
+                            render_surface,
+                            line,
+                        );
+                    }
+                    TerminalRenderCommand::Cursor(cursor) => push_cursor_background_quads(
                         &mut self.layers,
                         &mut background_batches,
                         &mut background_batch_count,
                         render_surface,
-                        TerminalQuadDraw {
-                            rect: fill.rect,
-                            color: fill.color,
-                        },
-                    );
+                        cursor,
+                    ),
+                    TerminalRenderCommand::Image(image) => {
+                        let previous = previous_image_resources.next().flatten();
+                        let resources = prepare_image_resource(
+                            device,
+                            queue,
+                            render_surface,
+                            image,
+                            &self.image_bind_group_layout,
+                            &self.image_sampler,
+                            previous,
+                        );
+                        image_vertex_count += resources
+                            .as_ref()
+                            .map_or(0, |resources| resources.vertex_count);
+                        let image_layer_index = self.image_resources.len();
+                        self.image_resources.push(resources);
+                        self.layers
+                            .push(TerminalPreparedLayer::Image(image_layer_index));
+                    }
+                    TerminalRenderCommand::KittyVirtualPlacement(_) => {}
                 }
-                TerminalRenderCommand::Decoration(line) => {
-                    push_decoration_command(
-                        &mut self.layers,
-                        &mut background_batches,
-                        &mut background_batch_count,
-                        render_surface,
-                        line,
-                    );
-                }
-                TerminalRenderCommand::Cursor(cursor) => push_cursor_background_quads(
-                    &mut self.layers,
-                    &mut background_batches,
-                    &mut background_batch_count,
-                    render_surface,
-                    cursor,
-                ),
-                TerminalRenderCommand::Image(image) => {
-                    let previous = previous_image_resources.next().flatten();
-                    let resources = prepare_image_resource(
-                        device,
-                        queue,
-                        render_surface,
-                        image,
-                        &self.image_bind_group_layout,
-                        &self.image_sampler,
-                        previous,
-                    );
-                    image_vertex_count += resources
-                        .as_ref()
-                        .map_or(0, |resources| resources.vertex_count);
-                    let image_layer_index = self.image_resources.len();
-                    self.image_resources.push(resources);
-                    self.layers
-                        .push(TerminalPreparedLayer::Image(image_layer_index));
-                }
-                TerminalRenderCommand::KittyVirtualPlacement(_) => {}
             }
-        }
-        self.text_builder.finish_text_frame();
+            self.text_builder.finish_text_frame();
 
-        let background_vertex_count = self.prepare_background_resources(
-            device,
-            queue,
-            &mut background_batches[..background_batch_count],
-        );
-        let text_vertex_count = self.prepare_text_resources(
-            device,
-            queue,
-            render_surface,
-            text_batches[..text_batch_count].iter().map(Vec::as_slice),
-            &text_batch_dirty[..text_batch_count],
-        );
-        self.background_batch_scratch = background_batches;
-        self.text_batch_scratch = text_batches;
-        self.text_batch_dirty_scratch = text_batch_dirty;
+            let background_vertex_count = self.prepare_background_resources(
+                device,
+                queue,
+                &mut background_batches[..background_batch_count],
+            );
+            let text_vertex_count = self.prepare_text_resources(
+                device,
+                queue,
+                render_surface,
+                text_batches[..text_batch_count].iter().map(Vec::as_slice),
+                &text_batch_dirty[..text_batch_count],
+            );
+            self.background_batch_scratch = background_batches;
+            self.text_batch_scratch = text_batches;
+            self.text_batch_dirty_scratch = text_batch_dirty;
 
-        let vertex_count = image_vertex_count + background_vertex_count + text_vertex_count;
-        // If the atlas grew mid-build, glyphs reserved before the grow carry pre-grow UVs; skip
-        // caching so the next frame rebuilds them all against the final atlas size.
-        let grew_during_build = self.text_builder.atlas_resized_count() != atlas_resized_count;
-        if update_frame_cache && !grew_during_build {
-            self.prepared_frame_cache = Some(PreparedTerminalFrameCache {
-                frame: frame.clone(),
-                pixels_per_point_bits,
-                view_bits,
-                atlas_resized_count,
-                vertex_count,
-            });
+            let vertex_count = image_vertex_count + background_vertex_count + text_vertex_count;
+            let grew_during_build = self.text_builder.atlas_resized_count() != atlas_resized_count;
+            if grew_during_build && build_attempt < 2 {
+                atlas_resized_count = self.text_builder.atlas_resized_count();
+                continue;
+            }
+            if update_frame_cache && !grew_during_build {
+                self.prepared_frame_cache = Some(PreparedTerminalFrameCache {
+                    frame: frame.clone(),
+                    pixels_per_point_bits,
+                    view_bits,
+                    atlas_resized_count,
+                    vertex_count,
+                });
+            }
+            break vertex_count;
         }
-        vertex_count
     }
 
     pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'_>) {
