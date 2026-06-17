@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSWindow;
 
 use crate::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig};
 
@@ -139,6 +143,41 @@ pub fn install_macos_app_icon() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn install_macos_app_icon() -> bool {
     true
+}
+
+// macOS automatic window tabbing claims Cmd+T (newWindowForTab:) at the OS level before it reaches
+// the app, which would shadow Bootty's new-tab shortcut. Opt out so the key reaches us. Must run
+// before any window is created, since the class flag is read at window-creation time.
+#[cfg(target_os = "macos")]
+pub fn disable_automatic_window_tabbing() {
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn disable_automatic_window_tabbing() {}
+
+// Sidebar footer hint, using each platform's modifier shorthand and default session shortcuts.
+// `^` is the terminal-idiomatic shorthand for Ctrl.
+#[cfg(target_os = "macos")]
+pub fn sidebar_shortcut_hint() -> &'static str {
+    "⌘1-9 session   ⌘⇧n/p nav   ⌘n new"
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sidebar_shortcut_hint() -> &'static str {
+    "^⇧1-9 session   ^⇧]/[ nav   ^⇧n new"
+}
+
+#[cfg(target_os = "macos")]
+pub fn new_tab_shortcut_hint() -> &'static str {
+    "⌘T"
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn new_tab_shortcut_hint() -> &'static str {
+    "Ctrl+Shift+T"
 }
 
 #[cfg(target_os = "macos")]

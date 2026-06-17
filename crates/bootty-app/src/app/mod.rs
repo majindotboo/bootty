@@ -279,27 +279,54 @@ impl BoottyApp {
             let pane_id = anchor.pane_id.as_deref().unwrap_or_default();
             format!("{terminal_backend:?}:{}:{pane_id}", anchor.session_id)
         });
-        self.terminal_widget
-            .set_transition_key(terminal_transition_key);
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(terminal_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                    Ok(surface) => self.state.record_surface(surface),
-                    Err(error) => self.state.record_render_error(error),
-                }
-                if !self.state.terminal_focused() {
-                    let dim = self.state.config().chrome.unfocused_terminal_dim;
-                    ui.painter().rect_filled(
-                        terminal_rect,
-                        0.0,
-                        egui::Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8),
-                    );
-                }
-            },
+        // A native session whose tabs have all been closed has no pane to attach. Paint an empty
+        // state instead of the terminal widget, which would otherwise hold the closed terminal's
+        // last frame.
+        let native_backend = matches!(
+            self.state.config().multiplexer.backend,
+            crate::config::MultiplexerBackendConfig::Native
         );
+        let has_terminal = !native_backend
+            || self
+                .state
+                .mux()
+                .selected_session_anchor()
+                .is_some_and(|anchor| anchor.pane_id.is_some());
+        if has_terminal {
+            self.terminal_widget
+                .set_transition_key(terminal_transition_key);
+            ui.scope_builder(
+                UiBuilder::new()
+                    .max_rect(terminal_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                |ui| {
+                    match self.terminal_widget.show(ui, self.state.terminal_mut()) {
+                        Ok(surface) => self.state.record_surface(surface),
+                        Err(error) => self.state.record_render_error(error),
+                    }
+                    if !self.state.terminal_focused() {
+                        let dim = self.state.config().chrome.unfocused_terminal_dim;
+                        ui.painter().rect_filled(
+                            terminal_rect,
+                            0.0,
+                            egui::Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8),
+                        );
+                    }
+                },
+            );
+        } else {
+            self.terminal_widget.reset();
+            ui.painter_at(terminal_rect).text(
+                terminal_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!(
+                    "No open tabs — press {} to open one",
+                    crate::platform::new_tab_shortcut_hint()
+                ),
+                egui::FontId::proportional(13.0),
+                palette.muted,
+            );
+        }
     }
 
     fn show_new_mux_session_dialog(&mut self, ctx: &egui::Context) {

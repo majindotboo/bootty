@@ -637,10 +637,8 @@ impl AppState {
             terminal_scale_factor,
         );
         match self.terminal.child_exited() {
-            Ok(true) => {
-                effects.push(AppEffect::CloseWindow);
-                return effects;
-            }
+            // A shell exiting closes its pane, cascading to the tab, instead of the whole window.
+            Ok(true) => self.close_active_pane(),
             Ok(false) => {}
             Err(error) => self.last_error = Some(error.to_string()),
         }
@@ -1166,12 +1164,30 @@ impl AppState {
         }
     }
 
+    // Close the focused pane (cmd+w or its shell exiting) and let the mux cascade to the tab. The
+    // active terminal is dropped here so its PTY is reaped; sync_mux_anchor then attaches whatever
+    // pane the mux selected next (or idle when the session has no tabs left).
+    fn close_active_pane(&mut self) {
+        let session_id = self.mux.selected_session().unwrap_or("local").to_owned();
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::ClosePane { session_id },
+        );
+        self.terminal.discard_active_pane();
+    }
+
     fn apply_mux_key_action(&mut self, action: MuxKeyAction) {
         if self.apply_session_navigation_action(action) {
             return;
         }
         if let MuxKeyAction::MoveSession(delta) = action {
             self.move_selected_session(delta);
+            return;
+        }
+        if matches!(action, MuxKeyAction::ClosePane) {
+            self.close_active_pane();
             return;
         }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
@@ -1209,6 +1225,9 @@ impl AppState {
             MuxKeyAction::KillPane => MuxCommand::KillPane {
                 session_id: selected_session,
             },
+            MuxKeyAction::ClosePane => {
+                unreachable!("close pane is handled before the command match")
+            }
             MuxKeyAction::TogglePaneZoom => MuxCommand::TogglePaneZoom {
                 session_id: selected_session,
             },
@@ -1712,6 +1731,21 @@ mod tests {
         );
 
         assert_eq!(effects, vec![AppEffect::CloseWindow]);
+    }
+
+    #[test]
+    fn new_tab_action_adds_a_window() {
+        let mut state = test_state();
+        let before = state.mux().selected_session_windows().len();
+        let selected = state.mux().selected_session().map(str::to_owned);
+
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+
+        let after = state.mux().selected_session_windows().len();
+        assert!(
+            after > before,
+            "before={before} after={after} selected={selected:?}"
+        );
     }
 
     #[test]

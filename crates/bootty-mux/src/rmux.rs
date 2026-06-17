@@ -91,6 +91,7 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
             | MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
             | MuxCommand::KillPane { .. }
+            | MuxCommand::ClosePane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {
                 anyhow::bail!("rmux backend does not support mux command {command:?}");
             }

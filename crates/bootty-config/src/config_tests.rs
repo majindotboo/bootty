@@ -1,8 +1,13 @@
 use super::*;
 use crate::color::Color;
+use bootty_winit::input_binding::{
+    BindingAction, BindingElement, BindingTrigger, parse_binding_elements,
+};
+use bootty_winit::input_binding_set::BindingSet;
 use indoc::indoc;
 use proptest::prelude::*;
 use rstest::rstest;
+use std::str::FromStr;
 use std::{collections::BTreeMap, fs};
 
 struct ConfigSandbox {
@@ -534,6 +539,29 @@ fn keybind_clear_directive_replaces_existing_bindings() {
 }
 
 #[test]
+fn keybind_entries_without_clear_layer_on_defaults() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        keybind = ["cmd+b=esc:090;8~"]
+    "#});
+
+    assert!(
+        config.input.keybind.iter().any(|k| k == "cmd+b=esc:090;8~"),
+        "user binding is kept"
+    );
+    assert!(
+        config
+            .input
+            .keybind
+            .iter()
+            .any(|k| k == "shift+Enter=text:\\n"),
+        "defaults the user did not list are retained"
+    );
+}
+
+#[test]
 fn sidebar_keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
         version = 1
@@ -553,4 +581,98 @@ fn config_accepts_native_multiplexer_backend() {
     "#});
 
     assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Native);
+}
+
+// The platform default tables are cfg-selected, so these tests address both tables directly to
+// validate the Linux/Windows table from any build host.
+fn binding_triggers(entries: &[&str]) -> Vec<BindingTrigger> {
+    entries
+        .iter()
+        .map(|entry| {
+            parse_binding_elements(entry)
+                .unwrap_or_else(|error| {
+                    panic!("default keybind {entry:?} failed to parse: {error:?}")
+                })
+                .into_iter()
+                .rev()
+                .find_map(|element| match element {
+                    BindingElement::Binding(binding) => Some(binding.trigger),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("default keybind {entry:?} has no binding trigger"))
+        })
+        .collect()
+}
+
+// Every shipped default keybind must parse; catches an invalid key token or action name (e.g. the
+// PageUp/PageDown additions or a future typo) before it reaches users.
+#[test]
+fn default_keybind_tables_parse() {
+    let tables: &[&[&str]] = &[
+        common_keybinds_macos(),
+        common_keybinds_other(),
+        native_keybinds(),
+        native_scroll_keybinds_macos(),
+        native_scroll_keybinds_other(),
+        tmux_keybinds(),
+    ];
+    for table in tables {
+        let mut set = BindingSet::default();
+        for entry in *table {
+            set.parse_and_put(entry).unwrap_or_else(|error| {
+                panic!("default keybind {entry:?} failed to parse: {error:?}")
+            });
+        }
+    }
+}
+
+// Root cause of the Linux/Windows breakage: a `cmd`/`super` binding maps to the Super/Windows key,
+// which the desktop environment swallows. The non-macOS defaults must never require it.
+#[test]
+fn non_macos_default_keybinds_never_require_super() {
+    let mut entries = Vec::new();
+    entries.extend_from_slice(common_keybinds_other());
+    entries.extend_from_slice(native_scroll_keybinds_other());
+    for trigger in binding_triggers(&entries) {
+        assert!(
+            !trigger.mods.command,
+            "non-macOS default {trigger:?} requires the Super key"
+        );
+    }
+}
+
+// A repeated trigger silently shadows another action; the hand-authored tables must keep every
+// trigger unique (the `cmd+w`/`cmd+shift+w` style collisions that motivated separate tables).
+#[test]
+fn common_keybind_triggers_are_unique_per_platform() {
+    for table in [common_keybinds_macos(), common_keybinds_other()] {
+        let triggers = binding_triggers(table);
+        for (index, trigger) in triggers.iter().enumerate() {
+            assert!(
+                !triggers[index + 1..].contains(trigger),
+                "duplicate trigger {trigger:?} in default keybinds"
+            );
+        }
+    }
+}
+
+// Known-answer: the Linux/Windows session shortcuts resolve to the WezTerm-style Ctrl+Shift combos.
+#[test]
+fn non_macos_session_shortcuts_use_ctrl_shift() {
+    let mut set = BindingSet::default();
+    for entry in common_keybinds_other() {
+        set.parse_and_put(entry).unwrap();
+    }
+    assert_eq!(
+        set.get_trigger(&BindingAction::NewMuxSession),
+        Some(&BindingTrigger::from_str("ctrl+shift+n").unwrap())
+    );
+    assert_eq!(
+        set.get_trigger(&BindingAction::SelectSession(1)),
+        Some(&BindingTrigger::from_str("ctrl+shift+1").unwrap())
+    );
+    assert_eq!(
+        set.get_trigger(&BindingAction::NextSession),
+        Some(&BindingTrigger::from_str("ctrl+shift+]").unwrap())
+    );
 }

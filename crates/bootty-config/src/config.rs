@@ -505,6 +505,15 @@ impl InputConfig {
 }
 
 fn common_keybinds() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        common_keybinds_macos()
+    } else {
+        common_keybinds_other()
+    }
+}
+
+// macOS uses the Command key (winit reports it as Super) for app/session shortcuts.
+fn common_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+shift+r=reload_config",
         "cmd+-=decrease_font_size:1",
@@ -522,6 +531,7 @@ fn common_keybinds() -> &'static [&'static str] {
         "cmd+o=toggle_sidebar_focus",
         "cmd+shift+e=toggle_sidebar_visibility",
         "cmd+n=new_mux_session",
+        "cmd+t=new_tab",
         "ctrl+Tab=last_session",
         "ctrl+shift+Tab=last_session",
         "cmd+shift+n=next_session",
@@ -540,6 +550,48 @@ fn common_keybinds() -> &'static [&'static str] {
         "cmd+8=select_session:8",
         "cmd+9=select_session:9",
         "cmd+alt+x=ditch_session",
+    ]
+}
+
+// Linux/Windows use Ctrl+Shift like WezTerm, because the Super/Windows key is reserved by the
+// desktop environment and never reaches the app. Hand-authored (not a cmd->ctrl+shift swap):
+// where macOS pairs a bare-cmd and a cmd+shift binding (w, n, p), the variants are reassigned to
+// keep every Ctrl+Shift trigger unique.
+fn common_keybinds_other() -> &'static [&'static str] {
+    &[
+        "ctrl+shift+r=reload_config",
+        "ctrl+-=decrease_font_size:1",
+        "ctrl+==increase_font_size:1",
+        "ctrl++=increase_font_size:1",
+        "ctrl+0=reset_font_size",
+        "performable:ctrl+shift+v=paste_from_clipboard",
+        "shift+Enter=text:\\n",
+        "ctrl+shift+alt+n=new_window",
+        "ctrl+shift+alt+w=close_window",
+        "ctrl+shift+w=close_surface",
+        "ctrl+shift+q=quit",
+        "ctrl+shift+alt+f=toggle_fullscreen",
+        "ctrl+shift+p=session_picker",
+        "ctrl+shift+o=toggle_sidebar_focus",
+        "ctrl+shift+e=toggle_sidebar_visibility",
+        "ctrl+shift+n=new_mux_session",
+        "ctrl+shift+t=new_tab",
+        "ctrl+Tab=last_session",
+        "ctrl+shift+Tab=last_session",
+        "ctrl+shift+]=next_session",
+        "ctrl+shift+[=previous_session",
+        "ctrl+shift+,=move_session:-1",
+        "ctrl+shift+.=move_session:1",
+        "ctrl+shift+1=select_session:1",
+        "ctrl+shift+2=select_session:2",
+        "ctrl+shift+3=select_session:3",
+        "ctrl+shift+4=select_session:4",
+        "ctrl+shift+5=select_session:5",
+        "ctrl+shift+6=select_session:6",
+        "ctrl+shift+7=select_session:7",
+        "ctrl+shift+8=select_session:8",
+        "ctrl+shift+9=select_session:9",
+        "ctrl+shift+alt+x=ditch_session",
     ]
 }
 
@@ -599,10 +651,34 @@ fn native_keybinds() -> &'static [&'static str] {
         "alt+o=next_pane",
         "alt+x=kill_pane",
         "alt+z=toggle_pane_zoom",
+    ]
+}
+
+// Scroll shortcuts differ per OS: macOS scrolls with Command, Linux/Windows follow the WezTerm
+// convention of Shift+PageUp/PageDown (page) and Ctrl+Shift+Arrows (line).
+fn native_scroll_keybinds() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        native_scroll_keybinds_macos()
+    } else {
+        native_scroll_keybinds_other()
+    }
+}
+
+fn native_scroll_keybinds_macos() -> &'static [&'static str] {
+    &[
         "cmd+y=scroll_page_up",
         "cmd+shift+y=scroll_page_down",
         "cmd+ArrowUp=scroll_page_lines:-1",
         "cmd+ArrowDown=scroll_page_lines:1",
+    ]
+}
+
+fn native_scroll_keybinds_other() -> &'static [&'static str] {
+    &[
+        "shift+PageUp=scroll_page_up",
+        "shift+PageDown=scroll_page_down",
+        "ctrl+shift+ArrowUp=scroll_page_lines:-1",
+        "ctrl+shift+ArrowDown=scroll_page_lines:1",
     ]
 }
 
@@ -676,7 +752,11 @@ impl Default for InputConfig {
             keybind: owned_keybinds(common_keybinds()),
             sidebar_keybind: owned_keybinds(sidebar_keybinds()),
             backend_keybinds: BackendKeybindConfig {
-                native: owned_keybinds(native_keybinds()),
+                native: {
+                    let mut native = owned_keybinds(native_keybinds());
+                    native.extend(owned_keybinds(native_scroll_keybinds()));
+                    native
+                },
                 rmux: Vec::new(),
                 tmux: owned_keybinds(tmux_keybinds()),
                 zellij: Vec::new(),
@@ -1275,10 +1355,10 @@ fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
     apply_value(&mut input.modifier_remap, partial.modifier_remap);
     apply_value(&mut input.macos_option_as_alt, partial.macos_option_as_alt);
     if let Some(value) = partial.keybind {
-        input.keybind = apply_keybind_entries(value);
+        input.keybind = merge_keybind_entries(&input.keybind, value);
     }
     if let Some(value) = partial.sidebar_keybind {
-        input.sidebar_keybind = apply_keybind_entries(value);
+        input.sidebar_keybind = merge_keybind_entries(&input.sidebar_keybind, value);
     }
     if let Some(value) = partial.backend_keybind {
         apply_partial_backend_keybind(&mut input.backend_keybinds, value);
@@ -1290,24 +1370,33 @@ fn apply_partial_backend_keybind(
     partial: BackendKeybindPatch,
 ) {
     if let Some(value) = partial.native {
-        keybinds.native = apply_keybind_entries(value);
+        keybinds.native = merge_keybind_entries(&keybinds.native, value);
     }
     if let Some(value) = partial.rmux {
-        keybinds.rmux = apply_keybind_entries(value);
+        keybinds.rmux = merge_keybind_entries(&keybinds.rmux, value);
     }
     if let Some(value) = partial.tmux {
-        keybinds.tmux = apply_keybind_entries(value);
+        keybinds.tmux = merge_keybind_entries(&keybinds.tmux, value);
     }
     if let Some(value) = partial.zellij {
-        keybinds.zellij = apply_keybind_entries(value);
+        keybinds.zellij = merge_keybind_entries(&keybinds.zellij, value);
     }
 }
 
-fn apply_keybind_entries(entries: Vec<String>) -> Vec<String> {
-    entries
-        .into_iter()
-        .filter(|entry| entry != "clear")
-        .collect()
+// User keybinds layer on top of the defaults so new default bindings reach existing configs;
+// later entries override earlier ones for the same trigger. A "clear" entry opts out of the
+// defaults entirely, keeping only the user's bindings (and individual defaults can be dropped with
+// an `=unbind` action).
+fn merge_keybind_entries(defaults: &[String], entries: Vec<String>) -> Vec<String> {
+    if entries.iter().any(|entry| entry == "clear") {
+        return entries
+            .into_iter()
+            .filter(|entry| entry != "clear")
+            .collect();
+    }
+    let mut merged = defaults.to_vec();
+    merged.extend(entries);
+    merged
 }
 
 fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {

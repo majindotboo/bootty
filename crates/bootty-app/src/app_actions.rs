@@ -50,6 +50,7 @@ pub enum MuxKeyAction {
     SelectPane(MuxDirection),
     NextPane,
     KillPane,
+    ClosePane,
     TogglePaneZoom,
     NextSession,
     PreviousSession,
@@ -304,25 +305,31 @@ pub fn split_app_actions_for_bindings(
     (terminal_events, actions)
 }
 
+// Safety net for new-session even when keybinds are cleared: Cmd+N on macOS, Ctrl+Shift+N
+// elsewhere (matching the platform default tables).
 pub fn builtin_app_action_for_key(
     key: egui::Key,
     modifiers: egui::Modifiers,
 ) -> Option<KeybindAction> {
-    (key == egui::Key::N
-        && (modifiers.command || modifiers.mac_cmd)
-        && !modifiers.alt
-        && !modifiers.ctrl
-        && !modifiers.shift)
-        .then_some(KeybindAction::App(AppAction::NewMuxSession))
+    let matches = if cfg!(target_os = "macos") {
+        (modifiers.command || modifiers.mac_cmd)
+            && !modifiers.alt
+            && !modifiers.ctrl
+            && !modifiers.shift
+    } else {
+        // egui inflates `command` from `ctrl` off macOS, so it is not checked here.
+        modifiers.ctrl && modifiers.shift && !modifiers.alt
+    };
+    (key == egui::Key::N && matches).then_some(KeybindAction::App(AppAction::NewMuxSession))
 }
 
 pub fn builtin_app_action_for_direct_key(input: KeyInput) -> Option<KeybindAction> {
-    (input.key == TerminalKey::N
-        && input.mods.command
-        && !input.mods.alt
-        && !input.mods.ctrl
-        && !input.mods.shift)
-        .then_some(KeybindAction::App(AppAction::NewMuxSession))
+    let matches = if cfg!(target_os = "macos") {
+        input.mods.command && !input.mods.alt && !input.mods.ctrl && !input.mods.shift
+    } else {
+        input.mods.ctrl && input.mods.shift && !input.mods.alt && !input.mods.command
+    };
+    (input.key == TerminalKey::N && matches).then_some(KeybindAction::App(AppAction::NewMuxSession))
 }
 
 fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
@@ -332,9 +339,10 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::NewWindow => Ok(KeybindAction::App(AppAction::NewWindow)),
         BindingAction::NewMuxSession => Ok(KeybindAction::App(AppAction::NewMuxSession)),
         BindingAction::SessionPicker => Ok(KeybindAction::App(AppAction::SessionPicker)),
-        BindingAction::CloseWindow | BindingAction::CloseSurface | BindingAction::Quit => {
+        BindingAction::CloseWindow | BindingAction::Quit => {
             Ok(KeybindAction::App(AppAction::Close))
         }
+        BindingAction::CloseSurface => Ok(KeybindAction::Mux(MuxKeyAction::ClosePane)),
         BindingAction::ToggleFullscreen => Ok(KeybindAction::App(AppAction::ToggleFullscreen)),
         BindingAction::ToggleSidebarFocus => Ok(KeybindAction::App(AppAction::ToggleSidebarFocus)),
         BindingAction::ToggleSidebarVisibility => {
@@ -474,7 +482,9 @@ fn binding_triggers_for_egui_key(
         shift: modifiers.shift,
         ctrl: modifiers.ctrl,
         alt: modifiers.alt,
-        command: modifiers.command || modifiers.mac_cmd,
+        // egui aliases `command` to `ctrl` off macOS, which would spuriously set `command` for any
+        // Ctrl press and break Ctrl / Ctrl+Shift bindings. Only treat the real Cmd key as command.
+        command: cfg!(target_os = "macos") && (modifiers.command || modifiers.mac_cmd),
     };
     let Some(terminal_key) = terminal_key(key) else {
         return Vec::new();
@@ -596,18 +606,26 @@ mod tests {
     }
 
     #[test]
-    fn builtin_cmd_n_creates_mux_session_not_terminal_input() {
-        let action = builtin_app_action_for_key(
-            egui::Key::N,
+    fn builtin_new_session_shortcut_creates_mux_session_not_terminal_input() {
+        let modifiers = if cfg!(target_os = "macos") {
             egui::Modifiers {
                 command: true,
                 ..Default::default()
-            },
-        );
+            }
+        } else {
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            }
+        };
+
+        let action = builtin_app_action_for_key(egui::Key::N, modifiers);
 
         assert_eq!(action, Some(KeybindAction::App(AppAction::NewMuxSession)));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn builtin_macos_cmd_n_creates_mux_session_not_terminal_input() {
         let action = builtin_app_action_for_key(
@@ -622,13 +640,23 @@ mod tests {
     }
 
     #[test]
-    fn builtin_direct_cmd_n_creates_mux_session_not_terminal_input() {
-        let action = builtin_app_action_for_direct_key(KeyInput {
-            key: TerminalKey::N,
-            mods: crate::terminal::KeyMods {
+    fn builtin_direct_new_session_shortcut_creates_mux_session_not_terminal_input() {
+        let mods = if cfg!(target_os = "macos") {
+            crate::terminal::KeyMods {
                 command: true,
                 ..Default::default()
-            },
+            }
+        } else {
+            crate::terminal::KeyMods {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            }
+        };
+
+        let action = builtin_app_action_for_direct_key(KeyInput {
+            key: TerminalKey::N,
+            mods,
             repeat: false,
             utf8: Some("n"),
             unshifted: Some('n'),
@@ -638,7 +666,16 @@ mod tests {
     }
 
     #[test]
-    fn split_app_actions_consumes_text_paired_with_macos_cmd_n() {
+    fn split_app_actions_consumes_text_paired_with_new_session_shortcut() {
+        let modifiers = if cfg!(target_os = "macos") {
+            egui::Modifiers::MAC_CMD
+        } else {
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            }
+        };
         let mut bindings = AppKeyBindings::default();
         let (terminal_events, actions) = split_app_actions_for_bindings(
             &mut bindings,
@@ -648,7 +685,7 @@ mod tests {
                     physical_key: None,
                     pressed: true,
                     repeat: false,
-                    modifiers: egui::Modifiers::MAC_CMD,
+                    modifiers,
                 },
                 egui::Event::Text("~2".to_owned()),
                 egui::Event::Text("2~".to_owned()),
@@ -657,7 +694,7 @@ mod tests {
                     physical_key: None,
                     pressed: false,
                     repeat: false,
-                    modifiers: egui::Modifiers::MAC_CMD,
+                    modifiers,
                 },
             ],
         );
@@ -672,8 +709,26 @@ mod tests {
 
     #[test]
     fn split_app_actions_consumes_paste_event_paired_with_paste_binding() {
+        let (keybind, modifiers) = if cfg!(target_os = "macos") {
+            (
+                "performable:cmd+v=paste_from_clipboard",
+                egui::Modifiers {
+                    command: true,
+                    ..Default::default()
+                },
+            )
+        } else {
+            (
+                "performable:ctrl+shift+v=paste_from_clipboard",
+                egui::Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+            )
+        };
         let mut bindings = AppKeyBindings::from_config(&InputConfig {
-            keybind: vec!["performable:cmd+v=paste_from_clipboard".to_owned()],
+            keybind: vec![keybind.to_owned()],
             ..Default::default()
         })
         .unwrap();
@@ -685,10 +740,7 @@ mod tests {
                     physical_key: None,
                     pressed: true,
                     repeat: false,
-                    modifiers: egui::Modifiers {
-                        command: true,
-                        ..Default::default()
-                    },
+                    modifiers,
                 },
                 egui::Event::Paste("clipboard".to_owned()),
             ],
@@ -758,6 +810,10 @@ mod tests {
         );
     }
 
+    // macOS-only: dispatches `cmd+…` bindings through the egui path, where the primary modifier is
+    // representable as `command`. Off macOS egui aliases `command` to `ctrl`, so the primary
+    // modifier is Ctrl+Shift instead (covered by the platform-aware tests above).
+    #[cfg(target_os = "macos")]
     #[test]
     fn app_keybindings_route_escape_and_text_actions_to_terminal_bytes() {
         let mut bindings = AppKeyBindings::from_config(&InputConfig {
@@ -872,5 +928,26 @@ mod tests {
 
         assert!(error.contains("unsupported keybind"));
         assert!(error.contains("select_all"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_t_resolves_to_new_tab_in_default_bindings() {
+        let keybinds = InputConfig::default()
+            .keybinds_for_backend(crate::config::MultiplexerBackendConfig::Native);
+        let mut bindings = AppKeyBindings::from_keybinds(&keybinds).unwrap();
+
+        let action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::T,
+            mods: crate::terminal::KeyMods {
+                command: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("t"),
+            unshifted: Some('t'),
+        });
+
+        assert_eq!(action, Some(KeybindAction::Mux(MuxKeyAction::NewTab)));
     }
 }

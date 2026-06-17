@@ -401,6 +401,8 @@ physical_keys! {
     "Digit0" | "digit_0" => TerminalKey::Digit0,
     "ArrowUp" | "arrow_up" => TerminalKey::ArrowUp,
     "ArrowDown" | "arrow_down" => TerminalKey::ArrowDown,
+    "PageUp" | "page_up" => TerminalKey::PageUp,
+    "PageDown" | "page_down" => TerminalKey::PageDown,
     "Quote" | "quote" => TerminalKey::Quote,
     "Enter" | "enter" => TerminalKey::Enter,
     "Tab" | "tab" => TerminalKey::Tab,
