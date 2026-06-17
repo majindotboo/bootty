@@ -105,6 +105,7 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
             | MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
             | MuxCommand::KillPane { .. }
+            | MuxCommand::ClosePane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {
                 anyhow::bail!("tmux backend does not support mux command {command:?}");
             }

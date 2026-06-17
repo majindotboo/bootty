@@ -242,6 +242,11 @@ impl BackendPaneTerminal {
         };
 
         if backend == MuxBackendKind::Native {
+            // A native session whose tabs have all been closed resolves to a session-level target
+            // with no pane; it has no shell to attach, so it renders as idle.
+            if !matches!(target, MuxPaneTarget::Pane { .. }) {
+                return Ok(ActiveTerminalRuntime::idle());
+            }
             if let Some(mut terminal) = self.native_terminals.remove(target) {
                 terminal.resize(self.geometry)?;
                 return Ok(terminal);
@@ -297,10 +302,14 @@ impl BackendPaneTerminal {
     }
 
     pub fn child_exited(&mut self) -> Result<bool> {
-        if !self.terminal.child_exited()? {
-            return Ok(false);
-        }
-        Ok(false)
+        self.terminal.child_exited()
+    }
+
+    // Drop the active pane's terminal (its PTY is killed on drop) and forget its target, so the next
+    // sync_mux_anchor attaches the surviving pane instead of parking the closed one.
+    pub fn discard_active_pane(&mut self) {
+        self.terminal = ActiveTerminalRuntime::idle();
+        self.active_target = None;
     }
 
     fn clear_terminal(&mut self) {

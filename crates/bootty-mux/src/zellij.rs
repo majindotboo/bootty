@@ -95,6 +95,7 @@ impl<R: CommandRunner> MuxBackend for ZellijBackend<R> {
             | MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
             | MuxCommand::KillPane { .. }
+            | MuxCommand::ClosePane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {
                 anyhow::bail!("zellij backend does not support mux command {command:?}");
             }

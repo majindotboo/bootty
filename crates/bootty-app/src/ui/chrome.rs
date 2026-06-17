@@ -1145,7 +1145,7 @@ fn paint_sidebar_footer(
     painter.text(
         Pos2::new(rect.min.x + 14.0, rect.max.y - 18.0),
         egui::Align2::LEFT_CENTER,
-        "⌘1-9 session   ⌘⇧n/p nav   ⌘n new",
+        crate::platform::sidebar_shortcut_hint(),
         egui::FontId::monospace(11.0),
         palette.muted,
     );

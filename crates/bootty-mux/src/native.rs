@@ -230,6 +230,51 @@ impl NativeMuxState {
         }
     }
 
+    // Close the active pane; when it was the last pane in its window, cascade to remove the window
+    // (tab). A session left with no windows stays in the sidebar as an empty session.
+    fn close_active_pane(&mut self, session_id: &str) {
+        let Some(window) = self.active_window_mut(session_id) else {
+            return;
+        };
+        let Some(index) = window
+            .panes
+            .iter()
+            .position(|pane| pane.id == window.active_pane_id)
+        else {
+            return;
+        };
+        window.panes.remove(index);
+        if !window.panes.is_empty() {
+            window.active_pane_id = window.panes[index.min(window.panes.len() - 1)].id.clone();
+            self.active_session_id = session_id.to_owned();
+            return;
+        }
+        self.close_active_window(session_id);
+    }
+
+    fn close_active_window(&mut self, session_id: &str) {
+        let Some(session) = self.active_session_mut(session_id) else {
+            return;
+        };
+        let Some(index) = session
+            .windows
+            .iter()
+            .position(|window| window.id == session.active_window_id)
+        else {
+            return;
+        };
+        session.windows.remove(index);
+        for (position, window) in session.windows.iter_mut().enumerate() {
+            window.index = position as u32 + 1;
+        }
+        session.active_window_id = session
+            .windows
+            .get(index.min(session.windows.len().saturating_sub(1)))
+            .map(|window| window.id.clone())
+            .unwrap_or_default();
+        self.active_session_id = session_id.to_owned();
+    }
+
     fn snapshot(&self) -> MuxSnapshot {
         MuxSnapshot {
             active_session_id: (!self.active_session_id.is_empty())
@@ -387,6 +432,7 @@ impl MuxBackend for NativeBackend {
             },
             MuxCommand::SelectNextPane { session_id } => state.select_relative_pane(&session_id, 1),
             MuxCommand::KillPane { session_id } => state.kill_active_pane(&session_id),
+            MuxCommand::ClosePane { session_id } => state.close_active_pane(&session_id),
             MuxCommand::TogglePaneZoom { .. } => {}
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
@@ -442,5 +488,77 @@ mod tests {
         assert_eq!(snapshot.sessions.len(), 2);
         assert_eq!(snapshot.sessions[1].name, "renamed");
         assert_eq!(snapshot.sessions[1].anchor.cwd.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn close_pane_command_removes_last_tab_and_leaves_session_without_a_pane() {
+        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "local".to_owned(),
+            })
+            .unwrap();
+
+        let snapshot = backend.snapshot().unwrap();
+        assert_eq!(
+            snapshot.sessions.len(),
+            1,
+            "empty session stays in the sidebar"
+        );
+        assert!(
+            snapshot.sessions[0].windows.is_empty(),
+            "its last tab is gone"
+        );
+        // No pane means sync_mux_anchor renders idle instead of spawning a fresh shell.
+        assert!(snapshot.sessions[0].anchor.pane_id.is_none());
+    }
+
+    #[test]
+    fn close_pane_in_a_split_tab_keeps_the_tab() {
+        let mut state = NativeMuxState::new();
+        state.split_pane("local");
+
+        state.close_active_pane("local");
+
+        let session = &state.sessions[0];
+        assert_eq!(session.windows.len(), 1);
+        assert_eq!(session.windows[0].panes.len(), 1);
+    }
+
+    #[test]
+    fn new_window_revives_an_empty_session() {
+        let mut state = NativeMuxState::new();
+        state.close_active_pane("local");
+        assert!(state.sessions[0].windows.is_empty());
+
+        state.new_window("local");
+
+        let session = &state.sessions[0];
+        assert_eq!(session.windows.len(), 1);
+        assert_eq!(session.active_window_id, "tab-1");
+        assert_eq!(session.windows[0].panes.len(), 1);
+    }
+
+    #[test]
+    fn close_pane_on_last_pane_removes_the_tab_and_selects_a_neighbor() {
+        let mut state = NativeMuxState::new();
+        state.new_window("local");
+        state.new_window("local");
+
+        state.close_active_pane("local");
+
+        let session = &state.sessions[0];
+        assert_eq!(session.windows.len(), 2);
+        assert_eq!(session.active_window_id, "tab-2");
+        assert_eq!(
+            session
+                .windows
+                .iter()
+                .map(|window| window.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "remaining tabs are reindexed"
+        );
     }
 }

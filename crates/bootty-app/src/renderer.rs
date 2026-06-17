@@ -64,6 +64,14 @@ impl TerminalWidget {
         self.terminal_cursor_icon = icon;
     }
 
+    // Drop the cached frame and transition state so an empty session stops painting the closed
+    // terminal and the next tab starts from a clean slate.
+    pub fn reset(&mut self) {
+        self.render_cache.clear();
+        self.transition_key = None;
+        self.transition_pending = false;
+    }
+
     pub fn is_zoomed(&self) -> bool {
         self.view.is_zoomed()
     }

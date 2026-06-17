@@ -14,10 +14,14 @@ use crate::{
     app::BoottyApp,
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, direct_key_input_from_winit_event},
-    platform::install_macos_app_icon,
+    platform::{disable_automatic_window_tabbing, install_macos_app_icon},
 };
 
 pub fn run(options: eframe::NativeOptions, config: BoottyConfig) -> Result<()> {
+    // Must run before any window is created (the flag is read at window-creation time), otherwise
+    // macOS automatic window tabbing keeps the Cmd+T key equivalent and the keypress never reaches
+    // the app.
+    disable_automatic_window_tabbing();
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .context("create bootty event loop")?;
