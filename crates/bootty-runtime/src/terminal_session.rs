@@ -6,7 +6,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver, Sender, SyncSender},
     },
     thread,
     time::{Duration, Instant},
@@ -165,6 +165,7 @@ enum TerminalCommand {
     MouseViewportScroll {
         delta: isize,
     },
+    DiscardPendingOutput(SyncSender<()>),
 }
 impl TerminalSession {
     pub fn new(geometry: TerminalGeometry) -> Result<Self> {
@@ -299,6 +300,14 @@ impl TerminalSession {
 
     pub fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.send_command(TerminalCommand::MouseViewportScroll { delta })
+    }
+
+    pub fn discard_pending_output(&mut self) -> Result<()> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::DiscardPendingOutput(done_tx))?;
+        done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("terminal worker stopped before discarding output"))
     }
 
     pub fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
@@ -579,6 +588,10 @@ impl TerminalWorker {
                         self.write_output_buf();
                     }
                 }
+                TerminalCommand::DiscardPendingOutput(done) => {
+                    self.discard_pending_output_queue();
+                    let _ = done.send(());
+                }
                 TerminalCommand::RawInput(bytes) => {
                     self.mark_input_fast_path();
                     self.engine.scroll_viewport_bottom();
@@ -602,6 +615,23 @@ impl TerminalWorker {
             );
         }
         stats
+    }
+
+    fn discard_pending_output_queue(&mut self) {
+        self.pending_pty.clear();
+        loop {
+            match self.pty_rx.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pty_disconnected = true;
+                    break;
+                }
+            }
+        }
+        self.pending_pty_len.store(0, Ordering::Relaxed);
+        self.has_unpublished_frame = false;
+        self.last_terminal_change = None;
     }
 
     fn collect_pty(&mut self) -> bool {

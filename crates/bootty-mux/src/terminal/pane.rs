@@ -4,6 +4,7 @@ use std::{
     ffi::OsStr,
     hash::{Hash, Hasher},
     path::Path,
+    process::Command,
     sync::Arc,
 };
 
@@ -56,6 +57,12 @@ pub trait TerminalRuntime: TerminalRenderSource {
     fn drain_pty(&mut self) -> DrainStats;
     fn pending_pty_len(&self) -> usize;
     fn child_exited(&mut self) -> Result<bool>;
+    fn tty_name(&self) -> Option<&str> {
+        None
+    }
+    fn discard_pending_output(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn set_colors(
         &mut self,
         colors: bootty_terminal::terminal_engine::TerminalColorConfig,
@@ -136,6 +143,14 @@ impl TerminalRuntime for TerminalSession {
         Self::child_exited(self)
     }
 
+    fn tty_name(&self) -> Option<&str> {
+        Self::tty_name(self)
+    }
+
+    fn discard_pending_output(&mut self) -> Result<()> {
+        Self::discard_pending_output(self)
+    }
+
     fn set_colors(
         &mut self,
         colors: bootty_terminal::terminal_engine::TerminalColorConfig,
@@ -213,6 +228,17 @@ impl BackendPaneTerminal {
         }
 
         let target = anchor.cloned().map(MuxPaneTarget::from);
+        if self.backend == MuxBackendKind::Tmux
+            && backend == MuxBackendKind::Tmux
+            && target.is_some()
+            && self.active_target.is_some()
+            && self
+                .switch_tmux_client(target.as_ref().expect("target checked above"))
+                .is_ok()
+        {
+            self.active_target = target;
+            return Ok(());
+        }
         self.park_native_terminal();
         let terminal = self
             .start_terminal(backend, target.as_ref())
@@ -303,6 +329,24 @@ impl BackendPaneTerminal {
 
     pub fn child_exited(&mut self) -> Result<bool> {
         self.terminal.child_exited()
+    }
+
+    fn switch_tmux_client(&mut self, target: &MuxPaneTarget) -> Result<()> {
+        let tty = self
+            .terminal
+            .tty_name()
+            .ok_or_else(|| anyhow::anyhow!("active tmux attach client tty unavailable"))?
+            .to_owned();
+        self.terminal.discard_pending_output()?;
+        let status = Command::new(resolve_launch_program("tmux")?)
+            .args(["switch-client", "-c", &tty, "-t", target.session_id()])
+            .env_remove("TMUX")
+            .env_remove("ZELLIJ")
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tmux switch-client failed with status {status}");
+        }
+        Ok(())
     }
 
     // Drop the active pane's terminal (its PTY is killed on drop) and forget its target, so the next
