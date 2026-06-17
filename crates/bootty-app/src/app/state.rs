@@ -101,6 +101,7 @@ pub enum AppEffect {
     SetTerminalCursorIcon(egui::CursorIcon),
     SetWindowFocus,
     OpenUrl(String),
+    OpenSettings,
 }
 
 pub struct AppState {
@@ -1088,6 +1089,9 @@ impl AppState {
             }
             KeybindAction::App(AppAction::Close) => {
                 effects.push(AppEffect::CloseWindow);
+            }
+            KeybindAction::App(AppAction::OpenSettings) => {
+                effects.push(AppEffect::OpenSettings);
             }
             KeybindAction::App(AppAction::ToggleFullscreen) => {
                 if should_toggle_native_fullscreen(&self.config().window) {

@@ -12,16 +12,23 @@ pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 use crate::{
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
+    menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
     theme::theme_palette_from_config,
-    ui::chrome::{self, SidebarModel, StatusBarModel},
+    ui::{
+        chrome::{self, SidebarModel, StatusBarModel},
+        settings::{self, SettingsWindow},
+    },
 };
 
 pub struct BoottyApp {
     state: AppState,
     terminal_widget: TerminalWidget,
     app_icon_texture: Option<TextureHandle>,
+    settings: Option<SettingsWindow>,
+    // Held for the process lifetime so the native menu stays installed.
+    _menu: Option<AppMenu>,
 }
 
 impl BoottyApp {
@@ -66,7 +73,27 @@ impl BoottyApp {
             state: AppState::new(config, repaint, direct_input_rx, modifier_side_rx)?,
             terminal_widget,
             app_icon_texture: None,
+            settings: None,
+            _menu: crate::menu::install(),
         })
+    }
+
+    fn open_settings(&mut self, ctx: &egui::Context) {
+        if self.settings.is_some() {
+            // Already open: raise the existing window instead of spawning a second one.
+            ctx.send_viewport_cmd_to(settings::viewport_id(), egui::ViewportCommand::Focus);
+        } else {
+            self.settings = Some(SettingsWindow::new(self.state.config().clone()));
+        }
+    }
+
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        let theme = self.state.ui_theme();
+        if let Some(settings) = self.settings.as_mut()
+            && !settings.show(ctx, theme)
+        {
+            self.settings = None;
+        }
     }
 
     fn apply_effects(&mut self, ctx: &egui::Context, effects: Vec<AppEffect>) {
@@ -109,6 +136,7 @@ impl BoottyApp {
                 AppEffect::OpenUrl(url) => {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
+                AppEffect::OpenSettings => self.open_settings(ctx),
             }
         }
     }
@@ -423,6 +451,10 @@ impl eframe::App for BoottyApp {
         };
         let effects = self.state.update_frame(inputs);
         self.apply_effects(ctx, effects);
+
+        if crate::menu::settings_requested() {
+            self.open_settings(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -432,6 +464,7 @@ impl eframe::App for BoottyApp {
         });
         self.show_new_mux_session_dialog(ui.ctx());
         self.show_session_picker_dialog(ui.ctx());
+        self.show_settings(ui.ctx());
     }
 }
 

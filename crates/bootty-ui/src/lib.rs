@@ -161,34 +161,49 @@ impl<'a> ThemedUi<'a> {
 
 pub fn configure_style(style: &mut egui::Style, theme: Theme) {
     let palette = theme.palette;
+    // Start from a dark base so widgets (buttons, combos, checkboxes) don't inherit the OS
+    // light-mode visuals, then layer the palette on top.
+    style.visuals = egui::Visuals::dark();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    // A taller interact size keeps buttons, combo boxes, and text fields the same height so rows of
+    // mixed widgets line up.
+    style.spacing.interact_size.y = 26.0;
     style.visuals.override_text_color = Some(palette.text);
     style.visuals.window_fill = palette.pane;
+    style.visuals.window_stroke = Stroke::new(1.0, palette.border);
     style.visuals.panel_fill = palette.base;
     style.visuals.extreme_bg_color = palette.mantle;
     style.visuals.faint_bg_color = palette.surface;
+    style.visuals.hyperlink_color = palette.accent;
     style.visuals.selection.bg_fill = palette.primary;
-    style.visuals.selection.stroke = Stroke::new(1.0, palette.text);
+    style.visuals.selection.stroke = Stroke::new(1.0, palette.base);
 
     for widget in [
         &mut style.visuals.widgets.noninteractive,
         &mut style.visuals.widgets.inactive,
         &mut style.visuals.widgets.open,
     ] {
+        // egui fills buttons/combos/checkboxes with `weak_bg_fill`; `bg_fill` covers sliders and
+        // a few others. Set both so every interactive surface picks up the theme.
         widget.bg_fill = palette.surface;
+        widget.weak_bg_fill = palette.surface;
         widget.bg_stroke = Stroke::new(1.0, palette.border);
         widget.fg_stroke = Stroke::new(1.0, palette.text);
         widget.corner_radius = CornerRadius::same(palette.radius);
     }
-    style.visuals.widgets.hovered.bg_fill = palette.hover;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.primary);
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, palette.text);
-    style.visuals.widgets.hovered.corner_radius = CornerRadius::same(palette.radius);
-    style.visuals.widgets.active.bg_fill = palette.primary;
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.primary);
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.base);
-    style.visuals.widgets.active.corner_radius = CornerRadius::same(palette.radius);
+    let hovered = &mut style.visuals.widgets.hovered;
+    hovered.bg_fill = palette.hover;
+    hovered.weak_bg_fill = palette.hover;
+    hovered.bg_stroke = Stroke::new(1.0, palette.primary);
+    hovered.fg_stroke = Stroke::new(1.0, palette.text);
+    hovered.corner_radius = CornerRadius::same(palette.radius);
+    let active = &mut style.visuals.widgets.active;
+    active.bg_fill = palette.primary;
+    active.weak_bg_fill = palette.primary;
+    active.bg_stroke = Stroke::new(1.0, palette.primary);
+    active.fg_stroke = Stroke::new(1.0, palette.base);
+    active.corner_radius = CornerRadius::same(palette.radius);
 }
 
 pub fn themed_text_edit_singleline(

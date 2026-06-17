@@ -48,6 +48,7 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "20
   "png",
 ] }
 memchr = "2.8"
+muda = "0.19"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",

@@ -548,6 +548,7 @@ fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+w=close_surface",
         "cmd+q=quit",
         "cmd+alt+ctrl+f=toggle_fullscreen",
+        "cmd+,=open_settings",
         "cmd+p=session_picker",
         "cmd+o=toggle_sidebar_focus",
         "cmd+shift+e=toggle_sidebar_visibility",
@@ -601,8 +602,9 @@ fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+Tab=last_session",
         "ctrl+shift+]=next_session",
         "ctrl+shift+[=previous_session",
-        "ctrl+shift+,=move_session:-1",
-        "ctrl+shift+.=move_session:1",
+        "ctrl+shift+,=open_settings",
+        "ctrl+shift+alt+,=move_session:-1",
+        "ctrl+shift+alt+.=move_session:1",
         "ctrl+shift+1=select_session:1",
         "ctrl+shift+2=select_session:2",
         "ctrl+shift+3=select_session:3",
@@ -951,6 +953,24 @@ impl ConfigDocument {
             })?;
         }
         table[*leaf] = item;
+        Ok(())
+    }
+
+    /// Remove a key, restoring its built-in default on the next load. Missing keys are a no-op.
+    pub fn remove_item(&mut self, path: &[&str]) -> ConfigResult<()> {
+        let Some((leaf, parents)) = path.split_last() else {
+            return Err(ConfigLoadError::new(
+                "config writeback path cannot be empty",
+            ));
+        };
+        let mut table = self.document.as_table_mut();
+        for key in parents {
+            match table.get_mut(key).and_then(Item::as_table_mut) {
+                Some(child) => table = child,
+                None => return Ok(()),
+            }
+        }
+        table.remove(leaf);
         Ok(())
     }
 

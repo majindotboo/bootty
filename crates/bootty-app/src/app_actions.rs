@@ -25,6 +25,7 @@ pub enum AppAction {
     ToggleFullscreen,
     ToggleSidebarFocus,
     ToggleSidebarVisibility,
+    OpenSettings,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -348,6 +349,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::ToggleSidebarVisibility => {
             Ok(KeybindAction::App(AppAction::ToggleSidebarVisibility))
         }
+        BindingAction::OpenSettings => Ok(KeybindAction::App(AppAction::OpenSettings)),
         BindingAction::NewTab => Ok(KeybindAction::Mux(MuxKeyAction::NewTab)),
         BindingAction::NextTab => Ok(KeybindAction::Mux(MuxKeyAction::NextTab)),
         BindingAction::PreviousTab => Ok(KeybindAction::Mux(MuxKeyAction::PreviousTab)),
