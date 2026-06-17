@@ -308,6 +308,32 @@ fn glyph_atlas_grows_to_fit_instead_of_dropping_glyphs() {
 }
 
 #[test]
+fn sprite_quad_uvs_sample_texel_centers_not_transparent_atlas_gutters() {
+    let mut builder = TextAtlasBuilder::new_rgba(64, 64);
+    let rect = SurfaceRect::from_min_size(0.0, 0.0, 10.0, 20.0);
+    let registry = crate::terminal_sprite::SpriteRegistry::prompt_graphics();
+    let glyph = registry.glyph_for('─').expect("box glyph is sprite-owned");
+    let command = crate::terminal_render::SpriteCommandBatch {
+        ch: '─',
+        glyph,
+        rect,
+        color: PlanColor {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
+        commands: registry.commands_for(glyph, rect),
+    };
+
+    let quad = builder.prepare_sprite_command(&command, 1.0);
+
+    assert_eq!(quad.uv.min_x, 1.5 / 64.0);
+    assert_eq!(quad.uv.min_y, 1.5 / 64.0);
+    assert_eq!(quad.uv.max_x, 10.5 / 64.0);
+    assert_eq!(quad.uv.max_y, 20.5 / 64.0);
+}
+#[test]
 fn prepared_text_frame_cache_refreshes_uvs_after_atlas_resize() {
     let mut builder = TextAtlasBuilder::new(64, 64);
     let command = text_command("A");

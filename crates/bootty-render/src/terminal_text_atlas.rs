@@ -2274,10 +2274,10 @@ fn blit_pixels_from_source(pixels: &mut [u8], target: BlitTarget, source: BlitSo
 
 fn atlas_uv((atlas_width, atlas_height): (u32, u32), entry: GlyphAtlasEntry) -> SurfaceRect {
     SurfaceRect {
-        min_x: entry.x as f32 / atlas_width as f32,
-        min_y: entry.y as f32 / atlas_height as f32,
-        max_x: (entry.x + entry.width) as f32 / atlas_width as f32,
-        max_y: (entry.y + entry.height) as f32 / atlas_height as f32,
+        min_x: (entry.x as f32 + 0.5) / atlas_width as f32,
+        min_y: (entry.y as f32 + 0.5) / atlas_height as f32,
+        max_x: (entry.x + entry.width) as f32 / atlas_width as f32 - 0.5 / atlas_width as f32,
+        max_y: (entry.y + entry.height) as f32 / atlas_height as f32 - 0.5 / atlas_height as f32,
     }
 }
 
