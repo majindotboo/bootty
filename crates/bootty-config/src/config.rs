@@ -25,6 +25,7 @@ pub struct BoottyConfig {
     pub colors: ColorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
+    pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub input: InputConfig,
     pub session: SessionConfig,
@@ -48,6 +49,8 @@ struct RawConfig {
     font: FontPatch,
     #[serde(default)]
     chrome: ChromePatch,
+    #[serde(default)]
+    sidebar: SidebarPatch,
     #[serde(default)]
     multiplexer: MultiplexerPatch,
     #[serde(default)]
@@ -179,6 +182,41 @@ struct ChromePatch {
     gap: Option<f32>,
     unfocused_sidebar_dim: Option<f32>,
     unfocused_terminal_dim: Option<f32>,
+}
+
+/// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
+/// falls back to the theme-derived value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SidebarConfig {
+    pub position: SidebarPosition,
+    pub background: Option<Color>,
+    /// Background used when the sidebar extends into the notch/menu-bar area in non-native
+    /// fullscreen; falls back to `background` when unset.
+    pub fullscreen_background: Option<Color>,
+    pub foreground: Option<Color>,
+    pub selected: Option<Color>,
+    pub hover: Option<Color>,
+    pub border: Option<Color>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarPosition {
+    #[default]
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct SidebarPatch {
+    position: Option<SidebarPosition>,
+    background: Option<Color>,
+    fullscreen_background: Option<Color>,
+    foreground: Option<Color>,
+    selected: Option<Color>,
+    hover: Option<Color>,
+    border: Option<Color>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1000,6 +1038,7 @@ impl Default for BoottyConfig {
             colors: ColorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
+            sidebar: SidebarConfig::default(),
             multiplexer: MultiplexerConfig::default(),
             input: InputConfig::default(),
             session: SessionConfig::default(),
@@ -1340,6 +1379,7 @@ impl ConfigResolver<'_> {
         apply_partial_colors(&mut config.colors, raw.colors);
         apply_partial_font(&mut config.font, raw.font);
         apply_partial_chrome(&mut config.chrome, raw.chrome);
+        apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer);
         apply_partial_input(&mut config.input, raw.input);
         apply_partial_session(&mut config.session, raw.session);
@@ -1386,6 +1426,19 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         &mut chrome.unfocused_terminal_dim,
         partial.unfocused_terminal_dim,
     );
+}
+
+fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
+    apply_value(&mut sidebar.position, partial.position);
+    apply_present(&mut sidebar.background, partial.background);
+    apply_present(
+        &mut sidebar.fullscreen_background,
+        partial.fullscreen_background,
+    );
+    apply_present(&mut sidebar.foreground, partial.foreground);
+    apply_present(&mut sidebar.selected, partial.selected);
+    apply_present(&mut sidebar.hover, partial.hover);
+    apply_present(&mut sidebar.border, partial.border);
 }
 
 fn apply_partial_multiplexer(multiplexer: &mut MultiplexerConfig, partial: MultiplexerPatch) {

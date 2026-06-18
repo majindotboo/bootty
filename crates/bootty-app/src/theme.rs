@@ -28,7 +28,7 @@ fn ui_color_config_from_colors(colors: &ColorConfig) -> UiColorConfig {
     }
 }
 
-fn config_color32(color: Color) -> Color32 {
+pub(crate) fn config_color32(color: Color) -> Color32 {
     Color32::from_rgb(color.r, color.g, color.b)
 }
 

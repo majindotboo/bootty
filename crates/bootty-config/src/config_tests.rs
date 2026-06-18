@@ -249,6 +249,55 @@ fn config_resolves_theme_and_color_overrides(
 }
 
 #[test]
+fn config_resolves_sidebar_section() {
+    let config = load_config_source(indoc! {r##"
+        [sidebar]
+        position = "right"
+        background = "#11131a"
+        fullscreen-background = "#0a0b0f"
+        foreground = "#cdd6f4"
+        selected = "#2a2f3d"
+        hover = "#1e222c"
+        border = "#313244"
+    "##});
+
+    assert_eq!(config.sidebar.position, SidebarPosition::Right);
+    assert_eq!(
+        config.sidebar.background,
+        Some(Color::from_hex("#11131a").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.fullscreen_background,
+        Some(Color::from_hex("#0a0b0f").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.foreground,
+        Some(Color::from_hex("#cdd6f4").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.selected,
+        Some(Color::from_hex("#2a2f3d").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.hover,
+        Some(Color::from_hex("#1e222c").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.border,
+        Some(Color::from_hex("#313244").unwrap())
+    );
+}
+
+#[test]
+fn config_defaults_sidebar_to_left_without_overrides() {
+    let config = load_config_source("");
+
+    assert_eq!(config.sidebar.position, SidebarPosition::Left);
+    assert_eq!(config.sidebar.background, None);
+    assert_eq!(config.sidebar.fullscreen_background, None);
+}
+
+#[test]
 fn config_accepts_ghostty_palette_generation_settings() {
     let config = load_config_source(indoc! {r##"
         [colors]

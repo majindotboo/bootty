@@ -43,6 +43,10 @@ pub struct SidebarModel<'a> {
     pub focused: bool,
     pub hovered_session: Option<&'a str>,
     pub unfocused_dim: f32,
+    /// Explicit color overrides from `[sidebar]`; each falls back to the theme-derived tint.
+    pub hover_override: Option<egui::Color32>,
+    pub current_override: Option<egui::Color32>,
+    pub border_override: Option<egui::Color32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +118,7 @@ const SIDEBAR_FOOTER_BASE_HEIGHT: f32 = 44.0;
 const SIDEBAR_MAX_USAGE_BARS: usize = 4;
 const SIDEBAR_ROW_HEIGHT: f32 = 24.0;
 const SIDEBAR_PAD_X: f32 = 14.0;
-const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
+pub(crate) const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
 const AGENT_DETAIL_MAX_CHARS: usize = 18;
 const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
 
@@ -151,7 +155,17 @@ pub fn show_sidebar(
     height: f32,
     model: SidebarModel<'_>,
 ) -> Option<SidebarEvent> {
-    let palette = sidebar_palette(palette);
+    // `palette` arrives with `base`/`foreground` already overridden, so the derived tints below
+    // mix from the resolved colors; explicit `[sidebar]` overrides win outright.
+    let hover_color = model
+        .hover_override
+        .unwrap_or_else(|| sidebar_hover_color(palette));
+    let current_color = model
+        .current_override
+        .unwrap_or_else(|| sidebar_current_color(palette));
+    let border_color = model
+        .border_override
+        .unwrap_or_else(|| subtle_border(palette));
     let width = ui.max_rect().width().max(0.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -160,7 +174,7 @@ pub fn show_sidebar(
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0, subtle_border(palette)),
+            Stroke::new(1.0, border_color),
             egui::StrokeKind::Inside,
         );
     }
@@ -230,7 +244,15 @@ pub fn show_sidebar(
             Some(session_id) == pointer_hovered_session
                 || model.focused && Some(session_id) == model.hovered_session
         });
-        let response = sidebar_item_row(ui, row_rect, item, hovered, palette);
+        let response = sidebar_item_row(
+            ui,
+            row_rect,
+            item,
+            hovered,
+            palette,
+            hover_color,
+            current_color,
+        );
         if response.drag_started()
             && let Some(anchor) = item.reorder_anchor
         {
@@ -296,6 +318,7 @@ pub fn show_sidebar(
         &usage_bars,
         model.separator_visible,
         palette,
+        border_color,
     );
     if !model.focused {
         painter.rect_filled(rect, 0.0, dim_overlay_color(model.unfocused_dim));
@@ -328,9 +351,6 @@ fn visible_sidebar_row_capacity(
         .max(0.0) as usize
 }
 
-fn sidebar_palette(palette: ThemePalette) -> ThemePalette {
-    palette
-}
 fn sidebar_hover_color(palette: ThemePalette) -> egui::Color32 {
     mix_color(palette.base, palette.text, 0.045)
 }
@@ -692,6 +712,8 @@ fn sidebar_item_row(
     item: &SidebarItem<'_>,
     hovered_session: bool,
     palette: ThemePalette,
+    hover_color: egui::Color32,
+    current_color: egui::Color32,
 ) -> egui::Response {
     let response = ui.interact(
         rect,
@@ -707,9 +729,9 @@ fn sidebar_item_row(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         let bg = if hovered_session {
-            sidebar_hover_color(palette)
+            hover_color
         } else if item.current {
-            sidebar_current_color(palette)
+            current_color
         } else {
             palette.base
         };
@@ -1118,13 +1140,14 @@ fn paint_sidebar_footer(
     usage_bars: &UsageBars,
     separator_visible: bool,
     palette: ThemePalette,
+    border_color: egui::Color32,
 ) {
     let painter = ui.painter_at(rect);
     let y = rect.max.y - footer_h;
     if separator_visible {
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(1.0, subtle_border(palette)),
+            Stroke::new(1.0, border_color),
         );
     }
 
@@ -1818,6 +1841,9 @@ mod tests {
                 focused: false,
                 hovered_session: None,
                 unfocused_dim: 0.0,
+                hover_override: None,
+                current_override: None,
+                border_override: None,
             },
         )
     }

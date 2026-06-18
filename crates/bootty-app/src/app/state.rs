@@ -13,7 +13,10 @@ use crate::{
         SidebarKeyBindings, TerminalScrollAction, builtin_app_action_for_direct_key,
         split_app_actions_for_bindings,
     },
-    config::{BoottyConfig, ConfigState, WindowConfig, load_config_from_path},
+    config::{
+        BoottyConfig, ConfigState, WindowConfig, load_config_from_path,
+        load_or_create_config_document,
+    },
     config_reload::{CONFIG_HOT_RELOAD_INTERVAL, ConfigHotReload, new_session_only_config_changed},
     diagnostics::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
@@ -328,6 +331,30 @@ impl AppState {
 
     pub fn config(&self) -> &BoottyConfig {
         self.config_state.current()
+    }
+
+    /// Apply a dragged sidebar width to the live config without touching disk, so the layout
+    /// tracks the pointer each frame. [`Self::persist_sidebar_width`] writes the final value.
+    pub fn set_sidebar_width_live(&mut self, width: f32) {
+        self.config_state.current_mut().chrome.sidebar_width = width;
+    }
+
+    /// Persist the sidebar width to `config.toml` on drag release. The live value already matches,
+    /// so the hot-reload baseline is refreshed to skip the redundant reload the write would trigger.
+    pub fn persist_sidebar_width(&mut self, width: f32) {
+        let path = self.config().config_path.clone();
+        let result = (|| {
+            let mut document = load_or_create_config_document(&path)?;
+            document.set_item(
+                &["chrome", "sidebar-width"],
+                bootty_config::toml_edit::value(f64::from(width)),
+            )?;
+            document.write_to_disk()
+        })();
+        match result {
+            Ok(()) => self.config_hot_reload.refresh_after_reload(&path),
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
     }
 
     pub fn ui_theme(&self) -> bootty_ui::Theme {

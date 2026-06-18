@@ -55,6 +55,20 @@ gap = 1
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.08
 
+[sidebar]
+# Sidebar placement and color overrides. Drag the sidebar's inner edge to resize
+# (writes back to chrome.sidebar-width). Colors layer on top of the active theme;
+# any unset slot falls back to the theme-derived value.
+position = "left" # or "right"
+# background = "#11131a"
+# Background used when the sidebar extends into the notch/menu-bar area in
+# non-native fullscreen; falls back to background when unset.
+# fullscreen-background = "#0a0b0f"
+# foreground = "#cdd6f4"
+# selected = "#2a2f3d" # active session row tint
+# hover = "#1e222c"
+# border = "#313244" # edge border and footer separator
+
 [multiplexer]
 # native keeps mux state and terminals inside Bootty. rmux renders through
 # rmux-sdk. tmux and zellij attach through their backend UI.

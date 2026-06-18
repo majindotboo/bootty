@@ -195,7 +195,109 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             );
         });
 
+    sidebar_colors_section(win, ui);
     palette_section(win, ui);
+}
+
+/// Sidebar color overrides from `[sidebar]`. Each slot layers on top of the theme; `fullscreen`
+/// background only applies when the sidebar extends into the notch/menu-bar area.
+fn sidebar_colors_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+    let palette = win.palette;
+    super::section(ui, palette, "SIDEBAR");
+    ui.label(
+        egui::RichText::new(
+            "Override sidebar colors on top of the theme. Hover, selected, and border tints fall \
+             back to a blend of the background and foreground when unset.",
+        )
+        .color(palette.muted)
+        .size(12.0),
+    );
+    ui.add_space(6.0);
+
+    egui::Grid::new("settings_sidebar_colors_grid")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            sidebar_color_row(
+                win,
+                ui,
+                "Background",
+                &["sidebar", "background"],
+                palette.base,
+                |sidebar| &mut sidebar.background,
+            );
+            sidebar_color_row(
+                win,
+                ui,
+                "Fullscreen background",
+                &["sidebar", "fullscreen-background"],
+                palette.base,
+                |sidebar| &mut sidebar.fullscreen_background,
+            );
+            sidebar_color_row(
+                win,
+                ui,
+                "Foreground",
+                &["sidebar", "foreground"],
+                palette.text,
+                |sidebar| &mut sidebar.foreground,
+            );
+            sidebar_color_row(
+                win,
+                ui,
+                "Selected item",
+                &["sidebar", "selected"],
+                palette.hover,
+                |sidebar| &mut sidebar.selected,
+            );
+            sidebar_color_row(
+                win,
+                ui,
+                "Hover",
+                &["sidebar", "hover"],
+                palette.hover,
+                |sidebar| &mut sidebar.hover,
+            );
+            sidebar_color_row(
+                win,
+                ui,
+                "Border",
+                &["sidebar", "border"],
+                palette.border,
+                |sidebar| &mut sidebar.border,
+            );
+        });
+}
+
+/// Sidebar variant of [`super::color_row`]: projects an override slot on `SidebarConfig`.
+fn sidebar_color_row(
+    win: &mut SettingsWindow,
+    ui: &mut egui::Ui,
+    label: &str,
+    path: &[&str],
+    seed: egui::Color32,
+    field: fn(&mut crate::config::SidebarConfig) -> &mut Option<Color>,
+) {
+    ui.label(label);
+    let current = *field(&mut win.config.sidebar);
+    ui.horizontal(|ui| {
+        let mut rgb = current.map_or([seed.r(), seed.g(), seed.b()], |color| {
+            [color.r, color.g, color.b]
+        });
+        if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+            *field(&mut win.config.sidebar) = Some(Color {
+                r: rgb[0],
+                g: rgb[1],
+                b: rgb[2],
+            });
+            win.set_color(path, rgb);
+        }
+        if current.is_some() && ui.small_button("Reset").clicked() {
+            *field(&mut win.config.sidebar) = None;
+            win.remove(path);
+        }
+    });
+    ui.end_row();
 }
 
 /// The ANSI palette editor: optional `palette-generate`/`palette-harmonious` toggles plus an

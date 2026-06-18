@@ -22,6 +22,11 @@ use crate::{
     },
 };
 
+/// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
+const MIN_SIDEBAR_WIDTH: f32 = 120.0;
+/// Grab width of the invisible splitter painted at the sidebar's inner edge.
+const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+
 pub struct BoottyApp {
     state: AppState,
     terminal_widget: TerminalWidget,
@@ -154,6 +159,9 @@ impl BoottyApp {
             || ui
                 .ctx()
                 .input(|input| input.viewport().fullscreen.unwrap_or(false));
+        // The sidebar's fullscreen background applies when it covers the screen top on a notched
+        // display, independent of the titlebar style. Short-circuits to no objc calls when windowed.
+        let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_has_notch();
         let sidebar_width = if sidebar {
             configured_sidebar_width
         } else {
@@ -177,21 +185,57 @@ impl BoottyApp {
             )
             && !self.state.mux().selected_session_windows().is_empty();
         let window_tabs_height = if show_window_tabs { 34.0 } else { 0.0 };
-        let sidebar_rect = if sidebar {
-            Rect::from_min_size(
-                rect.min,
-                egui::vec2(sidebar_width.min(rect.width()), rect.height()),
+        let sidebar_on_right = matches!(
+            self.state.config().sidebar.position,
+            crate::config::SidebarPosition::Right
+        );
+        let clamped_sidebar_width = sidebar_width.min(rect.width());
+        let (sidebar_rect, right_rect) = if !sidebar {
+            (
+                Rect::from_min_size(rect.min, egui::vec2(0.0, rect.height())),
+                rect,
+            )
+        } else if sidebar_on_right {
+            let split = (rect.max.x - clamped_sidebar_width).max(rect.min.x);
+            (
+                Rect::from_min_max(Pos2::new(split, rect.min.y), rect.max),
+                Rect::from_min_max(
+                    rect.min,
+                    Pos2::new((split - gap).max(rect.min.x), rect.max.y),
+                ),
             )
         } else {
-            Rect::from_min_size(rect.min, egui::vec2(0.0, rect.height()))
+            let split = (rect.min.x + clamped_sidebar_width).min(rect.max.x);
+            (
+                Rect::from_min_max(rect.min, Pos2::new(split, rect.max.y)),
+                Rect::from_min_max(
+                    Pos2::new((split + gap).min(rect.max.x), rect.min.y),
+                    rect.max,
+                ),
+            )
         };
-        let right_rect = Rect::from_min_max(
-            Pos2::new((sidebar_rect.max.x + gap).min(rect.max.x), rect.min.y),
-            rect.max,
-        );
-        let status_rect = Rect::from_min_size(
-            right_rect.min,
-            egui::vec2(right_rect.width(), status_height.min(right_rect.height())),
+        // With the sidebar on the right, the macOS traffic-light buttons land over the content's
+        // top-left instead of the sidebar, so inset the status bar to clear them.
+        let status_left_inset = if sidebar_on_right
+            && self
+                .state
+                .config()
+                .window
+                .reserves_macos_titlebar_button_area()
+        {
+            chrome::MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
+        } else {
+            0.0
+        };
+        let status_rect = Rect::from_min_max(
+            Pos2::new(
+                (right_rect.min.x + status_left_inset).min(right_rect.max.x),
+                right_rect.min.y,
+            ),
+            Pos2::new(
+                right_rect.max.x,
+                (right_rect.min.y + status_height).min(right_rect.max.y),
+            ),
         );
         let window_tabs_rect = Rect::from_min_max(
             Pos2::new(right_rect.min.x, status_rect.max.y),
@@ -212,22 +256,41 @@ impl BoottyApp {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
                     let title_visible = self.state.config().window.custom_chrome_title_visible();
-                    let reserve_titlebar_buttons = self
-                        .state
-                        .config()
-                        .window
-                        .reserves_macos_titlebar_button_area();
+                    // Traffic lights stay at the window's top-left, so only reserve their space in
+                    // the sidebar when it is on the left edge.
+                    let reserve_titlebar_buttons = !sidebar_on_right
+                        && self
+                            .state
+                            .config()
+                            .window
+                            .reserves_macos_titlebar_button_area();
                     let top_inset = if fullscreen_chrome && !title_visible {
                         28.0
                     } else {
                         0.0
                     };
+                    // Resolve `[sidebar]` color overrides on top of the theme. `base`/`text` feed the
+                    // derived hover/current/border tints; the notch background applies only in
+                    // fullscreen on a notched screen.
+                    let sidebar_cfg = self.state.config().sidebar.clone();
+                    let sidebar_background = if notch_context {
+                        sidebar_cfg.fullscreen_background.or(sidebar_cfg.background)
+                    } else {
+                        sidebar_cfg.background
+                    };
+                    let mut sidebar_palette = palette;
+                    if let Some(color) = sidebar_background {
+                        sidebar_palette.base = crate::theme::config_color32(color);
+                    }
+                    if let Some(color) = sidebar_cfg.foreground {
+                        sidebar_palette.text = crate::theme::config_color32(color);
+                    }
                     let title_icon = title_visible.then(|| {
                         chrome::load_app_icon_texture(ui.ctx(), &mut self.app_icon_texture)
                     });
                     if let Some(event) = chrome::show_sidebar(
                         ui,
-                        palette,
+                        sidebar_palette,
                         sidebar_rect.height(),
                         SidebarModel {
                             sessions: self.state.mux().sessions(),
@@ -242,6 +305,11 @@ impl BoottyApp {
                             focused: self.state.sidebar_focused(),
                             hovered_session: self.state.sidebar_hovered_session(),
                             unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
+                            hover_override: sidebar_cfg.hover.map(crate::theme::config_color32),
+                            current_override: sidebar_cfg
+                                .selected
+                                .map(crate::theme::config_color32),
+                            border_override: sidebar_cfg.border.map(crate::theme::config_color32),
                         },
                     ) {
                         match event {
@@ -256,6 +324,56 @@ impl BoottyApp {
                     }
                 },
             );
+
+            // Drag the inner edge to resize. The handle lives in a foreground layer so it wins the
+            // hit-test over the sidebar rows and the terminal beneath the gap.
+            if clamped_sidebar_width > 0.0 {
+                let handle_x = if sidebar_on_right {
+                    sidebar_rect.min.x
+                } else {
+                    sidebar_rect.max.x
+                };
+                let handle_rect = Rect::from_center_size(
+                    Pos2::new(handle_x, rect.center().y),
+                    egui::vec2(SIDEBAR_RESIZE_HANDLE_WIDTH, rect.height()),
+                );
+                let response = egui::Area::new(egui::Id::new("bootty-sidebar-resize"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(handle_rect.min)
+                    .show(ui.ctx(), |ui| {
+                        let response = ui.allocate_rect(handle_rect, egui::Sense::drag());
+                        if response.hovered() || response.dragged() {
+                            ui.painter().line_segment(
+                                [
+                                    Pos2::new(handle_x, rect.min.y),
+                                    Pos2::new(handle_x, rect.max.y),
+                                ],
+                                egui::Stroke::new(2.0, palette.primary),
+                            );
+                        }
+                        response
+                    })
+                    .inner;
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                if response.dragged()
+                    && let Some(pos) = ui.ctx().pointer_interact_pos()
+                {
+                    let raw = if sidebar_on_right {
+                        rect.max.x - pos.x
+                    } else {
+                        pos.x - rect.min.x
+                    };
+                    let max = (rect.width() - MIN_SIDEBAR_WIDTH).max(MIN_SIDEBAR_WIDTH);
+                    self.state
+                        .set_sidebar_width_live(raw.clamp(MIN_SIDEBAR_WIDTH, max));
+                }
+                if response.drag_stopped() {
+                    let width = self.state.config().chrome.sidebar_width;
+                    self.state.persist_sidebar_width(width);
+                }
+            }
         }
 
         if status_bar {

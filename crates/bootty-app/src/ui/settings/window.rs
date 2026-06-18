@@ -2,7 +2,8 @@ use eframe::egui;
 
 use super::SettingsWindow;
 use crate::config::{
-    MacosTitlebarStyle, MultiplexerBackendConfig, WindowDecoration, WindowFullscreen,
+    MacosTitlebarStyle, MultiplexerBackendConfig, SidebarPosition, WindowDecoration,
+    WindowFullscreen,
 };
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
@@ -194,6 +195,22 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 " px",
                 |chrome| &mut chrome.sidebar_width,
             );
+            ui.label("Sidebar position");
+            let mut position = win.config.sidebar.position;
+            if enum_combo(
+                ui,
+                palette,
+                "settings_sidebar_position",
+                &mut position,
+                &[
+                    (SidebarPosition::Left, "left"),
+                    (SidebarPosition::Right, "right"),
+                ],
+            ) {
+                win.config.sidebar.position = position;
+                win.set_str(&["sidebar", "position"], position_token(position));
+            }
+            ui.end_row();
             slider(
                 ui,
                 win,
@@ -319,6 +336,13 @@ fn backend_token(backend: MultiplexerBackendConfig) -> &'static str {
         MultiplexerBackendConfig::Rmux => "rmux",
         MultiplexerBackendConfig::Tmux => "tmux",
         MultiplexerBackendConfig::Zellij => "zellij",
+    }
+}
+
+fn position_token(position: SidebarPosition) -> &'static str {
+    match position {
+        SidebarPosition::Left => "left",
+        SidebarPosition::Right => "right",
     }
 }
 

@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 #[cfg(target_os = "macos")]
-use objc2::MainThreadMarker;
+use objc2::runtime::NSObjectProtocol;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::NSWindow;
+use objc2::{MainThreadMarker, sel};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSWindow};
 
 use crate::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig};
 
@@ -91,6 +93,37 @@ pub fn apply_macos_non_native_fullscreen_presentation(window: &WindowConfig) -> 
 
 pub fn restore_macos_presentation() -> bool {
     set_macos_non_native_fullscreen_presentation(false)
+}
+
+/// Whether the active window's screen has a camera-housing notch. The sidebar's fullscreen
+/// background only matters when the sidebar covers the screen top next to the notch, so callers
+/// combine this with a fullscreen check.
+pub fn macos_active_screen_has_notch() -> bool {
+    platform_active_screen_has_notch()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_active_screen_has_notch() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(screen) = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().firstObject())
+        .and_then(|window| window.screen())
+    else {
+        return false;
+    };
+    // A non-zero top safe-area inset reflects the camera housing. The selector is macOS 12+, so
+    // guard with respondsToSelector to stay safe on older systems (which never have a notch).
+    screen.respondsToSelector(sel!(safeAreaInsets)) && screen.safeAreaInsets().top > 0.0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_active_screen_has_notch() -> bool {
+    false
 }
 
 pub fn macos_handles_non_native_fullscreen_frame(window: &WindowConfig) -> bool {
