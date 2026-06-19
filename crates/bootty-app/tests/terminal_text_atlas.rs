@@ -12,12 +12,15 @@ use bootty_app::{
 };
 
 #[test]
-fn text_shaper_keeps_ligature_combining_emoji_variation_and_fallback_cases() {
+fn text_shaper_groups_combining_emoji_and_variation_clusters() {
     let shaper = TerminalTextShaper::default();
 
     let clusters = shaper.shape("fi e\u{301} 😀 \u{2764}\u{FE0F}", 1);
 
-    assert!(clusters.iter().any(|cluster| cluster.text == "fi"));
+    // Plain adjacent letters stay one cluster each. Ligatures are decided later
+    // from the font's own tables, not forced by this font-agnostic segmenter.
+    assert!(clusters.iter().any(|cluster| cluster.text == "f"));
+    assert!(clusters.iter().any(|cluster| cluster.text == "i"));
     assert!(clusters.iter().any(|cluster| cluster.text == "e\u{301}"));
     assert!(
         clusters
@@ -29,20 +32,6 @@ fn text_shaper_keeps_ligature_combining_emoji_variation_and_fallback_cases() {
             .iter()
             .any(|cluster| cluster.text == "\u{2764}\u{FE0F}" && cluster.cells == 1)
     );
-}
-
-#[test]
-fn text_shaper_honors_ligature_font_feature_settings() {
-    let default_clusters = TerminalTextShaper::default().shape("fi", 0);
-    assert_eq!(default_clusters.len(), 1);
-    assert_eq!(default_clusters[0].text, "fi");
-
-    let without_liga = TerminalTextShaper::with_features(vec![FontFeature::new(*b"liga", 0)]);
-    let clusters = without_liga.shape("fi", 0);
-
-    assert_eq!(clusters.len(), 2);
-    assert_eq!(clusters[0].text, "f");
-    assert_eq!(clusters[1].text, "i");
 }
 
 #[test]
@@ -80,8 +69,9 @@ fn text_shaper_shape_into_replaces_previous_clusters() {
     let total_cells = shaper.shape_into("fi", 0, &mut clusters);
 
     assert_eq!(total_cells, 2);
-    assert_eq!(clusters.len(), 1);
-    assert_eq!(clusters[0].text, "fi");
+    assert_eq!(clusters.len(), 2);
+    assert_eq!(clusters[0].text, "f");
+    assert_eq!(clusters[1].text, "i");
 }
 
 #[test]
@@ -133,11 +123,11 @@ fn text_shaper_ports_backend_boundary_and_symbol_cases() {
     assert_eq!(box_glyph[1].text, "─");
     assert_eq!(box_glyph[1].cell, 1);
 
-    let cursor_boundary = shaper.shape("fi|fi", 0);
-    assert_eq!(cursor_boundary[0].text, "fi");
-    assert_eq!(cursor_boundary[1].text, "|");
-    assert_eq!(cursor_boundary[2].text, "fi");
-    assert_cells_are_monotonic(&cursor_boundary, "cursor boundary");
+    let symbol_boundary = shaper.shape("a|b", 0);
+    assert_eq!(symbol_boundary[0].text, "a");
+    assert_eq!(symbol_boundary[1].text, "|");
+    assert_eq!(symbol_boundary[2].text, "b");
+    assert_cells_are_monotonic(&symbol_boundary, "symbol boundary");
 }
 
 #[test]

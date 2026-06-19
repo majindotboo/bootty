@@ -11,6 +11,7 @@ libghostty-vt.workspace = true
 bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
 png.workspace = true
+rustybuzz.workspace = true
 smallvec.workspace = true
 ttf-parser.workspace = true
 unicode-width.workspace = true

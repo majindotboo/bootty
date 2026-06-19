@@ -23,6 +23,7 @@ fn font_library_from_paths(paths: impl IntoIterator<Item = std::path::PathBuf>) 
         fonts_by_id: HashMap::new(),
         fallback_font_ids: HashMap::new(),
         metrics: HashMap::new(),
+        shaping_capable: HashMap::new(),
     }
 }
 
@@ -47,6 +48,7 @@ fn shaped_cluster(text: &str, cells: u16) -> ShapedCluster {
         cell: 0,
         cells,
         is_whitespace: text.chars().all(char::is_whitespace),
+        glyphs: Default::default(),
     }
 }
 
@@ -699,5 +701,56 @@ fn terminal_graphics_symbols_stay_one_cell_wide() {
     assert_eq!(
         cluster_constraint_cells(None, &clusters[0], clusters.get(1)),
         1
+    );
+}
+
+#[test]
+fn glyph_id_cluster_rasterizes_the_same_ink_as_its_character() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let glyph_id = library
+        .font_for_face(&face)
+        .expect("Maple Mono loads")
+        .glyph_id('A');
+    assert_ne!(glyph_id.0, 0, "Maple Mono has an 'A' glyph");
+
+    let by_char = shaped_cluster("A", 1);
+    let mut by_glyph = shaped_cluster("A", 1);
+    by_glyph.glyphs.push(ShapedGlyph {
+        glyph_id: glyph_id.0,
+        cluster: 0,
+        x_advance: 0.0,
+        x_offset: 0.0,
+        y_offset: 0.0,
+    });
+
+    let char_alpha =
+        rasterize_cluster_for_test(&mut library, &face, &by_char, 16.0, 2.0, 1, 24, 40);
+    let glyph_alpha =
+        rasterize_cluster_for_test(&mut library, &face, &by_glyph, 16.0, 2.0, 1, 24, 40);
+
+    // The glyph-id path must reproduce exactly what the per-character path draws
+    // for the same glyph; only the source (shaped id vs. cmap lookup) differs.
+    assert_eq!(glyph_alpha, char_alpha);
+}
+
+#[test]
+fn shaping_emits_legacy_clusters_for_plain_text_in_a_gsub_font() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let features = crate::terminal_text::default_font_features();
+    let mut clusters = Vec::new();
+
+    let (total_cells, len) = library
+        .shape_into_clusters(&face, "abc", 16.0, &features, &mut clusters)
+        .expect("Maple Mono advertises GSUB features, so the run is shaped");
+
+    assert_eq!((total_cells, len), (3, 3));
+    assert_eq!(clusters[0].text, "a");
+    assert!(
+        clusters[..len]
+            .iter()
+            .all(|cluster| cluster.glyphs.is_empty()),
+        "plain ASCII needs no glyph-id drawing: {clusters:?}"
     );
 }

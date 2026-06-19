@@ -5,8 +5,14 @@ use std::{
 };
 
 use ab_glyph::{Font, FontArc, FontVec, GlyphId, PxScale, ScaleFont, point};
+use smallvec::SmallVec;
 
 mod coretext;
+mod shaping;
+
+use shaping::{
+    ShapedGlyph, font_has_ligature_features, harfbuzz_features, shape_run, shaped_spans,
+};
 
 use crate::{
     font_database::system_font_database,
@@ -61,9 +67,8 @@ impl TerminalTextShaper {
         start_cell: u16,
         clusters: &mut Vec<ShapedCluster>,
     ) -> (u16, usize) {
-        let liga_enabled = self.feature_enabled(*b"liga");
         if is_printable_ascii(text) {
-            return shape_ascii_into_retained(text, start_cell, liga_enabled, clusters);
+            return shape_ascii_into_retained(text, start_cell, clusters);
         }
 
         let mut cell = start_cell;
@@ -73,6 +78,7 @@ impl TerminalTextShaper {
         while let Some(ch) = chars.next() {
             let cluster = shaped_cluster_slot(clusters, cluster_index);
             cluster.text.clear();
+            cluster.glyphs.clear();
             cluster.text.push(ch);
             cluster.cell = cell;
             cluster.is_whitespace = ch.is_whitespace();
@@ -87,12 +93,6 @@ impl TerminalTextShaper {
                     break;
                 }
             }
-            if liga_enabled && cluster.text == "f" && chars.peek() == Some(&'i') {
-                cluster.text.push('i');
-                cluster.is_whitespace = false;
-                total_cells = total_cells.saturating_add(terminal_char_width('i'));
-                chars.next();
-            }
             cluster.cells = cluster
                 .text
                 .chars()
@@ -105,50 +105,28 @@ impl TerminalTextShaper {
         }
         (total_cells.max(1), cluster_index)
     }
-
-    fn feature_enabled(&self, tag: [u8; 4]) -> bool {
-        self.font_features
-            .iter()
-            .rev()
-            .find(|feature| feature.tag() == tag)
-            .is_none_or(|feature| feature.value() != 0)
-    }
 }
 
 fn is_printable_ascii(text: &str) -> bool {
     text.bytes().all(|byte| matches!(byte, b' '..=b'~'))
 }
-fn can_prepare_ascii_directly(text: &str, liga_enabled: bool) -> bool {
-    is_printable_ascii(text)
-        && (!liga_enabled || !text.as_bytes().windows(2).any(|pair| pair == b"fi"))
-}
 
 fn shape_ascii_into_retained(
     text: &str,
     start_cell: u16,
-    liga_enabled: bool,
     clusters: &mut Vec<ShapedCluster>,
 ) -> (u16, usize) {
     let mut cell = start_cell;
-    let mut index = 0;
     let mut cluster_index = 0;
-    while index < text.len() {
-        let cluster_len = if liga_enabled
-            && text.as_bytes()[index] == b'f'
-            && text.as_bytes().get(index + 1) == Some(&b'i')
-        {
-            2
-        } else {
-            1
-        };
+    for byte in text.bytes() {
         let cluster = shaped_cluster_slot(clusters, cluster_index);
         cluster.text.clear();
-        cluster.text.push_str(&text[index..index + cluster_len]);
+        cluster.glyphs.clear();
+        cluster.text.push(char::from(byte));
         cluster.cell = cell;
-        cluster.cells = cluster_len as u16;
-        cluster.is_whitespace = text.as_bytes()[index] == b' ';
-        cell = cell.saturating_add(cluster_len as u16);
-        index += cluster_len;
+        cluster.cells = 1;
+        cluster.is_whitespace = byte == b' ';
+        cell = cell.saturating_add(1);
         cluster_index += 1;
     }
     (
@@ -157,12 +135,17 @@ fn shape_ascii_into_retained(
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShapedCluster {
     pub text: String,
     pub cell: u16,
     pub cells: u16,
     pub is_whitespace: bool,
+    /// Glyphs to rasterize by id when the font shaped this cluster into
+    /// ligatures or contextual alternates. Empty means render the cluster
+    /// through the per-character path (the common case, and all fallback,
+    /// emoji, symbol, and combining-mark handling).
+    pub(crate) glyphs: SmallVec<[ShapedGlyph; 2]>,
 }
 
 fn shaped_cluster_slot(clusters: &mut Vec<ShapedCluster>, index: usize) -> &mut ShapedCluster {
@@ -172,6 +155,7 @@ fn shaped_cluster_slot(clusters: &mut Vec<ShapedCluster>, index: usize) -> &mut 
             cell: 0,
             cells: 0,
             is_whitespace: false,
+            glyphs: SmallVec::new(),
         });
     }
     &mut clusters[index]
@@ -828,6 +812,7 @@ impl TextAtlasBuilder {
             cell: 0,
             cells: 1,
             is_whitespace: false,
+            glyphs: SmallVec::new(),
         };
 
         for (cell, ch) in command.text.bytes().enumerate() {
@@ -882,20 +867,34 @@ impl TextAtlasBuilder {
         face_key: GlyphAtlasFaceKey,
         quads: &mut Vec<TexturedGlyphQuad>,
     ) {
-        if can_prepare_ascii_directly(&command.text, self.shaper.feature_enabled(*b"liga")) {
-            self.prepare_ascii_text_command_into_uncached_with_face(
-                command,
-                pixels_per_point,
-                face_key,
-                quads,
-            );
-            return;
-        }
-
         let mut clusters = std::mem::take(&mut self.clusters);
-        let (total_cells, cluster_len) =
-            self.shaper
-                .shape_into_retained(&command.text, 0, &mut clusters);
+        let features = self.shaper.font_features.clone();
+        let shaped = self.fonts.shape_into_clusters(
+            &command.face,
+            &command.text,
+            command.font_size,
+            &features,
+            &mut clusters,
+        );
+        let (total_cells, cluster_len) = match shaped {
+            Some(result) => result,
+            None => {
+                // The font carries no ligature/contextual features (or shaping is
+                // unavailable): keep the per-character fast paths unchanged.
+                if is_printable_ascii(&command.text) {
+                    self.clusters = clusters;
+                    self.prepare_ascii_text_command_into_uncached_with_face(
+                        command,
+                        pixels_per_point,
+                        face_key,
+                        quads,
+                    );
+                    return;
+                }
+                self.shaper
+                    .shape_into_retained(&command.text, 0, &mut clusters)
+            }
+        };
         let active_clusters = &clusters[..cluster_len];
         let cell_width = command.rect.width() / f32::from(total_cells);
         quads.reserve(active_clusters.len());
@@ -991,7 +990,7 @@ impl TextAtlasBuilder {
     fn prepare_cluster(&mut self, request: ClusterGlyphRequest<'_>) -> (GlyphAtlasEntry, bool) {
         let key = GlyphAtlasKey {
             face: request.face_key,
-            text: self.intern_cluster_text(&request.cluster.text),
+            text: self.intern_cluster_key(request.cluster),
             font_size_bits: request.command.font_size.to_bits(),
             pixels_per_point_bits: request.pixels_per_point.to_bits(),
             width: request.glyph_width,
@@ -1030,6 +1029,22 @@ impl TextAtlasBuilder {
             return self.intern_char(ch);
         }
         self.intern_text(text)
+    }
+
+    /// Atlas key for a cluster. Shaped (ligature/contextual) clusters key on
+    /// their glyph ids rather than source text, because the same characters can
+    /// shape to different glyphs depending on run context.
+    fn intern_cluster_key(&mut self, cluster: &ShapedCluster) -> GlyphAtlasTextKey {
+        if cluster.glyphs.is_empty() {
+            return self.intern_cluster_text(&cluster.text);
+        }
+        let mut signature = String::with_capacity(cluster.glyphs.len() * 6 + 1);
+        signature.push('\u{1}');
+        for glyph in &cluster.glyphs {
+            signature.push_str(&glyph.glyph_id.to_string());
+            signature.push(',');
+        }
+        self.intern_text(&signature)
     }
 
     fn intern_char(&mut self, ch: char) -> GlyphAtlasTextKey {
@@ -1156,6 +1171,7 @@ struct FontLibrary {
     fonts_by_id: HashMap<fontdb::ID, Option<FontArc>>,
     fallback_font_ids: HashMap<FallbackFontKey, Option<fontdb::ID>>,
     metrics: HashMap<FontMetricsKey, FontFaceMetrics>,
+    shaping_capable: HashMap<fontdb::ID, bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1208,7 +1224,92 @@ impl FontLibrary {
             fonts_by_id: HashMap::new(),
             fallback_font_ids: HashMap::new(),
             metrics: HashMap::new(),
+            shaping_capable: HashMap::new(),
         }
+    }
+
+    /// Shapes `text` with the primary font and emits cell-aligned clusters,
+    /// attaching shaped glyph ids to ligature/contextual clusters. Returns
+    /// `None` when the font has no ligature features, so the caller can keep the
+    /// cheaper per-character paths.
+    fn shape_into_clusters(
+        &mut self,
+        face: &ResolvedFontFace,
+        text: &str,
+        font_size: f32,
+        features: &[FontFeature],
+        clusters: &mut Vec<ShapedCluster>,
+    ) -> Option<(u16, usize)> {
+        let id = self.primary_font_id(face)?;
+        if !self.font_has_shaping_features(id) {
+            return None;
+        }
+        let font = self.font_for_id(id)?;
+        let hb_features = harfbuzz_features(features);
+        let glyphs = self
+            .database
+            .with_face_data(id, |data, index| {
+                shape_run(data, index, text, font_size, &hb_features)
+            })
+            .flatten()?;
+        // Cell mapping relies on left-to-right, non-decreasing clusters. Bail on
+        // RTL or complex reordering and let those runs keep the per-character
+        // path, which lays out cells the same way the terminal grid does.
+        if glyphs
+            .windows(2)
+            .any(|pair| pair[1].cluster < pair[0].cluster)
+        {
+            return None;
+        }
+        let spans = shaped_spans(text, &glyphs);
+
+        let mut cell = 0_u16;
+        let mut total_cells = 0_u16;
+        let mut cluster_index = 0;
+        for span in &spans {
+            let slice = &text[span.start..span.end];
+            let cluster = shaped_cluster_slot(clusters, cluster_index);
+            cluster.text.clear();
+            cluster.glyphs.clear();
+            cluster.text.push_str(slice);
+            cluster.cell = cell;
+            cluster.is_whitespace = slice.chars().all(char::is_whitespace);
+            let span_cells = slice.chars().map(terminal_char_width).sum::<u16>().max(1);
+            cluster.cells = span_cells;
+            if draw_span_by_glyph(slice, &span.glyphs, &font) {
+                cluster.glyphs.extend(span.glyphs.iter().copied());
+            }
+            total_cells = total_cells.saturating_add(span_cells);
+            cell = cell.saturating_add(span_cells);
+            cluster_index += 1;
+        }
+        Some((total_cells.max(1), cluster_index))
+    }
+
+    fn primary_font_id(&self, face: &ResolvedFontFace) -> Option<fontdb::ID> {
+        for family in std::iter::once(&face.family).chain(face.fallback_families.iter()) {
+            let query_family = if family == "monospace" {
+                fontdb::Family::Monospace
+            } else {
+                fontdb::Family::Name(family)
+            };
+            if let Some(id) = query_font_id(self.database, &[query_family], face.style) {
+                return Some(id);
+            }
+        }
+        query_font_id(self.database, &[fontdb::Family::Monospace], face.style)
+    }
+
+    fn font_has_shaping_features(&mut self, id: fontdb::ID) -> bool {
+        if let Some(&capable) = self.shaping_capable.get(&id) {
+            return capable;
+        }
+        let capable = self
+            .database
+            .with_face_data(id, font_has_ligature_features)
+            .unwrap_or(false);
+        self.shaping_capable.insert(id, capable);
+        capable
     }
 
     fn rasterize_cluster(&mut self, request: RasterizeClusterRequest<'_>) -> RasterizedCluster {
@@ -1224,6 +1325,23 @@ impl FontLibrary {
         if cluster.is_whitespace {
             return RasterizedCluster {
                 pixels: vec![0; (width * height * format.depth()) as usize],
+                color: false,
+            };
+        }
+        if !cluster.glyphs.is_empty()
+            && let Some(font) = self.font_for_face(face)
+            && let Some(alpha) = rasterize_glyph_cluster(
+                &font,
+                &cluster.glyphs,
+                font_size * pixels_per_point,
+                pixels_per_point,
+                face.style,
+                width,
+                height,
+            )
+        {
+            return RasterizedCluster {
+                pixels: alpha_to_atlas_pixels(format, alpha),
                 color: false,
             };
         }
@@ -1447,6 +1565,88 @@ fn draw_outline_glyph<F: Font>(
 
 fn font_supports_char(font: &FontArc, ch: char) -> bool {
     font.glyph_id(ch) != GlyphId(0)
+}
+
+/// Draws a shaped cluster from its glyph ids into an alpha mask. Glyph advances
+/// and offsets arrive in logical pixels (shaped at the logical font size) and
+/// scale up by `pixels_per_point` to device pixels. Bold faces get the same
+/// synthetic-weight double strike as the per-character path.
+fn rasterize_glyph_cluster(
+    font: &FontArc,
+    glyphs: &[ShapedGlyph],
+    physical_font_size: f32,
+    pixels_per_point: f32,
+    style: FontStyle,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let scale = PxScale::from(physical_font_size.max(1.0));
+    let scaled = font.as_scaled(scale);
+    let baseline = ((height as f32 - scaled.height()) * 0.5).max(0.0) + scaled.ascent();
+    let synthesize_bold = matches!(style, FontStyle::Bold | FontStyle::BoldItalic);
+    let bold_offset = (pixels_per_point * 0.45).max(1.0);
+
+    let mut alpha = vec![0_u8; (width * height) as usize];
+    let mut pen_x = 0.0_f32;
+    for glyph in glyphs {
+        let glyph_id = GlyphId(glyph.glyph_id);
+        let x = pen_x + glyph.x_offset * pixels_per_point;
+        let y = baseline - glyph.y_offset * pixels_per_point;
+        draw_outline_glyph(
+            &mut alpha,
+            &scaled,
+            glyph_id.with_scale_and_position(scale, point(x, y)),
+            width,
+            height,
+        );
+        if synthesize_bold {
+            draw_outline_glyph(
+                &mut alpha,
+                &scaled,
+                glyph_id.with_scale_and_position(scale, point(x + bold_offset, y)),
+                width,
+                height,
+            );
+        }
+        pen_x += glyph.x_advance * pixels_per_point;
+    }
+    alpha.iter().any(|value| *value > 0).then_some(alpha)
+}
+
+/// Whether a shaped span should be drawn directly from its glyph ids rather than
+/// the per-character path. True only for genuine font output the per-character
+/// path cannot reproduce: a ligature (several source cells shaped together) or a
+/// single character the font swapped for a contextual alternate. Everything with
+/// dedicated handling (whitespace, private-use icons, symbols/box-drawing, emoji,
+/// combining marks, or any uncovered `.notdef` glyph) stays on the legacy path.
+fn draw_span_by_glyph(slice: &str, glyphs: &[ShapedGlyph], font: &FontArc) -> bool {
+    if glyphs.is_empty() || glyphs.iter().any(|glyph| glyph.glyph_id == 0) {
+        return false;
+    }
+    if slice.chars().any(|ch| {
+        ch.is_whitespace()
+            || is_private_use(ch)
+            || is_symbol_like(ch)
+            || is_combining_mark(ch)
+            || is_variation_selector(ch)
+            || ch == '\u{fe0f}'
+            || is_default_emoji_presentation(ch)
+    }) {
+        return false;
+    }
+    let width_chars = slice
+        .chars()
+        .filter(|ch| terminal_char_width(*ch) >= 1)
+        .count();
+    if width_chars >= 2 {
+        return true;
+    }
+    width_chars == 1
+        && glyphs.len() == 1
+        && slice
+            .chars()
+            .next()
+            .is_some_and(|ch| GlyphId(glyphs[0].glyph_id) != font.glyph_id(ch))
 }
 
 fn positioned_cluster_glyph(
@@ -1739,18 +1939,7 @@ fn load_matching_font(
     families: &[fontdb::Family<'_>],
     face: &ResolvedFontFace,
 ) -> Option<FontArc> {
-    let id = database.query(&fontdb::Query {
-        families,
-        weight: match face.style {
-            FontStyle::Bold | FontStyle::BoldItalic => fontdb::Weight::BOLD,
-            FontStyle::Regular | FontStyle::Italic => fontdb::Weight::NORMAL,
-        },
-        style: match face.style {
-            FontStyle::Italic | FontStyle::BoldItalic => fontdb::Style::Italic,
-            FontStyle::Regular | FontStyle::Bold => fontdb::Style::Normal,
-        },
-        ..fontdb::Query::default()
-    })?;
+    let id = query_font_id(database, families, face.style)?;
     database
         .with_face_data(id, |data, face_index| {
             FontVec::try_from_vec_and_index(data.to_vec(), face_index)
@@ -1758,6 +1947,19 @@ fn load_matching_font(
                 .map(FontArc::new)
         })
         .flatten()
+}
+
+fn query_font_id(
+    database: &fontdb::Database,
+    families: &[fontdb::Family<'_>],
+    style: FontStyle,
+) -> Option<fontdb::ID> {
+    database.query(&fontdb::Query {
+        families,
+        weight: font_weight(style),
+        style: font_style(style),
+        ..fontdb::Query::default()
+    })
 }
 
 fn font_id_supporting_char(

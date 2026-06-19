@@ -569,6 +569,9 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                                 focused: false,
                                 hovered_session: None,
                                 unfocused_dim: 0.0,
+                                hover_override: None,
+                                current_override: None,
+                                border_override: None,
                             },
                         ));
                     },
@@ -621,6 +624,9 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                                 focused: false,
                                 hovered_session: None,
                                 unfocused_dim: 0.0,
+                                hover_override: None,
+                                current_override: None,
+                                border_override: None,
                             },
                         ));
                     },

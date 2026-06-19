@@ -234,6 +234,9 @@ fn sidebar_ui_frame(
                     focused: false,
                     hovered_session: None,
                     unfocused_dim: 0.0,
+                    hover_override: None,
+                    current_override: None,
+                    border_override: None,
                 },
             ));
         },
