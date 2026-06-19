@@ -10,6 +10,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 arboard.workspace = true
 eframe.workspace = true
+iconflow.workspace = true
 fontdb.workspace = true
 libghostty-vt.workspace = true
 bootty-winit = { path = "../bootty-winit", default-features = false }
@@ -22,9 +23,7 @@ bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
 png.workspace = true
 rusqlite.workspace = true
-resvg.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 

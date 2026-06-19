@@ -43,6 +43,7 @@ eframe = { version = "0.34", default-features = false, features = [
 egui = "0.34"
 epaint_default_fonts = "0.34"
 fontdb = "0.23"
+iconflow = { version = "1", features = ["pack-lucide", "pack-tabler"] }
 indoc = "2"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "20edad15d7984c727acc4f4facdadf045609f543", features = [
   "png",
@@ -65,7 +66,6 @@ pollster = "0.4"
 png = "0.18"
 portable-pty = "0.9"
 proptest = "1"
-resvg = { version = "0.47", default-features = false }
 rmux-sdk = "0.5"
 rmux-ipc = "0.5"
 rmux-proto = "0.5"

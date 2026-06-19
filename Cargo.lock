@@ -623,6 +623,7 @@ dependencies = [
  "criterion",
  "eframe",
  "fontdb",
+ "iconflow",
  "indoc",
  "libghostty-vt",
  "muda",
@@ -632,11 +633,9 @@ dependencies = [
  "png 0.18.1",
  "pollster",
  "proptest",
- "resvg",
  "rstest",
  "rusqlite",
  "serde",
- "serde_json",
  "tempfile",
  "wgpu",
  "winit",
@@ -2907,6 +2906,12 @@ dependencies = [
  "byteorder",
  "png 0.17.16",
 ]
+
+[[package]]
+name = "iconflow"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdea0c209457d8685cf6f1aae4eabc71d69f3c6ee6bb1fab0861a52251763936"
 
 [[package]]
 name = "icu_collections"

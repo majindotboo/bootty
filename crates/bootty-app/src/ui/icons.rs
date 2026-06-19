@@ -1,16 +1,10 @@
-//! Semantic sidebar icons rasterized from bundled SVG bodies.
+//! Semantic icon rendering backed by iconflow's embedded fonts.
 //!
-//! `assets/icons-lucide.json` is a trimmed iconify pack (lucide, ISC license)
-//! holding only the icons referenced here. Bodies render to a white alpha
-//! shape once per (icon, pixel size) and are cached as textures in the egui
-//! context; callers tint at draw time via `painter.image`.
+//! Callers use Bootty's stable semantic enum or icon slug strings; this module
+//! handles compatibility aliases and keeps egui/font details out of extension APIs.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
-use eframe::egui::{self, ColorImage, Pos2, Rect, TextureHandle, TextureOptions};
-use resvg::tiny_skia;
-use serde::Deserialize;
+use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId, Pos2};
+use iconflow::{Pack, Size, Style, try_icon};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
@@ -44,62 +38,47 @@ impl Icon {
     }
 }
 
-#[derive(Deserialize)]
-struct Pack {
-    width: u32,
-    height: u32,
-    icons: HashMap<String, PackIcon>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedIcon {
+    pub family: &'static str,
+    pub codepoint: u32,
 }
 
-#[derive(Deserialize)]
-struct PackIcon {
-    body: String,
-}
-
-fn pack() -> &'static Pack {
-    static PACK: OnceLock<Pack> = OnceLock::new();
-    PACK.get_or_init(|| {
-        serde_json::from_slice(include_bytes!("../../assets/icons-lucide.json"))
-            .expect("bundled icon pack json")
+/// Resolve an icon slug exposed to status/extensions.
+pub fn resolve_slug(slug: &str) -> Option<ResolvedIcon> {
+    let (pack, slug) = compatibility_icon(slug);
+    let icon = try_icon(pack, slug, Style::Regular, Size::Regular).ok()?;
+    Some(ResolvedIcon {
+        family: icon.family,
+        codepoint: icon.codepoint,
     })
 }
 
-/// Rasterize to a white shape so the draw-time tint supplies the color.
-fn rasterize(icon: Icon, px: u32) -> Option<ColorImage> {
-    let pack = pack();
-    let body = &pack.icons.get(icon.slug())?.body;
-    // Iconify bodies reference `currentColor`; `color="white"` on the wrapper
-    // resolves it to white so the alpha channel carries the shape.
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" color="white">{body}</svg>"#,
-        w = pack.width,
-        h = pack.height,
-    );
-    let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok()?;
-    let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
-    let scale = px as f32 / pack.width.max(pack.height) as f32;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
-    Some(ColorImage::from_rgba_premultiplied([w, h], pixmap.data()))
+/// Whether a status icon slug is drawable, so layout can reserve width only when needed.
+pub fn has_slug(slug: &str) -> bool {
+    resolve_slug(slug).is_some()
 }
 
-fn icon_texture(ctx: &egui::Context, icon: Icon, px: u32) -> Option<TextureHandle> {
-    let id = egui::Id::new(("bootty-icon", icon, px));
-    if let Some(handle) = ctx.data(|data| data.get_temp::<TextureHandle>(id)) {
-        return Some(handle);
+/// Merge iconflow's embedded icon fonts into egui font definitions.
+pub fn add_icon_fonts(fonts: &mut FontDefinitions) {
+    for asset in iconflow::fonts() {
+        fonts.font_data.insert(
+            asset.family.to_owned(),
+            std::sync::Arc::new(FontData::from_static(asset.bytes)),
+        );
+        fonts
+            .families
+            .entry(FontFamily::Name(asset.family.into()))
+            .or_default()
+            .push(asset.family.to_owned());
     }
-    let image = rasterize(icon, px)?;
-    let handle = ctx.load_texture(
-        format!("icon:{}:{px}", icon.slug()),
-        image,
-        TextureOptions::LINEAR,
-    );
-    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
-    Some(handle)
+}
+
+/// Install iconflow fonts during app startup, before any paint pass asks egui to resolve them.
+pub fn install_icon_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    add_icon_fonts(&mut fonts);
+    ctx.set_fonts(fonts);
 }
 
 /// Paint `icon` centered at `center`, `size` logical pixels square, tinted.
@@ -110,16 +89,38 @@ pub fn paint_icon(
     size: f32,
     tint: egui::Color32,
 ) {
-    let px = (size * painter.ctx().pixels_per_point()).round().max(1.0) as u32;
-    let Some(texture) = icon_texture(painter.ctx(), icon, px) else {
-        return;
+    paint_icon_slug(painter, icon.slug(), center, size, tint);
+}
+
+/// Paint an icon named by `slug` (as exposed to status modules), tinted.
+/// Returns whether the slug resolved, so callers can lay out around it.
+pub fn paint_icon_slug(
+    painter: &egui::Painter,
+    slug: &str,
+    center: Pos2,
+    size: f32,
+    tint: egui::Color32,
+) -> bool {
+    let Some(icon) = resolve_slug(slug) else {
+        return false;
     };
-    painter.image(
-        texture.id(),
-        Rect::from_center_size(center, egui::vec2(size, size)),
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+    let glyph = char::from_u32(icon.codepoint).unwrap_or('?');
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        FontId::new(size, FontFamily::Name(icon.family.into())),
         tint,
     );
+    true
+}
+
+fn compatibility_icon(slug: &str) -> (Pack, &str) {
+    match slug {
+        "coffee-cup" => (Pack::Tabler, "coffee-off"),
+        "coffee-cup-filled" => (Pack::Tabler, "coffee"),
+        other => (Pack::Lucide, other),
+    }
 }
 
 #[cfg(test)]
@@ -127,16 +128,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_icon_rasterizes_to_a_visible_shape() {
+    fn semantic_icons_resolve_through_iconflow() {
         for icon in Icon::ALL {
-            let image = rasterize(icon, 16)
-                .unwrap_or_else(|| panic!("{:?} ('{}') failed to rasterize", icon, icon.slug()));
-            assert_eq!(image.size, [16, 16]);
             assert!(
-                image.pixels.iter().any(|pixel| pixel.a() > 0),
-                "{:?} rasterized fully transparent — currentColor resolution broke",
-                icon
+                resolve_slug(icon.slug()).is_some(),
+                "semantic icon {:?} ('{}') failed to resolve through iconflow",
+                icon,
+                icon.slug()
             );
         }
+    }
+
+    #[test]
+    fn status_bar_icon_slugs_resolve_for_builtin_luau_defaults() {
+        for slug in [
+            "folder",
+            "cpu",
+            "memory-stick",
+            "battery",
+            "zap",
+            "calendar",
+            "clock",
+            "coffee-cup",
+            "coffee-cup-filled",
+            "plug-zap",
+        ] {
+            assert!(has_slug(slug), "missing status icon '{slug}' in iconflow");
+        }
+    }
+
+    #[test]
+    fn status_cup_aliases_resolve_to_iconflow_glyphs() {
+        assert_eq!(resolve_slug("coffee-cup").unwrap().family, "Tabler Regular");
+        assert_eq!(
+            resolve_slug("coffee-cup-filled").unwrap().family,
+            "Tabler Regular"
+        );
+    }
+
+    #[test]
+    fn missing_icon_slug_does_not_resolve() {
+        assert!(!has_slug("not-a-real-lucide-icon"));
+    }
+
+    #[test]
+    fn icon_font_installer_binds_resolved_family_before_paint() {
+        let icon = resolve_slug("terminal").expect("terminal icon should resolve");
+        let mut fonts = FontDefinitions::default();
+
+        add_icon_fonts(&mut fonts);
+
+        assert!(fonts.font_data.contains_key(icon.family));
+        assert!(
+            fonts
+                .families
+                .get(&FontFamily::Name(icon.family.into()))
+                .is_some_and(|families| families.iter().any(|family| family == icon.family)),
+            "resolved icon family must be bound before paint"
+        );
     }
 }
