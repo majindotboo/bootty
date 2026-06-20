@@ -67,6 +67,7 @@ png = "0.18"
 portable-pty = "0.9"
 proptest = "1"
 rmux-sdk = "0.5"
+keepawake = "0.6"
 rmux-ipc = "0.5"
 rmux-proto = "0.5"
 rstest = "0.26"
@@ -76,6 +77,8 @@ serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 serde_json = "1"
 smallvec = "1"
+starship-battery = "0.11"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 syntect = { version = "5.3", default-features = false, features = [
   "default-fancy",
 ] }
@@ -97,6 +100,7 @@ wgpu = { version = "29", default-features = false, features = [
   "wgsl",
 ] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+
 
 [profile.dev]
 debug = "limited"

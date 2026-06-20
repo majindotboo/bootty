@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use super::{
     backend::MuxBackend,
-    command::MuxCommand,
+    command::{MuxCommand, MuxDirection},
     config::MuxBackendKind,
     process::{CommandRunner, SystemCommandRunner, require_success},
     snapshot::{MuxPaneAnchor, MuxSession, MuxSnapshot, MuxWindow},
@@ -95,19 +95,78 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
             MuxCommand::DitchSession { session_id } => {
                 self.run_owned(vec!["kill-session".into(), "-t".into(), session_id])?;
             }
-            MuxCommand::NewWindow { .. }
-            | MuxCommand::ActivateNextWindow { .. }
-            | MuxCommand::ActivatePreviousWindow { .. }
-            | MuxCommand::ActivateLastWindow { .. }
-            | MuxCommand::ActivateWindowIndex { .. }
-            | MuxCommand::MoveWindow { .. }
-            | MuxCommand::SplitPane { .. }
-            | MuxCommand::SelectPane { .. }
-            | MuxCommand::SelectNextPane { .. }
-            | MuxCommand::KillPane { .. }
-            | MuxCommand::ClosePane { .. }
-            | MuxCommand::TogglePaneZoom { .. } => {
-                anyhow::bail!("tmux backend does not support mux command {command:?}");
+            MuxCommand::NewWindow { session_id, cwd } => {
+                let mut args = vec!["new-window".to_owned(), "-t".to_owned(), session_id];
+                if let Some(cwd) = cwd {
+                    args.extend(["-c".to_owned(), cwd]);
+                }
+                self.run_owned(args)?;
+            }
+            MuxCommand::ActivateNextWindow { session_id } => {
+                self.run_owned(vec!["next-window".into(), "-t".into(), session_id])?;
+            }
+            MuxCommand::ActivatePreviousWindow { session_id } => {
+                self.run_owned(vec!["previous-window".into(), "-t".into(), session_id])?;
+            }
+            MuxCommand::ActivateLastWindow { session_id } => {
+                self.run_owned(vec!["last-window".into(), "-t".into(), session_id])?;
+            }
+            MuxCommand::ActivateWindowIndex { session_id, index } => {
+                self.run_owned(vec![
+                    "select-window".into(),
+                    "-t".into(),
+                    format!("{session_id}:{index}"),
+                ])?;
+            }
+            MuxCommand::MoveWindow {
+                session_id: _,
+                delta,
+            } => {
+                // Relative swap, following the moved window. tmux resolves the unscoped relative
+                // target against the attached client's current session (the one bootty attached).
+                let target = if delta < 0 { "-1" } else { "+1" };
+                for _ in 0..delta.unsigned_abs() {
+                    self.run(&["swap-window", "-t", target])?;
+                    self.run(&["select-window", "-t", target])?;
+                }
+            }
+            MuxCommand::SplitPane { session_id } => {
+                self.run_owned(vec!["split-window".into(), "-t".into(), session_id])?;
+            }
+            MuxCommand::SelectPane {
+                session_id,
+                direction,
+            } => {
+                let flag = match direction {
+                    MuxDirection::Left => "-L",
+                    MuxDirection::Down => "-D",
+                    MuxDirection::Up => "-U",
+                    MuxDirection::Right => "-R",
+                };
+                self.run_owned(vec![
+                    "select-pane".into(),
+                    "-t".into(),
+                    session_id,
+                    flag.into(),
+                ])?;
+            }
+            MuxCommand::SelectNextPane { session_id } => {
+                self.run_owned(vec![
+                    "select-pane".into(),
+                    "-t".into(),
+                    format!("{session_id}:.+"),
+                ])?;
+            }
+            MuxCommand::KillPane { session_id } | MuxCommand::ClosePane { session_id } => {
+                self.run_owned(vec!["kill-pane".into(), "-t".into(), session_id])?;
+            }
+            MuxCommand::TogglePaneZoom { session_id } => {
+                self.run_owned(vec![
+                    "resize-pane".into(),
+                    "-Z".into(),
+                    "-t".into(),
+                    session_id,
+                ])?;
             }
         }
         Ok(())
@@ -315,6 +374,53 @@ mod tests {
                 vec!["tmux", "new-session", "-d", "-s", "proj", "-c", "/repo"],
                 vec!["tmux", "rename-session", "-t", "proj", "next"],
                 vec!["tmux", "kill-session", "-t", "next"],
+            ]
+            .into_iter()
+            .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn tmux_adapter_translates_window_and_pane_navigation() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::NewWindow {
+                session_id: "$1".to_owned(),
+                cwd: Some("/repo".to_owned()),
+            })
+            .unwrap();
+        for command in [
+            MuxCommand::ActivateWindowIndex {
+                session_id: "$1".to_owned(),
+                index: 3,
+            },
+            MuxCommand::ActivateNextWindow {
+                session_id: "$1".to_owned(),
+            },
+            MuxCommand::SelectPane {
+                session_id: "$1".to_owned(),
+                direction: MuxDirection::Left,
+            },
+            MuxCommand::TogglePaneZoom {
+                session_id: "$1".to_owned(),
+            },
+        ] {
+            backend.execute(command).unwrap();
+        }
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                vec!["tmux", "new-window", "-t", "$1", "-c", "/repo"],
+                vec!["tmux", "select-window", "-t", "$1:3"],
+                vec!["tmux", "next-window", "-t", "$1"],
+                vec!["tmux", "select-pane", "-t", "$1", "-L"],
+                vec!["tmux", "resize-pane", "-Z", "-t", "$1"],
             ]
             .into_iter()
             .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())

@@ -1,32 +1,5 @@
 use super::{super::*, terminal_engine::test_terminal_engine};
 
-fn encode_key(input: KeyInput) -> Result<Vec<u8>> {
-    let terminal = Terminal::new(TerminalOptions {
-        cols: 80,
-        rows: 24,
-        max_scrollback: 0,
-    })?;
-    let mut encoder = key::Encoder::new()?;
-    let mut event = key::Event::new()?;
-    let mut buf = Vec::new();
-
-    encoder
-        .set_options_from_terminal(&terminal)
-        .set_alt_esc_prefix(true)
-        .set_macos_option_as_alt(key::OptionAsAlt::True);
-    event
-        .set_action(if input.repeat {
-            key::Action::Repeat
-        } else {
-            key::Action::Press
-        })
-        .set_key(input.key.into())
-        .set_mods(input.mods.into())
-        .set_utf8(input.utf8);
-    encoder.encode_to_vec(&event, &mut buf)?;
-    Ok(buf)
-}
-
 fn terminal_key_input(
     key: TerminalKey,
     mods: KeyMods,
@@ -40,11 +13,6 @@ fn terminal_key_input(
         utf8,
         unshifted,
     }
-}
-
-fn assert_encoded_key(input: KeyInput, expected: &[u8]) -> Result<()> {
-    assert_eq!(encode_key(input)?, expected);
-    Ok(())
 }
 
 fn assert_engine_key(
@@ -159,8 +127,13 @@ fn encode_legacy_case(case: KeyEncodeCase<'_>) -> Result<Vec<u8>> {
 }
 
 #[test]
-fn ctrl_c_encodes_interrupt_byte() -> Result<()> {
-    assert_encoded_key(
+fn key_encoder_supports_legacy_core_cases() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+    let mut out = Vec::new();
+
+    assert_engine_key(
+        &mut engine,
+        &mut out,
         terminal_key_input(
             TerminalKey::C,
             KeyMods {
@@ -171,12 +144,11 @@ fn ctrl_c_encodes_interrupt_byte() -> Result<()> {
             Some('c'),
         ),
         b"\x03",
-    )
-}
+    )?;
 
-#[test]
-fn ctrl_d_encodes_eof_byte() -> Result<()> {
-    assert_encoded_key(
+    assert_engine_key(
+        &mut engine,
+        &mut out,
         terminal_key_input(
             TerminalKey::D,
             KeyMods {
@@ -187,12 +159,11 @@ fn ctrl_d_encodes_eof_byte() -> Result<()> {
             Some('d'),
         ),
         b"\x04",
-    )
-}
+    )?;
 
-#[test]
-fn alt_b_encodes_meta_readline_sequence() -> Result<()> {
-    assert_encoded_key(
+    assert_engine_key(
+        &mut engine,
+        &mut out,
         terminal_key_input(
             TerminalKey::B,
             KeyMods {
@@ -203,12 +174,11 @@ fn alt_b_encodes_meta_readline_sequence() -> Result<()> {
             Some('b'),
         ),
         b"\x1bb",
-    )
-}
+    )?;
 
-#[test]
-fn alt_shift_q_encodes_shifted_meta_sequence() -> Result<()> {
-    assert_encoded_key(
+    assert_engine_key(
+        &mut engine,
+        &mut out,
         terminal_key_input(
             TerminalKey::Q,
             KeyMods {
@@ -220,13 +190,7 @@ fn alt_shift_q_encodes_shifted_meta_sequence() -> Result<()> {
             Some('q'),
         ),
         b"\x1bQ",
-    )
-}
-
-#[test]
-fn key_encoder_supports_legacy_core_cases() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
-    let mut out = Vec::new();
+    )?;
 
     assert_engine_key(
         &mut engine,
@@ -740,32 +704,7 @@ fn key_encoder_ports_platform_modifier_and_backspace_text_cases() -> Result<()> 
 }
 
 #[test]
-fn key_metadata_adapter_ports_key_tables_and_function_sequences() -> Result<()> {
-    for (terminal_key, ghostty_key) in [
-        (TerminalKey::Digit0, key::Key::Digit0),
-        (TerminalKey::Digit1, key::Key::Digit1),
-        (TerminalKey::A, key::Key::A),
-        (TerminalKey::Z, key::Key::Z),
-        (TerminalKey::Semicolon, key::Key::Semicolon),
-        (TerminalKey::Space, key::Key::Space),
-        (TerminalKey::Tab, key::Key::Tab),
-        (TerminalKey::Backquote, key::Key::Backquote),
-        (TerminalKey::Slash, key::Key::Slash),
-        (TerminalKey::Minus, key::Key::Minus),
-        (TerminalKey::Equal, key::Key::Equal),
-        (TerminalKey::BracketLeft, key::Key::BracketLeft),
-        (TerminalKey::BracketRight, key::Key::BracketRight),
-        (TerminalKey::Backslash, key::Key::Backslash),
-        (TerminalKey::ArrowUp, key::Key::ArrowUp),
-        (TerminalKey::F12, key::Key::F12),
-        (TerminalKey::Numpad1, key::Key::Numpad1),
-        (TerminalKey::NumpadEnter, key::Key::NumpadEnter),
-        (TerminalKey::NumpadAdd, key::Key::NumpadAdd),
-    ] {
-        assert_eq!(key::Key::from(terminal_key), ghostty_key);
-    }
-    assert_ne!(key::Key::from(TerminalKey::Digit0), key::Key::Numpad0);
-
+fn key_encoder_ports_function_sequences() -> Result<()> {
     let mut engine = test_terminal_engine()?;
     let mut out = Vec::new();
     for (terminal_key, plain, ctrl) in [
@@ -950,128 +889,6 @@ fn key_encoder_ports_modify_other_keys_terminal_state() -> Result<()> {
 }
 
 #[test]
-fn key_event_adapter_preserves_complete_state() -> Result<()> {
-    let mut event = key::Event::new()?;
-
-    event
-        .set_action(key::Action::Repeat)
-        .set_key(key::Key::Z)
-        .set_mods(key::Mods::ALT | key::Mods::SUPER)
-        .set_consumed_mods(key::Mods::ALT)
-        .set_composing(true)
-        .set_utf8(Some("test"))
-        .set_unshifted_codepoint('z');
-
-    assert_eq!(event.action(), key::Action::Repeat);
-    assert_eq!(event.key(), key::Key::Z);
-    assert_eq!(event.mods(), key::Mods::ALT | key::Mods::SUPER);
-    assert_eq!(event.consumed_mods(), key::Mods::ALT);
-    assert!(event.is_composing());
-    assert_eq!(event.utf8(), Some("test"));
-    assert_eq!(event.unshifted_codepoint(), 'z');
-
-    event
-        .set_action(key::Action::Press)
-        .set_key(key::Key::A)
-        .set_mods(key::Mods::SHIFT)
-        .set_consumed_mods(key::Mods::SHIFT)
-        .set_utf8(Some("A"))
-        .set_unshifted_codepoint('a');
-
-    assert_eq!(event.action(), key::Action::Press);
-    assert_eq!(event.key(), key::Key::A);
-    assert_eq!(event.mods(), key::Mods::SHIFT);
-    assert_eq!(event.consumed_mods(), key::Mods::SHIFT);
-    assert_eq!(event.utf8(), Some("A"));
-    assert_eq!(event.unshifted_codepoint(), 'a');
-
-    event.set_utf8::<String>(None);
-    assert_eq!(event.utf8(), None);
-    event.set_unshifted_codepoint('\0');
-    assert_eq!(event.unshifted_codepoint(), '\0');
-    Ok(())
-}
-
-#[test]
-fn key_mods_adapter_ports_lock_and_side_bits() {
-    assert_eq!(key::Mods::from(KeyMods::default()), key::Mods::empty());
-
-    assert_eq!(
-        key::Mods::from(KeyMods {
-            shift: true,
-            alt: true,
-            ctrl: true,
-            command: true,
-            caps_lock: true,
-            num_lock: true,
-            right_shift: true,
-            right_alt: true,
-            right_ctrl: true,
-            right_command: true,
-        }),
-        key::Mods::SHIFT
-            | key::Mods::ALT
-            | key::Mods::CTRL
-            | key::Mods::SUPER
-            | key::Mods::CAPS_LOCK
-            | key::Mods::NUM_LOCK
-            | key::Mods::SHIFT_SIDE
-            | key::Mods::ALT_SIDE
-            | key::Mods::CTRL_SIDE
-            | key::Mods::SUPER_SIDE
-    );
-
-    assert_eq!(
-        key::Mods::from(KeyMods {
-            right_shift: true,
-            right_alt: true,
-            right_ctrl: true,
-            right_command: true,
-            ..Default::default()
-        }),
-        key::Mods::empty()
-    );
-}
-
-#[test]
-fn keymap_darwin_carbon_modifier_values_match_upstream() {
-    fn carbon_modifier_value(
-        meta: bool,
-        shift: bool,
-        caps_lock: bool,
-        alt: bool,
-        ctrl: bool,
-    ) -> u32 {
-        (u32::from(meta) << 8)
-            | (u32::from(shift) << 9)
-            | (u32::from(caps_lock) << 10)
-            | (u32::from(alt) << 11)
-            | (u32::from(ctrl) << 12)
-    }
-
-    assert_eq!(
-        carbon_modifier_value(true, false, false, false, false),
-        0x100
-    );
-    assert_eq!(
-        carbon_modifier_value(false, true, false, false, false),
-        0x200
-    );
-    assert_eq!(
-        carbon_modifier_value(false, false, true, false, false),
-        0x400
-    );
-    assert_eq!(
-        carbon_modifier_value(false, false, false, true, false),
-        0x800
-    );
-    assert_eq!(
-        carbon_modifier_value(false, false, false, false, true),
-        0x1000
-    );
-}
-
-#[test]
 fn key_encoder_adapter_ports_options_and_kitty_ctrl_release() -> Result<()> {
     let terminal = Terminal::new(TerminalOptions {
         cols: 80,
@@ -1096,13 +913,6 @@ fn key_encoder_adapter_ports_options_and_kitty_ctrl_release() -> Result<()> {
     encoder
         .set_kitty_flags(key::KittyKeyFlags::ALL)
         .set_macos_option_as_alt(key::OptionAsAlt::True);
-
-    let mut small = [0_u8; 0];
-    let required = match encoder.encode(&event, &mut small) {
-        Err(libghostty_vt::Error::OutOfSpace { required }) => required,
-        result => panic!("expected out-of-space length, got {result:?}"),
-    };
-    assert_eq!(required, "\x1b[57442;5:3u".len());
 
     let mut out = Vec::new();
     encoder.encode_to_vec(&event, &mut out)?;

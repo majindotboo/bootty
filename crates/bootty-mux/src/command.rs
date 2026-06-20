@@ -14,6 +14,7 @@ pub enum MuxCommand {
     },
     NewWindow {
         session_id: String,
+        cwd: Option<String>,
     },
     ActivateNextWindow {
         session_id: String,

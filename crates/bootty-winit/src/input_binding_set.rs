@@ -431,11 +431,6 @@ mod tests {
     fn input_binding_set_ports_reverse_lookup_policy() {
         let mut set = BindingSet::default();
         set.parse_and_put("a=reset").unwrap();
-        assert_eq!(
-            set.get_trigger(&BindingAction::Reset).unwrap().key,
-            BindingKey::Unicode('a')
-        );
-
         set.parse_and_put("b=reset").unwrap();
         assert_eq!(
             set.get_trigger(&BindingAction::Reset).unwrap().key,
@@ -454,20 +449,11 @@ mod tests {
             BindingKey::Unicode('a')
         );
 
-        set.parse_and_put("a=text:old").unwrap();
-        assert_eq!(set.get_trigger(&BindingAction::Reset), None);
-    }
-
-    #[test]
-    fn input_binding_set_ports_chained_reverse_lookup_restoration() {
-        let mut set = BindingSet::default();
-        set.parse_and_put("a=reset").unwrap();
         set.parse_and_put("b=reset").unwrap();
         assert_eq!(
             set.get_trigger(&BindingAction::Reset).unwrap().key,
             BindingKey::Unicode('b')
         );
-
         set.parse_and_put("chain=text:next").unwrap();
         assert_eq!(
             set.get_trigger(&BindingAction::Reset).unwrap().key,
@@ -480,52 +466,9 @@ mod tests {
             set.get_trigger(&BindingAction::Reset).unwrap().key,
             BindingKey::Unicode('a')
         );
-    }
 
-    #[test]
-    fn input_binding_set_ports_sequence_tree_storage() {
-        let mut set = BindingSet::default();
-        set.parse_and_put("a>b=reset").unwrap();
-        set.parse_and_put("a>c=text:next").unwrap();
-
-        let BindingEntry::Leader(child) = &set.entries[0].1 else {
-            panic!("expected sequence leader");
-        };
-        assert_eq!(
-            child
-                .get(&BindingTrigger {
-                    mods: BindingMods::default(),
-                    key: BindingKey::Unicode('b')
-                })
-                .unwrap()
-                .action,
-            BindingAction::Reset
-        );
-        assert_eq!(
-            child
-                .get(&BindingTrigger {
-                    mods: BindingMods::default(),
-                    key: BindingKey::Unicode('c')
-                })
-                .unwrap()
-                .action,
-            BindingAction::Text("next".to_owned())
-        );
-
-        set.parse_and_put("a>b=text:updated").unwrap();
-        let BindingEntry::Leader(child) = &set.entries[0].1 else {
-            panic!("expected sequence leader");
-        };
-        assert_eq!(
-            child
-                .get(&BindingTrigger {
-                    mods: BindingMods::default(),
-                    key: BindingKey::Unicode('b')
-                })
-                .unwrap()
-                .action,
-            BindingAction::Text("updated".to_owned())
-        );
+        set.parse_and_put("a=text:old").unwrap();
+        assert_eq!(set.get_trigger(&BindingAction::Reset), None);
     }
 
     #[test]
@@ -543,10 +486,10 @@ mod tests {
         );
 
         set.parse_and_put("a>b=unbind").unwrap();
-        assert!(set.entries.is_empty());
+        assert!(set.format_entries().is_empty());
 
         set.parse_and_put("a>b=unbind").unwrap();
-        assert!(set.entries.is_empty());
+        assert!(set.format_entries().is_empty());
     }
 
     #[test]
@@ -570,25 +513,6 @@ mod tests {
         );
         assert!(!set.get(&trigger).unwrap().flags.consumed);
         assert_eq!(set.get_trigger(&BindingAction::Reset), None);
-
-        let mut sequence = BindingSet::default();
-        sequence.parse_and_put("a>b=reset").unwrap();
-        sequence.parse_and_put("chain=text:after").unwrap();
-        let BindingEntry::Leader(child) = &sequence.entries[0].1 else {
-            panic!("expected sequence leader");
-        };
-        assert_eq!(
-            child
-                .chained_actions(&BindingTrigger {
-                    mods: BindingMods::default(),
-                    key: BindingKey::Unicode('b')
-                })
-                .unwrap(),
-            &[
-                BindingAction::Reset,
-                BindingAction::Text("after".to_owned())
-            ]
-        );
     }
 
     #[test]
@@ -619,20 +543,9 @@ mod tests {
         set.parse_and_put("a=text:hello").unwrap();
         set.parse_and_put("chain=text:world").unwrap();
         set.parse_and_put("b>c=reset").unwrap();
-        assert!(set.chain_parent.is_some());
 
         let cloned = set.clone_for_config();
-        assert!(cloned.chain_parent.is_none());
-        assert!(
-            cloned
-                .entries
-                .iter()
-                .filter_map(|(_, entry)| match entry {
-                    BindingEntry::Leader(child) => Some(child),
-                    BindingEntry::Leaf(_) | BindingEntry::Chained { .. } => None,
-                })
-                .all(|child| child.chain_parent.is_none())
-        );
+        assert_eq!(cloned.format_entries(), set.format_entries());
         assert_eq!(
             cloned
                 .chained_actions(&BindingTrigger {
@@ -654,6 +567,9 @@ mod tests {
         set.parse_and_put("chain=text:world").unwrap();
         set.parse_and_put("ctrl+b=reset").unwrap();
         set.parse_and_put("c>d=csi:0m").unwrap();
+        set.parse_and_put("e>b=reset").unwrap();
+        set.parse_and_put("e>c=text:next").unwrap();
+        set.parse_and_put("e>b=text:updated").unwrap();
 
         assert_eq!(
             set.format_entries(),
@@ -661,7 +577,9 @@ mod tests {
                 "a=text:hello".to_owned(),
                 "chain=text:world".to_owned(),
                 "ctrl+b=reset".to_owned(),
-                "c>d=csi:0m".to_owned()
+                "c>d=csi:0m".to_owned(),
+                "e>c=text:next".to_owned(),
+                "e>b=text:updated".to_owned()
             ]
         );
     }

@@ -50,7 +50,10 @@ mod tests {
             (MultiplexerBackendConfig::Tmux, MuxBackendKind::Tmux),
             (MultiplexerBackendConfig::Zellij, MuxBackendKind::Zellij),
         ] {
-            let config = MultiplexerConfig { backend };
+            let config = MultiplexerConfig {
+                backend,
+                ..Default::default()
+            };
 
             assert_eq!(selected_backend(&config), expected);
         }
@@ -64,7 +67,10 @@ mod tests {
             (MultiplexerBackendConfig::Tmux, MuxBackendKind::Tmux),
             (MultiplexerBackendConfig::Zellij, MuxBackendKind::Zellij),
         ] {
-            let config = MultiplexerConfig { backend };
+            let config = MultiplexerConfig {
+                backend,
+                ..Default::default()
+            };
 
             assert_eq!(build_backend(&config).kind(), expected);
         }

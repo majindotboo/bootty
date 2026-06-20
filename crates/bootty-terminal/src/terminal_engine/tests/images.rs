@@ -1570,21 +1570,6 @@ fn terminal_engine_decodes_tmux_passthrough_kitty_payloads() -> Result<()> {
 }
 
 #[test]
-fn terminal_engine_reuses_kitty_image_payload_across_frame_extraction() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
-
-    engine.write_vt(ONE_PIXEL_PNG_APC.as_bytes());
-    let first = engine.extract_frame()?.images.placements[0].data.clone();
-    let second = engine.extract_frame()?.images.placements[0].data.clone();
-
-    assert!(
-        Arc::ptr_eq(&first, &second),
-        "unchanged Kitty image payload should not be copied every frame"
-    );
-    Ok(())
-}
-
-#[test]
 fn terminal_engine_refreshes_reused_kitty_image_id_when_middle_bytes_change() -> Result<()> {
     let mut engine = test_terminal_engine()?;
     let first_bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8];

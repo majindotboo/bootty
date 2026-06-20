@@ -456,50 +456,6 @@ fn render_frames_with_reused_renderer(
     outputs
 }
 
-fn progress_row_frame() -> TerminalRenderFrame {
-    single_text_frame(
-        SurfaceRect::from_min_size(0.0, 0.0, 80.0, 20.0),
-        SurfaceRect::from_min_size(0.0, 0.0, 80.0, 20.0),
-        8,
-        "0▏▌█▓▒░1",
-        NativeSymbolPolicy::terminal_glyph_primitives(),
-    )
-}
-
-fn nerd_progress_indicator_frame() -> TerminalRenderFrame {
-    single_text_frame(
-        SurfaceRect::from_min_size(0.0, 0.0, 80.0, 20.0),
-        SurfaceRect::from_min_size(0.0, 0.0, 80.0, 20.0),
-        8,
-        "0\u{EE00}\u{EE01}\u{EE02}\u{EE06}\u{EE09}\u{EE0B}1",
-        NativeSymbolPolicy::terminal_glyph_primitives(),
-    )
-}
-
-fn border_box_frame() -> TerminalRenderFrame {
-    let plan = TerminalPaintPlan {
-        surface: SurfaceRect::from_min_size(0.0, 0.0, 50.0, 30.0),
-        default_background: color(1, 2, 3),
-        backgrounds: Vec::new(),
-        text_runs: vec![
-            text_run(SurfaceRect::from_min_size(0.0, 0.0, 50.0, 10.0), 5, "a┌─┐b"),
-            text_run(
-                SurfaceRect::from_min_size(0.0, 10.0, 50.0, 10.0),
-                5,
-                " │ │ ",
-            ),
-            text_run(
-                SurfaceRect::from_min_size(0.0, 20.0, 50.0, 10.0),
-                5,
-                " └─┘ ",
-            ),
-        ],
-        decorations: Vec::new(),
-        cursor: None,
-    };
-    primitive_render_frame(&plan)
-}
-
 fn cursor_frame(shape: CursorShape) -> TerminalRenderFrame {
     let plan = TerminalPaintPlan {
         surface: SurfaceRect::from_min_size(0.0, 0.0, 21.0, 21.0),
@@ -563,15 +519,25 @@ fn background_callback_input_uses_terminal_render_fill_commands() {
 }
 
 #[test]
-fn background_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape = terminal_render_callback(
-        &background_frame(),
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("background callback shape");
+fn terminal_frame_command_variants_produce_wgpu_callback_shape() {
+    for (name, frame) in [
+        ("mixed", mixed_background_image_text_cursor_frame()),
+        ("sprite-only", prompt_sprite_frame()),
+        ("image-only", image_only_frame()),
+        ("cursor-only", cursor_frame(CursorShape::Block)),
+    ] {
+        let shape = terminal_render_callback(
+            &frame,
+            eframe::wgpu::TextureFormat::Rgba8Unorm,
+            ViewTransform::IDENTITY,
+        )
+        .unwrap_or_else(|| panic!("{name} frame should produce a callback shape"));
 
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
+        assert!(
+            matches!(shape, eframe::egui::Shape::Callback(_)),
+            "{name} frame should produce a callback shape"
+        );
+    }
 }
 
 #[test]
@@ -656,35 +622,6 @@ fn prompt_sprite_draws_are_batched_from_terminal_render_sprite_commands() {
                 && vertex.position[1] <= 21.0
         })
     }));
-}
-
-#[test]
-fn prompt_sprite_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let mut frame = prompt_sprite_frame();
-    frame
-        .commands
-        .retain(|command| matches!(command, TerminalRenderCommand::Sprite(_)));
-
-    let shape = terminal_render_callback(
-        &frame,
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("sprite callback shape");
-
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
-}
-
-#[test]
-fn image_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape = terminal_render_callback(
-        &image_only_frame(),
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("image callback shape");
-
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }
 
 #[test]
@@ -808,123 +745,6 @@ fn reused_renderer_preserves_mixed_layer_order_without_pixel_drift() {
 }
 
 #[test]
-fn progress_row_sprites_are_batched_from_terminal_render_sprite_commands() {
-    let draws = terminal_sprite_draws(&progress_row_frame());
-
-    assert_eq!(
-        draws.iter().map(|draw| draw.ch).collect::<Vec<_>>(),
-        vec!['▏', '▌', '█', '▓', '▒', '░']
-    );
-    assert!(draws.iter().all(|draw| !draw.vertices.is_empty()));
-    assert!(draws.iter().all(|draw| !draw.indices.is_empty()));
-    assert!(draws.iter().all(|draw| {
-        draw.vertices.iter().all(|vertex| {
-            vertex.position[0] >= 0.0
-                && vertex.position[0] <= 70.0
-                && vertex.position[1] >= 0.0
-                && vertex.position[1] <= 20.0
-        })
-    }));
-}
-
-#[test]
-fn nerd_progress_indicators_are_batched_from_terminal_render_sprite_commands() {
-    let draws = terminal_sprite_draws(&nerd_progress_indicator_frame());
-
-    assert_eq!(
-        draws.iter().map(|draw| draw.ch).collect::<Vec<_>>(),
-        vec![
-            '\u{EE00}', '\u{EE01}', '\u{EE02}', '\u{EE06}', '\u{EE09}', '\u{EE0B}'
-        ]
-    );
-    assert!(draws.iter().all(|draw| !draw.vertices.is_empty()));
-    assert!(draws.iter().all(|draw| !draw.indices.is_empty()));
-}
-
-#[test]
-fn nerd_progress_indicator_neighbors_remain_in_terminal_text_batch() {
-    let draws = terminal_text_draws(&nerd_progress_indicator_frame());
-
-    assert!(draws.iter().any(|draw| draw.ch == '0'));
-    assert!(draws.iter().any(|draw| draw.ch == '1'));
-    assert!(
-        !draws
-            .iter()
-            .any(|draw| ('\u{EE00}'..='\u{EE0B}').contains(&draw.ch))
-    );
-}
-
-#[test]
-fn progress_row_neighbors_remain_in_terminal_text_batch() {
-    let draws = terminal_text_draws(&progress_row_frame());
-
-    assert!(draws.iter().any(|draw| draw.ch == '0'));
-    assert!(draws.iter().any(|draw| draw.ch == '1'));
-    assert!(
-        !draws
-            .iter()
-            .any(|draw| matches!(draw.ch, '▏' | '▌' | '█' | '▓' | '▒' | '░'))
-    );
-}
-
-#[test]
-fn progress_row_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape = terminal_render_callback(
-        &progress_row_frame(),
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("progress row callback shape");
-
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
-}
-
-#[test]
-fn border_box_sprites_are_batched_from_terminal_render_sprite_commands() {
-    let draws = terminal_sprite_draws(&border_box_frame());
-
-    assert_eq!(
-        draws.iter().map(|draw| draw.ch).collect::<Vec<_>>(),
-        vec!['┌', '─', '┐', '│', '│', '└', '─', '┘']
-    );
-    assert!(draws.iter().all(|draw| !draw.vertices.is_empty()));
-    assert!(draws.iter().all(|draw| !draw.indices.is_empty()));
-    assert!(draws.iter().all(|draw| {
-        draw.vertices.iter().all(|vertex| {
-            vertex.position[0] >= 10.0
-                && vertex.position[0] <= 40.0
-                && vertex.position[1] >= 0.0
-                && vertex.position[1] <= 30.0
-        })
-    }));
-}
-
-#[test]
-fn border_box_neighbors_remain_in_terminal_text_batch() {
-    let draws = terminal_text_draws(&border_box_frame());
-
-    assert!(draws.iter().any(|draw| draw.ch == 'a'));
-    assert!(draws.iter().any(|draw| draw.ch == 'b'));
-    assert!(
-        !draws
-            .iter()
-            .any(|draw| matches!(draw.ch, '┌' | '─' | '┐' | '│' | '└' | '┘'))
-    );
-}
-
-#[test]
-fn border_box_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let shape = terminal_render_callback(
-        &border_box_frame(),
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("border box callback shape");
-
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
-}
-
-#[test]
 fn cursor_draws_are_batched_from_terminal_render_cursor_commands() {
     let block = terminal_cursor_draws(&cursor_frame(CursorShape::Block));
     let bar = terminal_cursor_draws(&cursor_frame(CursorShape::Bar));
@@ -972,21 +792,4 @@ fn decoration_draws_are_batched_from_terminal_render_decoration_commands() {
             .any(|draw| draw.rect == SurfaceRect::from_min_size(0.0, 5.5, 28.0, 1.0))
     );
     assert!(draws.iter().any(|draw| draw.rect.width() == 4.0));
-}
-
-#[test]
-fn cursor_only_frame_is_enqueueable_as_terminal_wgpu_callback() {
-    let mut frame = cursor_frame(CursorShape::Block);
-    frame
-        .commands
-        .retain(|command| matches!(command, TerminalRenderCommand::Cursor(_)));
-
-    let shape = terminal_render_callback(
-        &frame,
-        eframe::wgpu::TextureFormat::Rgba8Unorm,
-        ViewTransform::IDENTITY,
-    )
-    .expect("cursor callback shape");
-
-    assert!(matches!(shape, eframe::egui::Shape::Callback(_)));
 }

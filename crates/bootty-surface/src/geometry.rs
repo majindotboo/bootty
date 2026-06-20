@@ -677,33 +677,29 @@ mod tests {
     }
 
     #[test]
-    fn renderer_grid_dimensions_update_exact() {
-        assert_eq!(
-            GridDimensions::for_pixels(
+    fn grid_dimensions_floor_to_whole_cells_with_minimum_size() {
+        for (width, height, cell, expected) in [
+            (
                 100,
                 40,
                 RoundedCellMetrics {
                     width: 5,
                     height: 10,
                 },
+                GridDimensions { cols: 20, rows: 4 },
             ),
-            GridDimensions { cols: 20, rows: 4 }
-        );
-    }
-
-    #[test]
-    fn renderer_grid_dimensions_update_rounding() {
-        assert_eq!(
-            GridDimensions::for_pixels(
+            (
                 20,
                 40,
                 RoundedCellMetrics {
                     width: 6,
                     height: 15,
                 },
+                GridDimensions { cols: 3, rows: 2 },
             ),
-            GridDimensions { cols: 3, rows: 2 }
-        );
+        ] {
+            assert_eq!(GridDimensions::for_pixels(width, height, cell), expected);
+        }
     }
 
     #[test]
@@ -798,22 +794,25 @@ mod tests {
     }
 
     #[test]
-    fn view_transform_identity_leaves_surface_untouched() {
-        let surface = SurfaceRect::from_min_size(10.0, 20.0, 800.0, 600.0);
-        assert_eq!(ViewTransform::IDENTITY.applied_to(surface), surface);
-    }
-
-    #[test]
-    fn view_transform_at_2x_halves_the_projection_rect() {
-        let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
-        let adjusted = ViewTransform {
-            zoom: 2.0,
-            pan_x: 0.0,
-            pan_y: 0.0,
+    fn view_transform_projects_surface_by_zoom() {
+        for (view, surface, expected) in [
+            (
+                ViewTransform::IDENTITY,
+                SurfaceRect::from_min_size(10.0, 20.0, 800.0, 600.0),
+                SurfaceRect::from_min_size(10.0, 20.0, 800.0, 600.0),
+            ),
+            (
+                ViewTransform {
+                    zoom: 2.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                },
+                SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0),
+                SurfaceRect::from_min_size(0.0, 0.0, 400.0, 300.0),
+            ),
+        ] {
+            assert_eq!(view.applied_to(surface), expected);
         }
-        .applied_to(surface);
-        assert_eq!(adjusted.width(), 400.0);
-        assert_eq!(adjusted.height(), 300.0);
     }
 
     #[test]

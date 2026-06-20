@@ -1,11 +1,7 @@
-use std::{hint::black_box, time::Duration};
+use std::hint::black_box;
 
 use bootty_runtime::{
-    PtyBacklog, drain_pty_backlog,
-    geometry::TerminalGeometry,
-    terminal_session::{
-        DrainStats, should_publish_frame_after_work, sync_output_suppresses_publish,
-    },
+    PtyBacklog, drain_pty_backlog, geometry::TerminalGeometry, terminal_session::DrainStats,
 };
 use bootty_terminal::terminal_engine::TerminalEngine;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -129,44 +125,9 @@ fn bench_engine_drain(c: &mut Criterion) {
     });
 }
 
-fn bench_publish_policy(c: &mut Criterion) {
-    c.bench_function("pty_publish_policy_backlog_mixed", |b| {
-        let elapsed = [
-            Duration::ZERO,
-            Duration::from_millis(8),
-            Duration::from_millis(16),
-            Duration::from_millis(64),
-        ];
-        b.iter(|| {
-            let mut publishes = 0_usize;
-            for pending in black_box([0, 4 * 1024, 512 * 1024]) {
-                for force in black_box([false, true]) {
-                    for sync in black_box([false, true]) {
-                        for change_elapsed in black_box(elapsed) {
-                            for publish_elapsed in black_box(elapsed) {
-                                if should_publish_frame_after_work(
-                                    black_box(true),
-                                    force,
-                                    sync_output_suppresses_publish(sync, change_elapsed),
-                                    pending,
-                                    change_elapsed,
-                                    publish_elapsed,
-                                ) {
-                                    publishes += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            black_box(publishes)
-        })
-    });
-}
-
 criterion_group!(
     name = benches;
     config = Criterion::default().noise_threshold(0.15);
-    targets = bench_backlog_queue, bench_engine_drain, bench_publish_policy
+    targets = bench_backlog_queue, bench_engine_drain
 );
 criterion_main!(benches);

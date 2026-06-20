@@ -22,10 +22,25 @@ use crate::{
     },
 };
 
+/// Fallback notch height (points) when the screen reports a notch by name but the exact inset can't
+/// be measured (the menu bar is hidden in fullscreen). The configurable offset overrides it.
+const FALLBACK_NOTCH_HEIGHT: f32 = 32.0;
 /// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+
+fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visible: bool) -> bool {
+    !(sidebar_visible && segment.module == "session")
+}
+
+fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32 {
+    if sidebar_visible && !sidebar_on_right {
+        0.0
+    } else {
+        chrome::STATUS_EDGE_PAD
+    }
+}
 
 pub struct BoottyApp {
     state: AppState,
@@ -34,6 +49,9 @@ pub struct BoottyApp {
     settings: Option<SettingsWindow>,
     // Held for the process lifetime so the native menu stays installed.
     _menu: Option<AppMenu>,
+    /// Worker for built-in and user Lua/Luau status modules.
+    status_modules: crate::status_module::StatusModuleHost,
+    keep_awake: Option<keepawake::KeepAwake>,
 }
 
 impl BoottyApp {
@@ -62,6 +80,8 @@ impl BoottyApp {
     ) -> Result<Self> {
         if uses_custom_egui_fonts(&config) {
             configure_egui_fonts(&cc.egui_ctx, &config.font.family);
+        } else {
+            crate::ui::icons::install_icon_fonts(&cc.egui_ctx);
         }
         let repaint_ctx = cc.egui_ctx.clone();
         let repaint: crate::mux::RepaintHandle =
@@ -74,12 +94,28 @@ impl BoottyApp {
         )
         .with_text_config(text_config);
 
+        // User status modules live in `<config>/status/`; built-ins are Luau modules and user
+        // `.lua` / `.luau` files override same-named defaults.
+        let theme_tokens = crate::theme::theme_tokens(&config);
+        let status_dir = config
+            .config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("status");
+        let status_modules = crate::status_module::StatusModuleHost::spawn(
+            status_dir,
+            cc.egui_ctx.clone(),
+            theme_tokens,
+        );
+
         Ok(Self {
             state: AppState::new(config, repaint, direct_input_rx, modifier_side_rx)?,
             terminal_widget,
             app_icon_texture: None,
             settings: None,
             _menu: crate::menu::install(),
+            status_modules,
+            keep_awake: None,
         })
     }
 
@@ -146,6 +182,114 @@ impl BoottyApp {
         }
     }
 
+    fn resolve_status_segments(&self, sidebar_visible: bool) -> Vec<chrome::ResolvedSegment> {
+        self.state
+            .config()
+            .chrome
+            .status_segments
+            .iter()
+            .filter(|segment| status_segment_visible(segment, sidebar_visible))
+            .filter_map(|segment| {
+                let seg_fg = segment.fg.map(crate::theme::config_color32);
+                let seg_bg = segment.bg.map(crate::theme::config_color32);
+                let items = self
+                    .status_modules
+                    .items(&segment.module)
+                    .into_iter()
+                    .map(|item| chrome::ResolvedItem {
+                        text: item.text,
+                        icon: item.icon.or_else(|| segment.icon.clone()),
+                        stroke: item.stroke,
+                        fg: item.fg.or(seg_fg),
+                        bg: item.bg.or(seg_bg),
+                        gauge: item.gauge,
+                        primitives: item.primitives,
+                        pad_left: item.pad_left,
+                        pad_right: item.pad_right,
+                        join: item.join,
+                        gap: item.gap,
+                        action: item.action,
+                    })
+                    .collect::<Vec<_>>();
+                (!items.is_empty()).then_some(chrome::ResolvedSegment {
+                    align: segment.align,
+                    items,
+                })
+            })
+            .collect()
+    }
+
+    fn current_status_mux_view(&self) -> crate::status_module::MuxView {
+        let selected = self.state.mux().selected_window();
+        let windows = self
+            .state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| crate::status_module::WindowView {
+                id: window.id.clone(),
+                index: window.index,
+                name: window.name.clone(),
+                active: selected == Some(window.id.as_str())
+                    || (selected.is_none() && window.active),
+            })
+            .collect();
+        let session = chrome::selected_session_name(
+            self.state.mux().sessions(),
+            self.state.mux().selected_session(),
+        )
+        .map(str::to_owned);
+        let session_color = crate::ui::sidebar::session_accent_color(
+            self.state.mux().sessions(),
+            self.state.mux().selected_session(),
+        )
+        .map(|color| format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()));
+        crate::status_module::MuxView {
+            windows,
+            session,
+            session_color,
+            keep_awake: self.keep_awake.is_some(),
+        }
+    }
+
+    /// Pushes the active session's windows and name to the status-module worker so modules
+    /// (`bootty.windows()` / `bootty.session()`) can render them.
+    fn publish_status_mux_view(&self) {
+        let sidebar_visible = self.state.config().chrome.sidebar;
+        self.status_modules.set_active(
+            self.state
+                .config()
+                .chrome
+                .status_segments
+                .iter()
+                .filter(|segment| status_segment_visible(segment, sidebar_visible))
+                .map(|segment| segment.module.clone()),
+        );
+
+        self.status_modules
+            .update_mux(self.current_status_mux_view());
+    }
+
+    fn toggle_keep_awake(&mut self) {
+        if self.keep_awake.take().is_some() {
+            self.publish_status_mux_view();
+            return;
+        }
+
+        match keepawake::Builder::default()
+            .display(true)
+            .idle(true)
+            .reason("Bootty status-bar toggle")
+            .app_name("Bootty")
+            .app_reverse_domain("dev.bootty")
+            .create()
+        {
+            Ok(guard) => self.keep_awake = Some(guard),
+            Err(error) => self.state.record_render_error(error),
+        }
+        self.publish_status_mux_view();
+    }
+
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         let palette = theme_palette_from_config(self.state.config());
@@ -159,9 +303,44 @@ impl BoottyApp {
             || ui
                 .ctx()
                 .input(|input| input.viewport().fullscreen.unwrap_or(false));
-        // The sidebar's fullscreen background applies when it covers the screen top on a notched
-        // display, independent of the titlebar style. Short-circuits to no objc calls when windowed.
-        let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_has_notch();
+        // Reserve a top offset in fullscreen to clear the notch and switch the sidebar to its
+        // fullscreen background. The explicit override applies whenever fullscreen so it works even
+        // when auto-detection can't read the notch (a hidden menu bar zeroes safeAreaInsets); the
+        // safe-area auto value only fills in when the override is unset. No objc calls when windowed.
+        if fullscreen_chrome {
+            crate::platform::macos_disable_titlebar_separator();
+        }
+        // Drop the window shadow in fullscreen; its rim otherwise reads as a border around the
+        // screen-filling window. Restored when windowed.
+        crate::platform::macos_set_window_shadow(!fullscreen_chrome);
+        // Detect the notch by display name (stable across fullscreen/menu-bar state) rather than the
+        // safe-area inset, which zeroes out when the menu bar is hidden in non-native fullscreen.
+        let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_is_notched();
+        // Pixel height for the layout offset: the config override, else the measured inset when
+        // available, else a fallback (the inset is unreadable while the menu bar is hidden).
+        let measured_notch = crate::platform::macos_active_screen_notch_height();
+        let fullscreen_top_offset = if notch_context {
+            self.state
+                .config()
+                .window
+                .fullscreen_top_offset
+                .or((measured_notch > 0.0).then_some(measured_notch))
+                .unwrap_or(FALLBACK_NOTCH_HEIGHT)
+                .max(0.0)
+        } else {
+            0.0
+        };
+        // When enabled, the terminal/tab bar sits inside the notch band instead of being pushed
+        // entirely below it; the band reuses the sidebar's fullscreen background either way.
+        let tabs_in_notch = notch_context && self.state.config().window.fullscreen_tabs_in_notch;
+        let sidebar_fullscreen_bg = {
+            let sidebar_cfg = &self.state.config().sidebar;
+            sidebar_cfg
+                .fullscreen_background
+                .or(sidebar_cfg.background)
+                .map(crate::theme::config_color32)
+        };
+        let notch_band_color = sidebar_fullscreen_bg.unwrap_or(palette.base);
         let sidebar_width = if sidebar {
             configured_sidebar_width
         } else {
@@ -227,14 +406,37 @@ impl BoottyApp {
         } else {
             0.0
         };
+        // Paint the notch band with the sidebar's fullscreen background so the strip above the
+        // content matches the sidebar (the sidebar fills its own band). Content draws on top.
+        if notch_context && fullscreen_top_offset > 0.0 {
+            let band = Rect::from_min_max(
+                Pos2::new(right_rect.min.x, rect.min.y),
+                Pos2::new(right_rect.max.x, rect.min.y + fullscreen_top_offset),
+            );
+            ui.painter().rect_filled(band, 0.0, notch_band_color);
+        }
+        // With tabs-in-notch the content rises into the notch band. For tmux (no Bootty tab bar) the
+        // terminal drops by one row less than the notch so the status line's bottom edge lines up
+        // with the bottom of the notch; a Bootty tab bar instead fills the band from the top. The
+        // terminal default background is overridden to the band color below so a tmux `bg=default`
+        // status line matches the chrome.
+        let terminal_cell_height = self.terminal_widget.cell_dimensions().1;
+        let content_offset = if !tabs_in_notch {
+            fullscreen_top_offset
+        } else if show_window_tabs {
+            0.0
+        } else {
+            (fullscreen_top_offset - terminal_cell_height).max(0.0)
+        };
+        let content_top = (right_rect.min.y + content_offset).min(right_rect.max.y);
         let status_rect = Rect::from_min_max(
             Pos2::new(
                 (right_rect.min.x + status_left_inset).min(right_rect.max.x),
-                right_rect.min.y,
+                content_top,
             ),
             Pos2::new(
                 right_rect.max.x,
-                (right_rect.min.y + status_height).min(right_rect.max.y),
+                (content_top + status_height).min(right_rect.max.y),
             ),
         );
         let window_tabs_rect = Rect::from_min_max(
@@ -264,11 +466,8 @@ impl BoottyApp {
                             .config()
                             .window
                             .reserves_macos_titlebar_button_area();
-                    let top_inset = if fullscreen_chrome && !title_visible {
-                        28.0
-                    } else {
-                        0.0
-                    };
+                    // Shared with the content stack so the sidebar header clears the notch too.
+                    let top_inset = fullscreen_top_offset;
                     // Resolve `[sidebar]` color overrides on top of the theme. `base`/`text` feed the
                     // derived hover/current/border tints; the notch background applies only in
                     // fullscreen on a notched screen.
@@ -355,7 +554,7 @@ impl BoottyApp {
                     })
                     .inner;
                 if response.hovered() || response.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
                 if response.dragged()
                     && let Some(pos) = ui.ctx().pointer_interact_pos()
@@ -377,26 +576,48 @@ impl BoottyApp {
         }
 
         if status_bar {
+            // Tick once a second so the clock advances and module output refreshes when idle.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+            self.publish_status_mux_view();
+            let status_background = if notch_context {
+                notch_band_color
+            } else {
+                palette.base
+            };
+            let segments = self.resolve_status_segments(sidebar);
+            let mut clicked_action = None;
             ui.scope_builder(
                 UiBuilder::new()
                     .max_rect(status_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
-                    chrome::show_status_bar(
+                    clicked_action = chrome::show_status_bar(
                         ui,
                         palette,
                         StatusBarModel {
-                            backend: selected_backend(&self.state.config().multiplexer),
-                            selected_session_name: chrome::selected_session_name(
-                                self.state.mux().sessions(),
-                                self.state.mux().selected_session(),
-                            ),
-                            metrics: self.state.status_metrics(),
-                            last_error: self.state.last_error(),
+                            segments: &segments,
+                            background: status_background,
+                            left_padding: status_bar_left_padding(sidebar, sidebar_on_right),
                         },
                     );
                 },
             );
+            match clicked_action.as_deref() {
+                Some("toggle-caffeinate") => self.toggle_keep_awake(),
+                Some(action) => {
+                    if let Some(window_id) = action.strip_prefix("activate-window:")
+                        && let Some(session_id) =
+                            self.state.mux().selected_session().map(str::to_owned)
+                    {
+                        self.state.activate_window_from_ui(&session_id, window_id);
+                    }
+                }
+                None => {}
+            }
+        } else {
+            // Bar hidden: no module is referenced, so none should keep running.
+            self.status_modules.set_active(Vec::new());
         }
 
         if show_window_tabs {
@@ -411,6 +632,12 @@ impl BoottyApp {
                         chrome::WindowTabsModel {
                             windows: self.state.mux().selected_session_windows(),
                             selected_window: self.state.mux().selected_window(),
+                            background: if tabs_in_notch {
+                                notch_band_color
+                            } else {
+                                palette.base
+                            },
+                            left_padding: status_bar_left_padding(sidebar, sidebar_on_right),
                         },
                     ) && let Some(session_id) =
                         self.state.mux().selected_session().map(str::to_owned)
@@ -641,7 +868,7 @@ fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {
             .or_default()
             .insert(0, name);
     }
-
+    crate::ui::icons::add_icon_fonts(&mut fonts);
     ctx.set_fonts(fonts);
 }
 
@@ -661,5 +888,34 @@ mod tests {
 
         config.chrome.status_bar = true;
         assert!(uses_custom_egui_fonts(&config));
+    }
+
+    #[test]
+    fn session_status_segment_tracks_sidebar_visibility() {
+        let segment = crate::config::StatusSegment {
+            module: "session".to_owned(),
+            ..Default::default()
+        };
+        assert!(!status_segment_visible(&segment, true));
+        assert!(status_segment_visible(&segment, false));
+    }
+
+    #[test]
+    fn non_session_status_segments_remain_visible_with_sidebar() {
+        let segment = crate::config::StatusSegment {
+            module: "windows".to_owned(),
+            ..Default::default()
+        };
+        assert!(status_segment_visible(&segment, true));
+    }
+
+    #[test]
+    fn status_bar_left_padding_is_flush_next_to_left_sidebar() {
+        assert_eq!(status_bar_left_padding(true, false), 0.0);
+        assert_eq!(
+            status_bar_left_padding(false, false),
+            chrome::STATUS_EDGE_PAD
+        );
+        assert_eq!(status_bar_left_padding(true, true), chrome::STATUS_EDGE_PAD);
     }
 }

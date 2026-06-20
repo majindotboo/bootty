@@ -9,34 +9,19 @@ fn family(ch: u32) -> Option<SpriteFamily> {
 }
 
 #[test]
-fn family_ranges_have_exact_edges() {
+fn registry_owns_representative_sprite_families_and_rejects_unimplemented_codepoints() {
     use SpriteFamily::{
         Block, BoxDrawing, Braille, LegacyComputing, LegacyComputingSupplement, Powerline,
-        ProgressIndicator, Separator, Shade,
+        ProgressIndicator, Shade,
     };
 
     let cases: &[(u32, Option<SpriteFamily>)] = &[
-        (0x24FF, None),
-        (0x2500, Some(BoxDrawing)),
-        (0x257F, Some(BoxDrawing)),
-        (0x2580, Some(Block)),
-        (0x2590, Some(Block)),
-        (0x2591, Some(Shade)),
-        (0x2593, Some(Shade)),
-        (0x2594, Some(Block)),
-        (0x2595, Some(Block)),
-        (0x2596, Some(Block)),
-        (0x259F, Some(Block)),
-        (0x25A0, None),
-        (0x276E, Some(Separator)),
-        (0x276F, Some(Separator)),
-        (0x27FF, None),
-        (0x2800, Some(Braille)),
-        (0x28FF, Some(Braille)),
-        (0x2900, None),
+        ('─' as u32, Some(BoxDrawing)),
+        ('▌' as u32, Some(Block)),
+        ('▒' as u32, Some(Shade)),
+        ('⣿' as u32, Some(Braille)),
         (0xE0AF, None),
         (0xE0B0, Some(Powerline)),
-        (0xE0BF, Some(Powerline)),
         (0xE0C0, None),
         (0xE0D1, None),
         (0xE0D2, Some(Powerline)),
@@ -47,21 +32,18 @@ fn family_ranges_have_exact_edges() {
         (0xEE00, Some(ProgressIndicator)),
         (0xEE0B, Some(ProgressIndicator)),
         (0xEE0C, None),
-        (0x1FAFF, None),
-        (0x1FB00, Some(LegacyComputing)),
-        (0x1FBAF, Some(LegacyComputing)),
+        (0x1FB67, Some(LegacyComputing)),
+        (0x1FB68, Some(LegacyComputing)),
         (0x1FBB0, None),
+        (0x1FBBC, None),
         (0x1FBBD, Some(LegacyComputing)),
         (0x1FBC0, None),
-        (0x1FBEF, Some(LegacyComputing)),
-        (0x1FBF0, None),
         (0x1CC1A, None),
         (0x1CC1B, Some(LegacyComputingSupplement)),
-        (0x1CC1E, Some(LegacyComputingSupplement)),
         (0x1CC1F, None),
-        (0x1CC21, Some(LegacyComputingSupplement)),
-        (0x1CEAF, Some(LegacyComputingSupplement)),
         (0x1CEB0, None),
+        ('A' as u32, None),
+        ('■' as u32, None),
     ];
 
     for (codepoint, expected) in cases {

@@ -31,7 +31,8 @@ use crate::{
     mux::{
         RepaintHandle,
         command::MuxCommand,
-        controller::MuxController,
+        config::{MuxBackendKind, selected_backend},
+        controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
         sidebar_meta::{
             SidebarMetadata, SidebarMetadataSession, collect_sidebar_metadata,
             sidebar_metadata_sessions_for_prefix,
@@ -63,6 +64,9 @@ use bootty_terminal::terminal_engine::{
 const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const SIDEBAR_METADATA_INITIAL_DELAY: Duration = Duration::from_secs(1);
 
+fn mux_refresh_repaint_after(config: &crate::config::MultiplexerConfig) -> Option<Duration> {
+    (selected_backend(config) != MuxBackendKind::Native).then_some(MUX_SESSION_REFRESH_INTERVAL)
+}
 /// Per-frame snapshot of everything the state machine needs from the host.
 /// Captured once at frame start; `egui::Context` never enters this module.
 #[derive(Clone, Debug)]
@@ -680,6 +684,9 @@ impl AppState {
         if let Some(result) = self.mux.poll_command() {
             self.last_error = result.err();
         }
+        if let Some(after) = mux_refresh_repaint_after(&self.config_state.current().multiplexer) {
+            effects.push(AppEffect::RepaintAfter(after));
+        }
         self.sync_session_order();
         if self.config_state.current().chrome.sidebar {
             self.refresh_sidebar_metadata(viewport, now);
@@ -789,8 +796,10 @@ impl AppState {
     fn sidebar_metadata_session_budget(&self, viewport: ViewportSnapshot) -> usize {
         let fullscreen_chrome = self.macos_non_native_fullscreen_active || viewport.fullscreen;
         let title_visible = self.config().window.custom_chrome_title_visible();
-        let top_inset = if fullscreen_chrome && !title_visible {
-            28.0
+        // Approximates the render layout's notch reservation; an exact match isn't needed since this
+        // only sizes the metadata prefetch budget, and the off-thread path can't query the screen.
+        let top_inset = if fullscreen_chrome {
+            self.config().window.fullscreen_top_offset.unwrap_or(28.0)
         } else {
             0.0
         };
@@ -1222,9 +1231,14 @@ impl AppState {
             return;
         }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
+        let selected_cwd = self
+            .mux
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.cwd.clone());
         let command = match action {
             MuxKeyAction::NewTab => MuxCommand::NewWindow {
                 session_id: selected_session,
+                cwd: selected_cwd,
             },
             MuxKeyAction::NextTab => MuxCommand::ActivateNextWindow {
                 session_id: selected_session,
@@ -1451,7 +1465,7 @@ fn next_non_native_fullscreen_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::WindowFullscreen;
+    use crate::config::{MultiplexerBackendConfig, WindowFullscreen};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1575,6 +1589,20 @@ mod tests {
         let last_refresh = now - SIDEBAR_METADATA_REFRESH_INTERVAL;
 
         assert!(!sidebar_metadata_refresh_due(last_refresh, now, true));
+    }
+
+    #[test]
+    fn external_mux_backends_schedule_frequent_refresh_repaints() {
+        let mut config = BoottyConfig::default();
+        assert_eq!(mux_refresh_repaint_after(&config.multiplexer), None);
+
+        config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+
+        assert_eq!(
+            mux_refresh_repaint_after(&config.multiplexer),
+            Some(MUX_SESSION_REFRESH_INTERVAL)
+        );
+        assert!(MUX_SESSION_REFRESH_INTERVAL <= Duration::from_millis(250));
     }
 
     #[test]

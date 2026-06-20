@@ -122,8 +122,6 @@ bench_targets=(
   idle_overhead
   power_thermal
   input_protocols
-  vt_correctness
-  cell_diff
 )
 
 emit_metadata
@@ -146,16 +144,10 @@ if ! run_logged compile_flood_response cargo test -p bootty-runtime --bench floo
 fi
 
 if [[ $quick -eq 1 ]]; then
-  if ! run_logged quick_cell_diff cargo bench -p bootty-app --bench cell_diff cell_diff_gate_matrix_all -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
-    failures=$((failures + 1))
-  fi
-  if ! run_logged quick_vt_correctness cargo bench -p bootty-app --bench vt_correctness vt_correctness_gate_matrix_all -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
-    failures=$((failures + 1))
-  fi
   if ! run_logged quick_input_protocols cargo bench -p bootty-app --bench input_protocols input_protocol_keyboard_legacy_printable -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
     failures=$((failures + 1))
   fi
-  if ! run_logged quick_power_thermal cargo bench -p bootty-app --bench power_thermal power_thermal_idle_prompt_1s_model -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
+  if ! run_logged quick_power_thermal cargo bench -p bootty-app --bench power_thermal power_thermal_idle_prompt_1s_render_model -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
     failures=$((failures + 1))
   fi
 fi

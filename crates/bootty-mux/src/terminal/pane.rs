@@ -37,6 +37,9 @@ pub struct BackendPaneTerminal {
     terminal_config: TerminalSessionConfig,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     native_terminals: HashMap<MuxPaneTarget, ActiveTerminalRuntime>,
+    /// Session whose tmux `status` option bootty has toggled off so its own
+    /// status bar is the only one shown; restored when bootty stops showing it.
+    status_hidden_session: Option<String>,
     #[deref]
     #[deref_mut]
     terminal: ActiveTerminalRuntime,
@@ -211,6 +214,7 @@ impl BackendPaneTerminal {
             terminal_config,
             repaint_wakeup,
             native_terminals: HashMap::new(),
+            status_hidden_session: None,
             terminal: ActiveTerminalRuntime::idle(),
         }
     }
@@ -224,6 +228,9 @@ impl BackendPaneTerminal {
         if self.backend == backend
             && target_matches_anchor(backend, self.active_target.as_ref(), anchor)
         {
+            // Attach and target unchanged; still reconcile the status override so a
+            // runtime toggle of hide-tmux-status takes effect without a re-attach.
+            self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
 
@@ -237,6 +244,7 @@ impl BackendPaneTerminal {
                 .is_ok()
         {
             self.active_target = target;
+            self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
         self.park_native_terminal();
@@ -251,7 +259,32 @@ impl BackendPaneTerminal {
         self.backend = backend;
         self.active_target = target;
         self.terminal = terminal;
+        self.sync_status_bar(config.hide_tmux_status);
         Ok(())
+    }
+
+    /// Toggle tmux's per-session `status` option so only bootty's own status bar
+    /// shows in its client, restoring the previous session's bar when bootty
+    /// moves off it. Session-scoped and reversible: it never touches a global
+    /// option, and only ever acts on the tmux backend. Best-effort, so a failed
+    /// toggle never blocks the attach.
+    fn sync_status_bar(&mut self, hide_enabled: bool) {
+        let want = status_bar_hidden_target(
+            hide_enabled,
+            self.backend,
+            self.active_target.as_ref().map(MuxPaneTarget::session_id),
+        );
+        if self.status_hidden_session.as_deref() == want {
+            return;
+        }
+        if let Some(previous) = self.status_hidden_session.take() {
+            let _ = set_session_status_hidden(&previous, false);
+        }
+        if let Some(session) = want
+            && set_session_status_hidden(session, true).is_ok()
+        {
+            self.status_hidden_session = Some(session.to_owned());
+        }
     }
 
     pub fn set_terminal_config(&mut self, terminal_config: TerminalSessionConfig) {
@@ -290,7 +323,7 @@ impl BackendPaneTerminal {
             let config = backend_attach_session_config(
                 self.terminal_config.clone(),
                 backend,
-                target,
+                target.session_id(),
                 bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
             )?;
             Ok(ActiveTerminalRuntime(Box::new(
@@ -369,6 +402,17 @@ impl BackendPaneTerminal {
         };
         let terminal = std::mem::replace(&mut self.terminal, ActiveTerminalRuntime::idle());
         self.native_terminals.insert(target, terminal);
+    }
+}
+
+impl Drop for BackendPaneTerminal {
+    fn drop(&mut self) {
+        // Bring the tmux status bar back when bootty stops showing the session
+        // (window closed, app quit). Best-effort: a hard kill skips this, and a
+        // later attach re-hides while a clean detach restores.
+        if let Some(session) = self.status_hidden_session.take() {
+            let _ = set_session_status_hidden(&session, false);
+        }
     }
 }
 
@@ -483,9 +527,9 @@ fn target_matches_anchor(
 
 pub(super) fn backend_attach_launch(
     backend: MuxBackendKind,
-    target: &MuxPaneTarget,
+    session: &str,
 ) -> (String, Vec<String>) {
-    let session = target.session_id().to_owned();
+    let session = session.to_owned();
     match backend {
         // -T declares outer-terminal features tmux cannot learn from the
         // forced xterm-256color terminfo; "clipboard" enables OSC 52 and
@@ -521,10 +565,10 @@ fn backend_attach_env_remove(backend: MuxBackendKind) -> Vec<String> {
 fn backend_attach_session_config(
     mut config: TerminalSessionConfig,
     backend: MuxBackendKind,
-    target: &MuxPaneTarget,
+    attach_session: &str,
     bootty_terminfo_available: bool,
 ) -> Result<TerminalSessionConfig> {
-    let (program, args) = backend_attach_launch(backend, target);
+    let (program, args) = backend_attach_launch(backend, attach_session);
     config.launch.shell = Some(resolve_launch_program(&program)?);
     config.launch.args = args;
     config.launch.env_remove = backend_attach_env_remove(backend);
@@ -557,6 +601,44 @@ fn resolve_launch_program_with_path(program: &str, path: Option<&OsStr>) -> Resu
     anyhow::bail!("backend attach program {program:?} not found in PATH")
 }
 
+/// The session whose tmux status bar should be hidden: only with the feature on,
+/// the tmux backend, and a session attached. Native/rmux/zellij are never
+/// touched, so this can only ever issue a `set-option` against a tmux server.
+fn status_bar_hidden_target(
+    hide_enabled: bool,
+    backend: MuxBackendKind,
+    session_id: Option<&str>,
+) -> Option<&str> {
+    if hide_enabled && backend == MuxBackendKind::Tmux {
+        session_id
+    } else {
+        None
+    }
+}
+
+/// Toggle a single tmux session's `status` option on the default-socket server
+/// bootty attached. Hiding sets it off for that session alone; restoring unsets
+/// the session override so it falls back to the global default. Never sets a
+/// global option, so it cannot affect any other session.
+fn set_session_status_hidden(session_id: &str, hidden: bool) -> Result<()> {
+    let program = resolve_launch_program("tmux")?;
+    let mut command = Command::new(program);
+    if hidden {
+        command.args(["set-option", "-t", session_id, "status", "off"]);
+    } else {
+        command.args(["set-option", "-u", "-t", session_id, "status"]);
+    }
+    command.env_remove("TMUX").env_remove("ZELLIJ");
+    let output = command.output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux set-option status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +646,31 @@ mod tests {
     use tempfile::TempDir;
 
     use bootty_config::config::{MultiplexerBackendConfig, MultiplexerConfig};
+
+    #[test]
+    fn status_bar_hidden_only_targets_tmux_when_enabled() {
+        // Enabled, tmux backend, attached session: that session is the target.
+        assert_eq!(
+            status_bar_hidden_target(true, MuxBackendKind::Tmux, Some("$1")),
+            Some("$1")
+        );
+        // Disabled: never hide, even on tmux.
+        assert_eq!(
+            status_bar_hidden_target(false, MuxBackendKind::Tmux, Some("$1")),
+            None
+        );
+        // Safety contract: a non-tmux backend is never touched, so bootty can
+        // never run `set-option` against native/rmux/zellij sessions.
+        assert_eq!(
+            status_bar_hidden_target(true, MuxBackendKind::Native, Some("$1")),
+            None
+        );
+        // No attached session means nothing to toggle.
+        assert_eq!(
+            status_bar_hidden_target(true, MuxBackendKind::Tmux, None),
+            None
+        );
+    }
 
     fn terminal_config() -> TerminalSessionConfig {
         TerminalSessionConfig {
@@ -573,13 +680,6 @@ mod tests {
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
             benchmark_trace: None,
-        }
-    }
-
-    fn target(session_id: &str) -> MuxPaneTarget {
-        MuxPaneTarget::Session {
-            session_id: session_id.to_owned(),
-            cwd: None,
         }
     }
 
@@ -624,6 +724,7 @@ mod tests {
         let result = terminal.sync_mux_anchor(
             &MultiplexerConfig {
                 backend: MultiplexerBackendConfig::Rmux,
+                ..Default::default()
             },
             Some(&anchor),
         );
@@ -722,7 +823,7 @@ mod tests {
     #[test]
     fn backend_owned_ui_launches_normal_backend_attach() {
         assert_eq!(
-            backend_attach_launch(MuxBackendKind::Tmux, &target("agents")),
+            backend_attach_launch(MuxBackendKind::Tmux, "agents"),
             (
                 "tmux".to_owned(),
                 vec![
@@ -736,7 +837,7 @@ mod tests {
             )
         );
         assert_eq!(
-            backend_attach_launch(MuxBackendKind::Zellij, &target("agents")),
+            backend_attach_launch(MuxBackendKind::Zellij, "agents"),
             (
                 "zellij".to_owned(),
                 vec![
@@ -774,17 +875,13 @@ mod tests {
             benchmark_trace: None,
         };
 
-        let with_terminfo = backend_attach_session_config(
-            config.clone(),
-            MuxBackendKind::Tmux,
-            &target("agents"),
-            true,
-        )
-        .expect("attach config");
+        let with_terminfo =
+            backend_attach_session_config(config.clone(), MuxBackendKind::Tmux, "agents", true)
+                .expect("attach config");
         assert_eq!(with_terminfo.launch.term, "xterm-bootty");
 
         let without_terminfo =
-            backend_attach_session_config(config, MuxBackendKind::Tmux, &target("agents"), false)
+            backend_attach_session_config(config, MuxBackendKind::Tmux, "agents", false)
                 .expect("attach config");
         assert_eq!(without_terminfo.launch.term, "xterm-256color");
     }
@@ -803,9 +900,8 @@ mod tests {
             benchmark_trace: None,
         };
 
-        let attach =
-            backend_attach_session_config(config, MuxBackendKind::Tmux, &target("agents"), true)
-                .expect("attach config");
+        let attach = backend_attach_session_config(config, MuxBackendKind::Tmux, "agents", true)
+            .expect("attach config");
         assert_eq!(attach.launch.term, "xterm-256color");
     }
 
@@ -822,7 +918,7 @@ mod tests {
             side_effect_tx: None,
             benchmark_trace: None,
         };
-        let (program, args) = backend_attach_launch(MuxBackendKind::Tmux, &target("agents"));
+        let (program, args) = backend_attach_launch(MuxBackendKind::Tmux, "agents");
         config.launch.shell = Some(program);
         config.launch.args = args;
         config.launch.env_remove = backend_attach_env_remove(MuxBackendKind::Tmux);

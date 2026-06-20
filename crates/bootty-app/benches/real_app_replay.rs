@@ -538,32 +538,9 @@ fn bench_replay_scaled(c: &mut Criterion) {
     }
 }
 
-fn bench_fixture_metadata(c: &mut Criterion) {
-    c.bench_function("real_app_replay_fixture_metadata_hashes", |b| {
-        b.iter(|| {
-            let mut combined = 0_u64;
-            for fixture in fixtures() {
-                combined ^= fixture
-                    .chunks
-                    .iter()
-                    .flat_map(|chunk| chunk.bytes.iter())
-                    .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                    });
-                combined ^= u64::from(fixture.cols) << 32 | u64::from(fixture.rows);
-                combined ^= fixture
-                    .term
-                    .bytes()
-                    .fold(0_u64, |acc, byte| acc + u64::from(byte));
-            }
-            black_box(combined)
-        })
-    });
-}
-
 criterion_group!(
     name = benches;
     config = Criterion::default().noise_threshold(0.15);
-    targets = bench_replay_asap, bench_replay_scaled, bench_fixture_metadata
+    targets = bench_replay_asap, bench_replay_scaled
 );
 criterion_main!(benches);

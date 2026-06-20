@@ -53,16 +53,6 @@ impl IdleCase {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ImportedIdleSample {
-    second: u32,
-    cpu_milli_pct: u32,
-    wakeups: u32,
-    rss_bytes: u64,
-    gpu_milli_pct: u32,
-    power_mw: u32,
-}
-
 #[derive(Default)]
 struct IdleStats {
     ticks: usize,
@@ -72,11 +62,6 @@ struct IdleStats {
     chars: usize,
     modeled_tabs: usize,
     modeled_panes: usize,
-    cpu_milli_pct: u64,
-    wakeups: u64,
-    rss_bytes: u64,
-    gpu_milli_pct: u64,
-    power_mw: u64,
     hash: u64,
 }
 
@@ -90,11 +75,6 @@ impl IdleStats {
             ^ (self.chars as u64).rotate_left(29)
             ^ (self.modeled_tabs as u64).rotate_left(37)
             ^ (self.modeled_panes as u64).rotate_left(43)
-            ^ self.cpu_milli_pct.rotate_left(47)
-            ^ self.wakeups.rotate_left(53)
-            ^ self.rss_bytes.rotate_left(59)
-            ^ self.gpu_milli_pct.rotate_left(61)
-            ^ self.power_mw.rotate_left(3)
     }
 }
 
@@ -205,33 +185,6 @@ fn run_idle_case(case: IdleCase, seconds: u32) -> u64 {
     stats.checksum()
 }
 
-fn imported_idle_samples(seconds: u32) -> Vec<ImportedIdleSample> {
-    (0..seconds)
-        .map(|second| ImportedIdleSample {
-            second,
-            cpu_milli_pct: 50 + second % 7,
-            wakeups: 2 + second % 3,
-            rss_bytes: 96 * 1024 * 1024 + u64::from(second % 11) * 64 * 1024,
-            gpu_milli_pct: second % 2,
-            power_mw: 90 + second % 9,
-        })
-        .collect()
-}
-
-fn summarize_imported_idle(samples: &[ImportedIdleSample]) -> u64 {
-    let mut stats = IdleStats::default();
-    for sample in samples {
-        stats.ticks += 1;
-        stats.cpu_milli_pct += u64::from(sample.cpu_milli_pct);
-        stats.wakeups += u64::from(sample.wakeups);
-        stats.rss_bytes = stats.rss_bytes.max(sample.rss_bytes);
-        stats.gpu_milli_pct += u64::from(sample.gpu_milli_pct);
-        stats.power_mw += u64::from(sample.power_mw);
-        stats.hash ^= u64::from(sample.second).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    }
-    stats.checksum()
-}
-
 fn default_idle_cases() -> [IdleCase; 12] {
     [
         IdleCase::EmptyShellBlinkOff,
@@ -275,18 +228,9 @@ fn bench_long_duration_models(c: &mut Criterion) {
     }
 }
 
-fn bench_imported_system_counters(c: &mut Criterion) {
-    c.bench_function("idle_overhead_import_60s_system_counters", |b| {
-        b.iter(|| black_box(summarize_imported_idle(&imported_idle_samples(60))))
-    });
-    c.bench_function("idle_overhead_import_5m_system_counters", |b| {
-        b.iter(|| black_box(summarize_imported_idle(&imported_idle_samples(5 * 60))))
-    });
-}
-
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10).noise_threshold(0.20);
-    targets = bench_idle_cases, bench_long_duration_models, bench_imported_system_counters,
+    targets = bench_idle_cases, bench_long_duration_models,
 }
 criterion_main!(benches);

@@ -94,6 +94,8 @@ struct WindowPatch {
     width: Option<f32>,
     height: Option<f32>,
     fullscreen: Option<WindowFullscreen>,
+    fullscreen_top_offset: Option<f32>,
+    fullscreen_tabs_in_notch: Option<bool>,
     window_decoration: Option<WindowDecoration>,
     macos_titlebar_style: Option<MacosTitlebarStyle>,
 }
@@ -104,6 +106,12 @@ pub struct WindowConfig {
     pub width: f32,
     pub height: f32,
     pub fullscreen: WindowFullscreen,
+    /// Top offset reserved when the window covers a notched screen in fullscreen. `None` auto-detects
+    /// the notch height from the display's safe area; `Some` overrides it.
+    pub fullscreen_top_offset: Option<f32>,
+    /// When fullscreen on a notched screen, let the terminal/tab bar sit inside the notch band
+    /// instead of being pushed entirely below it.
+    pub fullscreen_tabs_in_notch: bool,
     pub window_decoration: WindowDecoration,
     pub macos_titlebar_style: MacosTitlebarStyle,
 }
@@ -169,6 +177,8 @@ pub struct ChromeConfig {
     pub gap: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,
+    /// Ordered status-bar segments. Composed left/center/right; builtins plus Lua modules.
+    pub status_segments: Vec<StatusSegment>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -182,6 +192,7 @@ struct ChromePatch {
     gap: Option<f32>,
     unfocused_sidebar_dim: Option<f32>,
     unfocused_terminal_dim: Option<f32>,
+    status_segment: Option<Vec<StatusSegment>>,
 }
 
 /// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
@@ -219,15 +230,71 @@ struct SidebarPatch {
     border: Option<Color>,
 }
 
+/// One status-bar segment: a Luau module (builtin default or user file) plus optional style. The
+/// module's own per-item style overrides these; these fill in where it leaves a field unset.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct StatusSegment {
+    #[serde(default)]
+    pub align: SegmentAlign,
+    /// Module name: an embedded default (`windows`, `clock`, `session`, ...) or a `*.luau` file
+    /// stem under `<config>/status/`.
+    pub module: String,
+    #[serde(default)]
+    pub fg: Option<Color>,
+    #[serde(default)]
+    pub bg: Option<Color>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SegmentAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+fn default_status_segments() -> Vec<StatusSegment> {
+    vec![
+        StatusSegment {
+            align: SegmentAlign::Left,
+            module: "session".to_owned(),
+            ..StatusSegment::default()
+        },
+        StatusSegment {
+            align: SegmentAlign::Left,
+            module: "windows".to_owned(),
+            ..StatusSegment::default()
+        },
+        StatusSegment {
+            align: SegmentAlign::Right,
+            module: "sysinfo".to_owned(),
+            ..StatusSegment::default()
+        },
+        StatusSegment {
+            align: SegmentAlign::Right,
+            module: "clock".to_owned(),
+            ..StatusSegment::default()
+        },
+    ]
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiplexerConfig {
     pub backend: MultiplexerBackendConfig,
+    /// Hide tmux's own status bar in bootty's client by toggling the attached
+    /// session's `status` option off (and restoring it on detach). tmux-only.
+    pub hide_tmux_status: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct MultiplexerPatch {
     backend: Option<MultiplexerBackendConfig>,
+    hide_tmux_status: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -449,6 +516,7 @@ impl Default for ChromeConfig {
             gap: 1.0,
             unfocused_sidebar_dim: 0.16,
             unfocused_terminal_dim: 0.08,
+            status_segments: default_status_segments(),
         }
     }
 }
@@ -457,6 +525,7 @@ impl Default for MultiplexerConfig {
     fn default() -> Self {
         Self {
             backend: MultiplexerBackendConfig::Native,
+            hide_tmux_status: false,
         }
     }
 }
@@ -687,6 +756,14 @@ fn native_keybinds() -> &'static [&'static str] {
         "ctrl+space>9=select_session:9",
         "ctrl+space>shift+,=move_tab:-1",
         "ctrl+space>shift+.=move_tab:1",
+    ]
+}
+
+// Tab and pane navigation, handled directly by bootty's mux layer on every backend (tmux included,
+// now that the tmux backend implements every command). Shared so the bindings don't depend on a
+// per-backend relay to an external config.
+fn navigation_keybinds() -> &'static [&'static str] {
+    &[
         "alt+n=next_tab",
         "alt+shift+n=next_tab",
         "alt+p=previous_tab",
@@ -770,33 +847,12 @@ fn tmux_keybinds() -> &'static [&'static str] {
         "cmd+alt+j=csi:90;19~",
         "cmd+alt+shift+k=csi:90;20~",
         "cmd+alt+shift+j=csi:90;21~",
+        // Non-navigation tmux actions still relay to the user's tmux config; tab/pane navigation is
+        // handled by bootty directly (see navigation_keybinds).
         "alt+\\=esc:\\",
         "alt+shift+c=esc:C",
-        "alt+h=esc:H",
-        "alt+j=esc:J",
-        "alt+k=esc:K",
-        "alt+l=esc:L",
-        "alt+o=esc:O",
-        "alt+n=esc:N",
-        "alt+p=esc:P",
-        "alt+shift+]=esc:}",
-        "alt+shift+[=esc:{",
         "ctrl+alt+]=text:\\x1b\\x1d",
-        "alt+x=esc:X",
-        "alt+z=esc:Z",
-        "alt+Tab=text:\\x1b\\t",
         "alt+r=esc:R",
-        "alt+1=esc:1",
-        "alt+2=esc:2",
-        "alt+3=esc:3",
-        "alt+4=esc:4",
-        "alt+5=esc:5",
-        "alt+6=esc:6",
-        "alt+7=esc:7",
-        "alt+8=esc:8",
-        "alt+9=esc:9",
-        "alt+shift+,=esc:<",
-        "alt+shift+.=esc:>",
         "ctrl+space=text:\\x00",
     ]
 }
@@ -810,7 +866,11 @@ impl Default for InputConfig {
         Self {
             modifier_remap: Vec::new(),
             macos_option_as_alt: MacosOptionAsAltConfig::default(),
-            keybind: owned_keybinds(common_keybinds()),
+            keybind: {
+                let mut keybind = owned_keybinds(common_keybinds());
+                keybind.extend(owned_keybinds(navigation_keybinds()));
+                keybind
+            },
             sidebar_keybind: owned_keybinds(sidebar_keybinds()),
             backend_keybinds: BackendKeybindConfig {
                 native: {
@@ -1048,6 +1108,8 @@ impl Default for BoottyConfig {
                 width: 1220.0,
                 height: 760.0,
                 fullscreen: WindowFullscreen::default(),
+                fullscreen_top_offset: None,
+                fullscreen_tabs_in_notch: true,
                 window_decoration: WindowDecoration::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
             },
@@ -1394,6 +1456,14 @@ fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
     apply_value(&mut window.width, partial.width);
     apply_value(&mut window.height, partial.height);
     apply_value(&mut window.fullscreen, partial.fullscreen);
+    apply_present(
+        &mut window.fullscreen_top_offset,
+        partial.fullscreen_top_offset,
+    );
+    apply_value(
+        &mut window.fullscreen_tabs_in_notch,
+        partial.fullscreen_tabs_in_notch,
+    );
     apply_value(&mut window.window_decoration, partial.window_decoration);
     apply_value(
         &mut window.macos_titlebar_style,
@@ -1426,6 +1496,9 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         &mut chrome.unfocused_terminal_dim,
         partial.unfocused_terminal_dim,
     );
+    if let Some(segments) = partial.status_segment {
+        chrome.status_segments = segments;
+    }
 }
 
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
@@ -1443,6 +1516,7 @@ fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
 
 fn apply_partial_multiplexer(multiplexer: &mut MultiplexerConfig, partial: MultiplexerPatch) {
     apply_value(&mut multiplexer.backend, partial.backend);
+    apply_value(&mut multiplexer.hide_tmux_status, partial.hide_tmux_status);
 }
 
 fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {

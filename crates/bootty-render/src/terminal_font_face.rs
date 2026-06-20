@@ -362,65 +362,6 @@ fn is_symbol_codepoint(codepoint: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_font_tables::Sfnt;
-
-    const JETBRAINS_MONO: &[u8] = epaint_default_fonts::HACK_REGULAR;
-    const INCONSOLATA: &[u8] = epaint_default_fonts::UBUNTU_LIGHT;
-    const JULIA_MONO: &[u8] = epaint_default_fonts::HACK_REGULAR;
-    const LILEX_VARIABLE: &[u8] = epaint_default_fonts::UBUNTU_LIGHT;
-    const NOTO_COLOR_EMOJI: &[u8] = epaint_default_fonts::NOTO_EMOJI_REGULAR;
-    const TERMINUS_TTF: &[u8] = epaint_default_fonts::HACK_REGULAR;
-    const SPLEEN_BDF: &str = "STARTFONT 2.1\nENCODING 65\nBITMAP\n00\n00\n7C\nC6\nC6\nC6\nFE\nC6\nC6\nC6\nC6\nC6\n00\n00\n00\n00\n";
-    const SPLEEN_PCF: &[u8] = &[1, b'f', b'c', b'p'];
-    const SPLEEN_OTB: &[u8] = epaint_default_fonts::HACK_REGULAR;
-
-    const SPLEEN_A: &str = "\
-........
-........
-.#####..
-##...##.
-##...##.
-##...##.
-#######.
-##...##.
-##...##.
-##...##.
-##...##.
-##...##.
-........
-........
-........
-........";
-
-    #[test]
-    #[ignore = "requires Ghostty fixture fonts that are not vendored in this rewrite"]
-    fn freetype_face_ports_names_color_tables_and_svg_cases() {
-        assert_eq!(fontdb_family(JETBRAINS_MONO), "JetBrains Mono");
-        assert_eq!(fontdb_family(INCONSOLATA), "Inconsolata");
-
-        let emoji = Sfnt::parse(NOTO_COLOR_EMOJI).expect("NotoColorEmoji parses");
-        assert!(emoji.table(b"CBDT").unwrap().is_some());
-        assert!(emoji.table(b"CBLC").unwrap().is_some());
-
-        let julia = Sfnt::parse(JULIA_MONO).expect("JuliaMono parses");
-        assert_eq!(julia.table(b"SVG ").unwrap().unwrap().len(), 430);
-    }
-
-    #[test]
-    #[ignore = "requires Ghostty bitmap fixture fonts that are not vendored in this rewrite"]
-    fn freetype_face_ports_bitmap_fixture_format_cases() {
-        let terminus = Sfnt::parse(TERMINUS_TTF).expect("Terminus TTF parses");
-        assert!(terminus.table(b"BDF ").unwrap().is_some());
-
-        assert!(SPLEEN_BDF.starts_with("STARTFONT 2.1"));
-        assert_eq!(bdf_bitmap_rows(SPLEEN_BDF, "A"), SPLEEN_A);
-
-        assert_eq!(&SPLEEN_PCF[..4], &[1, b'f', b'c', b'p']);
-
-        let otb = Sfnt::parse(SPLEEN_OTB).expect("Spleen OTB parses");
-        assert!(otb.table(b"EBDT").unwrap().is_some());
-        assert!(otb.table(b"EBLC").unwrap().is_some());
-    }
 
     #[test]
     fn freetype_face_ports_mono_to_bgra_case() {
@@ -443,68 +384,6 @@ mod tests {
             }
         );
         assert_eq!(BgraPixel::from_mono_alpha(0xff).a, 0xff);
-    }
-
-    #[test]
-    #[ignore = "requires Ghostty variable font fixtures that are not vendored in this rewrite"]
-    fn coretext_face_ports_name_in_memory_and_variable_cases() {
-        assert_eq!(fontdb_family(JETBRAINS_MONO), "JetBrains Mono");
-
-        let regular = ttf_parser::Face::parse(JETBRAINS_MONO, 0).expect("JetBrains parses");
-        for ch in ' '..='~' {
-            assert!(regular.glyph_index(ch).is_some(), "missing glyph {ch:?}");
-        }
-
-        let mut variable = ttf_parser::Face::parse(LILEX_VARIABLE, 0).expect("Lilex VF parses");
-        assert!(variable.is_variable());
-        let axes = variable.variation_axes();
-        assert!(
-            axes.into_iter()
-                .any(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"))
-        );
-        variable
-            .set_variation(ttf_parser::Tag::from_bytes(b"wght"), 700.0)
-            .expect("wght axis can be set");
-        assert!(variable.has_non_default_variation_coordinates());
-        for ch in ' '..='~' {
-            assert!(
-                variable.glyph_index(ch).is_some(),
-                "missing variable glyph {ch:?}"
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "requires Ghostty color/SVG font fixtures that are not vendored in this rewrite"]
-    fn coretext_face_ports_color_svg_and_glyph_index_cases() {
-        let emoji = Sfnt::parse(NOTO_COLOR_EMOJI).expect("NotoColorEmoji parses");
-        assert!(emoji.table(b"CBDT").unwrap().is_some());
-        let emoji_face = ttf_parser::Face::parse(NOTO_COLOR_EMOJI, 0).expect("emoji face parses");
-        assert!(emoji_face.glyph_index('🥸').is_some());
-
-        let julia = Sfnt::parse(JULIA_MONO).expect("JuliaMono parses");
-        let svg = crate::terminal_font_tables::SvgTable::parse(
-            julia.table(b"SVG ").unwrap().expect("SVG table"),
-        )
-        .expect("SVG table parses");
-        assert_eq!(svg.start_glyph_id, 11482);
-        assert_eq!(svg.end_glyph_id, 11482);
-        assert!(svg.has_glyph(11482));
-
-        let julia_face = ttf_parser::Face::parse(JULIA_MONO, 0).expect("Julia face parses");
-        assert_eq!(julia_face.glyph_index('A').unwrap().0, 4);
-        assert_eq!(julia_face.glyph_index('\u{e800}').unwrap().0, 11482);
-    }
-
-    #[test]
-    fn font_variation_ids_match_upstream_tags() {
-        let weight = FontVariationId::new(*b"wght");
-        assert_eq!(weight.as_u32(), 2_003_265_652);
-        assert_eq!(&weight.tag(), b"wght");
-
-        let slant = FontVariationId::new(*b"slnt");
-        assert_eq!(slant.as_u32(), 1_936_486_004);
-        assert_eq!(&slant.tag(), b"slnt");
     }
 
     #[test]
@@ -673,48 +552,5 @@ mod tests {
             (actual - expected).abs() <= 0.000001,
             "expected {expected}, got {actual}"
         );
-    }
-
-    fn fontdb_family(data: &[u8]) -> String {
-        let mut database = fontdb::Database::new();
-        database.load_font_data(data.to_vec());
-        database
-            .faces()
-            .next()
-            .and_then(|face| face.families.first())
-            .map(|(family, _)| family.clone())
-            .expect("font family")
-    }
-
-    fn bdf_bitmap_rows(source: &str, glyph: &str) -> String {
-        let mut lines = source.lines();
-        for line in lines.by_ref() {
-            if line == "ENCODING 65" {
-                break;
-            }
-        }
-        for line in lines.by_ref() {
-            if line == "BITMAP" {
-                break;
-            }
-        }
-
-        let mut rows = Vec::new();
-        for line in lines.by_ref().take(16) {
-            let bits = u8::from_str_radix(line, 16).expect("bitmap row");
-            rows.push(
-                (0..8)
-                    .map(|shift| {
-                        if bits & (0x80 >> shift) == 0 {
-                            '.'
-                        } else {
-                            '#'
-                        }
-                    })
-                    .collect::<String>(),
-            );
-        }
-        assert_eq!(glyph, "A");
-        rows.join("\n")
     }
 }

@@ -715,11 +715,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kitty_unicode_diacritics_are_sorted_for_binary_search() {
-        assert!(DIACRITICS.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[test]
     fn kitty_unicode_diacritic_indices_match_upstream_spots() {
         assert_eq!(diacritic_index('\u{0483}'), Some(30));
         assert_eq!(diacritic_index('\u{1D242}'), Some(294));

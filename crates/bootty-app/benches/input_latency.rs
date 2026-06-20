@@ -54,13 +54,6 @@ impl EchoCase {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ImportedLatencySample {
-    event_id: u32,
-    key_down_ns: u64,
-    visible_ns: u64,
-}
-
 #[derive(Default)]
 struct LatencyStats {
     events: usize,
@@ -336,55 +329,6 @@ fn run_input_case(case: EchoCase, events: u32) -> u64 {
     stats.checksum()
 }
 
-fn imported_typometer_samples() -> Vec<ImportedLatencySample> {
-    (0..240)
-        .map(|event_id| ImportedLatencySample {
-            event_id,
-            key_down_ns: u64::from(event_id) * 16_666_667,
-            visible_ns: u64::from(event_id) * 16_666_667
-                + 7_000_000
-                + u64::from(event_id % 5) * 500_000,
-        })
-        .collect()
-}
-
-fn imported_hardware_samples() -> Vec<ImportedLatencySample> {
-    (0..240)
-        .map(|event_id| ImportedLatencySample {
-            event_id,
-            key_down_ns: u64::from(event_id) * 8_333_333,
-            visible_ns: u64::from(event_id) * 8_333_333
-                + 11_000_000
-                + u64::from(event_id % 7) * 300_000,
-        })
-        .collect()
-}
-
-fn summarize_imported_samples(mut samples: Vec<ImportedLatencySample>) -> u64 {
-    samples.sort_by_key(|sample| sample.visible_ns.saturating_sub(sample.key_down_ns));
-    let len = samples.len();
-    let percentile = |numerator: usize, denominator: usize| -> u64 {
-        let index = ((len.saturating_sub(1)) * numerator) / denominator;
-        samples[index]
-            .visible_ns
-            .saturating_sub(samples[index].key_down_ns)
-    };
-    let stats = LatencyStats {
-        events: len,
-        p50_ns: percentile(50, 100),
-        p95_ns: percentile(95, 100),
-        p99_ns: percentile(99, 100),
-        max_ns: percentile(100, 100),
-        hash: samples
-            .iter()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
-                (hash ^ u64::from(sample.event_id)).wrapping_mul(0x0000_0100_0000_01b3)
-            }),
-        ..LatencyStats::default()
-    };
-    stats.checksum()
-}
-
 fn bench_internal_input_cases(c: &mut Criterion) {
     let cases = [
         EchoCase::ShellPrompt,
@@ -433,18 +377,9 @@ fn bench_direct_input_suppression(c: &mut Criterion) {
     }
 }
 
-fn bench_import_hooks(c: &mut Criterion) {
-    c.bench_function("input_latency_import_typometer_samples", |b| {
-        b.iter(|| black_box(summarize_imported_samples(imported_typometer_samples())))
-    });
-    c.bench_function("input_latency_import_hardware_samples", |b| {
-        b.iter(|| black_box(summarize_imported_samples(imported_hardware_samples())))
-    });
-}
-
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10).noise_threshold(0.20);
-    targets = bench_internal_input_cases, bench_direct_input_suppression, bench_import_hooks,
+    targets = bench_internal_input_cases, bench_direct_input_suppression,
 }
 criterion_main!(benches);

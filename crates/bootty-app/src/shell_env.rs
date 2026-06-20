@@ -11,6 +11,38 @@
 #[cfg(target_os = "macos")]
 use std::io::IsTerminal;
 
+use bootty_runtime::terminal_session::{BOOTTY_SHELL_ENV, configured_user_shell};
+
+/// Align `$SHELL` with the OS account login shell before bootty spawns anything.
+///
+/// tmux captures `$SHELL` as a new server's `default-shell`, so a stale value
+/// (zsh inherited from a dev launch or an old launchd session) makes every pane
+/// spawn the wrong shell even when the account login shell is fish. The OS
+/// account record is the source of truth; an explicit `BOOTTY_SHELL` wins first.
+pub fn align_shell_env() {
+    let Some(shell) = aligned_shell(
+        std::env::var(BOOTTY_SHELL_ENV).ok(),
+        configured_user_shell(),
+    ) else {
+        return;
+    };
+    if std::env::var("SHELL").ok().as_deref() == Some(shell.as_str()) {
+        return;
+    }
+    // SAFETY: runs at startup before any threads are spawned.
+    unsafe { std::env::set_var("SHELL", shell) };
+}
+
+/// The value `$SHELL` should advertise: an explicit override, then the login
+/// shell, taking the first that is an absolute path. `None` leaves `$SHELL` as
+/// inherited (e.g. non-macOS, where no account shell is resolved).
+fn aligned_shell(override_shell: Option<String>, login_shell: Option<String>) -> Option<String> {
+    [override_shell, login_shell]
+        .into_iter()
+        .flatten()
+        .find(|shell| std::path::Path::new(shell).is_absolute())
+}
+
 /// Import the login shell's environment when the process was launched outside a
 /// terminal (the GUI-launch case). No-op when already attached to a tty, so
 /// terminal launches keep the environment the user already has.
@@ -106,7 +138,26 @@ fn apply_env(vars: Vec<(String, String)>) {
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
-    use super::{login_shell_from, parse_null_delimited_env};
+    use super::{aligned_shell, login_shell_from, parse_null_delimited_env};
+
+    #[test]
+    fn aligned_shell_prefers_override_then_login_and_requires_absolute() {
+        // Explicit override wins when it is an absolute path.
+        assert_eq!(
+            aligned_shell(
+                Some("/opt/homebrew/bin/fish".to_string()),
+                Some("/bin/zsh".to_string()),
+            ),
+            Some("/opt/homebrew/bin/fish".to_string())
+        );
+        // A non-absolute override is skipped, falling through to the login shell.
+        assert_eq!(
+            aligned_shell(Some("fish".to_string()), Some("/bin/zsh".to_string())),
+            Some("/bin/zsh".to_string())
+        );
+        // Nothing absolute leaves `$SHELL` untouched.
+        assert_eq!(aligned_shell(Some("fish".to_string()), None), None);
+    }
 
     #[test]
     fn login_shell_prefers_configured_user_shell_over_inherited_shell() {

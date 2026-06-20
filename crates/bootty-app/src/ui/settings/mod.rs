@@ -9,6 +9,7 @@ mod appearance;
 mod font;
 mod keybinds;
 mod session;
+mod status_bar;
 mod window;
 
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ enum SettingsTab {
     Appearance,
     Window,
     Session,
+    StatusBar,
     Keybindings,
 }
 
@@ -42,11 +44,12 @@ pub fn viewport_id() -> egui::ViewportId {
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 5] = [
+    const ALL: [(SettingsTab, &'static str); 6] = [
         (SettingsTab::Font, "Font"),
         (SettingsTab::Appearance, "Appearance"),
         (SettingsTab::Window, "Window"),
         (SettingsTab::Session, "Session"),
+        (SettingsTab::StatusBar, "Status Bar"),
         (SettingsTab::Keybindings, "Keybindings"),
     ];
 }
@@ -113,8 +116,6 @@ impl SettingsWindow {
         }
 
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
-            // Theme both the local ui (panels/widgets) and the context style: combo box and menu
-            // popups open as separate areas that read the context style, not the local ui style.
             bootty_ui::configure_style(ui.style_mut(), theme);
             ui.ctx()
                 .global_style_mut(|style| bootty_ui::configure_style(style, theme));
@@ -131,6 +132,7 @@ impl SettingsWindow {
             let rail_top = if custom_titlebar { 34 } else { 16 };
             egui::Panel::left("bootty_settings_rail")
                 .exact_size(168.0)
+                .show_separator_line(false)
                 .resizable(false)
                 .frame(
                     egui::Frame::NONE
@@ -162,6 +164,7 @@ impl SettingsWindow {
                             SettingsTab::Appearance => appearance::ui(self, ui),
                             SettingsTab::Window => window::ui(self, ui),
                             SettingsTab::Session => session::ui(self, ui),
+                            SettingsTab::StatusBar => status_bar::ui(self, ui),
                             SettingsTab::Keybindings => keybinds::ui(self, ui),
                         });
                 });
@@ -181,14 +184,13 @@ impl SettingsWindow {
         ui.add_space(12.0);
         for (tab, label) in SettingsTab::ALL {
             let selected = self.tab == tab;
-            // Selected rows sit on the light `primary` fill, so their text must be dark to read.
             let text = egui::RichText::new(label).color(if selected {
                 self.palette.base
             } else {
                 self.palette.subtext
             });
             let response = ui.add_sized(
-                [ui.available_width(), 30.0],
+                [ui.available_width(), 28.0],
                 egui::Button::selectable(selected, text),
             );
             if response.clicked() {
@@ -258,6 +260,42 @@ impl SettingsWindow {
     fn remove(&mut self, path: &[&str]) {
         self.write(|document| document.remove_item(path));
     }
+
+    /// Write the whole `chrome.status-segment` array from the working copy (array elements can't be
+    /// addressed by the string-path setters, so the list is serialized wholesale on any change).
+    fn set_status_segments(&mut self) {
+        use bootty_config::toml_edit;
+        let mut array = toml_edit::Array::new();
+        for segment in &self.config.chrome.status_segments {
+            let mut table = toml_edit::InlineTable::new();
+            let align = match segment.align {
+                crate::config::SegmentAlign::Left => "left",
+                crate::config::SegmentAlign::Center => "center",
+                crate::config::SegmentAlign::Right => "right",
+            };
+            table.insert("align", toml_edit::Value::from(align));
+            table.insert("module", toml_edit::Value::from(segment.module.as_str()));
+            if let Some(color) = segment.fg {
+                table.insert("fg", toml_edit::Value::from(color_hex(color)));
+            }
+            if let Some(color) = segment.bg {
+                table.insert("bg", toml_edit::Value::from(color_hex(color)));
+            }
+            if let Some(icon) = &segment.icon
+                && !icon.is_empty()
+            {
+                table.insert("icon", toml_edit::Value::from(icon.as_str()));
+            }
+            array.push(table);
+        }
+        self.write(move |document| {
+            document.set_item(&["chrome", "status-segment"], toml_edit::value(array))
+        });
+    }
+}
+
+fn color_hex(color: Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
 }
 
 /// A combo box whose dropdown has a search filter at the top. Returns the chosen option index.

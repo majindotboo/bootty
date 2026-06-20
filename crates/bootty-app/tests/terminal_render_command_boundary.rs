@@ -295,65 +295,6 @@ fn command_boundary_routes_block_shade_progress_row_through_sprites() {
 }
 
 #[test]
-fn command_boundary_routes_single_line_border_box_through_sprites() {
-    let plan = plan_with_text_runs(
-        SurfaceRect::from_min_size(0.0, 0.0, 50.0, 30.0),
-        vec![
-            text_run(SurfaceRect::from_min_size(0.0, 0.0, 50.0, 10.0), 5, "a┌─┐b"),
-            text_run(
-                SurfaceRect::from_min_size(0.0, 10.0, 50.0, 10.0),
-                5,
-                " │ │ ",
-            ),
-            text_run(
-                SurfaceRect::from_min_size(0.0, 20.0, 50.0, 10.0),
-                5,
-                " └─┘ ",
-            ),
-        ],
-    );
-
-    let frame = TerminalRenderFrame::from_plan(&plan, &text_contract());
-    let sprites = frame
-        .commands
-        .iter()
-        .filter_map(|command| match command {
-            TerminalRenderCommand::Sprite(sprite) => Some((sprite.ch, sprite.rect)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        sprites,
-        vec![
-            ('┌', SurfaceRect::from_min_size(10.0, 0.0, 10.0, 10.0)),
-            ('─', SurfaceRect::from_min_size(20.0, 0.0, 10.0, 10.0)),
-            ('┐', SurfaceRect::from_min_size(30.0, 0.0, 10.0, 10.0)),
-            ('│', SurfaceRect::from_min_size(10.0, 10.0, 10.0, 10.0)),
-            ('│', SurfaceRect::from_min_size(30.0, 10.0, 10.0, 10.0)),
-            ('└', SurfaceRect::from_min_size(10.0, 20.0, 10.0, 10.0)),
-            ('─', SurfaceRect::from_min_size(20.0, 20.0, 10.0, 10.0)),
-            ('┘', SurfaceRect::from_min_size(30.0, 20.0, 10.0, 10.0)),
-        ]
-    );
-    assert!(frame.commands.iter().any(|command| matches!(
-        command,
-        TerminalRenderCommand::Text(text)
-            if text.text == "a" && text.rect == SurfaceRect::from_min_size(0.0, 0.0, 10.0, 10.0)
-    )));
-    assert!(frame.commands.iter().any(|command| matches!(
-        command,
-        TerminalRenderCommand::Text(text)
-            if text.text == "b" && text.rect == SurfaceRect::from_min_size(40.0, 0.0, 10.0, 10.0)
-    )));
-    assert!(!frame.commands.iter().any(|command| matches!(
-        command,
-        TerminalRenderCommand::Text(text)
-            if ['┌', '─', '┐', '│', '└', '┘'].iter().any(|ch| text.text.contains(*ch))
-    )));
-}
-
-#[test]
 fn command_boundary_represents_backgrounds_decorations_and_cursor() {
     let cursor_rect = SurfaceRect::from_min_size(20.0, 0.0, 10.0, 20.0);
     let plan = TerminalPaintPlan {

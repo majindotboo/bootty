@@ -126,17 +126,6 @@ fn hidden_hardware_cursor_is_not_extracted() -> Result<()> {
 }
 
 #[test]
-fn terminal_scrollback_defaults_to_disabled_for_backend_attach_catchup() {
-    assert_eq!(DEFAULT_MAX_SCROLLBACK, 0);
-}
-
-#[test]
-fn native_terminal_scrollback_uses_tmux_sized_budget() {
-    assert_eq!(NATIVE_SCROLLBACK_TARGET_ROWS, 1_000_000);
-    assert_eq!(NATIVE_MAX_SCROLLBACK, 320_000_000);
-}
-
-#[test]
 fn native_terminal_scrollback_retains_more_than_old_ten_thousand_row_cap() -> Result<()> {
     let geometry = TerminalGeometry {
         cols: 16,

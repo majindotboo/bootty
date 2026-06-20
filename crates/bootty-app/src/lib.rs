@@ -20,6 +20,7 @@ pub mod project_catalog;
 pub mod renderer;
 pub mod session_order;
 pub mod shell_env;
+pub mod status_module;
 pub mod strings;
 pub mod terminal;
 pub mod theme;

@@ -41,15 +41,6 @@ impl Default for BindingFlags {
     }
 }
 
-impl BindingFlags {
-    pub fn c_value(self) -> u8 {
-        u8::from(self.consumed)
-            | (u8::from(self.all) << 1)
-            | (u8::from(self.global) << 2)
-            | (u8::from(self.performable) << 3)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BindingMods {
     pub shift: bool,
@@ -891,43 +882,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_binding_flags_match_upstream_c_values() {
-        for (flags, expected) in [
-            (BindingFlags::default(), 0b0001),
-            (
-                BindingFlags {
-                    consumed: false,
-                    ..Default::default()
-                },
-                0b0000,
-            ),
-            (
-                BindingFlags {
-                    all: true,
-                    ..Default::default()
-                },
-                0b0011,
-            ),
-            (
-                BindingFlags {
-                    global: true,
-                    ..Default::default()
-                },
-                0b0101,
-            ),
-            (
-                BindingFlags {
-                    performable: true,
-                    ..Default::default()
-                },
-                0b1001,
-            ),
-        ] {
-            assert_eq!(flags.c_value(), expected);
-        }
-    }
-
-    #[test]
     fn input_binding_parser_ports_trigger_modifiers_and_edges() {
         for (input, mods, key) in [
             (
@@ -1265,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn input_binding_ports_ordering_and_action_clone() {
+    fn input_binding_ports_ordering() {
         let ctrl_shift = parse_binding("ctrl+shift+a=ignore").unwrap();
         let command = parse_binding("cmd+a=ignore").unwrap();
         let ctrl_b = parse_binding("ctrl+b=ignore").unwrap();
@@ -1276,10 +1230,6 @@ mod tests {
         assert!(command.sorts_before(&ctrl_b));
         assert!(ctrl_a.sorts_before(&ctrl_b));
         assert!(key_a.sorts_before(&ctrl_a));
-
-        let cloned = BindingAction::Text("foo".to_owned()).clone();
-        assert_eq!(cloned, BindingAction::Text("foo".to_owned()));
-        assert_eq!(BindingAction::Ignore.clone(), BindingAction::Ignore);
     }
 
     #[test]

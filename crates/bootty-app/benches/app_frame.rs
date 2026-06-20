@@ -7,7 +7,6 @@ use bootty_app::{
     geometry::TerminalGeometry,
     mux::{
         RepaintHandle,
-        config::MuxBackendKind,
         sidebar_meta::{
             DiffStat, ProcessStatus, SidebarMetadata, SidebarSessionMetadata,
             sidebar_metadata_sessions_for_prefix,
@@ -253,19 +252,20 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
             .max_rect(status_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
+            let segments = [chrome::ResolvedSegment {
+                align: bootty_app::config::SegmentAlign::Left,
+                items: vec![chrome::ResolvedItem {
+                    text: selected.unwrap_or("session").to_owned(),
+                    ..Default::default()
+                }],
+            }];
             chrome::show_status_bar(
                 ui,
                 bootty_ui::ThemePalette::default(),
                 StatusBarModel {
-                    backend: MuxBackendKind::Native,
-                    selected_session_name: selected,
-                    metrics: bootty_app::diagnostics::StatusMetrics {
-                        renderer: renderer_metrics(42, 1),
-                        cols: 160,
-                        rows: 60,
-                        ..Default::default()
-                    },
-                    last_error: None,
+                    segments: &segments,
+                    background: bootty_ui::ThemePalette::default().base,
+                    left_padding: chrome::STATUS_EDGE_PAD,
                 },
             );
         },
@@ -380,7 +380,11 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                     events: vec![egui::Event::PointerMoved(egui::Pos2::new(600.0, 400.0))],
                     ..Default::default()
                 },
-                |ui| terminal_widget_frame(ui, &mut terminal, &mut widget),
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        terminal_widget_frame(ui, &mut terminal, &mut widget);
+                    });
+                },
             );
             black_box(output.shapes.len())
         })
@@ -395,8 +399,10 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                     ..Default::default()
                 },
                 |ui| {
-                    sidebar_ui_frame(ui, black_box(&sessions), black_box(&metadata), selected);
-                    status_ui_frame(ui, selected);
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        sidebar_ui_frame(ui, black_box(&sessions), black_box(&metadata), selected);
+                        status_ui_frame(ui, selected);
+                    });
                 },
             );
             black_box(output.shapes.len())
@@ -420,9 +426,16 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        sidebar_ui_frame(ui, black_box(&sessions), black_box(&metadata), selected);
-                        status_ui_frame(ui, selected);
-                        terminal_widget_frame(ui, &mut terminal, &mut widget);
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            sidebar_ui_frame(
+                                ui,
+                                black_box(&sessions),
+                                black_box(&metadata),
+                                selected,
+                            );
+                            status_ui_frame(ui, selected);
+                            terminal_widget_frame(ui, &mut terminal, &mut widget);
+                        });
                     },
                 );
                 black_box(output.shapes.len())

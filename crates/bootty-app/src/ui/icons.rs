@@ -140,51 +140,23 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_icon_slugs_resolve_for_builtin_luau_defaults() {
+    fn status_bar_icon_slugs_resolve_for_public_status_api() {
         for slug in [
             "folder",
-            "cpu",
-            "memory-stick",
-            "battery",
-            "zap",
-            "calendar",
-            "clock",
             "coffee-cup",
             "coffee-cup-filled",
             "plug-zap",
+            "cpu",
+            "memory-stick",
+            "calendar",
+            "clock",
         ] {
             assert!(has_slug(slug), "missing status icon '{slug}' in iconflow");
         }
     }
 
     #[test]
-    fn status_cup_aliases_resolve_to_iconflow_glyphs() {
-        assert_eq!(resolve_slug("coffee-cup").unwrap().family, "Tabler Regular");
-        assert_eq!(
-            resolve_slug("coffee-cup-filled").unwrap().family,
-            "Tabler Regular"
-        );
-    }
-
-    #[test]
     fn missing_icon_slug_does_not_resolve() {
         assert!(!has_slug("not-a-real-lucide-icon"));
-    }
-
-    #[test]
-    fn icon_font_installer_binds_resolved_family_before_paint() {
-        let icon = resolve_slug("terminal").expect("terminal icon should resolve");
-        let mut fonts = FontDefinitions::default();
-
-        add_icon_fonts(&mut fonts);
-
-        assert!(fonts.font_data.contains_key(icon.family));
-        assert!(
-            fonts
-                .families
-                .get(&FontFamily::Name(icon.family.into()))
-                .is_some_and(|families| families.iter().any(|family| family == icon.family)),
-            "resolved icon family must be bound before paint"
-        );
     }
 }

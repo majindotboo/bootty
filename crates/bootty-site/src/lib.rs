@@ -2147,23 +2147,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wide_menu_hit_tracks_drawn_menu_rows() {
-        assert_eq!(hit_target(96, 32, 2, 5), Some(HitTarget::Menu(0)));
-        assert_eq!(hit_target(96, 32, 2, 7), Some(HitTarget::Menu(1)));
-        assert_eq!(hit_target(96, 32, 2, 15), Some(HitTarget::Menu(5)));
-    }
-
-    #[test]
-    fn wide_menu_hit_rejects_border_and_detail() {
-        assert_eq!(hit_target(96, 32, 0, 4), None);
-        assert_eq!(hit_target(96, 32, 40, 5), Some(HitTarget::Detail));
-    }
-
-    #[test]
-    fn narrow_menu_hit_uses_vertical_layout() {
-        assert_eq!(hit_target(60, 32, 2, 5), Some(HitTarget::Menu(0)));
-        assert_eq!(hit_target(60, 32, 2, 15), Some(HitTarget::Menu(5)));
-        assert_eq!(hit_target(60, 32, 2, 25), Some(HitTarget::Detail));
+    fn menu_hit_targets_follow_drawn_layout() {
+        for (cols, rows, x, y, expected) in [
+            (96, 32, 2, 5, Some(HitTarget::Menu(0))),
+            (96, 32, 2, 7, Some(HitTarget::Menu(1))),
+            (96, 32, 2, 15, Some(HitTarget::Menu(5))),
+            (96, 32, 0, 4, None),
+            (96, 32, 40, 5, Some(HitTarget::Detail)),
+            (60, 32, 2, 5, Some(HitTarget::Menu(0))),
+            (60, 32, 2, 15, Some(HitTarget::Menu(5))),
+            (60, 32, 2, 25, Some(HitTarget::Detail)),
+        ] {
+            assert_eq!(hit_target(cols, rows, x, y), expected);
+        }
     }
 
     #[test]
@@ -2304,52 +2300,6 @@ mod tests {
     }
 
     #[test]
-    fn github_section_uses_github_icon_and_osc8_link() {
-        let section = sections().last().expect("github section exists");
-
-        assert!(matches!(section.icon, SectionIcon::Github));
-        assert_eq!(section.icon.glyph(), "\u{f09b}");
-        assert_eq!(section.label, "GitHub");
-        assert_eq!(section.plain_label, "GitHub");
-        assert_eq!(section.title, "Source");
-        assert_eq!(section.links[0].text, "GitHub");
-        assert_eq!(section.links[0].url, GITHUB_URL);
-    }
-
-    #[test]
-    fn palette_section_renders_harmonious_demo_swatches() {
-        let palette_section = sections()
-            .iter()
-            .find(|section| section.plain_label == "Palette")
-            .expect("palette section exists");
-        let palette = harmonious_demo_palette();
-        let lines = palette_demo_lines(*palette_section);
-        let content = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-        let palette_glyph_count = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .filter(|span| {
-                let content = span.content.as_ref();
-                content.len() == 2
-                    && content.ends_with(' ')
-                    && content
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| ch.is_ascii_hexdigit())
-            })
-            .count();
-
-        assert!(matches!(palette_section.icon, SectionIcon::Palette));
-        assert_eq!(palette_section.icon.glyph(), "\u{f1fc}");
-        assert!(content.contains("Default"));
-        assert!(!content.contains("216-color cube"));
-        assert_eq!(lines.len(), 17);
-        assert!(palette_glyph_count >= 256);
-        assert_eq!(palette[16], DEMO_BACKGROUND);
-        assert_eq!(palette[231], DEMO_FOREGROUND);
-    }
-
-    #[test]
     fn github_link_cells_export_model_osc8_url() {
         let github = sections()
             .iter()
@@ -2362,23 +2312,31 @@ mod tests {
             .saturating_add(SECTION_DETAIL_STATIC_ROWS)
             .saturating_add(sections()[github].lines.len() as u16);
 
-        assert_eq!(
-            osc8_link_at(96, 32, github, content.x, link_y),
-            Some(GITHUB_URL)
+        let buffer = Buffer::empty(Rect::new(0, 0, 96, 32));
+        let frame = web_frame(
+            &new_egui_context(),
+            &buffer,
+            WebFrameState {
+                selected: github,
+                hovered_menu: None,
+                tick: 0,
+                focus: Focus::Detail,
+                fps: 0.0,
+            },
         );
-        assert_eq!(
-            osc8_link_at(96, 32, github, content.x + 5, link_y),
-            Some(GITHUB_URL)
-        );
-        assert_eq!(osc8_link_at(96, 32, github, content.x + 6, link_y), None);
-        assert_eq!(osc8_link_at(96, 32, 0, content.x, link_y), None);
-    }
+        let linked_cell = frame
+            .cells
+            .iter()
+            .find(|cell| cell.x == content.x && cell.y == link_y)
+            .expect("link cell exported");
+        let trailing_cell = frame
+            .cells
+            .iter()
+            .find(|cell| cell.x == content.x + 6 && cell.y == link_y)
+            .expect("trailing cell exported");
 
-    #[test]
-    fn web_cell_serializes_osc8_url() {
-        let cell = web_cell(0, 0, &Cell::new("g"), Some(GITHUB_URL));
-
-        assert_eq!(cell.osc8.as_deref(), Some(GITHUB_URL));
+        assert_eq!(linked_cell.osc8.as_deref(), Some(GITHUB_URL));
+        assert_eq!(trailing_cell.osc8.as_deref(), None);
     }
 
     #[test]

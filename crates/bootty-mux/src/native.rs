@@ -117,16 +117,18 @@ impl NativeMuxState {
             .find(|session| session.id == session_id)
     }
 
-    fn new_window(&mut self, session_id: &str) {
+    fn new_window(&mut self, session_id: &str, cwd: Option<PathBuf>) {
         let pane_id = self.next_pane_id();
         if let Some(session) = self.active_session_mut(session_id) {
-            let cwd = session
-                .windows
-                .iter()
-                .find(|window| window.id == session.active_window_id)
-                .and_then(|window| window.panes.first())
-                .map(|pane| pane.cwd.clone())
-                .unwrap_or_else(|| PathBuf::from("."));
+            let cwd = cwd.unwrap_or_else(|| {
+                session
+                    .windows
+                    .iter()
+                    .find(|window| window.id == session.active_window_id)
+                    .and_then(|window| window.panes.first())
+                    .map(|pane| pane.cwd.clone())
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
             let index = session.windows.len() as u32 + 1;
             let window = NativeWindow {
                 id: format!("tab-{index}"),
@@ -402,7 +404,9 @@ impl MuxBackend for NativeBackend {
                 session_id,
                 window_id,
             } => state.activate_window(&session_id, &window_id),
-            MuxCommand::NewWindow { session_id } => state.new_window(&session_id),
+            MuxCommand::NewWindow { session_id, cwd } => {
+                state.new_window(&session_id, cwd.map(PathBuf::from));
+            }
             MuxCommand::ActivateNextWindow { session_id } => {
                 state.activate_relative_window(&session_id, 1);
             }
@@ -532,7 +536,7 @@ mod tests {
         state.close_active_pane("local");
         assert!(state.sessions[0].windows.is_empty());
 
-        state.new_window("local");
+        state.new_window("local", None);
 
         let session = &state.sessions[0];
         assert_eq!(session.windows.len(), 1);
@@ -543,8 +547,8 @@ mod tests {
     #[test]
     fn close_pane_on_last_pane_removes_the_tab_and_selects_a_neighbor() {
         let mut state = NativeMuxState::new();
-        state.new_window("local");
-        state.new_window("local");
+        state.new_window("local", None);
+        state.new_window("local", None);
 
         state.close_active_pane("local");
 

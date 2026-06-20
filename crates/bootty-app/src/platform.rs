@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 #[cfg(target_os = "macos")]
@@ -6,7 +8,7 @@ use objc2::runtime::NSObjectProtocol;
 #[cfg(target_os = "macos")]
 use objc2::{MainThreadMarker, sel};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplication, NSWindow};
+use objc2_app_kit::{NSApplication, NSScreen, NSTitlebarSeparatorStyle, NSWindow};
 
 use crate::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig};
 
@@ -95,17 +97,73 @@ pub fn restore_macos_presentation() -> bool {
     set_macos_non_native_fullscreen_presentation(false)
 }
 
-/// Whether the active window's screen has a camera-housing notch. The sidebar's fullscreen
-/// background only matters when the sidebar covers the screen top next to the notch, so callers
-/// combine this with a fullscreen check.
-pub fn macos_active_screen_has_notch() -> bool {
-    platform_active_screen_has_notch()
+/// Whether the active window's screen has a camera-housing notch. Detected by display name (the
+/// built-in Liquid Retina panel on 2021+ Macs) because `safeAreaInsets`/`auxiliaryTopLeftArea` zero
+/// out when the menu bar is hidden in fullscreen. Mirrors wezterm's detection.
+pub fn macos_active_screen_is_notched() -> bool {
+    platform_active_screen_is_notched()
 }
 
 #[cfg(target_os = "macos")]
-fn platform_active_screen_has_notch() -> bool {
+fn name_reads_as_notched(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("built-in") || name.contains("builtin") || name.contains("liquid retina")
+}
+
+#[cfg(target_os = "macos")]
+fn platform_active_screen_is_notched() -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
+    };
+    // Prefer the active window's screen, but fall back to scanning every screen: when the window's
+    // `screen()` is unresolved mid-transition, a built-in panel still present in the list is enough.
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(screen) = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().firstObject())
+        .and_then(|window| window.screen())
+        && name_reads_as_notched(&screen.localizedName().to_string())
+    {
+        return true;
+    }
+    let screens = NSScreen::screens(mtm);
+    (0..screens.count())
+        .map(|index| screens.objectAtIndex(index))
+        .any(|screen| name_reads_as_notched(&screen.localizedName().to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_active_screen_is_notched() -> bool {
+    false
+}
+
+/// Height of the active window's screen notch (camera-housing band), in points. Returns `0.0` off
+/// macOS or when it can't be measured (the menu bar is hidden in fullscreen). Used as the auto
+/// fullscreen top offset when available.
+pub fn macos_active_screen_notch_height() -> f32 {
+    platform_active_screen_notch_height()
+}
+
+#[cfg(target_os = "macos")]
+static CACHED_NOTCH_HEIGHT: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_os = "macos")]
+fn platform_active_screen_notch_height() -> f32 {
+    let measured = measure_active_screen_notch_height();
+    if measured > 0.0 {
+        // The notch is fixed hardware; cache it so a query that transiently reads 0 can't drop the
+        // offset mid-session.
+        CACHED_NOTCH_HEIGHT.store(measured.to_bits(), Ordering::Relaxed);
+        return measured;
+    }
+    f32::from_bits(CACHED_NOTCH_HEIGHT.load(Ordering::Relaxed))
+}
+
+#[cfg(target_os = "macos")]
+fn measure_active_screen_notch_height() -> f32 {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return 0.0;
     };
     let app = NSApplication::sharedApplication(mtm);
     let Some(screen) = app
@@ -114,17 +172,75 @@ fn platform_active_screen_has_notch() -> bool {
         .or_else(|| app.windows().firstObject())
         .and_then(|window| window.screen())
     else {
-        return false;
+        return 0.0;
     };
-    // A non-zero top safe-area inset reflects the camera housing. The selector is macOS 12+, so
-    // guard with respondsToSelector to stay safe on older systems (which never have a notch).
-    screen.respondsToSelector(sel!(safeAreaInsets)) && screen.safeAreaInsets().top > 0.0
+    // auxiliaryTopLeftArea is Apple's API for laying out around the camera housing, so it stays
+    // valid in fullscreen with the menu bar hidden (where safeAreaInsets zeroes out). Its band
+    // height is the notch height. Both selectors are macOS 12+, hence the respondsToSelector guard.
+    if screen.respondsToSelector(sel!(auxiliaryTopLeftArea)) {
+        let height = screen.auxiliaryTopLeftArea().size.height as f32;
+        if height > 0.0 {
+            return height;
+        }
+    }
+    if screen.respondsToSelector(sel!(safeAreaInsets)) {
+        return screen.safeAreaInsets().top as f32;
+    }
+    0.0
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_active_screen_has_notch() -> bool {
-    false
+fn platform_active_screen_notch_height() -> f32 {
+    0.0
 }
+
+/// Remove the 1px titlebar separator macOS draws under the transparent titlebar. In fullscreen it
+/// reads as a stray border across the top of the window; wezterm suppresses the same line.
+pub fn macos_disable_titlebar_separator() {
+    platform_disable_titlebar_separator();
+}
+
+/// Toggle the window drop shadow. Disabled in fullscreen so the shadow rim doesn't read as a border
+/// around the screen-filling window (wezterm's `MACOS_FORCE_DISABLE_SHADOW`).
+pub fn macos_set_window_shadow(enabled: bool) {
+    platform_set_window_shadow(enabled);
+}
+
+#[cfg(target_os = "macos")]
+fn platform_set_window_shadow(enabled: bool) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(window) = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().firstObject())
+    {
+        window.setHasShadow(enabled);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_set_window_shadow(_enabled: bool) {}
+
+#[cfg(target_os = "macos")]
+fn platform_disable_titlebar_separator() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(window) = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().firstObject())
+    {
+        window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_disable_titlebar_separator() {}
 
 pub fn macos_handles_non_native_fullscreen_frame(window: &WindowConfig) -> bool {
     window.non_native_fullscreen_enabled()
@@ -366,6 +482,9 @@ mod macos_presentation {
         let app = NSApplication::sharedApplication(mtm);
 
         if enabled {
+            // Measure the notch while the menu bar is still present; auto-hiding it below makes the
+            // screen report a zero safe area, so the cached value is what the layout reads later.
+            super::platform_active_screen_notch_height();
             let mut saved = SAVED_PRESENTATION_OPTIONS
                 .lock()
                 .expect("lock presentation options");
@@ -381,8 +500,14 @@ mod macos_presentation {
                 if saved_state.is_none() {
                     *saved_state = Some(WindowState::from_window(&window));
                 }
+                // Drop Titled so the window has no frame border (the 1px outline at the screen
+                // edge). winit overrides canBecomeKeyWindow, so a borderless window keeps focus.
                 let mut style_mask = window.styleMask();
-                style_mask.remove(NSWindowStyleMask::Resizable | NSWindowStyleMask::Miniaturizable);
+                style_mask.remove(
+                    NSWindowStyleMask::Resizable
+                        | NSWindowStyleMask::Miniaturizable
+                        | NSWindowStyleMask::Titled,
+                );
                 window.setStyleMask(style_mask);
                 window.setMovable(false);
                 window.setMovableByWindowBackground(false);

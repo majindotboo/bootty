@@ -33,6 +33,14 @@ height = 760
 fullscreen = false
 window-decoration = "auto"
 macos-titlebar-style = "transparent"
+# Top offset reserved when the window covers a notched screen in fullscreen, so the sidebar and
+# terminal clear the notch. Omitted (the default) auto-detects the notch height from the display's
+# safe area; set a number to override.
+# fullscreen-top-offset = 32
+# When fullscreen on a notched screen, let the terminal/tab bar sit inside the notch band (beside
+# the camera) instead of being pushed entirely below it. The notch strip uses the sidebar's
+# fullscreen background. Set false to push everything below the notch.
+fullscreen-tabs-in-notch = true
 
 [font]
 # Live-reloaded terminal text metrics.
@@ -55,6 +63,28 @@ gap = 1
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.08
 
+# Status-bar segments, composed left/center/right. Each segment names a Luau module: a built-in
+# (session, windows, clock, sysinfo) or a *.luau file stem under ~/.config/bootty/status/. Built-ins
+# are overridable by a same-named file. Only referenced modules run. Items carry an optional lucide
+# icon slug (rendered as an SVG via the sidebar icon set, not a glyph font) and fg/bg fills the module
+# leaves unset. The session/windows built-ins tint with the session's sidebar color via
+# bootty.session_color(); see docs/status/.
+[[chrome.status-segment]]
+align = "left"
+module = "session"
+
+[[chrome.status-segment]]
+align = "left"
+module = "windows"
+
+[[chrome.status-segment]]
+align = "right"
+module = "sysinfo"
+
+[[chrome.status-segment]]
+align = "right"
+module = "clock"
+
 [sidebar]
 # Sidebar placement and color overrides. Drag the sidebar's inner edge to resize
 # (writes back to chrome.sidebar-width). Colors layer on top of the active theme;
@@ -73,6 +103,13 @@ position = "left" # or "right"
 # native keeps mux state and terminals inside Bootty. rmux renders through
 # rmux-sdk. tmux and zellij attach through their backend UI.
 backend = "native"
+# tmux backend only: hide tmux's own status bar inside Bootty's client by
+# toggling the attached session's status option off (restored on detach), so
+# Bootty's native status bar is the only one shown. Session-scoped and
+# reversible; never a global or permanent disable. If you also attach the same
+# session from another terminal at the same time, its bar is hidden there too
+# until Bootty detaches.
+hide-tmux-status = false
 
 [input]
 # Active keybinds must use executable Bootty actions. Unsupported actions are

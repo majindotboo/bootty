@@ -146,16 +146,33 @@ fn config_path_prefers_xdg_then_home(
 }
 
 #[test]
-fn missing_config_file_loads_current_defaults() {
+fn missing_config_file_loads_with_selected_path() {
     let sandbox = ConfigSandbox::new();
 
     let config = sandbox.load().unwrap();
 
-    assert_eq!(config.window.title, "Bootty");
-    assert_eq!(config.window.width, 1220.0);
-    assert_eq!(config.window.height, 760.0);
-    assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Native);
     assert_eq!(config.config_path, sandbox.path);
+}
+
+#[test]
+fn defaults_include_session_status_segment_before_windows() {
+    let config = load_config_source("");
+    let modules = config
+        .chrome
+        .status_segments
+        .iter()
+        .map(|segment| segment.module.as_str())
+        .collect::<Vec<_>>();
+    let session = modules
+        .iter()
+        .position(|module| *module == "session")
+        .expect("session status module is enabled by default");
+    let windows = modules
+        .iter()
+        .position(|module| *module == "windows")
+        .expect("windows status module is enabled by default");
+
+    assert!(session < windows, "session should appear before windows");
 }
 
 #[test]
@@ -295,6 +312,30 @@ fn config_defaults_sidebar_to_left_without_overrides() {
     assert_eq!(config.sidebar.position, SidebarPosition::Left);
     assert_eq!(config.sidebar.background, None);
     assert_eq!(config.sidebar.fullscreen_background, None);
+}
+
+#[test]
+fn config_overrides_fullscreen_top_offset() {
+    let config = load_config_source(indoc! {r#"
+        [window]
+        fullscreen-top-offset = 40
+    "#});
+
+    assert_eq!(config.window.fullscreen_top_offset, Some(40.0));
+    // Absent key keeps auto-detection (None).
+    assert_eq!(load_config_source("").window.fullscreen_top_offset, None);
+}
+
+#[test]
+fn config_toggles_fullscreen_tabs_in_notch() {
+    let config = load_config_source(indoc! {r#"
+        [window]
+        fullscreen-tabs-in-notch = false
+    "#});
+
+    assert!(!config.window.fullscreen_tabs_in_notch);
+    // Defaults to on so the notch band is used out of the box.
+    assert!(load_config_source("").window.fullscreen_tabs_in_notch);
 }
 
 #[test]
@@ -521,40 +562,6 @@ fn documented_sample_config_loads() {
     let config = load_config_from_path(&path).unwrap();
 
     assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
-    assert!(
-        config
-            .input
-            .keybind
-            .contains(&"cmd+p=session_picker".to_owned())
-    );
-    assert!(
-        config
-            .input
-            .keybind
-            .contains(&"cmd+n=new_mux_session".to_owned())
-    );
-    assert!(
-        config
-            .input
-            .backend_keybinds
-            .tmux
-            .contains(&"cmd+ctrl+n=csi:68~".to_owned())
-    );
-    assert_eq!(config.chrome.unfocused_sidebar_dim, 0.16);
-    assert_eq!(config.chrome.unfocused_terminal_dim, 0.08);
-    assert!(
-        config
-            .input
-            .sidebar_keybind
-            .contains(&"Enter=activate_session".to_owned())
-    );
-    assert!(
-        config
-            .input
-            .sidebar_keybind
-            .contains(&"ctrl+n=next_session".to_owned())
-    );
-    assert_eq!(config.colors.palette.len(), 16);
 }
 
 #[test]

@@ -1,0 +1,1251 @@
+//! Loader for built-in and user-provided Lua/Luau status-bar modules.
+//!
+//! Built-in defaults and `~/.config/bootty/status/*.lua` / `*.luau` overrides all use the
+//! same item schema. A module returns a render function or a table `{ interval = <secs>,
+//! render = ... }`. The render function returns a string, one item table, or a list of item
+//! tables `{ text = ..., fg = "#rrggbb", bg = ..., icon = ..., gauge = ..., primitives = ..., action = ... }`.
+//!
+//! Mux state is exposed through `bootty.windows()` / `bootty.session()` / `bootty.session_color()`,
+//! system stats through the native cross-platform `bootty.metrics()`, and `bootty.theme.*` carries
+//! palette colors. Modules get isolated environments with read-only shared `bootty` tables; use
+//! `bootty.run(cmd)` for explicit platform-shell commands. Modules run on a worker thread (the
+//! Luau state is single-threaded and shell-outs must never block the UI); the render thread reads items each frame.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime};
+
+use eframe::egui::{self, Color32};
+use mlua::{Function, Lua, Table, Value};
+use starship_battery::{Manager as BatteryManager, State as BatteryState, units::time::second};
+use sysinfo::{MemoryRefreshKind, System};
+
+/// Default refresh cadence for a module that doesn't declare its own `interval`.
+const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
+/// Background poll granularity; a module fires on the first tick at or after its interval elapses.
+const TICK: Duration = Duration::from_millis(100);
+/// How often the status dir is re-scanned for edited/added/removed module files (hot reload).
+const RELOAD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const ERROR_COLOR: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
+
+const BUILTIN_MODULES: &[(&str, &str)] = &[
+    ("windows", include_str!("status_defaults/windows.luau")),
+    ("clock", include_str!("status_defaults/clock.luau")),
+    ("session", include_str!("status_defaults/session.luau")),
+    ("sysinfo", include_str!("status_defaults/sysinfo.luau")),
+];
+
+/// One renderable element a Lua/Luau module produced.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModuleItem {
+    pub text: String,
+    pub fg: Option<Color32>,
+    pub bg: Option<Color32>,
+    pub stroke: Option<Color32>,
+    pub icon: Option<String>,
+    /// 0.0-1.0 fill drawn as a battery meter (tinted with `fg`) before the text.
+    pub gauge: Option<f32>,
+    pub primitives: Vec<ModulePrimitive>,
+    /// Extra layout padding reserved inside the item for custom primitives.
+    pub pad_left: f32,
+    pub pad_right: f32,
+    /// Whether this item may visually connect its background to adjacent items. Defaults to true.
+    pub join: Option<bool>,
+    /// Whether to keep the normal inter-item gap before this item. Defaults to true.
+    pub gap: Option<bool>,
+    pub action: Option<String>,
+}
+
+/// A local coordinate for status item primitives: `frac` is relative to the item rect,
+/// and `px` is an additional logical-pixel offset.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModuleCoord {
+    pub frac: f32,
+    pub px: f32,
+}
+
+pub type ModuleCornerRadius = egui::CornerRadius;
+
+/// Generic egui-style primitives drawn in the item's local rect before text/icons.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModulePrimitive {
+    Rect {
+        fill: Option<Color32>,
+        stroke: Option<Color32>,
+        x: ModuleCoord,
+        y: ModuleCoord,
+        w: ModuleCoord,
+        h: ModuleCoord,
+        radius: ModuleCornerRadius,
+    },
+    Polygon {
+        fill: Option<Color32>,
+        stroke: Option<Color32>,
+        points: Vec<(ModuleCoord, ModuleCoord)>,
+    },
+}
+
+/// A single window as exposed to modules via `bootty.windows()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowView {
+    pub id: String,
+    pub index: u32,
+    pub name: String,
+    pub active: bool,
+}
+
+/// Mux state shared with the worker thread so modules can render it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MuxView {
+    pub windows: Vec<WindowView>,
+    pub session: Option<String>,
+    /// The active session's sidebar accent color as `#rrggbb`, so modules can
+    /// match the bar to the session like the sidebar does.
+    pub session_color: Option<String>,
+    /// Whether Bootty is currently holding a keep-awake/caffeinate guard.
+    pub keep_awake: bool,
+}
+
+/// Cross-platform system metrics gathered natively (no per-OS shell-outs), so
+/// modules read them through `bootty.metrics()` on any platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Metrics {
+    /// Global CPU usage, 0-100.
+    pub cpu: f32,
+    /// 1-minute load average; 0 where the OS has no concept of it (e.g. Windows).
+    pub load1: f64,
+    /// Memory in use as a percentage. On macOS this is real memory pressure (what
+    /// Activity Monitor's pressure reflects), not the cache-inflated "used" figure.
+    pub mem_used_pct: f64,
+    pub mem_total_bytes: u64,
+    /// Battery charge 0-100, or `None` on a machine with no battery (desktop).
+    pub battery_percent: Option<f32>,
+    /// Plugged in / charging / full / no battery (not draining).
+    pub on_ac: bool,
+    /// Seconds until empty while discharging, or `None` when unavailable/not discharging.
+    pub battery_time_to_empty_secs: Option<f32>,
+    /// Seconds until full while charging, or `None` when unavailable/not charging.
+    pub battery_time_to_full_secs: Option<f32>,
+}
+
+/// How often native metrics are sampled (CPU needs a gap between samples).
+const METRICS_INTERVAL: Duration = Duration::from_secs(2);
+
+enum ModuleBody {
+    Render(Function),
+    /// The file failed to parse/evaluate; surfaced in the bar so edits aren't silently dropped.
+    LoadError(String),
+}
+
+struct LoadedModule {
+    name: String,
+    interval: Duration,
+    body: ModuleBody,
+    last_run: Option<Instant>,
+}
+
+/// Owns the Luau worker thread, the shared item map the UI reads, and the mux snapshot the UI feeds.
+pub struct StatusModuleHost {
+    items: Arc<RwLock<HashMap<String, Vec<ModuleItem>>>>,
+    mux: Arc<RwLock<MuxView>>,
+    metrics: Arc<RwLock<Metrics>>,
+    active: Arc<RwLock<BTreeSet<String>>>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StatusModuleHost {
+    /// Spawns the worker. `ctx` is woken when a module's output changes. `theme` is exposed as
+    /// `bootty.theme.*`. Embedded defaults always load, so a missing `dir` still yields modules.
+    pub fn spawn(dir: PathBuf, ctx: egui::Context, theme: Vec<(String, String)>) -> Self {
+        let items: Arc<RwLock<HashMap<String, Vec<ModuleItem>>>> = Arc::default();
+        let mux: Arc<RwLock<MuxView>> = Arc::default();
+        let metrics: Arc<RwLock<Metrics>> = Arc::default();
+        let active: Arc<RwLock<BTreeSet<String>>> = Arc::default();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::Builder::new()
+            .name("bootty-status".to_owned())
+            .spawn({
+                let items = Arc::clone(&items);
+                let mux = Arc::clone(&mux);
+                let metrics = Arc::clone(&metrics);
+                let active = Arc::clone(&active);
+                let shutdown = Arc::clone(&shutdown);
+                move || {
+                    run_loop(
+                        &dir, &ctx, &theme, &mux, &metrics, &active, &items, &shutdown,
+                    )
+                }
+            })
+            .ok();
+        Self {
+            items,
+            mux,
+            metrics,
+            active,
+            shutdown,
+            handle,
+        }
+    }
+
+    /// Declares which modules are referenced by the configured segments. Only
+    /// these run, so an unreferenced module (e.g. `sysinfo`) never shell-outs.
+    pub fn set_active(&self, names: impl IntoIterator<Item = String>) {
+        let next: BTreeSet<String> = names.into_iter().collect();
+        if let Ok(mut current) = self.active.write()
+            && *current != next
+        {
+            *current = next;
+        }
+    }
+
+    #[must_use]
+    pub fn items(&self, name: &str) -> Vec<ModuleItem> {
+        self.items
+            .read()
+            .ok()
+            .and_then(|map| map.get(name).cloned())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> Metrics {
+        self.metrics
+            .read()
+            .map(|metrics| *metrics)
+            .unwrap_or_default()
+    }
+
+    /// Publishes the latest mux snapshot for modules to render. Cheap; the UI calls it per frame.
+    pub fn update_mux(&self, view: MuxView) {
+        if let Ok(mut current) = self.mux.write()
+            && *current != view
+        {
+            *current = view;
+        }
+    }
+}
+
+impl Drop for StatusModuleHost {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop(
+    dir: &Path,
+    ctx: &egui::Context,
+    theme: &[(String, String)],
+    mux: &Arc<RwLock<MuxView>>,
+    metrics: &Arc<RwLock<Metrics>>,
+    active: &RwLock<BTreeSet<String>>,
+    items: &RwLock<HashMap<String, Vec<ModuleItem>>>,
+    shutdown: &AtomicBool,
+) {
+    let Ok(lua) = setup_lua(theme, Arc::clone(mux), Arc::clone(metrics)) else {
+        return;
+    };
+    let mut modules = load_modules(&lua, dir);
+    let mut signature = dir_signature(dir);
+    let mut last_scan = Instant::now();
+    let mut system = System::new();
+    let battery = BatteryManager::new().ok();
+    let mut last_metrics: Option<Instant> = None;
+    while !shutdown.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        // Hot reload: re-evaluate when files in the status dir are added, edited, or removed.
+        if now.duration_since(last_scan) >= RELOAD_SCAN_INTERVAL {
+            last_scan = now;
+            let current = dir_signature(dir);
+            if current != signature {
+                signature = current;
+                modules = load_modules(&lua, dir);
+                let module_names = modules
+                    .iter()
+                    .map(|module| module.name.clone())
+                    .collect::<BTreeSet<_>>();
+                prune_removed_items(items, &module_names);
+                ctx.request_repaint();
+            }
+        }
+        // Sample native metrics only while the bar has modules, and before running
+        // them, so `bootty.metrics()` reads fresh values without per-OS shell-outs.
+        let bar_active = active.read().is_ok_and(|names| !names.is_empty());
+        if bar_active
+            && last_metrics.is_none_or(|last| now.duration_since(last) >= METRICS_INTERVAL)
+        {
+            last_metrics = Some(now);
+            refresh_metrics(&mut system, battery.as_ref(), metrics);
+        }
+        let mut changed = false;
+        for module in &mut modules {
+            // Only run modules a segment references, so an unused module never
+            // shells out on its interval.
+            if !active
+                .read()
+                .is_ok_and(|names| names.contains(&module.name))
+            {
+                continue;
+            }
+            if module
+                .last_run
+                .is_none_or(|last| now.duration_since(last) >= module.interval)
+            {
+                module.last_run = Some(now);
+                let produced = run_module(&module.body);
+                if let Ok(mut map) = items.write()
+                    && map.get(&module.name) != Some(&produced)
+                {
+                    map.insert(module.name.clone(), produced);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+fn prune_removed_items(
+    items: &RwLock<HashMap<String, Vec<ModuleItem>>>,
+    module_names: &BTreeSet<String>,
+) {
+    let Ok(mut map) = items.write() else {
+        return;
+    };
+    map.retain(|name, _| module_names.contains(name));
+}
+
+/// Module names available to reference from a segment: built-ins plus user `*.lua` / `*.luau`
+/// files. Sorted and de-duplicated for settings.
+pub fn available_module_names(dir: &Path) -> Vec<String> {
+    let mut names: BTreeSet<String> = BUILTIN_MODULES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_status_module_file(&path)
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                names.insert(stem.to_owned());
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+/// Sorted (path, mtime) of module files, so a reload can detect added/edited/removed files cheaply.
+fn dir_signature(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut signature: Vec<(PathBuf, Option<SystemTime>)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_status_module_file(path))
+        .map(|path| {
+            let mtime = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            (path, mtime)
+        })
+        .collect();
+    signature.sort();
+    signature
+}
+
+fn is_status_module_file(path: &Path) -> bool {
+    path.is_file()
+        && matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("lua" | "luau")
+        )
+}
+
+fn refresh_metrics(
+    system: &mut System,
+    battery: Option<&BatteryManager>,
+    metrics: &RwLock<Metrics>,
+) {
+    system.refresh_cpu_usage();
+    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+    let load = System::load_average();
+    let (battery_percent, on_ac, battery_time_to_empty_secs, battery_time_to_full_secs) =
+        battery_status(battery);
+    let next = Metrics {
+        cpu: system.global_cpu_usage(),
+        load1: load.one,
+        mem_used_pct: memory_used_percent(system),
+        mem_total_bytes: system.total_memory(),
+        battery_percent,
+        on_ac,
+        battery_time_to_empty_secs,
+        battery_time_to_full_secs,
+    };
+    if let Ok(mut current) = metrics.write() {
+        *current = next;
+    }
+}
+
+/// Memory in use as a percentage. macOS reports most RAM as "used" for reclaimable
+/// caches, so its raw used/total is misleading; use the kernel's real pressure via
+/// `memory_pressure` instead. Other platforms use sysinfo's available figure.
+#[cfg(target_os = "macos")]
+fn memory_used_percent(system: &System) -> f64 {
+    macos_memory_pressure_used().unwrap_or_else(|| sysinfo_used_percent(system))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn memory_used_percent(system: &System) -> f64 {
+    sysinfo_used_percent(system)
+}
+
+fn sysinfo_used_percent(system: &System) -> f64 {
+    let total = system.total_memory();
+    if total == 0 {
+        return 0.0;
+    }
+    let available = system.available_memory().min(total);
+    100.0 * (total - available) as f64 / total as f64
+}
+
+/// Parse `memory_pressure`'s "System-wide memory free percentage: NN%" and return
+/// used = 100 - free, the figure Activity Monitor's memory-pressure graph reflects.
+#[cfg(target_os = "macos")]
+fn macos_memory_pressure_used() -> Option<f64> {
+    let output = std::process::Command::new("/usr/bin/memory_pressure")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let free: f64 = text
+        .lines()
+        .find_map(|line| line.split("free percentage:").nth(1))
+        .and_then(|rest| rest.trim().trim_end_matches('%').trim().parse().ok())?;
+    Some((100.0 - free).clamp(0.0, 100.0))
+}
+
+/// Charge percentage, AC state, and remaining battery time. A machine with no battery
+/// (desktop, or a probe error) reports `(None, true, None, None)` so the bar shows an AC icon.
+fn battery_status(
+    manager: Option<&BatteryManager>,
+) -> (Option<f32>, bool, Option<f32>, Option<f32>) {
+    let Some(manager) = manager else {
+        return (None, true, None, None);
+    };
+    let Ok(mut batteries) = manager.batteries() else {
+        return (None, true, None, None);
+    };
+    match batteries.next() {
+        Some(Ok(battery)) => {
+            let percent = battery.state_of_charge().value * 100.0;
+            let on_ac = matches!(battery.state(), BatteryState::Charging | BatteryState::Full);
+            let time_to_empty = battery.time_to_empty().map(|time| time.get::<second>());
+            let time_to_full = battery.time_to_full().map(|time| time.get::<second>());
+            (Some(percent), on_ac, time_to_empty, time_to_full)
+        }
+        _ => (None, true, None, None),
+    }
+}
+
+fn setup_lua(
+    theme: &[(String, String)],
+    mux: Arc<RwLock<MuxView>>,
+    metrics: Arc<RwLock<Metrics>>,
+) -> mlua::Result<Lua> {
+    let lua = Lua::new();
+    let bootty = lua.create_table()?;
+
+    // Shell out and return trimmed stdout, via the platform shell. Prefer
+    // `bootty.metrics()` for system stats, which is native and cross-platform.
+    bootty.set(
+        "run",
+        lua.create_function(|_, cmd: String| {
+            let (program, flag) = if cfg!(windows) {
+                ("cmd", "/C")
+            } else {
+                ("sh", "-c")
+            };
+            let output = std::process::Command::new(program)
+                .arg(flag)
+                .arg(&cmd)
+                .output()
+                .map_err(mlua::Error::external)?;
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })?,
+    )?;
+
+    // Mux state: the active session's windows, and the session name.
+    let windows_mux = Arc::clone(&mux);
+    bootty.set(
+        "windows",
+        lua.create_function(move |lua, ()| {
+            let array = lua.create_table()?;
+            if let Ok(view) = windows_mux.read() {
+                for (index, window) in view.windows.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("id", window.id.as_str())?;
+                    entry.set("index", window.index)?;
+                    entry.set("name", window.name.as_str())?;
+                    entry.set("active", window.active)?;
+                    array.set(index + 1, entry)?;
+                }
+            }
+            Ok(array)
+        })?,
+    )?;
+    let session_mux = Arc::clone(&mux);
+    bootty.set(
+        "session",
+        lua.create_function(move |_, ()| {
+            Ok(session_mux
+                .read()
+                .ok()
+                .and_then(|view| view.session.clone()))
+        })?,
+    )?;
+    let color_mux = Arc::clone(&mux);
+    bootty.set(
+        "session_color",
+        lua.create_function(move |_, ()| {
+            Ok(color_mux
+                .read()
+                .ok()
+                .and_then(|view| view.session_color.clone()))
+        })?,
+    )?;
+    let awake_mux = Arc::clone(&mux);
+    bootty.set(
+        "awake",
+        lua.create_function(move |_, ()| {
+            Ok(awake_mux
+                .read()
+                .map(|view| view.keep_awake)
+                .unwrap_or(false))
+        })?,
+    )?;
+
+    // Native, cross-platform system metrics. `load1` is 0 where the OS has no load
+    // average (e.g. Windows); fall back to `cpu` there. `mem_pct` is the used
+    // percentage (real memory pressure on macOS); `mem_used`/`mem_total` are GiB
+    // and stay consistent with `mem_pct`.
+    bootty.set(
+        "metrics",
+        lua.create_function(move |lua, ()| {
+            let m = metrics.read().map(|m| *m).unwrap_or_default();
+            let table = lua.create_table()?;
+            table.set("cpu", m.cpu)?;
+            table.set("load1", m.load1)?;
+            let total_gib = m.mem_total_bytes as f64 / 1_073_741_824.0;
+            table.set("mem_total", total_gib)?;
+            table.set("mem_pct", m.mem_used_pct)?;
+            table.set("mem_used", total_gib * m.mem_used_pct / 100.0)?;
+            if let Some(secs) = m.battery_time_to_empty_secs {
+                table.set("battery_time_to_empty", secs)?;
+            }
+            if let Some(secs) = m.battery_time_to_full_secs {
+                table.set("battery_time_to_full", secs)?;
+            }
+            // `battery` is nil on a machine with no battery; `on_ac` is true when
+            // plugged in / charging / full (or no battery).
+            if let Some(percent) = m.battery_percent {
+                table.set("battery", percent)?;
+            }
+            table.set("on_ac", m.on_ac)?;
+            Ok(table)
+        })?,
+    )?;
+
+    // Palette tokens so modules style with theme colors: `fg = bootty.theme.accent`.
+    let theme_table = lua.create_table()?;
+    for (name, hex) in theme {
+        theme_table.set(name.as_str(), hex.as_str())?;
+    }
+    theme_table.set_readonly(true);
+    bootty.set("theme", theme_table)?;
+    bootty.set_readonly(true);
+
+    lua.globals().set("bootty", bootty)?;
+    lua.sandbox(true)?;
+    Ok(lua)
+}
+
+fn module_environment(lua: &Lua) -> mlua::Result<Table> {
+    let env = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.set("__index", lua.globals())?;
+    env.set_metatable(Some(metatable))?;
+    env.set_safeenv(true);
+    Ok(env)
+}
+
+fn load_modules(lua: &Lua, dir: &Path) -> Vec<LoadedModule> {
+    let mut sources = BUILTIN_MODULES
+        .iter()
+        .map(|(name, source)| ((*name).to_owned(), Ok((*source).to_owned())))
+        .collect::<BTreeMap<_, _>>();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_status_module_file(&path) {
+                continue;
+            }
+            if let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) {
+                let source =
+                    std::fs::read_to_string(&path).map_err(|error| first_line(&error.to_string()));
+                sources.insert(name.to_owned(), source);
+            }
+        }
+    }
+    sources
+        .into_iter()
+        .map(|(name, source)| match source {
+            Ok(code) => match module_environment(lua).and_then(|env| {
+                lua.load(&code)
+                    .set_name(&name)
+                    .set_environment(env)
+                    .eval::<Value>()
+            }) {
+                Ok(value) => loaded_module_from_value(name.clone(), value).unwrap_or_else(|| {
+                    load_error(
+                        name,
+                        "must return a function or { render = ... }".to_owned(),
+                    )
+                }),
+                Err(error) => load_error(name, first_line(&error.to_string())),
+            },
+            Err(error) => load_error(name, error),
+        })
+        .collect()
+}
+
+fn load_error(name: String, message: String) -> LoadedModule {
+    LoadedModule {
+        interval: DEFAULT_INTERVAL,
+        body: ModuleBody::LoadError(format!("{name}: {message}")),
+        name,
+        last_run: None,
+    }
+}
+
+fn loaded_module_from_value(name: String, value: Value) -> Option<LoadedModule> {
+    match value {
+        Value::Function(render) => Some(LoadedModule {
+            name,
+            interval: DEFAULT_INTERVAL,
+            body: ModuleBody::Render(render),
+            last_run: None,
+        }),
+        Value::Table(table) => {
+            let render: Function = table.get("render").ok()?;
+            let interval = table
+                .get::<f64>("interval")
+                .ok()
+                .filter(|secs| *secs > 0.0)
+                .map_or(DEFAULT_INTERVAL, Duration::from_secs_f64);
+            Some(LoadedModule {
+                name,
+                interval,
+                body: ModuleBody::Render(render),
+                last_run: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn run_module(body: &ModuleBody) -> Vec<ModuleItem> {
+    match body {
+        ModuleBody::Render(render) => match render.call::<Value>(()) {
+            Ok(value) => items_from_value(value),
+            Err(error) => vec![error_item(&error.to_string())],
+        },
+        ModuleBody::LoadError(message) => vec![error_item(message)],
+    }
+}
+
+fn error_item(message: &str) -> ModuleItem {
+    ModuleItem {
+        text: first_line(message),
+        fg: Some(ERROR_COLOR),
+        ..ModuleItem::default()
+    }
+}
+
+fn items_from_value(value: Value) -> Vec<ModuleItem> {
+    match value {
+        Value::String(text) => vec![ModuleItem {
+            text: text.to_string_lossy(),
+            ..ModuleItem::default()
+        }],
+        Value::Table(table) => {
+            // Item text is optional; icon/gauge/action-only tables are single items too.
+            if table_looks_like_item(&table) {
+                vec![item_from_table(&table)]
+            } else {
+                table
+                    .sequence_values::<Table>()
+                    .filter_map(Result::ok)
+                    .map(|item| item_from_table(&item))
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn table_looks_like_item(table: &Table) -> bool {
+    [
+        "text",
+        "fg",
+        "bg",
+        "stroke",
+        "icon",
+        "gauge",
+        "primitives",
+        "pad_left",
+        "pad_right",
+        "join",
+        "gap",
+        "action",
+    ]
+    .into_iter()
+    .any(|key| table.contains_key(key).unwrap_or(false))
+}
+
+fn item_from_table(table: &Table) -> ModuleItem {
+    ModuleItem {
+        text: table.get::<String>("text").unwrap_or_default(),
+        fg: table
+            .get::<String>("fg")
+            .ok()
+            .and_then(|hex| parse_hex_color(&hex)),
+        bg: table
+            .get::<String>("bg")
+            .ok()
+            .and_then(|hex| parse_hex_color(&hex)),
+        stroke: table
+            .get::<String>("stroke")
+            .ok()
+            .and_then(|hex| parse_hex_color(&hex)),
+        icon: table
+            .get::<String>("icon")
+            .ok()
+            .filter(|icon| !icon.is_empty()),
+        gauge: table
+            .get::<f64>("gauge")
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0) as f32),
+        primitives: table
+            .get::<Table>("primitives")
+            .ok()
+            .map(|primitives| primitives_from_table(&primitives))
+            .unwrap_or_default(),
+        pad_left: table
+            .get::<f64>("pad_left")
+            .ok()
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0) as f32,
+        pad_right: table
+            .get::<f64>("pad_right")
+            .ok()
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0) as f32,
+        join: table.get::<bool>("join").ok(),
+        gap: table.get::<bool>("gap").ok(),
+        action: table
+            .get::<String>("action")
+            .ok()
+            .filter(|action| !action.is_empty()),
+    }
+}
+
+fn primitives_from_table(table: &Table) -> Vec<ModulePrimitive> {
+    table
+        .sequence_values::<Table>()
+        .filter_map(Result::ok)
+        .filter_map(|primitive| primitive_from_table(&primitive))
+        .collect()
+}
+
+fn primitive_from_table(table: &Table) -> Option<ModulePrimitive> {
+    let kind = table
+        .get::<String>("type")
+        .or_else(|_| table.get::<String>("kind"))
+        .ok()?;
+    let fill = table
+        .get::<String>("fill")
+        .ok()
+        .and_then(|hex| parse_hex_color(&hex));
+    let stroke = table
+        .get::<String>("stroke")
+        .ok()
+        .and_then(|hex| parse_hex_color(&hex));
+    match kind.as_str() {
+        "rect" => Some(ModulePrimitive::Rect {
+            fill,
+            stroke,
+            x: coord_from_table(table, "x", "x_px", 0.0),
+            y: coord_from_table(table, "y", "y_px", 0.0),
+            w: coord_from_table(table, "w", "w_px", 1.0),
+            h: coord_from_table(table, "h", "h_px", 1.0),
+            radius: radius_from_table(table),
+        }),
+        "polygon" => {
+            let points = table
+                .get::<Table>("points")
+                .ok()?
+                .sequence_values::<Table>()
+                .filter_map(Result::ok)
+                .map(|point| {
+                    (
+                        coord_from_table(&point, "x", "dx", 0.0),
+                        coord_from_table(&point, "y", "dy", 0.0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (points.len() >= 3).then_some(ModulePrimitive::Polygon {
+                fill,
+                stroke,
+                points,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn coord_from_table(table: &Table, frac_key: &str, px_key: &str, default_frac: f32) -> ModuleCoord {
+    let frac = table
+        .get::<f64>(frac_key)
+        .ok()
+        .filter(|value| value.is_finite())
+        .map_or(default_frac, |value| value as f32);
+    let px = table
+        .get::<f64>(px_key)
+        .ok()
+        .filter(|value| value.is_finite())
+        .map_or(0.0, |value| value as f32);
+    ModuleCoord { frac, px }
+}
+
+fn radius_from_table(table: &Table) -> ModuleCornerRadius {
+    if let Ok(radius) = table.get::<f64>("radius") {
+        let radius = radius.clamp(0.0, u8::MAX as f64) as u8;
+        return egui::CornerRadius {
+            nw: radius,
+            ne: radius,
+            sw: radius,
+            se: radius,
+        };
+    }
+    let Ok(radius) = table.get::<Table>("radius") else {
+        return egui::CornerRadius::default();
+    };
+    let corner = |key: &str| {
+        radius
+            .get::<f64>(key)
+            .ok()
+            .filter(|value| value.is_finite())
+            .map_or(0, |value| value.clamp(0.0, u8::MAX as f64) as u8)
+    };
+    egui::CornerRadius {
+        nw: corner("nw"),
+        ne: corner("ne"),
+        sw: corner("sw"),
+        se: corner("se"),
+    }
+}
+
+fn parse_hex_color(value: &str) -> Option<Color32> {
+    let hex = value.trim().strip_prefix('#')?;
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Color32::from_rgb(r, g, b))
+        }
+        3 => {
+            let expand = |slice: &str| u8::from_str_radix(slice, 16).map(|v| v * 17);
+            let r = expand(&hex[0..1]).ok()?;
+            let g = expand(&hex[1..2]).ok()?;
+            let b = expand(&hex[2..3]).ok()?;
+            Some(Color32::from_rgb(r, g, b))
+        }
+        _ => None,
+    }
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or(text).to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_source(source: &str) -> Vec<ModuleItem> {
+        let theme = [("accent".to_owned(), "#89b4fa".to_owned())];
+        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let value = lua.load(source).eval::<Value>().unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        run_module(&module.body)
+    }
+
+    #[test]
+    fn built_in_luau_modules_load_without_user_files() {
+        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let modules = load_modules(&lua, dir.path());
+        let names = modules
+            .iter()
+            .map(|module| module.name.as_str())
+            .collect::<Vec<_>>();
+
+        for expected in ["windows", "clock", "session", "sysinfo"] {
+            assert!(names.contains(&expected), "{expected} builtin should load");
+        }
+        assert!(
+            modules
+                .iter()
+                .filter(|module| {
+                    ["windows", "clock", "session", "sysinfo"].contains(&module.name.as_str())
+                })
+                .all(|module| matches!(&module.body, ModuleBody::Render(_))),
+            "builtins should load as renderable modules"
+        );
+    }
+
+    #[test]
+    fn list_module_yields_styled_items_with_actions() {
+        let items = run_source(
+            "return function() return { \
+                { text = 'a', fg = '#a6e3a1', action = 'activate-window:1' }, \
+                { text = 'b' } \
+            } end",
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].text, "a");
+        assert_eq!(items[0].fg, Some(Color32::from_rgb(0xa6, 0xe3, 0xa1)));
+        assert_eq!(items[0].action.as_deref(), Some("activate-window:1"));
+        assert_eq!(items[1].text, "b");
+    }
+
+    #[test]
+    fn string_return_is_one_item() {
+        let items = run_source("return function() return 'hi' end");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "hi");
+    }
+
+    #[test]
+    fn icon_only_table_return_is_one_item() {
+        let items = run_source(
+            "return function() return { icon = 'plug-zap', action = 'toggle-caffeinate' } end",
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].icon.as_deref(), Some("plug-zap"));
+        assert_eq!(items[0].action.as_deref(), Some("toggle-caffeinate"));
+    }
+
+    #[test]
+    fn scalar_array_return_yields_no_items() {
+        let items = run_source("return function() return { 1, 2, 3 } end");
+        assert!(items.is_empty());
+    }
+    #[test]
+    fn module_styles_from_theme_token() {
+        let items =
+            run_source("return function() return { text = 'x', fg = bootty.theme.accent } end");
+        assert_eq!(items[0].fg, Some(Color32::from_rgb(0x89, 0xb4, 0xfa)));
+    }
+
+    #[test]
+    fn module_globals_do_not_leak_between_modules() {
+        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("aaa.luau"),
+            "leaked = 'bad'; return function() return 'aaa' end",
+        )
+        .expect("write first module");
+        std::fs::write(
+            dir.path().join("bbb.luau"),
+            "return function() return tostring(leaked) end",
+        )
+        .expect("write second module");
+
+        let modules = load_modules(&lua, dir.path());
+        let module = modules
+            .iter()
+            .find(|module| module.name == "bbb")
+            .expect("second module should load");
+        let items = run_module(&module.body);
+
+        assert_eq!(items[0].text, "nil");
+    }
+
+    #[test]
+    fn module_load_cannot_mutate_shared_theme() {
+        let theme = [("text".to_owned(), "#cdd6f4".to_owned())];
+        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("mutator.luau"),
+            "bootty.theme.text = '#000000'; return function() return 'bad' end",
+        )
+        .expect("write mutator module");
+
+        let modules = load_modules(&lua, dir.path());
+        let module = modules
+            .iter()
+            .find(|module| module.name == "mutator")
+            .expect("mutator module should surface an error");
+        let ModuleBody::LoadError(message) = &module.body else {
+            panic!("theme mutation should fail while loading the module");
+        };
+        let env = module_environment(&lua).unwrap();
+        let text = lua
+            .load("return bootty.theme.text")
+            .set_environment(env)
+            .eval::<String>()
+            .unwrap();
+
+        assert!(message.starts_with("mutator:"));
+        assert_eq!(text, "#cdd6f4");
+    }
+
+    #[test]
+    fn table_module_interval_is_read() {
+        let theme: [(String, String); 0] = [];
+        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let value = lua
+            .load("return { interval = 5, render = function() return 'x' end }")
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        assert_eq!(module.interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn windows_host_fn_exposes_mux_view() {
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            windows: vec![WindowView {
+                id: "@1".to_owned(),
+                index: 2,
+                name: "edit".to_owned(),
+                active: true,
+            }],
+            session: Some("work".to_owned()),
+            session_color: Some("#89b4fa".to_owned()),
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let value = lua
+            .load(
+                "return function() local w = bootty.windows()[1] \
+                 return { text = w.index .. ':' .. w.name, action = 'activate-window:' .. w.id } end",
+            )
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+        assert_eq!(items[0].text, "2:edit");
+        assert_eq!(items[0].action.as_deref(), Some("activate-window:@1"));
+    }
+
+    #[test]
+    fn refresh_metrics_probes_memory() {
+        // Catches a wiring regression (no memory refresh, or used/total swapped);
+        // total memory is non-zero on any real OS the tests run on.
+        let metrics: Arc<RwLock<Metrics>> = Arc::default();
+        let mut system = System::new();
+        let battery = BatteryManager::new().ok();
+        refresh_metrics(&mut system, battery.as_ref(), &metrics);
+        let m = *metrics.read().unwrap();
+        assert!(m.mem_total_bytes > 0, "total memory should be probed");
+        assert!(
+            (0.0..=100.0).contains(&m.mem_used_pct),
+            "memory percent out of range: {}",
+            m.mem_used_pct
+        );
+        // A battery may be absent on CI; when present, charge is a real percentage.
+        if let Some(pct) = m.battery_percent {
+            assert!(
+                (0.0..=100.0).contains(&pct),
+                "battery percent out of range: {pct}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_color_host_fn_exposes_mux_color() {
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            session_color: Some("#a6e3a1".to_owned()),
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let value = lua
+            .load("return function() return { text = 's', fg = bootty.session_color() } end")
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+        assert_eq!(items[0].fg, Some(Color32::from_rgb(0xa6, 0xe3, 0xa1)));
+    }
+
+    #[test]
+    fn awake_host_fn_exposes_keep_awake_state() {
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            keep_awake: true,
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let value = lua
+            .load("return function() return { text = tostring(bootty.awake()) } end")
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+        assert_eq!(items[0].text, "true");
+    }
+
+    #[test]
+    fn metrics_host_fn_exposes_battery_remaining_seconds() {
+        let metrics: Arc<RwLock<Metrics>> = Arc::new(RwLock::new(Metrics {
+            battery_percent: Some(78.0),
+            on_ac: false,
+            battery_time_to_empty_secs: Some(7_080.0),
+            battery_time_to_full_secs: None,
+            ..Metrics::default()
+        }));
+        let lua = setup_lua(&[], Arc::default(), metrics).unwrap();
+        let value = lua
+            .load(
+                "return function() local m = bootty.metrics() \
+                 return { text = m.battery .. ':' .. m.battery_time_to_empty } end",
+            )
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+        assert_eq!(items[0].text, "78:7080");
+    }
+
+    #[test]
+    fn available_module_names_include_user_luau_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("custom.luau"),
+            "return function() return 'ok' end",
+        )
+        .expect("write luau");
+        std::fs::write(dir.path().join("ignored.txt"), "ignored").expect("write ignored file");
+        std::fs::create_dir(dir.path().join("folder.luau")).expect("create ignored directory");
+
+        let names = available_module_names(dir.path());
+
+        assert!(names.contains(&"custom".to_owned()));
+        assert!(!names.contains(&"ignored".to_owned()));
+        assert!(!names.contains(&"folder".to_owned()));
+        assert!(names.contains(&"clock".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_user_module_file_surfaces_load_error() {
+        use std::os::unix::fs::PermissionsExt;
+        struct PermissionGuard {
+            path: std::path::PathBuf,
+            mode: u32,
+        }
+
+        impl Drop for PermissionGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(
+                    &self.path,
+                    std::fs::Permissions::from_mode(self.mode),
+                );
+            }
+        }
+
+        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("unreadable.luau");
+        std::fs::write(&path, "return function() return 'ok' end").expect("write module");
+        let original_mode = std::fs::metadata(&path)
+            .expect("stat module")
+            .permissions()
+            .mode();
+        let _guard = PermissionGuard {
+            path: path.clone(),
+            mode: original_mode,
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("deny module reads");
+        if std::fs::read_to_string(&path).is_ok() {
+            eprintln!("skipping unreadable-module assertion: chmod 000 file remains readable");
+            return;
+        }
+
+        let modules = load_modules(&lua, dir.path());
+        let module = modules
+            .iter()
+            .find(|module| module.name == "unreadable")
+            .expect("unreadable module should be loaded as an error");
+        let items = run_module(&module.body);
+
+        assert_eq!(items[0].fg, Some(ERROR_COLOR));
+        assert!(items[0].text.starts_with("unreadable:"));
+    }
+
+    #[test]
+    fn reload_prunes_items_for_deleted_modules() {
+        let items = RwLock::new(HashMap::from([
+            (
+                "clock".to_owned(),
+                vec![ModuleItem {
+                    text: "time".to_owned(),
+                    ..ModuleItem::default()
+                }],
+            ),
+            (
+                "deleted".to_owned(),
+                vec![ModuleItem {
+                    text: "stale".to_owned(),
+                    ..ModuleItem::default()
+                }],
+            ),
+        ]));
+        let module_names = BTreeSet::from(["clock".to_owned()]);
+
+        prune_removed_items(&items, &module_names);
+        let map = items.read().unwrap();
+        assert!(map.contains_key("clock"));
+        assert!(!map.contains_key("deleted"));
+    }
+
+    #[test]
+    fn short_hex_color_expands_nibbles() {
+        assert_eq!(
+            parse_hex_color("#fff"),
+            Some(Color32::from_rgb(255, 255, 255))
+        );
+        assert_eq!(parse_hex_color("#0a0"), Some(Color32::from_rgb(0, 170, 0)));
+        assert_eq!(parse_hex_color("nope"), None);
+    }
+}

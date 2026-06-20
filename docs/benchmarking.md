@@ -49,10 +49,8 @@ of the default gate unless validation policy changes explicitly.
 | Render throughput/frame pacing | `cargo test -p bootty-app --bench render_pacing --no-run` |
 | Input latency/responsiveness | `cargo test -p bootty-app --bench input_latency --no-run` |
 | Idle overhead/wakeups/memory/power | `cargo test -p bootty-app --bench idle_overhead --no-run` |
-| Power/thermal/perf-per-watt | `cargo test -p bootty-app --bench power_thermal --no-run` |
+| Power-sensitive render workload models | `cargo test -p bootty-app --bench power_thermal --no-run` |
 | Keyboard/mouse/paste/clipboard/IME protocols | `cargo test -p bootty-app --bench input_protocols --no-run` |
-| Differential cell-state gates | `cargo test -p bootty-app --bench cell_diff --no-run` |
-| VT/xterm correctness gates | `cargo test -p bootty-app --bench vt_correctness --no-run` |
 | Hostile input/recovery | `cargo test -p bootty-app --bench hostile_input --no-run` |
 | Panes/tabs/multi-window | `cargo test -p bootty-app --bench panes_multiwindow --no-run` |
 | Multiplexer performance/passthrough | `cargo test -p bootty-app --bench multiplexer --no-run` |
@@ -89,12 +87,10 @@ status before making competitive claims.
 | `scrollback` | append/memory snapshots, bounded/native scrollback budgets, search/copy, clear/reclaim, and reflow |
 | `parser_control` | direct parser/state update and full visible frame modes for ASCII, split UTF-8/CSI, SGR/truecolor, cursor motion, scroll margins, insert/delete, erase, OSC/DCS/query storms, and synchronized updates |
 | `render_pacing` | CPU-side pacing model for cursor-only, single-cell, statusline, row/column, random cells, full repaint, scroll, alternate screen, and target Hz budgets |
-| `input_latency` | internal encode-to-visible-frame contribution for shell/raw/readline/editor/tmux/SSH echo, repeat bursts, redraw/flood contention, plus latency CSV import hooks |
-| `idle_overhead` | idle tick/repaint models for prompts, tabs, panes, ligatures, IME preedit, shell integration, notifications, and imported host counters |
-| `power_thermal` | modeled idle/typing/editor/flood/animation scenarios, imported CPU/GPU power, wakeups, temperature, throttling, and performance-per-watt evidence |
+| `input_latency` | internal encode-to-visible-frame contribution for shell/raw/readline/editor/tmux/SSH echo, repeat bursts, and redraw/flood contention |
+| `idle_overhead` | idle tick/repaint models for prompts, tabs, panes, ligatures, IME preedit, shell integration, and notifications |
+| `power_thermal` | modeled idle/typing/editor/flood/animation render workloads for power-sensitive profiling; pair with external telemetry for real power or thermal claims |
 | `input_protocols` | keyboard protocols, modifiers, function/repeat/dead-key/AltGr cases, mouse tracking, paste, OSC 52, and IME text handling |
-| `vt_correctness` | VT/SGR/cursor/scroll/alternate screen/bracketed paste/focus/mouse/query/OSC/synchronized-update gates |
-| `cell_diff` | headless differential grid checks for text, colors, attributes, hyperlinks, cursor state, visible mode state, mismatch counts, and correctness-result hashing |
 | `hostile_input` | invalid bytes, malformed controls, huge OSC/DCS payloads, reset storms, long lines, fuzz streams, image quota abuse, and recovery ladders |
 | `panes_multiwindow` | native/tmux/zellij-equivalent tabs and panes, active/inactive panes, all-panes-tailing updates, tab switching, create/close models, and aggregate multi-window rendering |
 | `multiplexer` | terminal-alone, native mux, tmux, zellij, screen, tmux-over-SSH, nested SSH/tmux, passthrough/fallback, feature classification, latency delta, and render overhead |

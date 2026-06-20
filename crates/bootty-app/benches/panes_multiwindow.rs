@@ -513,14 +513,18 @@ fn bench_window_tabs_chrome(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        black_box(chrome::show_window_tabs(
-                            ui,
-                            palette,
-                            WindowTabsModel {
-                                windows: black_box(&windows),
-                                selected_window: black_box(selected),
-                            },
-                        ));
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            black_box(chrome::show_window_tabs(
+                                ui,
+                                palette,
+                                WindowTabsModel {
+                                    windows: black_box(&windows),
+                                    selected_window: black_box(selected),
+                                    background: palette.base,
+                                    left_padding: chrome::STATUS_EDGE_PAD,
+                                },
+                            ));
+                        });
                     },
                 );
                 black_box(output.shapes.len())
@@ -544,14 +548,18 @@ fn bench_window_tabs_chrome(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        black_box(chrome::show_window_tabs(
-                            ui,
-                            palette,
-                            WindowTabsModel {
-                                windows: black_box(&windows),
-                                selected_window: black_box(Some(selected)),
-                            },
-                        ));
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            black_box(chrome::show_window_tabs(
+                                ui,
+                                palette,
+                                WindowTabsModel {
+                                    windows: black_box(&windows),
+                                    selected_window: black_box(Some(selected)),
+                                    background: palette.base,
+                                    left_padding: chrome::STATUS_EDGE_PAD,
+                                },
+                            ));
+                        });
                     },
                 );
                 black_box(output.shapes.len())
@@ -560,7 +568,7 @@ fn bench_window_tabs_chrome(c: &mut Criterion) {
     }
 }
 
-fn bench_tab_keybind_and_create_close(c: &mut Criterion) {
+fn bench_tab_keybind_lookup(c: &mut Criterion) {
     let keybinds = BoottyConfig::default()
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Native);
@@ -581,27 +589,6 @@ fn bench_tab_keybind_and_create_close(c: &mut Criterion) {
                 }
             }
             black_box(hits)
-        })
-    });
-
-    c.bench_function("window_model_create_close_32_tabs", |b| {
-        let mut windows = mux_windows(32, 0);
-        let mut tick = 0_usize;
-        b.iter(|| {
-            tick = tick.wrapping_add(1);
-            windows.push(MuxWindow {
-                id: format!("@new-{tick}"),
-                index: windows.len() as u32,
-                name: format!("scratch-{tick}"),
-                active: true,
-                anchor: window_anchor("$tabs", tick),
-            });
-            if windows.len() > 32 {
-                windows.remove(0);
-            }
-            let active = tick % windows.len();
-            rotate_active_window(&mut windows, active);
-            black_box(windows.len())
         })
     });
 }
@@ -712,30 +699,6 @@ fn bench_mux_equivalent_tab_modes(c: &mut Criterion) {
                 },
             );
         }
-
-        c.bench_function(
-            &format!("mux_equivalent_{}_create_close_32_tabs_model", mode.label()),
-            |b| {
-                let mut windows = mux_windows(32, 0);
-                let mut tick = 0_usize;
-                b.iter(|| {
-                    tick = tick.wrapping_add(1);
-                    windows.push(MuxWindow {
-                        id: format!("@{}-new-{tick}", mode.label()),
-                        index: windows.len() as u32,
-                        name: format!("{}-scratch-{tick}", mode.label()),
-                        active: true,
-                        anchor: window_anchor(mode.label(), tick),
-                    });
-                    if windows.len() > 32 {
-                        windows.remove(0);
-                    }
-                    let active = tick % windows.len();
-                    rotate_active_window(&mut windows, active);
-                    black_box((windows.len(), windows[active].active))
-                })
-            },
-        );
     }
 }
 
@@ -746,7 +709,7 @@ criterion_group!(
         bench_pane_grid_pipeline,
         bench_pane_active_and_inactive_paths,
         bench_window_tabs_chrome,
-        bench_tab_keybind_and_create_close,
+        bench_tab_keybind_lookup,
         bench_multi_window_frame_paths,
         bench_mux_equivalent_pane_modes,
         bench_mux_equivalent_tab_modes

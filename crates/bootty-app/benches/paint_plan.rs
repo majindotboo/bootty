@@ -249,8 +249,8 @@ fn input_burst_events() -> Vec<egui::Event> {
         events.push(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
             delta: egui::vec2(0.0, 11.0 + (index % 3) as f32),
-            phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::default(),
+            phase: egui::TouchPhase::Move,
         });
     }
     events
@@ -552,28 +552,30 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        black_box(chrome::show_sidebar(
-                            ui,
-                            bootty_ui::ThemePalette::default(),
-                            900.0,
-                            SidebarModel {
-                                sessions: black_box(&sessions),
-                                selected_session: black_box(Some(selected)),
-                                metadata: black_box(&metadata),
-                                title_visible: true,
-                                reserve_titlebar_buttons: true,
-                                title_icon: None,
-                                top_inset: 0.0,
-                                border_visible: true,
-                                separator_visible: true,
-                                focused: false,
-                                hovered_session: None,
-                                unfocused_dim: 0.0,
-                                hover_override: None,
-                                current_override: None,
-                                border_override: None,
-                            },
-                        ));
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            black_box(chrome::show_sidebar(
+                                ui,
+                                bootty_ui::ThemePalette::default(),
+                                900.0,
+                                SidebarModel {
+                                    sessions: black_box(&sessions),
+                                    selected_session: black_box(Some(selected)),
+                                    metadata: black_box(&metadata),
+                                    title_visible: true,
+                                    reserve_titlebar_buttons: true,
+                                    title_icon: None,
+                                    top_inset: 0.0,
+                                    border_visible: true,
+                                    separator_visible: true,
+                                    focused: false,
+                                    hovered_session: None,
+                                    unfocused_dim: 0.0,
+                                    hover_override: None,
+                                    current_override: None,
+                                    border_override: None,
+                                },
+                            ));
+                        });
                     },
                 );
                 black_box(output.shapes.len())
@@ -607,28 +609,30 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        black_box(chrome::show_sidebar(
-                            ui,
-                            bootty_ui::ThemePalette::default(),
-                            900.0,
-                            SidebarModel {
-                                sessions: black_box(&sessions),
-                                selected_session: black_box(Some(selected)),
-                                metadata: black_box(&metadata),
-                                title_visible: true,
-                                reserve_titlebar_buttons: true,
-                                title_icon: None,
-                                top_inset: 0.0,
-                                border_visible: true,
-                                separator_visible: true,
-                                focused: false,
-                                hovered_session: None,
-                                unfocused_dim: 0.0,
-                                hover_override: None,
-                                current_override: None,
-                                border_override: None,
-                            },
-                        ));
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            black_box(chrome::show_sidebar(
+                                ui,
+                                bootty_ui::ThemePalette::default(),
+                                900.0,
+                                SidebarModel {
+                                    sessions: black_box(&sessions),
+                                    selected_session: black_box(Some(selected)),
+                                    metadata: black_box(&metadata),
+                                    title_visible: true,
+                                    reserve_titlebar_buttons: true,
+                                    title_icon: None,
+                                    top_inset: 0.0,
+                                    border_visible: true,
+                                    separator_visible: true,
+                                    focused: false,
+                                    hovered_session: None,
+                                    unfocused_dim: 0.0,
+                                    hover_override: None,
+                                    current_override: None,
+                                    border_override: None,
+                                },
+                            ));
+                        });
                     },
                 );
                 black_box(output.shapes.len())
@@ -695,89 +699,6 @@ fn bench_animated_agent_pipeline(c: &mut Criterion) {
     });
 }
 
-fn bench_animated_agent_pipeline_stages(c: &mut Criterion) {
-    let surface = surface_for(160, 60);
-
-    {
-        let mut engine = terminal_engine(160, 60);
-        let mut tick = 0_u32;
-        c.bench_function("animated_agent_update_160x60", |b| {
-            b.iter(|| {
-                tick = tick.wrapping_add(1);
-                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
-                black_box(engine.grid_size())
-            })
-        });
-    }
-
-    {
-        let mut engine = terminal_engine(160, 60);
-        let mut tick = 0_u32;
-        c.bench_function("animated_agent_update_extract_160x60", |b| {
-            b.iter(|| {
-                tick = tick.wrapping_add(1);
-                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
-                black_box(engine.extract_frame().expect("frame").stats.dirty_rows)
-            })
-        });
-    }
-
-    {
-        let mut engine = terminal_engine(160, 60);
-        let mut planner = PaintPlanner::default();
-        let mut tick = 0_u32;
-        c.bench_function("animated_agent_update_extract_plan_160x60", |b| {
-            b.iter(|| {
-                tick = tick.wrapping_add(1);
-                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
-                let frame = engine.extract_frame().expect("frame");
-                let plan = planner.plan(surface, frame, 16.0);
-                black_box(plan.text_runs.len() + plan.backgrounds.len() + plan.decorations.len())
-            })
-        });
-    }
-
-    {
-        let mut engine = terminal_engine(160, 60);
-        let mut planner = PaintPlanner::default();
-        let mut tick = 0_u32;
-        c.bench_function("animated_agent_update_extract_plan_contract_160x60", |b| {
-            b.iter(|| {
-                tick = tick.wrapping_add(1);
-                write_agent_dashboard_frame(&mut engine, tick, 160, 60);
-                let frame = engine.extract_frame().expect("frame");
-                let plan = planner.plan(surface, frame, 16.0);
-                let text_contract = TerminalTextContract::for_terminal_paint_plan(
-                    plan,
-                    &TerminalTextConfig::default(),
-                );
-                black_box(text_contract.config.font_size)
-            })
-        });
-    }
-
-    {
-        let mut engine = terminal_engine(160, 60);
-        let mut planner = PaintPlanner::default();
-        let plan = {
-            write_agent_dashboard_frame(&mut engine, 1, 160, 60);
-            let frame = engine.extract_frame().expect("frame");
-            planner.plan(surface, frame, 16.0).clone()
-        };
-        let text_contract =
-            TerminalTextContract::for_terminal_paint_plan(&plan, &TerminalTextConfig::default());
-        c.bench_function("animated_agent_render_frame_from_plan_160x60", |b| {
-            b.iter(|| {
-                black_box(
-                    TerminalRenderFrame::from_plan(black_box(&plan), black_box(&text_contract))
-                        .commands
-                        .len(),
-                )
-            })
-        });
-    }
-}
-
 criterion_group!(
 name = benches;
 // These benches cover CPU planning, terminal extraction, input routing,
@@ -797,6 +718,5 @@ targets =
     bench_sidebar_ui_usage_footer,
     bench_session_picker_ui,
     bench_animated_agent_pipeline,
-    bench_animated_agent_pipeline_stages,
 );
 criterion_main!(benches);

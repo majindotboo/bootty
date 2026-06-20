@@ -301,55 +301,6 @@ fn command_to_first_frame(command: &str) -> usize {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct StartupResourceSnapshot {
-    open_fds: Option<usize>,
-    thread_count: Option<usize>,
-    peak_rss_kb: Option<u64>,
-}
-
-fn collect_self_resources() -> StartupResourceSnapshot {
-    StartupResourceSnapshot {
-        open_fds: count_open_fds(),
-        thread_count: count_threads(),
-        peak_rss_kb: peak_rss_kb(),
-    }
-}
-
-#[cfg(unix)]
-fn count_open_fds() -> Option<usize> {
-    fs::read_dir("/dev/fd").ok().map(|entries| entries.count())
-}
-
-#[cfg(not(unix))]
-fn count_open_fds() -> Option<usize> {
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn count_threads() -> Option<usize> {
-    fs::read_dir("/proc/self/task")
-        .ok()
-        .map(|entries| entries.count())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn count_threads() -> Option<usize> {
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn peak_rss_kb() -> Option<u64> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
-    line.split_whitespace().nth(1)?.parse().ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn peak_rss_kb() -> Option<u64> {
-    None
-}
-
 fn bench_startup_configs(c: &mut Criterion) {
     let empty = empty_config_fixture();
     c.bench_function("startup_empty_config_to_native_options", |b| {
@@ -410,22 +361,9 @@ fn bench_first_frame(c: &mut Criterion) {
     });
 }
 
-fn bench_resource_snapshot(c: &mut Criterion) {
-    c.bench_function("startup_resource_snapshot_self", |b| {
-        b.iter(|| {
-            let snapshot = collect_self_resources();
-            black_box((
-                snapshot.open_fds,
-                snapshot.thread_count,
-                snapshot.peak_rss_kb,
-            ))
-        })
-    });
-}
-
 criterion_group!(
     name = benches;
     config = Criterion::default().noise_threshold(0.20);
-    targets = bench_startup_configs, bench_window_models, bench_first_frame, bench_resource_snapshot,
+    targets = bench_startup_configs, bench_window_models, bench_first_frame,
 );
 criterion_main!(benches);

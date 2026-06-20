@@ -910,20 +910,20 @@ mod tests {
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::new(0.0, 1.0),
-                    phase: egui::TouchPhase::Move,
                     modifiers: modifiers(false, true, false),
+                    phase: egui::TouchPhase::Move,
                 },
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::new(0.0, -1.0),
-                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
                 },
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Line,
                     delta: Vec2::ZERO,
-                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
                 },
             ],
             modifiers: egui::Modifiers::default(),
@@ -984,8 +984,8 @@ mod tests {
             events: vec![egui::Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Line,
                 delta: Vec2::new(0.0, 2.0),
-                phase: egui::TouchPhase::Move,
                 modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
             }],
             modifiers: egui::Modifiers::default(),
             modifier_sides: ModifierSideState::default(),
@@ -1009,8 +1009,8 @@ mod tests {
                 events: vec![egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: Vec2::new(0.0, 11.0),
-                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
                 }],
                 modifiers: egui::Modifiers::default(),
                 modifier_sides: ModifierSideState::default(),
@@ -1028,8 +1028,8 @@ mod tests {
                 events: vec![egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: Vec2::new(0.0, 11.0),
-                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
                 }],
                 modifiers: egui::Modifiers::default(),
                 modifier_sides: ModifierSideState::default(),
@@ -1124,8 +1124,8 @@ mod tests {
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: Vec2::new(0.0, 1.0),
-                    phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::default(),
+                    phase: egui::TouchPhase::Move,
                 },
             ],
             modifiers: egui::Modifiers::default(),

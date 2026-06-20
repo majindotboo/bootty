@@ -1,20 +1,19 @@
 use std::{borrow::Cow, collections::HashMap, fmt::Write as _, time::Duration};
 
 use bootty_ui::ThemePalette;
-use eframe::egui::{self, Pos2, Rect, RichText, Stroke, TextureHandle};
+use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind, TextureHandle};
 
 use crate::{
     assets,
-    config::ChromeConfig,
-    diagnostics::{StatusMetrics, us_to_ms},
+    config::{ChromeConfig, SegmentAlign},
     mux::{
-        config::MuxBackendKind,
         sidebar_meta::{DiffStat, SidebarMetadata},
         snapshot::{MuxSession, MuxWindow},
     },
+    status_module::{ModuleCoord, ModulePrimitive},
     strings::{push_truncated_label, truncate_label},
     ui::{
-        icons::{Icon, paint_icon},
+        icons::{Icon, has_slug, paint_icon, paint_icon_slug},
         sidebar::{
             SidebarDisplay, SidebarItem, SidebarItemKind, SidebarTree, build_visible_sidebar_items,
         },
@@ -23,10 +22,39 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct StatusBarModel<'a> {
-    pub backend: MuxBackendKind,
-    pub selected_session_name: Option<&'a str>,
-    pub metrics: StatusMetrics,
-    pub last_error: Option<&'a str>,
+    /// Ordered, resolved segments. Every segment is a Luau module's items; the app fills these in.
+    pub segments: &'a [ResolvedSegment],
+    /// Bar fill; set to the sidebar fullscreen background when the bar sits in the notch band.
+    pub background: egui::Color32,
+    /// Left edge inset before left-aligned segments; zero lets tab strips sit flush to adjacent chrome.
+    pub left_padding: f32,
+}
+
+/// A status segment resolved for this frame: a module's items plus where the segment is aligned.
+#[derive(Clone, Debug, Default)]
+pub struct ResolvedSegment {
+    pub align: SegmentAlign,
+    pub items: Vec<ResolvedItem>,
+}
+
+/// One drawable element from a module. `action` (e.g. `activate-window:<id>`) is dispatched on click.
+#[derive(Clone, Debug, Default)]
+pub struct ResolvedItem {
+    pub text: String,
+    pub icon: Option<String>,
+    pub fg: Option<egui::Color32>,
+    pub bg: Option<egui::Color32>,
+    pub stroke: Option<egui::Color32>,
+    /// 0.0-1.0 fill drawn as a battery meter before the text.
+    pub gauge: Option<f32>,
+    pub primitives: Vec<ModulePrimitive>,
+    pub pad_left: f32,
+    pub pad_right: f32,
+    /// Whether this item may visually connect its background to adjacent items. Defaults to true.
+    pub join: Option<bool>,
+    /// Whether to keep the normal inter-item gap before this item. Defaults to true.
+    pub gap: Option<bool>,
+    pub action: Option<String>,
 }
 
 #[derive(Clone)]
@@ -61,56 +89,441 @@ pub enum SidebarEvent {
 pub struct WindowTabsModel<'a> {
     pub windows: &'a [MuxWindow],
     pub selected_window: Option<&'a str>,
+    /// Bar fill; set to the sidebar fullscreen background when the bar sits in the notch band.
+    pub background: egui::Color32,
+    /// Left edge inset before the first tab.
+    pub left_padding: f32,
 }
 
-pub fn show_status_bar(ui: &mut egui::Ui, palette: ThemePalette, model: StatusBarModel<'_>) {
-    let height = 30.0;
+pub const STATUS_EDGE_PAD: f32 = 12.0;
+const STATUS_ITEM_GAP: f32 = 4.0;
+const STATUS_ITEM_PAD: f32 = 8.0;
+const STATUS_ICON_GAP: f32 = 6.0;
+/// Square edge of a status-bar icon glyph, matched to the 12pt text.
+const STATUS_ICON_SIZE: f32 = 14.0;
+/// Battery meter dimensions for a `gauge` item (body width excludes the nub).
+const STATUS_GAUGE_WIDTH: f32 = 22.0;
+const STATUS_GAUGE_HEIGHT: f32 = 11.0;
+/// Corner radius (logical px) for status-bar pills and the strip's outer ends.
+const STATUS_PILL_RADIUS: u8 = 6;
+
+/// Native replacement for the tmux status line. Flattens each alignment group's module items and
+/// lays them out: left from the left edge, right anchored to the right edge, center centered. Items
+/// with a `bg` render as pills; items with an `action` are clickable. Returns a clicked action.
+pub fn show_status_bar(
+    ui: &mut egui::Ui,
+    palette: ThemePalette,
+    model: StatusBarModel<'_>,
+) -> Option<String> {
+    let height = ui.available_height();
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click_and_drag(),
     );
-    start_window_drag_on_primary_press(&response);
+    ui.painter_at(rect).rect_filled(rect, 0.0, model.background);
 
-    ui.painter().rect_filled(rect, 0.0, palette.base);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Bootty").color(palette.text).strong());
-            ui.separator();
-            ui.label(
-                RichText::new(format!("backend: {}", backend_label(model.backend)))
-                    .color(palette.subtext),
-            );
-            ui.separator();
-            let target = model.selected_session_name.unwrap_or("no mux session");
-            ui.label(RichText::new(format!("active: {target}")).color(palette.subtext));
-            ui.separator();
-            let metrics = model.metrics;
-            ui.label(
-                RichText::new(format!("{}×{}", metrics.cols, metrics.rows)).color(palette.muted),
-            );
-            ui.separator();
-            ui.label(
-                RichText::new(format!(
-                    "drain {:.2}ms/{}b · update {:.2}ms · extract {:.2}ms · paint {:.2}ms · {} runs",
-                    us_to_ms(metrics.drain.elapsed_us),
-                    metrics.drain.bytes,
-                    us_to_ms(metrics.renderer.render_state_update_us),
-                    us_to_ms(metrics.renderer.frame_extraction_us),
-                    us_to_ms(metrics.renderer.paint_us),
-                    metrics.renderer.text_runs
-                ))
-                .color(palette.muted),
-            );
-            if let Some(error) = model.last_error {
-                ui.separator();
-                ui.colored_label(palette.warning, truncate_label(error, 80));
-            }
-        },
+    let font = egui::FontId::monospace(12.0);
+    let segments_for = |align: SegmentAlign| {
+        model
+            .segments
+            .iter()
+            .filter(move |segment| segment.align == align && !segment.items.is_empty())
+            .collect::<Vec<_>>()
+    };
+    let right = segments_for(SegmentAlign::Right);
+    let center = segments_for(SegmentAlign::Center);
+    let left = segments_for(SegmentAlign::Left);
+
+    let right_start = rect.max.x - STATUS_EDGE_PAD - segments_width(ui, &right, &font);
+    let mut clicked = None;
+    let primary_press_pos = ui.input(|input| {
+        input
+            .pointer
+            .button_pressed(egui::PointerButton::Primary)
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+    });
+    let mut drag_blocked = false;
+
+    draw_segments(
+        ui,
+        rect,
+        right_start,
+        rect.max.x - STATUS_EDGE_PAD,
+        &right,
+        palette,
+        &font,
+        &mut clicked,
+        primary_press_pos,
+        &mut drag_blocked,
     );
+    let left_end = draw_segments(
+        ui,
+        rect,
+        rect.min.x + model.left_padding,
+        right_start - STATUS_ITEM_GAP,
+        &left,
+        palette,
+        &font,
+        &mut clicked,
+        primary_press_pos,
+        &mut drag_blocked,
+    );
+    if !center.is_empty() {
+        let center_width = segments_width(ui, &center, &font);
+        let center_start = rect.center().x - center_width / 2.0;
+        let center_bound = right_start - STATUS_ITEM_GAP;
+        if center_start >= left_end + STATUS_ITEM_GAP && center_start + center_width <= center_bound
+        {
+            draw_segments(
+                ui,
+                rect,
+                center_start,
+                center_bound,
+                &center,
+                palette,
+                &font,
+                &mut clicked,
+                primary_press_pos,
+                &mut drag_blocked,
+            );
+        }
+    }
+    if !drag_blocked {
+        start_window_drag_on_primary_press(&response);
+    }
+    clicked
+}
+
+fn segment_width(ui: &egui::Ui, segment: &ResolvedSegment, font: &egui::FontId) -> f32 {
+    let items = segment.items.iter().collect::<Vec<_>>();
+    items_width(ui, &items, font)
+}
+
+fn segments_width(ui: &egui::Ui, segments: &[&ResolvedSegment], font: &egui::FontId) -> f32 {
+    let mut total = 0.0;
+    for segment in segments.iter().filter(|segment| !segment.items.is_empty()) {
+        if total > 0.0 {
+            total += STATUS_ITEM_GAP;
+        }
+        total += segment_width(ui, segment, font);
+    }
+    total
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_segments(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    start_x: f32,
+    bound: f32,
+    segments: &[&ResolvedSegment],
+    palette: ThemePalette,
+    font: &egui::FontId,
+    clicked: &mut Option<String>,
+    primary_press_pos: Option<Pos2>,
+    drag_blocked: &mut bool,
+) -> f32 {
+    let mut x = start_x;
+    let mut drawn = 0;
+    for segment in segments {
+        let width = segment_width(ui, segment, font);
+        if width <= 0.0 {
+            continue;
+        }
+        if drawn > 0 {
+            x += STATUS_ITEM_GAP;
+        }
+        if x + width > bound {
+            break;
+        }
+        let items = segment.items.iter().collect::<Vec<_>>();
+        draw_items(
+            ui,
+            rect,
+            x,
+            x + width,
+            &items,
+            palette,
+            font,
+            clicked,
+            primary_press_pos,
+            drag_blocked,
+        );
+        drawn += 1;
+        x += width;
+    }
+    x
+}
+
+fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+        .size()
+        .x
+}
+
+/// Whether the item draws an iconflow glyph for the requested slug.
+fn item_icon(item: &ResolvedItem) -> Option<&str> {
+    item.icon.as_deref().filter(|slug| has_slug(slug))
+}
+
+fn item_width(ui: &egui::Ui, item: &ResolvedItem, font: &egui::FontId) -> f32 {
+    let mut inner = text_width(ui, &item.text, font);
+    let lead = if item.gauge.is_some() {
+        Some(STATUS_GAUGE_WIDTH)
+    } else if item_icon(item).is_some() {
+        Some(STATUS_ICON_SIZE)
+    } else {
+        None
+    };
+    if let Some(lead_width) = lead {
+        inner += lead_width;
+        if !item.text.is_empty() {
+            inner += STATUS_ICON_GAP;
+        }
+    }
+    inner + STATUS_ITEM_PAD * 2.0 + item.pad_left + item.pad_right
+}
+
+/// Adjacent items that both carry a background render as one connected strip (no
+/// gap), like the tmux/mux segmented bar, unless a module opts either item out.
+fn connected(prev: Option<&ResolvedItem>, cur: &ResolvedItem) -> bool {
+    prev.is_some_and(|prev| {
+        item_join(prev) && item_join(cur) && prev.bg.is_some() && prev.stroke.is_none()
+    }) && cur.bg.is_some()
+        && cur.stroke.is_none()
+}
+
+fn item_join(item: &ResolvedItem) -> bool {
+    item.join.unwrap_or(true)
+}
+
+fn item_gap_before(item: &ResolvedItem) -> bool {
+    item.gap.unwrap_or(true)
+}
+
+fn items_width(ui: &egui::Ui, items: &[&ResolvedItem], font: &egui::FontId) -> f32 {
+    let mut total = 0.0;
+    let mut prev: Option<&ResolvedItem> = None;
+    for item in items {
+        if prev.is_some() && item_gap_before(item) && !connected(prev, item) {
+            total += STATUS_ITEM_GAP;
+        }
+        total += item_width(ui, item, font);
+        prev = Some(item);
+    }
+    total
+}
+
+/// A battery meter (rounded body + terminal nub) filled to `ratio`, tinted `color`.
+fn paint_battery_gauge(
+    painter: &egui::Painter,
+    left: f32,
+    center_y: f32,
+    ratio: f32,
+    color: egui::Color32,
+) {
+    let body_w = STATUS_GAUGE_WIDTH - 3.0;
+    let body = Rect::from_min_size(
+        Pos2::new(left, center_y - STATUS_GAUGE_HEIGHT / 2.0),
+        egui::vec2(body_w, STATUS_GAUGE_HEIGHT),
+    );
+    painter.rect_stroke(body, 2.0, Stroke::new(1.0, color), StrokeKind::Inside);
+    let nub = Rect::from_min_size(
+        Pos2::new(body.max.x + 1.0, center_y - STATUS_GAUGE_HEIGHT * 0.22),
+        egui::vec2(2.0, STATUS_GAUGE_HEIGHT * 0.44),
+    );
+    painter.rect_filled(nub, 0.0, color);
+    let inset = 2.0;
+    let fill_w = (body.width() - inset * 2.0) * ratio.clamp(0.0, 1.0);
+    if fill_w > 0.5 {
+        let fill = Rect::from_min_size(
+            Pos2::new(body.min.x + inset, body.min.y + inset),
+            egui::vec2(fill_w, body.height() - inset * 2.0),
+        );
+        painter.rect_filled(fill, 1.0, color);
+    }
+}
+
+fn coord_x(rect: Rect, coord: ModuleCoord) -> f32 {
+    rect.min.x + rect.width() * coord.frac + coord.px
+}
+
+fn coord_y(rect: Rect, coord: ModuleCoord) -> f32 {
+    rect.min.y + rect.height() * coord.frac + coord.px
+}
+
+fn coord_w(rect: Rect, coord: ModuleCoord) -> f32 {
+    rect.width() * coord.frac + coord.px
+}
+
+fn coord_h(rect: Rect, coord: ModuleCoord) -> f32 {
+    rect.height() * coord.frac + coord.px
+}
+
+fn paint_item_primitives(painter: &egui::Painter, item_rect: Rect, item: &ResolvedItem) {
+    for primitive in &item.primitives {
+        match primitive {
+            ModulePrimitive::Rect {
+                fill,
+                stroke,
+                x,
+                y,
+                w,
+                h,
+                radius,
+            } => {
+                let rect = Rect::from_min_size(
+                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
+                    egui::vec2(coord_w(item_rect, *w), coord_h(item_rect, *h)),
+                );
+                if let Some(fill) = fill {
+                    painter.rect_filled(rect, *radius, *fill);
+                }
+                if let Some(stroke) = stroke {
+                    painter.rect_stroke(
+                        rect,
+                        *radius,
+                        Stroke::new(1.0, *stroke),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            ModulePrimitive::Polygon {
+                fill,
+                stroke,
+                points,
+            } => {
+                let points = points
+                    .iter()
+                    .map(|(x, y)| Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)))
+                    .collect::<Vec<_>>();
+                if points.len() >= 3 {
+                    if let Some(fill) = fill {
+                        painter.add(egui::Shape::convex_polygon(
+                            points.clone(),
+                            *fill,
+                            Stroke::new(0.0, egui::Color32::TRANSPARENT),
+                        ));
+                    }
+                    if let Some(stroke) = stroke {
+                        painter.add(egui::Shape::closed_line(points, Stroke::new(1.0, *stroke)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn paint_status_item_background(
+    painter: &egui::Painter,
+    item_rect: Rect,
+    bg: Option<egui::Color32>,
+    stroke: Option<egui::Color32>,
+    corners: CornerRadius,
+) {
+    if let Some(bg) = bg {
+        painter.rect_filled(item_rect, corners, bg);
+    }
+    if let Some(stroke) = stroke {
+        painter.rect_stroke(
+            item_rect,
+            corners,
+            Stroke::new(1.0, stroke),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_items(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    start_x: f32,
+    bound: f32,
+    items: &[&ResolvedItem],
+    palette: ThemePalette,
+    font: &egui::FontId,
+    clicked: &mut Option<String>,
+    primary_press_pos: Option<Pos2>,
+    drag_blocked: &mut bool,
+) {
+    let mut x = start_x;
+    for index in 0..items.len() {
+        let item = items[index];
+        let prev = (index > 0).then(|| items[index - 1]);
+        let next = items.get(index + 1).copied();
+        if prev.is_some() && item_gap_before(item) && !connected(prev, item) {
+            x += STATUS_ITEM_GAP;
+        }
+        let width = item_width(ui, item, font);
+        if x + width > bound {
+            break;
+        }
+        let item_rect = Rect::from_min_size(
+            Pos2::new(x, rect.min.y + 3.0),
+            egui::vec2(width, rect.height() - 6.0),
+        );
+
+        let response = item.action.as_ref().map(|action| {
+            let id = ui.make_persistent_id(("status-item", action.as_str(), x as i32));
+            (ui.interact(item_rect, id, egui::Sense::click()), action)
+        });
+        if item.action.is_some() && primary_press_pos.is_some_and(|pos| item_rect.contains(pos)) {
+            *drag_blocked = true;
+        }
+        let hovered = response.as_ref().is_some_and(|(resp, _)| resp.hovered());
+
+        let painter = ui.painter_at(rect);
+        if item.bg.is_some() || item.stroke.is_some() {
+            let r = STATUS_PILL_RADIUS;
+            let left_join = connected(prev, item);
+            let right_join = next.is_some_and(|next| connected(Some(item), next));
+            let corners = CornerRadius {
+                nw: if left_join { 0 } else { r },
+                sw: if left_join { 0 } else { r },
+                ne: if right_join { 0 } else { r },
+                se: if right_join { 0 } else { r },
+            };
+            paint_status_item_background(&painter, item_rect, item.bg, item.stroke, corners);
+        } else if hovered {
+            painter.rect_filled(item_rect, STATUS_PILL_RADIUS, palette.hover);
+        }
+        paint_item_primitives(&painter, item_rect, item);
+        let color = item.fg.unwrap_or(palette.subtext);
+        let mut text_x = x + STATUS_ITEM_PAD + item.pad_left;
+        if let Some(ratio) = item.gauge {
+            paint_battery_gauge(&painter, text_x, rect.center().y, ratio, color);
+            text_x += STATUS_GAUGE_WIDTH;
+            if !item.text.is_empty() {
+                text_x += STATUS_ICON_GAP;
+            }
+        } else if let Some(slug) = item_icon(item) {
+            let center = Pos2::new(text_x + STATUS_ICON_SIZE / 2.0, rect.center().y);
+            paint_icon_slug(&painter, slug, center, STATUS_ICON_SIZE, color);
+            text_x += STATUS_ICON_SIZE;
+            if !item.text.is_empty() {
+                text_x += STATUS_ICON_GAP;
+            }
+        }
+        if !item.text.is_empty() {
+            painter.text(
+                Pos2::new(text_x, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &item.text,
+                font.clone(),
+                color,
+            );
+        }
+
+        if let Some((resp, action)) = response
+            && resp.clicked()
+        {
+            *clicked = Some(action.clone());
+        }
+        x += width;
+    }
 }
 
 const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
@@ -665,18 +1078,18 @@ pub fn show_window_tabs(
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, palette.base);
+    painter.rect_filled(rect, 0.0, model.background);
     painter.line_segment(
         [rect.left_bottom(), rect.right_bottom()],
         Stroke::new(1.0, palette.surface),
     );
 
     let mut activated = None;
-    let mut x = rect.min.x + 8.0;
+    let mut x = rect.min.x + model.left_padding;
     for window in model.windows {
         let label = format!("{}:{}", window.index, truncate_label(&window.name, 18));
         let width = (label.chars().count() as f32 * 8.0 + 28.0).clamp(56.0, 180.0);
-        if x + width > rect.max.x - 8.0 {
+        if x + width > rect.max.x - STATUS_EDGE_PAD {
             break;
         }
         let tab_rect = Rect::from_min_size(
@@ -1573,15 +1986,6 @@ fn window_tab(
     response
 }
 
-fn backend_label(backend: MuxBackendKind) -> &'static str {
-    match backend {
-        MuxBackendKind::Rmux => "rmux",
-        MuxBackendKind::Native => "native",
-        MuxBackendKind::Tmux => "tmux",
-        MuxBackendKind::Zellij => "zellij",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1759,6 +2163,36 @@ mod tests {
     }
 
     #[test]
+    fn status_segments_width_ignores_empty_segments() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
+        let empty = ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: Vec::new(),
+        };
+        let non_empty = ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: vec![ResolvedItem {
+                text: "1".to_owned(),
+                ..ResolvedItem::default()
+            }],
+        };
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let font = egui::FontId::monospace(12.0);
+                let with_empty = segments_width(ui, &[&empty, &non_empty], &font);
+                let without_empty = segments_width(ui, &[&non_empty], &font);
+                assert_eq!(with_empty, without_empty);
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
     fn status_bar_primary_press_starts_window_drag() {
         let context = egui::Context::default();
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
@@ -1767,10 +2201,9 @@ mod tests {
                 ui,
                 ThemePalette::default(),
                 StatusBarModel {
-                    backend: MuxBackendKind::Native,
-                    selected_session_name: Some("alpha"),
-                    metrics: StatusMetrics::default(),
-                    last_error: None,
+                    segments: &[],
+                    background: ThemePalette::default().base,
+                    left_padding: STATUS_EDGE_PAD,
                 },
             );
         };
@@ -1781,7 +2214,9 @@ mod tests {
                 events: vec![egui::Event::PointerMoved(Pos2::new(20.0, 15.0))],
                 ..Default::default()
             },
-            show,
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+            },
         );
 
         let output = context.run_ui(
@@ -1795,7 +2230,9 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            show,
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+            },
         );
 
         let root_output = output
@@ -1804,6 +2241,68 @@ mod tests {
             .expect("root viewport output");
         assert!(
             root_output
+                .commands
+                .contains(&egui::ViewportCommand::StartDrag)
+        );
+    }
+
+    #[test]
+    fn status_action_primary_press_does_not_start_window_drag() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
+        let segments = [ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: vec![ResolvedItem {
+                text: "wake".to_owned(),
+                action: Some("toggle-caffeinate".to_owned()),
+                ..ResolvedItem::default()
+            }],
+        }];
+        let show = |ui: &mut egui::Ui| {
+            show_status_bar(
+                ui,
+                ThemePalette::default(),
+                StatusBarModel {
+                    segments: &segments,
+                    background: ThemePalette::default().base,
+                    left_padding: STATUS_EDGE_PAD,
+                },
+            );
+        };
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(Pos2::new(20.0, 15.0))],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+            },
+        );
+
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerButton {
+                    pos: Pos2::new(20.0, 15.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+            },
+        );
+
+        let root_output = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output");
+        assert!(
+            !root_output
                 .commands
                 .contains(&egui::ViewportCommand::StartDrag)
         );
@@ -1864,10 +2363,12 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    let item_id = crate::ui::sidebar::SidebarItemId::Session("s2");
-                    let id = ui.make_persistent_id(("mux-sidebar-item", &item_id));
-                    ui.memory_mut(|memory| memory.request_focus(id));
-                    show_test_sidebar(ui, &sessions);
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let item_id = crate::ui::sidebar::SidebarItemId::Session("s2");
+                        let id = ui.make_persistent_id(("mux-sidebar-item", &item_id));
+                        ui.memory_mut(|memory| memory.request_focus(id));
+                        show_test_sidebar(ui, &sessions);
+                    });
                 },
             );
 
@@ -1885,7 +2386,9 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    event = show_test_sidebar(ui, &sessions);
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        event = show_test_sidebar(ui, &sessions);
+                    });
                 },
             );
 
