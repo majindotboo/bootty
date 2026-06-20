@@ -8,7 +8,7 @@ use std::{
 use serde::{Deserialize, Deserializer};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
-use bootty_render::terminal_text::TerminalTextConfig;
+use bootty_render::terminal_text::{FontFeature, TerminalTextConfig};
 use bootty_runtime::{SessionLaunchConfig, TerminalSessionConfig};
 use bootty_terminal::{
     terminal_engine::{NATIVE_MAX_SCROLLBACK, TERMINAL_TERM, TerminalColorConfig},
@@ -47,6 +47,8 @@ struct RawConfig {
     colors: ColorPatch,
     #[serde(default)]
     font: FontPatch,
+    #[serde(default)]
+    font_feature: Vec<String>,
     #[serde(default)]
     chrome: ChromePatch,
     #[serde(default)]
@@ -147,6 +149,7 @@ pub enum MacosTitlebarStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontConfig {
     pub family: Vec<String>,
+    pub features: Vec<FontFeature>,
     pub size: f32,
     pub cell_width: f32,
     pub cell_height: f32,
@@ -159,6 +162,7 @@ pub struct FontConfig {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct FontPatch {
     family: Option<Vec<String>>,
+    features: Option<Vec<String>>,
     size: Option<f32>,
     cell_width: Option<f32>,
     cell_height: Option<f32>,
@@ -480,6 +484,7 @@ impl Default for FontConfig {
         let text = TerminalTextConfig::default();
         Self {
             family: text.families,
+            features: text.font_features,
             size: text.font_size,
             cell_width: text.cell_width,
             cell_height: text.cell_height,
@@ -495,6 +500,7 @@ impl FontConfig {
         TerminalTextConfig {
             families: self.family.clone(),
             font_size: self.size,
+            font_features: self.features.clone(),
             cell_width: self.cell_width,
             cell_height: self.cell_height,
             baseline_adjustment: self.baseline_adjustment,
@@ -1439,7 +1445,8 @@ impl ConfigResolver<'_> {
             config.colors = resolve_theme_colors(theme, self.config_dir)?;
         }
         apply_partial_colors(&mut config.colors, raw.colors);
-        apply_partial_font(&mut config.font, raw.font);
+        apply_partial_font(&mut config.font, raw.font)?;
+        apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer);
@@ -1471,7 +1478,7 @@ fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
     );
 }
 
-fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) {
+fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) -> ConfigResult<()> {
     apply_value(&mut font.family, partial.family);
     apply_value(&mut font.size, partial.size);
     apply_value(&mut font.cell_width, partial.cell_width);
@@ -1479,6 +1486,19 @@ fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) {
     apply_value(&mut font.baseline_adjustment, partial.baseline_adjustment);
     apply_value(&mut font.underline_position, partial.underline_position);
     apply_value(&mut font.underline_thickness, partial.underline_thickness);
+    if let Some(features) = partial.features {
+        apply_font_features(font, features)?;
+    }
+    Ok(())
+}
+
+fn apply_font_features(font: &mut FontConfig, features: Vec<String>) -> ConfigResult<()> {
+    for feature in features {
+        let parsed = FontFeature::parse(&feature)
+            .ok_or_else(|| ConfigLoadError::new(format!("invalid font feature: {feature}")))?;
+        font.features.push(parsed);
+    }
+    Ok(())
 }
 
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {

@@ -194,6 +194,53 @@ impl TerminalRenderFrame {
         face: Arc<ResolvedFontFace>,
         font_size: f32,
     ) {
+        let mut fragment_start_byte = 0_usize;
+        let mut fragment_start_cell = 0_u16;
+        let mut cell = 0_u16;
+        let mut previous = None;
+
+        for (byte_index, ch) in text.char_indices() {
+            if previous.is_some_and(|previous| is_bad_ligature_pair(previous, ch)) {
+                self.push_text_command(
+                    run,
+                    cell_width,
+                    TextCellSpan {
+                        start: cells.start.saturating_add(fragment_start_cell),
+                        width: cell.saturating_sub(fragment_start_cell),
+                    },
+                    &text[fragment_start_byte..byte_index],
+                    Arc::clone(&face),
+                    font_size,
+                );
+                fragment_start_byte = byte_index;
+                fragment_start_cell = cell;
+            }
+            previous = Some(ch);
+            cell = cell.saturating_add(crate::terminal_text::terminal_char_width(ch));
+        }
+
+        self.push_text_command(
+            run,
+            cell_width,
+            TextCellSpan {
+                start: cells.start.saturating_add(fragment_start_cell),
+                width: cell.saturating_sub(fragment_start_cell),
+            },
+            &text[fragment_start_byte..],
+            face,
+            font_size,
+        );
+    }
+
+    fn push_text_command(
+        &mut self,
+        run: &TextRun,
+        cell_width: f32,
+        cells: TextCellSpan,
+        text: &str,
+        face: Arc<ResolvedFontFace>,
+        font_size: f32,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -379,6 +426,10 @@ fn text_cell_width(text: &str) -> u16 {
         .max(1)
 }
 
+fn is_bad_ligature_pair(left: char, right: char) -> bool {
+    matches!((left, right), ('f', 'i' | 'l') | ('s', 't'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,11 +517,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn text_runs_break_ghostty_bad_ligatures() {
+        let plan = TerminalPaintPlan {
+            surface: SurfaceRect::from_min_size(0.0, 0.0, 120.0, 20.0),
+            default_background: color(0),
+            backgrounds: Vec::new(),
+            text_runs: vec![TextRun {
+                rect: SurfaceRect::from_min_size(0.0, 0.0, 90.0, 10.0),
+                cells: 9,
+                text: "fi fl st".to_owned(),
+                attrs: attrs(),
+            }],
+            decorations: Vec::new(),
+            cursor: None,
+        };
+
+        let frame = TerminalRenderFrame::from_plan(&plan, &text_contract());
+        let text = frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                TerminalRenderCommand::Text(command) => Some((command.text.as_str(), command.rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            text,
+            vec![
+                ("f", SurfaceRect::from_min_size(0.0, 0.0, 10.0, 10.0)),
+                ("i f", SurfaceRect::from_min_size(10.0, 0.0, 30.0, 10.0)),
+                ("l s", SurfaceRect::from_min_size(40.0, 0.0, 30.0, 10.0)),
+                ("t", SurfaceRect::from_min_size(70.0, 0.0, 10.0, 10.0)),
+            ]
+        );
+    }
+
     proptest! {
         #[test]
         fn property_ascii_render_command_count_matches_plan_resources(
             run_bytes in proptest::collection::vec(
-                proptest::collection::vec(b'a'..=b'z', 1..16),
+                proptest::collection::vec(b'a'..=b'e', 1..16),
                 0..8,
             ),
             background_count in 0_usize..8,

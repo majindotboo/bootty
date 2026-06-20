@@ -10,9 +10,7 @@ use smallvec::SmallVec;
 mod coretext;
 mod shaping;
 
-use shaping::{
-    ShapedGlyph, font_has_ligature_features, harfbuzz_features, shape_run, shaped_spans,
-};
+use shaping::{ShapedGlyph, font_has_ligature_features, harfbuzz_features, shape_run};
 
 use crate::{
     font_database::system_font_database,
@@ -1038,10 +1036,14 @@ impl TextAtlasBuilder {
         if cluster.glyphs.is_empty() {
             return self.intern_cluster_text(&cluster.text);
         }
-        let mut signature = String::with_capacity(cluster.glyphs.len() * 6 + 1);
+        let mut signature = String::with_capacity(cluster.glyphs.len() * 22 + 1);
         signature.push('\u{1}');
         for glyph in &cluster.glyphs {
             signature.push_str(&glyph.glyph_id.to_string());
+            signature.push('@');
+            signature.push_str(&glyph.x_offset.to_bits().to_string());
+            signature.push(':');
+            signature.push_str(&glyph.y_offset.to_bits().to_string());
             signature.push(',');
         }
         self.intern_text(&signature)
@@ -1252,36 +1254,46 @@ impl FontLibrary {
                 shape_run(data, index, text, font_size, &hb_features)
             })
             .flatten()?;
-        // Cell mapping relies on left-to-right, non-decreasing clusters. Bail on
-        // RTL or complex reordering and let those runs keep the per-character
-        // path, which lays out cells the same way the terminal grid does.
-        if glyphs
-            .windows(2)
-            .any(|pair| pair[1].cluster < pair[0].cluster)
-        {
-            return None;
-        }
-        let spans = shaped_spans(text, &glyphs);
-
-        let mut cell = 0_u16;
-        let mut total_cells = 0_u16;
+        let total_cells = text_cell_count(text);
         let mut cluster_index = 0;
-        for span in &spans {
-            let slice = &text[span.start..span.end];
+        let mut glyph_index = 0;
+        while glyph_index < glyphs.len() {
+            let group = shaped_glyph_group(text, &glyphs, glyph_index, total_cells, &font);
+            let mut glyph_end = group.end;
+            let mut cells = group.cells;
+            let mut source_end = group.source_end;
+            let draw_by_glyph = group.draw_by_glyph;
+
+            if draw_by_glyph {
+                while glyph_end < glyphs.len() {
+                    let next_group =
+                        shaped_glyph_group(text, &glyphs, glyph_end, total_cells, &font);
+                    if !next_group.draw_by_glyph
+                        || next_group.cell != group.cell.saturating_add(cells)
+                    {
+                        break;
+                    }
+                    glyph_end = next_group.end;
+                    cells = cells.saturating_add(next_group.cells);
+                    source_end = next_group.source_end;
+                }
+            }
+
+            let slice = &text[group.source_start..source_end];
             let cluster = shaped_cluster_slot(clusters, cluster_index);
             cluster.text.clear();
             cluster.glyphs.clear();
             cluster.text.push_str(slice);
-            cluster.cell = cell;
+            cluster.cell = group.cell;
             cluster.is_whitespace = slice.chars().all(char::is_whitespace);
-            let span_cells = slice.chars().map(terminal_char_width).sum::<u16>().max(1);
-            cluster.cells = span_cells;
-            if draw_span_by_glyph(slice, &span.glyphs, &font) {
-                cluster.glyphs.extend(span.glyphs.iter().copied());
+            cluster.cells = cells;
+            if draw_by_glyph {
+                cluster
+                    .glyphs
+                    .extend(glyphs[glyph_index..glyph_end].iter().copied());
             }
-            total_cells = total_cells.saturating_add(span_cells);
-            cell = cell.saturating_add(span_cells);
             cluster_index += 1;
+            glyph_index = glyph_end;
         }
         Some((total_cells.max(1), cluster_index))
     }
@@ -1330,15 +1342,15 @@ impl FontLibrary {
         }
         if !cluster.glyphs.is_empty()
             && let Some(font) = self.font_for_face(face)
-            && let Some(alpha) = rasterize_glyph_cluster(
-                &font,
-                &cluster.glyphs,
-                font_size * pixels_per_point,
+            && let Some(alpha) = rasterize_glyph_cluster(RasterizeGlyphClusterRequest {
+                font: &font,
+                glyphs: &cluster.glyphs,
+                physical_font_size: font_size * pixels_per_point,
                 pixels_per_point,
-                face.style,
-                width,
-                height,
-            )
+                style: face.style,
+                constraint_cells,
+                tile: (width, height),
+            })
         {
             return RasterizedCluster {
                 pixels: alpha_to_atlas_pixels(format, alpha),
@@ -1567,30 +1579,43 @@ fn font_supports_char(font: &FontArc, ch: char) -> bool {
     font.glyph_id(ch) != GlyphId(0)
 }
 
-/// Draws a shaped cluster from its glyph ids into an alpha mask. Glyph advances
-/// and offsets arrive in logical pixels (shaped at the logical font size) and
-/// scale up by `pixels_per_point` to device pixels. Bold faces get the same
-/// synthetic-weight double strike as the per-character path.
-fn rasterize_glyph_cluster(
-    font: &FontArc,
-    glyphs: &[ShapedGlyph],
+struct RasterizeGlyphClusterRequest<'a> {
+    font: &'a FontArc,
+    glyphs: &'a [ShapedGlyph],
     physical_font_size: f32,
     pixels_per_point: f32,
     style: FontStyle,
-    width: u32,
-    height: u32,
-) -> Option<Vec<u8>> {
+    constraint_cells: u16,
+    tile: (u32, u32),
+}
+
+/// Draws a shaped cluster from its glyph ids into an alpha mask. Glyph offsets
+/// arrive in logical pixels (shaped at the logical font size) and scale up by
+/// `pixels_per_point` to device pixels. Bold faces get the same synthetic-weight
+/// double strike as the per-character path.
+fn rasterize_glyph_cluster(request: RasterizeGlyphClusterRequest<'_>) -> Option<Vec<u8>> {
+    let RasterizeGlyphClusterRequest {
+        font,
+        glyphs,
+        physical_font_size,
+        pixels_per_point,
+        style,
+        constraint_cells,
+        tile: (width, height),
+    } = request;
     let scale = PxScale::from(physical_font_size.max(1.0));
     let scaled = font.as_scaled(scale);
     let baseline = ((height as f32 - scaled.height()) * 0.5).max(0.0) + scaled.ascent();
     let synthesize_bold = matches!(style, FontStyle::Bold | FontStyle::BoldItalic);
     let bold_offset = (pixels_per_point * 0.45).max(1.0);
 
+    let cluster_start = glyphs.iter().map(|glyph| glyph.cluster).min().unwrap_or(0);
+    let cell_width = width as f32 / f32::from(constraint_cells.max(1));
     let mut alpha = vec![0_u8; (width * height) as usize];
-    let mut pen_x = 0.0_f32;
     for glyph in glyphs {
         let glyph_id = GlyphId(glyph.glyph_id);
-        let x = pen_x + glyph.x_offset * pixels_per_point;
+        let cell_offset = glyph.cluster.saturating_sub(cluster_start) as f32 * cell_width;
+        let x = cell_offset + glyph.x_offset * pixels_per_point;
         let y = baseline - glyph.y_offset * pixels_per_point;
         draw_outline_glyph(
             &mut alpha,
@@ -1608,9 +1633,90 @@ fn rasterize_glyph_cluster(
                 height,
             );
         }
-        pen_x += glyph.x_advance * pixels_per_point;
     }
     alpha.iter().any(|value| *value > 0).then_some(alpha)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShapedGlyphGroup {
+    cell: u16,
+    cells: u16,
+    source_start: usize,
+    source_end: usize,
+    end: usize,
+    draw_by_glyph: bool,
+}
+
+fn shaped_glyph_group(
+    text: &str,
+    glyphs: &[ShapedGlyph],
+    start: usize,
+    total_cells: u16,
+    font: &FontArc,
+) -> ShapedGlyphGroup {
+    let cell = glyphs[start].cluster;
+    let mut end = start + 1;
+    while end < glyphs.len() && glyphs[end].cluster == cell {
+        end += 1;
+    }
+
+    let cell = u16::try_from(cell).unwrap_or(u16::MAX);
+    let next_cell = glyphs.get(end).map_or(total_cells, |glyph| {
+        u16::try_from(glyph.cluster).unwrap_or(u16::MAX)
+    });
+    let cells = next_cell.saturating_sub(cell).max(1);
+    let (source_start, source_end) =
+        text_byte_range_for_cells(text, cell, cell.saturating_add(cells));
+    let slice = &text[source_start..source_end];
+
+    ShapedGlyphGroup {
+        cell,
+        cells,
+        source_start,
+        source_end,
+        end,
+        draw_by_glyph: draw_span_by_glyph(slice, &glyphs[start..end], font),
+    }
+}
+
+fn text_cell_count(text: &str) -> u16 {
+    text.chars()
+        .filter(|ch| !is_combining_mark(*ch) && !is_variation_selector(*ch))
+        .map(terminal_char_width)
+        .sum::<u16>()
+}
+
+fn text_byte_range_for_cells(text: &str, start: u16, end: u16) -> (usize, usize) {
+    let mut cell = 0_u16;
+    let mut range_start = None;
+    let mut range_end = None;
+
+    for (byte_start, ch) in text.char_indices() {
+        let byte_end = byte_start + ch.len_utf8();
+        let attached = is_combining_mark(ch) || is_variation_selector(ch);
+        let char_start = if attached {
+            cell.saturating_sub(1)
+        } else {
+            cell
+        };
+        let char_cells = if attached {
+            1
+        } else {
+            terminal_char_width(ch).max(1)
+        };
+        let char_end = char_start.saturating_add(char_cells);
+
+        if char_start < end && char_end > start {
+            range_start.get_or_insert(byte_start);
+            range_end = Some(byte_end);
+        }
+
+        if !attached {
+            cell = cell.saturating_add(terminal_char_width(ch));
+        }
+    }
+
+    (range_start.unwrap_or(0), range_end.unwrap_or(text.len()))
 }
 
 /// Whether a shaped span should be drawn directly from its glyph ids rather than

@@ -35,6 +35,12 @@ type Glyph = {
   offsetY: number;
 };
 
+type TextRun = {
+  color: WebColor;
+  text: string;
+  cells: number;
+};
+
 export class WebGlTerminalRenderer {
   private readonly gl: WebGL2RenderingContext;
   private readonly solidProgram: WebGLProgram;
@@ -113,17 +119,22 @@ export class WebGlTerminalRenderer {
       pushSelectionInstances(selectionInstances, frame, selection);
     }
 
-    for (const cell of frame.cells) {
-      if (cell.style.invisible || cell.text.length === 0) {
+    let cellIndex = 0;
+    while (cellIndex < frame.cells.length) {
+      const cell = frame.cells[cellIndex];
+      if (!isDrawableTextCell(cell)) {
+        cellIndex += 1;
         continue;
       }
 
       const color = resolvedCellColors(frame, cell).foreground;
       if (pushBoxDrawingInstance(backgroundInstances, cell, frame, rgba(color))) {
+        cellIndex += 1;
         continue;
       }
 
-      const glyph = this.atlas.glyph(cell.text, frame.cellWidth, frame.cellHeight, this.dpr, cell.style);
+      const run = textRunAt(frame, cellIndex, this.atlas.maxCellsFor(frame.cellWidth, this.dpr));
+      const glyph = this.atlas.glyph(run.text, frame.cellWidth * run.cells, frame.cellHeight, this.dpr, cell.style);
       pushTextInstance(
         textInstances,
         cell.x * frame.cellWidth + glyph.offsetX,
@@ -131,18 +142,19 @@ export class WebGlTerminalRenderer {
         glyph.width,
         glyph.height,
         glyph,
-        rgba(color),
+        rgba(run.color),
       );
       if (cell.style.underline) {
         pushSolidInstance(
           backgroundInstances,
           cell.x * frame.cellWidth,
           cell.y * frame.cellHeight + frame.cellHeight - 2,
-          frame.cellWidth,
+          frame.cellWidth * run.cells,
           1,
-          rgba(color),
+          rgba(run.color),
         );
       }
+      cellIndex += run.cells;
     }
 
     if (frame.cursor) {
@@ -518,7 +530,7 @@ class GlyphAtlas {
   private next = 0;
 
   private static readonly size = 2048;
-  private static readonly tileWidth = 128;
+  private static readonly tileWidth = 256;
   private static readonly tileHeight = 96;
   private static readonly horizontalPaddingPx = 8;
 
@@ -538,6 +550,12 @@ class GlyphAtlas {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  maxCellsFor(cellWidth: number, dpr: number): number {
+    const horizontalPadding = Math.ceil(GlyphAtlas.horizontalPaddingPx * dpr);
+    const usableWidth = GlyphAtlas.tileWidth - horizontalPadding * 2;
+    return Math.max(1, Math.floor(usableWidth / Math.max(1, cellWidth * dpr)));
   }
 
   glyph(text: string, cellWidth: number, cellHeight: number, dpr: number, style: WebCell["style"]): Glyph {
@@ -771,6 +789,93 @@ function bindAttribute(
   gl.enableVertexAttribArray(location);
   gl.vertexAttribPointer(location, size, gl.FLOAT, false, strideFloats * 4, offsetFloats * 4);
   gl.vertexAttribDivisor(location, instanced ? 1 : 0);
+}
+
+function textRunAt(frame: WebTerminalFrame, startIndex: number, maxCells: number): TextRun {
+  const cell = frame.cells[startIndex];
+  const color = resolvedCellColors(frame, cell).foreground;
+  if (!isMergeableText(cell.text)) {
+    return { color, text: cell.text, cells: 1 };
+  }
+  const parts = [cell.text];
+  let cells = 1;
+  let previous = lastCodepoint(cell.text);
+
+  for (let index = startIndex + 1; index < frame.cells.length && cells < maxCells; index += 1) {
+    const next = frame.cells[index];
+    if (!canMergeTextRunCell(frame, cell, color, cells, next, previous)) {
+      break;
+    }
+    parts.push(next.text);
+    cells += 1;
+    previous = lastCodepoint(next.text);
+  }
+
+  return { color, text: parts.join(""), cells };
+}
+
+function canMergeTextRunCell(
+  frame: WebTerminalFrame,
+  start: WebCell,
+  color: WebColor,
+  offsetCells: number,
+  next: WebCell,
+  previous: string,
+): boolean {
+  if (!isDrawableTextCell(next) || !isMergeableText(next.text)) {
+    return false;
+  }
+  if (next.y !== start.y || next.x !== start.x + offsetCells) {
+    return false;
+  }
+  if (!sameStyle(start.style, next.style) || !sameColor(color, resolvedCellColors(frame, next).foreground)) {
+    return false;
+  }
+  const first = firstCodepoint(next.text);
+  return !(previous && first && isBadLigaturePair(previous, first));
+}
+
+function isDrawableTextCell(cell: WebCell): boolean {
+  return !cell.style.invisible && cell.text.length > 0;
+}
+
+function isBoxDrawingText(text: string): boolean {
+  return BOX_DRAWING_TEXT.has(text);
+}
+
+function isMergeableText(text: string): boolean {
+  return Array.from(text).length === 1 && !isBoxDrawingText(text);
+}
+
+function sameStyle(left: WebCell["style"], right: WebCell["style"]): boolean {
+  return (
+    left.bold === right.bold &&
+    left.italic === right.italic &&
+    left.faint === right.faint &&
+    left.blink === right.blink &&
+    left.inverse === right.inverse &&
+    left.invisible === right.invisible &&
+    left.strikethrough === right.strikethrough &&
+    left.overline === right.overline &&
+    left.underline === right.underline
+  );
+}
+
+function sameColor(left: WebColor, right: WebColor): boolean {
+  return left.r === right.r && left.g === right.g && left.b === right.b;
+}
+
+function firstCodepoint(text: string): string {
+  return Array.from(text)[0] ?? "";
+}
+
+function lastCodepoint(text: string): string {
+  const codepoints = Array.from(text);
+  return codepoints[codepoints.length - 1] ?? "";
+}
+
+function isBadLigaturePair(left: string, right: string): boolean {
+  return (left === "f" && (right === "i" || right === "l")) || (left === "s" && right === "t");
 }
 
 type ResolvedCellColors = {

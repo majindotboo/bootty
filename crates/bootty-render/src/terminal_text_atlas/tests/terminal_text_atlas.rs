@@ -585,6 +585,14 @@ fn alpha_sum(alpha: &[u8]) -> u64 {
     alpha.iter().map(|value| u64::from(*value)).sum()
 }
 
+fn alpha_sum_columns(alpha: &[u8], width: u32, min_x: u32, max_x: u32) -> u64 {
+    let height = alpha.len() as u32 / width;
+    (0..height)
+        .flat_map(|y| (min_x..max_x).map(move |x| (y * width + x) as usize))
+        .map(|index| u64::from(alpha[index]))
+        .sum()
+}
+
 #[cfg(target_os = "macos")]
 fn alpha_sum_rows(alpha: &[u8], width: u32, min_y: u32, max_y: u32) -> u64 {
     (min_y..=max_y)
@@ -719,7 +727,6 @@ fn glyph_id_cluster_rasterizes_the_same_ink_as_its_character() {
     by_glyph.glyphs.push(ShapedGlyph {
         glyph_id: glyph_id.0,
         cluster: 0,
-        x_advance: 0.0,
         x_offset: 0.0,
         y_offset: 0.0,
     });
@@ -753,4 +760,85 @@ fn shaping_emits_legacy_clusters_for_plain_text_in_a_gsub_font() {
             .all(|cluster| cluster.glyphs.is_empty()),
         "plain ASCII needs no glyph-id drawing: {clusters:?}"
     );
+}
+
+#[test]
+fn default_shaping_groups_contextual_operator_ligature_pieces() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let features = crate::terminal_text::default_font_features();
+    let mut clusters = Vec::new();
+
+    for operator in ["<>", "!=", "==", "->", "<=", ">=", "=>", "&&", "||"] {
+        let (total_cells, len) = library
+            .shape_into_clusters(&face, operator, 16.0, &features, &mut clusters)
+            .expect("Maple Mono advertises GSUB features, so the run is shaped");
+
+        assert_eq!(total_cells, 2, "{operator}");
+        assert_eq!(len, 1, "{operator}: {clusters:?}");
+        assert_eq!(clusters[0].text, operator, "{operator}");
+        assert_eq!(clusters[0].cell, 0, "{operator}");
+        assert_eq!(clusters[0].cells, 2, "{operator}");
+        assert_eq!(clusters[0].glyphs.len(), 2, "{operator}: {clusters:?}");
+    }
+}
+
+#[test]
+fn contextual_operator_ligature_rasterizes_across_merged_cells() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let features = crate::terminal_text::default_font_features();
+    let mut clusters = Vec::new();
+    let (_, len) = library
+        .shape_into_clusters(&face, "<>", 16.0, &features, &mut clusters)
+        .expect("Maple Mono advertises GSUB features, so the run is shaped");
+    assert_eq!(len, 1);
+
+    let alpha = rasterize_cluster_for_test(&mut library, &face, &clusters[0], 16.0, 2.0, 2, 48, 40);
+
+    assert!(alpha_sum_columns(&alpha, 48, 0, 24) > 0);
+    assert!(alpha_sum_columns(&alpha, 48, 24, 48) > 0);
+}
+
+#[test]
+fn configured_variants_and_style_sets_shape_feature_heavy_samples() {
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let mut features = crate::terminal_text::default_font_features();
+    features.extend(
+        [
+            "cv01", "cv02", "cv33", "cv34", "cv35", "cv36", "cv61", "cv62", "ss05", "ss06", "ss07",
+            "ss08",
+        ]
+        .into_iter()
+        .map(|tag| crate::terminal_text::FontFeature::parse(tag).expect("feature parses")),
+    );
+    let mut clusters = Vec::new();
+    let mut shaped_samples = 0;
+
+    for sample in [
+        r"~!@#$%^&* {} [] () I1l O0o",
+        r"!== \\ <= #{ -> ~@ |> 0x12",
+        r"|=>==<==>=|======|===|===>",
+        r"<---|--|--------|-<->--<-|",
+        r"[INFO] [TODO] [FIXME]",
+    ] {
+        let (total_cells, len) = library
+            .shape_into_clusters(&face, sample, 16.0, &features, &mut clusters)
+            .expect("Maple Mono advertises GSUB features, so the run is shaped");
+        let expected_cells = sample
+            .chars()
+            .map(crate::terminal_text::terminal_char_width)
+            .sum::<u16>();
+
+        assert_eq!(total_cells, expected_cells, "{sample}");
+        assert!(len > 0, "{sample}");
+        shaped_samples += usize::from(
+            clusters[..len]
+                .iter()
+                .any(|cluster| !cluster.glyphs.is_empty()),
+        );
+    }
+
+    assert_eq!(shaped_samples, 5);
 }

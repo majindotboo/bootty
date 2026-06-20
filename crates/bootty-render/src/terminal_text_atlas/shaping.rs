@@ -1,6 +1,5 @@
 use rustybuzz::ttf_parser::Tag;
-use rustybuzz::{Face, Feature, UnicodeBuffer};
-use smallvec::SmallVec;
+use rustybuzz::{BufferClusterLevel, Direction, Face, Feature, UnicodeBuffer};
 
 use crate::terminal_text::FontFeature;
 
@@ -10,24 +9,12 @@ use crate::terminal_text::FontFeature;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ShapedGlyph {
     pub glyph_id: u16,
-    /// Byte offset into the shaped text of the source cluster this glyph covers.
-    /// HarfBuzz assigns ligatures the cluster of their first source character.
+    /// Cell-relative origin chosen by the Ghostty-compatible shaper. Glyphs
+    /// that belong to the same ligature can share this origin even when
+    /// HarfBuzz reports different source clusters.
     pub cluster: u32,
-    /// Horizontal advance in pixels at the requested font size.
-    pub x_advance: f32,
     pub x_offset: f32,
     pub y_offset: f32,
-}
-
-/// A contiguous source-text span produced by shaping, expressed as a byte range
-/// plus the glyphs that render it. A ligature span covers several source
-/// characters with fewer glyphs; a decomposition covers one character with
-/// several glyphs.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct ShapedSpan {
-    pub start: usize,
-    pub end: usize,
-    pub glyphs: SmallVec<[ShapedGlyph; 2]>,
 }
 
 /// Shapes a run of text against a font's GSUB/GPOS tables via HarfBuzz
@@ -50,27 +37,77 @@ pub(super) fn shape_run(
     }
     let scale = font_size / units_per_em;
 
+    let mut source = Vec::new();
     let mut buffer = UnicodeBuffer::new();
-    buffer.push_str(text);
+    buffer.set_cluster_level(BufferClusterLevel::Characters);
+    buffer.set_direction(Direction::LeftToRight);
+    let mut cell = 0_u16;
+    for (index, (_, ch)) in text.char_indices().enumerate() {
+        let char_width = crate::terminal_text::terminal_char_width(ch);
+        let glyph_cell = if is_attached_codepoint(ch) {
+            cell.saturating_sub(1)
+        } else {
+            cell
+        };
+        buffer.add(ch, u32::try_from(index).ok()?);
+        source.push(SourceCodepoint {
+            cell: glyph_cell,
+            starts_cell: !is_attached_codepoint(ch),
+        });
+        cell = cell.saturating_add(char_width);
+    }
     buffer.guess_segment_properties();
 
     let shaped = rustybuzz::shape(&face, features, buffer);
     let infos = shaped.glyph_infos();
     let positions = shaped.glyph_positions();
+    if infos.len() != positions.len() {
+        return None;
+    }
 
-    Some(
-        infos
-            .iter()
-            .zip(positions)
-            .map(|(info, position)| ShapedGlyph {
-                glyph_id: info.glyph_id as u16,
-                cluster: info.cluster,
-                x_advance: position.x_advance as f32 * scale,
-                x_offset: position.x_offset as f32 * scale,
-                y_offset: position.y_offset as f32 * scale,
-            })
-            .collect(),
-    )
+    let mut run_offset_x = 0.0_f32;
+    let mut run_offset_y = 0.0_f32;
+    let mut run_offset_cell = 0_u16;
+    let mut cell_offset_cell = 0_u16;
+    let mut cell_offset_x = 0.0_f32;
+    let mut glyphs = Vec::with_capacity(infos.len());
+
+    for (info, position) in infos.iter().zip(positions) {
+        let source_index = usize::try_from(info.cluster).ok()?;
+        let codepoint = source.get(source_index)?;
+        let glyph_cell = codepoint.cell;
+        if cell_offset_cell != glyph_cell {
+            let is_after_glyph_from_current_or_next_clusters = glyph_cell <= run_offset_cell;
+            if codepoint.starts_cell && !is_after_glyph_from_current_or_next_clusters {
+                cell_offset_cell = glyph_cell;
+                cell_offset_x = run_offset_x;
+            }
+        }
+
+        glyphs.push(ShapedGlyph {
+            glyph_id: info.glyph_id as u16,
+            cluster: u32::from(cell_offset_cell),
+            x_offset: run_offset_x - cell_offset_x + position.x_offset as f32 * scale,
+            y_offset: run_offset_y + position.y_offset as f32 * scale,
+        });
+
+        run_offset_x += position.x_advance as f32 * scale;
+        run_offset_y += position.y_advance as f32 * scale;
+        run_offset_cell = run_offset_cell.max(glyph_cell);
+    }
+
+    Some(glyphs)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceCodepoint {
+    cell: u16,
+    starts_cell: bool,
+}
+
+fn is_attached_codepoint(ch: char) -> bool {
+    crate::terminal_text_atlas::is_combining_mark(ch)
+        || crate::terminal_text_atlas::is_variation_selector(ch)
 }
 
 /// Translates the user's [`FontFeature`] list into HarfBuzz features. The
@@ -117,32 +154,6 @@ fn ligatures_enabled(features: &[FontFeature]) -> bool {
         .is_none_or(|feature| feature.value() != 0)
 }
 
-/// Partitions shaped glyphs into source spans using HarfBuzz cluster values.
-/// Glyphs sharing a cluster belong to one span, which covers source bytes
-/// `[cluster, next_distinct_cluster)`. Assumes left-to-right, monotonically
-/// non-decreasing clusters (HarfBuzz's default for terminal text).
-pub(super) fn shaped_spans(text: &str, glyphs: &[ShapedGlyph]) -> Vec<ShapedSpan> {
-    let mut spans = Vec::new();
-    let mut index = 0;
-    while index < glyphs.len() {
-        let start = glyphs[index].cluster as usize;
-        let mut next = index + 1;
-        while next < glyphs.len() && glyphs[next].cluster as usize == start {
-            next += 1;
-        }
-        let end = glyphs
-            .get(next)
-            .map_or(text.len(), |glyph| glyph.cluster as usize);
-        spans.push(ShapedSpan {
-            start,
-            end,
-            glyphs: glyphs[index..next].iter().copied().collect(),
-        });
-        index = next;
-    }
-    spans
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,18 +165,8 @@ mod tests {
         std::fs::read(path).expect("fixture font reads")
     }
 
-    fn glyph(glyph_id: u16, cluster: u32) -> ShapedGlyph {
-        ShapedGlyph {
-            glyph_id,
-            cluster,
-            x_advance: 9.6,
-            x_offset: 0.0,
-            y_offset: 0.0,
-        }
-    }
-
     #[test]
-    fn shapes_one_glyph_per_plain_character_with_byte_clusters() {
+    fn shapes_one_glyph_per_plain_character_with_cell_clusters() {
         let data = maple_mono();
         let features = harfbuzz_features(&default_font_features());
         let glyphs = shape_run(&data, 0, "abc", 16.0, &features).unwrap();
@@ -176,8 +177,8 @@ mod tests {
             vec![0, 1, 2]
         );
         assert!(
-            glyphs.iter().all(|g| g.glyph_id != 0 && g.x_advance > 0.0),
-            "every plain glyph resolves with a positive advance: {glyphs:?}"
+            glyphs.iter().all(|g| g.glyph_id != 0),
+            "every plain glyph resolves: {glyphs:?}"
         );
     }
 
@@ -205,32 +206,5 @@ mod tests {
             tags.contains(b"calt") && tags.contains(b"clig"),
             "liga=0 forces calt/clig off too: {tags:?}"
         );
-    }
-
-    #[test]
-    fn ligature_span_covers_all_source_bytes_of_one_glyph() {
-        // Synthetic: a single ligature glyph covering the two chars of "fi".
-        let spans = shaped_spans("fi", &[glyph(900, 0)]);
-        assert_eq!(spans.len(), 1);
-        assert_eq!((spans[0].start, spans[0].end), (0, 2));
-        assert_eq!(spans[0].glyphs.len(), 1);
-    }
-
-    #[test]
-    fn plain_glyphs_split_into_one_span_per_character() {
-        let spans = shaped_spans("ab", &[glyph(10, 0), glyph(11, 1)]);
-        assert_eq!(spans.len(), 2);
-        assert_eq!((spans[0].start, spans[0].end), (0, 1));
-        assert_eq!((spans[1].start, spans[1].end), (1, 2));
-    }
-
-    #[test]
-    fn decomposition_groups_multiple_glyphs_into_one_span() {
-        // One source char shaped into two glyphs (e.g. base + mark): both share
-        // the cluster and stay in a single span.
-        let spans = shaped_spans("x", &[glyph(20, 0), glyph(21, 0)]);
-        assert_eq!(spans.len(), 1);
-        assert_eq!((spans[0].start, spans[0].end), (0, 1));
-        assert_eq!(spans[0].glyphs.len(), 2);
     }
 }

@@ -358,6 +358,36 @@ fn config_accepts_ghostty_palette_generation_settings() {
 }
 
 #[test]
+fn config_maps_font_features_to_terminal_text_config() {
+    let config = load_config_source(indoc! {r#"
+        font-feature = ["cv01", "ss05"]
+
+        [font]
+        features = ["cv33", "-calt"]
+    "#});
+
+    let features = config.font.terminal_text_config().font_features;
+
+    assert!(features.contains(&FontFeature::new(*b"liga", 1)));
+    assert!(features.contains(&FontFeature::new(*b"cv01", 1)));
+    assert!(features.contains(&FontFeature::new(*b"ss05", 1)));
+    assert!(features.contains(&FontFeature::new(*b"cv33", 1)));
+    assert!(features.contains(&FontFeature::new(*b"calt", 0)));
+}
+
+#[test]
+fn config_rejects_invalid_font_features() {
+    let error = ConfigSandbox::with_config(indoc! {r#"
+        [font]
+        features = ["toolong"]
+    "#})
+    .load()
+    .unwrap_err();
+
+    assert!(error.to_string().contains("invalid font feature"));
+}
+
+#[test]
 fn config_accepts_xterm_dynamic_color_slots() {
     let config = load_config_source(indoc! {r##"
         [colors]
