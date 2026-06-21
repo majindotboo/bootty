@@ -584,25 +584,38 @@ mod tests {
     #[test]
     fn app_keybindings_route_default_app_shortcuts() {
         let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
-        let action = bindings.action_for_key(
-            egui::Key::R,
+        let reload_modifiers = if cfg!(target_os = "macos") {
             egui::Modifiers {
                 shift: true,
                 command: true,
                 ..Default::default()
-            },
-        );
+            }
+        } else {
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            }
+        };
+        let picker_modifiers = if cfg!(target_os = "macos") {
+            egui::Modifiers {
+                command: true,
+                ..Default::default()
+            }
+        } else {
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            }
+        };
+
+        let action = bindings.action_for_key(egui::Key::R, reload_modifiers);
 
         assert_eq!(action, Some(KeybindAction::App(AppAction::ReloadConfig)));
 
         assert_eq!(
-            bindings.action_for_key(
-                egui::Key::P,
-                egui::Modifiers {
-                    command: true,
-                    ..Default::default()
-                }
-            ),
+            bindings.action_for_key(egui::Key::P, picker_modifiers),
             Some(KeybindAction::App(AppAction::SessionPicker))
         );
     }
