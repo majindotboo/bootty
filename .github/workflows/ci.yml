@@ -31,64 +31,8 @@ jobs:
       - name: Check formatting
         run: mise run fmt
 
-  rust-clippy:
-    name: Rust clippy
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libayatana-appindicator3-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libgl1-mesa-dev \
-            libglib2.0-dev \
-            libssl-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcursor-dev \
-            libxi-dev \
-            libxinerama-dev \
-            libxkbcommon-dev \
-            libxrandr-dev \
-            libxdo-dev \
-            pkg-config
-
-      - name: Set up mise toolchain
-        uses: jdx/mise-action@v4
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-validation
-          cache-on-failure: true
-
-      # zig compiles libghostty for the build machine's exact CPU, so its
-      # cached output can SIGILL on a runner with a different microarch.
-      - name: Evict CPU-specific zig artifacts
-        run: |
-          cargo clean -p libghostty-vt-sys
-          cargo clean --release -p libghostty-vt-sys
-
-      - name: Run clippy
-        run: mise run clippy
-
-  rust-tests:
-    name: Rust tests (nextest)
+  rust-validation:
+    name: Rust validation
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -141,65 +85,13 @@ jobs:
       # zig compiles libghostty for the build machine's exact CPU, so its
       # cached output can SIGILL on a runner with a different microarch.
       - name: Evict CPU-specific zig artifacts
-        run: |
-          cargo clean -p libghostty-vt-sys
-          cargo clean --release -p libghostty-vt-sys
+        run: cargo clean -p libghostty-vt-sys
+
+      - name: Run clippy
+        run: mise run clippy
 
       - name: Run tests with nextest
         run: mise run test
-
-  rust-benchmarks:
-    name: Rust benchmarks
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libayatana-appindicator3-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev \
-            libgl1-mesa-dev \
-            libglib2.0-dev \
-            libssl-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcursor-dev \
-            libxi-dev \
-            libxinerama-dev \
-            libxkbcommon-dev \
-            libxrandr-dev \
-            libxdo-dev \
-            pkg-config
-
-      - name: Set up mise toolchain
-        uses: jdx/mise-action@v4
-
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-validation
-          cache-on-failure: true
-
-      # zig compiles libghostty for the build machine's exact CPU, so its
-      # cached output can SIGILL on a runner with a different microarch.
-      - name: Evict CPU-specific zig artifacts
-        run: |
-          cargo clean -p libghostty-vt-sys
-          cargo clean --release -p libghostty-vt-sys
 
       - name: Compile and smoke benchmark suite
         run: mise run bench:ci
@@ -248,7 +140,7 @@ jobs:
 
   native-app-bundles:
     name: Native app bundle (${{ matrix.name }})
-    needs: [rust-format, rust-clippy, rust-tests, rust-benchmarks, rust-cross]
+    needs: [rust-format, rust-validation, rust-cross]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -314,9 +206,7 @@ jobs:
       # zig compiles libghostty for the build machine's exact CPU, so its
       # cached output can SIGILL on a runner with a different microarch.
       - name: Evict CPU-specific zig artifacts
-        run: |
-          cargo clean -p libghostty-vt-sys
-          cargo clean --release -p libghostty-vt-sys
+        run: cargo clean -p libghostty-vt-sys
 
       - name: Package native app on Unix
         if: runner.os != 'Windows'

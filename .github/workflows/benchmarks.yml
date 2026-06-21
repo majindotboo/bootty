@@ -66,9 +66,7 @@ jobs:
       # zig compiles libghostty for the build machine's exact CPU, so its
       # cached output can SIGILL on a runner with a different microarch.
       - name: Evict CPU-specific zig artifacts
-        run: |
-          cargo clean -p libghostty-vt-sys
-          cargo clean --release -p libghostty-vt-sys
+        run: cargo clean -p libghostty-vt-sys
 
       - name: Run full benchmark reproduction suite
         run: mise run bench:overnight
