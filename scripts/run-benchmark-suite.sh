@@ -3,22 +3,28 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/run-benchmark-suite.sh [--quick] [--output DIR]
+Usage: scripts/run-benchmark-suite.sh [--ci-smoke] [--quick] [--output DIR]
 
 Runs Bootty benchmark reproduction commands sequentially and writes JSONL command
 metadata. Default mode is compile-only for all benchmark targets, suitable for
 checking that the suite is present without running measured Criterion suites.
 
 Options:
+  --ci-smoke    run only the fast benchmark gate for blocking CI
   --quick       also run a small representative measured subset
   --output DIR write logs and summary.jsonl under DIR
 USAGE
 }
 
+ci_smoke=0
 quick=0
 output_dir=artifacts/benchmark-reproduction/$(date -u +%Y%m%dT%H%M%SZ)
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --ci-smoke)
+      ci_smoke=1
+      shift
+      ;;
     --quick)
       quick=1
       shift
@@ -131,6 +137,18 @@ fi
 if ! run_logged validate_benchmark_dashboard scripts/build-benchmark-dashboard.py --self-test; then
   failures=$((failures + 1))
 fi
+if [[ $ci_smoke -eq 1 ]]; then
+  if ! run_logged compile_paint_plan cargo test -p bootty-app --bench paint_plan --no-run; then
+    failures=$((failures + 1))
+  fi
+  if [[ $failures -ne 0 ]]; then
+    printf 'Wrote benchmark reproduction evidence with %s failure(s): %s\n' "$failures" "$output_dir" >&2
+    exit 1
+  fi
+  printf 'Wrote benchmark reproduction evidence: %s\n' "$output_dir"
+  exit 0
+fi
+
 for target in "${bench_targets[@]}"; do
   if ! run_logged "compile_$target" cargo test -p bootty-app --bench "$target" --no-run; then
     failures=$((failures + 1))

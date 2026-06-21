@@ -29,13 +29,20 @@ Default local validation compiles only the core benchmark harness:
 cargo test -p bootty-app --bench paint_plan --no-run
 ```
 
-CI runs the broader benchmark reproduction path in parallel with the nextest job:
-all checked-in benchmark targets are compile-checked, the `paint_plan` smoke suite
-runs under `cargo test --bench`, and a small measured subset runs with short
-Criterion windows. Local repro:
+CI keeps the blocking benchmark gate deliberately small: it validates benchmark
+metadata/dashboard helpers and compile-checks the core `paint_plan` harness.
+Local repro:
 
 ```bash
-scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/ci
+scripts/run-benchmark-suite.sh --ci-smoke --output artifacts/benchmark-reproduction/ci
+```
+
+The full benchmark reproduction suite runs in the nightly benchmark workflow.
+It compile-checks all checked-in benchmark targets and runs the short measured
+subset that used to block push CI:
+
+```bash
+scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/overnight
 ```
 
 Run task-specific compile-only checks when touching those surfaces. Keep measured
@@ -114,16 +121,22 @@ status before making competitive claims.
 
 ## Reproduction and dashboard workflow
 
+Run the fast blocking-CI benchmark smoke locally:
+
+```bash
+scripts/run-benchmark-suite.sh --ci-smoke --output artifacts/benchmark-reproduction/ci
+```
+
 Compile checked-in benchmark targets and record command metadata:
 
 ```bash
 scripts/run-benchmark-suite.sh --output artifacts/benchmark-reproduction/local
 ```
 
-Run a small measured subset only for local sanity checks:
+Run the nightly/full reproduction shape, including a small measured subset:
 
 ```bash
-scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/quick
+scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/overnight
 ```
 
 Validate launcher/profile manifests:

@@ -1,0 +1,82 @@
+name: Nightly benchmarks
+
+on:
+  schedule:
+    # 02:00 Pacific during standard time; acceptable overnight window year-round.
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_BENCH_DEBUG: 0
+
+jobs:
+  full-benchmark-reproduction:
+    name: Full benchmark reproduction
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            libxdo-dev \
+            pkg-config
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-benchmarks
+          cache-on-failure: true
+
+      # zig compiles libghostty for the build machine's exact CPU, so its
+      # cached output can SIGILL on a runner with a different microarch.
+      - name: Evict CPU-specific zig artifacts
+        run: |
+          cargo clean -p libghostty-vt-sys
+          cargo clean --release -p libghostty-vt-sys
+
+      - name: Run full benchmark reproduction suite
+        run: mise run bench:overnight
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark-reproduction-${{ github.sha }}
+          path: artifacts/benchmark-reproduction/overnight
+          if-no-files-found: ignore

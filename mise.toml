@@ -76,8 +76,12 @@ description = "Run WGPU paint plan Criterion measurements"
 run = "cargo bench -p bootty-app --bench paint_plan_wgpu -- --noplot"
 
 [tasks."bench:ci"]
-description = "Compile all benchmark targets and run the quick CI benchmark subset"
-run = "scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/ci"
+description = "Run the fast benchmark smoke gate for blocking CI"
+run = "scripts/run-benchmark-suite.sh --ci-smoke --output artifacts/benchmark-reproduction/ci"
+
+[tasks."bench:overnight"]
+description = "Run the full benchmark reproduction suite for scheduled CI"
+run = "scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/overnight"
 
 [tasks.package]
 description = "Package the app bundle (macOS .app zip or Linux tarball)"
