@@ -724,6 +724,7 @@ dependencies = [
 name = "bootty-site"
 version = "0.1.0"
 dependencies = [
+ "bootty-surface",
  "egui",
  "png 0.18.1",
  "serde",

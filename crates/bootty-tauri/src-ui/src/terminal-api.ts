@@ -39,16 +39,10 @@ export type TerminalBackend = {
 };
 
 export async function createTerminalBackend(): Promise<TerminalBackend> {
-  const search = new URLSearchParams(window.location.search);
   const backendMode = String(import.meta.env.VITE_TERMINAL_BACKEND ?? "");
-  if (backendMode === "doom") {
-    const { createDoomSiteBackend } = await import("./doom-site-backend");
-    return createDoomSiteBackend(search);
-  }
-
   if (import.meta.env.MODE === "github-pages" || backendMode === "site") {
     const { createRustSiteBackend } = await import("./rust-site-backend");
-    return createRustSiteBackend(search);
+    return createRustSiteBackend(new URLSearchParams(window.location.search));
   }
 
   const { createTauriTerminalBackend } = await import("./tauri-terminal-backend");

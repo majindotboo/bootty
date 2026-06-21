@@ -12,6 +12,7 @@ use crate::{
         BackgroundRect, CursorBlinkPhase, DecorationLine, DecorationStyle, PaintPlanner, PlanColor,
         TerminalPaintPlan, TextAttrs, TextRun,
     },
+    selection::TerminalSelection,
     terminal::{CellStyle, CursorSnapshot, RenderFrame},
     terminal_image::KittyImageFrame,
     terminal_render::TerminalRenderFrame,
@@ -262,6 +263,19 @@ impl RendererFrame {
                     background,
                 };
             }
+        }
+    }
+
+    pub fn select_terminal_selection(&mut self, selection: TerminalSelection) {
+        let rows = self.rows.len() as u16;
+        let cols = self
+            .cells
+            .iter()
+            .map(|cell| cell.x.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        for (row, cols) in selection.row_ranges(rows, cols) {
+            self.select_cells(row, cols);
         }
     }
 

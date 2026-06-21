@@ -1,0 +1,78 @@
+{
+  "name": "bootty.js",
+  "version": "0.1.1",
+  "description": "Browser WebGL renderer and wasm site backend for Bootty terminals.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/majinboos/bootty#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/majinboos/bootty.git",
+    "directory": "packages/bootty-js"
+  },
+  "bugs": {
+    "url": "https://github.com/majinboos/bootty/issues"
+  },
+  "keywords": [
+    "bootty",
+    "terminal",
+    "webgl",
+    "wasm",
+    "xterm"
+  ],
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "examples"
+  ],
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/types/browser.d.ts",
+        "import": "./dist/browser.js",
+        "default": "./dist/browser.js"
+      },
+      "node": {
+        "types": "./dist/types/node.d.ts",
+        "import": "./dist/node.js",
+        "default": "./dist/node.js"
+      },
+      "types": "./dist/types/browser.d.ts",
+      "default": "./dist/browser.js"
+    },
+    "./browser": {
+      "types": "./dist/types/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
+    },
+    "./node": {
+      "types": "./dist/types/node.d.ts",
+      "import": "./dist/node.js",
+      "default": "./dist/node.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/types/browser.d.ts",
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "bun run clean && bun run build:wasm && bun run build:types && bun run build:js && bun run copy:wasm",
+    "build:wasm": "wasm-pack build ../../crates/bootty-site --target web --out-dir ../../packages/bootty-js/src/site-wasm --no-pack",
+    "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
+    "build:js": "tsup src/browser.ts src/node.ts --format esm --sourcemap --splitting --out-dir dist",
+    "copy:wasm": "node scripts/copy-wasm.mjs"
+  },
+  "peerDependencies": {},
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

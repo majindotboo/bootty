@@ -138,9 +138,9 @@ fn platform_active_screen_is_notched() -> bool {
     false
 }
 
-/// Height of the active window's screen notch (camera-housing band), in points. Returns `0.0` off
-/// macOS or when it can't be measured (the menu bar is hidden in fullscreen). Used as the auto
-/// fullscreen top offset when available.
+/// Raw height of the active window's camera-housing/menu-bar exclusion band, in points. Returns
+/// `0.0` off macOS or when it can't be measured. The layout layer calibrates this value to the
+/// physical notch-clear line.
 pub fn macos_active_screen_notch_height() -> f32 {
     platform_active_screen_notch_height()
 }
@@ -175,8 +175,8 @@ fn measure_active_screen_notch_height() -> f32 {
         return 0.0;
     };
     // auxiliaryTopLeftArea is Apple's API for laying out around the camera housing, so it stays
-    // valid in fullscreen with the menu bar hidden (where safeAreaInsets zeroes out). Its band
-    // height is the notch height. Both selectors are macOS 12+, hence the respondsToSelector guard.
+    // valid in fullscreen with the menu bar hidden (where safeAreaInsets zeroes out). Its band can
+    // track the menu-bar exclusion line, which is slightly lower than the physical notch.
     if screen.respondsToSelector(sel!(auxiliaryTopLeftArea)) {
         let height = screen.auxiliaryTopLeftArea().size.height as f32;
         if height > 0.0 {

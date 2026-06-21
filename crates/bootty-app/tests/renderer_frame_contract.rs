@@ -8,6 +8,7 @@ use bootty_app::{
         RendererPreeditRange, RendererSelectionIntent, renderer_cell_constraint_width,
         renderer_cursor_shape,
     },
+    selection::{SelectionPoint, TerminalSelection},
     terminal::{CellStyle, CursorSnapshot, FrameColors, FrameStats, RenderCell, RenderFrame},
     terminal_text::TerminalTextConfig,
 };
@@ -51,6 +52,46 @@ fn renderer_frame_preserves_rows_cells_metrics_padding_cursor_and_decor() {
         RendererSelectionIntent::None
     );
     assert_eq!(renderer_frame.cursor.map(|cursor| cursor.x), Some(1));
+}
+
+#[test]
+fn renderer_frame_applies_shared_terminal_selection() {
+    let surface = TerminalSurface::for_logical_size(
+        40.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let frame = render_frame(vec![
+        cell(0, 0, 0, 1, CellStyle::default()),
+        cell(1, 0, 1, 1, CellStyle::default()),
+        cell(0, 1, 2, 1, CellStyle::default()),
+        cell(1, 1, 3, 1, CellStyle::default()),
+    ])
+    .with_text(vec!['A', 'B', 'C', 'D']);
+    let mut renderer_frame = RendererFrame::from_terminal(
+        &frame,
+        surface,
+        &TerminalTextConfig::with_cell_metrics(surface.cell),
+    );
+
+    renderer_frame.select_terminal_selection(TerminalSelection::new(
+        SelectionPoint::new(1, 0),
+        SelectionPoint::new(0, 1),
+    ));
+
+    assert_eq!(
+        renderer_frame.cells[0].selection,
+        RendererSelectionIntent::None
+    );
+    assert!(matches!(
+        renderer_frame.cells[1].selection,
+        RendererSelectionIntent::Selected { .. }
+    ));
+    assert!(matches!(
+        renderer_frame.cells[2].selection,
+        RendererSelectionIntent::Selected { .. }
+    ));
 }
 
 #[test]

@@ -4,7 +4,7 @@ mod assets;
 pub use bootty_config::{color, config, config_reload};
 pub mod diagnostics;
 pub use bootty_render::{
-    geometry, paint_plan, renderer_frame, terminal_font_backend, terminal_font_face,
+    geometry, paint_plan, renderer_frame, selection, terminal_font_backend, terminal_font_face,
     terminal_font_shared_grid_set, terminal_font_tables, terminal_render, terminal_sprite,
     terminal_text, terminal_text_atlas, terminal_wgpu,
 };

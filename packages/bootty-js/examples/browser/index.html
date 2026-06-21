@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bootty.js browser example</title>
+    <style>
+      html,
+      body,
+      #terminal-root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background: #11111b;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="terminal-root">
+      <canvas id="terminal" aria-label="Bootty terminal" role="application"></canvas>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

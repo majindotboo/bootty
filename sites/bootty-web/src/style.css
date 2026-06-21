@@ -1,0 +1,273 @@
+@font-face {
+  font-family: "Maple Mono NF";
+  src: url("/MapleMono-NF-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Fira Code";
+  src: url("/FiraCode-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+}
+
+:root {
+  color-scheme: dark;
+  background: #0d0f15;
+  color: #d6def7;
+  font-family: "Fira Code", "Maple Mono NF", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --bg: #0d0f15;
+  --panel: #121620;
+  --panel-raised: #171c28;
+  --line: #2a3040;
+  --text: #d6def7;
+  --muted: #8b95b6;
+  --accent: #ff4fa8;
+  --ok: #9edc6a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr) 56px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.site-header {
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand,
+.site-sidebar a,
+.site-footer a {
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 24px;
+  height: 24px;
+  display: block;
+  object-fit: contain;
+}
+
+.brand-name {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.brand-domain {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.fps-counter {
+  color: var(--ok);
+  font-size: 13px;
+}
+
+.site-shell {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.site-sidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 20px 12px;
+  border-right: 1px solid var(--line);
+  background: #0a0d13;
+  overflow: hidden;
+}
+
+.site-sidebar a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-left: 2px solid transparent;
+  color: var(--muted);
+}
+
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  color: currentcolor;
+  overflow: visible;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-icon-fill {
+  width: 18px;
+  height: 18px;
+  fill: currentcolor;
+  stroke: none;
+}
+
+.site-sidebar a:hover,
+.site-sidebar a:focus-visible,
+.site-sidebar a.is-active {
+  color: var(--text);
+  background: var(--panel);
+  outline: none;
+}
+
+.site-sidebar a.is-active {
+  border-left-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel-raised);
+}
+
+.page-terminal {
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  background: var(--bg);
+  overflow: hidden;
+  contain: paint;
+}
+
+#terminal {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  outline: none;
+  box-shadow: none;
+}
+
+#terminal:focus-visible {
+  outline: none;
+}
+
+.site-footer {
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 24px;
+  border-top: 1px solid var(--line);
+  background: #0b0e14;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.site-footer nav {
+  display: flex;
+  align-items: center;
+  gap: clamp(20px, 4vw, 48px);
+}
+
+.site-footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.site-footer a:hover,
+.site-footer a:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+@media (max-width: 760px) {
+  body {
+    display: block;
+    overflow: auto;
+  }
+
+  .site-header {
+    min-height: 56px;
+    padding: 12px 16px;
+  }
+
+  .brand-domain {
+    display: none;
+  }
+
+  .site-shell {
+    min-height: calc(100vh - 112px);
+    grid-template-columns: 1fr;
+  }
+
+  .site-sidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .site-sidebar a {
+    min-width: max-content;
+  }
+
+  .page-terminal {
+    height: min(720px, calc(100vh - 178px));
+  }
+
+  .site-footer {
+    min-height: 56px;
+    padding: 14px 16px;
+  }
+}

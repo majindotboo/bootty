@@ -108,8 +108,8 @@ pub struct WindowConfig {
     pub width: f32,
     pub height: f32,
     pub fullscreen: WindowFullscreen,
-    /// Top offset reserved when the window covers a notched screen in fullscreen. `None` auto-detects
-    /// the notch height from the display's safe area; `Some` overrides it.
+    /// Top offset reserved when the window covers a notched screen in fullscreen. `None` uses the
+    /// calibrated auto-detected notch offset; `Some` overrides it exactly.
     pub fullscreen_top_offset: Option<f32>,
     /// When fullscreen on a notched screen, let the terminal/tab bar sit inside the notch band
     /// instead of being pushed entirely below it.

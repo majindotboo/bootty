@@ -22,9 +22,11 @@ use crate::{
     },
 };
 
-/// Fallback notch height (points) when the screen reports a notch by name but the exact inset can't
-/// be measured (the menu bar is hidden in fullscreen). The configurable offset overrides it.
-const FALLBACK_NOTCH_HEIGHT: f32 = 32.0;
+/// Fallback layout offset (points) when a notched screen is detected but the exact band can't
+/// be measured. This intentionally targets the physical notch, not the slightly lower menu-bar
+/// drop-down line reported by macOS safe-area APIs.
+const FALLBACK_NOTCH_LAYOUT_OFFSET: f32 = 24.0;
+const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 8.0;
 /// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
@@ -39,6 +41,18 @@ fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32
         0.0
     } else {
         chrome::STATUS_EDGE_PAD
+    }
+}
+
+fn fullscreen_notch_layout_offset(configured_offset: Option<f32>, measured_band: f32) -> f32 {
+    if let Some(offset) = configured_offset {
+        return offset.max(0.0);
+    }
+
+    if measured_band > 0.0 {
+        (measured_band - MACOS_NOTCH_MENU_BAR_OVERSHOOT).max(0.0)
+    } else {
+        FALLBACK_NOTCH_LAYOUT_OFFSET
     }
 }
 
@@ -316,17 +330,14 @@ impl BoottyApp {
         // Detect the notch by display name (stable across fullscreen/menu-bar state) rather than the
         // safe-area inset, which zeroes out when the menu bar is hidden in non-native fullscreen.
         let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_is_notched();
-        // Pixel height for the layout offset: the config override, else the measured inset when
-        // available, else a fallback (the inset is unreadable while the menu bar is hidden).
-        let measured_notch = crate::platform::macos_active_screen_notch_height();
+        // Pixel height for the layout offset: the config override, else the measured macOS band
+        // calibrated to the physical notch, else a fallback when the band is unreadable.
+        let measured_band = crate::platform::macos_active_screen_notch_height();
         let fullscreen_top_offset = if notch_context {
-            self.state
-                .config()
-                .window
-                .fullscreen_top_offset
-                .or((measured_notch > 0.0).then_some(measured_notch))
-                .unwrap_or(FALLBACK_NOTCH_HEIGHT)
-                .max(0.0)
+            fullscreen_notch_layout_offset(
+                self.state.config().window.fullscreen_top_offset,
+                measured_band,
+            )
         } else {
             0.0
         };

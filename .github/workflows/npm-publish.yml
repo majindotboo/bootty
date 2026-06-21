@@ -1,0 +1,66 @@
+name: Publish bootty.js
+
+on:
+  push:
+    tags:
+      - "bootty.js-v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack only; do not publish"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish bootty.js to npm
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v2
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set up Node for npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14"
+          registry-url: https://registry.npmjs.org
+
+      - name: Use npm with trusted publishing support
+        run: npm install -g npm@11.5.1
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Install dependencies
+        run: bun install --filter bootty.js --frozen-lockfile
+
+      - name: Build package
+        run: bun run --filter bootty.js build
+
+      - name: Validate package contents
+        working-directory: packages/bootty-js
+        run: npm --workspaces=false pack --dry-run
+
+      - name: Publish package
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+        working-directory: packages/bootty-js
+        run: npm --workspaces=false publish --access public --provenance

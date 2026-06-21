@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Bootty terminal UI and renderer for native and web apps" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/favicon.png" />
+    <title>Bootty</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" data-route="overview" aria-label="Bootty home">
+        <img class="brand-mark" src="/bootty-mascot.png" alt="" width="24" height="24" />
+        <span class="brand-name">BOOTTY</span>
+        <span class="brand-domain">bootty.org</span>
+      </a>
+      <span id="fps-counter" class="fps-counter" aria-label="Renderer frame rate">000.0 fps</span>
+    </header>
+    <div class="site-shell">
+      <nav class="site-sidebar" aria-label="Bootty site sections">
+        <a href="/" data-route="overview"><span>Overview</span></a>
+        <a href="/quickstart" data-route="quickstart"><span>Quickstart</span></a>
+        <a href="/docs" data-route="docs"><span>Docs</span></a>
+        <a href="/renderer" data-route="renderer"><span>Renderer</span></a>
+        <a href="/config" data-route="config"><span>Config</span></a>
+      </nav>
+      <main class="page-terminal" aria-label="Bootty-rendered page content">
+        <canvas id="terminal" aria-label="Interactive Bootty page content" tabindex="0"></canvas>
+      </main>
+    </div>
+    <footer class="site-footer">
+      <nav aria-label="Project links">
+        <a href="https://www.npmjs.com/package/bootty.js" rel="noreferrer">
+          <svg class="footer-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7h18v10H3z"/><path d="M7 15V9h3v6"/><path d="M14 15V9h3v6"/></svg>
+          <span>npm</span>
+        </a>
+        <a href="https://github.com/majinboos/bootty" rel="noreferrer">
+          <svg class="footer-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.8.6-3.4-1.2-3.4-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 .1 1.6 1.1 1.6 1.1.9 1.6 2.5 1.1 3.1.8.1-.7.4-1.1.7-1.4-2.2-.3-4.6-1.1-4.6-4.9 0-1.1.4-2 1.1-2.7-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.8 9.8 0 0 1 5.2 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7.7.7 1.1 1.6 1.1 2.7 0 3.8-2.4 4.6-4.6 4.9.4.3.8 1 .8 2.1V21c0 .3.2.6.8.5A10 10 0 0 0 12 2z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </nav>
+      <span>© 2026 Bootty</span>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

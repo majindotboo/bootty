@@ -11,6 +11,10 @@ pub mod geometry {
     pub use bootty_surface::geometry::*;
 }
 
+pub mod selection {
+    pub use bootty_surface::selection::*;
+}
+
 pub mod terminal {
     pub use crate::terminal_engine::{TERMINAL_BACKGROUND, TERMINAL_FOREGROUND, TerminalEngine};
     pub use crate::terminal_frame::{

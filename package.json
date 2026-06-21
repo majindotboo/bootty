@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "sites/*"
+  ],
+  "scripts": {
+    "build:bootty-js": "bun run --filter bootty.js build",
+    "build:web": "bun run --filter bootty-web build"
+  }
+}
