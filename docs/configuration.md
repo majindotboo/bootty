@@ -70,6 +70,11 @@ env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
 colorterm = "truecolor"
 max-scrollback = 320000000
+glyph-protocol = true
+
+[cursor]
+style = "block" # block, bar, underline, or hollow-block
+blink = false
 
 [diagnostics]
 stability-trace = "/tmp/bootty-stability.csv"
@@ -153,16 +158,17 @@ and supports `ignore`, `previous_session`, `next_session`, `activate_session`,
 and `focus_terminal`.
 
 Reload validates the full effective config first. If parsing, theme resolution,
-modifier remap parsing, keybind parsing, or live terminal color application
-fails, the current in-memory config remains active.
+modifier remap parsing, keybind parsing, or live terminal color/cursor
+application fails, the current in-memory config remains active.
+
+Libghostty-vt logs are bridged to stderr. Set `BOOTTY_LIBGHOSTTY_LOG=error|warn|info|debug|off` to adjust verbosity; unset defaults to warnings and errors.
 
 Live-applied fields:
 
 - `[chrome]` sidebar/status visibility, layout, and inactive panel dimming
 - `[multiplexer]` backend selection and backend UI mode
 - `[input]` modifier remaps, macOS Option-as-Meta mode, global keybinds, and sidebar keybinds
-- `[font]` terminal text metrics
-- `theme` and `[colors]` terminal defaults
+- `theme`, `[colors]` terminal defaults, `[cursor]` defaults, and `[session].glyph-protocol`
 - `[window].title`
 - `[diagnostics].stability-trace`
 

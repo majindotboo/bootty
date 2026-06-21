@@ -17,6 +17,7 @@ use crate::{
     paint_plan::{CursorBlinkPhase, PaintPlanner},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
     terminal::{CursorSnapshot, RenderFrame},
+    terminal_engine::TerminalSelectionEvent,
     terminal_render::{TerminalRenderCommand, TerminalRenderFrame},
     terminal_text::{TerminalTextConfig, TerminalTextContract},
     terminal_wgpu::{terminal_render_callback, terminal_text_cell_metrics},
@@ -118,8 +119,8 @@ impl TerminalWidget {
     ) -> Result<TerminalSurface> {
         let available = ui.available_size_before_wrap();
         let desired = Vec2::new(available.x.max(320.0), available.y.max(240.0));
-        let (rect, response) = ui.allocate_exact_size(desired, Sense::click());
-        if response.clicked() {
+        let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+        if response.clicked() || response.drag_started() {
             response.request_focus();
         }
 
@@ -131,8 +132,9 @@ impl TerminalWidget {
         self.metrics.extract_total_us = extract_start.elapsed().as_micros() as u64;
         // Match the grid rect the renderer projects through, so pinch/pan math agrees with it.
         self.last_surface = Some(surface.grid_rect(frame.cols, frame.rows));
-        self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.handle_scrollbar_interaction(ui, surface, frame.as_ref(), terminal)?;
+        self.handle_selection_interaction(ui, surface, &response, terminal)?;
+        self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.paint(ui, surface, &frame)?;
         self.metrics.render_state_update_us = frame.stats.render_state_update_us;
         self.metrics.frame_extraction_us = frame.stats.extraction_us;
@@ -153,6 +155,42 @@ impl TerminalWidget {
     }
     pub fn cell_dimensions(&self) -> (f32, f32) {
         (self.cell.width, self.cell.height)
+    }
+
+    fn handle_selection_interaction(
+        &self,
+        ui: &egui::Ui,
+        surface: TerminalSurface,
+        response: &egui::Response,
+        terminal: &mut dyn TerminalRenderSource,
+    ) -> Result<()> {
+        if self.scrollbar.dragging || self.scrollbar.thumb_hovered {
+            return Ok(());
+        }
+        let rectangle = ui.input(|input| input.modifiers.alt);
+        if response.drag_started()
+            && let Some(event) = response
+                .interact_pointer_pos()
+                .and_then(|pos| selection_event(surface, self.view, pos, rectangle))
+        {
+            terminal.begin_selection(event)?;
+        }
+        if response.dragged()
+            && let Some(event) = response
+                .interact_pointer_pos()
+                .and_then(|pos| selection_event(surface, self.view, pos, rectangle))
+        {
+            terminal.update_selection(event)?;
+        }
+        if response.drag_stopped() {
+            let event = response
+                .interact_pointer_pos()
+                .and_then(|pos| selection_event(surface, self.view, pos, rectangle));
+            terminal.end_selection(event)?;
+        } else if response.clicked() {
+            terminal.clear_selection()?;
+        }
+        Ok(())
     }
 
     fn handle_hyperlink_interaction(
@@ -633,6 +671,19 @@ struct CursorBlinkKey {
     y: u16,
     at_wide_tail: bool,
 }
+fn selection_event(
+    surface: TerminalSurface,
+    view: ViewTransform,
+    pos: Pos2,
+    rectangle: bool,
+) -> Option<TerminalSelectionEvent> {
+    let position = surface.relative_position(view.inverse_point(pos))?;
+    Some(TerminalSelectionEvent {
+        surface,
+        position,
+        rectangle,
+    })
+}
 
 impl From<CursorSnapshot> for CursorBlinkKey {
     fn from(cursor: CursorSnapshot) -> Self {
@@ -763,6 +814,7 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
             images: Default::default(),
@@ -801,6 +853,7 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
             images: KittyImageFrame {

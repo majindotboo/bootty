@@ -11,7 +11,10 @@ use toml_edit::{DocumentMut, Item, Table, TableLike};
 use bootty_render::terminal_text::{FontFeature, TerminalTextConfig};
 use bootty_runtime::{SessionLaunchConfig, TerminalSessionConfig};
 use bootty_terminal::{
-    terminal_engine::{NATIVE_MAX_SCROLLBACK, TERMINAL_TERM, TerminalColorConfig},
+    terminal_engine::{
+        NATIVE_MAX_SCROLLBACK, TERMINAL_TERM, TerminalColorConfig, TerminalCursorConfig,
+        TerminalCursorStyle, TerminalFeatureConfig,
+    },
     terminal_input_model::MacosOptionAsAlt,
 };
 use bootty_winit::modifier_remap::ModifierRemapSet;
@@ -23,6 +26,7 @@ pub struct BoottyConfig {
     pub version: u32,
     pub theme: Option<String>,
     pub colors: ColorConfig,
+    pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
     pub sidebar: SidebarConfig,
@@ -45,6 +49,8 @@ struct RawConfig {
     include: Vec<String>,
     #[serde(default)]
     colors: ColorPatch,
+    #[serde(default)]
+    cursor: CursorPatch,
     #[serde(default)]
     font: FontPatch,
     #[serde(default)]
@@ -378,6 +384,7 @@ pub struct SessionConfig {
     pub term: String,
     pub colorterm: String,
     pub max_scrollback: usize,
+    pub glyph_protocol: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -389,6 +396,7 @@ struct SessionPatch {
     term: Option<String>,
     colorterm: Option<String>,
     max_scrollback: Option<usize>,
+    glyph_protocol: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -456,6 +464,39 @@ struct ColorPatch {
     palette_harmonious: Option<bool>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CursorConfig {
+    pub style: Option<CursorStyleConfig>,
+    pub blink: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CursorStyleConfig {
+    Bar,
+    Block,
+    Underline,
+    HollowBlock,
+}
+
+impl From<CursorStyleConfig> for TerminalCursorStyle {
+    fn from(value: CursorStyleConfig) -> Self {
+        match value {
+            CursorStyleConfig::Bar => Self::Bar,
+            CursorStyleConfig::Block => Self::Block,
+            CursorStyleConfig::Underline => Self::Underline,
+            CursorStyleConfig::HollowBlock => Self::HollowBlock,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct CursorPatch {
+    style: Option<CursorStyleConfig>,
+    blink: Option<bool>,
+}
+
 #[derive(Debug)]
 pub struct ConfigLoadError {
     message: String,
@@ -511,6 +552,14 @@ impl FontConfig {
     }
 }
 
+impl SessionConfig {
+    pub fn terminal_feature_config(&self) -> TerminalFeatureConfig {
+        TerminalFeatureConfig {
+            glyph_protocol: self.glyph_protocol,
+        }
+    }
+}
+
 impl Default for ChromeConfig {
     fn default() -> Self {
         Self {
@@ -545,6 +594,7 @@ impl Default for SessionConfig {
             term: TERMINAL_TERM.to_owned(),
             colorterm: "truecolor".to_owned(),
             max_scrollback: NATIVE_MAX_SCROLLBACK,
+            glyph_protocol: true,
         }
     }
 }
@@ -568,6 +618,8 @@ impl BoottyConfig {
         TerminalSessionConfig {
             launch: self.session.launch_config(),
             colors: self.colors.terminal_color_config(),
+            cursor: self.cursor.terminal_cursor_config(),
+            features: self.session.terminal_feature_config(),
             max_scrollback: self.session.max_scrollback,
             macos_option_as_alt: self.input.macos_option_as_alt.into(),
             side_effect_tx: None,
@@ -610,6 +662,15 @@ impl ColorConfig {
         terminal.palette_generate = self.palette_generate;
         terminal.palette_harmonious = self.palette_harmonious;
         terminal
+    }
+}
+
+impl CursorConfig {
+    pub fn terminal_cursor_config(&self) -> TerminalCursorConfig {
+        TerminalCursorConfig {
+            style: self.style.map(Into::into),
+            blink: self.blink,
+        }
     }
 }
 
@@ -1102,6 +1163,7 @@ impl Default for BoottyConfig {
             version: 1,
             theme: None,
             colors: ColorConfig::default(),
+            cursor: CursorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
             sidebar: SidebarConfig::default(),
@@ -1445,6 +1507,7 @@ impl ConfigResolver<'_> {
             config.colors = resolve_theme_colors(theme, self.config_dir)?;
         }
         apply_partial_colors(&mut config.colors, raw.colors);
+        apply_partial_cursor(&mut config.cursor, raw.cursor);
         apply_partial_font(&mut config.font, raw.font)?;
         apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
@@ -1599,6 +1662,7 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
     apply_value(&mut session.term, partial.term);
     apply_value(&mut session.colorterm, partial.colorterm);
     apply_value(&mut session.max_scrollback, partial.max_scrollback);
+    apply_value(&mut session.glyph_protocol, partial.glyph_protocol);
 }
 
 fn apply_partial_diagnostics(diagnostics: &mut DiagnosticsConfig, partial: DiagnosticsPatch) {
@@ -1640,6 +1704,11 @@ fn apply_partial_colors(colors: &mut ColorConfig, partial: ColorPatch) {
     apply_value(&mut colors.palette, partial.palette);
     apply_value(&mut colors.palette_generate, partial.palette_generate);
     apply_value(&mut colors.palette_harmonious, partial.palette_harmonious);
+}
+
+fn apply_partial_cursor(cursor: &mut CursorConfig, partial: CursorPatch) {
+    apply_present(&mut cursor.style, partial.style);
+    apply_present(&mut cursor.blink, partial.blink);
 }
 
 fn resolve_theme_colors(theme: &str, config_dir: &Path) -> ConfigResult<ColorConfig> {

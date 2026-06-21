@@ -217,6 +217,100 @@ fn native_terminal_scrolls_viewport_through_owned_scrollback() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_engine_projects_active_selection_into_render_frame() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 8,
+        rows: 2,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let surface = TerminalSurface::for_logical_size(
+        80.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let event = |x, y| TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint { x, y },
+        rectangle: false,
+    };
+
+    engine.write_vt(b"abcdefgh");
+    engine.begin_selection(event(15.0, 10.0))?;
+    engine.update_selection(event(45.0, 10.0))?;
+    engine.end_selection(Some(event(45.0, 10.0)))?;
+
+    assert_eq!(
+        engine.extract_frame()?.selections,
+        vec![FrameSelection {
+            row: 0,
+            start_col: 1,
+            end_col: 3,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_formats_active_selection_as_plain_text() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 8,
+        rows: 2,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let surface = TerminalSurface::for_logical_size(
+        80.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let event = |x, y| TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint { x, y },
+        rectangle: false,
+    };
+
+    engine.write_vt(b"abcdefgh");
+    engine.begin_selection(event(15.0, 10.0))?;
+    engine.update_selection(event(45.0, 10.0))?;
+    engine.end_selection(Some(event(45.0, 10.0)))?;
+
+    let text = engine
+        .format_selection(TerminalSelectionFormat::PlainText)?
+        .expect("active selection");
+    assert_eq!(String::from_utf8_lossy(&text), "bcd");
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_applies_configured_default_cursor_style_and_blink() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_cursor_options(
+        TerminalGeometry {
+            cols: 8,
+            rows: 2,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        TerminalCursorConfig {
+            style: Some(TerminalCursorStyle::Underline),
+            blink: Some(true),
+        },
+        DEFAULT_MAX_SCROLLBACK,
+        MacosOptionAsAlt::default(),
+    )?;
+
+    engine.write_vt(b"\x1b[0 q");
+    let cursor = engine.extract_frame()?.cursor.expect("visible cursor");
+
+    assert_eq!(cursor.style, CursorVisualStyle::Underline);
+    assert!(cursor.blinking);
+    Ok(())
+}
+
 proptest! {
     #[test]
     fn terminal_engine_extracts_truecolor_sgr_cells(

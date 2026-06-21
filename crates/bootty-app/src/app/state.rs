@@ -57,8 +57,8 @@ use crate::{
     },
 };
 use bootty_terminal::terminal_engine::{
-    TerminalSideEffect, encode_iterm2_report_cell_size, encode_iterm2_report_variable,
-    encode_osc52_response,
+    TerminalSelectionFormat, TerminalSideEffect, encode_iterm2_report_cell_size,
+    encode_iterm2_report_variable, encode_osc52_response,
 };
 
 const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -902,6 +902,24 @@ impl AppState {
             self.last_error = self.config_state.last_error().map(str::to_owned);
             return false;
         }
+        if previous.cursor != next.cursor
+            && let Err(error) = self
+                .terminal
+                .set_cursor_config(next.cursor.terminal_cursor_config())
+        {
+            self.config_state.reject(error.to_string());
+            self.last_error = self.config_state.last_error().map(str::to_owned);
+            return false;
+        }
+        if previous.session.glyph_protocol != next.session.glyph_protocol
+            && let Err(error) = self
+                .terminal
+                .set_feature_config(next.session.terminal_feature_config())
+        {
+            self.config_state.reject(error.to_string());
+            self.last_error = self.config_state.last_error().map(str::to_owned);
+            return false;
+        }
         if previous.font != next.font {
             effects.push(AppEffect::SetTerminalTextConfig(
                 next.font.terminal_text_config(),
@@ -1190,7 +1208,7 @@ impl AppState {
             }
             KeybindAction::Font(action) => self.apply_font_size_action(action, effects),
             KeybindAction::CopyToClipboard => {
-                effects.push(AppEffect::RequestCopy);
+                self.copy_terminal_selection_or_request_copy(effects);
             }
             KeybindAction::PasteFromClipboard => match read_clipboard_text() {
                 Ok(Some(text)) => {
@@ -1201,6 +1219,22 @@ impl AppState {
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error.to_string()),
             },
+        }
+    }
+
+    fn copy_terminal_selection_or_request_copy(&mut self, effects: &mut Vec<AppEffect>) {
+        match self
+            .terminal
+            .format_selection(TerminalSelectionFormat::PlainText)
+        {
+            Ok(Some(bytes)) => {
+                let text = String::from_utf8_lossy(&bytes);
+                if let Err(error) = write_clipboard_text(&text) {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            Ok(None) => effects.push(AppEffect::RequestCopy),
+            Err(error) => self.last_error = Some(error.to_string()),
         }
     }
 

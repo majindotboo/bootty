@@ -265,6 +265,15 @@ native = [
 # ]
 # term = "xterm-bootty"
 # colorterm = "truecolor"
+# Ghostty Glyph Protocol APC handling. Enabled by default; disable if an app's
+# custom glyph sequences cause compatibility issues.
+glyph-protocol = true
+
+[cursor]
+# Live-reloaded default used when applications reset the cursor style (CSI 0 q).
+# style accepts: block, bar, underline, hollow-block.
+style = "block"
+blink = false
 
 [diagnostics]
 # Live-reloaded. Set to a writable path to record frame/status stability data.

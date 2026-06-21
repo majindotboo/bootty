@@ -3,12 +3,14 @@ use std::{
     cell::RefCell,
     io::Write as _,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
     time::Instant,
 };
 
 use crate::{
-    geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface},
+    geometry::{
+        CellMetrics, GridPoint, SurfacePoint, TerminalGeometry, TerminalPadding, TerminalSurface,
+    },
     terminal_image::{
         KittyImageDataCache, KittyImageFrame, KittyVirtualCell, append_virtual_image_placements,
         collect_kitty_image_frame,
@@ -18,21 +20,25 @@ use crate::{
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use libghostty_vt::{
-    Terminal, TerminalOptions, focus, key,
+    Terminal, TerminalOptions,
+    fmt::Format,
+    focus, key,
     kitty::graphics::set_png_decoder,
     mouse, paste,
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIteration, RowIterator},
+    selection::{FormatOptions as SelectionFormatOptions, gesture},
     style::RgbColor,
     terminal::{
-        ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
-        Point, PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
-        SizeReportSize, TertiaryDeviceAttributes,
+        ColorScheme, ConformanceLevel, CursorStyle, DeviceAttributeFeature, DeviceAttributes,
+        DeviceType, Mode, Point, PointCoordinate, PrimaryDeviceAttributes, ScrollViewport,
+        SecondaryDeviceAttributes, SizeReportSize, TertiaryDeviceAttributes,
     },
 };
 use memchr::memchr3_iter;
 
 use crate::terminal_frame::{
-    CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, FrameStats, RenderCell, RenderFrame,
+    CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, FrameSelection, FrameStats, RenderCell,
+    RenderFrame,
 };
 use crate::terminal_input_model::{
     KeyInput, MacosOptionAsAlt, MouseAction, MouseEncoderSize, MouseInput,
@@ -97,6 +103,44 @@ impl Default for TerminalColorConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalCursorConfig {
+    pub style: Option<TerminalCursorStyle>,
+    pub blink: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalCursorStyle {
+    Bar,
+    Block,
+    Underline,
+    HollowBlock,
+}
+
+impl TerminalCursorStyle {
+    fn into_ghostty(self) -> CursorStyle {
+        match self {
+            Self::Bar => CursorStyle::Bar,
+            Self::Block => CursorStyle::Block,
+            Self::Underline => CursorStyle::Underline,
+            Self::HollowBlock => CursorStyle::BlockHollow,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalFeatureConfig {
+    pub glyph_protocol: bool,
+}
+
+impl Default for TerminalFeatureConfig {
+    fn default() -> Self {
+        Self {
+            glyph_protocol: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalSideEffect {
     Bell,
@@ -119,11 +163,71 @@ pub enum TerminalSideEffect {
     UnsupportedHostCommand { protocol: String, command: String },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalSelectionEvent {
+    pub surface: TerminalSurface,
+    pub position: SurfacePoint,
+    pub rectangle: bool,
+}
+
+impl TerminalSelectionEvent {
+    fn grid_point(self) -> GridPoint {
+        let x = ((self.position.x - self.surface.padding.left).max(0.0) / self.surface.cell.width)
+            .floor();
+        let y = ((self.position.y - self.surface.padding.top).max(0.0) / self.surface.cell.height)
+            .floor();
+        GridPoint {
+            x: x as u16,
+            y: y as u16,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalSelectionFormat {
+    PlainText,
+    Vt,
+    Html,
+}
+
+impl TerminalSelectionFormat {
+    fn emit_format(self) -> Format {
+        match self {
+            Self::PlainText => Format::Plain,
+            Self::Vt => Format::Vt,
+            Self::Html => Format::Html,
+        }
+    }
+}
+
+fn selection_geometry(surface: TerminalSurface) -> gesture::Geometry {
+    let metrics = surface.mouse_metrics();
+    let grid = surface.raw_grid_size();
+    gesture::Geometry {
+        columns: u32::from(grid.cols),
+        cell_width: metrics.cell_width,
+        padding_left: metrics.padding.left,
+        screen_height: metrics.screen_height,
+    }
+}
+
+fn selection_point(
+    event: TerminalSelectionEvent,
+    geometry: TerminalGeometry,
+) -> Option<PointCoordinate> {
+    let grid = event.grid_point();
+    (grid.x < geometry.cols && grid.y < geometry.rows).then_some(PointCoordinate {
+        x: grid.x,
+        y: u32::from(grid.y),
+    })
+}
+
 #[derive(Default)]
 struct CachedRenderRow {
     cells: Vec<RenderCell>,
     text: Vec<char>,
     virtual_cells: Vec<KittyVirtualCell>,
+    selection: Option<FrameSelection>,
     has_virtual_placeholder: bool,
 }
 
@@ -132,6 +236,7 @@ impl CachedRenderRow {
         self.cells.clear();
         self.text.clear();
         self.virtual_cells.clear();
+        self.selection = None;
         self.has_virtual_placeholder = false;
     }
 }
@@ -149,6 +254,11 @@ fn extract_render_row(
     let raw_row = row.raw_row()?;
     let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
     out.has_virtual_placeholder = raw_row.has_kitty_virtual_placeholder()?;
+    out.selection = row.selection()?.map(|selection| FrameSelection {
+        row: row_index,
+        start_col: selection.start_x,
+        end_col: selection.end_x,
+    });
 
     let mut cell_iter = cell_iterator.update(row)?;
     let mut col_index = 0_u16;
@@ -277,12 +387,16 @@ pub struct TerminalEngine {
     macos_option_as_alt: MacosOptionAsAlt,
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
+    selection_gesture: gesture::Gesture<'static>,
+    selection_press_event: gesture::PressEvent<'static>,
+    selection_drag_event: gesture::DragEvent<'static>,
+    selection_release_event: gesture::ReleaseEvent<'static>,
     mouse_any_button_pressed: bool,
     mouse_encoder_options_dirty: bool,
     mouse_encoder_size: Option<MouseEncoderSize>,
     geometry: TerminalGeometry,
     size_report_geometry: Arc<Mutex<TerminalGeometry>>,
-    osc_pwd_pending: Vec<u8>,
+    current_working_directory_state: Arc<Mutex<String>>,
     osc_side_effect_pending: Vec<u8>,
     terminal_write_pending: Vec<u8>,
     cursor_home_pending_len: usize,
@@ -326,6 +440,76 @@ fn configure_default_colors(
         .set_default_fg_color(Some(config.foreground))?
         .set_default_cursor_color(config.cursor)?;
     Ok(())
+}
+
+fn configure_default_cursor(
+    terminal: &mut Terminal<'static, 'static>,
+    config: TerminalCursorConfig,
+) -> Result<()> {
+    terminal
+        .set_default_cursor_style(config.style.map(TerminalCursorStyle::into_ghostty))?
+        .set_default_cursor_blink(config.blink)?;
+    Ok(())
+}
+
+fn configure_terminal_features(
+    terminal: &mut Terminal<'static, 'static>,
+    config: TerminalFeatureConfig,
+) -> Result<()> {
+    terminal.set_glyph_protocol_enabled(config.glyph_protocol)?;
+    Ok(())
+}
+
+struct BoottyGhosttyLogger;
+
+impl libghostty_vt::log::Logger for BoottyGhosttyLogger {
+    fn log(&self, level: libghostty_vt::log::Level, scope: &str, message: &str) {
+        if !libghostty_log_enabled(level) {
+            return;
+        }
+        let scope = if scope.is_empty() {
+            "libghostty-vt"
+        } else {
+            scope
+        };
+        eprintln!("[libghostty-vt {level:?}] {scope}: {message}");
+    }
+}
+
+fn install_libghostty_logger() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = libghostty_vt::set_logger(Some(Box::new(BoottyGhosttyLogger)));
+    });
+}
+
+fn libghostty_log_enabled(level: libghostty_vt::log::Level) -> bool {
+    let minimum = std::env::var("BOOTTY_LIBGHOSTTY_LOG")
+        .ok()
+        .and_then(|value| parse_libghostty_log_level(&value))
+        .unwrap_or(Some(libghostty_vt::log::Level::Warning));
+    minimum.is_some_and(|minimum| log_level_rank(level) <= log_level_rank(minimum))
+}
+
+fn parse_libghostty_log_level(value: &str) -> Option<Option<libghostty_vt::log::Level>> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "false" | "0" => Some(None),
+        "error" => Some(Some(libghostty_vt::log::Level::Error)),
+        "warn" | "warning" | "true" | "1" => Some(Some(libghostty_vt::log::Level::Warning)),
+        "info" => Some(Some(libghostty_vt::log::Level::Info)),
+        "debug" | "trace" | "all" => Some(Some(libghostty_vt::log::Level::Debug)),
+        _ => None,
+    }
+}
+
+fn log_level_rank(level: libghostty_vt::log::Level) -> u8 {
+    match level {
+        libghostty_vt::log::Level::Error => 0,
+        libghostty_vt::log::Level::Warning => 1,
+        libghostty_vt::log::Level::Info => 2,
+        libghostty_vt::log::Level::Debug => 3,
+        _ => 3,
+    }
 }
 
 fn rgb((r, g, b): (u8, u8, u8)) -> RgbColor {
@@ -407,18 +591,13 @@ fn find_osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
 struct TerminalWriteFeatures {
     tmux_passthrough: bool,
     kitty_graphics: bool,
-    osc_pwd: bool,
     osc_side_effect: bool,
     osc_color: bool,
 }
 
 impl TerminalWriteFeatures {
     fn needs_sanitizing(self) -> bool {
-        self.tmux_passthrough
-            || self.kitty_graphics
-            || self.osc_pwd
-            || self.osc_side_effect
-            || self.osc_color
+        self.tmux_passthrough || self.kitty_graphics || self.osc_side_effect || self.osc_color
     }
 }
 
@@ -581,7 +760,7 @@ const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
 ];
 
 const SIDE_EFFECT_OSC_PREFIXES: &[&[u8]] = &[
-    b"0;", b"1;", b"2;", b"9;", b"22;", b"52;", b"66;", b"133;", b"777;", b"1337;",
+    b"1;", b"9;", b"22;", b"52;", b"66;", b"133;", b"777;", b"1337;",
 ];
 
 const COLOR_OSC_PREFIXES: &[&[u8]] = &[
@@ -730,9 +909,6 @@ fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
             Some(b'_') if data.get(start + 2) == Some(&b'G') => {
                 features.kitty_graphics = true;
             }
-            Some(b']') if data.get(start + 2..start + 4) == Some(b"7;") => {
-                features.osc_pwd = true;
-            }
             Some(b']') if is_color_osc_prefix(data.get(start + 2..).unwrap_or_default()) => {
                 features.osc_color = true;
             }
@@ -743,7 +919,6 @@ fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
         }
         if features.tmux_passthrough
             && features.kitty_graphics
-            && features.osc_pwd
             && features.osc_side_effect
             && features.osc_color
         {
@@ -903,9 +1078,7 @@ fn append_kitty_graphics_field(out: &mut Vec<u8>, field: &[u8]) {
 }
 
 fn is_side_effect_osc_prefix(data: &[u8]) -> bool {
-    data.starts_with(b"0;")
-        || data.starts_with(b"1;")
-        || data.starts_with(b"2;")
+    data.starts_with(b"1;")
         || data.starts_with(b"9;")
         || data.starts_with(b"22;")
         || data.starts_with(b"52;")
@@ -1116,7 +1289,49 @@ impl TerminalEngine {
         max_scrollback: usize,
         macos_option_as_alt: MacosOptionAsAlt,
     ) -> Result<Self> {
-        Self::new_inner(geometry, colors, max_scrollback, macos_option_as_alt)
+        Self::new_inner(
+            geometry,
+            colors,
+            TerminalCursorConfig::default(),
+            TerminalFeatureConfig::default(),
+            max_scrollback,
+            macos_option_as_alt,
+        )
+    }
+
+    pub fn new_with_cursor_options(
+        geometry: TerminalGeometry,
+        colors: TerminalColorConfig,
+        cursor: TerminalCursorConfig,
+        max_scrollback: usize,
+        macos_option_as_alt: MacosOptionAsAlt,
+    ) -> Result<Self> {
+        Self::new_inner(
+            geometry,
+            colors,
+            cursor,
+            TerminalFeatureConfig::default(),
+            max_scrollback,
+            macos_option_as_alt,
+        )
+    }
+
+    pub fn new_with_terminal_options(
+        geometry: TerminalGeometry,
+        colors: TerminalColorConfig,
+        cursor: TerminalCursorConfig,
+        features: TerminalFeatureConfig,
+        max_scrollback: usize,
+        macos_option_as_alt: MacosOptionAsAlt,
+    ) -> Result<Self> {
+        Self::new_inner(
+            geometry,
+            colors,
+            cursor,
+            features,
+            max_scrollback,
+            macos_option_as_alt,
+        )
     }
 
     pub fn new_with_scrollback(
@@ -1127,6 +1342,8 @@ impl TerminalEngine {
         Self::new_inner(
             geometry,
             colors,
+            TerminalCursorConfig::default(),
+            TerminalFeatureConfig::default(),
             max_scrollback,
             MacosOptionAsAlt::default(),
         )
@@ -1135,9 +1352,12 @@ impl TerminalEngine {
     fn new_inner(
         geometry: TerminalGeometry,
         colors: TerminalColorConfig,
+        cursor: TerminalCursorConfig,
+        features: TerminalFeatureConfig,
         max_scrollback: usize,
         macos_option_as_alt: MacosOptionAsAlt,
     ) -> Result<Self> {
+        install_libghostty_logger();
         let mut terminal = Terminal::new(TerminalOptions {
             cols: geometry.cols,
             rows: geometry.rows,
@@ -1145,6 +1365,8 @@ impl TerminalEngine {
         })?;
         let base_color_palette = terminal.default_color_palette()?;
         configure_default_colors(&mut terminal, &base_color_palette, &colors)?;
+        configure_default_cursor(&mut terminal, cursor)?;
+        configure_terminal_features(&mut terminal, features)?;
         let size_report_geometry = Arc::new(Mutex::new(geometry));
         let report_geometry = size_report_geometry.clone();
         terminal.on_size(move |_terminal| {
@@ -1162,6 +1384,24 @@ impl TerminalEngine {
         terminal.on_color_scheme(move |_terminal| report_color_scheme.lock().ok().map(|s| *s))?;
         terminal.on_xtversion(|_terminal| Some(concat!("Bootty ", env!("CARGO_PKG_VERSION"))))?;
         let callback_side_effects = Arc::new(Mutex::new(Vec::new()));
+        let title_side_effects = callback_side_effects.clone();
+        terminal.on_title_changed(move |terminal| {
+            if let Ok(title) = terminal.title()
+                && let Ok(mut effects) = title_side_effects.lock()
+            {
+                effects.push(TerminalSideEffect::WindowTitle(title.to_owned()));
+            }
+        })?;
+        let pwd_state = Arc::new(Mutex::new(String::new()));
+        let callback_pwd_state = pwd_state.clone();
+        terminal.on_pwd_changed(move |terminal| {
+            if let Ok(pwd) = terminal.pwd()
+                && let Ok(mut current) = callback_pwd_state.lock()
+            {
+                current.clear();
+                current.push_str(pwd);
+            }
+        })?;
         let bell_side_effects = callback_side_effects.clone();
         terminal.on_bell(move |_terminal| {
             if let Ok(mut effects) = bell_side_effects.lock() {
@@ -1186,6 +1426,10 @@ impl TerminalEngine {
         terminal.set_kitty_image_from_shared_mem_allowed(false)?;
         set_png_decoder(Some(Box::new(BoottyPngDecoder)))?;
 
+        let selection_gesture = gesture::Gesture::new()?;
+        let selection_press_event = gesture::PressEvent::new()?;
+        let selection_drag_event = gesture::DragEvent::new()?;
+        let selection_release_event = gesture::ReleaseEvent::new()?;
         let mut engine = Self {
             terminal,
             base_color_palette,
@@ -1203,11 +1447,14 @@ impl TerminalEngine {
             mouse_encoder: mouse::Encoder::new()?,
             mouse_event: mouse::Event::new()?,
             mouse_any_button_pressed: false,
+            selection_gesture,
+            selection_press_event,
+            selection_drag_event,
+            selection_release_event,
             mouse_encoder_options_dirty: true,
             mouse_encoder_size: None,
             geometry,
             size_report_geometry,
-            osc_pwd_pending: Vec::new(),
             osc_side_effect_pending: Vec::new(),
             terminal_write_pending: Vec::new(),
             cursor_home_pending_len: 0,
@@ -1217,6 +1464,7 @@ impl TerminalEngine {
             callback_side_effects,
             iterm_copy_capture: None,
             current_working_directory: String::new(),
+            current_working_directory_state: pwd_state,
             color_scheme,
             colors,
             xterm_color_overrides: XtermColorOverrides::default(),
@@ -1230,6 +1478,106 @@ impl TerminalEngine {
 
     fn mark_content_changed(&mut self) {
         self.content_epoch = self.content_epoch.wrapping_add(1);
+    }
+
+    pub fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        let Some(point) = selection_point(event, self.geometry) else {
+            self.clear_selection()?;
+            return Ok(());
+        };
+
+        {
+            let terminal = &self.terminal;
+            let grid_ref = terminal.grid_ref(Point::Viewport(point))?;
+            self.selection_press_event
+                .set_position(f64::from(event.position.x), f64::from(event.position.y))?
+                .set_repeat_distance(4.0)?;
+            let selection = self.selection_press_event.apply(
+                &mut self.selection_gesture,
+                terminal,
+                grid_ref,
+            )?;
+            terminal.set_selection(selection.as_ref())?;
+        }
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    pub fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        let Some(point) = selection_point(event, self.geometry) else {
+            return Ok(());
+        };
+
+        {
+            let terminal = &self.terminal;
+            let grid_ref = terminal.grid_ref(Point::Viewport(point))?;
+            self.selection_drag_event
+                .set_position(f64::from(event.position.x), f64::from(event.position.y))?
+                .set_rectangle(event.rectangle)?;
+            let selection = self.selection_drag_event.apply(
+                &mut self.selection_gesture,
+                terminal,
+                grid_ref,
+                selection_geometry(event.surface),
+            )?;
+            terminal.set_selection(selection.as_ref())?;
+        }
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    pub fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        let was_dragged = self
+            .selection_gesture
+            .dragged(&self.terminal)
+            .unwrap_or(false);
+        let point = event.and_then(|event| selection_point(event, self.geometry));
+
+        {
+            let terminal = &self.terminal;
+            let grid_ref = point
+                .map(|point| terminal.grid_ref(Point::Viewport(point)))
+                .transpose()?;
+            self.selection_release_event
+                .apply(&mut self.selection_gesture, terminal, grid_ref)?;
+        }
+
+        if !was_dragged {
+            self.clear_selection()?;
+        } else {
+            self.mark_content_changed();
+        }
+        Ok(())
+    }
+
+    pub fn clear_selection(&mut self) -> Result<()> {
+        self.terminal.set_selection(None)?;
+        self.selection_gesture.reset(&self.terminal);
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    pub fn format_selection(&self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        let options = SelectionFormatOptions::new()
+            .with_emit_format(format.emit_format())
+            .with_unwrap(true)
+            .with_trim(true);
+        Ok(self
+            .terminal
+            .format_selection_alloc(None, options)?
+            .map(|bytes| bytes.as_ref().to_vec()))
+    }
+
+    pub fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        configure_default_cursor(&mut self.terminal, cursor)?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    pub fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        configure_terminal_features(&mut self.terminal, features)?;
+        self.mark_content_changed();
+        Ok(())
     }
 
     pub fn set_kitty_image_storage_limit(&mut self, limit: u64) -> Result<()> {
@@ -1500,7 +1848,6 @@ impl TerminalEngine {
 
     pub fn write_vt(&mut self, bytes: &[u8]) {
         let can_fast_write = self.terminal_write_pending.is_empty()
-            && self.osc_pwd_pending.is_empty()
             && self.osc_side_effect_pending.is_empty()
             && !contains_tracked_streaming_control(bytes);
 
@@ -1519,6 +1866,7 @@ impl TerminalEngine {
         if can_fast_write {
             let optimized = self.sgr_optimizer.optimize(bytes);
             self.terminal.vt_write(optimized);
+            self.sync_current_working_directory();
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
             return;
@@ -1530,15 +1878,13 @@ impl TerminalEngine {
         }
 
         let mut features = terminal_write_features(write_bytes.as_ref());
-        if !self.osc_pwd_pending.is_empty() {
-            features.osc_pwd = true;
-        }
         if !self.osc_side_effect_pending.is_empty() {
             features.osc_side_effect = true;
         }
         if !features.needs_sanitizing() {
             self.sgr_optimizer.reset();
             self.terminal.vt_write(write_bytes.as_ref());
+            self.sync_current_working_directory();
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
             return;
@@ -1547,9 +1893,6 @@ impl TerminalEngine {
         let bytes = if features.tmux_passthrough {
             let unwrapped = unwrap_tmux_passthrough_commands(write_bytes.as_ref());
             features = terminal_write_features(unwrapped.as_ref());
-            if !self.osc_pwd_pending.is_empty() {
-                features.osc_pwd = true;
-            }
             if !self.osc_side_effect_pending.is_empty() {
                 features.osc_side_effect = true;
             }
@@ -1571,11 +1914,9 @@ impl TerminalEngine {
         }
         self.sgr_optimizer.reset();
         self.terminal.vt_write(sanitized.bytes.as_ref());
+        self.sync_current_working_directory();
         if features.osc_color {
             self.apply_osc_color_responses_and_state(sanitized.bytes.as_ref());
-        }
-        if features.osc_pwd {
-            self.apply_osc_pwd_updates(sanitized.bytes.as_ref());
         }
         if features.osc_side_effect {
             self.apply_osc_side_effects(sanitized.bytes.as_ref());
@@ -1587,6 +1928,15 @@ impl TerminalEngine {
     fn drain_callback_side_effects(&mut self) {
         if let Ok(mut effects) = self.callback_side_effects.lock() {
             self.side_effects.extend(effects.drain(..));
+        }
+    }
+
+    fn sync_current_working_directory(&mut self) {
+        if let Ok(current) = self.current_working_directory_state.lock()
+            && self.current_working_directory.as_str() != current.as_str()
+        {
+            self.current_working_directory.clear();
+            self.current_working_directory.push_str(&current);
         }
     }
 
@@ -1611,33 +1961,6 @@ impl TerminalEngine {
         }
         self.side_effects = remaining;
         clipboard_texts
-    }
-
-    fn apply_osc_pwd_updates(&mut self, data: &[u8]) {
-        let mut bytes = Vec::with_capacity(self.osc_pwd_pending.len() + data.len());
-        bytes.extend_from_slice(&self.osc_pwd_pending);
-        bytes.extend_from_slice(data);
-        self.osc_pwd_pending.clear();
-
-        let mut search_start = 0;
-        while let Some(relative_start) = find_subslice(&bytes[search_start..], b"\x1b]7;") {
-            let start = search_start + relative_start;
-            let payload_start = start + 4;
-            match find_osc_terminator(&bytes[payload_start..]) {
-                Some((payload_len, terminator_len)) => {
-                    let payload = &bytes[payload_start..payload_start + payload_len];
-                    if let Ok(pwd) = std::str::from_utf8(payload) {
-                        self.current_working_directory.clear();
-                        self.current_working_directory.push_str(pwd);
-                    }
-                    search_start = payload_start + payload_len + terminator_len;
-                }
-                None => {
-                    self.osc_pwd_pending.extend_from_slice(&bytes[start..]);
-                    break;
-                }
-            }
-        }
     }
 
     fn apply_osc_side_effects(&mut self, data: &[u8]) {
@@ -1676,12 +1999,6 @@ impl TerminalEngine {
             return;
         };
         match command {
-            b"0" | b"2" => {
-                if let Ok(title) = std::str::from_utf8(rest) {
-                    self.side_effects
-                        .push(TerminalSideEffect::WindowTitle(title.to_owned()));
-                }
-            }
             b"1" => {
                 if let Ok(icon) = std::str::from_utf8(rest) {
                     self.side_effects
@@ -1814,12 +2131,9 @@ impl TerminalEngine {
             return;
         };
         match key {
-            "CurrentDir" => {
-                self.current_working_directory.clear();
-                self.current_working_directory.push_str(value);
-                self.side_effects
-                    .push(TerminalSideEffect::Iterm2Control(data.to_owned()));
-            }
+            "CurrentDir" => self
+                .side_effects
+                .push(TerminalSideEffect::Iterm2Control(data.to_owned())),
             "CursorShape" => {
                 if let Some(sequence) = iterm_cursor_shape_sequence(value) {
                     self.terminal.vt_write(sequence);
@@ -2026,6 +2340,7 @@ impl TerminalEngine {
         self.frame.cells.clear();
         self.frame.text.clear();
         self.frame.images = KittyImageFrame::default();
+        self.frame.selections.clear();
         self.frame.stats = FrameStats {
             render_state_update_us,
             ..FrameStats::default()
@@ -2036,6 +2351,9 @@ impl TerminalEngine {
         for (row_index, row) in self.row_cache.iter().enumerate() {
             if row.has_virtual_placeholder {
                 virtual_placeholder_rows.push(row_index as u16);
+            }
+            if let Some(selection) = row.selection {
+                self.frame.selections.push(selection);
             }
             virtual_cells.extend(row.virtual_cells.iter().cloned());
             let text_offset = self.frame.text.len();
@@ -2198,6 +2516,7 @@ impl TerminalEngine {
         self.row_cache.clear();
 
         self.frame.row_dirty.clear();
+        self.frame.selections.clear();
         self.frame.cells.clear();
         self.frame.text.clear();
         self.frame.images = KittyImageFrame::default();
@@ -2215,6 +2534,13 @@ impl TerminalEngine {
                 self.frame.stats.dirty_rows += 1;
             }
             self.frame.row_dirty.push(row_dirty);
+            if let Some(selection) = row.selection()? {
+                self.frame.selections.push(FrameSelection {
+                    row: row_index,
+                    start_col: selection.start_x,
+                    end_col: selection.end_x,
+                });
+            }
             let raw_row = row.raw_row()?;
             let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
             if raw_row.has_kitty_virtual_placeholder()? {

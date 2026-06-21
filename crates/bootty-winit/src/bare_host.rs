@@ -342,6 +342,7 @@ pub fn renderer_parity_gallery_frame() -> RendererFrame {
             color: None,
         }),
         row_dirty: vec![true],
+        selections: Vec::new(),
         cells: vec![
             gallery_cell(0, 0, 0, 1, CellStyle::default()),
             gallery_cell(1, 0, 1, 1, CellStyle::default()),

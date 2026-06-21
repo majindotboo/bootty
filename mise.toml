@@ -2,6 +2,9 @@
 rust = "stable"
 zig = "0.15.2"
 
+[settings]
+disable_tools = ["zig"]
+
 [tasks.build]
 description = "Build the bootty app in release mode"
 run = "cargo build --release -p bootty-app --bin bootty"

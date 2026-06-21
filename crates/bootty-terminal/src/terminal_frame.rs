@@ -13,6 +13,7 @@ pub struct RenderFrame {
     pub colors: FrameColors,
     pub cursor: Option<CursorSnapshot>,
     pub row_dirty: Vec<bool>,
+    pub selections: Vec<FrameSelection>,
     pub cells: Vec<RenderCell>,
     pub text: Vec<char>,
     pub images: KittyImageFrame,
@@ -29,6 +30,7 @@ impl Default for RenderFrame {
             colors: FrameColors::default(),
             cursor: None,
             row_dirty: Vec::new(),
+            selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
             images: KittyImageFrame::default(),
@@ -49,6 +51,13 @@ pub struct FrameScrollbar {
     pub total: u64,
     pub offset: u64,
     pub len: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameSelection {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

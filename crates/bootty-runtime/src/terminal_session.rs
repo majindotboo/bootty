@@ -21,7 +21,10 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
-    terminal_engine::{TERMINAL_TERM, TerminalColorConfig, TerminalEngine, TerminalSideEffect},
+    terminal_engine::{
+        TERMINAL_TERM, TerminalColorConfig, TerminalCursorConfig, TerminalEngine,
+        TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+    },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
 };
@@ -55,6 +58,8 @@ pub(crate) const SYNC_OUTPUT_MAX_SUPPRESS: Duration = Duration::from_secs(1);
 pub struct TerminalSessionConfig {
     pub launch: SessionLaunchConfig,
     pub colors: TerminalColorConfig,
+    pub cursor: TerminalCursorConfig,
+    pub features: TerminalFeatureConfig,
     pub max_scrollback: usize,
     pub macos_option_as_alt: MacosOptionAsAlt,
     pub side_effect_tx: Option<Sender<TerminalSideEffect>>,
@@ -150,7 +155,11 @@ impl PublishedFrame {
     }
 }
 
+type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
+
 enum TerminalCommand {
+    Cursor(TerminalCursorConfig),
+    Features(TerminalFeatureConfig),
     Resize(TerminalGeometry),
     Colors(TerminalColorConfig),
     Key(KeyInput),
@@ -164,6 +173,14 @@ enum TerminalCommand {
     RawInput(Vec<u8>),
     MouseViewportScroll {
         delta: isize,
+    },
+    SelectionBegin(TerminalSelectionEvent),
+    SelectionUpdate(TerminalSelectionEvent),
+    SelectionEnd(Option<TerminalSelectionEvent>),
+    SelectionClear,
+    FormatSelection {
+        format: TerminalSelectionFormat,
+        done: SyncSender<SelectionFormatResponse>,
     },
     DiscardPendingOutput(SyncSender<()>),
 }
@@ -197,6 +214,8 @@ impl TerminalSession {
         spawn_terminal_worker(TerminalWorkerConfig {
             geometry,
             colors: config.colors,
+            cursor: config.cursor,
+            features: config.features,
             max_scrollback: config.max_scrollback,
             macos_option_as_alt: config.macos_option_as_alt,
             pty_rx,
@@ -245,6 +264,14 @@ impl TerminalSession {
 
     pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
         self.send_command(TerminalCommand::Colors(colors))
+    }
+
+    pub fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        self.send_command(TerminalCommand::Cursor(cursor))
+    }
+
+    pub fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        self.send_command(TerminalCommand::Features(features))
     }
 
     pub fn drain_pty(&mut self) -> DrainStats {
@@ -302,6 +329,34 @@ impl TerminalSession {
         self.send_command(TerminalCommand::MouseViewportScroll { delta })
     }
 
+    pub fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.send_command(TerminalCommand::SelectionBegin(event))
+    }
+
+    pub fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.send_command(TerminalCommand::SelectionUpdate(event))
+    }
+
+    pub fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        self.send_command(TerminalCommand::SelectionEnd(event))
+    }
+
+    pub fn clear_selection(&mut self) -> Result<()> {
+        self.send_command(TerminalCommand::SelectionClear)
+    }
+
+    pub fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::FormatSelection {
+            format,
+            done: done_tx,
+        })?;
+        done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("terminal worker stopped before formatting selection"))?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub fn discard_pending_output(&mut self) -> Result<()> {
         let (done_tx, done_rx) = mpsc::sync_channel(0);
         self.send_command(TerminalCommand::DiscardPendingOutput(done_tx))?;
@@ -324,6 +379,8 @@ impl TerminalSession {
 struct TerminalWorkerConfig {
     geometry: TerminalGeometry,
     colors: TerminalColorConfig,
+    cursor: TerminalCursorConfig,
+    features: TerminalFeatureConfig,
     max_scrollback: usize,
     macos_option_as_alt: MacosOptionAsAlt,
     pty_rx: Receiver<Vec<u8>>,
@@ -340,9 +397,11 @@ struct TerminalWorkerConfig {
 fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut engine = match TerminalEngine::new_with_options(
+        let mut engine = match TerminalEngine::new_with_terminal_options(
             config.geometry,
             config.colors,
+            config.cursor,
+            config.features,
             config.max_scrollback,
             config.macos_option_as_alt,
         ) {
@@ -522,6 +581,16 @@ impl TerminalWorker {
                         stats.terminal_changed = true;
                     }
                 }
+                TerminalCommand::Cursor(cursor) => {
+                    if self.engine.set_cursor_config(cursor).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                TerminalCommand::Features(features) => {
+                    if self.engine.set_feature_config(features).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
                 TerminalCommand::Key(input) => {
                     self.mark_input_fast_path();
                     self.engine.scroll_viewport_bottom();
@@ -602,6 +671,37 @@ impl TerminalWorker {
                     self.mark_input_fast_path();
                     self.engine.scroll_viewport_delta(delta);
                     stats.terminal_changed = true;
+                }
+                TerminalCommand::SelectionBegin(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.begin_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                TerminalCommand::SelectionUpdate(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.update_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                TerminalCommand::SelectionEnd(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.end_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                TerminalCommand::SelectionClear => {
+                    self.mark_input_fast_path();
+                    if self.engine.clear_selection().is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                TerminalCommand::FormatSelection { format, done } => {
+                    let response = self
+                        .engine
+                        .format_selection(format)
+                        .map_err(|error| error.to_string());
+                    let _ = done.send(response);
                 }
             }
         }

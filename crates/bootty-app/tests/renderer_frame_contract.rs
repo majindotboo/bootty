@@ -474,6 +474,7 @@ fn render_frame(cells: Vec<RenderCell>) -> RenderFrame {
             color: None,
         }),
         row_dirty: vec![true, true],
+        selections: Vec::new(),
         cells,
         text: vec!['A', 'B', 'C'],
         images: Default::default(),

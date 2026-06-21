@@ -591,6 +591,7 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
             images: Default::default(),

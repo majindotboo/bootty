@@ -1049,6 +1049,7 @@ fn render_frame_with_text(ch: char) -> RenderFrame {
         },
         cursor: None,
         row_dirty: vec![true],
+        selections: Vec::new(),
         cells: vec![RenderCell {
             x: 0,
             y: 0,

@@ -17,7 +17,13 @@ use bootty_config::config::MultiplexerConfig;
 use bootty_runtime::{
     DrainStats, TerminalSession, TerminalSessionConfig, render_source::TerminalRenderSource,
 };
-use bootty_terminal::terminal_input_model::{KeyInput, MouseInput};
+use bootty_terminal::{
+    terminal_engine::{
+        TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
+        TerminalSelectionFormat,
+    },
+    terminal_input_model::{KeyInput, MouseInput},
+};
 
 use crate::{
     config::{MuxBackendKind, selected_backend},
@@ -64,6 +70,15 @@ pub trait TerminalRuntime: TerminalRenderSource {
         None
     }
     fn discard_pending_output(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn format_selection(&mut self, _format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn set_cursor_config(&mut self, _cursor: TerminalCursorConfig) -> Result<()> {
+        Ok(())
+    }
+    fn set_feature_config(&mut self, _features: TerminalFeatureConfig) -> Result<()> {
         Ok(())
     }
     fn set_colors(
@@ -152,6 +167,18 @@ impl TerminalRuntime for TerminalSession {
 
     fn discard_pending_output(&mut self) -> Result<()> {
         Self::discard_pending_output(self)
+    }
+
+    fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        Self::format_selection(self, format)
+    }
+
+    fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        Self::set_cursor_config(self, cursor)
+    }
+
+    fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        Self::set_feature_config(self, features)
     }
 
     fn set_colors(
@@ -356,6 +383,18 @@ impl BackendPaneTerminal {
         self.terminal.scroll_viewport_delta(delta)
     }
 
+    pub fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        self.terminal.format_selection(format)
+    }
+
+    pub fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        self.terminal.set_cursor_config(cursor)
+    }
+
+    pub fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        self.terminal.set_feature_config(features)
+    }
+
     pub fn grid_size(&self) -> (u16, u16) {
         (self.geometry.cols, self.geometry.rows)
     }
@@ -428,6 +467,22 @@ impl TerminalRenderSource for BackendPaneTerminal {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.terminal.scroll_viewport_delta(delta)
+    }
+
+    fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.terminal.begin_selection(event)
+    }
+
+    fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.terminal.update_selection(event)
+    }
+
+    fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        self.terminal.end_selection(event)
+    }
+
+    fn clear_selection(&mut self) -> Result<()> {
+        self.terminal.clear_selection()
     }
 }
 
@@ -676,6 +731,8 @@ mod tests {
         TerminalSessionConfig {
             launch: Default::default(),
             colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
@@ -869,6 +926,8 @@ mod tests {
                 ..Default::default()
             },
             colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
@@ -894,6 +953,8 @@ mod tests {
                 ..Default::default()
             },
             colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
@@ -913,6 +974,8 @@ mod tests {
                 ..Default::default()
             },
             colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,

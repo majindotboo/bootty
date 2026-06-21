@@ -635,6 +635,45 @@ fn config_maps_session_scrollback_to_terminal_session_config() {
 }
 
 #[test]
+fn config_maps_cursor_defaults_to_terminal_session_config() {
+    let config = load_config_source(indoc! {r#"
+        [cursor]
+        style = "underline"
+        blink = true
+    "#});
+
+    assert_eq!(config.cursor.style, Some(CursorStyleConfig::Underline));
+    assert_eq!(config.cursor.blink, Some(true));
+    assert_eq!(
+        config.terminal_session_config().cursor,
+        bootty_terminal::terminal_engine::TerminalCursorConfig {
+            style: Some(bootty_terminal::terminal_engine::TerminalCursorStyle::Underline),
+            blink: Some(true),
+        }
+    );
+    assert_eq!(
+        BoottyConfig::default().terminal_session_config().cursor,
+        bootty_terminal::terminal_engine::TerminalCursorConfig::default()
+    );
+}
+
+#[test]
+fn config_maps_glyph_protocol_policy_to_terminal_features() {
+    let config = load_config_source(indoc! {r#"
+        [session]
+        glyph-protocol = false
+    "#});
+
+    assert!(!config.session.glyph_protocol);
+    assert!(!config.terminal_session_config().features.glyph_protocol);
+    assert!(
+        BoottyConfig::default()
+            .terminal_session_config()
+            .features
+            .glyph_protocol
+    );
+}
+#[test]
 fn chrome_window_tabs_can_be_disabled() {
     let config = load_config_source(indoc! {r#"
         [chrome]

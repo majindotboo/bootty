@@ -145,6 +145,7 @@ fn frame_with_cells(cells: Vec<RenderCell>) -> RenderFrame {
         },
         cursor: None,
         row_dirty: vec![true],
+        selections: Vec::new(),
         cells,
         text: vec!['A', '█', 'B', 'C'],
         images: Default::default(),
