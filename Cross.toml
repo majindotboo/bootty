@@ -1,0 +1,11 @@
+[build]
+dockerfile = ".github/cross/Dockerfile"
+
+[build.env]
+passthrough = [
+  "CARGO_PROFILE_BENCH_DEBUG",
+  "CARGO_PROFILE_DEV_DEBUG",
+  "CARGO_PROFILE_TEST_DEBUG",
+  "CARGO_TERM_COLOR",
+]
+

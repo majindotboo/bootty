@@ -23,14 +23,29 @@ numbers and hillclimb findings belong in `docs/benchmark-report.md`, not here.
 
 ## Routine validation policy
 
-Default validation compiles only the core benchmark harness:
+Default local validation compiles only the core benchmark harness:
 
 ```bash
 cargo test -p bootty-app --bench paint_plan --no-run
 ```
 
-Run task-specific compile-only checks when touching those surfaces. Keep them out
-of the default gate unless validation policy changes explicitly.
+CI runs the broader benchmark reproduction path in parallel with the nextest job:
+all checked-in benchmark targets are compile-checked, the `paint_plan` smoke suite
+runs under `cargo test --bench`, and a small measured subset runs with short
+Criterion windows. Local repro:
+
+```bash
+scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/ci
+```
+
+Run task-specific compile-only checks when touching those surfaces. Keep measured
+Criterion suites out of the default local gate unless validation policy changes
+explicitly.
+
+Cross-rs CI covers portable crates on non-host targets. Full GUI/app coverage
+stays on native Linux, macOS, and Windows jobs because the released cross-rs
+images are older Linux bases and do not carry Bootty's current GTK/WebKit app
+stack.
 
 | Surface | Compile-only check |
 | --- | --- |

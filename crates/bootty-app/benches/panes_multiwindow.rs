@@ -11,7 +11,10 @@ use bootty_app::{
     terminal::{KeyInput, KeyMods, TerminalEngine, TerminalKey},
     terminal_render::TerminalRenderFrame,
     terminal_text::{TerminalTextConfig, TerminalTextContract},
-    ui::chrome::{self, WindowTabsModel},
+    ui::{
+        chrome::{self, WindowTabsModel},
+        icons,
+    },
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use eframe::egui::{self, Pos2, Rect};
@@ -504,6 +507,7 @@ fn bench_window_tabs_chrome(c: &mut Criterion) {
             let windows = mux_windows(tab_count, tab_count / 2);
             let selected = windows.get(tab_count / 2).map(|window| window.id.as_str());
             let context = egui::Context::default();
+            icons::install_icon_fonts(&context);
             let palette = bootty_ui::ThemePalette::default();
             b.iter(|| {
                 let output = context.run_ui(
@@ -534,6 +538,7 @@ fn bench_window_tabs_chrome(c: &mut Criterion) {
         c.bench_function(&format!("window_tabs_switch_ui_{tab_count}_tabs"), |b| {
             let mut windows = mux_windows(tab_count, 0);
             let context = egui::Context::default();
+            icons::install_icon_fonts(&context);
             let palette = bootty_ui::ThemePalette::default();
             let mut tick = 0_usize;
             b.iter(|| {

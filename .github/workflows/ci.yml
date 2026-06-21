@@ -18,12 +18,25 @@ env:
   CARGO_PROFILE_BENCH_DEBUG: 0
 
 jobs:
-  rust-validation:
-    name: Rust validation
+  rust-format:
+    name: Rust fmt
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Check formatting
+        run: mise run fmt
+
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
       - name: Install Linux build dependencies
         run: |
@@ -51,10 +64,13 @@ jobs:
             pkg-config
 
       - name: Set up mise toolchain
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-validation
+          cache-on-failure: true
 
       # zig compiles libghostty for the build machine's exact CPU, so its
       # cached output can SIGILL on a runner with a different microarch.
@@ -63,24 +79,161 @@ jobs:
           cargo clean -p libghostty-vt-sys
           cargo clean --release -p libghostty-vt-sys
 
-      - name: Check formatting
-        run: mise run fmt
-
       - name: Run clippy
         run: mise run clippy
 
-      - name: Run tests
+  rust-tests:
+    name: Rust tests (nextest)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            libxdo-dev \
+            pkg-config
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-validation
+          cache-on-failure: true
+
+      # zig compiles libghostty for the build machine's exact CPU, so its
+      # cached output can SIGILL on a runner with a different microarch.
+      - name: Evict CPU-specific zig artifacts
+        run: |
+          cargo clean -p libghostty-vt-sys
+          cargo clean --release -p libghostty-vt-sys
+
+      - name: Run tests with nextest
         run: mise run test
 
-      - name: Compile benchmarks
-        run: mise run bench:build
+  rust-benchmarks:
+    name: Rust benchmarks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: Run paint plan benchmark smoke
-        run: mise run bench:smoke
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libayatana-appindicator3-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            libxdo-dev \
+            pkg-config
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-validation
+          cache-on-failure: true
+
+      # zig compiles libghostty for the build machine's exact CPU, so its
+      # cached output can SIGILL on a runner with a different microarch.
+      - name: Evict CPU-specific zig artifacts
+        run: |
+          cargo clean -p libghostty-vt-sys
+          cargo clean --release -p libghostty-vt-sys
+
+      - name: Compile and smoke benchmark suite
+        run: mise run bench:ci
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reproduction-${{ github.sha }}
+          path: artifacts/benchmark-reproduction/ci
+          if-no-files-found: ignore
+
+  rust-cross:
+    name: Cross portable crates (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@v4
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Cross-compile portable crates
+        run: >
+          cross check
+          -p bootty-surface
+          -p bootty-ui
+          --target ${{ matrix.target }}
 
   github-pages:
     name: GitHub Pages
-    needs: rust-validation
+    needs: [rust-format, rust-clippy, rust-tests, rust-benchmarks, rust-cross]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     permissions:
@@ -92,13 +245,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up mise toolchain
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -107,7 +260,8 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: github-pages
+          shared-key: github-pages
+          cache-on-failure: true
 
       - name: Add WASM target
         run: rustup target add wasm32-unknown-unknown
@@ -141,7 +295,7 @@ jobs:
 
   native-app-bundles:
     name: Native app bundle (${{ matrix.name }})
-    needs: rust-validation
+    needs: [rust-format, rust-clippy, rust-tests, rust-benchmarks, rust-cross]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -162,7 +316,7 @@ jobs:
             artifact-name: bootty-linux-x64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -191,12 +345,13 @@ jobs:
         run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | head -1)/Contents/Developer"
 
       - name: Set up mise toolchain
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          shared-key: native-${{ matrix.name }}
+          cache-on-failure: true
 
       # zig compiles libghostty for the build machine's exact CPU, so its
       # cached output can SIGILL on a runner with a different microarch.

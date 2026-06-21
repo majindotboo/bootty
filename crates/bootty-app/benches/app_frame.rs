@@ -15,7 +15,10 @@ use bootty_app::{
     },
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     terminal::{RenderFrame, TerminalEngine},
-    ui::chrome::{self, SidebarModel, StatusBarModel},
+    ui::{
+        chrome::{self, SidebarModel, StatusBarModel},
+        icons,
+    },
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use eframe::{egui, wgpu};
@@ -365,6 +368,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
         .get(SIDEBAR_FRAME_SESSIONS / 2)
         .map(|session| session.id.as_str());
     let context = egui::Context::default();
+    icons::install_icon_fonts(&context);
 
     c.bench_function("egui_frame_terminal_active_109x39", |b| {
         let mut terminal = BenchTerminal::new(109, 39);

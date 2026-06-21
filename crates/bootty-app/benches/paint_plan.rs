@@ -23,6 +23,7 @@ use bootty_app::{
     terminal_text::{TerminalTextConfig, TerminalTextContract},
     ui::{
         chrome::{self, SidebarModel},
+        icons,
         session_picker::SessionPickerDialog,
         sidebar::{build_sidebar_items, build_visible_sidebar_items},
     },
@@ -541,6 +542,7 @@ fn bench_sidebar_ui(c: &mut Criterion) {
             .map(|session| session.id.as_str())
             .unwrap_or("$1");
         let context = egui::Context::default();
+        icons::install_icon_fonts(&context);
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(280.0, 900.0));
 
         c.bench_function(&format!("sidebar_ui_{count}_rich_sessions"), |b| {
@@ -600,6 +602,7 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
         let mut metadata = sidebar_metadata_for(&sessions);
         metadata.set_usage_lines(usage_lines);
         let context = egui::Context::default();
+        icons::install_icon_fonts(&context);
         c.bench_function(&format!("sidebar_ui_96_rich_sessions_{name}"), |b| {
             b.iter(|| {
                 let output = context.run_ui(
@@ -648,6 +651,7 @@ fn bench_session_picker_ui(c: &mut Criterion) {
         .map(|session| session.id.as_str())
         .unwrap_or("$1");
     let context = egui::Context::default();
+    icons::install_icon_fonts(&context);
     let theme = bootty_ui::Theme::new(bootty_ui::ThemePalette::default());
     let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 900.0));
 

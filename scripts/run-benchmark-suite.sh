@@ -144,6 +144,9 @@ if ! run_logged compile_flood_response cargo test -p bootty-runtime --bench floo
 fi
 
 if [[ $quick -eq 1 ]]; then
+  if ! run_logged quick_paint_plan_smoke cargo test -p bootty-app --bench paint_plan; then
+    failures=$((failures + 1))
+  fi
   if ! run_logged quick_input_protocols cargo bench -p bootty-app --bench input_protocols input_protocol_keyboard_legacy_printable -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1; then
     failures=$((failures + 1))
   fi
