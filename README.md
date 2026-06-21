@@ -27,12 +27,10 @@ same renderer path as the main app.
 - `bootty-render` - paint plans, text shaping, sprites, and WGPU rendering.
 - `bootty-winit` - native winit/WGPU host adapters.
 - `bootty` - convenience re-export crate for embedders.
-- `bootty-tauri` - Tauri + React + WebGL2 embedding demo and static website.
 
 ## Native app bundles
 
-Native Bootty app bundles are built from `bootty-app --bin bootty`, not from the
-Tauri demo crate.
+Native Bootty app bundles are built from `bootty-app --bin bootty`.
 
 ```sh
 mise run package          # macOS .app zip or Linux tarball
@@ -44,16 +42,16 @@ The CI workflow runs full Rust validation on pull requests and pushes, then
 uploads native macOS, Windows, and Linux app artifacts for pushes to `main` and
 manual workflow runs.
 
-## Tauri and website
+## Website
+
+Build the static website that GitHub Pages deploys:
 
 ```sh
-cd crates/bootty-tauri
-npm install
-npm run tauri -- dev
-npm run build:pages
+bun install --frozen-lockfile
+bun run build:web
 ```
 
-The static build writes `crates/bootty-tauri/pages-dist`.
+The static website writes root `pages-dist` from `sites/bootty-web`.
 
 ## Validation
 

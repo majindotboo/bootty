@@ -2,7 +2,7 @@
 //!
 //! Use `bootty-runtime` to own PTY-backed terminal sessions, `bootty-terminal`
 //! for frame data, `bootty-render` for paint plans and WGPU rendering, and the
-//! frontend examples for concrete Tauri/WebGL2 and Winit/WGPU hosts.
+//! frontend examples for concrete Winit/WGPU hosts.
 
 pub mod geometry {
     pub use bootty_surface::geometry::*;

@@ -38,8 +38,6 @@ multiple callers.
 - `bootty` is the stable library facade: re-exports of the four core library
   crates for external callers.
 - `bootty-ui` owns egui theme/color widgets shared by app chrome.
-- `bootty-tauri` is a Tauri host adapter exposing terminal sessions over Tauri
-  commands.
 - `bootty-site` is the documentation website and interactive demo.
 - `bootty-surface` owns terminal geometry: cell metrics, padding, viewport
   rectangles, grid sizing, PTY pixel dimensions, and pointer transforms.
