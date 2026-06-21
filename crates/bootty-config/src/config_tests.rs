@@ -376,6 +376,35 @@ fn config_maps_font_features_to_terminal_text_config() {
 }
 
 #[test]
+fn config_maps_font_fit_cell_height_to_terminal_text_config() {
+    assert!(load_config_source("").font.fit_cell_height);
+
+    let config = load_config_source(indoc! {r#"
+        [font]
+        fit-cell-height = false
+    "#});
+
+    assert!(!config.font.fit_cell_height);
+    assert!(!config.font.terminal_text_config().fit_cell_height);
+}
+
+#[test]
+fn config_uses_auto_font_cell_metrics_until_width_or_height_is_configured() {
+    let default = load_config_source("");
+    assert_eq!(default.font.cell_width, None);
+    assert_eq!(default.font.cell_height, None);
+
+    let config = load_config_source(indoc! {r#"
+        [font]
+        cell-width = 11
+        cell-height = 24
+    "#});
+
+    assert_eq!(config.font.cell_width, Some(11.0));
+    assert_eq!(config.font.cell_height, Some(24.0));
+}
+
+#[test]
 fn config_rejects_invalid_font_features() {
     let error = ConfigSandbox::with_config(indoc! {r#"
         [font]

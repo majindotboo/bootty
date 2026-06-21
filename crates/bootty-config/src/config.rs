@@ -157,8 +157,9 @@ pub struct FontConfig {
     pub family: Vec<String>,
     pub features: Vec<FontFeature>,
     pub size: f32,
-    pub cell_width: f32,
-    pub cell_height: f32,
+    pub cell_width: Option<f32>,
+    pub cell_height: Option<f32>,
+    pub fit_cell_height: bool,
     pub baseline_adjustment: f32,
     pub underline_position: f32,
     pub underline_thickness: f32,
@@ -172,6 +173,7 @@ struct FontPatch {
     size: Option<f32>,
     cell_width: Option<f32>,
     cell_height: Option<f32>,
+    fit_cell_height: Option<bool>,
     baseline_adjustment: Option<f32>,
     underline_position: Option<f32>,
     underline_thickness: Option<f32>,
@@ -529,6 +531,7 @@ impl Default for FontConfig {
             size: text.font_size,
             cell_width: text.cell_width,
             cell_height: text.cell_height,
+            fit_cell_height: text.fit_cell_height,
             baseline_adjustment: text.baseline_adjustment,
             underline_position: text.underline_position,
             underline_thickness: text.underline_thickness,
@@ -544,6 +547,7 @@ impl FontConfig {
             font_features: self.features.clone(),
             cell_width: self.cell_width,
             cell_height: self.cell_height,
+            fit_cell_height: self.fit_cell_height,
             baseline_adjustment: self.baseline_adjustment,
             underline_position: self.underline_position,
             underline_thickness: self.underline_thickness,
@@ -1544,8 +1548,9 @@ fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
 fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) -> ConfigResult<()> {
     apply_value(&mut font.family, partial.family);
     apply_value(&mut font.size, partial.size);
-    apply_value(&mut font.cell_width, partial.cell_width);
-    apply_value(&mut font.cell_height, partial.cell_height);
+    apply_present(&mut font.cell_width, partial.cell_width);
+    apply_present(&mut font.cell_height, partial.cell_height);
+    apply_value(&mut font.fit_cell_height, partial.fit_cell_height);
     apply_value(&mut font.baseline_adjustment, partial.baseline_adjustment);
     apply_value(&mut font.underline_position, partial.underline_position);
     apply_value(&mut font.underline_thickness, partial.underline_thickness);

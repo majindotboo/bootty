@@ -12,7 +12,7 @@ use eframe::{
 use crate::{
     geometry::{
         CellMetrics, CoordinateSpace, SurfacePoint, SurfaceRect, TerminalCoordinate,
-        TerminalSurface, ViewTransform,
+        TerminalSurface, ViewTransform, fit_cell_height_to_available_space,
     },
     paint_plan::{CursorBlinkPhase, PaintPlanner},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
@@ -28,6 +28,7 @@ pub struct TerminalWidget {
     planner: PaintPlanner,
     metrics: RendererMetrics,
     cell: CellMetrics,
+    base_cell: CellMetrics,
     text_config: TerminalTextConfig,
     cursor_blink: CursorBlinkClock,
     scrollbar: ScrollbarVisibility,
@@ -124,6 +125,7 @@ impl TerminalWidget {
             response.request_focus();
         }
 
+        self.cell = self.cell_metrics_for_rect(rect);
         let surface = TerminalSurface::for_rect(rect, self.cell);
         terminal.resize(surface.geometry())?;
 
@@ -155,6 +157,14 @@ impl TerminalWidget {
     }
     pub fn cell_dimensions(&self) -> (f32, f32) {
         (self.cell.width, self.cell.height)
+    }
+
+    fn cell_metrics_for_rect(&self, rect: Rect) -> CellMetrics {
+        if self.text_config.fit_cell_height {
+            fit_cell_height_to_available_space(rect.height(), self.base_cell, Default::default())
+        } else {
+            self.base_cell
+        }
     }
 
     fn handle_selection_interaction(
@@ -217,7 +227,8 @@ impl TerminalWidget {
     }
 
     fn update_cell_metrics(&mut self) {
-        self.cell = terminal_text_cell_metrics(&self.text_config);
+        self.base_cell = terminal_text_cell_metrics(&self.text_config);
+        self.cell = self.base_cell;
     }
     fn paint(
         &mut self,
@@ -968,8 +979,9 @@ mod tests {
             font_features: crate::terminal_text::default_font_features(),
             codepoint_overrides: crate::terminal_text::CodepointFontMap::default(),
             font_size: 15.0,
-            cell_width: 9.0,
-            cell_height: 21.0,
+            cell_width: Some(9.0),
+            cell_height: Some(21.0),
+            fit_cell_height: true,
             baseline_adjustment: -1.0,
             underline_position: 3.0,
             underline_thickness: 2.0,
@@ -992,6 +1004,19 @@ mod tests {
         let widget = TerminalWidget::new(None).with_text_config(config);
 
         assert_eq!(widget.cell_size(), expected);
+    }
+
+    #[test]
+    fn widget_fit_cell_height_uses_rect_height_without_changing_columns() {
+        let mut widget = TerminalWidget::new(None);
+        widget.base_cell = CellMetrics::new(10.0, 22.0);
+        widget.text_config.fit_cell_height = true;
+
+        let cell = widget
+            .cell_metrics_for_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1159.0)));
+
+        assert_eq!(cell.width, 10.0);
+        assert!((cell.height - 22.288_462).abs() < 0.001);
     }
 
     #[test]

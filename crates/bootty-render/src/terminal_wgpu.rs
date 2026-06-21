@@ -1,5 +1,8 @@
 use crate::{
-    geometry::{CellMetrics, SurfaceRect, ViewTransform},
+    geometry::{
+        CellMetrics, DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, SurfaceRect,
+        ViewTransform,
+    },
     paint_plan::{DecorationStyle, PlanColor},
     terminal_image::KittyImagePlacement,
     terminal_render::{
@@ -103,11 +106,20 @@ pub fn terminal_text_cell_metrics(
             overline: false,
         },
     );
-    let Some(font) = terminal_font(&face) else {
-        return CellMetrics::new(config.cell_width, config.cell_height);
-    };
+    let ratio = config.font_size.max(1.0) / DEFAULT_FONT_SIZE;
+    let mut cell = terminal_font(&face)
+        .map(|font| ghostty_cell_metrics_from_font(&font, config.font_size))
+        .unwrap_or_else(|| {
+            CellMetrics::new(DEFAULT_CELL_WIDTH * ratio, DEFAULT_LINE_HEIGHT * ratio)
+        });
 
-    ghostty_cell_metrics_from_font(&font, config.font_size)
+    if let Some(width) = config.cell_width {
+        cell.width = width.max(1.0);
+    }
+    if let Some(height) = config.cell_height {
+        cell.height = height.max(1.0);
+    }
+    cell
 }
 
 pub fn terminal_text_draws(frame: &TerminalRenderFrame) -> Vec<TerminalTextDraw> {

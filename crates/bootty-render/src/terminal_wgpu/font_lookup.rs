@@ -1,6 +1,6 @@
 use crate::{
     font_database::system_font_database,
-    geometry::{CellMetrics, GHOSTTY_CONFIG_CELL_HEIGHT_ADJUSTMENT},
+    geometry::CellMetrics,
     terminal_text::{FontStyle, ResolvedFontFace},
 };
 use ab_glyph::{Font, FontArc, FontVec, GlyphId, PxScale, ScaleFont};
@@ -8,6 +8,8 @@ use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
 };
+
+const GHOSTTY_CONFIG_CELL_HEIGHT_ADJUSTMENT: f32 = 1.45;
 
 pub(super) fn terminal_font(face: &ResolvedFontFace) -> Option<FontArc> {
     static FONT_CACHE: OnceLock<Mutex<TerminalFontCache>> = OnceLock::new();

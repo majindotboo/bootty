@@ -3,7 +3,6 @@ use eframe::egui::{Pos2, Rect, Vec2};
 pub const COMPARISON_GHOSTTY_FONT_POINTS_MACOS: f32 = 11.75;
 pub const DEFAULT_FONT_DPI: f32 = 96.0;
 pub const DEFAULT_FONT_SIZE: f32 = COMPARISON_GHOSTTY_FONT_POINTS_MACOS * DEFAULT_FONT_DPI / 72.0;
-pub const GHOSTTY_CONFIG_CELL_HEIGHT_ADJUSTMENT: f32 = 1.45;
 pub const DEFAULT_CELL_WIDTH: f32 = 10.0;
 pub const DEFAULT_LINE_HEIGHT: f32 = 22.0;
 pub const DEFAULT_PADDING: f32 = 0.0;
@@ -563,6 +562,20 @@ pub fn geometry_for_pixels(
     }
 }
 
+pub fn fit_cell_height_to_available_space(
+    height: f32,
+    cell: CellMetrics,
+    padding: TerminalPadding,
+) -> CellMetrics {
+    let available_height = (height - padding.vertical()).max(0.0);
+    if !available_height.is_finite() || available_height <= 0.0 {
+        return cell;
+    }
+
+    let rows = f32::from(geometry_for_pixels(0.0, height, cell, padding).rows);
+    CellMetrics::new(cell.width, available_height / rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +619,24 @@ mod tests {
             surface.grid_rect(12, 7),
             SurfaceRect::from_min_size(5.0, 5.0, 120.0, 140.0)
         );
+    }
+
+    #[test]
+    fn fitted_cell_height_distributes_vertical_remainder_across_rows() {
+        let base_cell = CellMetrics::new(10.0, 22.0);
+        let fitted_cell =
+            fit_cell_height_to_available_space(1159.0, base_cell, TerminalPadding::default());
+
+        let base_geometry =
+            geometry_for_pixels(1000.0, 1159.0, base_cell, TerminalPadding::default());
+        let fitted_geometry =
+            geometry_for_pixels(1000.0, 1159.0, fitted_cell, TerminalPadding::default());
+
+        assert_eq!(base_geometry.rows, 52);
+        assert_eq!(fitted_geometry.rows, 52);
+        assert_eq!(fitted_cell.width, 10.0);
+        assert!((fitted_cell.height - 22.288_462).abs() < 0.001);
+        assert!((fitted_cell.height * 52.0 - 1159.0).abs() < 0.001);
     }
 
     #[test]

@@ -97,48 +97,40 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 " pt",
                 |font| &mut font.size,
             );
-            slider(
+            optional_slider(
                 ui,
                 win,
-                "Cell width",
-                &["font", "cell-width"],
-                1.0..=64.0,
-                " px",
-                |font| &mut font.cell_width,
+                MetricOverrideRow {
+                    label: "Cell width",
+                    path: &["font", "cell-width"],
+                    range: 1.0..=64.0,
+                    suffix: " px",
+                    default_value: crate::geometry::DEFAULT_CELL_WIDTH,
+                    field: |font| &mut font.cell_width,
+                },
             );
-            slider(
+            optional_slider(
                 ui,
                 win,
-                "Cell height",
-                &["font", "cell-height"],
-                1.0..=128.0,
-                " px",
-                |font| &mut font.cell_height,
+                MetricOverrideRow {
+                    label: "Cell height",
+                    path: &["font", "cell-height"],
+                    range: 1.0..=128.0,
+                    suffix: " px",
+                    default_value: crate::geometry::DEFAULT_LINE_HEIGHT,
+                    field: |font| &mut font.cell_height,
+                },
             );
-            drag(
-                ui,
-                win,
-                "Baseline",
-                &["font", "baseline-adjustment"],
-                -20.0..=20.0,
-                |font| &mut font.baseline_adjustment,
-            );
-            drag(
-                ui,
-                win,
-                "Underline position",
-                &["font", "underline-position"],
-                -20.0..=20.0,
-                |font| &mut font.underline_position,
-            );
-            drag(
-                ui,
-                win,
-                "Underline thickness",
-                &["font", "underline-thickness"],
-                0.0..=10.0,
-                |font| &mut font.underline_thickness,
-            );
+            ui.label("Fit cell height");
+            let mut fit_cell_height = win.config.font.fit_cell_height;
+            if ui
+                .checkbox(&mut fit_cell_height, "Fill available terminal height")
+                .changed()
+            {
+                win.config.font.fit_cell_height = fit_cell_height;
+                win.set_bool(&["font", "fit-cell-height"], fit_cell_height);
+            }
+            ui.end_row();
         });
 }
 
@@ -163,23 +155,36 @@ fn slider(
     ui.end_row();
 }
 
-fn drag(
-    ui: &mut egui::Ui,
-    win: &mut SettingsWindow,
-    label: &str,
-    path: &[&str],
+struct MetricOverrideRow<'a> {
+    label: &'a str,
+    path: &'a [&'a str],
     range: std::ops::RangeInclusive<f32>,
-    field: fn(&mut crate::config::FontConfig) -> &mut f32,
-) {
-    ui.label(label);
-    let mut value = *field(&mut win.config.font);
-    if ui
-        .add(egui::DragValue::new(&mut value).speed(0.1).range(range))
-        .changed()
-    {
-        *field(&mut win.config.font) = value;
-        win.set_f32(path, value);
-    }
+    suffix: &'a str,
+    default_value: f32,
+    field: fn(&mut crate::config::FontConfig) -> &mut Option<f32>,
+}
+
+fn optional_slider(ui: &mut egui::Ui, win: &mut SettingsWindow, row: MetricOverrideRow<'_>) {
+    ui.label(row.label);
+    let current = *(row.field)(&mut win.config.font);
+    ui.horizontal(|ui| {
+        let mut value = current.unwrap_or(row.default_value);
+        if ui
+            .add(egui::Slider::new(&mut value, row.range.clone()).suffix(row.suffix))
+            .changed()
+        {
+            *(row.field)(&mut win.config.font) = Some(value);
+            win.set_f32(row.path, value);
+        }
+        if current.is_some() {
+            if ui.small_button("Reset to Auto").clicked() {
+                *(row.field)(&mut win.config.font) = None;
+                win.remove(row.path);
+            }
+        } else {
+            ui.label(egui::RichText::new("Auto").color(win.palette.muted));
+        }
+    });
     ui.end_row();
 }
 

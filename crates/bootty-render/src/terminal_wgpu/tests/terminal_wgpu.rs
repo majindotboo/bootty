@@ -77,40 +77,37 @@ fn terminal_font_priority_uses_text_command_face_before_fallbacks() {
 }
 
 #[test]
-fn terminal_text_cell_metrics_follow_ghostty_primary_face_rounding_when_font_resolves() {
+fn terminal_text_cell_metrics_use_configured_cell_dimensions() {
     let config = crate::terminal_text::TerminalTextConfig {
         font_size: 30.0,
-        cell_width: 1.0,
-        cell_height: 1.0,
+        cell_width: Some(13.0),
+        cell_height: Some(27.0),
         ..Default::default()
     };
-    let configured = CellMetrics::new(config.cell_width, config.cell_height);
-    let face = crate::terminal_text::FontResolver::new(config.clone()).resolve_face(
-        &crate::paint_plan::TextAttrs {
-            fg: PlanColor {
-                r: 255,
-                g: 255,
-                b: 255,
-                a: 255,
-            },
-            bold: false,
-            italic: false,
-            underline: libghostty_vt::style::Underline::None,
-            strikethrough: false,
-            overline: false,
-        },
-    );
-    let metrics = terminal_text_cell_metrics(&config);
 
-    if let Some(font) = terminal_font(&face) {
-        assert_eq!(
-            metrics,
-            ghostty_cell_metrics_from_font(&font, config.font_size)
-        );
-        assert_ne!(metrics, configured);
-    } else {
-        assert_eq!(metrics, configured);
-    }
+    assert_eq!(
+        terminal_text_cell_metrics(&config),
+        CellMetrics::new(13.0, 27.0)
+    );
+}
+
+#[test]
+fn terminal_text_cell_metrics_auto_scales_with_font_size() {
+    let small = terminal_text_cell_metrics(&crate::terminal_text::TerminalTextConfig {
+        font_size: 12.0,
+        cell_width: None,
+        cell_height: None,
+        ..Default::default()
+    });
+    let large = terminal_text_cell_metrics(&crate::terminal_text::TerminalTextConfig {
+        font_size: 24.0,
+        cell_width: None,
+        cell_height: None,
+        ..Default::default()
+    });
+
+    assert!(large.width > small.width);
+    assert!(large.height > small.height);
 }
 
 #[test]

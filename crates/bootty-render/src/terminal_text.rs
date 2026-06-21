@@ -1,5 +1,5 @@
 use crate::{
-    geometry::{CellMetrics, DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT},
+    geometry::{CellMetrics, DEFAULT_FONT_SIZE},
     paint_plan::{TerminalPaintPlan, TextAttrs, TextRun},
     terminal_sprite::{SpriteFamily, SpriteGlyph, SpriteRegistry},
 };
@@ -12,8 +12,9 @@ pub struct TerminalTextConfig {
     pub font_features: Vec<FontFeature>,
     pub codepoint_overrides: CodepointFontMap,
     pub font_size: f32,
-    pub cell_width: f32,
-    pub cell_height: f32,
+    pub cell_width: Option<f32>,
+    pub cell_height: Option<f32>,
+    pub fit_cell_height: bool,
     pub baseline_adjustment: f32,
     pub underline_position: f32,
     pub underline_thickness: f32,
@@ -36,8 +37,9 @@ impl Default for TerminalTextConfig {
             font_features: default_font_features(),
             codepoint_overrides: CodepointFontMap::default(),
             font_size: DEFAULT_FONT_SIZE,
-            cell_width: DEFAULT_CELL_WIDTH,
-            cell_height: DEFAULT_LINE_HEIGHT,
+            cell_width: None,
+            cell_height: None,
+            fit_cell_height: true,
             baseline_adjustment: 3.0,
             underline_position: 2.0,
             underline_thickness: 1.0,
@@ -48,8 +50,8 @@ impl Default for TerminalTextConfig {
 impl TerminalTextConfig {
     pub fn with_cell_metrics(cell: CellMetrics) -> Self {
         Self {
-            cell_width: cell.width,
-            cell_height: cell.height,
+            cell_width: Some(cell.width),
+            cell_height: Some(cell.height),
             ..Self::default()
         }
     }
@@ -803,8 +805,8 @@ pub fn terminal_text_config_for_plan(
     plan.text_runs
         .first()
         .map(|run| TerminalTextConfig {
-            cell_width: run.rect.width() / f32::from(run.cells.max(1)),
-            cell_height: run.rect.height(),
+            cell_width: Some(run.rect.width() / f32::from(run.cells.max(1))),
+            cell_height: Some(run.rect.height()),
             ..base_config.clone()
         })
         .unwrap_or_else(|| base_config.clone())
@@ -926,6 +928,7 @@ mod tests {
         assert_eq!(config.families[1], "Font Awesome 7 Brands");
         assert_eq!(config.families[2], "Maple Mono NF");
         assert_eq!(config.font_size, DEFAULT_FONT_SIZE);
+        assert!(config.fit_cell_height);
         assert_eq!(config.baseline_adjustment, 3.0);
         assert!(
             config

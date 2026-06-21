@@ -36,11 +36,10 @@ macos-titlebar-style = "transparent"
 [font]
 family = ["Maple Mono", "Font Awesome 7 Brands", "Maple Mono NF", "monospace"]
 size = 15.666
-cell-width = 10
-cell-height = 22
-baseline-adjustment = 3
-underline-position = 2
-underline-thickness = 1
+# Optional fixed cell metric overrides; omit to derive from font size.
+# cell-width = 10
+# cell-height = 22
+fit-cell-height = true
 
 [chrome]
 sidebar = true
@@ -92,6 +91,13 @@ palette = [
 ```
 
 Only set values you want to override. Unknown fields are rejected.
+
+By default, cell width and height are derived from the selected font and
+`[font].size`; set `cell-width` or `cell-height` only when you want a fixed
+override. `[font].fit-cell-height = true` is also enabled by default. It keeps
+the row count implied by the current cell height, then stretches row spacing just
+enough for those rows to fill the terminal area's available height. It does not
+change the glyph font size.
 
 ## Includes
 
@@ -168,7 +174,8 @@ Live-applied fields:
 - `[chrome]` sidebar/status visibility, layout, and inactive panel dimming
 - `[multiplexer]` backend selection and backend UI mode
 - `[input]` modifier remaps, macOS Option-as-Meta mode, global keybinds, and sidebar keybinds
-- `theme`, `[colors]` terminal defaults, `[cursor]` defaults, and `[session].glyph-protocol`
+- `theme`, `[colors]` terminal defaults, `[cursor]` defaults, `[font]` metrics,
+  and `[session].glyph-protocol`
 - `[window].title`
 - `[diagnostics].stability-trace`
 
