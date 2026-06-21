@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fs,
     path::Path,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::snapshot::MuxSession;
@@ -487,43 +489,263 @@ fn is_agent_asking(agent: &str, text: &str) -> bool {
     }
 }
 
-fn collect_usage_lines(width: u16) -> Vec<String> {
-    let output = Command::new(ct_bin())
-        .args([
-            "tui",
-            "usage-bars",
-            "--sidebar",
-            "--width",
-            &width.to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .filter(|line| !line.trim().is_empty())
-        .collect()
+const CODEX_USAGE_LOG_FILE: &str = "codex-usage-log.tsv";
+const CODEX_PROVIDER_LABEL: &str = "\u{e7cf}";
+const CODEX_PROVIDER_COLOR: Rgb = Rgb(0x74, 0xc7, 0xec);
+const USAGE_DIM_COLOR: Rgb = Rgb(0x6c, 0x70, 0x86);
+const USAGE_ORANGE_COLOR: Rgb = Rgb(0xfa, 0xb3, 0x87);
+const USAGE_RED_COLOR: Rgb = Rgb(0xef, 0x44, 0x44);
+const USAGE_GREEN_COLOR: Rgb = Rgb(0xa6, 0xe3, 0xa1);
+
+#[derive(Clone, Copy)]
+struct Rgb(u8, u8, u8);
+
+#[derive(Clone, Copy)]
+struct CodexUsageSample {
+    primary_percent: f64,
+    primary_reset: i64,
+    secondary_percent: f64,
+    secondary_reset: i64,
 }
 
-fn ct_bin() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("CT_BIN") {
-        return path.into();
+#[derive(Clone, Copy)]
+struct UsageWindow {
+    label: &'static str,
+    used_percent: f64,
+    window_secs: i64,
+    reset_secs: i64,
+}
+
+fn collect_usage_lines(width: u16) -> Vec<String> {
+    let path = std::env::temp_dir().join(CODEX_USAGE_LOG_FILE);
+    let data = fs::read_to_string(path).unwrap_or_default();
+    render_codex_usage_lines(&data, usize::from(width), now_secs())
+}
+
+fn render_codex_usage_lines(data: &str, width: usize, now_secs: i64) -> Vec<String> {
+    let Some(sample) = data
+        .lines()
+        .filter_map(parse_codex_usage_sample)
+        .next_back()
+    else {
+        return Vec::new();
+    };
+    let windows = [
+        UsageWindow {
+            label: "5h",
+            used_percent: sample.primary_percent,
+            window_secs: 5 * 3600,
+            reset_secs: seconds_until_next_reset(sample.primary_reset, now_secs, 5 * 3600),
+        },
+        UsageWindow {
+            label: "7d",
+            used_percent: sample.secondary_percent,
+            window_secs: 7 * 24 * 3600,
+            reset_secs: seconds_until_next_reset(sample.secondary_reset, now_secs, 7 * 24 * 3600),
+        },
+    ];
+    render_sidebar_usage_lines(width, &windows)
+}
+
+fn parse_codex_usage_sample(line: &str) -> Option<CodexUsageSample> {
+    let mut fields = line.split('\t');
+    let _timestamp = fields.next()?;
+    Some(CodexUsageSample {
+        primary_percent: fields.next()?.parse().ok()?,
+        primary_reset: fields.next()?.parse().ok()?,
+        secondary_percent: fields.next()?.parse().ok()?,
+        secondary_reset: fields.next()?.parse().ok()?,
+    })
+}
+
+fn seconds_until_next_reset(reset_epoch_secs: i64, now_secs: i64, window_secs: i64) -> i64 {
+    let remaining = reset_epoch_secs - now_secs;
+    if remaining > 0 || window_secs <= 0 {
+        return remaining;
     }
-    let cargo_ct = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/"))
-        .join(".cargo/bin/ct");
-    if cargo_ct.exists() {
-        return cargo_ct;
+    let rolled = remaining.rem_euclid(window_secs);
+    if rolled == 0 { window_secs } else { rolled }
+}
+
+fn render_sidebar_usage_lines(width: usize, windows: &[UsageWindow]) -> Vec<String> {
+    let safe_width = width.max(1);
+    let bar_width = safe_width.saturating_sub(2);
+    let mut lines = Vec::with_capacity(windows.len() * 2);
+    for window in windows {
+        let label = format!("{CODEX_PROVIDER_LABEL} {}", window.label);
+        let used = window.used_percent.clamp(0.0, 100.0);
+        let remaining_pct = (100.0 - used).clamp(0.0, 100.0);
+        let fill_color = quota_color(used, window.reset_secs, window.window_secs);
+        let mut right = format!("{}%", remaining_pct.round() as i64);
+        if window.reset_secs > 0
+            && window.window_secs > 0
+            && let Some(balance) = pace_balance_secs(used, window.reset_secs, window.window_secs)
+            && balance != 0
+        {
+            right.push(' ');
+            right.push_str(&format_pace(balance));
+        }
+        if window.reset_secs > 0 {
+            right.push(' ');
+            right.push('↺');
+            right.push_str(&format_reset(window.reset_secs));
+        }
+        let gap = safe_width.saturating_sub(label.chars().count() + right.chars().count() + 2);
+        lines.push(format!(
+            " {}{}{} ",
+            ansi_fg(CODEX_PROVIDER_COLOR, &label),
+            " ".repeat(gap),
+            ansi_fg(fill_color, &right)
+        ));
+        lines.push(format!(
+            " {} ",
+            render_usage_bar_line(
+                bar_width,
+                remaining_pct,
+                elapsed_percent(window),
+                fill_color
+            )
+        ));
     }
-    "ct".into()
+    lines
+}
+
+fn render_usage_bar_line(
+    width: usize,
+    remaining_pct: f64,
+    elapsed_pct: f64,
+    fill_color: Rgb,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let remaining_cells = ((remaining_pct / 100.0) * width as f64)
+        .round()
+        .clamp(0.0, width as f64) as usize;
+    let tick_cell = (elapsed_pct > 0.0).then(|| {
+        let expected_remaining_pct = (100.0 - elapsed_pct).clamp(0.0, 100.0);
+        ((expected_remaining_pct / 100.0) * width as f64)
+            .round()
+            .clamp(0.0, width.saturating_sub(1) as f64) as usize
+    });
+    let tick_color = pace_marker_color(100.0 - remaining_pct, elapsed_pct);
+    let mut out = String::new();
+    for index in 0..width {
+        if Some(index) == tick_cell {
+            out.push_str(&ansi_fg(tick_color, "│"));
+        } else if index < remaining_cells {
+            out.push_str(&ansi_fg(fill_color, "▓"));
+        } else {
+            out.push_str(&ansi_fg(USAGE_DIM_COLOR, "░"));
+        }
+    }
+    out
+}
+
+fn elapsed_percent(window: &UsageWindow) -> f64 {
+    if window.window_secs <= 0 || window.reset_secs <= 0 {
+        return 0.0;
+    }
+    let elapsed_secs = (window.window_secs - window.reset_secs).max(0) as f64;
+    (elapsed_secs / window.window_secs as f64 * 100.0).clamp(0.0, 100.0)
+}
+
+fn pace_balance_secs(used_percent: f64, reset_secs: i64, window_secs: i64) -> Option<i64> {
+    let elapsed_secs = window_secs - reset_secs;
+    if elapsed_secs < 60 {
+        return None;
+    }
+    let remaining_pct = (100.0 - used_percent).clamp(0.0, 100.0);
+    let expected_remaining_pct = (reset_secs as f64 / window_secs as f64) * 100.0;
+    Some(((remaining_pct - expected_remaining_pct) * window_secs as f64 / 100.0) as i64)
+}
+
+fn quota_color(used_percent: f64, reset_secs: i64, window_secs: i64) -> Rgb {
+    if window_secs <= 0 || reset_secs <= 0 {
+        let urgency = (used_percent / 100.0).clamp(0.0, 1.0) as f32;
+        return urgency_tint(urgency);
+    }
+    let elapsed_pct = ((window_secs - reset_secs) as f64 / window_secs as f64) * 100.0;
+    let ratio = if elapsed_pct > 0.0 {
+        used_percent / elapsed_pct
+    } else if used_percent > 0.0 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+    let urgency = ((ratio - 1.0) / 0.5).clamp(0.0, 1.0) as f32;
+    urgency_tint(urgency)
+}
+
+fn pace_marker_color(used_percent: f64, elapsed_pct: f64) -> Rgb {
+    let deficit = used_percent - elapsed_pct;
+    if deficit <= 0.0 {
+        USAGE_GREEN_COLOR
+    } else if deficit < 3.0 {
+        USAGE_ORANGE_COLOR
+    } else {
+        USAGE_RED_COLOR
+    }
+}
+
+fn urgency_tint(urgency: f32) -> Rgb {
+    let urgency = urgency.clamp(0.0, 1.0);
+    let red_end = blend(USAGE_RED_COLOR, CODEX_PROVIDER_COLOR, 0.25);
+    if urgency < 0.5 {
+        blend(
+            CODEX_PROVIDER_COLOR,
+            USAGE_ORANGE_COLOR,
+            urgency * 2.0 * 0.75,
+        )
+    } else {
+        let mid = blend(CODEX_PROVIDER_COLOR, USAGE_ORANGE_COLOR, 0.75);
+        blend(mid, red_end, (urgency - 0.5) * 2.0)
+    }
+}
+
+fn blend(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let mix = |x: u8, y: u8| ((x as f32) * (1.0 - t) + (y as f32) * t).round() as u8;
+    Rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+fn format_reset(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs >= 86400 {
+        format!(
+            "{}d{:02}:{:02}",
+            secs / 86400,
+            (secs % 86400) / 3600,
+            (secs % 3600) / 60
+        )
+    } else if secs >= 3600 {
+        format!("{}h{:02}", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}m", secs / 60)
+    }
+}
+
+fn format_pace(secs: i64) -> String {
+    let abs_secs = secs.unsigned_abs();
+    let sign = if secs >= 0 { '+' } else { '-' };
+    let text = if abs_secs >= 86400 {
+        format!("{}d{}h", abs_secs / 86400, (abs_secs % 86400) / 3600)
+    } else if abs_secs >= 3600 {
+        format!("{}h{:02}", abs_secs / 3600, (abs_secs % 3600) / 60)
+    } else {
+        format!("{}m", abs_secs / 60)
+    };
+    format!("{sign}{text}")
+}
+
+fn ansi_fg(rgb: Rgb, text: &str) -> String {
+    format!("\x1b[38;2;{};{};{}m{text}\x1b[39m", rgb.0, rgb.1, rgb.2)
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn git_branch(dir: &str) -> Option<String> {
@@ -771,5 +993,43 @@ mod tests {
         assert_eq!(agent_command("claude"), Some("claude"));
         assert_eq!(agent_command("opencode"), Some("opencode"));
         assert_eq!(agent_command("zsh"), None);
+    }
+
+    #[test]
+    fn codex_usage_lines_keep_expired_primary_and_active_pace_marker() {
+        let now = 1_782_082_196;
+        let data = "1782064741\t7\t1782073613\t44\t1782351227\n";
+
+        let lines = render_codex_usage_lines(data, 32, now);
+
+        assert_eq!(
+            lines.len(),
+            4,
+            "usage output should be label/bar pairs: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("5h"),
+            "expired 5h window should remain visible: {lines:?}"
+        );
+        assert!(
+            lines[2].contains("7d"),
+            "7d window should remain visible: {lines:?}"
+        );
+        assert!(
+            lines[0].contains('+'),
+            "5h label should include pace text: {lines:?}"
+        );
+        assert!(
+            lines[0].contains('↺'),
+            "5h label should include reset text: {lines:?}"
+        );
+        assert!(
+            lines[1].contains('│'),
+            "5h usage bar should include a pace marker: {lines:?}"
+        );
+        assert!(
+            lines[3].contains('│'),
+            "active usage bar should include a pace marker: {lines:?}"
+        );
     }
 }
