@@ -211,7 +211,7 @@ jobs:
       - name: Package native app on Unix
         if: runner.os != 'Windows'
         shell: bash
-        run: mise run package
+        run: BOOTTY_STRICT_MACOS_ICON=1 mise run package
 
       - name: Package native app on Windows
         if: runner.os == 'Windows'
