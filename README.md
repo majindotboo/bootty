@@ -44,14 +44,11 @@ manual workflow runs.
 
 ## Website
 
-Build the static website that GitHub Pages deploys:
+Cloudflare Pages deploys `bootty.org` and `www.bootty.org` from `main`.
+The Cloudflare project builds from the repository root and uploads root
+`pages-dist` from `sites/bootty-web`. GitHub Actions does not deploy the site.
 
-```sh
-bun install --frozen-lockfile
-bun run build:web
-```
-
-The static website writes root `pages-dist` from `sites/bootty-web`.
+Run the same source build locally with `mise run site:build`.
 
 ## Validation
 
