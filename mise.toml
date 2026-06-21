@@ -12,9 +12,6 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 rustup target add wasm32-unknown-unknown
-if ! command -v wasm-pack >/dev/null 2>&1; then
-  cargo install wasm-pack --locked
-fi
 bun install --frozen-lockfile
 bun run build:web
 """
