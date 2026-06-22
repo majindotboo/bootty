@@ -46,7 +46,7 @@ pub struct ResolvedIcon {
 
 /// Resolve an icon slug exposed to status/extensions.
 pub fn resolve_slug(slug: &str) -> Option<ResolvedIcon> {
-    let (pack, slug) = compatibility_icon(slug);
+    let (pack, slug) = icon_pack_and_slug(slug)?;
     let icon = try_icon(pack, slug, Style::Regular, Size::Regular).ok()?;
     Some(ResolvedIcon {
         family: icon.family,
@@ -92,7 +92,7 @@ pub fn paint_icon(
     paint_icon_slug(painter, icon.slug(), center, size, tint);
 }
 
-/// Paint an icon named by `slug` (as exposed to status modules), tinted.
+/// Paint an icon named by `slug` (as exposed to extensions), tinted.
 /// Returns whether the slug resolved, so callers can lay out around it.
 pub fn paint_icon_slug(
     painter: &egui::Painter,
@@ -115,10 +115,24 @@ pub fn paint_icon_slug(
     true
 }
 
+fn icon_pack_and_slug(slug: &str) -> Option<(Pack, &str)> {
+    if let Some((pack, slug)) = slug.split_once(':') {
+        let pack = match pack {
+            "bootstrap" => Pack::Bootstrap,
+            "lucide" => Pack::Lucide,
+            "tabler" => Pack::Tabler,
+            _ => return None,
+        };
+        return Some((pack, slug));
+    }
+    Some(compatibility_icon(slug))
+}
+
 fn compatibility_icon(slug: &str) -> (Pack, &str) {
     match slug {
         "coffee-cup" => (Pack::Tabler, "coffee-off"),
         "coffee-cup-filled" => (Pack::Tabler, "coffee"),
+        "openai" | "claude" | "anthropic" => (Pack::Bootstrap, slug),
         other => (Pack::Lucide, other),
     }
 }
@@ -152,6 +166,13 @@ mod tests {
             "clock",
         ] {
             assert!(has_slug(slug), "missing status icon '{slug}' in iconflow");
+        }
+    }
+
+    #[test]
+    fn provider_logo_slugs_resolve_from_bootstrap_pack() {
+        for slug in ["openai", "claude", "anthropic", "bootstrap:openai"] {
+            assert!(has_slug(slug), "missing provider logo '{slug}' in iconflow");
         }
     }
 

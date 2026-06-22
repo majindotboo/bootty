@@ -4,17 +4,12 @@ mod paint_plan_fixtures;
 
 use bootty_app::{
     config::{BoottyConfig, MultiplexerBackendConfig},
+    extensions::ModuleItem,
     geometry::ViewTransform,
     input_binding::BindingAction,
     input_binding_set::BindingSet,
     modifier_remap::ModifierRemapSet,
-    mux::{
-        sidebar_meta::{
-            DiffStat, ProcessStatus, SidebarMetadata, SidebarSessionMetadata,
-            sidebar_metadata_sessions, sidebar_metadata_sessions_for_prefix,
-        },
-        snapshot::{MuxPaneAnchor, MuxSession, MuxWindow},
-    },
+    mux::snapshot::{MuxPaneAnchor, MuxSession, MuxWindow},
     paint_plan::PaintPlanner,
     terminal::{
         KeyInput, KeyMods, MacosOptionAsAlt, MouseAction, MouseButton, MouseEncoderSize,
@@ -40,7 +35,6 @@ use paint_plan_fixtures::{
 };
 
 const SIDEBAR_BENCH_SESSION_COUNTS: [usize; 3] = [24, 96, 384];
-const SIDEBAR_VISIBLE_METADATA_PREFIX: usize = 42;
 
 fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
     (0..count)
@@ -88,75 +82,18 @@ fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
         .collect()
 }
 
-fn native_sidebar_sessions_without_metadata(count: usize) -> Vec<MuxSession> {
-    (0..count)
-        .map(|index| {
-            let id = format!("local-{index}");
-            let anchor = MuxPaneAnchor {
-                session_id: id.clone(),
-                pane_id: None,
-                cwd: None,
-                process: Some("zsh".to_owned()),
-            };
-            MuxSession {
-                id,
-                name: format!("native/session-{index:03}"),
-                active: index == 0,
-                anchor,
-                active_window_id: None,
-                windows: Vec::new(),
-            }
-        })
-        .collect()
-}
-
-fn sidebar_metadata_for(sessions: &[MuxSession]) -> SidebarMetadata {
-    let mut metadata = SidebarMetadata::default();
-    for (index, session) in sessions.iter().enumerate() {
-        metadata.insert(
-            session.name.clone(),
-            SidebarSessionMetadata {
-                branch: Some(format!("feature/sidebar-{index:03}")),
-                diff: Some(DiffStat {
-                    added: (index as u32) % 40,
-                    removed: (index as u32) % 17,
-                }),
-                attention: index % 11 == 0,
-                status: Some(format!("working batch {}", index % 9)),
-                progress: Some(((index * 7) % 101) as u8),
-                process_cpu: Some(format!("{:.1}%", (index % 16) as f32 * 1.7)),
-                agent_status: (index % 3 == 0).then(|| "codex Working...".to_owned()),
-                processes: vec![ProcessStatus {
-                    name: session
-                        .anchor
-                        .process
-                        .clone()
-                        .unwrap_or_else(|| "shell".to_owned()),
-                    cpu_pct: (index % 16) as f32 * 1.7,
-                    mem_bytes: 128 * 1024 * 1024 + index as u64 * 1024 * 1024,
-                }],
-            },
-        );
-    }
-    metadata
-}
-
-fn usage_lines_plain() -> Vec<String> {
+fn usage_footer_items(name: &str) -> Vec<ModuleItem> {
     vec![
-        "terminal 5h 90% +38m".to_owned(),
-        "agent 7d 73% +1d06:20 ↺3d20:18".to_owned(),
-        "build 50m 42% +12m".to_owned(),
-        "overflow 1h 10% +1m".to_owned(),
-    ]
-}
-
-fn usage_lines_ansi() -> Vec<String> {
-    vec![
-        "\x1b[38;2;116;199;236m 5h 90% +38m\x1b[0m".to_owned(),
-        "\x1b[38;2;249;226;175m████████░░\x1b[0m".to_owned(),
-        "\x1b[38;2;166;227;161magent 7d 73% +1d06:20 ↺3d20:18\x1b[0m".to_owned(),
-        "\x1b[38;2;137;220;235mbuild 50m 42% +12m\x1b[0m".to_owned(),
-        "\x1b[38;2;243;139;168moverflow 1h 10% +1m\x1b[0m".to_owned(),
+        ModuleItem {
+            text: format!("{name} 5h 90%"),
+            icon: Some("openai".to_owned()),
+            ..ModuleItem::default()
+        },
+        ModuleItem {
+            text: format!("{name} 7d 73%"),
+            icon: Some("rotate-ccw".to_owned()),
+            ..ModuleItem::default()
+        },
     ]
 }
 
@@ -462,7 +399,6 @@ fn bench_render_commands(c: &mut Criterion) {
 fn bench_sidebar_items(c: &mut Criterion) {
     for count in SIDEBAR_BENCH_SESSION_COUNTS {
         let sessions = sidebar_sessions(count);
-        let metadata = sidebar_metadata_for(&sessions);
         let selected = sessions
             .get(count / 2)
             .map(|session| session.id.as_str())
@@ -472,7 +408,6 @@ fn bench_sidebar_items(c: &mut Criterion) {
                 black_box(build_sidebar_items(
                     black_box(&sessions),
                     black_box(Some(selected)),
-                    black_box(&metadata),
                 ))
                 .len()
             })
@@ -485,7 +420,6 @@ fn bench_visible_sidebar_items(c: &mut Criterion) {
 
     for count in SIDEBAR_BENCH_SESSION_COUNTS {
         let sessions = sidebar_sessions(count);
-        let metadata = sidebar_metadata_for(&sessions);
         let selected = sessions
             .get(count / 2)
             .map(|session| session.id.as_str())
@@ -497,7 +431,6 @@ fn bench_visible_sidebar_items(c: &mut Criterion) {
                     black_box(build_visible_sidebar_items(
                         black_box(&sessions),
                         black_box(Some(selected)),
-                        black_box(&metadata),
                         black_box(VISIBLE_ROWS),
                     ))
                     .len()
@@ -507,42 +440,14 @@ fn bench_visible_sidebar_items(c: &mut Criterion) {
     }
 }
 
-fn bench_sidebar_metadata_request(c: &mut Criterion) {
-    for count in SIDEBAR_BENCH_SESSION_COUNTS {
-        let sessions = sidebar_sessions(count);
-        c.bench_function(
-            &format!("sidebar_metadata_request_{count}_rich_sessions"),
-            |b| b.iter(|| black_box(sidebar_metadata_sessions(black_box(&sessions))).len()),
-        );
-        c.bench_function(
-            &format!("sidebar_metadata_request_{count}_rich_sessions_visible_prefix"),
-            |b| {
-                b.iter(|| {
-                    black_box(sidebar_metadata_sessions_for_prefix(
-                        black_box(&sessions),
-                        black_box(SIDEBAR_VISIBLE_METADATA_PREFIX),
-                    ))
-                    .len()
-                })
-            },
-        );
-
-        let native_sessions = native_sidebar_sessions_without_metadata(count);
-        c.bench_function(
-            &format!("sidebar_metadata_request_{count}_native_no_metadata"),
-            |b| b.iter(|| black_box(sidebar_metadata_sessions(black_box(&native_sessions))).len()),
-        );
-    }
-}
-
 fn bench_sidebar_ui(c: &mut Criterion) {
     for count in SIDEBAR_BENCH_SESSION_COUNTS {
         let sessions = sidebar_sessions(count);
-        let metadata = sidebar_metadata_for(&sessions);
         let selected = sessions
             .get(count / 2)
             .map(|session| session.id.as_str())
             .unwrap_or("$1");
+        let items = build_sidebar_items(&sessions, Some(selected));
         let context = egui::Context::default();
         icons::install_icon_fonts(&context);
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(280.0, 900.0));
@@ -562,9 +467,10 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                                 bootty_ui::ThemePalette::default(),
                                 900.0,
                                 SidebarModel {
-                                    sessions: black_box(&sessions),
-                                    selected_session: black_box(Some(selected)),
-                                    metadata: black_box(&metadata),
+                                    items: black_box(&items),
+                                    footer_items: &[],
+                                    session_count: sessions.len(),
+                                    has_sessions: !sessions.is_empty(),
                                     title_visible: true,
                                     reserve_titlebar_buttons: true,
                                     title_icon: None,
@@ -574,7 +480,9 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                                     focused: false,
                                     hovered_session: None,
                                     unfocused_dim: 0.0,
+                                    fullscreen: false,
                                     hover_override: None,
+                                    fullscreen_hover_override: None,
                                     current_override: None,
                                     border_override: None,
                                 },
@@ -595,14 +503,11 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
         .get(count / 2)
         .map(|session| session.id.as_str())
         .unwrap_or("$1");
+    let items = build_sidebar_items(&sessions, Some(selected));
     let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(280.0, 900.0));
 
-    for (name, usage_lines) in [
-        ("plain_usage_footer", usage_lines_plain()),
-        ("ansi_usage_footer", usage_lines_ansi()),
-    ] {
-        let mut metadata = sidebar_metadata_for(&sessions);
-        metadata.set_usage_lines(usage_lines);
+    for name in ["plain_usage_footer", "compact_usage_footer"] {
+        let footer_items = usage_footer_items(name);
         let context = egui::Context::default();
         icons::install_icon_fonts(&context);
         c.bench_function(&format!("sidebar_ui_96_rich_sessions_{name}"), |b| {
@@ -620,9 +525,10 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                                 bootty_ui::ThemePalette::default(),
                                 900.0,
                                 SidebarModel {
-                                    sessions: black_box(&sessions),
-                                    selected_session: black_box(Some(selected)),
-                                    metadata: black_box(&metadata),
+                                    items: black_box(&items),
+                                    footer_items: black_box(&footer_items),
+                                    session_count: sessions.len(),
+                                    has_sessions: !sessions.is_empty(),
                                     title_visible: true,
                                     reserve_titlebar_buttons: true,
                                     title_icon: None,
@@ -632,7 +538,9 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                                     focused: false,
                                     hovered_session: None,
                                     unfocused_dim: 0.0,
+                                    fullscreen: false,
                                     hover_override: None,
+                                    fullscreen_hover_override: None,
                                     current_override: None,
                                     border_override: None,
                                 },
@@ -719,7 +627,6 @@ targets =
     bench_render_commands,
     bench_sidebar_items,
     bench_visible_sidebar_items,
-    bench_sidebar_metadata_request,
     bench_sidebar_ui,
     bench_sidebar_ui_usage_footer,
     bench_session_picker_ui,

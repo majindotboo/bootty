@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, fmt::Write as _, time::Duration};
+use std::collections::HashMap;
 
 use bootty_ui::ThemePalette;
 use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind, TextureHandle};
@@ -6,17 +6,12 @@ use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind, TextureHa
 use crate::{
     assets,
     config::{ChromeConfig, SegmentAlign},
-    mux::{
-        sidebar_meta::{DiffStat, SidebarMetadata},
-        snapshot::MuxSession,
-    },
-    status_module::{ModuleCoord, ModulePrimitive},
-    strings::{push_truncated_label, truncate_label},
+    extensions::{ModuleCoord, ModuleItem, ModulePrimitive},
+    mux::snapshot::MuxSession,
+    strings::truncate_label,
     ui::{
-        icons::{Icon, has_slug, paint_icon, paint_icon_slug},
-        sidebar::{
-            SidebarDisplay, SidebarItem, SidebarItemKind, SidebarTree, build_visible_sidebar_items,
-        },
+        icons::{has_slug, paint_icon_slug},
+        sidebar::{SidebarDisplay, SidebarItem, SidebarItemKind, SidebarTree},
     },
 };
 
@@ -59,9 +54,10 @@ pub struct ResolvedItem {
 
 #[derive(Clone)]
 pub struct SidebarModel<'a> {
-    pub sessions: &'a [MuxSession],
-    pub selected_session: Option<&'a str>,
-    pub metadata: &'a SidebarMetadata,
+    pub items: &'a [SidebarItem<'a>],
+    pub footer_items: &'a [ModuleItem],
+    pub session_count: usize,
+    pub has_sessions: bool,
     pub title_visible: bool,
     pub reserve_titlebar_buttons: bool,
     pub title_icon: Option<&'a TextureHandle>,
@@ -71,8 +67,10 @@ pub struct SidebarModel<'a> {
     pub focused: bool,
     pub hovered_session: Option<&'a str>,
     pub unfocused_dim: f32,
-    /// Explicit color overrides from `[sidebar]`; each falls back to the theme-derived tint.
+    /// Explicit color overrides from `[sidebar]`; each falls back to a theme-derived tint.
+    pub fullscreen: bool,
     pub hover_override: Option<egui::Color32>,
+    pub fullscreen_hover_override: Option<egui::Color32>,
     pub current_override: Option<egui::Color32>,
     pub border_override: Option<egui::Color32>,
 }
@@ -353,8 +351,13 @@ fn coord_h(rect: Rect, coord: ModuleCoord) -> f32 {
     rect.height() * coord.frac + coord.px
 }
 
-fn paint_item_primitives(painter: &egui::Painter, item_rect: Rect, item: &ResolvedItem) {
-    for primitive in &item.primitives {
+fn paint_item_primitives(
+    painter: &egui::Painter,
+    item_rect: Rect,
+    primitives: &[ModulePrimitive],
+    default_color: egui::Color32,
+) {
+    for primitive in primitives {
         match primitive {
             ModulePrimitive::Rect {
                 fill,
@@ -403,7 +406,61 @@ fn paint_item_primitives(painter: &egui::Painter, item_rect: Rect, item: &Resolv
                     }
                 }
             }
+            ModulePrimitive::Text {
+                text,
+                color,
+                x,
+                y,
+                size,
+                align,
+                min_width,
+            } => {
+                if min_width.is_some_and(|min_width| item_rect.width() < min_width) {
+                    continue;
+                }
+                painter.text(
+                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
+                    primitive_align(align),
+                    text,
+                    egui::FontId::monospace(*size),
+                    color.unwrap_or(default_color),
+                );
+            }
+            ModulePrimitive::Icon {
+                icon,
+                color,
+                x,
+                y,
+                size,
+                min_width,
+            } => {
+                if min_width.is_some_and(|min_width| item_rect.width() < min_width) {
+                    continue;
+                }
+                paint_icon_slug(
+                    painter,
+                    icon,
+                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
+                    *size,
+                    color.unwrap_or(default_color),
+                );
+            }
         }
+    }
+}
+
+fn primitive_align(value: &str) -> egui::Align2 {
+    match value {
+        "left_top" => egui::Align2::LEFT_TOP,
+        "left_center" => egui::Align2::LEFT_CENTER,
+        "left_bottom" => egui::Align2::LEFT_BOTTOM,
+        "center_top" => egui::Align2::CENTER_TOP,
+        "center_center" | "center" => egui::Align2::CENTER_CENTER,
+        "center_bottom" => egui::Align2::CENTER_BOTTOM,
+        "right_top" => egui::Align2::RIGHT_TOP,
+        "right_center" => egui::Align2::RIGHT_CENTER,
+        "right_bottom" => egui::Align2::RIGHT_BOTTOM,
+        _ => egui::Align2::LEFT_CENTER,
     }
 }
 
@@ -481,7 +538,7 @@ fn draw_items(
         } else if hovered {
             painter.rect_filled(item_rect, STATUS_PILL_RADIUS, palette.hover);
         }
-        paint_item_primitives(&painter, item_rect, item);
+        paint_item_primitives(&painter, item_rect, &item.primitives, palette.subtext);
         let color = item.fg.unwrap_or(palette.subtext);
         let mut text_x = x + STATUS_ITEM_PAD + item.pad_left;
         if let Some(ratio) = item.gauge {
@@ -519,11 +576,11 @@ fn draw_items(
 
 const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
 const SIDEBAR_FOOTER_BASE_HEIGHT: f32 = 44.0;
-const SIDEBAR_MAX_USAGE_BARS: usize = 4;
+const SIDEBAR_MAX_FOOTER_ITEMS: usize = 4;
+const SIDEBAR_FOOTER_ITEM_HEIGHT: f32 = 30.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 24.0;
 const SIDEBAR_PAD_X: f32 = 14.0;
 pub(crate) const MACOS_TITLEBAR_BUTTON_SAFE_WIDTH: f32 = 72.0;
-const AGENT_DETAIL_MAX_CHARS: usize = 18;
 const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
 
 fn start_window_drag_on_primary_press(response: &egui::Response) {
@@ -559,11 +616,18 @@ pub fn show_sidebar(
     height: f32,
     model: SidebarModel<'_>,
 ) -> Option<SidebarEvent> {
-    // `palette` arrives with `base`/`foreground` already overridden, so the derived tints below
-    // mix from the resolved colors; explicit `[sidebar]` overrides win outright.
-    let hover_color = model
-        .hover_override
-        .unwrap_or_else(|| sidebar_hover_color(palette));
+    // `palette` arrives with `base`/`foreground` already overridden. Windowed hover derives from
+    // the sidebar background; fullscreen uses a stronger lift so a black fullscreen background still
+    // has a visible, non-muddy hover state. Explicit mode-specific overrides win outright.
+    let hover_color = if model.fullscreen {
+        model
+            .fullscreen_hover_override
+            .unwrap_or_else(|| sidebar_fullscreen_hover_color(palette))
+    } else {
+        model
+            .hover_override
+            .unwrap_or_else(|| sidebar_hover_color(palette))
+    };
     let current_color = model
         .current_override
         .unwrap_or_else(|| sidebar_current_color(palette));
@@ -601,9 +665,10 @@ pub fn show_sidebar(
     }
 
     let list_top = content_top + header_h;
-    let usage_bars = parse_usage_bars(model.metadata.usage_lines());
-    let footer_h = sidebar_footer_height(usage_bars.len());
-    if model.sessions.is_empty() {
+
+    let footer_items = sidebar_footer_items(model.footer_items);
+    let footer_h = sidebar_footer_height(footer_items.len());
+    if !model.has_sessions {
         painter.text(
             Pos2::new(rect.center().x, list_top + 42.0),
             egui::Align2::CENTER_CENTER,
@@ -614,12 +679,12 @@ pub fn show_sidebar(
     }
 
     let max_rows = visible_sidebar_row_capacity(height, model.top_inset, header_h, footer_h);
-    let items = build_visible_sidebar_items(
-        model.sessions,
-        model.selected_session,
-        model.metadata,
-        max_rows,
-    );
+    let items = model
+        .items
+        .iter()
+        .take(max_rows)
+        .cloned()
+        .collect::<Vec<_>>();
     let preview_labels = sidebar_drag_preview_labels(&items);
     let drag_id = egui::Id::new("mux-sidebar-drag-anchor");
     let mut dragged = ui
@@ -635,7 +700,7 @@ pub fn show_sidebar(
     let pointer_hovered_session = pointer_pos
         .and_then(|pos| sidebar_hovered_row(pos, rect.min.x, list_top, width, max_rows))
         .and_then(|index| items.get(index))
-        .and_then(|item| item.session_id);
+        .and_then(|item| item.selectable.then_some(item.session_id).flatten());
     let suppress_click = dragged.is_some();
 
     let mut event = None;
@@ -644,10 +709,11 @@ pub fn show_sidebar(
             Pos2::new(rect.min.x, list_top + index as f32 * SIDEBAR_ROW_HEIGHT),
             egui::vec2(width, SIDEBAR_ROW_HEIGHT),
         );
-        let hovered = item.session_id.is_some_and(|session_id| {
-            Some(session_id) == pointer_hovered_session
-                || model.focused && Some(session_id) == model.hovered_session
-        });
+        let hovered = item.selectable
+            && item.session_id.is_some_and(|session_id| {
+                Some(session_id) == pointer_hovered_session
+                    || model.focused && Some(session_id) == model.hovered_session
+            });
         let response = sidebar_item_row(
             ui,
             row_rect,
@@ -676,6 +742,7 @@ pub fn show_sidebar(
         if event.is_none()
             && !suppress_click
             && response.clicked_by(egui::PointerButton::Primary)
+            && item.selectable
             && let Some(session_id) = &item.session_id
         {
             event = Some(SidebarEvent::ActivateSession((*session_id).to_owned()));
@@ -719,7 +786,7 @@ pub fn show_sidebar(
         ui,
         rect,
         footer_h,
-        &usage_bars,
+        footer_items,
         model.separator_visible,
         palette,
         border_color,
@@ -730,15 +797,15 @@ pub fn show_sidebar(
     event
 }
 
-pub(crate) fn sidebar_metadata_session_budget(
+#[cfg(test)]
+pub(crate) fn sidebar_session_row_capacity(
     height: f32,
     top_inset: f32,
     title_visible: bool,
-    usage_lines: &[String],
+    footer_item_count: usize,
 ) -> usize {
     let header_h = sidebar_header_height(title_visible);
-    let usage_bars = parse_usage_bars(usage_lines);
-    let footer_h = sidebar_footer_height(usage_bars.len());
+    let footer_h = sidebar_footer_height(footer_item_count);
     visible_sidebar_row_capacity(height, top_inset, header_h, footer_h)
 }
 
@@ -749,6 +816,7 @@ fn visible_sidebar_row_capacity(
     footer_h: f32,
 ) -> usize {
     let list_top = top_inset + header_h;
+
     let list_bottom = (height - footer_h).max(list_top);
     ((list_bottom - list_top) / SIDEBAR_ROW_HEIGHT)
         .floor()
@@ -757,6 +825,10 @@ fn visible_sidebar_row_capacity(
 
 fn sidebar_hover_color(palette: ThemePalette) -> egui::Color32 {
     mix_color(palette.base, palette.text, 0.045)
+}
+
+fn sidebar_fullscreen_hover_color(palette: ThemePalette) -> egui::Color32 {
+    mix_color(palette.base, palette.text, 0.13)
 }
 
 fn sidebar_current_color(palette: ThemePalette) -> egui::Color32 {
@@ -811,7 +883,6 @@ fn sidebar_drag_label(item: &SidebarItem<'_>) -> String {
     match item.display {
         SidebarDisplay::Text(text) => text.to_owned(),
         SidebarDisplay::Numbered { label, .. } => label.to_owned(),
-        SidebarDisplay::Progress(pct) => format!("{pct}%"),
     }
 }
 
@@ -1005,7 +1076,7 @@ fn paint_sidebar_title(ui: &egui::Ui, rect: Rect, palette: ThemePalette, model: 
     painter.text(
         Pos2::new(rect.max.x - SIDEBAR_PAD_X, layout.title_pos.y),
         egui::Align2::RIGHT_CENTER,
-        model.sessions.len().to_string(),
+        model.session_count.to_string(),
         egui::FontId::monospace(13.0),
         palette.muted,
     );
@@ -1078,17 +1149,26 @@ fn sidebar_item_row(
     hover_color: egui::Color32,
     current_color: egui::Color32,
 ) -> egui::Response {
+    let draggable = item.reorder_anchor.is_some()
+        && matches!(
+            item.kind,
+            SidebarItemKind::Group | SidebarItemKind::Session { .. }
+        );
+    let clickable = item.selectable && item.session_id.is_some();
     let response = ui.interact(
         rect,
         ui.make_persistent_id(("mux-sidebar-item", &item.id)),
-        if item.reorder_anchor.is_some() {
+        if draggable {
             egui::Sense::click_and_drag()
-        } else if item.session_id.is_some() || item.selectable {
+        } else if clickable {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         },
     );
+    if response.hovered() && clickable {
+        ui.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     if ui.is_rect_visible(rect) {
         let painter = ui.painter_at(rect);
         let bg = if hovered_session {
@@ -1109,33 +1189,10 @@ fn sidebar_item_row(
 
         match &item.kind {
             SidebarItemKind::Group => paint_group_item(&painter, rect, item, palette),
-            SidebarItemKind::Session {
-                active,
-                process,
-                diff,
-            } => paint_session_item(&painter, rect, item, *active, *process, *diff, palette),
-            SidebarItemKind::Process {
-                name,
-                cpu_pct,
-                mem_bytes,
-            } => paint_process_item(&painter, rect, item, name, *cpu_pct, *mem_bytes, palette),
-            SidebarItemKind::Agent { text } => {
-                let active = is_agent_active(text);
-                if active {
-                    ui.ctx().request_repaint_after(Duration::from_millis(180));
-                }
-                let time = ui.input(|input| input.time);
-                paint_agent_item(&painter, rect, item, text, active, time, palette)
+            SidebarItemKind::Session { active } => {
+                paint_session_item(&painter, rect, item, *active, palette)
             }
-            SidebarItemKind::Branch { name } => {
-                paint_detail_item(&painter, rect, item, "", name, palette)
-            }
-            SidebarItemKind::Status { text } => {
-                paint_detail_item(&painter, rect, item, "status", text, palette)
-            }
-            SidebarItemKind::Progress { pct } => {
-                paint_progress_item(&painter, rect, item, *pct, palette)
-            }
+            SidebarItemKind::Row => paint_generic_sidebar_item(&painter, rect, item, palette),
         }
     }
     response
@@ -1182,6 +1239,7 @@ fn paint_group_item(
         egui::FontId::monospace(12.0),
         palette.border,
     );
+    paint_item_primitives(painter, rect, item.primitives, item.color);
 }
 
 fn paint_session_item(
@@ -1189,8 +1247,6 @@ fn paint_session_item(
     rect: Rect,
     item: &SidebarItem<'_>,
     active: bool,
-    process: Option<&str>,
-    diff: Option<DiffStat>,
     palette: ThemePalette,
 ) {
     let label_color = if active { item.color } else { item.dim_color };
@@ -1199,7 +1255,6 @@ fn paint_session_item(
     let (number, name) = match item.display {
         SidebarDisplay::Numbered { number, label } => (Some(number), label),
         SidebarDisplay::Text(text) => (None, text),
-        SidebarDisplay::Progress(_) => (None, ""),
     };
     let mut text_x = x;
     if let Some(number) = number {
@@ -1230,277 +1285,57 @@ fn paint_session_item(
         egui::FontId::monospace(13.0),
         label_color,
     );
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color);
+}
 
-    if let Some(diff) = diff
-        && (diff.added > 0 || diff.removed > 0)
+fn paint_generic_sidebar_item(
+    painter: &egui::Painter,
+    rect: Rect,
+    item: &SidebarItem<'_>,
+    palette: ThemePalette,
+) {
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color);
+    if !item.primitives.is_empty() {
+        return;
+    }
+    let x = item_text_x(rect, item);
+    let cy = rect.center().y;
+    let mut text_x = x;
+    if let Some(icon) = item.icon
+        && paint_icon_slug(painter, icon, Pos2::new(x + 6.0, cy), 12.0, item.color)
     {
-        paint_diff_stat(painter, rect, diff, palette);
-    } else if let Some(process) = process {
+        text_x += 16.0;
+    }
+    let text = match item.display {
+        SidebarDisplay::Text(text) => text,
+        SidebarDisplay::Numbered { label, .. } => label,
+    };
+    if !text.is_empty() {
         painter.text(
-            Pos2::new(rect.max.x - 12.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            truncate_label(process, 10),
-            egui::FontId::monospace(12.0),
-            palette.border,
-        );
-    }
-}
-
-fn paint_diff_stat(painter: &egui::Painter, rect: Rect, diff: DiffStat, palette: ThemePalette) {
-    painter.text(
-        Pos2::new(rect.max.x - 12.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        format!("-{}", diff.removed),
-        egui::FontId::monospace(12.0),
-        palette.destructive,
-    );
-    painter.text(
-        Pos2::new(rect.max.x - 46.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        format!("+{}", diff.added),
-        egui::FontId::monospace(12.0),
-        palette.success,
-    );
-}
-
-fn paint_process_item(
-    painter: &egui::Painter,
-    rect: Rect,
-    item: &SidebarItem<'_>,
-    name: &str,
-    cpu_pct: Option<f32>,
-    mem_bytes: Option<u64>,
-    palette: ThemePalette,
-) {
-    let color = process_color(name, palette);
-    let x = item_text_x(rect, item);
-    let cy = rect.center().y;
-    paint_icon(
-        painter,
-        process_icon(name),
-        Pos2::new(x + 6.0, cy),
-        12.0,
-        color,
-    );
-    let mut label = String::new();
-    push_truncated_label(&mut label, name, 16);
-    painter.text(
-        Pos2::new(x + 16.0, cy),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::monospace(11.0),
-        color,
-    );
-
-    let mut metrics = String::new();
-    if let Some(cpu_pct) = cpu_pct {
-        let _ = write!(metrics, "{cpu_pct:.1}%");
-    }
-    if let Some(mem_bytes) = mem_bytes.filter(|bytes| *bytes > 0) {
-        if !metrics.is_empty() {
-            metrics.push(' ');
-        }
-        push_formatted_bytes(&mut metrics, mem_bytes);
-    }
-    if !metrics.is_empty() {
-        painter.text(
-            Pos2::new(rect.max.x - 12.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            metrics,
+            Pos2::new(text_x, cy),
+            egui::Align2::LEFT_CENTER,
+            truncate_label(text, 28),
             egui::FontId::monospace(11.0),
-            palette.border,
-        );
-    }
-}
-
-fn process_color(name: &str, palette: ThemePalette) -> egui::Color32 {
-    match name {
-        "node" | "bun" | "deno" => palette.success,
-        "nvim" | "vim" => palette.accent,
-        "fish" | "zsh" | "bash" | "sh" => palette.subtext,
-        "cargo" | "rustc" | "rust-analyzer" | "python" | "python3" => palette.warning,
-        "git" => palette.destructive,
-        _ => palette.muted,
-    }
-}
-
-fn process_icon(name: &str) -> Icon {
-    match name {
-        "nvim" | "vim" => Icon::Editor,
-        "git" => Icon::GitBranch,
-        "node" | "bun" | "deno" | "cargo" | "rustc" | "rust-analyzer" | "python" | "python3" => {
-            Icon::Package
-        }
-        _ => Icon::Terminal,
-    }
-}
-
-fn push_formatted_bytes(out: &mut String, bytes: u64) {
-    const MIB: u64 = 1024 * 1024;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        let _ = write!(out, "{:.1}g", bytes as f64 / GIB as f64);
-    } else {
-        let _ = write!(out, "{}m", bytes.div_ceil(MIB));
-    }
-}
-
-fn paint_agent_item(
-    painter: &egui::Painter,
-    rect: Rect,
-    item: &SidebarItem<'_>,
-    text: &str,
-    active: bool,
-    time: f64,
-    palette: ThemePalette,
-) {
-    let (name, detail) = text.split_once(' ').unwrap_or((text, ""));
-    let color = agent_color(name, palette);
-    let x = item_text_x(rect, item);
-    let cy = rect.center().y;
-    let icon = if name == "claude" {
-        Icon::Sparkles
-    } else {
-        Icon::Bot
-    };
-    paint_icon(painter, icon, Pos2::new(x + 6.0, cy), 12.0, color);
-    painter.text(
-        Pos2::new(x + 16.0, cy),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::monospace(11.0),
-        color,
-    );
-    painter.text(
-        Pos2::new(rect.max.x - 12.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        agent_detail_label(detail, active, time),
-        egui::FontId::monospace(11.0),
-        if detail.contains("asking") {
-            palette.warning
-        } else {
-            palette.subtext
-        },
-    );
-}
-
-fn is_agent_active(text: &str) -> bool {
-    text.contains('…') || text.contains("Working")
-}
-
-fn agent_detail_label(detail: &str, active: bool, time: f64) -> String {
-    let pulse_len = if active {
-        ((time * 5.0) as usize % 4) + 1
-    } else {
-        0
-    };
-    let mut label = String::with_capacity(detail.len().min(AGENT_DETAIL_MAX_CHARS * 4) + pulse_len);
-    let mut chars = detail.chars().chain(std::iter::repeat_n('.', pulse_len));
-    for _ in 0..AGENT_DETAIL_MAX_CHARS {
-        let Some(ch) = chars.next() else {
-            return label;
-        };
-        label.push(ch);
-    }
-
-    if chars.next().is_some() {
-        label.pop();
-        label.push('…');
-    }
-    label
-}
-
-fn agent_color(name: &str, palette: ThemePalette) -> egui::Color32 {
-    match name {
-        "claude" => palette.warning,
-        "codex" => egui::Color32::from_rgb(0x74, 0xc7, 0xec),
-        "opencode" => egui::Color32::from_rgb(0x9a, 0x8f, 0xbf),
-        _ => palette.subtext,
-    }
-}
-
-fn paint_detail_item(
-    painter: &egui::Painter,
-    rect: Rect,
-    item: &SidebarItem<'_>,
-    kind: &str,
-    text: &str,
-    palette: ThemePalette,
-) {
-    let x = item_text_x(rect, item);
-    let cy = rect.center().y;
-    let mut display = String::new();
-    let text_x = if kind.is_empty() {
-        paint_icon(
-            painter,
-            Icon::GitBranch,
-            Pos2::new(x + 6.0, cy),
-            11.0,
             palette.muted,
         );
-        push_truncated_label(&mut display, text, 24);
-        x + 16.0
-    } else {
-        display.push_str(kind);
-        display.push(' ');
-        push_truncated_label(&mut display, text, 22);
-        x
-    };
-    painter.text(
-        Pos2::new(text_x, cy),
-        egui::Align2::LEFT_CENTER,
-        display,
-        egui::FontId::monospace(11.0),
-        palette.muted,
-    );
-}
-
-fn paint_progress_item(
-    painter: &egui::Painter,
-    rect: Rect,
-    item: &SidebarItem<'_>,
-    pct: u8,
-    palette: ThemePalette,
-) {
-    let x = item_text_x(rect, item);
-    let cy = rect.center().y;
-    let color = if pct >= 100 {
-        palette.success
-    } else {
-        item.dim_color
-    };
-    let track = Rect::from_min_size(
-        Pos2::new(x, cy - 2.0),
-        egui::vec2((rect.max.x - 52.0 - x).max(20.0), 4.0),
-    );
-    painter.rect_filled(track, 2.0, palette.surface);
-    let fill_w = track.width() * f32::from(pct.min(100)) / 100.0;
-    if fill_w > 0.0 {
-        painter.rect_filled(
-            Rect::from_min_size(track.min, egui::vec2(fill_w, 4.0)),
-            2.0,
-            color,
-        );
     }
-    painter.text(
-        Pos2::new(track.max.x + 8.0, cy),
-        egui::Align2::LEFT_CENTER,
-        format!("{pct}%"),
-        egui::FontId::monospace(11.0),
-        color,
-    );
 }
 
-fn sidebar_footer_height(usage_bar_count: usize) -> f32 {
-    let usage_count = usage_bar_count.min(SIDEBAR_MAX_USAGE_BARS);
-    SIDEBAR_FOOTER_BASE_HEIGHT + usage_count as f32 * 30.0
+fn sidebar_footer_items(items: &[ModuleItem]) -> &[ModuleItem] {
+    let len = items.len().min(SIDEBAR_MAX_FOOTER_ITEMS);
+    &items[..len]
+}
+
+fn sidebar_footer_height(footer_item_count: usize) -> f32 {
+    let footer_count = footer_item_count.min(SIDEBAR_MAX_FOOTER_ITEMS);
+    SIDEBAR_FOOTER_BASE_HEIGHT + footer_count as f32 * SIDEBAR_FOOTER_ITEM_HEIGHT
 }
 
 fn paint_sidebar_footer(
     ui: &egui::Ui,
     rect: Rect,
     footer_h: f32,
-    usage_bars: &UsageBars,
+    footer_items: &[ModuleItem],
     separator_visible: bool,
     palette: ThemePalette,
     border_color: egui::Color32,
@@ -1515,17 +1350,17 @@ fn paint_sidebar_footer(
     }
 
     let mut row_y = y + 18.0;
-    for bar in usage_bars.iter() {
-        paint_usage_bar(
-            &painter,
-            Rect::from_min_size(
-                Pos2::new(rect.min.x + 14.0, row_y - 10.0),
-                egui::vec2(rect.width() - 28.0, 26.0),
-            ),
-            bar,
-            palette,
+    for item in footer_items.iter() {
+        let item_rect = Rect::from_min_size(
+            Pos2::new(rect.min.x + 14.0, row_y - 10.0),
+            egui::vec2(rect.width() - 28.0, 26.0),
         );
-        row_y += 30.0;
+        let color = item.fg.unwrap_or(palette.subtext);
+        paint_item_primitives(&painter, item_rect, &item.primitives, color);
+        if item.primitives.is_empty() {
+            paint_footer_fallback(&painter, item_rect, item, color, palette);
+        }
+        row_y += SIDEBAR_FOOTER_ITEM_HEIGHT;
     }
 
     painter.text(
@@ -1537,357 +1372,40 @@ fn paint_sidebar_footer(
     );
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct UsageMarker {
-    pos: f32,
-    color: egui::Color32,
-}
-
-#[derive(Clone, Debug)]
-struct UsageBar<'a> {
-    label: Cow<'a, str>,
-    pct: u8,
-    pace: Cow<'a, str>,
-    marker: Option<UsageMarker>,
-    color: egui::Color32,
-}
-
-#[derive(Clone, Debug)]
-struct UsageBars<'a> {
-    bars: [Option<UsageBar<'a>>; SIDEBAR_MAX_USAGE_BARS],
-    len: usize,
-}
-
-impl<'a> UsageBars<'a> {
-    fn new() -> Self {
-        Self {
-            bars: std::array::from_fn(|_| None),
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, bar: UsageBar<'a>) -> bool {
-        if self.len >= SIDEBAR_MAX_USAGE_BARS {
-            return false;
-        }
-        self.bars[self.len] = Some(bar);
-        self.len += 1;
-        true
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &UsageBar<'a>> {
-        self.bars[..self.len]
-            .iter()
-            .filter_map(std::option::Option::as_ref)
-    }
-}
-
-impl<'a> std::ops::Index<usize> for UsageBars<'a> {
-    type Output = UsageBar<'a>;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        self.bars[index].as_ref().expect("usage bar index in range")
-    }
-}
-fn paint_usage_bar(painter: &egui::Painter, rect: Rect, bar: &UsageBar<'_>, palette: ThemePalette) {
-    painter.text(
-        Pos2::new(rect.min.x, rect.min.y + 6.0),
-        egui::Align2::LEFT_CENTER,
-        truncate_label(&bar.label, 22),
-        egui::FontId::monospace(11.0),
-        palette.subtext,
-    );
-    paint_usage_right_text(painter, rect, bar, palette);
-
-    let track = Rect::from_min_size(
-        Pos2::new(rect.min.x, rect.min.y + 17.0),
-        egui::vec2(rect.width(), 4.0),
-    );
-    let fill_x = track.left() + track.width() * f32::from(bar.pct) / 100.0;
-    painter.rect_filled(track, 2.0, palette.surface);
-    painter.line_segment(
-        [
-            Pos2::new(track.left(), track.center().y),
-            Pos2::new(fill_x, track.center().y),
-        ],
-        Stroke::new(2.0, bar.color),
-    );
-    if let Some(marker) = bar.marker {
-        let marker_x = track.left() + track.width() * marker.pos;
-        painter.line_segment(
-            [
-                Pos2::new(marker_x, track.top() - 3.0),
-                Pos2::new(marker_x, track.bottom() + 3.0),
-            ],
-            Stroke::new(2.0, marker.color),
-        );
-    }
-}
-
-fn paint_usage_right_text(
+fn paint_footer_fallback(
     painter: &egui::Painter,
     rect: Rect,
-    bar: &UsageBar<'_>,
+    item: &ModuleItem,
+    color: egui::Color32,
     palette: ThemePalette,
 ) {
-    if bar.pace.is_empty() {
+    let mut text_x = rect.min.x;
+    if let Some(icon) = item.icon.as_deref()
+        && paint_icon_slug(
+            painter,
+            icon,
+            Pos2::new(rect.min.x + 6.0, rect.min.y + 6.0),
+            12.0,
+            color,
+        )
+    {
+        text_x += 16.0;
+    }
+    if !item.text.is_empty() {
         painter.text(
-            Pos2::new(rect.max.x, rect.min.y + 6.0),
-            egui::Align2::RIGHT_CENTER,
-            format!("{}%", bar.pct),
+            Pos2::new(text_x, rect.min.y + 6.0),
+            egui::Align2::LEFT_CENTER,
+            truncate_label(&item.text, 28),
             egui::FontId::monospace(11.0),
-            bar.color,
+            palette.subtext,
         );
-        return;
     }
-
-    painter.text(
-        Pos2::new(rect.max.x, rect.min.y + 6.0),
-        egui::Align2::RIGHT_CENTER,
-        &bar.pace,
-        egui::FontId::monospace(11.0),
-        palette.muted,
-    );
-    let pace_width = bar.pace.chars().count() as f32 * 7.0 + 8.0;
-    painter.text(
-        Pos2::new(rect.max.x - pace_width, rect.min.y + 6.0),
-        egui::Align2::RIGHT_CENTER,
-        format!("{}%", bar.pct),
-        egui::FontId::monospace(11.0),
-        bar.color,
-    );
-}
-fn parse_usage_bars(lines: &[String]) -> UsageBars<'_> {
-    let mut bars = UsageBars::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = &lines[index];
-        index += 1;
-        let (pct, label, pace) = match strip_ansi(line) {
-            Cow::Borrowed(text) => {
-                let Some(pct) = parse_percent(text) else {
-                    continue;
-                };
-                (pct, usage_label(text, true), usage_pace(text, true))
-            }
-            Cow::Owned(text) => {
-                let Some(pct) = parse_percent(&text) else {
-                    continue;
-                };
-                (
-                    pct,
-                    Cow::Owned(usage_label(&text, true).into_owned()),
-                    Cow::Owned(usage_pace(&text, true).into_owned()),
-                )
-            }
-        };
-        // A label line may be followed by its painted bar line, which carries
-        // the pace marker (`│`) position and over/under-pace color.
-        let marker = match lines.get(index) {
-            Some(next) if is_bar_line(next) => {
-                index += 1;
-                bar_line_marker(next)
-            }
-            _ => None,
-        };
-        if !bars.push(UsageBar {
-            label: if label.is_empty() {
-                Cow::Borrowed("usage")
-            } else {
-                label
-            },
-            pct,
-            pace,
-            marker,
-            color: first_ansi_color(line).unwrap_or(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)),
-        }) {
-            break;
-        }
-    }
-    bars
-}
-
-fn usage_label<'a>(text: &'a str, borrow_single_part: bool) -> Cow<'a, str> {
-    let mut label = None;
-    for part in text
-        .split_whitespace()
-        .filter(|part| !part.contains('%'))
-        .filter(|part| !part.starts_with('+') && !part.contains(':') && !part.contains('↺'))
-        .filter(|part| part.chars().any(|ch| ch.is_ascii_alphanumeric()))
-        .take(2)
-    {
-        let Some(first) = label else {
-            label = Some(Cow::Borrowed(part));
-            continue;
-        };
-        let mut joined = String::with_capacity(first.len() + 1 + part.len());
-        joined.push_str(&first);
-        joined.push(' ');
-        joined.push_str(part);
-        return Cow::Owned(joined);
-    }
-    match label {
-        Some(label) if borrow_single_part => label,
-        Some(label) => Cow::Owned(label.into_owned()),
-        None => Cow::Borrowed(""),
-    }
-}
-
-fn usage_pace<'a>(text: &'a str, borrow_single_part: bool) -> Cow<'a, str> {
-    let mut seen_pct = false;
-    let mut first = None;
-    let mut joined = None::<String>;
-    let mut count = 0usize;
-    for part in text.split_whitespace() {
-        if part.ends_with('%') {
-            seen_pct = true;
-            continue;
-        }
-        if !seen_pct || !(part.starts_with('+') || part.contains(':') || part.contains('↺')) {
-            continue;
-        }
-        count += 1;
-        if count == 1 {
-            first = Some(part);
-        } else {
-            let joined = joined.get_or_insert_with(|| {
-                let first = first.unwrap_or_default();
-                let mut joined = String::with_capacity(first.len() + 1 + part.len());
-                joined.push_str(first);
-                joined
-            });
-            joined.push(' ');
-            joined.push_str(part);
-        }
-        if count == 3 {
-            break;
-        }
-    }
-    match (joined, first) {
-        (Some(pace), _) => Cow::Owned(pace),
-        (None, Some(pace)) if borrow_single_part => Cow::Borrowed(pace),
-        (None, Some(pace)) => Cow::Owned(pace.to_owned()),
-        (None, None) => Cow::Borrowed(""),
-    }
-}
-
-fn is_bar_line(line: &str) -> bool {
-    line.contains(['█', '▓', '▒', '░']) && parse_percent(&strip_ansi(line)).is_none()
-}
-
-/// Extract the pace marker (`│` cell) from a painted usage bar line:
-/// fractional position across the bar cells and its ANSI color.
-fn bar_line_marker(line: &str) -> Option<UsageMarker> {
-    let mut color = None;
-    let mut cells = 0usize;
-    let mut marker = None;
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            let mut code = String::new();
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    if c == 'm' {
-                        color = sgr_color(&code);
-                    }
-                    break;
-                }
-                code.push(c);
-            }
-        } else if matches!(ch, '█' | '▓' | '▒' | '░') {
-            cells += 1;
-        } else if ch == '│' {
-            marker = Some((cells, color));
-            cells += 1;
-        }
-    }
-    let (index, marker_color) = marker?;
-    (cells > 1).then(|| UsageMarker {
-        pos: (index as f32 + 0.5) / cells as f32,
-        color: marker_color.unwrap_or(egui::Color32::from_rgb(0xa6, 0xe3, 0xa1)),
-    })
-}
-
-fn parse_percent(text: &str) -> Option<u8> {
-    text.split_whitespace().find_map(|part| {
-        part.strip_suffix('%')
-            .and_then(|value| value.parse::<u8>().ok())
-            .map(|pct| pct.min(100))
-    })
-}
-fn strip_ansi(line: &str) -> Cow<'_, str> {
-    if !line.contains('\x1b') && !line.chars().any(|ch| matches!(ch, '█' | '░' | '▒' | '▓'))
-    {
-        return Cow::Borrowed(line.trim());
-    }
-
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else if !matches!(ch, '█' | '░' | '▒' | '▓') {
-            out.push(ch);
-        }
-    }
-    Cow::Owned(out.trim().to_owned())
-}
-
-fn first_ansi_color(line: &str) -> Option<egui::Color32> {
-    if !line.contains('\x1b') {
-        return None;
-    }
-
-    let mut offset = 0;
-    while let Some(start) = line[offset..].find("\x1b[") {
-        let code_start = offset + start + 2;
-        let code = &line[code_start..];
-        let Some(command_offset) = code.bytes().position(|byte| byte.is_ascii_alphabetic()) else {
-            break;
-        };
-        let command = code.as_bytes()[command_offset];
-        if command == b'm' {
-            let code = &code[..command_offset];
-            if let Some(color) = sgr_color(code) {
-                return Some(color);
-            }
-        }
-        offset = code_start + command_offset + 1;
-    }
-    None
-}
-
-fn sgr_color(code: &str) -> Option<egui::Color32> {
-    if code == "0" || code == "39" {
-        return None;
-    }
-
-    let mut parts = code.split(';');
-    if parts.next()? != "38" || parts.next()? != "2" {
-        return None;
-    }
-    let r = parts.next()?.parse::<u8>().ok()?;
-    let g = parts.next()?.parse::<u8>().ok()?;
-    let b = parts.next()?.parse::<u8>().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(egui::Color32::from_rgb(r, g, b))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::sidebar::build_visible_sidebar_items;
 
     #[test]
     fn sidebar_rect_uses_configured_width_and_can_be_disabled() {
@@ -1901,98 +1419,6 @@ mod tests {
 
         chrome.sidebar = false;
         assert_eq!(sidebar_rect(rect, &chrome).width(), 0.0);
-    }
-
-    #[test]
-    fn usage_lines_parse_to_native_bar_data() {
-        let lines = vec![
-            "\x1b[38;2;116;199;236m  5h  90% +38m\x1b[0m".to_owned(),
-            "\x1b[38;2;116;199;236m████████░░\x1b[0m".to_owned(),
-        ];
-
-        let bars = parse_usage_bars(&lines);
-
-        assert_eq!(bars.len(), 1);
-        assert_eq!(bars[0].pct, 90);
-        assert!(bars[0].label.contains("5h"));
-        assert_eq!(bars[0].label, "5h");
-        assert_eq!(bars[0].pace, "+38m");
-        assert_eq!(bars[0].color, egui::Color32::from_rgb(116, 199, 236));
-        assert_eq!(bars[0].marker, None);
-    }
-
-    #[test]
-    fn usage_lines_parse_only_painted_bars() {
-        let lines = vec![
-            "not a usage line".to_owned(),
-            "first 10% +1m".to_owned(),
-            "second 20% +2m".to_owned(),
-            "third 30% +3m".to_owned(),
-            "fourth 40% +4m".to_owned(),
-        ];
-
-        let bars = parse_usage_bars(&lines);
-
-        assert_eq!(bars.len(), SIDEBAR_MAX_USAGE_BARS);
-        assert_eq!(bars[0].label, "first");
-        assert_eq!(bars[1].label, "second");
-        assert_eq!(bars[2].label, "third");
-        assert_eq!(bars[3].label, "fourth");
-    }
-
-    #[test]
-    fn usage_marker_comes_from_bar_line_position_and_color() {
-        let cell = |color: &str, ch: &str| format!("\x1b[38;2;{color}m{ch}\x1b[39m");
-        let mut bar_line = String::new();
-        bar_line.push_str(&cell("232;150;103", "\u{2593}"));
-        bar_line.push_str(&cell("232;150;103", "\u{2593}"));
-        bar_line.push_str(&cell("58;61;78", "\u{2591}"));
-        bar_line.push_str(&cell("239;68;68", "\u{2502}"));
-        for _ in 0..6 {
-            bar_line.push_str(&cell("58;61;78", "\u{2591}"));
-        }
-        let lines = vec![
-            "\x1b[38;2;116;199;236m 5h 78% +3h03 \u{21ba}50m\x1b[0m".to_owned(),
-            bar_line,
-        ];
-
-        let bars = parse_usage_bars(&lines);
-
-        assert_eq!(bars.len(), 1);
-        assert_eq!(bars[0].pace, "+3h03 \u{21ba}50m");
-        let marker = bars[0].marker.unwrap();
-        assert!((marker.pos - 0.35).abs() < 0.001);
-        assert_eq!(marker.color, egui::Color32::from_rgb(239, 68, 68));
-    }
-
-    #[test]
-    fn bar_line_without_marker_yields_no_marker() {
-        let lines = vec![
-            "\x1b[38;2;116;199;236m 5h 90% +38m\x1b[0m".to_owned(),
-            "\x1b[38;2;116;199;236m\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\x1b[0m".to_owned(),
-            "\x1b[38;2;116;199;236m 7d 10% +1h\x1b[0m".to_owned(),
-        ];
-
-        let bars = parse_usage_bars(&lines);
-
-        assert_eq!(bars.len(), 2);
-        assert_eq!(bars[0].marker, None);
-        assert_eq!(bars[1].label, "7d");
-    }
-
-    #[test]
-    fn agent_detail_label_formats_active_pulse_without_intermediate_text() {
-        assert_eq!(agent_detail_label("Working", false, 0.0), "Working");
-        assert_eq!(agent_detail_label("Working", true, 0.0), "Working.");
-        assert_eq!(agent_detail_label("Working", true, 0.6), "Working....");
-        assert_eq!(
-            agent_detail_label("abcdefghijklmnop", true, 0.6),
-            "abcdefghijklmnop.…"
-        );
-        assert_eq!(
-            agent_detail_label("abcdefghijklmnopqrst", true, 0.0),
-            "abcdefghijklmnopq…"
-        );
     }
 
     #[test]
@@ -2222,14 +1648,16 @@ mod tests {
     }
 
     fn show_test_sidebar(ui: &mut egui::Ui, sessions: &[MuxSession]) -> Option<SidebarEvent> {
+        let items = build_visible_sidebar_items(sessions, Some("s1"), 32);
         show_sidebar(
             ui,
             ThemePalette::default(),
             300.0,
             SidebarModel {
-                sessions,
-                selected_session: Some("s1"),
-                metadata: &SidebarMetadata::default(),
+                items: &items,
+                footer_items: &[],
+                session_count: sessions.len(),
+                has_sessions: !sessions.is_empty(),
                 title_visible: false,
                 reserve_titlebar_buttons: false,
                 title_icon: None,
@@ -2239,7 +1667,9 @@ mod tests {
                 focused: false,
                 hovered_session: None,
                 unfocused_dim: 0.0,
+                fullscreen: false,
                 hover_override: None,
+                fullscreen_hover_override: None,
                 current_override: None,
                 border_override: None,
             },
@@ -2296,6 +1726,112 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_detail_rows_with_session_id_do_not_activate() {
+        let context = egui::Context::default();
+        crate::ui::icons::install_icon_fonts(&context);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
+        let items = vec![
+            SidebarItem {
+                id: crate::ui::sidebar::SidebarItemId::Session("s1"),
+                display: SidebarDisplay::Text("alpha"),
+                indent: 0,
+                tree: SidebarTree::None,
+                selectable: true,
+                session_id: Some("s1"),
+                reorder_anchor: Some("alpha"),
+                color: egui::Color32::WHITE,
+                dim_color: egui::Color32::GRAY,
+                kind: SidebarItemKind::Session { active: true },
+                current: true,
+                icon: None,
+                primitives: &[],
+            },
+            SidebarItem {
+                id: crate::ui::sidebar::SidebarItemId::Row("s1-detail"),
+                display: SidebarDisplay::Text("codex"),
+                indent: 2,
+                tree: SidebarTree::None,
+                selectable: false,
+                session_id: Some("s1"),
+                reorder_anchor: Some("alpha"),
+                color: egui::Color32::WHITE,
+                dim_color: egui::Color32::GRAY,
+                kind: SidebarItemKind::Row,
+                current: true,
+                icon: None,
+                primitives: &[],
+            },
+        ];
+
+        let show = |ui: &mut egui::Ui| {
+            show_sidebar(
+                ui,
+                ThemePalette::default(),
+                300.0,
+                SidebarModel {
+                    items: &items,
+                    footer_items: &[],
+                    session_count: 1,
+                    has_sessions: true,
+                    title_visible: false,
+                    reserve_titlebar_buttons: false,
+                    title_icon: None,
+                    top_inset: 0.0,
+                    border_visible: false,
+                    separator_visible: false,
+                    focused: false,
+                    hovered_session: None,
+                    unfocused_dim: 0.0,
+                    fullscreen: false,
+                    hover_override: None,
+                    fullscreen_hover_override: None,
+                    current_override: None,
+                    border_override: None,
+                },
+            )
+        };
+
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerButton {
+                    pos: Pos2::new(20.0, SIDEBAR_ROW_HEIGHT * 1.5),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    let _ = show(ui);
+                });
+            },
+        );
+
+        let mut event = None;
+        let _ = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerButton {
+                    pos: Pos2::new(20.0, SIDEBAR_ROW_HEIGHT * 1.5),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    event = show(ui);
+                });
+            },
+        );
+
+        assert_eq!(event, None);
+    }
+
+    #[test]
     fn sidebar_drop_target_uses_group_midpoint_for_after_group_moves() {
         let sessions = vec![
             test_session("s1", "agents", true),
@@ -2303,8 +1839,7 @@ mod tests {
             test_session("s3", "arc/readiness", false),
             test_session("s4", "bootty", false),
         ];
-        let metadata = SidebarMetadata::default();
-        let items = build_visible_sidebar_items(&sessions, Some("s1"), &metadata, 32);
+        let items = build_visible_sidebar_items(&sessions, Some("s1"), 32);
 
         assert_eq!(
             sidebar_drop_target(
@@ -2353,19 +1888,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_metadata_budget_tracks_visible_row_capacity() {
-        let plain = sidebar_metadata_session_budget(900.0, 0.0, true, &[]);
-        let with_usage = sidebar_metadata_session_budget(
-            900.0,
-            0.0,
-            true,
-            &[
-                "terminal 5h 90% +38m".to_owned(),
-                "agent 7d 73% +1d06:20".to_owned(),
-            ],
-        );
+    fn sidebar_session_row_capacity_tracks_visible_row_capacity() {
+        let plain = sidebar_session_row_capacity(900.0, 0.0, true, 0);
+        let with_footer = sidebar_session_row_capacity(900.0, 0.0, true, 2);
 
-        assert!(with_usage < plain);
+        assert!(with_footer < plain);
         assert_eq!(plain, 33);
     }
 }

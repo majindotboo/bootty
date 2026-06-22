@@ -657,6 +657,7 @@ dependencies = [
  "rstest",
  "rusqlite",
  "serde",
+ "serde_json",
  "starship-battery",
  "sysinfo",
  "tempfile",

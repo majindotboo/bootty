@@ -33,10 +33,6 @@ use crate::{
         command::MuxCommand,
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
-        sidebar_meta::{
-            SidebarMetadata, SidebarMetadataSession, collect_sidebar_metadata,
-            sidebar_metadata_sessions_for_prefix,
-        },
         terminal::ActiveTerminal,
     },
     platform::{
@@ -51,7 +47,6 @@ use crate::{
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
-        chrome,
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
     },
@@ -60,9 +55,6 @@ use bootty_terminal::terminal_engine::{
     TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
     encode_iterm2_report_cell_size, encode_iterm2_report_variable, encode_osc52_response,
 };
-
-const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const SIDEBAR_METADATA_INITIAL_DELAY: Duration = Duration::from_secs(1);
 
 fn mux_refresh_repaint_after(config: &crate::config::MultiplexerConfig) -> Option<Duration> {
     (selected_backend(config) != MuxBackendKind::Native).then_some(MUX_SESSION_REFRESH_INTERVAL)
@@ -144,11 +136,6 @@ pub struct AppState {
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
     session_order: SessionOrderStore,
-    sidebar_metadata: SidebarMetadata,
-    last_sidebar_metadata_refresh: Instant,
-    sidebar_metadata_tx: Option<mpsc::Sender<Vec<SidebarMetadataSession>>>,
-    sidebar_metadata_rx: Option<mpsc::Receiver<SidebarMetadata>>,
-    sidebar_metadata_pending: bool,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
@@ -163,14 +150,6 @@ fn terminal_session_config_with_side_effects(
     let mut session_config = config.terminal_session_config();
     session_config.side_effect_tx = Some(side_effect_tx.clone());
     session_config
-}
-
-fn initial_sidebar_metadata_refresh_mark(started_at: Instant) -> Instant {
-    started_at - SIDEBAR_METADATA_REFRESH_INTERVAL + SIDEBAR_METADATA_INITIAL_DELAY
-}
-
-fn sidebar_metadata_refresh_due(last_refresh: Instant, now: Instant, pending: bool) -> bool {
-    !pending && now.duration_since(last_refresh) >= SIDEBAR_METADATA_REFRESH_INTERVAL
 }
 
 fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
@@ -439,11 +418,6 @@ impl AppState {
             stability_trace,
             config_hot_reload,
             session_order,
-            sidebar_metadata: SidebarMetadata::default(),
-            last_sidebar_metadata_refresh: initial_sidebar_metadata_refresh_mark(Instant::now()),
-            sidebar_metadata_tx: None,
-            sidebar_metadata_rx: None,
-            sidebar_metadata_pending: false,
             new_mux_session_dialog: None,
             sidebar_hovered_session: None,
             session_picker_dialog: None,
@@ -496,10 +470,6 @@ impl AppState {
         self.last_error.as_deref()
     }
 
-    pub fn sidebar_metadata(&self) -> &SidebarMetadata {
-        &self.sidebar_metadata
-    }
-
     pub fn sidebar_focused(&self) -> bool {
         self.input_focus == InputFocus::Sidebar
     }
@@ -543,6 +513,7 @@ impl AppState {
     pub fn activate_session_from_ui(&mut self, session_id: &str) {
         self.mux.activate_session(session_id);
         self.sidebar_hovered_session = Some(session_id.to_owned());
+        (self.repaint)();
     }
 
     pub fn activate_window_from_ui(&mut self, session_id: &str, window_id: &str) {
@@ -808,9 +779,6 @@ impl AppState {
             effects.push(AppEffect::RepaintAfter(after));
         }
         self.sync_session_order();
-        if self.config_state.current().chrome.sidebar {
-            self.refresh_sidebar_metadata(viewport, now);
-        }
         if let Err(error) = self.terminal.sync_mux_anchor(
             &self.config_state.current().multiplexer,
             self.mux.selected_session_anchor(),
@@ -867,90 +835,6 @@ impl AppState {
             repaint.after.min(CONFIG_HOT_RELOAD_INTERVAL),
         ));
         effects
-    }
-
-    fn refresh_sidebar_metadata(&mut self, viewport: ViewportSnapshot, now: Instant) {
-        if let Some(rx) = &self.sidebar_metadata_rx {
-            match rx.try_recv() {
-                Ok(metadata) => {
-                    self.sidebar_metadata = metadata;
-                    self.sidebar_metadata_pending = false;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.sidebar_metadata_tx = None;
-                    self.sidebar_metadata_rx = None;
-                    self.sidebar_metadata_pending = false;
-                }
-            }
-        }
-
-        if !sidebar_metadata_refresh_due(
-            self.last_sidebar_metadata_refresh,
-            now,
-            self.sidebar_metadata_pending,
-        ) {
-            return;
-        }
-
-        self.ensure_sidebar_metadata_worker();
-        let Some(tx) = &self.sidebar_metadata_tx else {
-            return;
-        };
-        let max_sessions = self.sidebar_metadata_session_budget(viewport);
-        match tx.send(sidebar_metadata_sessions_for_prefix(
-            self.mux.sessions(),
-            max_sessions,
-        )) {
-            Ok(()) => {
-                self.last_sidebar_metadata_refresh = now;
-                self.sidebar_metadata_pending = true;
-            }
-            Err(_) => {
-                self.sidebar_metadata_tx = None;
-                self.sidebar_metadata_rx = None;
-                self.sidebar_metadata_pending = false;
-            }
-        }
-    }
-
-    fn sidebar_metadata_session_budget(&self, viewport: ViewportSnapshot) -> usize {
-        let fullscreen_chrome = self.macos_non_native_fullscreen_active || viewport.fullscreen;
-        let title_visible = self.config().window.custom_chrome_title_visible();
-        // Approximates the render layout's notch reservation; an exact match isn't needed since this
-        // only sizes the metadata prefetch budget, and the off-thread path can't query the screen.
-        let top_inset = if fullscreen_chrome {
-            self.config().window.fullscreen_top_offset.unwrap_or(28.0)
-        } else {
-            0.0
-        };
-        chrome::sidebar_metadata_session_budget(
-            viewport.content_height,
-            top_inset,
-            title_visible,
-            self.sidebar_metadata.usage_lines(),
-        )
-    }
-
-    fn ensure_sidebar_metadata_worker(&mut self) {
-        if self.sidebar_metadata_tx.is_some() && self.sidebar_metadata_rx.is_some() {
-            return;
-        }
-
-        let (request_tx, request_rx) = mpsc::channel::<Vec<SidebarMetadataSession>>();
-        let (result_tx, result_rx) = mpsc::channel::<SidebarMetadata>();
-        let repaint = self.repaint.clone();
-        std::thread::spawn(move || {
-            while let Ok(sessions) = request_rx.recv() {
-                let metadata = collect_sidebar_metadata(&sessions);
-                if result_tx.send(metadata).is_err() {
-                    break;
-                }
-                repaint();
-            }
-        });
-        self.sidebar_metadata_tx = Some(request_tx);
-        self.sidebar_metadata_rx = Some(result_rx);
     }
 
     fn open_new_mux_session_dialog(&mut self) {
@@ -2019,31 +1903,6 @@ mod tests {
         config.window.fullscreen = WindowFullscreen::NonNative;
 
         assert!(!should_toggle_native_fullscreen(&config.window));
-    }
-
-    #[test]
-    fn initial_sidebar_metadata_refresh_is_deferred() {
-        let started_at = Instant::now();
-        let last_refresh = initial_sidebar_metadata_refresh_mark(started_at);
-
-        assert!(!sidebar_metadata_refresh_due(
-            last_refresh,
-            started_at,
-            false
-        ));
-        assert!(sidebar_metadata_refresh_due(
-            last_refresh,
-            started_at + SIDEBAR_METADATA_INITIAL_DELAY,
-            false
-        ));
-    }
-
-    #[test]
-    fn sidebar_metadata_refresh_waits_when_pending() {
-        let now = Instant::now();
-        let last_refresh = now - SIDEBAR_METADATA_REFRESH_INTERVAL;
-
-        assert!(!sidebar_metadata_refresh_due(last_refresh, now, true));
     }
 
     #[test]

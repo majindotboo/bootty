@@ -7,10 +7,6 @@ use bootty_app::{
     geometry::{TerminalGeometry, ViewTransform},
     mux::{
         RepaintHandle,
-        sidebar_meta::{
-            DiffStat, ProcessStatus, SidebarMetadata, SidebarSessionMetadata,
-            sidebar_metadata_sessions_for_prefix,
-        },
         snapshot::{MuxPaneAnchor, MuxSession, MuxWindow},
     },
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
@@ -18,6 +14,7 @@ use bootty_app::{
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
         icons,
+        sidebar::build_sidebar_items,
     },
 };
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -176,43 +173,7 @@ fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
         .collect()
 }
 
-fn sidebar_metadata_for(sessions: &[MuxSession]) -> SidebarMetadata {
-    let mut metadata = SidebarMetadata::default();
-    for (index, session) in sessions.iter().enumerate() {
-        metadata.insert(
-            session.name.clone(),
-            SidebarSessionMetadata {
-                branch: Some(format!("feature/frame-{index:03}")),
-                diff: Some(DiffStat {
-                    added: (index as u32) % 40,
-                    removed: (index as u32) % 17,
-                }),
-                attention: index % 11 == 0,
-                status: Some(format!("working batch {}", index % 9)),
-                progress: Some(((index * 7) % 101) as u8),
-                process_cpu: Some(format!("{:.1}%", (index % 16) as f32 * 1.7)),
-                agent_status: (index % 3 == 0).then(|| "codex Working...".to_owned()),
-                processes: vec![ProcessStatus {
-                    name: session
-                        .anchor
-                        .process
-                        .clone()
-                        .unwrap_or_else(|| "shell".to_owned()),
-                    cpu_pct: (index % 16) as f32 * 1.7,
-                    mem_bytes: 128 * 1024 * 1024 + index as u64 * 1024 * 1024,
-                }],
-            },
-        );
-    }
-    metadata
-}
-
-fn sidebar_ui_frame(
-    ui: &mut egui::Ui,
-    sessions: &[MuxSession],
-    metadata: &SidebarMetadata,
-    selected: Option<&str>,
-) {
+fn sidebar_ui_frame(ui: &mut egui::Ui, sessions: &[MuxSession], selected: Option<&str>) {
     let palette = bootty_ui::ThemePalette::default();
     let sidebar_rect = egui::Rect::from_min_size(FRAME_RECT.min, egui::vec2(280.0, 900.0));
     ui.scope_builder(
@@ -220,14 +181,16 @@ fn sidebar_ui_frame(
             .max_rect(sidebar_rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
+            let items = build_sidebar_items(sessions, selected);
             black_box(chrome::show_sidebar(
                 ui,
                 palette,
                 sidebar_rect.height(),
                 SidebarModel {
-                    sessions,
-                    selected_session: selected,
-                    metadata,
+                    items: &items,
+                    footer_items: &[],
+                    session_count: sessions.len(),
+                    has_sessions: !sessions.is_empty(),
                     title_visible: true,
                     reserve_titlebar_buttons: true,
                     title_icon: None,
@@ -237,7 +200,9 @@ fn sidebar_ui_frame(
                     focused: false,
                     hovered_session: None,
                     unfocused_dim: 0.0,
+                    fullscreen: false,
                     hover_override: None,
+                    fullscreen_hover_override: None,
                     current_override: None,
                     border_override: None,
                 },
@@ -364,7 +329,6 @@ fn bench_app_state_update(c: &mut Criterion) {
 
 fn bench_egui_app_frames(c: &mut Criterion) {
     let sessions = sidebar_sessions(SIDEBAR_FRAME_SESSIONS);
-    let metadata = sidebar_metadata_for(&sessions);
     let selected = sessions
         .get(SIDEBAR_FRAME_SESSIONS / 2)
         .map(|session| session.id.as_str());
@@ -405,7 +369,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                 },
                 |ui| {
                     egui::CentralPanel::default().show_inside(ui, |ui| {
-                        sidebar_ui_frame(ui, black_box(&sessions), black_box(&metadata), selected);
+                        sidebar_ui_frame(ui, black_box(&sessions), selected);
                         status_ui_frame(ui, selected);
                     });
                 },
@@ -432,12 +396,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                     },
                     |ui| {
                         egui::CentralPanel::default().show_inside(ui, |ui| {
-                            sidebar_ui_frame(
-                                ui,
-                                black_box(&sessions),
-                                black_box(&metadata),
-                                selected,
-                            );
+                            sidebar_ui_frame(ui, black_box(&sessions), selected);
                             status_ui_frame(ui, selected);
                             terminal_widget_frame(ui, &mut terminal, &mut widget);
                         });
@@ -449,24 +408,11 @@ fn bench_egui_app_frames(c: &mut Criterion) {
     );
 }
 
-fn bench_sidebar_metadata_frame(c: &mut Criterion) {
-    let sessions = sidebar_sessions(SIDEBAR_FRAME_SESSIONS);
-    c.bench_function("sidebar_metadata_update_request_384_sessions", |b| {
-        b.iter(|| {
-            black_box(sidebar_metadata_sessions_for_prefix(
-                black_box(&sessions),
-                SIDEBAR_FRAME_SESSIONS,
-            ));
-        })
-    });
-}
-
 criterion_group!(
 name = benches;
 config = Criterion::default().noise_threshold(0.15);
 targets =
     bench_app_state_update,
-    bench_egui_app_frames,
-    bench_sidebar_metadata_frame
+    bench_egui_app_frames
 );
 criterion_main!(benches);

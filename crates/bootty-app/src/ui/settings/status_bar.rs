@@ -60,7 +60,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let available = win
         .config_path
         .parent()
-        .map(|parent| crate::status_module::available_module_names(&parent.join("status")))
+        .map(|parent| crate::extensions::available_module_names(&parent.join("status")))
         .unwrap_or_default();
 
     let mut changed = false;

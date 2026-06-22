@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use eframe::egui::Color32;
 
-use crate::mux::{
-    sidebar_meta::{DiffStat, SidebarMetadata},
-    snapshot::MuxSession,
+use crate::{
+    extensions::{ModuleItem, ModulePrimitive},
+    mux::snapshot::MuxSession,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -13,48 +13,23 @@ pub struct SidebarState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SidebarItemKind<'a> {
+pub enum SidebarItemKind {
     Group,
-    Session {
-        active: bool,
-        process: Option<&'a str>,
-        diff: Option<DiffStat>,
-    },
-    Process {
-        name: &'a str,
-        cpu_pct: Option<f32>,
-        mem_bytes: Option<u64>,
-    },
-    Agent {
-        text: &'a str,
-    },
-    Branch {
-        name: &'a str,
-    },
-    Status {
-        text: &'a str,
-    },
-    Progress {
-        pct: u8,
-    },
+    Session { active: bool },
+    Row,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SidebarItemId<'a> {
     Group(&'a str),
     Session(&'a str),
-    Process(&'a str),
-    Agent(&'a str),
-    Branch(&'a str),
-    Status(&'a str),
-    Progress(&'a str),
+    Row(&'a str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarDisplay<'a> {
     Text(&'a str),
     Numbered { number: usize, label: &'a str },
-    Progress(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,31 +52,115 @@ pub struct SidebarItem<'a> {
     pub reorder_anchor: Option<&'a str>,
     pub color: Color32,
     pub dim_color: Color32,
-    pub kind: SidebarItemKind<'a>,
+    pub kind: SidebarItemKind,
     pub current: bool,
+    pub icon: Option<&'a str>,
+    pub primitives: &'a [ModulePrimitive],
 }
 
 pub fn build_sidebar_items<'a>(
     sessions: &'a [MuxSession],
     selected_session: Option<&str>,
-    metadata: &'a SidebarMetadata,
 ) -> Vec<SidebarItem<'a>> {
-    build_sidebar_items_inner(sessions, selected_session, metadata, None)
+    build_sidebar_items_inner(sessions, selected_session, None)
 }
 
 pub fn build_visible_sidebar_items<'a>(
     sessions: &'a [MuxSession],
     selected_session: Option<&str>,
-    metadata: &'a SidebarMetadata,
     max_rows: usize,
 ) -> Vec<SidebarItem<'a>> {
-    build_sidebar_items_inner(sessions, selected_session, metadata, Some(max_rows))
+    build_sidebar_items_inner(sessions, selected_session, Some(max_rows))
+}
+
+pub fn build_sidebar_items_from_module_items<'a>(
+    items: &'a [ModuleItem],
+    selected_session: Option<&str>,
+) -> Vec<SidebarItem<'a>> {
+    items
+        .iter()
+        .filter_map(|item| sidebar_item_from_module_item(item, selected_session))
+        .collect()
+}
+
+fn sidebar_item_from_module_item<'a>(
+    item: &'a ModuleItem,
+    selected_session: Option<&str>,
+) -> Option<SidebarItem<'a>> {
+    let kind = item.kind.as_deref().unwrap_or("row");
+    if kind == "footer" {
+        return None;
+    }
+    let row_key = item.key.as_deref().unwrap_or_else(|| {
+        if kind == "session" {
+            item.session_id.as_deref().unwrap_or(item.text.as_str())
+        } else {
+            item.text.as_str()
+        }
+    });
+    let display = if let Some(number) = item.number {
+        SidebarDisplay::Numbered {
+            number,
+            label: item.text.as_str(),
+        }
+    } else {
+        SidebarDisplay::Text(item.text.as_str())
+    };
+    let selected = selected_session.is_some_and(|selected| {
+        item.session_id.as_deref() == Some(selected) || item.text == selected
+    });
+    let selectable = item.selectable.unwrap_or(kind == "session");
+    let current = if selectable && selected_session.is_some() {
+        selected
+    } else {
+        item.current.unwrap_or(false)
+    };
+    let sidebar_kind = match kind {
+        "group" => SidebarItemKind::Group,
+        "session" => SidebarItemKind::Session {
+            active: selected_session.map_or(item.active.unwrap_or(current), |_| current),
+        },
+        _ => SidebarItemKind::Row,
+    };
+    let color = item.fg.unwrap_or(Color32::WHITE);
+    Some(SidebarItem {
+        id: sidebar_item_id(kind, row_key, item.text.as_str()),
+        display,
+        indent: item.indent.unwrap_or(0),
+        tree: sidebar_tree(item.tree.as_deref()),
+        selectable,
+        session_id: item.session_id.as_deref(),
+        reorder_anchor: item.reorder_anchor.as_deref(),
+        color,
+        dim_color: item.dim_fg.unwrap_or(color),
+        kind: sidebar_kind,
+        current,
+        icon: item.icon.as_deref(),
+        primitives: &item.primitives,
+    })
+}
+
+fn sidebar_item_id<'a>(kind: &str, row_key: &'a str, text: &'a str) -> SidebarItemId<'a> {
+    match kind {
+        "group" => SidebarItemId::Group(text),
+        "session" => SidebarItemId::Session(row_key),
+        _ => SidebarItemId::Row(row_key),
+    }
+}
+
+fn sidebar_tree(value: Option<&str>) -> SidebarTree {
+    match value {
+        Some("middle") => SidebarTree::Middle,
+        Some("last") => SidebarTree::Last,
+        Some("pipe") => SidebarTree::Pipe,
+        Some("blank") => SidebarTree::Blank,
+        _ => SidebarTree::None,
+    }
 }
 
 fn build_sidebar_items_inner<'a>(
     sessions: &'a [MuxSession],
     selected_session: Option<&str>,
-    metadata: &'a SidebarMetadata,
     max_rows: Option<usize>,
 ) -> Vec<SidebarItem<'a>> {
     if max_rows == Some(0) {
@@ -131,13 +190,7 @@ fn build_sidebar_items_inner<'a>(
         } else {
             SidebarTree::Middle
         };
-        let detail_tree = if !is_grouped {
-            SidebarTree::None
-        } else if is_last_in_group {
-            SidebarTree::Blank
-        } else {
-            SidebarTree::Pipe
-        };
+
         let (color, dim_color) = computed_color(
             group_index,
             group_meta.dynamic_total,
@@ -155,7 +208,7 @@ fn build_sidebar_items_inner<'a>(
         } else {
             session.name.as_str()
         };
-        let (display, session_indent, detail_indent) = if is_grouped {
+        let (display, session_indent) = if is_grouped {
             if group != last_group {
                 items.push(SidebarItem {
                     id: SidebarItemId::Group(group),
@@ -169,6 +222,8 @@ fn build_sidebar_items_inner<'a>(
                     dim_color,
                     kind: SidebarItemKind::Group,
                     current: false,
+                    icon: None,
+                    primitives: &[],
                 });
                 if max_rows.is_some_and(|limit| items.len() >= limit) {
                     break;
@@ -181,7 +236,7 @@ fn build_sidebar_items_inner<'a>(
                 label,
             };
             ordinal += 1;
-            (display, 2, 4)
+            (display, 2)
         } else {
             let label = if group.is_empty() {
                 session.name.as_str()
@@ -193,10 +248,9 @@ fn build_sidebar_items_inner<'a>(
                 label,
             };
             ordinal += 1;
-            (display, 0, 2)
+            (display, 0)
         };
 
-        let meta = metadata.get(&session.name);
         items.push(SidebarItem {
             id: SidebarItemId::Session(session.id.as_str()),
             display,
@@ -207,143 +261,13 @@ fn build_sidebar_items_inner<'a>(
             reorder_anchor: Some(reorder_anchor),
             color,
             dim_color,
-            kind: SidebarItemKind::Session {
-                active: selected,
-                process: session.anchor.process.as_deref(),
-                diff: meta.and_then(|meta| meta.diff),
-            },
+            kind: SidebarItemKind::Session { active: selected },
             current: selected,
+            icon: None,
+            primitives: &[],
         });
         if max_rows.is_some_and(|limit| items.len() >= limit) {
             break;
-        }
-        if let Some(process) = meta.and_then(|meta| meta.processes.first()) {
-            items.push(SidebarItem {
-                id: SidebarItemId::Process(session.id.as_str()),
-                display: SidebarDisplay::Text(process.name.as_str()),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Process {
-                    name: process.name.as_str(),
-                    cpu_pct: Some(process.cpu_pct),
-                    mem_bytes: Some(process.mem_bytes),
-                },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
-        } else if let Some(process) = session
-            .anchor
-            .process
-            .as_ref()
-            .filter(|process| !process.is_empty())
-        {
-            items.push(SidebarItem {
-                id: SidebarItemId::Process(session.id.as_str()),
-                display: SidebarDisplay::Text(process.as_str()),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Process {
-                    name: process.as_str(),
-                    cpu_pct: meta
-                        .and_then(|meta| meta.process_cpu.as_deref())
-                        .and_then(parse_cpu_percent),
-                    mem_bytes: None,
-                },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
-        }
-        if let Some(agent_status) = meta.and_then(|meta| meta.agent_status.as_ref()) {
-            items.push(SidebarItem {
-                id: SidebarItemId::Agent(session.id.as_str()),
-                display: SidebarDisplay::Text(agent_status.as_str()),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Agent {
-                    text: agent_status.as_str(),
-                },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
-        }
-        if let Some(branch) = meta.and_then(|meta| meta.branch.as_ref()) {
-            items.push(SidebarItem {
-                id: SidebarItemId::Branch(session.id.as_str()),
-                display: SidebarDisplay::Text(branch.as_str()),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Branch {
-                    name: branch.as_str(),
-                },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
-        }
-        if let Some(status) = meta.and_then(|meta| meta.status.as_ref()) {
-            items.push(SidebarItem {
-                id: SidebarItemId::Status(session.id.as_str()),
-                display: SidebarDisplay::Text(status.as_str()),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Status {
-                    text: status.as_str(),
-                },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
-        }
-        if let Some(progress) = meta.and_then(|meta| meta.progress) {
-            items.push(SidebarItem {
-                id: SidebarItemId::Progress(session.id.as_str()),
-                display: SidebarDisplay::Progress(progress),
-                indent: detail_indent,
-                tree: detail_tree,
-                selectable: false,
-                session_id: Some(session.id.as_str()),
-                reorder_anchor: Some(reorder_anchor),
-                color,
-                dim_color,
-                kind: SidebarItemKind::Progress { pct: progress },
-                current: selected,
-            });
-            if max_rows.is_some_and(|limit| items.len() >= limit) {
-                break;
-            }
         }
 
         last_group = group;
@@ -460,10 +384,6 @@ impl<'a> GroupMeta<'a> {
     }
 }
 
-fn parse_cpu_percent(value: &str) -> Option<f32> {
-    value.trim_end_matches('%').parse().ok()
-}
-
 /// The sidebar accent color for a session, so the status bar can match it. Walks
 /// the same grouping as the sidebar render (group position is computed by ordered
 /// iteration) and returns the primary (non-dim) color for the selected session.
@@ -550,33 +470,104 @@ fn hsl_to_color(hue: f64, saturation: f64, lightness: f64) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mux::{
-        sidebar_meta::{DiffStat, SidebarSessionMetadata},
-        snapshot::MuxPaneAnchor,
-    };
+    use crate::mux::snapshot::MuxPaneAnchor;
 
     #[test]
-    fn groups_sessions_and_places_detail_rows_after_session() {
+    fn extension_items_build_sidebar_rows_and_footer_items_stay_generic() {
+        let primitive = ModulePrimitive::Text {
+            text: "right".to_owned(),
+            color: Some(Color32::from_rgb(0xa6, 0xe3, 0xa1)),
+            x: crate::extensions::ModuleCoord {
+                frac: 1.0,
+                px: -8.0,
+            },
+            y: crate::extensions::ModuleCoord { frac: 0.5, px: 0.0 },
+            size: 11.0,
+            align: "right_center".to_owned(),
+            min_width: None,
+        };
+        let items = vec![
+            ModuleItem {
+                kind: Some("session".to_owned()),
+                text: "api".to_owned(),
+                number: Some(1),
+                session_id: Some("$1".to_owned()),
+                reorder_anchor: Some("work/api".to_owned()),
+                fg: Some(Color32::from_rgb(0x89, 0xb4, 0xfa)),
+                dim_fg: Some(Color32::from_rgb(0x45, 0x5a, 0x7d)),
+                current: Some(true),
+                active: Some(true),
+                primitives: vec![primitive.clone()],
+                ..ModuleItem::default()
+            },
+            ModuleItem {
+                kind: Some("footer".to_owned()),
+                text: "codex".to_owned(),
+                primitives: vec![primitive],
+                ..ModuleItem::default()
+            },
+        ];
+
+        let rows = build_sidebar_items_from_module_items(&items, None);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, Some("$1"));
+        assert_eq!(
+            rows[0].display,
+            SidebarDisplay::Numbered {
+                number: 1,
+                label: "api"
+            }
+        );
+        assert!(rows[0].current);
+        assert!(matches!(
+            rows[0].kind,
+            SidebarItemKind::Session { active: true }
+        ));
+        assert_eq!(rows[0].primitives.len(), 1);
+    }
+
+    #[test]
+    fn extension_session_selection_uses_bootty_selected_session_without_waiting_for_luau() {
+        let items = vec![
+            ModuleItem {
+                kind: Some("session".to_owned()),
+                text: "one".to_owned(),
+                session_id: Some("$1".to_owned()),
+                current: Some(true),
+                active: Some(true),
+                selectable: Some(true),
+                ..ModuleItem::default()
+            },
+            ModuleItem {
+                kind: Some("session".to_owned()),
+                text: "two".to_owned(),
+                session_id: Some("$2".to_owned()),
+                current: Some(false),
+                active: Some(false),
+                selectable: Some(true),
+                ..ModuleItem::default()
+            },
+        ];
+
+        let rows = build_sidebar_items_from_module_items(&items, Some("$2"));
+
+        assert!(!rows[0].current);
+        assert!(rows[1].current);
+        assert!(matches!(
+            rows[1].kind,
+            SidebarItemKind::Session { active: true, .. }
+        ));
+    }
+
+    #[test]
+    fn groups_sessions_without_luau_enrichment_rows() {
         let sessions = vec![
             session("$1", "work/api", "zsh"),
             session("$2", "work/ui", "nvim"),
         ];
-        let mut metadata = SidebarMetadata::default();
-        metadata.insert(
-            "work/api",
-            SidebarSessionMetadata {
-                branch: Some("main".to_owned()),
-                diff: Some(DiffStat {
-                    added: 7,
-                    removed: 4,
-                }),
-                status: Some("review".to_owned()),
-                progress: Some(42),
-                ..SidebarSessionMetadata::default()
-            },
-        );
 
-        let items = build_sidebar_items(&sessions, Some("$1"), &metadata);
+        let items = build_sidebar_items(&sessions, Some("$1"));
         assert_eq!(
             items[1].display,
             SidebarDisplay::Numbered {
@@ -585,31 +576,24 @@ mod tests {
             }
         );
         assert!(matches!(items[1].kind, SidebarItemKind::Session { .. }));
-        assert!(matches!(items[2].kind, SidebarItemKind::Process { .. }));
-        assert!(matches!(items[3].kind, SidebarItemKind::Branch { .. }));
-        assert!(matches!(items[4].kind, SidebarItemKind::Status { .. }));
-        assert!(matches!(
-            items[5].kind,
-            SidebarItemKind::Progress { pct: 42 }
-        ));
+        assert_eq!(items.len(), 3);
         assert_eq!(
-            items[6].display,
+            items[2].display,
             SidebarDisplay::Numbered {
                 number: 2,
                 label: "ui"
             }
         );
         assert_eq!(items[1].tree, SidebarTree::Middle);
-        assert_eq!(items[6].tree, SidebarTree::Last);
+        assert_eq!(items[2].tree, SidebarTree::Last);
     }
 
     #[test]
     fn selected_session_does_not_also_mark_attached_session_current() {
         let mut sessions = vec![session("$1", "one", "zsh"), session("$2", "two", "fish")];
         sessions[0].active = true;
-        let metadata = SidebarMetadata::default();
 
-        let items = build_sidebar_items(&sessions, Some("$2"), &metadata);
+        let items = build_sidebar_items(&sessions, Some("$2"));
 
         let current = items
             .iter()
@@ -627,19 +611,8 @@ mod tests {
             session("$3", "work/bench", "cargo"),
             session("$4", "ops/logs", "tail"),
         ];
-        let mut metadata = SidebarMetadata::default();
-        metadata.insert(
-            "work/api",
-            SidebarSessionMetadata {
-                branch: Some("main".to_owned()),
-                status: Some("review".to_owned()),
-                progress: Some(42),
-                ..SidebarSessionMetadata::default()
-            },
-        );
-
-        let full = build_sidebar_items(&sessions, Some("$2"), &metadata);
-        let visible = build_visible_sidebar_items(&sessions, Some("$2"), &metadata, 5);
+        let full = build_sidebar_items(&sessions, Some("$2"));
+        let visible = build_visible_sidebar_items(&sessions, Some("$2"), 5);
 
         assert_eq!(visible.as_slice(), &full[..5]);
     }
@@ -655,10 +628,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let metadata = SidebarMetadata::default();
-
-        let full = build_sidebar_items(&sessions, Some("$2"), &metadata);
-        let visible = build_visible_sidebar_items(&sessions, Some("$2"), &metadata, 17);
+        let full = build_sidebar_items(&sessions, Some("$2"));
+        let visible = build_visible_sidebar_items(&sessions, Some("$2"), 17);
 
         assert_eq!(visible.as_slice(), &full[..17]);
     }

@@ -36,6 +36,10 @@ fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visibl
     !(sidebar_visible && segment.module == "session")
 }
 
+fn color_hex(color: egui::Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
 fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32 {
     if sidebar_visible && !sidebar_on_right {
         0.0
@@ -63,8 +67,8 @@ pub struct BoottyApp {
     settings: Option<SettingsWindow>,
     // Held for the process lifetime so the native menu stays installed.
     _menu: Option<AppMenu>,
-    /// Worker for built-in and user Lua/Luau status modules.
-    status_modules: crate::status_module::StatusModuleHost,
+    status_extensions: crate::extensions::ExtensionHost,
+    sidebar_extensions: crate::extensions::ExtensionHost,
     keep_awake: Option<keepawake::KeepAwake>,
 }
 
@@ -108,16 +112,20 @@ impl BoottyApp {
         )
         .with_text_config(text_config);
 
-        // User status modules live in `<config>/status/`; built-ins are Luau modules and user
-        // `.lua` / `.luau` files override same-named defaults.
+        // User extensions live beside the config file. Built-ins are Luau modules;
+        // user `.lua` / `.luau` files override same-named defaults per extension surface.
         let theme_tokens = crate::theme::theme_tokens(&config);
-        let status_dir = config
+        let config_dir = config
             .config_path
             .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("status");
-        let status_modules = crate::status_module::StatusModuleHost::spawn(
-            status_dir,
+            .unwrap_or(std::path::Path::new("."));
+        let status_extensions = crate::extensions::ExtensionHost::spawn_status(
+            config_dir.join("status"),
+            cc.egui_ctx.clone(),
+            theme_tokens.clone(),
+        );
+        let sidebar_extensions = crate::extensions::ExtensionHost::spawn_sidebar(
+            config_dir.join("sidebar"),
             cc.egui_ctx.clone(),
             theme_tokens,
         );
@@ -128,7 +136,8 @@ impl BoottyApp {
             app_icon_texture: None,
             settings: None,
             _menu: crate::menu::install(),
-            status_modules,
+            status_extensions,
+            sidebar_extensions,
             keep_awake: None,
         })
     }
@@ -207,7 +216,7 @@ impl BoottyApp {
                 let seg_fg = segment.fg.map(crate::theme::config_color32);
                 let seg_bg = segment.bg.map(crate::theme::config_color32);
                 let items = self
-                    .status_modules
+                    .status_extensions
                     .items(&segment.module)
                     .into_iter()
                     .map(|item| chrome::ResolvedItem {
@@ -233,14 +242,14 @@ impl BoottyApp {
             .collect()
     }
 
-    fn current_status_mux_view(&self) -> crate::status_module::MuxView {
+    fn current_extension_mux_view(&self) -> crate::extensions::MuxView {
         let selected = self.state.mux().selected_window();
         let windows = self
             .state
             .mux()
             .selected_session_windows()
             .iter()
-            .map(|window| crate::status_module::WindowView {
+            .map(|window| crate::extensions::WindowView {
                 id: window.id.clone(),
                 index: window.index,
                 name: window.name.clone(),
@@ -257,36 +266,81 @@ impl BoottyApp {
             self.state.mux().sessions(),
             self.state.mux().selected_session(),
         )
-        .map(|color| format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()));
-        crate::status_module::MuxView {
+        .map(color_hex);
+        crate::extensions::MuxView {
             windows,
+            sessions: self.current_extension_sessions(),
             session,
             session_color,
             keep_awake: self.keep_awake.is_some(),
         }
     }
 
-    /// Pushes the active session's windows and name to the status-module worker so modules
-    /// (`bootty.windows()` / `bootty.session()`) can render them.
-    fn publish_status_mux_view(&self) {
-        let sidebar_visible = self.state.config().chrome.sidebar;
-        self.status_modules.set_active(
-            self.state
-                .config()
-                .chrome
-                .status_segments
-                .iter()
-                .filter(|segment| status_segment_visible(segment, sidebar_visible))
-                .map(|segment| segment.module.clone()),
-        );
+    fn current_extension_sessions(&self) -> Vec<crate::extensions::SessionView> {
+        let selected_session = self.state.mux().selected_session();
+        let sidebar_items =
+            crate::ui::sidebar::build_sidebar_items(self.state.mux().sessions(), selected_session);
+        self.state
+            .mux()
+            .sessions()
+            .iter()
+            .map(|session| {
+                let row = sidebar_items
+                    .iter()
+                    .find(|item| item.session_id == Some(session.id.as_str()));
+                let selected = if selected_session.is_some() {
+                    selected_session == Some(session.id.as_str())
+                        || selected_session == Some(session.name.as_str())
+                } else {
+                    session.active
+                };
+                crate::extensions::SessionView {
+                    id: session.id.clone(),
+                    name: session.name.clone(),
+                    active: session.active,
+                    selected,
+                    cwd: session.anchor.cwd.clone(),
+                    color: row.map(|item| color_hex(item.color)),
+                    dim_color: row.map(|item| color_hex(item.dim_color)),
+                }
+            })
+            .collect()
+    }
 
-        self.status_modules
-            .update_mux(self.current_status_mux_view());
+    /// Pushes Bootty-owned mux/session state to extension workers so Luau modules can render it.
+    fn publish_extension_mux_view(&self, sidebar_visible: bool, status_bar_visible: bool) {
+        if status_bar_visible {
+            self.status_extensions.set_active(
+                self.state
+                    .config()
+                    .chrome
+                    .status_segments
+                    .iter()
+                    .filter(|segment| status_segment_visible(segment, sidebar_visible))
+                    .map(|segment| segment.module.clone()),
+            );
+        } else {
+            self.status_extensions.set_active(Vec::new());
+        }
+
+        if sidebar_visible {
+            self.sidebar_extensions
+                .set_active([String::from("sessions"), String::from("codexbar")]);
+        } else {
+            self.sidebar_extensions.set_active(Vec::new());
+        }
+
+        let view = self.current_extension_mux_view();
+        self.status_extensions.update_mux(view.clone());
+        self.sidebar_extensions.update_mux(view);
     }
 
     fn toggle_keep_awake(&mut self) {
         if self.keep_awake.take().is_some() {
-            self.publish_status_mux_view();
+            self.publish_extension_mux_view(
+                self.state.config().chrome.sidebar,
+                self.state.config().chrome.status_bar,
+            );
             return;
         }
 
@@ -301,7 +355,10 @@ impl BoottyApp {
             Ok(guard) => self.keep_awake = Some(guard),
             Err(error) => self.state.record_render_error(error),
         }
-        self.publish_status_mux_view();
+        self.publish_extension_mux_view(
+            self.state.config().chrome.sidebar,
+            self.state.config().chrome.status_bar,
+        );
     }
 
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
@@ -367,6 +424,19 @@ impl BoottyApp {
         } else {
             0.0
         };
+        self.publish_extension_mux_view(sidebar, status_bar);
+        let (sidebar_session_items, sidebar_footer_items) = if sidebar {
+            (
+                self.sidebar_extensions.items("sessions"),
+                self.sidebar_extensions.items("codexbar"),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let sidebar_items = crate::ui::sidebar::build_sidebar_items_from_module_items(
+            &sidebar_session_items,
+            self.state.mux().selected_session(),
+        );
         let sidebar_on_right = matches!(
             self.state.config().sidebar.position,
             crate::config::SidebarPosition::Right
@@ -485,9 +555,10 @@ impl BoottyApp {
                         sidebar_palette,
                         sidebar_rect.height(),
                         SidebarModel {
-                            sessions: self.state.mux().sessions(),
-                            selected_session: self.state.mux().selected_session(),
-                            metadata: self.state.sidebar_metadata(),
+                            items: &sidebar_items,
+                            footer_items: &sidebar_footer_items,
+                            session_count: self.state.mux().sessions().len(),
+                            has_sessions: !self.state.mux().sessions().is_empty(),
                             title_visible,
                             reserve_titlebar_buttons,
                             title_icon: title_icon.as_ref(),
@@ -497,7 +568,11 @@ impl BoottyApp {
                             focused: self.state.sidebar_focused(),
                             hovered_session: self.state.sidebar_hovered_session(),
                             unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
+                            fullscreen: fullscreen_chrome,
                             hover_override: sidebar_cfg.hover.map(crate::theme::config_color32),
+                            fullscreen_hover_override: sidebar_cfg
+                                .fullscreen_hover
+                                .map(crate::theme::config_color32),
                             current_override: sidebar_cfg
                                 .selected
                                 .map(crate::theme::config_color32),
@@ -572,7 +647,6 @@ impl BoottyApp {
             // Tick once a second so the clock advances and module output refreshes when idle.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs(1));
-            self.publish_status_mux_view();
             let status_background = if notch_context {
                 notch_band_color
             } else {
@@ -608,9 +682,6 @@ impl BoottyApp {
                 }
                 None => {}
             }
-        } else {
-            // Bar hidden: no module is referenced, so none should keep running.
-            self.status_modules.set_active(Vec::new());
         }
 
         let terminal_backend = selected_backend(&self.state.config().multiplexer);
@@ -638,21 +709,19 @@ impl BoottyApp {
                 UiBuilder::new()
                     .max_rect(terminal_rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| {
-                    match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                        Ok(surface) => self.state.record_surface(surface),
-                        Err(error) => self.state.record_render_error(error),
-                    }
-                    if !self.state.terminal_focused() {
-                        let dim = self.state.config().chrome.unfocused_terminal_dim;
-                        ui.painter().rect_filled(
-                            terminal_rect,
-                            0.0,
-                            egui::Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8),
-                        );
-                    }
+                |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
+                    Ok(surface) => self.state.record_surface(surface),
+                    Err(error) => self.state.record_render_error(error),
                 },
             );
+            if !self.state.terminal_focused() {
+                let dim = self.state.config().chrome.unfocused_terminal_dim;
+                ui.painter().rect_filled(
+                    terminal_rect,
+                    0.0,
+                    egui::Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8),
+                );
+            }
         } else {
             self.terminal_widget.reset();
             ui.painter_at(terminal_rect).text(

@@ -44,7 +44,7 @@ eframe = { version = "0.34", default-features = false, features = [
 egui = "0.34"
 epaint_default_fonts = "0.34"
 fontdb = "0.23"
-iconflow = { version = "1", features = ["pack-lucide", "pack-tabler"] }
+iconflow = { version = "1", features = ["pack-bootstrap", "pack-lucide", "pack-tabler"] }
 indoc = "2"
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "c1fe97a6bed015209d59e8772e4e9e49311d8bc5", features = [
   "png",

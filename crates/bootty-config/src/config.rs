@@ -218,6 +218,7 @@ pub struct SidebarConfig {
     pub foreground: Option<Color>,
     pub selected: Option<Color>,
     pub hover: Option<Color>,
+    pub fullscreen_hover: Option<Color>,
     pub border: Option<Color>,
 }
 
@@ -238,6 +239,7 @@ struct SidebarPatch {
     foreground: Option<Color>,
     selected: Option<Color>,
     hover: Option<Color>,
+    fullscreen_hover: Option<Color>,
     border: Option<Color>,
 }
 
@@ -1592,6 +1594,7 @@ fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_present(&mut sidebar.foreground, partial.foreground);
     apply_present(&mut sidebar.selected, partial.selected);
     apply_present(&mut sidebar.hover, partial.hover);
+    apply_present(&mut sidebar.fullscreen_hover, partial.fullscreen_hover);
     apply_present(&mut sidebar.border, partial.border);
 }
 

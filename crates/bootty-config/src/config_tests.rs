@@ -275,6 +275,7 @@ fn config_resolves_sidebar_section() {
         foreground = "#cdd6f4"
         selected = "#2a2f3d"
         hover = "#1e222c"
+        fullscreen-hover = "#252a36"
         border = "#313244"
     "##});
 
@@ -298,6 +299,10 @@ fn config_resolves_sidebar_section() {
     assert_eq!(
         config.sidebar.hover,
         Some(Color::from_hex("#1e222c").unwrap())
+    );
+    assert_eq!(
+        config.sidebar.fullscreen_hover,
+        Some(Color::from_hex("#252a36").unwrap())
     );
     assert_eq!(
         config.sidebar.border,

@@ -9,7 +9,6 @@ pub mod controller;
 pub mod native;
 pub mod process;
 pub mod rmux;
-pub mod sidebar_meta;
 pub mod snapshot;
 pub mod terminal;
 pub mod tmux;

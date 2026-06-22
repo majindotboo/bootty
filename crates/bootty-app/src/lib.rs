@@ -15,13 +15,13 @@ pub use bootty_winit::{direct_input, input_binding, input_binding_set, modifier_
 pub mod input;
 pub mod menu;
 pub use bootty_mux as mux;
+pub mod extensions;
 pub mod native_host;
 pub mod platform;
 pub mod project_catalog;
 pub mod renderer;
 pub mod session_order;
 pub mod shell_env;
-pub mod status_module;
 pub mod strings;
 pub mod terminal;
 pub mod theme;

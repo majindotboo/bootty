@@ -32,7 +32,7 @@ pub(crate) fn config_color32(color: Color) -> Color32 {
     Color32::from_rgb(color.r, color.g, color.b)
 }
 
-/// Named theme colors as `#rrggbb` strings, exposed to Lua status modules as `bootty.theme.*` so
+/// Named theme colors as `#rrggbb` strings, exposed to Lua extensions as `bootty.theme.*` so
 /// extensions style themselves with palette tokens instead of hardcoded hex.
 pub fn theme_tokens(config: &BoottyConfig) -> Vec<(String, String)> {
     let palette = theme_palette_from_config(config);

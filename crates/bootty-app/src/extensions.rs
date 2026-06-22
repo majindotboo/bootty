@@ -1,15 +1,14 @@
-//! Loader for built-in and user-provided Lua/Luau status-bar modules.
+//! Loader for built-in and user-provided Lua/Luau UI extension modules.
 //!
-//! Built-in defaults and `~/.config/bootty/status/*.lua` / `*.luau` overrides all use the
-//! same item schema. A module returns a render function or a table `{ interval = <secs>,
-//! render = ... }`. The render function returns a string, one item table, or a list of item
-//! tables `{ text = ..., fg = "#rrggbb", bg = ..., icon = ..., gauge = ..., primitives = ..., action = ... }`.
+//! Status extensions live in `<config>/status/`; sidebar extensions live in `<config>/sidebar/`.
+//! Built-in defaults and user `.lua` / `.luau` overrides use the same item schema. A module
+//! returns a render function or a table `{ interval = <secs>, render = ... }`. The render
+//! function returns a string, one item table, or a list of item tables.
 //!
-//! Mux state is exposed through `bootty.windows()` / `bootty.session()` / `bootty.session_color()`,
-//! system stats through the native cross-platform `bootty.metrics()`, and `bootty.theme.*` carries
-//! palette colors. Modules get isolated environments with read-only shared `bootty` tables; use
-//! `bootty.run(cmd)` for explicit platform-shell commands. Modules run on a worker thread (the
-//! Luau state is single-threaded and shell-outs must never block the UI); the render thread reads items each frame.
+//! Mux/session state is exposed through `bootty.windows()`, `bootty.session()`,
+//! `bootty.sessions()`, and `bootty.session_color()`. System stats use `bootty.metrics()`;
+//! explicit shell-outs use `bootty.run(cmd)`. Modules run on a worker thread so shell-outs
+//! never block the UI.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -27,15 +26,21 @@ use sysinfo::{MemoryRefreshKind, System};
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 /// Background poll granularity; a module fires on the first tick at or after its interval elapses.
 const TICK: Duration = Duration::from_millis(100);
-/// How often the status dir is re-scanned for edited/added/removed module files (hot reload).
+/// How often extension dirs are re-scanned for edited/added/removed module files (hot reload).
 const RELOAD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const ERROR_COLOR: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
+const EXTENSION_UI_PRELUDE: &str = include_str!("extension_ui.luau");
 
-const BUILTIN_MODULES: &[(&str, &str)] = &[
+const BUILTIN_STATUS_EXTENSIONS: &[(&str, &str)] = &[
     ("windows", include_str!("status_defaults/windows.luau")),
     ("clock", include_str!("status_defaults/clock.luau")),
     ("session", include_str!("status_defaults/session.luau")),
     ("sysinfo", include_str!("status_defaults/sysinfo.luau")),
+];
+
+const BUILTIN_SIDEBAR_EXTENSIONS: &[(&str, &str)] = &[
+    ("sessions", include_str!("sidebar_defaults/sessions.luau")),
+    ("codexbar", include_str!("sidebar_defaults/codexbar.luau")),
 ];
 
 /// One renderable element a Lua/Luau module produced.
@@ -46,7 +51,7 @@ pub struct ModuleItem {
     pub bg: Option<Color32>,
     pub stroke: Option<Color32>,
     pub icon: Option<String>,
-    /// 0.0-1.0 fill drawn as a battery meter (tinted with `fg`) before the text.
+    /// 0.0-1.0 fill drawn as a battery meter (status bar) or generic gauge.
     pub gauge: Option<f32>,
     pub primitives: Vec<ModulePrimitive>,
     /// Extra layout padding reserved inside the item for custom primitives.
@@ -57,6 +62,19 @@ pub struct ModuleItem {
     /// Whether to keep the normal inter-item gap before this item. Defaults to true.
     pub gap: Option<bool>,
     pub action: Option<String>,
+    /// Generic stable identity for clickable/draggable rows. If absent, renderers derive one.
+    pub key: Option<String>,
+    /// Sidebar row kind. Bootty owns only `group` and `session`; other values are generic rows.
+    pub kind: Option<String>,
+    pub number: Option<usize>,
+    pub indent: Option<u16>,
+    pub tree: Option<String>,
+    pub selectable: Option<bool>,
+    pub session_id: Option<String>,
+    pub reorder_anchor: Option<String>,
+    pub current: Option<bool>,
+    pub active: Option<bool>,
+    pub dim_fg: Option<Color32>,
 }
 
 /// A local coordinate for status item primitives: `frac` is relative to the item rect,
@@ -86,6 +104,23 @@ pub enum ModulePrimitive {
         stroke: Option<Color32>,
         points: Vec<(ModuleCoord, ModuleCoord)>,
     },
+    Text {
+        text: String,
+        color: Option<Color32>,
+        x: ModuleCoord,
+        y: ModuleCoord,
+        size: f32,
+        align: String,
+        min_width: Option<f32>,
+    },
+    Icon {
+        icon: String,
+        color: Option<Color32>,
+        x: ModuleCoord,
+        y: ModuleCoord,
+        size: f32,
+        min_width: Option<f32>,
+    },
 }
 
 /// A single window as exposed to modules via `bootty.windows()`.
@@ -97,10 +132,23 @@ pub struct WindowView {
     pub active: bool,
 }
 
+/// A mux session as exposed to sidebar/status extensions via `bootty.sessions()`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionView {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+    pub selected: bool,
+    pub cwd: Option<String>,
+    pub color: Option<String>,
+    pub dim_color: Option<String>,
+}
+
 /// Mux state shared with the worker thread so modules can render it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MuxView {
     pub windows: Vec<WindowView>,
+    pub sessions: Vec<SessionView>,
     pub session: Option<String>,
     /// The active session's sidebar accent color as `#rrggbb`, so modules can
     /// match the bar to the session like the sidebar does.
@@ -148,7 +196,7 @@ struct LoadedModule {
 }
 
 /// Owns the Luau worker thread, the shared item map the UI reads, and the mux snapshot the UI feeds.
-pub struct StatusModuleHost {
+pub struct ExtensionHost {
     items: Arc<RwLock<HashMap<String, Vec<ModuleItem>>>>,
     mux: Arc<RwLock<MuxView>>,
     metrics: Arc<RwLock<Metrics>>,
@@ -157,17 +205,37 @@ pub struct StatusModuleHost {
     handle: Option<JoinHandle<()>>,
 }
 
-impl StatusModuleHost {
-    /// Spawns the worker. `ctx` is woken when a module's output changes. `theme` is exposed as
-    /// `bootty.theme.*`. Embedded defaults always load, so a missing `dir` still yields modules.
-    pub fn spawn(dir: PathBuf, ctx: egui::Context, theme: Vec<(String, String)>) -> Self {
+impl ExtensionHost {
+    /// Spawns the status-bar extension worker. `ctx` is woken when module output changes.
+    pub fn spawn_status(dir: PathBuf, ctx: egui::Context, theme: Vec<(String, String)>) -> Self {
+        Self::spawn_with_modules("bootty-status", dir, ctx, theme, BUILTIN_STATUS_EXTENSIONS)
+    }
+
+    /// Spawns the sidebar extension worker. User modules in `dir` override embedded defaults.
+    pub fn spawn_sidebar(dir: PathBuf, ctx: egui::Context, theme: Vec<(String, String)>) -> Self {
+        Self::spawn_with_modules(
+            "bootty-sidebar",
+            dir,
+            ctx,
+            theme,
+            BUILTIN_SIDEBAR_EXTENSIONS,
+        )
+    }
+
+    fn spawn_with_modules(
+        thread_name: &str,
+        dir: PathBuf,
+        ctx: egui::Context,
+        theme: Vec<(String, String)>,
+        builtins: &'static [(&'static str, &'static str)],
+    ) -> Self {
         let items: Arc<RwLock<HashMap<String, Vec<ModuleItem>>>> = Arc::default();
         let mux: Arc<RwLock<MuxView>> = Arc::default();
         let metrics: Arc<RwLock<Metrics>> = Arc::default();
         let active: Arc<RwLock<BTreeSet<String>>> = Arc::default();
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = std::thread::Builder::new()
-            .name("bootty-status".to_owned())
+            .name(thread_name.to_owned())
             .spawn({
                 let items = Arc::clone(&items);
                 let mux = Arc::clone(&mux);
@@ -176,7 +244,7 @@ impl StatusModuleHost {
                 let shutdown = Arc::clone(&shutdown);
                 move || {
                     run_loop(
-                        &dir, &ctx, &theme, &mux, &metrics, &active, &items, &shutdown,
+                        &dir, &ctx, &theme, builtins, &mux, &metrics, &active, &items, &shutdown,
                     )
                 }
             })
@@ -191,8 +259,8 @@ impl StatusModuleHost {
         }
     }
 
-    /// Declares which modules are referenced by the configured segments. Only
-    /// these run, so an unreferenced module (e.g. `sysinfo`) never shell-outs.
+    /// Declares which modules are referenced by the UI. Only these run, so an
+    /// unreferenced module never shells out on its interval.
     pub fn set_active(&self, names: impl IntoIterator<Item = String>) {
         let next: BTreeSet<String> = names.into_iter().collect();
         if let Ok(mut current) = self.active.write()
@@ -229,7 +297,7 @@ impl StatusModuleHost {
     }
 }
 
-impl Drop for StatusModuleHost {
+impl Drop for ExtensionHost {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -243,6 +311,7 @@ fn run_loop(
     dir: &Path,
     ctx: &egui::Context,
     theme: &[(String, String)],
+    builtins: &'static [(&'static str, &'static str)],
     mux: &Arc<RwLock<MuxView>>,
     metrics: &Arc<RwLock<Metrics>>,
     active: &RwLock<BTreeSet<String>>,
@@ -252,7 +321,7 @@ fn run_loop(
     let Ok(lua) = setup_lua(theme, Arc::clone(mux), Arc::clone(metrics)) else {
         return;
     };
-    let mut modules = load_modules(&lua, dir);
+    let mut modules = load_modules(&lua, dir, builtins);
     let mut signature = dir_signature(dir);
     let mut last_scan = Instant::now();
     let mut system = System::new();
@@ -260,13 +329,13 @@ fn run_loop(
     let mut last_metrics: Option<Instant> = None;
     while !shutdown.load(Ordering::Relaxed) {
         let now = Instant::now();
-        // Hot reload: re-evaluate when files in the status dir are added, edited, or removed.
+        // Hot reload: re-evaluate when extension files are added, edited, or removed.
         if now.duration_since(last_scan) >= RELOAD_SCAN_INTERVAL {
             last_scan = now;
             let current = dir_signature(dir);
             if current != signature {
                 signature = current;
-                modules = load_modules(&lua, dir);
+                modules = load_modules(&lua, dir, builtins);
                 let module_names = modules
                     .iter()
                     .map(|module| module.name.clone())
@@ -275,7 +344,7 @@ fn run_loop(
                 ctx.request_repaint();
             }
         }
-        // Sample native metrics only while the bar has modules, and before running
+        // Sample native metrics only while modules are active, and before running
         // them, so `bootty.metrics()` reads fresh values without per-OS shell-outs.
         let bar_active = active.read().is_ok_and(|names| !names.is_empty());
         if bar_active
@@ -328,14 +397,21 @@ fn prune_removed_items(
 /// Module names available to reference from a segment: built-ins plus user `*.lua` / `*.luau`
 /// files. Sorted and de-duplicated for settings.
 pub fn available_module_names(dir: &Path) -> Vec<String> {
-    let mut names: BTreeSet<String> = BUILTIN_MODULES
+    available_module_names_with_builtins(dir, BUILTIN_STATUS_EXTENSIONS)
+}
+
+fn available_module_names_with_builtins(
+    dir: &Path,
+    builtins: &'static [(&'static str, &'static str)],
+) -> Vec<String> {
+    let mut names: BTreeSet<String> = builtins
         .iter()
         .map(|(name, _)| (*name).to_owned())
         .collect();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if is_status_module_file(&path)
+            if is_extension_module_file(&path)
                 && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
             {
                 names.insert(stem.to_owned());
@@ -353,7 +429,7 @@ fn dir_signature(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
     let mut signature: Vec<(PathBuf, Option<SystemTime>)> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| is_status_module_file(path))
+        .filter(|path| is_extension_module_file(path))
         .map(|path| {
             let mtime = std::fs::metadata(&path)
                 .and_then(|meta| meta.modified())
@@ -365,7 +441,7 @@ fn dir_signature(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
     signature
 }
 
-fn is_status_module_file(path: &Path) -> bool {
+fn is_extension_module_file(path: &Path) -> bool {
     path.is_file()
         && matches!(
             path.extension().and_then(|ext| ext.to_str()),
@@ -458,6 +534,41 @@ fn battery_status(
     }
 }
 
+fn json_value_to_lua(lua: &Lua, value: serde_json::Value) -> mlua::Result<Value> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Nil),
+        serde_json::Value::Bool(value) => Ok(Value::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Integer(value))
+            } else if let Some(value) = value.as_u64() {
+                if let Ok(value) = i64::try_from(value) {
+                    Ok(Value::Integer(value))
+                } else {
+                    Ok(Value::Number(value as f64))
+                }
+            } else {
+                Ok(Value::Number(value.as_f64().unwrap_or_default()))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::String(lua.create_string(&value)?)),
+        serde_json::Value::Array(values) => {
+            let table = lua.create_table_with_capacity(values.len(), 0)?;
+            for (index, value) in values.into_iter().enumerate() {
+                table.set(index + 1, json_value_to_lua(lua, value)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+        serde_json::Value::Object(entries) => {
+            let table = lua.create_table_with_capacity(0, entries.len())?;
+            for (key, value) in entries {
+                table.set(key, json_value_to_lua(lua, value)?)?;
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
+
 fn setup_lua(
     theme: &[(String, String)],
     mux: Arc<RwLock<MuxView>>,
@@ -485,6 +596,26 @@ fn setup_lua(
         })?,
     )?;
 
+    bootty.set(
+        "time",
+        lua.create_function(|_, ()| {
+            Ok(SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0.0, |duration| duration.as_secs_f64()))
+        })?,
+    )?;
+
+    let json_table = lua.create_table()?;
+    json_table.set(
+        "decode",
+        lua.create_function(|lua, text: String| {
+            let value = serde_json::from_str(&text).map_err(mlua::Error::external)?;
+            json_value_to_lua(lua, value)
+        })?,
+    )?;
+    json_table.set_readonly(true);
+    bootty.set("json", json_table)?;
+
     // Mux state: the active session's windows, and the session name.
     let windows_mux = Arc::clone(&mux);
     bootty.set(
@@ -498,6 +629,33 @@ fn setup_lua(
                     entry.set("index", window.index)?;
                     entry.set("name", window.name.as_str())?;
                     entry.set("active", window.active)?;
+                    array.set(index + 1, entry)?;
+                }
+            }
+            Ok(array)
+        })?,
+    )?;
+    let sessions_mux = Arc::clone(&mux);
+    bootty.set(
+        "sessions",
+        lua.create_function(move |lua, ()| {
+            let array = lua.create_table()?;
+            if let Ok(view) = sessions_mux.read() {
+                for (index, session) in view.sessions.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("id", session.id.as_str())?;
+                    entry.set("name", session.name.as_str())?;
+                    entry.set("active", session.active)?;
+                    entry.set("selected", session.selected)?;
+                    if let Some(value) = &session.cwd {
+                        entry.set("cwd", value.as_str())?;
+                    }
+                    if let Some(value) = &session.color {
+                        entry.set("color", value.as_str())?;
+                    }
+                    if let Some(value) = &session.dim_color {
+                        entry.set("dim_color", value.as_str())?;
+                    }
                     array.set(index + 1, entry)?;
                 }
             }
@@ -566,6 +724,13 @@ fn setup_lua(
         })?,
     )?;
 
+    let ui_table: Table = lua
+        .load(EXTENSION_UI_PRELUDE)
+        .set_name("bootty.ui")
+        .eval()?;
+    ui_table.set_readonly(true);
+    bootty.set("ui", ui_table)?;
+
     // Palette tokens so modules style with theme colors: `fg = bootty.theme.accent`.
     let theme_table = lua.create_table()?;
     for (name, hex) in theme {
@@ -589,15 +754,19 @@ fn module_environment(lua: &Lua) -> mlua::Result<Table> {
     Ok(env)
 }
 
-fn load_modules(lua: &Lua, dir: &Path) -> Vec<LoadedModule> {
-    let mut sources = BUILTIN_MODULES
+fn load_modules(
+    lua: &Lua,
+    dir: &Path,
+    builtins: &'static [(&'static str, &'static str)],
+) -> Vec<LoadedModule> {
+    let mut sources = builtins
         .iter()
         .map(|(name, source)| ((*name).to_owned(), Ok((*source).to_owned())))
         .collect::<BTreeMap<_, _>>();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !is_status_module_file(&path) {
+            if !is_extension_module_file(&path) {
                 continue;
             }
             if let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) {
@@ -718,6 +887,17 @@ fn table_looks_like_item(table: &Table) -> bool {
         "join",
         "gap",
         "action",
+        "key",
+        "kind",
+        "number",
+        "indent",
+        "tree",
+        "selectable",
+        "session_id",
+        "reorder_anchor",
+        "current",
+        "active",
+        "dim_fg",
     ]
     .into_iter()
     .any(|key| table.contains_key(key).unwrap_or(false))
@@ -726,22 +906,10 @@ fn table_looks_like_item(table: &Table) -> bool {
 fn item_from_table(table: &Table) -> ModuleItem {
     ModuleItem {
         text: table.get::<String>("text").unwrap_or_default(),
-        fg: table
-            .get::<String>("fg")
-            .ok()
-            .and_then(|hex| parse_hex_color(&hex)),
-        bg: table
-            .get::<String>("bg")
-            .ok()
-            .and_then(|hex| parse_hex_color(&hex)),
-        stroke: table
-            .get::<String>("stroke")
-            .ok()
-            .and_then(|hex| parse_hex_color(&hex)),
-        icon: table
-            .get::<String>("icon")
-            .ok()
-            .filter(|icon| !icon.is_empty()),
+        fg: color_field(table, "fg"),
+        bg: color_field(table, "bg"),
+        stroke: color_field(table, "stroke"),
+        icon: string_field(table, "icon"),
         gauge: table
             .get::<f64>("gauge")
             .ok()
@@ -766,11 +934,33 @@ fn item_from_table(table: &Table) -> ModuleItem {
             .max(0.0) as f32,
         join: table.get::<bool>("join").ok(),
         gap: table.get::<bool>("gap").ok(),
-        action: table
-            .get::<String>("action")
-            .ok()
-            .filter(|action| !action.is_empty()),
+        action: string_field(table, "action"),
+        key: string_field(table, "key"),
+        kind: string_field(table, "kind"),
+        number: table.get::<u32>("number").ok().map(|value| value as usize),
+        indent: table.get::<u16>("indent").ok(),
+        tree: string_field(table, "tree"),
+        selectable: table.get::<bool>("selectable").ok(),
+        session_id: string_field(table, "session_id"),
+        reorder_anchor: string_field(table, "reorder_anchor"),
+        current: table.get::<bool>("current").ok(),
+        active: table.get::<bool>("active").ok(),
+        dim_fg: color_field(table, "dim_fg"),
     }
+}
+
+fn string_field(table: &Table, key: &str) -> Option<String> {
+    table
+        .get::<String>(key)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn color_field(table: &Table, key: &str) -> Option<Color32> {
+    table
+        .get::<String>(key)
+        .ok()
+        .and_then(|hex| parse_hex_color(&hex))
 }
 
 fn primitives_from_table(table: &Table) -> Vec<ModulePrimitive> {
@@ -823,6 +1013,29 @@ fn primitive_from_table(table: &Table) -> Option<ModulePrimitive> {
                 points,
             })
         }
+        "text" => {
+            let text = string_field(table, "text")?;
+            Some(ModulePrimitive::Text {
+                text,
+                color: color_field(table, "color").or(fill),
+                x: coord_from_table(table, "x", "x_px", 0.0),
+                y: coord_from_table(table, "y", "y_px", 0.5),
+                size: positive_f32_field(table, "size").unwrap_or(11.0),
+                align: string_field(table, "align").unwrap_or_else(|| "left_center".to_owned()),
+                min_width: positive_f32_field(table, "min_width"),
+            })
+        }
+        "icon" => {
+            let icon = string_field(table, "icon").or_else(|| string_field(table, "slug"))?;
+            Some(ModulePrimitive::Icon {
+                icon,
+                color: color_field(table, "color").or(fill),
+                x: coord_from_table(table, "x", "x_px", 0.0),
+                y: coord_from_table(table, "y", "y_px", 0.5),
+                size: positive_f32_field(table, "size").unwrap_or(12.0),
+                min_width: positive_f32_field(table, "min_width"),
+            })
+        }
         _ => None,
     }
 }
@@ -839,6 +1052,14 @@ fn coord_from_table(table: &Table, frac_key: &str, px_key: &str, default_frac: f
         .filter(|value| value.is_finite())
         .map_or(0.0, |value| value as f32);
     ModuleCoord { frac, px }
+}
+
+fn positive_f32_field(table: &Table, key: &str) -> Option<f32> {
+    table
+        .get::<f64>(key)
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value as f32)
 }
 
 fn radius_from_table(table: &Table) -> ModuleCornerRadius {
@@ -910,21 +1131,42 @@ mod tests {
         let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let modules = load_modules(&lua, dir.path());
+        assert_builtins_load(
+            &lua,
+            dir.path(),
+            BUILTIN_STATUS_EXTENSIONS,
+            &["windows", "clock", "session", "sysinfo"],
+        );
+        assert_builtins_load(
+            &lua,
+            dir.path(),
+            BUILTIN_SIDEBAR_EXTENSIONS,
+            &["sessions", "codexbar"],
+        );
+    }
+
+    fn assert_builtins_load(
+        lua: &Lua,
+        dir: &Path,
+        builtins: &'static [(&'static str, &'static str)],
+        expected: &[&str],
+    ) {
+        let modules = load_modules(lua, dir, builtins);
         let names = modules
             .iter()
             .map(|module| module.name.as_str())
             .collect::<Vec<_>>();
 
-        for expected in ["windows", "clock", "session", "sysinfo"] {
-            assert!(names.contains(&expected), "{expected} builtin should load");
+        for expected_name in expected {
+            assert!(
+                names.contains(expected_name),
+                "{expected_name} builtin should load"
+            );
         }
         assert!(
             modules
                 .iter()
-                .filter(|module| {
-                    ["windows", "clock", "session", "sysinfo"].contains(&module.name.as_str())
-                })
+                .filter(|module| expected.contains(&module.name.as_str()))
                 .all(|module| matches!(&module.body, ModuleBody::Render(_))),
             "builtins should load as renderable modules"
         );
@@ -943,6 +1185,65 @@ mod tests {
         assert_eq!(items[0].fg, Some(Color32::from_rgb(0xa6, 0xe3, 0xa1)));
         assert_eq!(items[0].action.as_deref(), Some("activate-window:1"));
         assert_eq!(items[1].text, "b");
+    }
+
+    #[test]
+    fn json_decode_host_fn_returns_lua_tables() {
+        let items = run_source(
+            r#"return function()
+                local decoded = bootty.json.decode('{"label":"codex","values":[20,true,null]}')
+                return { text = decoded.label .. ':' .. decoded.values[1] .. ':' .. tostring(decoded.values[2]) .. ':' .. tostring(decoded.values[3]) }
+            end"#,
+        );
+
+        assert_eq!(items[0].text, "codex:20:true:nil");
+    }
+
+    #[test]
+    fn ui_session_items_namespaces_child_row_keys() {
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            sessions: vec![
+                SessionView {
+                    id: "$1".to_owned(),
+                    name: "work/api".to_owned(),
+                    color: Some("#89b4fa".to_owned()),
+                    dim_color: Some("#455a7d".to_owned()),
+                    ..SessionView::default()
+                },
+                SessionView {
+                    id: "$2".to_owned(),
+                    name: "work/ui".to_owned(),
+                    color: Some("#a6e3a1".to_owned()),
+                    dim_color: Some("#526f50".to_owned()),
+                    ..SessionView::default()
+                },
+            ],
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let value = lua
+            .load(
+                r#"return function()
+                    return bootty.ui.session_items({
+                        sessions = bootty.sessions(),
+                        details = function(_, _) return { { key = 'process', icon = 'terminal', label = 'node' } } end,
+                        progress = function(_, _) return { key = 'progress', value = 50 } end,
+                    })
+                end"#,
+            )
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+        let keys = items
+            .iter()
+            .filter_map(|item| item.key.as_deref())
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&"$1:process"));
+        assert!(keys.contains(&"$2:process"));
+        assert!(keys.contains(&"$1:progress"));
+        assert!(keys.contains(&"$2:progress"));
     }
 
     #[test]
@@ -989,7 +1290,7 @@ mod tests {
         )
         .expect("write second module");
 
-        let modules = load_modules(&lua, dir.path());
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
         let module = modules
             .iter()
             .find(|module| module.name == "bbb")
@@ -1010,7 +1311,7 @@ mod tests {
         )
         .expect("write mutator module");
 
-        let modules = load_modules(&lua, dir.path());
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
         let module = modules
             .iter()
             .find(|module| module.name == "mutator")
@@ -1066,6 +1367,38 @@ mod tests {
         let items = run_module(&module.body);
         assert_eq!(items[0].text, "2:edit");
         assert_eq!(items[0].action.as_deref(), Some("activate-window:@1"));
+    }
+
+    #[test]
+    fn sessions_host_fn_exposes_bootty_owned_sessions() {
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            sessions: vec![SessionView {
+                id: "$1".to_owned(),
+                name: "work/api".to_owned(),
+                active: true,
+                selected: true,
+                cwd: Some("/tmp/work/api".to_owned()),
+                color: Some("#89b4fa".to_owned()),
+                dim_color: Some("#455a7d".to_owned()),
+            }],
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let value = lua
+            .load(
+                "return function() local s = bootty.sessions()[1] \
+                 return { kind = 'session', text = s.name .. ':' .. s.cwd .. ':' .. tostring(s.process), \
+                 session_id = s.id, fg = s.color } end",
+            )
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("test".to_owned(), value).unwrap();
+        let items = run_module(&module.body);
+
+        assert_eq!(items[0].kind.as_deref(), Some("session"));
+        assert_eq!(items[0].text, "work/api:/tmp/work/api:nil");
+        assert_eq!(items[0].session_id.as_deref(), Some("$1"));
+        assert_eq!(items[0].fg, Some(Color32::from_rgb(0x89, 0xb4, 0xfa)));
     }
 
     #[test]
@@ -1202,7 +1535,7 @@ mod tests {
             return;
         }
 
-        let modules = load_modules(&lua, dir.path());
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
         let module = modules
             .iter()
             .find(|module| module.name == "unreadable")
