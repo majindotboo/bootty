@@ -459,7 +459,7 @@ fn terminal_engine_reports_production_xtversion() -> Result<()> {
 
     assert_eq!(
         take_pty_output(&output),
-        format!("\x1bP>|Bootty {}\x1b\\", env!("CARGO_PKG_VERSION")).as_bytes()
+        format!("\x1bP>|{TERMINAL_XTVERSION}\x1b\\").as_bytes()
     );
     Ok(())
 }

@@ -96,6 +96,17 @@ fn raw_rgb_transmit_command(image_id: u32, width: u32, height: u32) -> String {
         base64_encode_bytes(&bytes)
     )
 }
+fn tmux_wrap(payload: &[u8]) -> Vec<u8> {
+    let mut wrapped = b"\x1bPtmux;".to_vec();
+    for byte in payload {
+        if *byte == 0x1b {
+            wrapped.push(0x1b);
+        }
+        wrapped.push(*byte);
+    }
+    wrapped.extend_from_slice(b"\x1b\\");
+    wrapped
+}
 
 fn raw_kitty_terminal() -> libghostty_vt::ffi::Terminal {
     let mut terminal: libghostty_vt::ffi::Terminal = std::ptr::null_mut();
@@ -264,6 +275,30 @@ fn terminal_engine_advertises_and_accepts_kitty_file_images() -> Result<()> {
     assert!(engine.terminal.is_kitty_image_from_file_allowed()?);
     assert!(engine.terminal.is_kitty_image_from_temp_file_allowed()?);
     assert!(!engine.terminal.is_kitty_image_from_shared_mem_allowed()?);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_ghostty_compatible_xtversion() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b[>q");
+    let output = lock_pty_output(&output);
+
+    assert!(
+        output
+            .windows(b"ghostty".len())
+            .any(|window| window == b"ghostty"),
+        "XTVERSION should advertise Ghostty compatibility: {:?}",
+        String::from_utf8_lossy(&output),
+    );
+    assert!(
+        output
+            .windows(b"Bootty".len())
+            .any(|window| window == b"Bootty"),
+        "XTVERSION should preserve Bootty branding: {:?}",
+        String::from_utf8_lossy(&output),
+    );
     Ok(())
 }
 
@@ -1566,6 +1601,49 @@ fn terminal_engine_decodes_tmux_passthrough_kitty_payloads() -> Result<()> {
     assert_eq!(frame.images.placements.len(), 1);
     assert_eq!(frame.images.placements[0].image_width, 1);
     assert_eq!(frame.images.placements[0].image_height, 1);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_decodes_tmux_passthrough_chunked_kitty_payloads() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+
+    engine.write_vt(&tmux_wrap(
+        b"\x1b_Ga=T,f=24,t=d,i=86,s=1,v=2,m=1,q=1;////\x1b\\",
+    ));
+    assert!(engine.extract_frame()?.images.placements.is_empty());
+
+    engine.write_vt(&tmux_wrap(b"\x1b_Gm=0,q=1;////\x1b\\"));
+    let frame = engine.extract_frame()?;
+
+    assert_eq!(frame.images.placements.len(), 1);
+    assert_eq!(frame.images.placements[0].image_id, 86);
+    assert_eq!(frame.images.placements[0].image_width, 1);
+    assert_eq!(frame.images.placements[0].image_height, 2);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_decodes_timg_tmux_rgb_unicode_placeholder() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+    let image_id = 475_812_481;
+
+    engine.write_vt(&tmux_wrap(
+        b"\x1b_Ga=T,i=475812481,q=2,f=100,m=0,U=1,c=1,r=1;iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAbUlEQVR4Aa3MgQDAIAAAwR/ABEYwgRFMYAIjmEAECUSQQAIRJBBBAhE0iT+A2xYsRNtkd8PB4Yad0w0blxtWbjcsPG6Yed0w8blhJLhhILrhR3LDl+yGD8UNb6obXjQ3POlueDDccGe6ISw1/AH8XifbYYnl/QAAAABJRU5ErkJggg==\x1b\\",
+    ));
+    engine.write_vt(
+        "\r\x1b[38:2:92:82:129m\u{10EEEE}\u{0305}\u{0305}\u{036E}\x1b[39m\r\n".as_bytes(),
+    );
+    let frame = engine.extract_frame()?;
+
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == image_id)
+        .expect("timg rgb placeholder placement");
+    assert_eq!(placement.source.width, 20);
+    assert_eq!(placement.source.height, 20);
     Ok(())
 }
 

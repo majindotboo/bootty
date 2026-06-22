@@ -58,6 +58,7 @@ pub const NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE: usize = 320;
 pub const NATIVE_MAX_SCROLLBACK: usize =
     NATIVE_SCROLLBACK_TARGET_ROWS * NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE;
 pub const TERMINAL_TERM: &str = "xterm-bootty";
+const TERMINAL_XTVERSION: &str = concat!("ghostty (Bootty ", env!("CARGO_PKG_VERSION"), ")");
 pub const TERMINAL_BACKGROUND: (u8, u8, u8) = (0x1a, 0x1b, 0x25);
 pub const TERMINAL_FOREGROUND: (u8, u8, u8) = (0xc0, 0xca, 0xf5);
 
@@ -1384,7 +1385,7 @@ impl TerminalEngine {
         let color_scheme = Arc::new(Mutex::new(color_scheme_for_background(colors.background)));
         let report_color_scheme = color_scheme.clone();
         terminal.on_color_scheme(move |_terminal| report_color_scheme.lock().ok().map(|s| *s))?;
-        terminal.on_xtversion(|_terminal| Some(concat!("Bootty ", env!("CARGO_PKG_VERSION"))))?;
+        terminal.on_xtversion(|_terminal| Some(TERMINAL_XTVERSION))?;
         let callback_side_effects = Arc::new(Mutex::new(Vec::new()));
         let title_side_effects = callback_side_effects.clone();
         terminal.on_title_changed(move |terminal| {
