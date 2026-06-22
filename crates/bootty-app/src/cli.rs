@@ -321,14 +321,6 @@ struct ConfigOverrides {
     #[arg(long, value_name = "0..1")]
     unfocused_terminal_dim: Option<f32>,
 
-    /// Force window tabs on.
-    #[arg(long, conflicts_with = "no_window_tabs")]
-    window_tabs: bool,
-
-    /// Force window tabs off.
-    #[arg(long)]
-    no_window_tabs: bool,
-
     /// Write stability trace CSV to this path.
     #[arg(long, value_name = "PATH")]
     stability_trace: Option<PathBuf>,
@@ -522,9 +514,6 @@ impl ConfigOverrides {
         if let Some(status_bar) = bool_override(self.status_bar, self.no_status_bar) {
             config.chrome.status_bar = status_bar;
         }
-        if let Some(window_tabs) = bool_override(self.window_tabs, self.no_window_tabs) {
-            config.chrome.window_tabs = window_tabs;
-        }
         if let Some(sidebar_width) = self.sidebar_width {
             config.chrome.sidebar_width = sidebar_width;
         }
@@ -640,7 +629,6 @@ impl From<CliWindowDecoration> for WindowDecoration {
 enum CliTitlebarStyle {
     Native,
     Transparent,
-    Tabs,
     Hidden,
 }
 
@@ -649,7 +637,6 @@ impl From<CliTitlebarStyle> for MacosTitlebarStyle {
         match value {
             CliTitlebarStyle::Native => Self::Native,
             CliTitlebarStyle::Transparent => Self::Transparent,
-            CliTitlebarStyle::Tabs => Self::Tabs,
             CliTitlebarStyle::Hidden => Self::Hidden,
         }
     }
@@ -823,8 +810,6 @@ mod tests {
                 [chrome]
                 sidebar = false
                 status-bar = false
-                window-tabs = false
-
                 [font]
                 family = ["Config Font"]
                 size = 11
@@ -852,7 +837,6 @@ mod tests {
             "600",
             "--sidebar",
             "--status-bar",
-            "--window-tabs",
             "--font-size",
             "14",
             "--font-family",
@@ -875,7 +859,6 @@ mod tests {
         assert_eq!(config.window.height, 600.0);
         assert!(config.chrome.sidebar);
         assert!(config.chrome.status_bar);
-        assert!(config.chrome.window_tabs);
         assert_eq!(config.font.size, 14.0);
         assert_eq!(config.font.family, ["Mono A", "Mono B"]);
         assert_eq!(config.session.shell.as_deref(), Some("/bin/bash"));

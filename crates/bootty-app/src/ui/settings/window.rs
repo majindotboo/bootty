@@ -69,7 +69,6 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 &[
                     (MacosTitlebarStyle::Native, "native"),
                     (MacosTitlebarStyle::Transparent, "transparent"),
-                    (MacosTitlebarStyle::Tabs, "tabs"),
                     (MacosTitlebarStyle::Hidden, "hidden"),
                 ],
             ) {
@@ -179,13 +178,6 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             checkbox(ui, win, "Status bar", &["chrome", "status-bar"], |chrome| {
                 &mut chrome.status_bar
             });
-            checkbox(
-                ui,
-                win,
-                "Window tabs",
-                &["chrome", "window-tabs"],
-                |chrome| &mut chrome.window_tabs,
-            );
             slider(
                 ui,
                 win,
@@ -316,7 +308,6 @@ fn titlebar_token(style: MacosTitlebarStyle) -> &'static str {
     match style {
         MacosTitlebarStyle::Native => "native",
         MacosTitlebarStyle::Transparent => "transparent",
-        MacosTitlebarStyle::Tabs => "tabs",
         MacosTitlebarStyle::Hidden => "hidden",
     }
 }

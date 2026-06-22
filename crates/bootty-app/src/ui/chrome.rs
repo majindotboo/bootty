@@ -8,7 +8,7 @@ use crate::{
     config::{ChromeConfig, SegmentAlign},
     mux::{
         sidebar_meta::{DiffStat, SidebarMetadata},
-        snapshot::{MuxSession, MuxWindow},
+        snapshot::MuxSession,
     },
     status_module::{ModuleCoord, ModulePrimitive},
     strings::{push_truncated_label, truncate_label},
@@ -84,15 +84,6 @@ pub enum SidebarEvent {
         source: String,
         before: Option<String>,
     },
-}
-#[derive(Clone, Debug)]
-pub struct WindowTabsModel<'a> {
-    pub windows: &'a [MuxWindow],
-    pub selected_window: Option<&'a str>,
-    /// Bar fill; set to the sidebar fullscreen background when the bar sits in the notch band.
-    pub background: egui::Color32,
-    /// Left edge inset before the first tab.
-    pub left_padding: f32,
 }
 
 pub const STATUS_EDGE_PAD: f32 = 12.0;
@@ -1067,47 +1058,6 @@ pub fn sidebar_rect(rect: Rect, chrome: &ChromeConfig) -> Rect {
     )
 }
 
-pub fn show_window_tabs(
-    ui: &mut egui::Ui,
-    palette: ThemePalette,
-    model: WindowTabsModel<'_>,
-) -> Option<String> {
-    let height = 34.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, model.background);
-    painter.line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, palette.surface),
-    );
-
-    let mut activated = None;
-    let mut x = rect.min.x + model.left_padding;
-    for window in model.windows {
-        let label = format!("{}:{}", window.index, truncate_label(&window.name, 18));
-        let width = (label.chars().count() as f32 * 8.0 + 28.0).clamp(56.0, 180.0);
-        if x + width > rect.max.x - STATUS_EDGE_PAD {
-            break;
-        }
-        let tab_rect = Rect::from_min_size(
-            Pos2::new(x, rect.min.y + 5.0),
-            egui::vec2(width, height - 10.0),
-        );
-        let selected = model.selected_window == Some(window.id.as_str())
-            || (model.selected_window.is_none() && window.active);
-        if window_tab(ui, tab_rect, window, &label, selected, palette)
-            .clicked_by(egui::PointerButton::Primary)
-        {
-            activated = Some(window.id.clone());
-        }
-        x += width + 6.0;
-    }
-    activated
-}
-
 pub fn selected_session_name<'a>(
     sessions: &'a [MuxSession],
     selected_session: Option<&str>,
@@ -1933,57 +1883,6 @@ fn sgr_color(code: &str) -> Option<egui::Color32> {
         return None;
     }
     Some(egui::Color32::from_rgb(r, g, b))
-}
-
-fn window_tab(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    window: &MuxWindow,
-    label: &str,
-    selected: bool,
-    palette: ThemePalette,
-) -> egui::Response {
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id(("mux-window-tab", &window.id)),
-        egui::Sense::click(),
-    );
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter_at(rect);
-        let bg = if selected {
-            palette.surface
-        } else if response.hovered() {
-            palette.hover
-        } else {
-            palette.base
-        };
-        painter.rect_filled(rect, 5.0, bg);
-        painter.rect_stroke(
-            rect,
-            5.0,
-            Stroke::new(
-                1.0,
-                if selected {
-                    palette.primary
-                } else {
-                    palette.border
-                },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::monospace(12.0),
-            if selected {
-                palette.text
-            } else {
-                palette.subtext
-            },
-        );
-    }
-    response
 }
 
 #[cfg(test)]

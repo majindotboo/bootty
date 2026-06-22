@@ -6,18 +6,12 @@ use bootty_app::{
     app_actions::{AppKeyBindings, KeybindAction, MuxKeyAction},
     config::{BoottyConfig, MultiplexerBackendConfig},
     geometry::TerminalSurface,
-    mux::snapshot::{MuxPaneAnchor, MuxWindow},
     paint_plan::PaintPlanner,
     terminal::{KeyInput, KeyMods, TerminalEngine, TerminalKey},
     terminal_render::TerminalRenderFrame,
     terminal_text::{TerminalTextConfig, TerminalTextContract},
-    ui::{
-        chrome::{self, WindowTabsModel},
-        icons,
-    },
 };
 use criterion::{Criterion, criterion_group, criterion_main};
-use eframe::egui::{self, Pos2, Rect};
 use paint_plan_fixtures::{surface_for, terminal_engine};
 
 const PANE_COUNTS: [usize; 4] = [1, 4, 16, 64];
@@ -27,13 +21,6 @@ const PANE_COLS: u16 = 240;
 const PANE_ROWS: u16 = 90;
 const WINDOW_COLS: u16 = 120;
 const WINDOW_ROWS: u16 = 40;
-const SCREEN_RECT: Rect = Rect {
-    min: Pos2 { x: 0.0, y: 0.0 },
-    max: Pos2 {
-        x: 1280.0,
-        y: 900.0,
-    },
-};
 
 #[derive(Clone, Copy)]
 struct PaneBounds {
@@ -387,48 +374,6 @@ fn window_engines(count: usize) -> Vec<TerminalEngine> {
         .collect()
 }
 
-fn window_anchor(session_id: &str, window: usize) -> MuxPaneAnchor {
-    MuxPaneAnchor {
-        session_id: session_id.to_owned(),
-        pane_id: Some(format!("%{}", 100 + window)),
-        cwd: Some("/Users/luan/src/bootty".to_owned()),
-        process: Some(
-            match window % 4 {
-                0 => "zsh",
-                1 => "nvim",
-                2 => "cargo",
-                _ => "agent",
-            }
-            .to_owned(),
-        ),
-    }
-}
-
-fn mux_windows(count: usize, active_index: usize) -> Vec<MuxWindow> {
-    let session_id = "$tabs";
-    (0..count)
-        .map(|index| MuxWindow {
-            id: format!("@{}", index + 1),
-            index: index as u32,
-            name: match index % 5 {
-                0 => format!("shell-{index:02}"),
-                1 => format!("editor-{index:02}"),
-                2 => format!("tests-{index:02}"),
-                3 => format!("logs-{index:02}"),
-                _ => format!("agent-{index:02}"),
-            },
-            active: index == active_index,
-            anchor: window_anchor(session_id, index),
-        })
-        .collect()
-}
-
-fn rotate_active_window(windows: &mut [MuxWindow], active_index: usize) {
-    for (index, window) in windows.iter_mut().enumerate() {
-        window.active = index == active_index;
-    }
-}
-
 fn tab_key_inputs() -> Vec<KeyInput> {
     vec![
         KeyInput {
@@ -498,78 +443,6 @@ fn bench_pane_active_and_inactive_paths(c: &mut Criterion) {
                 b.iter(|| black_box(engine.extract_frame().expect("clean frame").stats.cells))
             },
         );
-    }
-}
-
-fn bench_window_tabs_chrome(c: &mut Criterion) {
-    for tab_count in TAB_COUNTS {
-        c.bench_function(&format!("window_tabs_ui_{tab_count}_tabs"), |b| {
-            let windows = mux_windows(tab_count, tab_count / 2);
-            let selected = windows.get(tab_count / 2).map(|window| window.id.as_str());
-            let context = egui::Context::default();
-            icons::install_icon_fonts(&context);
-            let palette = bootty_ui::ThemePalette::default();
-            b.iter(|| {
-                let output = context.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(SCREEN_RECT),
-                        events: vec![egui::Event::PointerMoved(Pos2::new(420.0, 16.0))],
-                        ..Default::default()
-                    },
-                    |ui| {
-                        egui::CentralPanel::default().show_inside(ui, |ui| {
-                            black_box(chrome::show_window_tabs(
-                                ui,
-                                palette,
-                                WindowTabsModel {
-                                    windows: black_box(&windows),
-                                    selected_window: black_box(selected),
-                                    background: palette.base,
-                                    left_padding: chrome::STATUS_EDGE_PAD,
-                                },
-                            ));
-                        });
-                    },
-                );
-                black_box(output.shapes.len())
-            })
-        });
-
-        c.bench_function(&format!("window_tabs_switch_ui_{tab_count}_tabs"), |b| {
-            let mut windows = mux_windows(tab_count, 0);
-            let context = egui::Context::default();
-            icons::install_icon_fonts(&context);
-            let palette = bootty_ui::ThemePalette::default();
-            let mut tick = 0_usize;
-            b.iter(|| {
-                tick = tick.wrapping_add(1);
-                let active = tick % tab_count;
-                rotate_active_window(&mut windows, active);
-                let selected = windows[active].id.as_str();
-                let output = context.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(SCREEN_RECT),
-                        events: vec![egui::Event::PointerMoved(Pos2::new(420.0, 16.0))],
-                        ..Default::default()
-                    },
-                    |ui| {
-                        egui::CentralPanel::default().show_inside(ui, |ui| {
-                            black_box(chrome::show_window_tabs(
-                                ui,
-                                palette,
-                                WindowTabsModel {
-                                    windows: black_box(&windows),
-                                    selected_window: black_box(Some(selected)),
-                                    background: palette.base,
-                                    left_padding: chrome::STATUS_EDGE_PAD,
-                                },
-                            ));
-                        });
-                    },
-                );
-                black_box(output.shapes.len())
-            })
-        });
     }
 }
 
@@ -713,7 +586,6 @@ criterion_group!(
     targets =
         bench_pane_grid_pipeline,
         bench_pane_active_and_inactive_paths,
-        bench_window_tabs_chrome,
         bench_tab_keybind_lookup,
         bench_multi_window_frame_paths,
         bench_mux_equivalent_pane_modes,

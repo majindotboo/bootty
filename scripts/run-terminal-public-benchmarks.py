@@ -479,7 +479,6 @@ macos-titlebar-style = "transparent"
 [chrome]
 sidebar = false
 status-bar = false
-window-tabs = false
 sidebar-width = 0
 status-height = 0
 gap = 0

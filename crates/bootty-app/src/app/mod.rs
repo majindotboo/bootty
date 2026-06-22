@@ -367,14 +367,6 @@ impl BoottyApp {
         } else {
             0.0
         };
-        let show_window_tabs = chrome_config.window_tabs
-            && matches!(
-                self.state.config().multiplexer.backend,
-                crate::config::MultiplexerBackendConfig::Rmux
-                    | crate::config::MultiplexerBackendConfig::Native
-            )
-            && !self.state.mux().selected_session_windows().is_empty();
-        let window_tabs_height = if show_window_tabs { 34.0 } else { 0.0 };
         let sidebar_on_right = matches!(
             self.state.config().sidebar.position,
             crate::config::SidebarPosition::Right
@@ -404,9 +396,9 @@ impl BoottyApp {
                 ),
             )
         };
-        // With the sidebar on the right, the macOS traffic-light buttons land over the content's
-        // top-left instead of the sidebar, so inset the status bar to clear them.
-        let status_left_inset = if sidebar_on_right
+        // When the sidebar is not on the left edge, macOS traffic-light buttons land over the
+        // content's top-left instead of the sidebar, so inset the status bar to clear them.
+        let status_left_inset = if (!sidebar || sidebar_on_right)
             && self
                 .state
                 .config()
@@ -426,16 +418,13 @@ impl BoottyApp {
             );
             ui.painter().rect_filled(band, 0.0, notch_band_color);
         }
-        // With tabs-in-notch the content rises into the notch band. For tmux (no Bootty tab bar) the
-        // terminal drops by one row less than the notch so the status line's bottom edge lines up
-        // with the bottom of the notch; a Bootty tab bar instead fills the band from the top. The
-        // terminal default background is overridden to the band color below so a tmux `bg=default`
-        // status line matches the chrome.
+        // With tabs-in-notch the content rises into the notch band and the terminal drops by one
+        // row less than the notch so the status line's bottom edge lines up with the bottom of the
+        // notch. The terminal default background is overridden to the band color below so a tmux
+        // `bg=default` status line matches the chrome.
         let terminal_cell_height = self.terminal_widget.cell_dimensions().1;
         let content_offset = if !tabs_in_notch {
             fullscreen_top_offset
-        } else if show_window_tabs {
-            0.0
         } else {
             (fullscreen_top_offset - terminal_cell_height).max(0.0)
         };
@@ -450,15 +439,8 @@ impl BoottyApp {
                 (content_top + status_height).min(right_rect.max.y),
             ),
         );
-        let window_tabs_rect = Rect::from_min_max(
-            Pos2::new(right_rect.min.x, status_rect.max.y),
-            Pos2::new(
-                right_rect.max.x,
-                (status_rect.max.y + window_tabs_height).min(right_rect.max.y),
-            ),
-        );
         let terminal_rect = Rect::from_min_max(
-            Pos2::new(right_rect.min.x, window_tabs_rect.max.y),
+            Pos2::new(right_rect.min.x, status_rect.max.y),
             right_rect.max,
         );
 
@@ -631,33 +613,6 @@ impl BoottyApp {
             self.status_modules.set_active(Vec::new());
         }
 
-        if show_window_tabs {
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(window_tabs_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    if let Some(window_id) = chrome::show_window_tabs(
-                        ui,
-                        palette,
-                        chrome::WindowTabsModel {
-                            windows: self.state.mux().selected_session_windows(),
-                            selected_window: self.state.mux().selected_window(),
-                            background: if tabs_in_notch {
-                                notch_band_color
-                            } else {
-                                palette.base
-                            },
-                            left_padding: status_bar_left_padding(sidebar, sidebar_on_right),
-                        },
-                    ) && let Some(session_id) =
-                        self.state.mux().selected_session().map(str::to_owned)
-                    {
-                        self.state.activate_window_from_ui(&session_id, &window_id);
-                    }
-                },
-            );
-        }
         let terminal_backend = selected_backend(&self.state.config().multiplexer);
         let terminal_transition_key = self.state.mux().selected_session_anchor().map(|anchor| {
             let pane_id = anchor.pane_id.as_deref().unwrap_or_default();
@@ -825,7 +780,7 @@ impl eframe::App for BoottyApp {
 }
 
 fn uses_custom_egui_fonts(config: &BoottyConfig) -> bool {
-    config.chrome.sidebar || config.chrome.status_bar || config.chrome.window_tabs
+    config.chrome.sidebar || config.chrome.status_bar
 }
 
 // egui's wheel `delta` already points the way content should move, so it is the pan delta as-is.
@@ -894,7 +849,6 @@ mod tests {
 
         config.chrome.sidebar = false;
         config.chrome.status_bar = false;
-        config.chrome.window_tabs = false;
         assert!(!uses_custom_egui_fonts(&config));
 
         config.chrome.status_bar = true;

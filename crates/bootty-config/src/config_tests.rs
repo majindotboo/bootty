@@ -702,17 +702,14 @@ fn config_maps_glyph_protocol_policy_to_terminal_features() {
             .glyph_protocol
     );
 }
+
 #[test]
-fn chrome_window_tabs_can_be_disabled() {
-    let config = load_config_source(indoc! {r#"
+fn obsolete_chrome_window_tabs_key_is_ignored() {
+    load_config_source(indoc! {r#"
         [chrome]
-        window-tabs = false
+        window-tabs = true
     "#});
-
-    assert!(!config.chrome.window_tabs);
-    assert!(BoottyConfig::default().chrome.window_tabs);
 }
-
 #[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"

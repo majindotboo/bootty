@@ -266,10 +266,6 @@ pub fn native_options_for_config(config: &BoottyConfig) -> eframe::NativeOptions
             .with_title_shown(false)
             .with_titlebar_shown(false)
             .with_fullsize_content_view(true),
-        MacosTitlebarStyle::Tabs => viewport
-            .with_title_shown(false)
-            .with_titlebar_shown(false)
-            .with_fullsize_content_view(true),
         MacosTitlebarStyle::Hidden => viewport
             .with_title_shown(false)
             .with_titlebar_buttons_shown(false)
