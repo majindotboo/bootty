@@ -31,26 +31,30 @@ local AGENT_STYLE = {
 	opencode = { icon = "bot", color = OPENCODE_COLOR },
 }
 
+local FACTS_CACHE = {}
+local first_render = true
+local refresh_index = 1
+
 local function tmux_session(session)
 	return string.sub(session.id, 1, 1) == "$"
 end
 
 local function tmux_active_pane(session)
 	if not tmux_session(session) then
-		return nil, nil
+		return nil, nil, nil
 	end
 	local out = bootty.run(
 		"tmux list-panes -t "
 			.. quote(session.id)
-			.. " -F '#{pane_active}\t#{pane_id}\t#{pane_current_command}' 2>/dev/null"
+			.. " -F '#{pane_active}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}' 2>/dev/null"
 	)
 	for line in string.gmatch(out, "[^\n]+") do
-		local active, pane_id, command = string.match(line, "^([^\t]*)\t([^\t]*)\t(.+)$")
+		local active, pane_id, command, pane_pid = string.match(line, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.+)$")
 		if active == "1" and command ~= "" then
-			return command, pane_id
+			return command, pane_id, pane_pid
 		end
 	end
-	return nil, nil
+	return nil, nil, nil
 end
 
 local function tmux_option(session, option)
@@ -92,9 +96,102 @@ local function git_diff(cwd)
 	return added, removed
 end
 
-local function agent_command(command)
-	local lower = if command then string.lower(command) else nil
+local function command_basename(command)
+	if not command or command == "" then
+		return nil
+	end
+	local name = string.match(command, "([^/]+)$") or command
+	name = string.gsub(name, "^%-+", "")
+	return string.lower(name)
+end
+
+local function command_agent_name(command)
+	local lower = command_basename(command)
+	if lower == "codex.app" then
+		return "codex"
+	elseif lower == "claude.app" then
+		return "claude"
+	end
 	return if lower == "claude" or lower == "codex" or lower == "opencode" then lower else nil
+end
+
+local INTERPRETER_WRAPPERS = {
+	bun = true,
+	deno = true,
+	node = true,
+	python = true,
+	python3 = true,
+	ruby = true,
+}
+
+local function args_tokens(args)
+	local tokens = {}
+	for token in string.gmatch(args or "", "%S+") do
+		tokens[#tokens + 1] = token
+	end
+	return tokens
+end
+
+local function wrapper_script_agent(command, args)
+	local wrapper = command_basename(command)
+	if not INTERPRETER_WRAPPERS[wrapper] then
+		return nil
+	end
+	local tokens = args_tokens(args)
+	for index = 2, #tokens do
+		local token = tokens[index]
+		if not ui.starts_with(token, "-") then
+			return command_agent_name(token)
+		end
+	end
+	return nil
+end
+
+local function process_snapshot()
+	local children = {}
+	for line in string.gmatch(bootty.run("ps -axo pid=,ppid=,comm=,args= 2>/dev/null"), "[^\n]+") do
+		local pid, ppid, command, args = string.match(line, "^%s*(%d+)%s+(%d+)%s+(%S+)%s*(.*)$")
+		if pid and ppid and command then
+			if not children[ppid] then
+				children[ppid] = {}
+			end
+			local siblings = children[ppid]
+			siblings[#siblings + 1] = {
+				pid = pid,
+				command = command_basename(command),
+				agent = command_agent_name(command) or wrapper_script_agent(command, args),
+			}
+		end
+	end
+	return children
+end
+
+local function agent_command(command)
+	return command_agent_name(command)
+end
+
+local function descendant_agent(children, root_pid)
+	if not root_pid or root_pid == "" then
+		return nil
+	end
+	local queue = { root_pid }
+	local seen = {}
+	local head = 1
+	while head <= #queue and head < 256 do
+		local pid = queue[head]
+		head += 1
+		if not seen[pid] then
+			seen[pid] = true
+			for _, child in ipairs(children[pid] or {}) do
+				local agent = child.agent or agent_command(child.command)
+				if agent then
+					return agent
+				end
+				queue[#queue + 1] = child.pid
+			end
+		end
+	end
+	return nil
 end
 
 local function parse_star_activity(text)
@@ -119,8 +216,12 @@ end
 
 local function parse_codex_activity(text)
 	for line in string.gmatch(text, "[^\n]+") do
-		if ui.starts_with(ui.trim(line), "• Working") then
-			return "Working…"
+		local trimmed = ui.trim(line)
+		if ui.starts_with(trimmed, "• ") then
+			local verb = string.match(trimmed, "^•%s*(%S+)")
+			if verb == "Working" or verb == "Thinking" or verb == "Running" then
+				return verb .. "…"
+			end
 		end
 	end
 	return nil
@@ -141,11 +242,7 @@ local function parse_opencode_activity(text)
 		else nil
 end
 
-local function agent_status(command, text)
-	local agent = agent_command(command)
-	if not agent then
-		return nil
-	end
+local function agent_status(agent, text)
 	local activity = nil
 	if agent == "claude" then
 		activity = parse_star_activity(text)
@@ -155,23 +252,23 @@ local function agent_status(command, text)
 		activity = parse_opencode_activity(text)
 	end
 	if activity then
-		return agent, activity
+		return activity
 	end
+	local lower = string.lower(text or "")
 	local asking = false
 	if agent == "claude" then
-		asking = string.find(text, "Enter to select", 1, true) ~= nil
-			or string.find(text, "enter to select", 1, true) ~= nil
+		asking = string.find(lower, "enter to select", 1, true) ~= nil
 	elseif agent == "codex" then
-		asking = string.find(text, "to submit answer", 1, true) ~= nil
+		asking = string.find(lower, "to submit answer", 1, true) ~= nil
 	else
-		asking = string.find(text, "select", 1, true) ~= nil
-			and string.find(text, "submit", 1, true) ~= nil
-			and string.find(text, "dismiss", 1, true) ~= nil
+		asking = string.find(lower, "select", 1, true) ~= nil
+			and string.find(lower, "submit", 1, true) ~= nil
+			and string.find(lower, "dismiss", 1, true) ~= nil
 	end
 	if asking then
-		return agent, "asking"
+		return "asking"
 	end
-	return nil
+	return "active"
 end
 
 local function animated(detail)
@@ -181,17 +278,25 @@ local function animated(detail)
 	return string.gsub(detail, "…", string.rep(".", math.floor(bootty.time() * 5) % 4 + 1))
 end
 
-local function session_facts(session)
-	local process, pane_id = tmux_active_pane(session)
+local function minimal_facts()
+	return {
+		process_style = { icon = "terminal", color = MUTED_COLOR },
+	}
+end
+
+local function refreshed_session_facts(session)
+	local process, pane_id, pane_pid = tmux_active_pane(session)
 	local progress_text = tmux_option(session, "@sidebar_progress")
-	local agent_name, agent_detail = nil, nil
-	if agent_command(process) then
-		agent_name, agent_detail = agent_status(process, captured_pane(pane_id))
+	local agent_name = agent_command(process)
+	if not agent_name and pane_pid then
+		agent_name = descendant_agent(process_snapshot(), pane_pid)
 	end
+	local agent_detail = if agent_name then agent_status(agent_name, captured_pane(pane_id)) else nil
 	local diff_added, diff_removed = git_diff(session.cwd)
 	return {
 		process = process,
-		process_style = PROCESS_STYLE[process] or { icon = "terminal", color = MUTED_COLOR },
+		display_process = agent_name or process,
+		process_style = PROCESS_STYLE[command_basename(process)] or { icon = "terminal", color = MUTED_COLOR },
 		branch = git_branch(session.cwd),
 		diff_added = diff_added,
 		diff_removed = diff_removed,
@@ -201,6 +306,47 @@ local function session_facts(session)
 		agent_detail = agent_detail,
 		agent_style = AGENT_STYLE[agent_name],
 	}
+end
+
+local function cached_session_facts(session)
+	return FACTS_CACHE[session.id] or minimal_facts()
+end
+
+local function prune_fact_cache(sessions)
+	local live = {}
+	for _, session in ipairs(sessions) do
+		live[session.id] = true
+	end
+	for id, _ in pairs(FACTS_CACHE) do
+		if not live[id] then
+			FACTS_CACHE[id] = nil
+		end
+	end
+end
+
+local function next_refresh_session(sessions)
+	if #sessions == 0 then
+		return nil
+	end
+	for _, session in ipairs(sessions) do
+		if session.selected and not FACTS_CACHE[session.id] then
+			return session
+		end
+	end
+	if refresh_index > #sessions then
+		refresh_index = 1
+	end
+	local session = sessions[refresh_index]
+	refresh_index = refresh_index % #sessions + 1
+	return session
+end
+
+local function refresh_one_session(sessions)
+	local session = next_refresh_session(sessions)
+	if not session then
+		return
+	end
+	FACTS_CACHE[session.id] = refreshed_session_facts(session)
 end
 
 local function session_right(_, facts)
@@ -215,15 +361,25 @@ local function session_right(_, facts)
 				{ x = 1, x_px = -12, color = DESTRUCTIVE_COLOR, align = "right_center", size = 12 }
 			),
 		}
-	elseif facts.process and facts.process ~= "" then
-		return { ui.text(facts.process, { x = 1, x_px = -12, color = MUTED_COLOR, align = "right_center", size = 12 }) }
+	elseif facts.display_process and facts.display_process ~= "" then
+		return {
+			ui.text(
+				facts.display_process,
+				{ x = 1, x_px = -12, color = MUTED_COLOR, align = "right_center", size = 12 }
+			),
+		}
 	end
 	return {}
 end
 
 local function session_details(_, facts)
 	return {
-		{ key = "process", icon = facts.process_style.icon, label = facts.process, color = facts.process_style.color },
+		{
+			key = "process",
+			icon = facts.process_style.icon,
+			label = if facts.agent_name then nil else facts.process,
+			color = facts.process_style.color,
+		},
 		{
 			key = "agent",
 			icon = if facts.agent_style then facts.agent_style.icon else nil,
@@ -251,11 +407,18 @@ local function session_progress(ctx, facts)
 end
 
 return {
-	interval = 1,
+	interval = 0.5,
 	render = function()
+		local sessions = bootty.sessions()
+		prune_fact_cache(sessions)
+		if first_render then
+			first_render = false
+		else
+			refresh_one_session(sessions)
+		end
 		return ui.session_items({
-			sessions = bootty.sessions(),
-			facts = session_facts,
+			sessions = sessions,
+			facts = cached_session_facts,
 			right = session_right,
 			details = session_details,
 			progress = session_progress,
