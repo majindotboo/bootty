@@ -759,6 +759,7 @@ impl eframe::App for BoottyApp {
             terminal_cell_width,
             terminal_cell_height,
             terminal_scale_factor: ctx.pixels_per_point(),
+            terminal_view_transform: self.terminal_widget.view_transform(),
         };
         let effects = self.state.update_frame(inputs);
         self.apply_effects(ctx, effects);

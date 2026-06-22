@@ -4,7 +4,7 @@ use anyhow::Result;
 use bootty_app::{
     app::{AppState, FrameInputs, ViewportSnapshot},
     config::{BoottyConfig, MultiplexerBackendConfig},
-    geometry::TerminalGeometry,
+    geometry::{TerminalGeometry, ViewTransform},
     mux::{
         RepaintHandle,
         sidebar_meta::{
@@ -110,6 +110,7 @@ fn frame_inputs_at(
         terminal_cell_width: 9.0,
         terminal_cell_height: 22.0,
         terminal_scale_factor: 1.0,
+        terminal_view_transform: ViewTransform::IDENTITY,
     }
 }
 

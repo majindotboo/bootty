@@ -148,6 +148,13 @@ impl GridDimensions {
             rows: ((height / cell.height.max(1)).max(1)).min(u32::from(u16::MAX)) as u16,
         }
     }
+
+    pub fn new(cols: u16, rows: u16) -> Self {
+        Self {
+            cols: cols.max(1),
+            rows: rows.max(1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -417,16 +424,8 @@ impl TerminalSurface {
     }
 
     pub fn raw_grid_size(self) -> GridDimensions {
-        let padding = self.padding.rounded();
-        let width = self.rect.width().max(0.0).round() as u32;
-        let height = self.rect.height().max(0.0).round() as u32;
-        let horizontal_padding = padding.left.saturating_add(padding.right);
-        let vertical_padding = padding.top.saturating_add(padding.bottom);
-        GridDimensions::for_pixels(
-            width.saturating_sub(horizontal_padding),
-            height.saturating_sub(vertical_padding),
-            self.rounded_cell(),
-        )
+        let geometry = self.geometry();
+        GridDimensions::new(geometry.cols, geometry.rows)
     }
 
     pub fn balanced_padding(
@@ -520,16 +519,65 @@ impl TerminalSurface {
         })
     }
 
+    pub fn mouse_position(self, pos: Pos2) -> Option<SurfacePoint> {
+        let position = self.relative_position(pos)?;
+        let rounded_cell = self.rounded_cell();
+        let padding = self.padding.rounded();
+        Some(SurfacePoint {
+            x: mouse_axis_position(
+                position.x,
+                self.padding.left,
+                padding.left,
+                self.cell.width,
+                rounded_cell.width,
+            ),
+            y: mouse_axis_position(
+                position.y,
+                self.padding.top,
+                padding.top,
+                self.cell.height,
+                rounded_cell.height,
+            ),
+        })
+    }
+
     pub fn mouse_metrics(self) -> MouseSurfaceMetrics {
-        let (cell_width, cell_height) = self.cell_size();
+        let geometry = self.geometry();
+        let padding = self.padding.rounded();
         MouseSurfaceMetrics {
-            screen_width: self.rect.width().max(0.0).round() as u32,
-            screen_height: self.rect.height().max(0.0).round() as u32,
-            cell_width,
-            cell_height,
-            padding: self.padding.rounded(),
+            screen_width: u32::from(geometry.cols)
+                .saturating_mul(geometry.cell_width)
+                .saturating_add(padding.left)
+                .saturating_add(padding.right),
+            screen_height: u32::from(geometry.rows)
+                .saturating_mul(geometry.cell_height)
+                .saturating_add(padding.top)
+                .saturating_add(padding.bottom),
+            cell_width: geometry.cell_width,
+            cell_height: geometry.cell_height,
+            padding,
         }
     }
+}
+
+fn mouse_axis_position(
+    position: f32,
+    rendered_padding: f32,
+    rounded_padding: u32,
+    rendered_cell: f32,
+    rounded_cell: u32,
+) -> f32 {
+    let rounded_padding = rounded_padding as f32;
+    let content = position - rendered_padding;
+    if content <= 0.0 {
+        return if rendered_padding > 0.0 {
+            position * (rounded_padding / rendered_padding)
+        } else {
+            position
+        };
+    }
+
+    rounded_padding + content * (rounded_cell as f32 / rendered_cell.max(1.0))
 }
 
 pub fn geometry_for_size(

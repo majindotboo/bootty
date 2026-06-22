@@ -4,6 +4,7 @@ mod paint_plan_fixtures;
 
 use bootty_app::{
     config::{BoottyConfig, MultiplexerBackendConfig},
+    geometry::ViewTransform,
     input_binding::BindingAction,
     input_binding_set::BindingSet,
     modifier_remap::ModifierRemapSet,
@@ -269,6 +270,7 @@ fn input_snapshot(events: Vec<egui::Event>) -> InputSnapshot {
             Pos2::new(2_000.0, 2_000.0),
             Pos2::new(2_100.0, 2_100.0),
         )),
+        view: ViewTransform::IDENTITY,
     }
 }
 

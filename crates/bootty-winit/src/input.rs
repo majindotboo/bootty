@@ -1,11 +1,12 @@
 use eframe::egui::{self, Pos2, Rect};
 
 use crate::{
-    geometry::TerminalSurface,
+    geometry::{TerminalSurface, ViewTransform},
     input_keymap::{
         ModifierSideState, egui_key_utf8, is_control_key, key_mods_from_egui_modifiers,
-        key_unshifted, mouse_input_from_surface, mouse_input_from_surface_clamped,
-        mouse_mods_from_egui_modifiers, mouse_wheel_button_from_delta_y,
+        key_unshifted, mouse_input_from_surface_clamped_with_view,
+        mouse_input_from_surface_with_view, mouse_mods_from_egui_modifiers,
+        mouse_wheel_button_from_delta_y,
     },
     modifier_remap::ModifierRemapSet,
     terminal::{KeyInput, MacosOptionAsAlt, MouseAction, MouseButton, MouseInput, TerminalKey},
@@ -20,6 +21,7 @@ pub struct InputSnapshot {
     pub pressed_mouse_button: Option<MouseButton>,
     pub surface: Option<TerminalSurface>,
     pub mouse_exclusion: Option<Rect>,
+    pub view: ViewTransform,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,12 +108,13 @@ pub fn terminal_input_commands_with_wheel_state(
             }
             egui::Event::PointerMoved(pos) => {
                 if !mouse_excluded(pos, snapshot.mouse_exclusion)
-                    && let Some(input) = mouse_input(
+                    && let Some(input) = mouse_input_with_view(
                         pos,
                         MouseAction::Motion,
                         snapshot.pressed_mouse_button,
                         snapshot.modifiers,
                         snapshot.surface,
+                        snapshot.view,
                     )
                 {
                     commands.push(TerminalInputCommand::Mouse(input));
@@ -130,9 +133,23 @@ pub fn terminal_input_commands_with_wheel_state(
                         MouseAction::Release
                     };
                     let input = if !pressed && snapshot.pressed_mouse_button == Some(button) {
-                        mouse_input_clamped(pos, action, Some(button), modifiers, snapshot.surface)
+                        mouse_input_clamped_with_view(
+                            pos,
+                            action,
+                            Some(button),
+                            modifiers,
+                            snapshot.surface,
+                            snapshot.view,
+                        )
                     } else if !mouse_excluded(pos, snapshot.mouse_exclusion) {
-                        mouse_input(pos, action, Some(button), modifiers, snapshot.surface)
+                        mouse_input_with_view(
+                            pos,
+                            action,
+                            Some(button),
+                            modifiers,
+                            snapshot.surface,
+                            snapshot.view,
+                        )
                     } else {
                         None
                     };
@@ -156,12 +173,13 @@ pub fn terminal_input_commands_with_wheel_state(
                     if scroll_delta == 0 {
                         continue;
                     }
-                    if let Some(input) = mouse_input(
+                    if let Some(input) = mouse_input_with_view(
                         pos,
                         MouseAction::Press,
                         Some(button),
                         modifiers,
                         snapshot.surface,
+                        snapshot.view,
                     ) {
                         commands.push(TerminalInputCommand::MouseWheel {
                             input,
@@ -335,36 +353,40 @@ fn mouse_excluded(pos: Pos2, exclusion: Option<Rect>) -> bool {
     exclusion.is_some_and(|rect| rect.contains(pos))
 }
 
-fn mouse_input(
+fn mouse_input_with_view(
     pos: Pos2,
     action: MouseAction,
     button: Option<MouseButton>,
     modifiers: egui::Modifiers,
     surface: Option<TerminalSurface>,
+    view: ViewTransform,
 ) -> Option<MouseInput> {
     let surface = surface?;
-    mouse_input_from_surface(
+    mouse_input_from_surface_with_view(
         pos,
         action,
         button,
         mouse_mods_from_egui_modifiers(modifiers),
         surface,
+        view,
     )
 }
 
-fn mouse_input_clamped(
+fn mouse_input_clamped_with_view(
     pos: Pos2,
     action: MouseAction,
     button: Option<MouseButton>,
     modifiers: egui::Modifiers,
     surface: Option<TerminalSurface>,
+    view: ViewTransform,
 ) -> Option<MouseInput> {
-    Some(mouse_input_from_surface_clamped(
+    Some(mouse_input_from_surface_clamped_with_view(
         pos,
         action,
         button,
         mouse_mods_from_egui_modifiers(modifiers),
         surface?,
+        view,
     ))
 }
 
@@ -455,6 +477,7 @@ mod tests {
             pressed_mouse_button: None,
             surface: None,
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         })
     }
 
@@ -480,6 +503,7 @@ mod tests {
                 pressed_mouse_button: None,
                 surface: None,
                 mouse_exclusion: None,
+                view: ViewTransform::IDENTITY,
             },
             &ModifierRemapSet::default(),
             macos_option_as_alt,
@@ -593,6 +617,7 @@ mod tests {
             pressed_mouse_button: None,
             surface: None,
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
         assert_eq!(
             commands,
@@ -700,6 +725,7 @@ mod tests {
             pressed_mouse_button: None,
             surface: None,
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
         assert!(commands.is_empty());
     }
@@ -790,6 +816,7 @@ mod tests {
                 pressed_mouse_button: None,
                 surface: None,
                 mouse_exclusion: None,
+                view: ViewTransform::IDENTITY,
             },
             &remaps,
         );
@@ -846,12 +873,13 @@ mod tests {
     #[test]
     fn mouse_input_is_relative_to_terminal_rect() {
         let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
-        let input = mouse_input(
+        let input = mouse_input_with_view(
             Pos2::new(35.0, 70.0),
             MouseAction::Press,
             Some(MouseButton::Left),
             modifiers(true, false, false),
             Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+            ViewTransform::IDENTITY,
         )
         .expect("inside terminal rect");
 
@@ -860,11 +888,107 @@ mod tests {
         assert!(input.mods.ctrl);
         assert_eq!(input.x, 15.0);
         assert_eq!(input.y, 30.0);
-        assert_eq!(input.size.screen_width, 200);
-        assert_eq!(input.size.screen_height, 100);
+        assert_eq!(input.size.screen_width, 198);
+        assert_eq!(input.size.screen_height, 176);
         assert_eq!(input.size.cell_width, 9);
         assert_eq!(input.size.cell_height, 22);
         assert_eq!(input.size.padding_left, 0);
+    }
+
+    #[test]
+    fn mouse_input_inverts_view_transform_before_encoding() {
+        let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
+        let surface = TerminalSurface::for_rect(rect, CellMetrics::new(10.0, 20.0));
+        let view = ViewTransform {
+            zoom: 2.0,
+            pan_x: -15.0,
+            pan_y: 12.0,
+        };
+        let logical_pos = Pos2::new(55.0, 90.0);
+        let rendered_pos = Pos2::new(
+            logical_pos.x * view.zoom + view.pan_x,
+            logical_pos.y * view.zoom + view.pan_y,
+        );
+
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![egui::Event::PointerButton {
+                pos: rendered_pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: None,
+            pressed_mouse_button: None,
+            surface: Some(surface),
+            mouse_exclusion: None,
+            view,
+        });
+
+        assert_eq!(
+            commands,
+            vec![TerminalInputCommand::Mouse(MouseInput {
+                action: MouseAction::Press,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 35.0,
+                y: 50.0,
+                size: MouseEncoderSize {
+                    screen_width: 200,
+                    screen_height: 160,
+                    cell_width: 10,
+                    cell_height: 20,
+                    padding_left: 0,
+                    padding_top: 0,
+                    padding_right: 0,
+                    padding_bottom: 0,
+                },
+            })]
+        );
+    }
+
+    #[test]
+    fn mouse_input_scales_fractional_rendered_cell_height_to_encoder_grid() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_000.0, 765.0));
+        let surface = TerminalSurface::for_rect(rect, CellMetrics::new(10.0, 22.5));
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![egui::Event::PointerButton {
+                pos: Pos2::new(5.0, 33.0 * 22.5),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: None,
+            pressed_mouse_button: None,
+            surface: Some(surface),
+            mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
+        });
+
+        let [TerminalInputCommand::Mouse(input)] = commands.as_slice() else {
+            panic!("expected one mouse command, got {commands:?}");
+        };
+        assert_eq!(input.action, MouseAction::Press);
+        assert_eq!(input.button, Some(MouseButton::Left));
+        assert_eq!(input.mods, KeyMods::default());
+        assert_eq!(input.x, 5.0);
+        assert!((input.y - 759.0).abs() < 0.001);
+        assert_eq!(
+            input.size,
+            MouseEncoderSize {
+                screen_width: 1_000,
+                screen_height: 782,
+                cell_width: 10,
+                cell_height: 23,
+                padding_left: 0,
+                padding_top: 0,
+                padding_right: 0,
+                padding_bottom: 0,
+            }
+        );
     }
 
     #[test]
@@ -878,6 +1002,7 @@ mod tests {
             pressed_mouse_button: Some(MouseButton::Left),
             surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
 
         assert_eq!(
@@ -889,8 +1014,8 @@ mod tests {
                 x: 15.0,
                 y: 30.0,
                 size: MouseEncoderSize {
-                    screen_width: 200,
-                    screen_height: 100,
+                    screen_width: 198,
+                    screen_height: 176,
                     cell_width: 9,
                     cell_height: 22,
                     padding_left: 0,
@@ -932,11 +1057,12 @@ mod tests {
             pressed_mouse_button: None,
             surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
 
         let size = MouseEncoderSize {
-            screen_width: 200,
-            screen_height: 100,
+            screen_width: 198,
+            screen_height: 176,
             cell_width: 9,
             cell_height: 22,
             padding_left: 0,
@@ -993,6 +1119,7 @@ mod tests {
             pressed_mouse_button: None,
             surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
 
         assert_eq!(mouse_wheel_scroll_delta_for(&commands[0]), -2);
@@ -1018,6 +1145,7 @@ mod tests {
                 pressed_mouse_button: None,
                 surface: Some(surface),
                 mouse_exclusion: None,
+                view: ViewTransform::IDENTITY,
             },
             &ModifierRemapSet::default(),
             MacosOptionAsAlt::default(),
@@ -1037,6 +1165,7 @@ mod tests {
                 pressed_mouse_button: None,
                 surface: Some(surface),
                 mouse_exclusion: None,
+                view: ViewTransform::IDENTITY,
             },
             &ModifierRemapSet::default(),
             MacosOptionAsAlt::default(),
@@ -1063,6 +1192,7 @@ mod tests {
             pressed_mouse_button: Some(MouseButton::Left),
             surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
 
         assert_eq!(
@@ -1074,8 +1204,8 @@ mod tests {
                 x: 200.0,
                 y: 100.0,
                 size: MouseEncoderSize {
-                    screen_width: 200,
-                    screen_height: 100,
+                    screen_width: 198,
+                    screen_height: 176,
                     cell_width: 9,
                     cell_height: 22,
                     padding_left: 0,
@@ -1103,6 +1233,7 @@ mod tests {
             pressed_mouse_button: None,
             surface: Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
 
         assert!(commands.is_empty());
@@ -1137,6 +1268,7 @@ mod tests {
                 CellMetrics::new(9.0, 22.0),
             )),
             mouse_exclusion: Some(exclusion),
+            view: ViewTransform::IDENTITY,
         });
 
         assert!(commands.is_empty());
@@ -1146,12 +1278,13 @@ mod tests {
     fn mouse_input_outside_terminal_rect_is_ignored() {
         let rect = Rect::from_min_max(Pos2::new(20.0, 40.0), Pos2::new(220.0, 140.0));
         assert!(
-            mouse_input(
+            mouse_input_with_view(
                 Pos2::new(10.0, 70.0),
                 MouseAction::Motion,
                 None,
                 egui::Modifiers::default(),
                 Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+                ViewTransform::IDENTITY,
             )
             .is_none()
         );
@@ -1165,12 +1298,13 @@ mod tests {
         ) {
             let rect = Rect::from_min_size(Pos2::new(20.0, 40.0), Vec2::new(400.0, 300.0));
             let pos = Pos2::new(20.0 + x as f32, 40.0 + y as f32);
-            let input = mouse_input(
+            let input = mouse_input_with_view(
                 pos,
                 MouseAction::Motion,
                 None,
                 egui::Modifiers::default(),
                 Some(TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 22.0))),
+                ViewTransform::IDENTITY,
             ).expect("generated point is inside");
 
             prop_assert!(input.x >= 0.0);

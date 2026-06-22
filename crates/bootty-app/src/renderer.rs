@@ -77,6 +77,10 @@ impl TerminalWidget {
         self.view.is_zoomed()
     }
 
+    pub fn view_transform(&self) -> ViewTransform {
+        self.view
+    }
+
     pub fn apply_pinch(&mut self, factor: f32, focal: Option<Pos2>) {
         let Some(surface) = self.last_surface else {
             return;

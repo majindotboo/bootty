@@ -5,7 +5,7 @@ use winit::{
 };
 
 use crate::{
-    geometry::TerminalSurface,
+    geometry::{TerminalSurface, ViewTransform},
     modifier_remap::ModifierRemapSet,
     terminal::{KeyInput, KeyMods, MouseAction, MouseButton, MouseInput, TerminalKey},
 };
@@ -285,7 +285,7 @@ pub fn mouse_input_from_surface(
     mods: KeyMods,
     surface: TerminalSurface,
 ) -> Option<MouseInput> {
-    let position = surface.relative_position(pos)?;
+    let position = surface.mouse_position(pos)?;
 
     Some(MouseInput {
         action,
@@ -297,6 +297,17 @@ pub fn mouse_input_from_surface(
     })
 }
 
+pub fn mouse_input_from_surface_with_view(
+    pos: Pos2,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    mods: KeyMods,
+    surface: TerminalSurface,
+    view: ViewTransform,
+) -> Option<MouseInput> {
+    mouse_input_from_surface(view.inverse_point(pos), action, button, mods, surface)
+}
+
 pub fn mouse_input_from_surface_clamped(
     pos: Pos2,
     action: MouseAction,
@@ -304,16 +315,32 @@ pub fn mouse_input_from_surface_clamped(
     mods: KeyMods,
     surface: TerminalSurface,
 ) -> MouseInput {
-    let x = pos.x.clamp(surface.rect.min.x, surface.rect.max.x) - surface.rect.min.x;
-    let y = pos.y.clamp(surface.rect.min.y, surface.rect.max.y) - surface.rect.min.y;
+    let clamped = Pos2::new(
+        pos.x.clamp(surface.rect.min.x, surface.rect.max.x),
+        pos.y.clamp(surface.rect.min.y, surface.rect.max.y),
+    );
+    let position = surface
+        .mouse_position(clamped)
+        .expect("clamped mouse position is inside the terminal surface");
     MouseInput {
         action,
         button,
         mods,
-        x,
-        y,
+        x: position.x,
+        y: position.y,
         size: surface.mouse_metrics().into(),
     }
+}
+
+pub fn mouse_input_from_surface_clamped_with_view(
+    pos: Pos2,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    mods: KeyMods,
+    surface: TerminalSurface,
+    view: ViewTransform,
+) -> MouseInput {
+    mouse_input_from_surface_clamped(view.inverse_point(pos), action, button, mods, surface)
 }
 
 pub fn is_control_key(key: TerminalKey) -> bool {

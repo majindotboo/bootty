@@ -338,8 +338,8 @@ fn bare_host_maps_mouse_input_without_egui() {
     assert_eq!(
         input.size,
         MouseEncoderSize {
-            screen_width: 240,
-            screen_height: 120,
+            screen_width: 238,
+            screen_height: 172,
             cell_width: 10,
             cell_height: 20,
             padding_top: 4,

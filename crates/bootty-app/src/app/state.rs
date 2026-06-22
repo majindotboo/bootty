@@ -22,7 +22,7 @@ use crate::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
     },
     direct_input::{DirectKeyInput, ModifierSideState},
-    geometry::{SurfacePoint, TerminalSurface},
+    geometry::{SurfacePoint, TerminalSurface, ViewTransform},
     input::{
         InputSnapshot, TerminalInputCommand, WheelScrollState, focus::InputFocus,
         router::route_events, terminal_input_commands_with_wheel_state,
@@ -83,6 +83,7 @@ pub struct FrameInputs {
     pub terminal_cell_width: f32,
     pub terminal_cell_height: f32,
     pub terminal_scale_factor: f32,
+    pub terminal_view_transform: ViewTransform,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -120,6 +121,7 @@ pub struct AppState {
     status_metrics: StatusMetrics,
     last_status_metrics_sample: Instant,
     terminal_surface: Option<TerminalSurface>,
+    terminal_view_transform: ViewTransform,
     config_state: ConfigState,
     input_focus: InputFocus,
     app_key_bindings: AppKeyBindings,
@@ -193,6 +195,7 @@ enum TerminalSelectionAction {
 fn route_terminal_selection_events(
     events: Vec<egui::Event>,
     surface: Option<TerminalSurface>,
+    view: ViewTransform,
     active: &mut bool,
     mouse_tracking: bool,
     frame_modifiers: egui::Modifiers,
@@ -215,7 +218,9 @@ fn route_terminal_selection_events(
                 && (modifiers.shift || frame_modifiers.shift || !mouse_tracking) =>
             {
                 let rectangle = modifiers.alt || frame_modifiers.alt;
-                if let Some(selection_event) = terminal_selection_event(surface, pos, rectangle) {
+                if let Some(selection_event) =
+                    terminal_selection_event(surface, view, pos, rectangle)
+                {
                     *active = true;
                     selection_actions.push(TerminalSelectionAction::Begin(selection_event));
                     continue;
@@ -229,7 +234,7 @@ fn route_terminal_selection_events(
             }
             egui::Event::PointerMoved(pos) if *active => {
                 if let Some(selection_event) =
-                    terminal_selection_event(surface, pos, frame_modifiers.alt)
+                    terminal_selection_event(surface, view, pos, frame_modifiers.alt)
                 {
                     selection_actions.push(TerminalSelectionAction::Update(selection_event));
                 }
@@ -240,8 +245,12 @@ fn route_terminal_selection_events(
                 pressed: false,
                 modifiers,
             } if *active => {
-                let selection_event =
-                    terminal_selection_event(surface, pos, modifiers.alt || frame_modifiers.alt);
+                let selection_event = terminal_selection_event(
+                    surface,
+                    view,
+                    pos,
+                    modifiers.alt || frame_modifiers.alt,
+                );
                 selection_actions.push(TerminalSelectionAction::End(selection_event));
                 *active = false;
             }
@@ -254,10 +263,11 @@ fn route_terminal_selection_events(
 
 fn terminal_selection_event(
     surface: TerminalSurface,
+    view: ViewTransform,
     pos: Pos2,
     rectangle: bool,
 ) -> Option<TerminalSelectionEvent> {
-    let position = surface.relative_position(pos)?;
+    let position = surface.relative_position(view.inverse_point(pos))?;
     Some(TerminalSelectionEvent {
         surface,
         position: SurfacePoint {
@@ -406,6 +416,7 @@ impl AppState {
             status_metrics: StatusMetrics::default(),
             last_status_metrics_sample: Instant::now() - STATUS_METRICS_SAMPLE_INTERVAL,
             terminal_surface: None,
+            terminal_view_transform: ViewTransform::IDENTITY,
             config_state: ConfigState::new(config),
             input_focus: InputFocus::Terminal,
             app_key_bindings,
@@ -765,6 +776,7 @@ impl AppState {
             terminal_cell_width,
             terminal_cell_height,
             terminal_scale_factor,
+            terminal_view_transform,
         } = inputs;
         let mut effects = Vec::new();
 
@@ -806,6 +818,7 @@ impl AppState {
             self.last_error = Some(error.to_string());
         }
         self.hot_reload_config_if_changed(&mut effects, now);
+        self.terminal_view_transform = terminal_view_transform;
         let input_commands = self.handle_direct_input(viewport, &mut effects)
             + self.handle_egui_input(
                 events,
@@ -1159,6 +1172,7 @@ impl AppState {
         let (mut events, selection_actions) = route_terminal_selection_events(
             events,
             selection_surface,
+            self.terminal_view_transform,
             &mut self.terminal_selection_drag_active,
             mouse_tracking,
             modifiers,
@@ -1183,6 +1197,7 @@ impl AppState {
             mouse_exclusion: self
                 .terminal_surface
                 .map(crate::renderer::scrollbar_hit_rect),
+            view: self.terminal_view_transform,
         };
         let commands = terminal_input_commands_with_wheel_state(
             snapshot,
@@ -1764,6 +1779,7 @@ mod tests {
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
             Some(surface),
+            ViewTransform::IDENTITY,
             &mut active,
             false,
             egui::Modifiers::default(),
@@ -1804,6 +1820,7 @@ mod tests {
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
             Some(surface),
+            ViewTransform::IDENTITY,
             &mut active,
             true,
             egui::Modifiers::default(),
@@ -1832,8 +1849,14 @@ mod tests {
             modifiers: shift,
         }];
 
-        let (terminal_events, selection_actions) =
-            route_terminal_selection_events(events, Some(surface), &mut active, true, shift);
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            Some(surface),
+            ViewTransform::IDENTITY,
+            &mut active,
+            true,
+            shift,
+        );
 
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
@@ -1862,8 +1885,14 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         }];
 
-        let (terminal_events, selection_actions) =
-            route_terminal_selection_events(events, Some(surface), &mut active, true, shift);
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            Some(surface),
+            ViewTransform::IDENTITY,
+            &mut active,
+            true,
+            shift,
+        );
 
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);

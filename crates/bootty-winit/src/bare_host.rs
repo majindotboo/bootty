@@ -927,8 +927,8 @@ mod tests {
                 x: 200.0,
                 y: 100.0,
                 size: MouseEncoderSize {
-                    screen_width: 200,
-                    screen_height: 100,
+                    screen_width: 198,
+                    screen_height: 176,
                     cell_width: 9,
                     cell_height: 22,
                     padding_left: 0,

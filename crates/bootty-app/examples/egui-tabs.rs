@@ -1,5 +1,5 @@
 use bootty_app::{
-    geometry::TerminalSurface,
+    geometry::{TerminalSurface, ViewTransform},
     input::{
         InputSnapshot, TerminalInputCommand, WheelScrollState, pressed_mouse_button_from_egui,
         terminal_input_commands_with_wheel_state,
@@ -113,6 +113,7 @@ impl TabsExample {
             pressed_mouse_button: pressed_mouse_button_from_egui(&input.pointer),
             surface: tab.surface,
             mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
         });
         let mut last_error = None;
         let commands = terminal_input_commands_with_wheel_state(
