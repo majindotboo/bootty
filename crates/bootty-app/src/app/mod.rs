@@ -232,6 +232,8 @@ impl BoottyApp {
                         join: item.join,
                         gap: item.gap,
                         action: item.action,
+                        reorder_anchor: item.reorder_anchor,
+                        module: segment.module.clone(),
                     })
                     .collect::<Vec<_>>();
                 (!items.is_empty()).then_some(chrome::ResolvedSegment {
@@ -424,6 +426,12 @@ impl BoottyApp {
         } else {
             0.0
         };
+        // Apply session-order changes the sidebar module requested via `bootty.reorder_session`
+        // before publishing the snapshot, so the reordered sessions render on the next tick.
+        for reorder in self.sidebar_extensions.take_session_reorders() {
+            self.state
+                .reorder_session_before(&reorder.source, reorder.before.as_deref());
+        }
         self.publish_extension_mux_view(sidebar, status_bar);
         let (sidebar_session_items, sidebar_footer_items) = if sidebar {
             (
@@ -584,8 +592,16 @@ impl BoottyApp {
                                 self.state.activate_session_from_ui(&session_id);
                             }
                             chrome::SidebarEvent::Reorder { source, before } => {
-                                self.state
-                                    .reorder_session_before(&source, before.as_deref());
+                                // Session order is bootty-owned: commit it natively. The republished
+                                // mux forces the worker to re-render the sidebar, and that render
+                                // reuses cached shell-out results (a reorder changes only order, not
+                                // a session's facts), so it lands instantly with correct grouping.
+                                if self
+                                    .state
+                                    .reorder_session_before(&source, before.as_deref())
+                                {
+                                    ui.ctx().request_repaint();
+                                }
                             }
                         }
                     }
@@ -653,13 +669,13 @@ impl BoottyApp {
                 palette.base
             };
             let segments = self.resolve_status_segments(sidebar);
-            let mut clicked_action = None;
+            let mut status_event = None;
             ui.scope_builder(
                 UiBuilder::new()
                     .max_rect(status_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
-                    clicked_action = chrome::show_status_bar(
+                    status_event = chrome::show_status_bar(
                         ui,
                         palette,
                         StatusBarModel {
@@ -670,15 +686,27 @@ impl BoottyApp {
                     );
                 },
             );
-            match clicked_action.as_deref() {
-                Some("toggle-caffeinate") => self.toggle_keep_awake(),
-                Some(action) => {
-                    if let Some(window_id) = action.strip_prefix("activate-window:")
-                        && let Some(session_id) =
-                            self.state.mux().selected_session().map(str::to_owned)
-                    {
-                        self.state.activate_window_from_ui(&session_id, window_id);
+            match status_event {
+                Some(chrome::StatusBarEvent::Action(action)) => match action.as_str() {
+                    "toggle-caffeinate" => self.toggle_keep_awake(),
+                    other => {
+                        if let Some(window_id) = other.strip_prefix("activate-window:")
+                            && let Some(session_id) =
+                                self.state.mux().selected_session().map(str::to_owned)
+                        {
+                            self.state.activate_window_from_ui(&session_id, window_id);
+                        }
                     }
+                },
+                Some(chrome::StatusBarEvent::Reorder {
+                    module,
+                    source,
+                    before,
+                }) => {
+                    // Hand window-tab reordering to the module's `on_reorder` (windows.luau runs
+                    // the tmux move-window). No native commit; the extension owns it.
+                    self.status_extensions
+                        .request_reorder(&module, source, before);
                 }
                 None => {}
             }

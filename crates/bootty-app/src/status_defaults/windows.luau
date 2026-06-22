@@ -48,6 +48,8 @@ return {
 
 		local function push(window, item)
 			item.action = "activate-window:" .. window.id
+			-- Both cells of a window share the window id, so they form one draggable tab.
+			item.reorder_anchor = window.id
 			items[#items + 1] = item
 		end
 
@@ -87,5 +89,27 @@ return {
 			})
 		end
 		return items
+	end,
+	-- Dragging a window tab reorders it via tmux. `source`/`before` are window ids; `before` nil
+	-- means drop at the end. tmux renumbers windows on insert.
+	on_reorder = function(source, before)
+		local quote = bootty.ui.shell_quote
+		local moved = false
+		if before and before ~= "" then
+			bootty.run("tmux move-window -b -s " .. quote(source) .. " -t " .. quote(before))
+			moved = true
+		else
+			local windows = bootty.windows()
+			local last = windows[#windows]
+			if last and last.id ~= source then
+				bootty.run("tmux move-window -a -s " .. quote(source) .. " -t " .. quote(last.id))
+				moved = true
+			end
+		end
+		-- Renumber so indices stay gapless; `-r` respects base-index (0 or 1). It must be a
+		-- separate command: `move-window -b -r` ignores the move and only renumbers.
+		if moved then
+			bootty.run("tmux move-window -r -t " .. quote(source))
+		end
 	end,
 }

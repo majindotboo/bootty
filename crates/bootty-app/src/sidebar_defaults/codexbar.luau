@@ -1,9 +1,16 @@
 --!strict
 -- Built-in sidebar `codexbar` module. Override with ~/.config/bootty/sidebar/codexbar.luau.
--- Usage collection belongs to this extension and depends on the installed CodexBar CLI.
+-- Backed by the CodexBar CLI, which is multi-provider, so this renders a 5h/7d usage meter
+-- per entry in PROVIDERS. Add a row to surface any other provider CodexBar can fetch.
 local ui = bootty.ui
 
-local CODEX_COLOR = "#74c7ec"
+-- base color is the healthy-meter color; the icon distinguishes the provider. Keep it clear of
+-- ORANGE_COLOR/RED_COLOR below so a full quota never reads as a warning.
+local PROVIDERS = {
+	{ id = "codex", label = "codex", icon = "openai", color = "#74c7ec" },
+	{ id = "claude", label = "claude", icon = "claude", color = "#d97757" },
+}
+
 local ORANGE_COLOR = "#fab387"
 local RED_COLOR = "#ef4444"
 local GREEN_COLOR = "#a6e3a1"
@@ -26,14 +33,14 @@ local function parse_window(data, key, fallback_window_secs)
 	}
 end
 
-local function quota_color(window)
+local function quota_color(window, base_color)
 	local remaining_pct = math.max(0, math.min(100, 100 - window.used_percent))
 	if remaining_pct <= 5 then
 		return RED_COLOR
 	elseif remaining_pct <= 15 then
 		return ORANGE_COLOR
 	end
-	return CODEX_COLOR
+	return base_color
 end
 
 local function marker_color(remaining_percent, expected_remaining_percent)
@@ -67,15 +74,15 @@ local function pace_label(window, remaining_pct, expected_remaining_pct)
 	return "", nil
 end
 
-local function usage_item(label, window)
+local function usage_item(provider, label, window)
 	local remaining_pct = math.max(0, math.min(100, 100 - window.used_percent))
 	local expected_remaining_pct = expected_remaining_percent(window)
-	local color = quota_color(window)
+	local color = quota_color(window, provider.color)
 	local pace, pace_color = pace_label(window, remaining_pct, expected_remaining_pct)
 	local reset = if window.reset_secs and window.reset_secs > 0 then ui.format_duration(window.reset_secs) else ""
 	return ui.footer_meter({
-		text = "codex " .. label,
-		icon = "openai",
+		text = provider.label .. " " .. label,
+		icon = provider.icon,
 		label = string.format("%s %d%% left", label, math.floor(remaining_pct + 0.5)),
 		text_color = TEXT_COLOR,
 		muted_color = MUTED_COLOR,
@@ -90,9 +97,11 @@ local function usage_item(label, window)
 	})
 end
 
-local function codexbar_usage_items()
+local function provider_items(provider)
 	local ok, data = pcall(function()
-		return bootty.json.decode(bootty.run("codexbar usage --provider codex --format json --json-only"))
+		return bootty.json.decode(
+			bootty.run("codexbar usage --provider " .. provider.id .. " --format json --json-only")
+		)
 	end)
 	if not ok or not data then
 		return {}
@@ -103,16 +112,27 @@ local function codexbar_usage_items()
 	local secondary = parse_window(data, "secondary", 7 * 24 * 3600)
 	local items = {}
 	if primary then
-		items[#items + 1] = usage_item("5h", primary)
+		items[#items + 1] = usage_item(provider, "5h", primary)
 	end
 	if secondary then
-		items[#items + 1] = usage_item("7d", secondary)
+		items[#items + 1] = usage_item(provider, "7d", secondary)
+	end
+	return items
+end
+
+local function usage_items()
+	local items = {}
+	for _, provider in ipairs(PROVIDERS) do
+		for _, item in ipairs(provider_items(provider)) do
+			items[#items + 1] = item
+		end
 	end
 	return items
 end
 
 return {
 	-- The extension host re-runs this module on this cadence; no Bootty usage cache exists.
+	-- Each provider is one CodexBar fetch, so keep PROVIDERS short to bound per-tick work.
 	interval = 60,
-	render = codexbar_usage_items,
+	render = usage_items,
 }

@@ -12,8 +12,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -179,6 +179,23 @@ pub struct Metrics {
     pub battery_time_to_full_secs: Option<f32>,
 }
 
+/// A reorder gesture from the sidebar UI, routed to the named module's `on_reorder` handler
+/// on the worker thread (where the Lua VM lives).
+#[derive(Clone, Debug, PartialEq)]
+struct ReorderRequest {
+    module: String,
+    source: String,
+    before: Option<String>,
+}
+
+/// A session-order change a module requested via `bootty.reorder_session(source, before)`.
+/// The app drains these each frame and applies them to the native session-order store.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionReorder {
+    pub source: String,
+    pub before: Option<String>,
+}
+
 /// How often native metrics are sampled (CPU needs a gap between samples).
 const METRICS_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -192,7 +209,90 @@ struct LoadedModule {
     name: String,
     interval: Duration,
     body: ModuleBody,
+    /// Optional `on_reorder(source, before)` handler invoked when the UI drags one of this
+    /// module's anchored rows. Lets a module own what reordering its items means.
+    on_reorder: Option<Function>,
     last_run: Option<Instant>,
+}
+
+/// How `bootty.run` treats the shared shell-out cache during the current phase.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    /// Outside a render (e.g. an `on_reorder` mutation): always shell out, never cache. Keeps
+    /// side-effecting commands like `tmux move-window` out of the cache and always executed.
+    Live = 0,
+    /// Interval render: shell out and store the result, refreshing the cache.
+    Refresh = 1,
+    /// Forced render (a reorder or structural mux change): serve the last render's cached output so
+    /// the render is instant. A reorder changes only order, so the cached query results still hold;
+    /// only commands missing from the cache actually run.
+    Cached = 2,
+}
+
+/// Caches `bootty.run` query output across renders so a forced re-render reuses the previous
+/// render's shell-outs instead of re-running every `git`/`tmux` query. Shared between the worker
+/// loop (which sets the mode each phase) and the `bootty.run` host function.
+#[derive(Default)]
+struct RunCache {
+    /// Query command -> trimmed stdout from the most recent interval render.
+    entries: Mutex<HashMap<String, String>>,
+    /// Current behavior, a `RunMode` discriminant; defaults to `Live`.
+    mode: AtomicU8,
+}
+
+impl RunCache {
+    fn set_mode(&self, mode: RunMode) {
+        self.mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    fn mode(&self) -> RunMode {
+        match self.mode.load(Ordering::Relaxed) {
+            x if x == RunMode::Cached as u8 => RunMode::Cached,
+            x if x == RunMode::Refresh as u8 => RunMode::Refresh,
+            _ => RunMode::Live,
+        }
+    }
+}
+
+/// Wakes the worker out of its tick wait so reorders and structural mux changes apply promptly
+/// instead of waiting out the poll interval. `force_render` makes the next tick re-render active
+/// modules regardless of their interval.
+#[derive(Default)]
+struct Waker {
+    force_render: AtomicBool,
+    woken: Mutex<bool>,
+    cond: Condvar,
+}
+
+impl Waker {
+    fn wake(&self) {
+        if let Ok(mut woken) = self.woken.lock() {
+            *woken = true;
+            self.cond.notify_one();
+        }
+    }
+
+    fn force(&self) {
+        self.force_render.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    fn take_force(&self) -> bool {
+        self.force_render.swap(false, Ordering::Relaxed)
+    }
+
+    fn wait(&self, timeout: Duration) {
+        if let Ok(mut woken) = self.woken.lock() {
+            if !*woken {
+                woken = self
+                    .cond
+                    .wait_timeout(woken, timeout)
+                    .map(|(guard, _)| guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().0);
+            }
+            *woken = false;
+        }
+    }
 }
 
 /// Owns the Luau worker thread, the shared item map the UI reads, and the mux snapshot the UI feeds.
@@ -201,6 +301,11 @@ pub struct ExtensionHost {
     mux: Arc<RwLock<MuxView>>,
     metrics: Arc<RwLock<Metrics>>,
     active: Arc<RwLock<BTreeSet<String>>>,
+    /// Reorder gestures from the UI, awaiting their module's `on_reorder` handler on the worker.
+    pending_reorders: Arc<RwLock<Vec<ReorderRequest>>>,
+    /// Session-order changes modules requested via `bootty.reorder_session`, drained by the app.
+    session_reorders: Arc<RwLock<Vec<SessionReorder>>>,
+    waker: Arc<Waker>,
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -233,6 +338,9 @@ impl ExtensionHost {
         let mux: Arc<RwLock<MuxView>> = Arc::default();
         let metrics: Arc<RwLock<Metrics>> = Arc::default();
         let active: Arc<RwLock<BTreeSet<String>>> = Arc::default();
+        let pending_reorders: Arc<RwLock<Vec<ReorderRequest>>> = Arc::default();
+        let session_reorders: Arc<RwLock<Vec<SessionReorder>>> = Arc::default();
+        let waker: Arc<Waker> = Arc::default();
         let shutdown = Arc::new(AtomicBool::new(false));
         let handle = std::thread::Builder::new()
             .name(thread_name.to_owned())
@@ -241,10 +349,24 @@ impl ExtensionHost {
                 let mux = Arc::clone(&mux);
                 let metrics = Arc::clone(&metrics);
                 let active = Arc::clone(&active);
+                let pending_reorders = Arc::clone(&pending_reorders);
+                let session_reorders = Arc::clone(&session_reorders);
+                let waker = Arc::clone(&waker);
                 let shutdown = Arc::clone(&shutdown);
                 move || {
                     run_loop(
-                        &dir, &ctx, &theme, builtins, &mux, &metrics, &active, &items, &shutdown,
+                        &dir,
+                        &ctx,
+                        &theme,
+                        builtins,
+                        &mux,
+                        &metrics,
+                        &active,
+                        &items,
+                        &pending_reorders,
+                        &session_reorders,
+                        &waker,
+                        &shutdown,
                     )
                 }
             })
@@ -254,6 +376,9 @@ impl ExtensionHost {
             mux,
             metrics,
             active,
+            pending_reorders,
+            session_reorders,
+            waker,
             shutdown,
             handle,
         }
@@ -288,18 +413,58 @@ impl ExtensionHost {
     }
 
     /// Publishes the latest mux snapshot for modules to render. Cheap; the UI calls it per frame.
+    /// A change to the session order/set or window order/set wakes the worker to re-render right
+    /// away; selection-only changes don't, since the UI reflects those natively.
     pub fn update_mux(&self, view: MuxView) {
         if let Ok(mut current) = self.mux.write()
             && *current != view
         {
+            let structural = current
+                .sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .ne(view.sessions.iter().map(|session| session.name.as_str()))
+                || current
+                    .windows
+                    .iter()
+                    .map(|window| window.id.as_str())
+                    .ne(view.windows.iter().map(|window| window.id.as_str()));
             *current = view;
+            drop(current);
+            if structural {
+                self.waker.force();
+            }
         }
+    }
+
+    /// Routes a sidebar reorder gesture to the named module's `on_reorder` handler. The handler
+    /// runs on the worker thread, where the Lua VM lives.
+    pub fn request_reorder(&self, module: &str, source: String, before: Option<String>) {
+        if let Ok(mut queue) = self.pending_reorders.write() {
+            queue.push(ReorderRequest {
+                module: module.to_owned(),
+                source,
+                before,
+            });
+        }
+        self.waker.wake();
+    }
+
+    /// Drains session-order changes modules asked for via `bootty.reorder_session`, for the app
+    /// to apply to its native session-order store.
+    #[must_use]
+    pub fn take_session_reorders(&self) -> Vec<SessionReorder> {
+        self.session_reorders
+            .write()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
     }
 }
 
 impl Drop for ExtensionHost {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.waker.wake();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -316,9 +481,19 @@ fn run_loop(
     metrics: &Arc<RwLock<Metrics>>,
     active: &RwLock<BTreeSet<String>>,
     items: &RwLock<HashMap<String, Vec<ModuleItem>>>,
+    pending_reorders: &RwLock<Vec<ReorderRequest>>,
+    session_reorders: &Arc<RwLock<Vec<SessionReorder>>>,
+    waker: &Waker,
     shutdown: &AtomicBool,
 ) {
-    let Ok(lua) = setup_lua(theme, Arc::clone(mux), Arc::clone(metrics)) else {
+    let run_cache = Arc::new(RunCache::default());
+    let Ok(lua) = setup_lua(
+        theme,
+        Arc::clone(mux),
+        Arc::clone(metrics),
+        Arc::clone(session_reorders),
+        Arc::clone(&run_cache),
+    ) else {
         return;
     };
     let mut modules = load_modules(&lua, dir, builtins);
@@ -329,6 +504,9 @@ fn run_loop(
     let mut last_metrics: Option<Instant> = None;
     while !shutdown.load(Ordering::Relaxed) {
         let now = Instant::now();
+        // A structural mux change (reorder, session/window added or removed) forces a re-render
+        // this tick, so the new layout shows immediately instead of after the poll interval.
+        let force = waker.take_force();
         // Hot reload: re-evaluate when extension files are added, edited, or removed.
         if now.duration_since(last_scan) >= RELOAD_SCAN_INTERVAL {
             last_scan = now;
@@ -353,6 +531,38 @@ fn run_loop(
             last_metrics = Some(now);
             refresh_metrics(&mut system, battery.as_ref(), metrics);
         }
+        // Apply reorder gestures from the UI by invoking the owning module's handler, so a module
+        // owns what reordering its rows means (persist order, remap, `bootty.reorder_session`, ...).
+        let requests = pending_reorders
+            .write()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        for request in requests {
+            let Some(module) = modules
+                .iter_mut()
+                .find(|module| module.name == request.module)
+            else {
+                continue;
+            };
+            let Some(handler) = module.on_reorder.clone() else {
+                continue;
+            };
+            if let Err(error) = handler.call::<()>((request.source, request.before))
+                && let Ok(mut map) = items.write()
+            {
+                map.insert(module.name.clone(), vec![error_item(&error.to_string())]);
+            }
+            // Nudge the UI to apply the resulting state change (e.g. the session-order commit),
+            // which republishes the mux and forces the re-render via `update_mux`.
+            ctx.request_repaint();
+        }
+        // A forced render reuses cached shell-out results (the reorder/structural change that
+        // forced it didn't alter any query's output); an interval render refreshes the cache.
+        run_cache.set_mode(if force {
+            RunMode::Cached
+        } else {
+            RunMode::Refresh
+        });
         let mut changed = false;
         for module in &mut modules {
             // Only run modules a segment references, so an unused module never
@@ -363,9 +573,10 @@ fn run_loop(
             {
                 continue;
             }
-            if module
-                .last_run
-                .is_none_or(|last| now.duration_since(last) >= module.interval)
+            if force
+                || module
+                    .last_run
+                    .is_none_or(|last| now.duration_since(last) >= module.interval)
             {
                 module.last_run = Some(now);
                 let produced = run_module(&module.body);
@@ -377,10 +588,12 @@ fn run_loop(
                 }
             }
         }
+        // Back to Live so the next iteration's `on_reorder` mutations always execute and never cache.
+        run_cache.set_mode(RunMode::Live);
         if changed {
             ctx.request_repaint();
         }
-        std::thread::sleep(TICK);
+        waker.wait(TICK);
     }
 }
 
@@ -573,15 +786,29 @@ fn setup_lua(
     theme: &[(String, String)],
     mux: Arc<RwLock<MuxView>>,
     metrics: Arc<RwLock<Metrics>>,
+    reorders: Arc<RwLock<Vec<SessionReorder>>>,
+    run_cache: Arc<RunCache>,
 ) -> mlua::Result<Lua> {
     let lua = Lua::new();
     let bootty = lua.create_table()?;
 
     // Shell out and return trimmed stdout, via the platform shell. Prefer
     // `bootty.metrics()` for system stats, which is native and cross-platform.
+    // A forced (reorder) re-render serves the previous render's output from `run_cache`,
+    // so reordering doesn't re-run every per-session `git`/`tmux` query.
     bootty.set(
         "run",
-        lua.create_function(|_, cmd: String| {
+        lua.create_function(move |_, cmd: String| {
+            let mode = run_cache.mode();
+            if mode == RunMode::Cached
+                && let Some(output) = run_cache
+                    .entries
+                    .lock()
+                    .ok()
+                    .and_then(|entries| entries.get(&cmd).cloned())
+            {
+                return Ok(output);
+            }
             let (program, flag) = if cfg!(windows) {
                 ("cmd", "/C")
             } else {
@@ -592,7 +819,13 @@ fn setup_lua(
                 .arg(&cmd)
                 .output()
                 .map_err(mlua::Error::external)?;
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if mode != RunMode::Live
+                && let Ok(mut entries) = run_cache.entries.lock()
+            {
+                entries.insert(cmd, trimmed.clone());
+            }
+            Ok(trimmed)
         })?,
     )?;
 
@@ -690,6 +923,19 @@ fn setup_lua(
                 .read()
                 .map(|view| view.keep_awake)
                 .unwrap_or(false))
+        })?,
+    )?;
+
+    // Ask Bootty to apply a session-order change to its native session-order store. Modules
+    // call this from `on_reorder` to reorder bootty-owned sessions; the app drains and applies
+    // it on the main thread. `before` nil means "move to the end".
+    bootty.set(
+        "reorder_session",
+        lua.create_function(move |_, (source, before): (String, Option<String>)| {
+            if let Ok(mut queue) = reorders.write() {
+                queue.push(SessionReorder { source, before });
+            }
+            Ok(())
         })?,
     )?;
 
@@ -802,6 +1048,7 @@ fn load_error(name: String, message: String) -> LoadedModule {
     LoadedModule {
         interval: DEFAULT_INTERVAL,
         body: ModuleBody::LoadError(format!("{name}: {message}")),
+        on_reorder: None,
         name,
         last_run: None,
     }
@@ -813,6 +1060,7 @@ fn loaded_module_from_value(name: String, value: Value) -> Option<LoadedModule> 
             name,
             interval: DEFAULT_INTERVAL,
             body: ModuleBody::Render(render),
+            on_reorder: None,
             last_run: None,
         }),
         Value::Table(table) => {
@@ -822,10 +1070,12 @@ fn loaded_module_from_value(name: String, value: Value) -> Option<LoadedModule> 
                 .ok()
                 .filter(|secs| *secs > 0.0)
                 .map_or(DEFAULT_INTERVAL, Duration::from_secs_f64);
+            let on_reorder = table.get::<Function>("on_reorder").ok();
             Some(LoadedModule {
                 name,
                 interval,
                 body: ModuleBody::Render(render),
+                on_reorder,
                 last_run: None,
             })
         }
@@ -1120,7 +1370,14 @@ mod tests {
 
     fn run_source(source: &str) -> Vec<ModuleItem> {
         let theme = [("accent".to_owned(), "#89b4fa".to_owned())];
-        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &theme,
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let value = lua.load(source).eval::<Value>().unwrap();
         let module = loaded_module_from_value("test".to_owned(), value).unwrap();
         run_module(&module.body)
@@ -1128,7 +1385,14 @@ mod tests {
 
     #[test]
     fn built_in_luau_modules_load_without_user_files() {
-        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
 
         assert_builtins_load(
@@ -1220,7 +1484,7 @@ mod tests {
             ],
             ..MuxView::default()
         }));
-        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
                 r#"return function()
@@ -1277,7 +1541,14 @@ mod tests {
 
     #[test]
     fn module_globals_do_not_leak_between_modules() {
-        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("aaa.luau"),
@@ -1303,7 +1574,14 @@ mod tests {
     #[test]
     fn module_load_cannot_mutate_shared_theme() {
         let theme = [("text".to_owned(), "#cdd6f4".to_owned())];
-        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &theme,
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("mutator.luau"),
@@ -1333,7 +1611,14 @@ mod tests {
     #[test]
     fn table_module_interval_is_read() {
         let theme: [(String, String); 0] = [];
-        let lua = setup_lua(&theme, Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &theme,
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let value = lua
             .load("return { interval = 5, render = function() return 'x' end }")
             .eval::<Value>()
@@ -1355,7 +1640,7 @@ mod tests {
             session_color: Some("#89b4fa".to_owned()),
             ..MuxView::default()
         }));
-        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
                 "return function() local w = bootty.windows()[1] \
@@ -1383,7 +1668,7 @@ mod tests {
             }],
             ..MuxView::default()
         }));
-        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
                 "return function() local s = bootty.sessions()[1] \
@@ -1399,6 +1684,159 @@ mod tests {
         assert_eq!(items[0].text, "work/api:/tmp/work/api:nil");
         assert_eq!(items[0].session_id.as_deref(), Some("$1"));
         assert_eq!(items[0].fg, Some(Color32::from_rgb(0x89, 0xb4, 0xfa)));
+    }
+
+    #[test]
+    fn on_reorder_routes_through_reorder_session_host_fn() {
+        let reorders: Arc<RwLock<Vec<SessionReorder>>> = Arc::default();
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::clone(&reorders),
+            Arc::default(),
+        )
+        .unwrap();
+        let value = lua
+            .load(
+                "return { render = function() return {} end, \
+                 on_reorder = function(source, before) bootty.reorder_session(source, before) end }",
+            )
+            .eval::<Value>()
+            .unwrap();
+        let module = loaded_module_from_value("sessions".to_owned(), value).unwrap();
+        let handler = module
+            .on_reorder
+            .expect("on_reorder parsed from module table");
+
+        handler
+            .call::<()>(("agents".to_owned(), Some("bootty".to_owned())))
+            .unwrap();
+        handler
+            .call::<()>(("solo".to_owned(), Option::<String>::None))
+            .unwrap();
+
+        assert_eq!(
+            *reorders.read().unwrap(),
+            vec![
+                SessionReorder {
+                    source: "agents".to_owned(),
+                    before: Some("bootty".to_owned()),
+                },
+                SessionReorder {
+                    source: "solo".to_owned(),
+                    before: None,
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_cache_serves_query_output_only_during_forced_render() {
+        // A reorder forces a re-render whose shell-outs return the same data as the last render,
+        // so `Cached` mode must serve the stored output instead of re-running every git/tmux query
+        // (the lag this fixes). `Refresh` must re-run to pick up real changes, and `Live` (an
+        // `on_reorder` mutation phase) must never serve a cached, side-effect-free result.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let counter = dir.path().join("n");
+        let cmd = format!(
+            "n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; printf %s $n",
+            counter.display()
+        );
+        let run_cache = Arc::new(RunCache::default());
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::clone(&run_cache),
+        )
+        .unwrap();
+        let run = move || {
+            lua.load(format!("return bootty.run({cmd:?})"))
+                .eval::<String>()
+                .unwrap()
+        };
+
+        run_cache.set_mode(RunMode::Refresh);
+        assert_eq!(run(), "1", "refresh executes and caches the output");
+        run_cache.set_mode(RunMode::Cached);
+        assert_eq!(
+            run(),
+            "1",
+            "cached serves the stored output without re-running"
+        );
+        assert_eq!(run(), "1", "cached keeps serving on repeat");
+        run_cache.set_mode(RunMode::Refresh);
+        assert_eq!(run(), "2", "refresh re-executes and updates the cache");
+        run_cache.set_mode(RunMode::Live);
+        assert_eq!(run(), "3", "live always executes, ignoring the cache");
+        assert_eq!(run(), "4", "live never serves a cached result");
+    }
+
+    #[test]
+    fn built_in_windows_module_defines_on_reorder() {
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
+        let windows = modules
+            .iter()
+            .find(|module| module.name == "windows")
+            .expect("built-in windows module loaded");
+        assert!(
+            windows.on_reorder.is_some(),
+            "windows.luau must define on_reorder so dragging a tab reorders it"
+        );
+    }
+
+    #[test]
+    fn windows_module_anchors_each_tab_to_its_window_id() {
+        let theme = [
+            ("primary".to_owned(), "#89b4fa".to_owned()),
+            ("surface".to_owned(), "#313244".to_owned()),
+            ("base".to_owned(), "#1e1e2e".to_owned()),
+            ("subtext".to_owned(), "#a6adc8".to_owned()),
+            ("text".to_owned(), "#cdd6f4".to_owned()),
+        ];
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            windows: vec![
+                WindowView {
+                    id: "@1".to_owned(),
+                    index: 1,
+                    name: "edit".to_owned(),
+                    active: true,
+                },
+                WindowView {
+                    id: "@2".to_owned(),
+                    index: 2,
+                    name: "logs".to_owned(),
+                    active: false,
+                },
+            ],
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&theme, mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
+        let windows = modules
+            .iter()
+            .find(|module| module.name == "windows")
+            .expect("built-in windows module loaded");
+        let items = run_module(&windows.body);
+        let anchors: Vec<_> = items
+            .iter()
+            .filter_map(|item| item.reorder_anchor.clone())
+            .collect();
+        // Each window contributes two cells (index + name) sharing the window id anchor.
+        assert_eq!(anchors, vec!["@1", "@1", "@2", "@2"]);
     }
 
     #[test]
@@ -1431,7 +1869,7 @@ mod tests {
             session_color: Some("#a6e3a1".to_owned()),
             ..MuxView::default()
         }));
-        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load("return function() return { text = 's', fg = bootty.session_color() } end")
             .eval::<Value>()
@@ -1447,7 +1885,7 @@ mod tests {
             keep_awake: true,
             ..MuxView::default()
         }));
-        let lua = setup_lua(&[], mux, Arc::default()).unwrap();
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load("return function() return { text = tostring(bootty.awake()) } end")
             .eval::<Value>()
@@ -1466,7 +1904,7 @@ mod tests {
             battery_time_to_full_secs: None,
             ..Metrics::default()
         }));
-        let lua = setup_lua(&[], Arc::default(), metrics).unwrap();
+        let lua = setup_lua(&[], Arc::default(), metrics, Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
                 "return function() local m = bootty.metrics() \
@@ -1516,7 +1954,14 @@ mod tests {
             }
         }
 
-        let lua = setup_lua(&[], Arc::default(), Arc::default()).unwrap();
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("unreadable.luau");
         std::fs::write(&path, "return function() return 'ok' end").expect("write module");
