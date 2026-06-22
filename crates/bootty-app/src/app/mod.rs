@@ -426,9 +426,14 @@ impl BoottyApp {
         } else {
             0.0
         };
-        // Apply session-order changes the sidebar module requested via `bootty.reorder_session`
+        // Apply session-order changes any extension module requested via `bootty.reorder_session`
         // before publishing the snapshot, so the reordered sessions render on the next tick.
-        for reorder in self.sidebar_extensions.take_session_reorders() {
+        for reorder in self
+            .sidebar_extensions
+            .take_session_reorders()
+            .into_iter()
+            .chain(self.status_extensions.take_session_reorders())
+        {
             self.state
                 .reorder_session_before(&reorder.source, reorder.before.as_deref());
         }
