@@ -560,7 +560,9 @@ impl AppState {
     }
 
     pub fn reorder_session_before(&mut self, source: &str, target: Option<&str>) -> bool {
-        if !self.session_order.move_block_before(
+        // Per-session anchors: a drag reorders within a group when source and target share one,
+        // and moves the whole group across groups.
+        if !self.session_order.move_session_before(
             source,
             target,
             self.mux

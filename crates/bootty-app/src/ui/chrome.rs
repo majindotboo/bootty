@@ -50,6 +50,10 @@ pub struct ResolvedItem {
     /// Whether to keep the normal inter-item gap before this item. Defaults to true.
     pub gap: Option<bool>,
     pub action: Option<String>,
+    /// Drag-to-reorder anchor; contiguous items sharing one anchor form a draggable block.
+    pub reorder_anchor: Option<String>,
+    /// The module that produced this item, so a reorder routes back to its `on_reorder`.
+    pub module: String,
 }
 
 #[derive(Clone)]
@@ -84,6 +88,18 @@ pub enum SidebarEvent {
     },
 }
 
+/// The outcome of a status-bar frame: an item was clicked, or a draggable item was reordered
+/// (routed to `module`'s `on_reorder`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatusBarEvent {
+    Action(String),
+    Reorder {
+        module: String,
+        source: String,
+        before: Option<String>,
+    },
+}
+
 pub const STATUS_EDGE_PAD: f32 = 12.0;
 const STATUS_ITEM_GAP: f32 = 4.0;
 const STATUS_ITEM_PAD: f32 = 8.0;
@@ -103,7 +119,7 @@ pub fn show_status_bar(
     ui: &mut egui::Ui,
     palette: ThemePalette,
     model: StatusBarModel<'_>,
-) -> Option<String> {
+) -> Option<StatusBarEvent> {
     let height = ui.available_height();
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height),
@@ -124,7 +140,10 @@ pub fn show_status_bar(
     let left = segments_for(SegmentAlign::Left);
 
     let right_start = rect.max.x - STATUS_EDGE_PAD - segments_width(ui, &right, &font);
-    let mut clicked = None;
+    let drag_id = egui::Id::new("status-bar-drag");
+    let mut dragging = ui
+        .ctx()
+        .data_mut(|data| data.get_persisted::<StatusDragState>(drag_id));
     let primary_press_pos = ui.input(|input| {
         input
             .pointer
@@ -132,31 +151,38 @@ pub fn show_status_bar(
             .then(|| input.pointer.interact_pos())
             .flatten()
     });
-    let mut drag_blocked = false;
+    let primary_down = ui.input(|input| input.pointer.primary_down());
+    let pointer_pos = ui.input(|input| {
+        input
+            .pointer
+            .latest_pos()
+            .or_else(|| input.pointer.hover_pos())
+    });
+    let mut input = StatusInput {
+        rect,
+        palette,
+        font: font.clone(),
+        clicked: None,
+        primary_press_pos,
+        drag_blocked: false,
+        suppress_click: dragging.is_some(),
+        started: None,
+        blocks: Vec::new(),
+    };
 
     draw_segments(
         ui,
-        rect,
         right_start,
         rect.max.x - STATUS_EDGE_PAD,
         &right,
-        palette,
-        &font,
-        &mut clicked,
-        primary_press_pos,
-        &mut drag_blocked,
+        &mut input,
     );
     let left_end = draw_segments(
         ui,
-        rect,
         rect.min.x + model.left_padding,
         right_start - STATUS_ITEM_GAP,
         &left,
-        palette,
-        &font,
-        &mut clicked,
-        primary_press_pos,
-        &mut drag_blocked,
+        &mut input,
     );
     if !center.is_empty() {
         let center_width = segments_width(ui, &center, &font);
@@ -164,24 +190,114 @@ pub fn show_status_bar(
         let center_bound = right_start - STATUS_ITEM_GAP;
         if center_start >= left_end + STATUS_ITEM_GAP && center_start + center_width <= center_bound
         {
-            draw_segments(
-                ui,
-                rect,
-                center_start,
-                center_bound,
-                &center,
-                palette,
-                &font,
-                &mut clicked,
-                primary_press_pos,
-                &mut drag_blocked,
-            );
+            draw_segments(ui, center_start, center_bound, &center, &mut input);
         }
     }
-    if !drag_blocked {
+    if !input.drag_blocked {
         start_window_drag_on_primary_press(&response);
     }
-    clicked
+
+    // A press that crosses the drag threshold begins a reorder; persist it so the gesture spans
+    // frames (egui per-widget drag tracking would lapse as the bar reflows).
+    if let Some(started) = input.started.take() {
+        ui.ctx()
+            .data_mut(|data| data.insert_persisted(drag_id, started.clone()));
+        dragging = Some(started);
+        ui.ctx().request_repaint();
+    }
+
+    let mut event = input.clicked.take().map(StatusBarEvent::Action);
+    if let Some(drag) = dragging.as_ref() {
+        let drop = pointer_pos
+            .and_then(|pos| status_drop_target(&input.blocks, &drag.module, &drag.anchor, pos.x));
+        if let Some((_, indicator_x)) = drop.as_ref() {
+            ui.painter_at(rect).line_segment(
+                [
+                    Pos2::new(*indicator_x, rect.min.y + 2.0),
+                    Pos2::new(*indicator_x, rect.max.y - 2.0),
+                ],
+                Stroke::new(2.0, palette.primary),
+            );
+        }
+        if primary_down {
+            ui.ctx().request_repaint();
+            event = None;
+        } else {
+            event = drop.map(|(before, _)| StatusBarEvent::Reorder {
+                module: drag.module.clone(),
+                source: drag.anchor.clone(),
+                before,
+            });
+            ui.ctx()
+                .data_mut(|data| data.remove::<StatusDragState>(drag_id));
+        }
+    }
+    event
+}
+
+/// Reorder gesture for the status bar, persisted across frames while the pointer is held.
+#[derive(Clone)]
+struct StatusDragState {
+    module: String,
+    anchor: String,
+}
+
+/// A contiguous run of items sharing a `reorder_anchor`, with its drawn horizontal extent.
+struct StatusBlock {
+    module: String,
+    anchor: String,
+    start_x: f32,
+    end_x: f32,
+}
+
+/// Layout context plus per-frame interaction accumulators, threaded through the status-bar draw
+/// pass. Carrying `rect`/`palette`/`font` here keeps the draw fns to a few arguments.
+struct StatusInput {
+    rect: Rect,
+    palette: ThemePalette,
+    font: egui::FontId,
+    clicked: Option<String>,
+    primary_press_pos: Option<Pos2>,
+    drag_blocked: bool,
+    suppress_click: bool,
+    started: Option<StatusDragState>,
+    blocks: Vec<StatusBlock>,
+}
+
+/// Picks the insertion slot for a horizontal drag: scans same-module blocks left to right and
+/// drops before the first whose midpoint is past the pointer (or at the end). Returns the anchor
+/// to insert before (`None` = end) and the indicator x, or `None` when the drop is a no-op.
+fn status_drop_target(
+    blocks: &[StatusBlock],
+    module: &str,
+    anchor: &str,
+    pointer_x: f32,
+) -> Option<(Option<String>, f32)> {
+    let module_blocks: Vec<&StatusBlock> = blocks
+        .iter()
+        .filter(|block| block.module == module)
+        .collect();
+    let source_index = module_blocks
+        .iter()
+        .position(|block| block.anchor == anchor)?;
+    let mut target_index = module_blocks.len();
+    for (index, block) in module_blocks.iter().enumerate() {
+        if pointer_x < (block.start_x + block.end_x) * 0.5 {
+            target_index = index;
+            break;
+        }
+    }
+    if target_index == source_index || target_index == source_index + 1 {
+        return None;
+    }
+    let before = module_blocks
+        .get(target_index)
+        .map(|block| block.anchor.clone());
+    let indicator_x = match module_blocks.get(target_index) {
+        Some(block) => block.start_x,
+        None => module_blocks.last().map_or(pointer_x, |block| block.end_x),
+    };
+    Some((before, indicator_x))
 }
 
 fn segment_width(ui: &egui::Ui, segment: &ResolvedSegment, font: &egui::FontId) -> f32 {
@@ -200,23 +316,18 @@ fn segments_width(ui: &egui::Ui, segments: &[&ResolvedSegment], font: &egui::Fon
     total
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_segments(
     ui: &mut egui::Ui,
-    rect: Rect,
     start_x: f32,
     bound: f32,
     segments: &[&ResolvedSegment],
-    palette: ThemePalette,
-    font: &egui::FontId,
-    clicked: &mut Option<String>,
-    primary_press_pos: Option<Pos2>,
-    drag_blocked: &mut bool,
+    input: &mut StatusInput,
 ) -> f32 {
+    let font = input.font.clone();
     let mut x = start_x;
     let mut drawn = 0;
     for segment in segments {
-        let width = segment_width(ui, segment, font);
+        let width = segment_width(ui, segment, &font);
         if width <= 0.0 {
             continue;
         }
@@ -227,18 +338,7 @@ fn draw_segments(
             break;
         }
         let items = segment.items.iter().collect::<Vec<_>>();
-        draw_items(
-            ui,
-            rect,
-            x,
-            x + width,
-            &items,
-            palette,
-            font,
-            clicked,
-            primary_press_pos,
-            drag_blocked,
-        );
+        draw_items(ui, x, x + width, &items, input);
         drawn += 1;
         x += width;
     }
@@ -484,19 +584,16 @@ fn paint_status_item_background(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_items(
     ui: &mut egui::Ui,
-    rect: Rect,
     start_x: f32,
     bound: f32,
     items: &[&ResolvedItem],
-    palette: ThemePalette,
-    font: &egui::FontId,
-    clicked: &mut Option<String>,
-    primary_press_pos: Option<Pos2>,
-    drag_blocked: &mut bool,
+    input: &mut StatusInput,
 ) {
+    let rect = input.rect;
+    let palette = input.palette;
+    let font = input.font.clone();
     let mut x = start_x;
     for index in 0..items.len() {
         let item = items[index];
@@ -505,7 +602,7 @@ fn draw_items(
         if prev.is_some() && item_gap_before(item) && !connected(prev, item) {
             x += STATUS_ITEM_GAP;
         }
-        let width = item_width(ui, item, font);
+        let width = item_width(ui, item, &font);
         if x + width > bound {
             break;
         }
@@ -514,14 +611,47 @@ fn draw_items(
             egui::vec2(width, rect.height() - 6.0),
         );
 
-        let response = item.action.as_ref().map(|action| {
-            let id = ui.make_persistent_id(("status-item", action.as_str(), x as i32));
-            (ui.interact(item_rect, id, egui::Sense::click()), action)
+        // An anchored item drags; otherwise an action item just clicks. Key the id on the
+        // anchor/action (not position) so the press is recognized as the same widget.
+        let interactive = item.reorder_anchor.as_deref().or(item.action.as_deref());
+        let response = interactive.map(|key| {
+            let id = ui.make_persistent_id(("status-item", key, x as i32));
+            let sense = if item.reorder_anchor.is_some() {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::click()
+            };
+            ui.interact(item_rect, id, sense)
         });
-        if item.action.is_some() && primary_press_pos.is_some_and(|pos| item_rect.contains(pos)) {
-            *drag_blocked = true;
+        if interactive.is_some()
+            && input
+                .primary_press_pos
+                .is_some_and(|pos| item_rect.contains(pos))
+        {
+            input.drag_blocked = true;
         }
-        let hovered = response.as_ref().is_some_and(|(resp, _)| resp.hovered());
+        if let Some(anchor) = item.reorder_anchor.as_deref() {
+            match input.blocks.last_mut() {
+                Some(block) if block.module == item.module && block.anchor == anchor => {
+                    block.end_x = x + width;
+                }
+                _ => input.blocks.push(StatusBlock {
+                    module: item.module.clone(),
+                    anchor: anchor.to_owned(),
+                    start_x: x,
+                    end_x: x + width,
+                }),
+            }
+        }
+        if let Some(anchor) = item.reorder_anchor.as_deref()
+            && response.as_ref().is_some_and(egui::Response::drag_started)
+        {
+            input.started = Some(StatusDragState {
+                module: item.module.clone(),
+                anchor: anchor.to_owned(),
+            });
+        }
+        let hovered = response.as_ref().is_some_and(egui::Response::hovered);
 
         let painter = ui.painter_at(rect);
         if item.bg.is_some() || item.stroke.is_some() {
@@ -565,10 +695,11 @@ fn draw_items(
             );
         }
 
-        if let Some((resp, action)) = response
+        if let (Some(resp), Some(action)) = (response.as_ref(), item.action.as_deref())
             && resp.clicked()
+            && !input.suppress_click
         {
-            *clicked = Some(action.clone());
+            input.clicked = Some(action.to_owned());
         }
         x += width;
     }
@@ -1149,11 +1280,9 @@ fn sidebar_item_row(
     hover_color: egui::Color32,
     current_color: egui::Color32,
 ) -> egui::Response {
-    let draggable = item.reorder_anchor.is_some()
-        && matches!(
-            item.kind,
-            SidebarItemKind::Group | SidebarItemKind::Session { .. }
-        );
+    // Any row carrying an anchor drags its whole block, so grabbing a detail row
+    // (process/branch/status/progress) reorders just like grabbing the title row.
+    let draggable = item.reorder_anchor.is_some();
     let clickable = item.selectable && item.session_id.is_some();
     let response = ui.interact(
         rect,
@@ -1633,6 +1762,132 @@ mod tests {
         );
     }
 
+    fn window_tab(anchor: &str, index: &str, name: &str) -> Vec<ResolvedItem> {
+        let cell = |text: &str| ResolvedItem {
+            text: text.to_owned(),
+            action: Some(format!("activate-window:{anchor}")),
+            reorder_anchor: Some(anchor.to_owned()),
+            module: "windows".to_owned(),
+            ..ResolvedItem::default()
+        };
+        vec![cell(index), cell(name)]
+    }
+
+    #[test]
+    fn status_bar_drag_gesture_emits_window_reorder() {
+        let context = egui::Context::default();
+        crate::ui::icons::install_icon_fonts(&context);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 30.0));
+        let mut items = Vec::new();
+        items.extend(window_tab("@1", "1", "alpha"));
+        items.extend(window_tab("@2", "2", "beta"));
+        items.extend(window_tab("@3", "3", "gamma"));
+        let segments = [ResolvedSegment {
+            align: SegmentAlign::Left,
+            items,
+        }];
+
+        let frame = |events: Vec<egui::Event>, captured: &mut Option<StatusBarEvent>| {
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let event = show_status_bar(
+                            ui,
+                            ThemePalette::default(),
+                            StatusBarModel {
+                                segments: &segments,
+                                background: ThemePalette::default().base,
+                                left_padding: STATUS_EDGE_PAD,
+                            },
+                        );
+                        if event.is_some() {
+                            *captured = event;
+                        }
+                    });
+                },
+            );
+        };
+
+        // Press the first tab and drag it past the right edge: it drops at the end.
+        let press = Pos2::new(28.0, 15.0);
+        let far_right = Pos2::new(560.0, 15.0);
+        let mut captured = None;
+        frame(vec![egui::Event::PointerMoved(press)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: press,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerMoved(Pos2::new(120.0, 15.0))],
+            &mut captured,
+        );
+        frame(vec![egui::Event::PointerMoved(far_right)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: far_right,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+
+        assert_eq!(
+            captured,
+            Some(StatusBarEvent::Reorder {
+                module: "windows".to_owned(),
+                source: "@1".to_owned(),
+                before: None,
+            })
+        );
+    }
+
+    #[test]
+    fn status_drop_target_skips_noop_and_targets_next_block() {
+        let blocks = vec![
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@1".to_owned(),
+                start_x: 0.0,
+                end_x: 40.0,
+            },
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@2".to_owned(),
+                start_x: 40.0,
+                end_x: 80.0,
+            },
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@3".to_owned(),
+                start_x: 80.0,
+                end_x: 120.0,
+            },
+        ];
+        // Dragging @1 over the right half of @2 inserts before @3.
+        assert_eq!(
+            status_drop_target(&blocks, "windows", "@1", 70.0),
+            Some((Some("@3".to_owned()), 80.0))
+        );
+        // Dropping @1 onto its own slot (left of @2's midpoint) is a no-op.
+        assert_eq!(status_drop_target(&blocks, "windows", "@1", 50.0), None);
+        // Past the last block drops at the end.
+        assert_eq!(
+            status_drop_target(&blocks, "windows", "@1", 200.0),
+            Some((None, 120.0))
+        );
+    }
+
     fn test_session(id: &str, name: &str, active: bool) -> MuxSession {
         MuxSession {
             id: id.to_owned(),
@@ -1829,6 +2084,75 @@ mod tests {
         );
 
         assert_eq!(event, None);
+    }
+
+    #[test]
+    fn sidebar_drag_gesture_emits_reorder_event() {
+        let context = egui::Context::default();
+        crate::ui::icons::install_icon_fonts(&context);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
+        let sessions = vec![
+            test_session("s1", "alpha", true),
+            test_session("s2", "beta", false),
+        ];
+
+        let frame = |events: Vec<egui::Event>, captured: &mut Option<SidebarEvent>| {
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                        let event = show_test_sidebar(ui, &sessions);
+                        if event.is_some() {
+                            *captured = event;
+                        }
+                    });
+                },
+            );
+        };
+
+        let row0 = Pos2::new(20.0, SIDEBAR_ROW_HEIGHT * 0.5);
+        let row1_low = Pos2::new(20.0, SIDEBAR_ROW_HEIGHT * 1.9);
+        let mut captured = None;
+
+        frame(vec![egui::Event::PointerMoved(row0)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: row0,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerMoved(Pos2::new(
+                20.0,
+                SIDEBAR_ROW_HEIGHT * 1.0,
+            ))],
+            &mut captured,
+        );
+        frame(vec![egui::Event::PointerMoved(row1_low)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: row1_low,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+
+        assert_eq!(
+            captured,
+            Some(SidebarEvent::Reorder {
+                source: String::from("alpha"),
+                before: None,
+            })
+        );
     }
 
     #[test]

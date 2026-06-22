@@ -236,6 +236,44 @@ impl SessionStore {
         self.entries != previous
     }
 
+    /// Moves `source` to sit before `before` (or to the end when `None`). Within one group this
+    /// reorders the siblings; across groups a session can't leave its group, so the whole source
+    /// group moves before the target's group instead.
+    fn move_session_before(&mut self, source: &str, before: Option<&str>) -> bool {
+        let Some((src_group, src_idx)) = self.find_session(source) else {
+            return false;
+        };
+        match before {
+            Some(before) => {
+                let Some((tgt_group, tgt_idx)) = self.find_session(before) else {
+                    return false;
+                };
+                if tgt_group == src_group {
+                    let insert_idx = if tgt_idx > src_idx {
+                        tgt_idx - 1
+                    } else {
+                        tgt_idx
+                    };
+                    if insert_idx == src_idx {
+                        return false;
+                    }
+                    let sessions = &mut self.entries[src_group].sessions;
+                    let moved = sessions.remove(src_idx);
+                    sessions.insert(insert_idx, moved);
+                    true
+                } else {
+                    let src_leader = self.entries[src_group].sessions[0].clone();
+                    let tgt_leader = self.entries[tgt_group].sessions[0].clone();
+                    self.move_block_before(&src_leader, Some(&tgt_leader))
+                }
+            }
+            None => {
+                let src_leader = self.entries[src_group].sessions[0].clone();
+                self.move_block_before(&src_leader, None)
+            }
+        }
+    }
+
     fn find_session(&self, name: &str) -> Option<(usize, usize)> {
         self.entries
             .iter()
@@ -389,6 +427,20 @@ impl SessionOrderStore {
         moved
     }
 
+    pub fn move_session_before<'a>(
+        &mut self,
+        source: &str,
+        before: Option<&str>,
+        sessions: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        self.sync_sessions(sessions);
+        let moved = self.store.move_session_before(source, before);
+        if moved {
+            self.save();
+        }
+        moved
+    }
+
     fn save(&self) {
         if let Some(parent) = self.path.parent()
             && fs::create_dir_all(parent).is_err()
@@ -491,6 +543,33 @@ mod tests {
             store.sync_sessions(["agents", "arc/migrations", "arc/readiness", "bootty"]),
             vec!["arc/migrations", "arc/readiness", "agents", "bootty"]
         );
+    }
+
+    #[test]
+    fn move_session_before_reorders_siblings_within_a_group() {
+        let path = temp_config_path("within");
+        let mut store = SessionOrderStore::for_config_path(&path);
+        let alive = ["a/1", "a/2", "a/3", "b"];
+        store.sync_sessions(alive);
+
+        assert!(store.move_session_before("a/3", Some("a/1"), alive));
+        assert_eq!(
+            store.sync_sessions(alive),
+            vec!["a/3", "a/1", "a/2", "b"],
+            "a/3 should slot in front of its siblings without disturbing other groups"
+        );
+    }
+
+    #[test]
+    fn move_session_before_across_groups_moves_the_whole_block() {
+        let path = temp_config_path("across");
+        let mut store = SessionOrderStore::for_config_path(&path);
+        let alive = ["a/1", "a/2", "b"];
+        store.sync_sessions(alive);
+
+        // Dragging the standalone `b` ahead of an `a` session moves it past the entire group.
+        assert!(store.move_session_before("b", Some("a/1"), alive));
+        assert_eq!(store.sync_sessions(alive), vec!["b", "a/1", "a/2"]);
     }
 
     #[test]

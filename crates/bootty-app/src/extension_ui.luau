@@ -308,7 +308,9 @@ local function session_context(session, groups, last_group, options)
 		summary = summary,
 		emit_group = grouped and group ~= last_group,
 		label = label,
-		anchor = if grouped then summary.first else session.name,
+		-- Per-session anchor so a drag reorders within the group; the group header shares the
+		-- first session's anchor, so dragging it past another group still moves the whole block.
+		anchor = session.name,
 		indent = if grouped then 2 else 0,
 		tree = if not grouped then "none" elseif last_in_group then "last" else "middle",
 		detail_tree = if not grouped then "none" elseif last_in_group then "blank" else "pipe",
