@@ -156,6 +156,7 @@ impl PublishedFrame {
 }
 
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
+type MouseTrackingResponse = std::result::Result<bool, String>;
 
 enum TerminalCommand {
     Cursor(TerminalCursorConfig),
@@ -177,11 +178,11 @@ enum TerminalCommand {
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
     SelectionEnd(Option<TerminalSelectionEvent>),
-    SelectionClear,
     FormatSelection {
         format: TerminalSelectionFormat,
         done: SyncSender<SelectionFormatResponse>,
     },
+    IsMouseTracking(SyncSender<MouseTrackingResponse>),
     DiscardPendingOutput(SyncSender<()>),
 }
 impl TerminalSession {
@@ -341,10 +342,6 @@ impl TerminalSession {
         self.send_command(TerminalCommand::SelectionEnd(event))
     }
 
-    pub fn clear_selection(&mut self) -> Result<()> {
-        self.send_command(TerminalCommand::SelectionClear)
-    }
-
     pub fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         let (done_tx, done_rx) = mpsc::sync_channel(0);
         self.send_command(TerminalCommand::FormatSelection {
@@ -354,6 +351,17 @@ impl TerminalSession {
         done_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("terminal worker stopped before formatting selection"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn is_mouse_tracking(&mut self) -> Result<bool> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::IsMouseTracking(done_tx))?;
+        done_rx
+            .recv()
+            .map_err(|_| {
+                anyhow::anyhow!("terminal worker stopped before reporting mouse tracking")
+            })?
             .map_err(anyhow::Error::msg)
     }
 
@@ -690,16 +698,17 @@ impl TerminalWorker {
                         stats.terminal_changed = true;
                     }
                 }
-                TerminalCommand::SelectionClear => {
-                    self.mark_input_fast_path();
-                    if self.engine.clear_selection().is_ok() {
-                        stats.terminal_changed = true;
-                    }
-                }
                 TerminalCommand::FormatSelection { format, done } => {
                     let response = self
                         .engine
                         .format_selection(format)
+                        .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                TerminalCommand::IsMouseTracking(done) => {
+                    let response = self
+                        .engine
+                        .is_mouse_tracking()
                         .map_err(|error| error.to_string());
                     let _ = done.send(response);
                 }
@@ -1957,6 +1966,80 @@ mod tests {
                 prop_assert!(should_publish);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_session_selection_commands_publish_frame_selections() {
+        let geometry = TerminalGeometry {
+            cols: 8,
+            rows: 2,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let mut session = TerminalSession::new_with_config(
+            geometry,
+            TerminalSessionConfig {
+                launch: SessionLaunchConfig {
+                    shell: Some("/bin/sh".to_owned()),
+                    args: vec!["-c".to_owned(), "printf abcdefgh; sleep 2".to_owned()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Arc::new(|| {}),
+        )
+        .expect("spawn terminal session");
+        let surface = bootty_surface::geometry::TerminalSurface::for_logical_size(
+            80.0,
+            40.0,
+            bootty_surface::geometry::CellMetrics::new(10.0, 20.0),
+            bootty_surface::geometry::TerminalPadding::default(),
+        );
+        let event = |x, y| TerminalSelectionEvent {
+            surface,
+            position: bootty_surface::geometry::SurfacePoint { x, y },
+            rectangle: false,
+        };
+
+        for _ in 0..100 {
+            session.drain_pty();
+            let frame = session.extract_frame().expect("extract frame");
+            if frame.text.iter().collect::<String>().contains("abcdefgh") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        session
+            .begin_selection(event(15.0, 10.0))
+            .expect("begin selection");
+        session
+            .update_selection(event(45.0, 10.0))
+            .expect("update selection");
+        session
+            .end_selection(Some(event(45.0, 10.0)))
+            .expect("end selection");
+
+        let mut selected = None;
+        for _ in 0..100 {
+            session.drain_pty();
+            let frame = session.extract_frame().expect("extract frame");
+            if !frame.selections.is_empty() {
+                selected = Some(frame.selections.clone());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            selected.expect("selection frame rows"),
+            vec![bootty_terminal::terminal_frame::FrameSelection {
+                row: 0,
+                start_col: 1,
+                end_col: 3,
+            }]
+        );
     }
 
     // A shell on a fresh PTY blocks waiting for input, so it stays alive until the

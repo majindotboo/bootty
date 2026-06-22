@@ -22,7 +22,7 @@ use crate::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
     },
     direct_input::{DirectKeyInput, ModifierSideState},
-    geometry::TerminalSurface,
+    geometry::{SurfacePoint, TerminalSurface},
     input::{
         InputSnapshot, TerminalInputCommand, WheelScrollState, focus::InputFocus,
         router::route_events, terminal_input_commands_with_wheel_state,
@@ -44,10 +44,10 @@ use crate::{
         read_clipboard_text, restore_macos_presentation, show_desktop_notification,
         spawn_new_window, write_clipboard_text,
     },
-    renderer::{RendererMetrics, TerminalWidget},
+    renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
     session_order::SessionOrderStore,
-    terminal::{DrainStats, MouseButton, TerminalSessionConfig},
+    terminal::{DrainStats, KeyInput, MouseButton, TerminalKey, TerminalSessionConfig},
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
@@ -57,8 +57,8 @@ use crate::{
     },
 };
 use bootty_terminal::terminal_engine::{
-    TerminalSelectionFormat, TerminalSideEffect, encode_iterm2_report_cell_size,
-    encode_iterm2_report_variable, encode_osc52_response,
+    TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+    encode_iterm2_report_cell_size, encode_iterm2_report_variable, encode_osc52_response,
 };
 
 const SIDEBAR_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -134,6 +134,7 @@ pub struct AppState {
     modifier_sides: ModifierSideState,
     pending_direct_input: Vec<DirectKeyInput>,
     suppress_next_egui_paste: bool,
+    terminal_selection_drag_active: bool,
     wheel_scroll_state: WheelScrollState,
     modifier_remaps: ModifierRemapSet,
     terminal_cursor_icon: egui::CursorIcon,
@@ -180,6 +181,112 @@ fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
     } else {
         false
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TerminalSelectionAction {
+    Begin(TerminalSelectionEvent),
+    Update(TerminalSelectionEvent),
+    End(Option<TerminalSelectionEvent>),
+}
+
+fn route_terminal_selection_events(
+    events: Vec<egui::Event>,
+    surface: Option<TerminalSurface>,
+    active: &mut bool,
+    mouse_tracking: bool,
+    frame_modifiers: egui::Modifiers,
+) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
+    let Some(surface) = surface else {
+        *active = false;
+        return (events, Vec::new());
+    };
+
+    let mut terminal_events = Vec::with_capacity(events.len());
+    let mut selection_actions = Vec::new();
+    for event in events {
+        match event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers,
+            } if surface.rect.contains(pos)
+                && (modifiers.shift || frame_modifiers.shift || !mouse_tracking) =>
+            {
+                let rectangle = modifiers.alt || frame_modifiers.alt;
+                if let Some(selection_event) = terminal_selection_event(surface, pos, rectangle) {
+                    *active = true;
+                    selection_actions.push(TerminalSelectionAction::Begin(selection_event));
+                    continue;
+                }
+                terminal_events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                });
+            }
+            egui::Event::PointerMoved(pos) if *active => {
+                if let Some(selection_event) =
+                    terminal_selection_event(surface, pos, frame_modifiers.alt)
+                {
+                    selection_actions.push(TerminalSelectionAction::Update(selection_event));
+                }
+            }
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            } if *active => {
+                let selection_event =
+                    terminal_selection_event(surface, pos, modifiers.alt || frame_modifiers.alt);
+                selection_actions.push(TerminalSelectionAction::End(selection_event));
+                *active = false;
+            }
+            event => terminal_events.push(event),
+        }
+    }
+
+    (terminal_events, selection_actions)
+}
+
+fn terminal_selection_event(
+    surface: TerminalSurface,
+    pos: Pos2,
+    rectangle: bool,
+) -> Option<TerminalSelectionEvent> {
+    let position = surface.relative_position(pos)?;
+    Some(TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint {
+            x: position.x,
+            y: position.y,
+        },
+        rectangle,
+    })
+}
+
+fn copy_shortcut_pressed(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key {
+            key: egui::Key::C,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if modifiers.command && !modifiers.ctrl && !modifiers.alt
+    )
+}
+
+fn direct_copy_shortcut_pressed(input: KeyInput) -> bool {
+    input.key == TerminalKey::C
+        && input.mods.command
+        && !input.mods.ctrl
+        && !input.mods.alt
+        && !input.repeat
 }
 
 fn terminal_cursor_icon_for_mouse_shape(shape: &str) -> Option<egui::CursorIcon> {
@@ -313,6 +420,7 @@ impl AppState {
             modifier_sides: ModifierSideState::default(),
             pending_direct_input: Vec::new(),
             suppress_next_egui_paste: false,
+            terminal_selection_drag_active: false,
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
@@ -973,6 +1081,61 @@ impl AppState {
         split_app_actions_for_bindings(&mut self.app_key_bindings, events)
     }
 
+    fn terminal_mouse_tracking_for_selection(
+        &mut self,
+        events: &[egui::Event],
+        terminal_input_enabled: bool,
+    ) -> bool {
+        if !terminal_input_enabled
+            || !events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::PointerButton {
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        {
+            return false;
+        }
+
+        match TerminalRenderSource::is_mouse_tracking(&mut self.terminal) {
+            Ok(mouse_tracking) => mouse_tracking,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn apply_terminal_selection_actions(
+        &mut self,
+        actions: Vec<TerminalSelectionAction>,
+        effects: &mut Vec<AppEffect>,
+    ) -> usize {
+        let count = actions.len();
+        for action in actions {
+            let result = match action {
+                TerminalSelectionAction::Begin(event) => {
+                    TerminalRenderSource::begin_selection(&mut self.terminal, event)
+                }
+                TerminalSelectionAction::Update(event) => {
+                    TerminalRenderSource::update_selection(&mut self.terminal, event)
+                }
+                TerminalSelectionAction::End(event) => {
+                    TerminalRenderSource::end_selection(&mut self.terminal, event)
+                }
+            };
+            match result {
+                Ok(()) => effects.push(AppEffect::RequestRepaint),
+                Err(error) => self.last_error = Some(error.to_string()),
+            }
+        }
+        count
+    }
+
     fn handle_egui_input(
         &mut self,
         events: Vec<egui::Event>,
@@ -987,10 +1150,25 @@ impl AppState {
         if suppress_next_egui_paste {
             remove_first_paste_event(&mut events);
         }
+        let terminal_input_enabled = self.direct_terminal_input_enabled();
+        let selection_surface = terminal_input_enabled
+            .then_some(self.terminal_surface)
+            .flatten();
+        let mouse_tracking =
+            self.terminal_mouse_tracking_for_selection(&events, terminal_input_enabled);
+        let (mut events, selection_actions) = route_terminal_selection_events(
+            events,
+            selection_surface,
+            &mut self.terminal_selection_drag_active,
+            mouse_tracking,
+            modifiers,
+        );
+        let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
+        let copy_selection_count = self.consume_copy_shortcut_for_terminal_selection(&mut events);
         let (events, actions) = self.split_app_actions(events);
         let routed = route_events(self.input_focus, events);
         let sidebar_count = self.handle_sidebar_input(routed.ui_events);
-        let events = if self.direct_terminal_input_enabled() {
+        let events = if terminal_input_enabled {
             routed.terminal_events
         } else {
             Vec::new()
@@ -1012,7 +1190,8 @@ impl AppState {
             self.macos_option_as_alt,
             &mut self.wheel_scroll_state,
         );
-        let count = commands.len() + actions.len() + sidebar_count;
+        let count =
+            commands.len() + actions.len() + sidebar_count + selection_count + copy_selection_count;
 
         for action in actions {
             self.apply_keybind_action(action, viewport, effects);
@@ -1054,6 +1233,9 @@ impl AppState {
         for input in inputs {
             let mut input = input.input();
             input.mods = self.modifier_remaps.apply(input.mods);
+            if direct_copy_shortcut_pressed(input) && self.copy_terminal_selection_if_any() {
+                continue;
+            }
             if let Some(action) = self.app_key_bindings.action_for_input(input) {
                 if matches!(action, KeybindAction::PasteFromClipboard) {
                     self.suppress_next_egui_paste = true;
@@ -1222,7 +1404,21 @@ impl AppState {
         }
     }
 
-    fn copy_terminal_selection_or_request_copy(&mut self, effects: &mut Vec<AppEffect>) {
+    fn consume_copy_shortcut_for_terminal_selection(
+        &mut self,
+        events: &mut Vec<egui::Event>,
+    ) -> usize {
+        let Some(index) = events.iter().position(copy_shortcut_pressed) else {
+            return 0;
+        };
+        if !self.copy_terminal_selection_if_any() {
+            return 0;
+        }
+        events.remove(index);
+        1
+    }
+
+    fn copy_terminal_selection_if_any(&mut self) -> bool {
         match self
             .terminal
             .format_selection(TerminalSelectionFormat::PlainText)
@@ -1232,9 +1428,19 @@ impl AppState {
                 if let Err(error) = write_clipboard_text(&text) {
                     self.last_error = Some(error.to_string());
                 }
+                true
             }
-            Ok(None) => effects.push(AppEffect::RequestCopy),
-            Err(error) => self.last_error = Some(error.to_string()),
+            Ok(None) => false,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn copy_terminal_selection_or_request_copy(&mut self, effects: &mut Vec<AppEffect>) {
+        if !self.copy_terminal_selection_if_any() {
+            effects.push(AppEffect::RequestCopy);
         }
     }
 
@@ -1529,6 +1735,192 @@ mod tests {
                 egui::Event::Paste("second".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn bootty_selection_drag_is_not_sent_to_terminal_input() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: egui::Pos2::new(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(egui::Pos2::new(20.0, 10.0)),
+            egui::Event::PointerButton {
+                pos: egui::Pos2::new(20.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::Text("x".to_owned()),
+        ];
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            Some(surface),
+            &mut active,
+            false,
+            egui::Modifiers::default(),
+        );
+
+        assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
+        assert_eq!(selection_actions.len(), 3);
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert!(matches!(
+            selection_actions[1],
+            TerminalSelectionAction::Update(_)
+        ));
+        assert!(matches!(
+            selection_actions[2],
+            TerminalSelectionAction::End(_)
+        ));
+        assert!(!active);
+    }
+
+    #[test]
+    fn plain_mouse_drag_stays_available_for_terminal_mouse_reporting() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let events = vec![egui::Event::PointerButton {
+            pos: egui::Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }];
+        let original = events.clone();
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            Some(surface),
+            &mut active,
+            true,
+            egui::Modifiers::default(),
+        );
+
+        assert_eq!(terminal_events, original);
+        assert!(selection_actions.is_empty());
+        assert!(!active);
+    }
+
+    #[test]
+    fn shift_drag_overrides_mouse_reporting_for_bootty_selection() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let events = vec![egui::Event::PointerButton {
+            pos: egui::Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: shift,
+        }];
+
+        let (terminal_events, selection_actions) =
+            route_terminal_selection_events(events, Some(surface), &mut active, true, shift);
+
+        assert!(terminal_events.is_empty());
+        assert_eq!(selection_actions.len(), 1);
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert!(active);
+    }
+
+    #[test]
+    fn frame_shift_overrides_mouse_reporting_when_pointer_event_lacks_modifiers() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let events = vec![egui::Event::PointerButton {
+            pos: egui::Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        }];
+
+        let (terminal_events, selection_actions) =
+            route_terminal_selection_events(events, Some(surface), &mut active, true, shift);
+
+        assert!(terminal_events.is_empty());
+        assert_eq!(selection_actions.len(), 1);
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert!(active);
+    }
+
+    #[test]
+    fn command_c_is_detected_as_copy_shortcut_for_selection_override() {
+        assert!(copy_shortcut_pressed(&egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                mac_cmd: true,
+                ..Default::default()
+            },
+        }));
+        assert!(!copy_shortcut_pressed(&egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }));
+    }
+
+    #[test]
+    fn direct_command_c_is_detected_as_copy_shortcut_for_selection_override() {
+        assert!(direct_copy_shortcut_pressed(KeyInput {
+            key: TerminalKey::C,
+            mods: crate::terminal::KeyMods {
+                command: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("c"),
+            unshifted: Some('c'),
+        }));
+        assert!(!direct_copy_shortcut_pressed(KeyInput {
+            key: TerminalKey::C,
+            mods: crate::terminal::KeyMods {
+                ctrl: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("c"),
+            unshifted: Some('c'),
+        }));
     }
 
     #[test]

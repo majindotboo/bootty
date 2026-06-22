@@ -286,6 +286,72 @@ fn terminal_engine_formats_active_selection_as_plain_text() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_double_click_selects_word() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 2,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let surface = TerminalSurface::for_logical_size(
+        120.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let event = |x, y| TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint { x, y },
+        rectangle: false,
+    };
+
+    engine.write_vt(b"abc def");
+    engine.begin_selection(event(15.0, 10.0))?;
+    engine.end_selection(Some(event(15.0, 10.0)))?;
+    engine.begin_selection(event(15.0, 10.0))?;
+    engine.end_selection(Some(event(15.0, 10.0)))?;
+
+    let text = engine
+        .format_selection(TerminalSelectionFormat::PlainText)?
+        .expect("active selection");
+    assert_eq!(String::from_utf8_lossy(&text), "abc");
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_triple_click_selects_line() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 2,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let surface = TerminalSurface::for_logical_size(
+        120.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let event = |x, y| TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint { x, y },
+        rectangle: false,
+    };
+
+    engine.write_vt(b"abc def");
+    for _ in 0..3 {
+        engine.begin_selection(event(15.0, 10.0))?;
+        engine.end_selection(Some(event(15.0, 10.0)))?;
+    }
+
+    let text = engine
+        .format_selection(TerminalSelectionFormat::PlainText)?
+        .expect("active selection");
+    assert_eq!(String::from_utf8_lossy(&text), "abc def");
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_applies_configured_default_cursor_style_and_blink() -> Result<()> {
     let mut engine = TerminalEngine::new_with_cursor_options(
         TerminalGeometry {

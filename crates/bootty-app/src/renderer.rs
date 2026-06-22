@@ -17,7 +17,6 @@ use crate::{
     paint_plan::{CursorBlinkPhase, PaintPlanner},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
     terminal::{CursorSnapshot, RenderFrame},
-    terminal_engine::TerminalSelectionEvent,
     terminal_render::{TerminalRenderCommand, TerminalRenderFrame},
     terminal_text::{TerminalTextConfig, TerminalTextContract},
     terminal_wgpu::{terminal_render_callback, terminal_text_cell_metrics},
@@ -135,7 +134,6 @@ impl TerminalWidget {
         // Match the grid rect the renderer projects through, so pinch/pan math agrees with it.
         self.last_surface = Some(surface.grid_rect(frame.cols, frame.rows));
         self.handle_scrollbar_interaction(ui, surface, frame.as_ref(), terminal)?;
-        self.handle_selection_interaction(ui, surface, &response, terminal)?;
         self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.paint(ui, surface, &frame)?;
         self.metrics.render_state_update_us = frame.stats.render_state_update_us;
@@ -165,42 +163,6 @@ impl TerminalWidget {
         } else {
             self.base_cell
         }
-    }
-
-    fn handle_selection_interaction(
-        &self,
-        ui: &egui::Ui,
-        surface: TerminalSurface,
-        response: &egui::Response,
-        terminal: &mut dyn TerminalRenderSource,
-    ) -> Result<()> {
-        if self.scrollbar.dragging || self.scrollbar.thumb_hovered {
-            return Ok(());
-        }
-        let rectangle = ui.input(|input| input.modifiers.alt);
-        if response.drag_started()
-            && let Some(event) = response
-                .interact_pointer_pos()
-                .and_then(|pos| selection_event(surface, self.view, pos, rectangle))
-        {
-            terminal.begin_selection(event)?;
-        }
-        if response.dragged()
-            && let Some(event) = response
-                .interact_pointer_pos()
-                .and_then(|pos| selection_event(surface, self.view, pos, rectangle))
-        {
-            terminal.update_selection(event)?;
-        }
-        if response.drag_stopped() {
-            let event = response
-                .interact_pointer_pos()
-                .and_then(|pos| selection_event(surface, self.view, pos, rectangle));
-            terminal.end_selection(event)?;
-        } else if response.clicked() {
-            terminal.clear_selection()?;
-        }
-        Ok(())
     }
 
     fn handle_hyperlink_interaction(
@@ -681,19 +643,6 @@ struct CursorBlinkKey {
     x: u16,
     y: u16,
     at_wide_tail: bool,
-}
-fn selection_event(
-    surface: TerminalSurface,
-    view: ViewTransform,
-    pos: Pos2,
-    rectangle: bool,
-) -> Option<TerminalSelectionEvent> {
-    let position = surface.relative_position(view.inverse_point(pos))?;
-    Some(TerminalSelectionEvent {
-        surface,
-        position,
-        rectangle,
-    })
 }
 
 impl From<CursorSnapshot> for CursorBlinkKey {

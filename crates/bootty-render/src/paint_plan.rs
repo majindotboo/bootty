@@ -213,6 +213,7 @@ impl PaintPlanner {
         );
 
         plan_backgrounds(&mut self.plan, surface, frame, default_fg, default_bg);
+        plan_selections(&mut self.plan, surface, frame, default_fg);
         plan_text_runs(
             &mut self.plan,
             &mut self.run_text_pool,
@@ -294,6 +295,7 @@ fn plan_text_runs(
     default_bg: PlanColor,
     font_size: f32,
 ) {
+    let selection_fg = selection_text_foreground(frame, default_bg);
     let mut cell_index = 0;
     while cell_index < frame.cells.len() {
         let first = &frame.cells[cell_index];
@@ -304,7 +306,13 @@ fn plan_text_runs(
             continue;
         }
 
-        let attrs = paint_attrs(first, default_fg, default_bg);
+        let attrs = paint_attrs(
+            first,
+            default_fg,
+            default_bg,
+            selection_fg,
+            cell_selected(frame, first.x, first.y),
+        );
         let mut run_text = pool.pop().unwrap_or_default();
         run_text.clear();
         run_text.extend(first_text);
@@ -320,7 +328,13 @@ fn plan_text_runs(
                 || next.x != end_x
                 || next.style.invisible
                 || next_text.is_empty()
-                || paint_attrs(next, default_fg, default_bg) != attrs
+                || paint_attrs(
+                    next,
+                    default_fg,
+                    default_bg,
+                    selection_fg,
+                    cell_selected(frame, next.x, next.y),
+                ) != attrs
             {
                 break;
             }
@@ -516,6 +530,48 @@ fn cell_colors(
     (fg, bg)
 }
 
+fn plan_selections(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+    default_fg: PlanColor,
+) {
+    let background = frame
+        .colors
+        .selection_background
+        .map(PlanColor::opaque)
+        .unwrap_or(default_fg);
+    for selection in &frame.selections {
+        if selection.end_col < selection.start_col {
+            continue;
+        }
+        let cells = selection
+            .end_col
+            .saturating_sub(selection.start_col)
+            .saturating_add(1);
+        push_background(
+            &mut plan.backgrounds,
+            surface.run_rect(selection.start_col, selection.row, cells),
+            background,
+        );
+    }
+}
+
+fn selection_text_foreground(frame: &RenderFrame, default_bg: PlanColor) -> PlanColor {
+    frame
+        .colors
+        .selection_foreground
+        .map(PlanColor::opaque)
+        .unwrap_or(default_bg)
+}
+
+fn cell_selected(frame: &RenderFrame, x: u16, y: u16) -> bool {
+    frame
+        .selections
+        .iter()
+        .any(|selection| selection.row == y && x >= selection.start_col && x <= selection.end_col)
+}
+
 fn cell_background(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanColor) -> PlanColor {
     if cell.style.inverse {
         cell.fg.map_or(default_fg, PlanColor::opaque)
@@ -524,8 +580,17 @@ fn cell_background(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanCol
     }
 }
 
-fn paint_attrs(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanColor) -> TextAttrs {
-    let (fg, _) = cell_colors(cell, default_fg, default_bg);
+fn paint_attrs(
+    cell: &RenderCell,
+    default_fg: PlanColor,
+    default_bg: PlanColor,
+    selection_fg: PlanColor,
+    selected: bool,
+) -> TextAttrs {
+    let (mut fg, _) = cell_colors(cell, default_fg, default_bg);
+    if selected {
+        fg = selection_fg;
+    }
     TextAttrs {
         fg,
         bold: cell.style.bold,
@@ -554,7 +619,9 @@ mod tests {
     use super::*;
     use crate::{
         geometry::{CellMetrics, TerminalPadding},
-        terminal::{CellStyle, CursorSnapshot, FrameColors, RenderCell, RenderFrame},
+        terminal::{
+            CellStyle, CursorSnapshot, FrameColors, FrameSelection, RenderCell, RenderFrame,
+        },
     };
     use eframe::egui::Vec2;
     use libghostty_vt::{render::Dirty, style::Underline};
@@ -637,6 +704,39 @@ mod tests {
 
         assert_eq!(plan.text_runs.len(), 1);
         assert_eq!(plan.text_runs[0].text, "abc");
+    }
+
+    #[test]
+    fn frame_selections_plan_highlight_background_and_text_color() {
+        let mut frame = frame_from_cells(vec![
+            (0, 0, 'a', style()),
+            (1, 0, 'b', style()),
+            (2, 0, 'c', style()),
+        ]);
+        frame.colors.selection_background = Some(rgb(10, 20, 30));
+        frame.colors.selection_foreground = Some(rgb(220, 230, 240));
+        frame.selections.push(FrameSelection {
+            row: 0,
+            start_col: 1,
+            end_col: 2,
+        });
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 1);
+        assert_eq!(plan.backgrounds[0].rect, surface().run_rect(1, 0, 2));
+        assert_eq!(
+            plan.backgrounds[0].color,
+            PlanColor::opaque(rgb(10, 20, 30))
+        );
+        assert_eq!(plan.text_runs.len(), 2);
+        assert_eq!(plan.text_runs[0].text, "a");
+        assert_eq!(plan.text_runs[1].text, "bc");
+        assert_eq!(
+            plan.text_runs[1].attrs.fg,
+            PlanColor::opaque(rgb(220, 230, 240))
+        );
     }
 
     #[test]

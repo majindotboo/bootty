@@ -465,6 +465,10 @@ impl TerminalRenderSource for BackendPaneTerminal {
         self.terminal.extract_frame()
     }
 
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        self.terminal.is_mouse_tracking()
+    }
+
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.terminal.scroll_viewport_delta(delta)
     }
@@ -479,10 +483,6 @@ impl TerminalRenderSource for BackendPaneTerminal {
 
     fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
         self.terminal.end_selection(event)
-    }
-
-    fn clear_selection(&mut self) -> Result<()> {
-        self.terminal.clear_selection()
     }
 }
 

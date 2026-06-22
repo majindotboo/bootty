@@ -9,6 +9,9 @@ use crate::terminal_session::TerminalSession;
 pub trait TerminalRenderSource {
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()>;
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>>;
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        Ok(false)
+    }
     fn scroll_viewport_delta(&mut self, _delta: isize) -> Result<()> {
         Ok(())
     }
@@ -21,9 +24,6 @@ pub trait TerminalRenderSource {
     fn end_selection(&mut self, _event: Option<TerminalSelectionEvent>) -> Result<()> {
         Ok(())
     }
-    fn clear_selection(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 impl TerminalRenderSource for TerminalSession {
@@ -33,6 +33,10 @@ impl TerminalRenderSource for TerminalSession {
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
         Self::extract_frame(self)
+    }
+
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        Self::is_mouse_tracking(self)
     }
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
@@ -49,9 +53,5 @@ impl TerminalRenderSource for TerminalSession {
 
     fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
         Self::end_selection(self, event)
-    }
-
-    fn clear_selection(&mut self) -> Result<()> {
-        Self::clear_selection(self)
     }
 }

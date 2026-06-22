@@ -4,7 +4,7 @@ use std::{
     io::Write as _,
     rc::Rc,
     sync::{Arc, Mutex, Once},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -52,6 +52,7 @@ use {
 };
 
 pub const DEFAULT_MAX_SCROLLBACK: usize = 0;
+const SELECTION_REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 pub const NATIVE_SCROLLBACK_TARGET_ROWS: usize = 1_000_000;
 pub const NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE: usize = 320;
 pub const NATIVE_MAX_SCROLLBACK: usize =
@@ -391,6 +392,7 @@ pub struct TerminalEngine {
     selection_press_event: gesture::PressEvent<'static>,
     selection_drag_event: gesture::DragEvent<'static>,
     selection_release_event: gesture::ReleaseEvent<'static>,
+    selection_clock_started: Instant,
     mouse_any_button_pressed: bool,
     mouse_encoder_options_dirty: bool,
     mouse_encoder_size: Option<MouseEncoderSize>,
@@ -1451,6 +1453,7 @@ impl TerminalEngine {
             selection_press_event,
             selection_drag_event,
             selection_release_event,
+            selection_clock_started: Instant::now(),
             mouse_encoder_options_dirty: true,
             mouse_encoder_size: None,
             geometry,
@@ -1491,7 +1494,9 @@ impl TerminalEngine {
             let grid_ref = terminal.grid_ref(Point::Viewport(point))?;
             self.selection_press_event
                 .set_position(f64::from(event.position.x), f64::from(event.position.y))?
-                .set_repeat_distance(4.0)?;
+                .set_repeat_distance(4.0)?
+                .set_repeat_interval(SELECTION_REPEAT_INTERVAL)?
+                .set_time(self.selection_clock_started.elapsed())?;
             let selection = self.selection_press_event.apply(
                 &mut self.selection_gesture,
                 terminal,
@@ -1531,6 +1536,10 @@ impl TerminalEngine {
             .selection_gesture
             .dragged(&self.terminal)
             .unwrap_or(false);
+        let behavior = self
+            .selection_gesture
+            .behavior(&self.terminal)
+            .unwrap_or(gesture::Behavior::Cell);
         let point = event.and_then(|event| selection_point(event, self.geometry));
 
         {
@@ -1542,11 +1551,10 @@ impl TerminalEngine {
                 .apply(&mut self.selection_gesture, terminal, grid_ref)?;
         }
 
-        if !was_dragged {
-            self.clear_selection()?;
-        } else {
-            self.mark_content_changed();
+        if !was_dragged && behavior == gesture::Behavior::Cell {
+            self.terminal.set_selection(None)?;
         }
+        self.mark_content_changed();
         Ok(())
     }
 
