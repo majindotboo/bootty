@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 
 fn main() -> Result<()> {
     // Correct a stale `$SHELL` to the OS login shell before any child inherits
@@ -8,8 +9,8 @@ fn main() -> Result<()> {
     // environment; a Finder-launched .app starts with launchd's minimal PATH.
     bootty_app::shell_env::hydrate_from_login_shell();
 
-    let config =
-        bootty_app::config::load_config_from_path(bootty_app::config::default_config_path())?;
+    let cli = bootty_app::cli::Cli::parse();
+    let config = cli.load_config()?;
     let options = bootty_app::platform::native_options_for_config(&config);
 
     bootty_app::native_host::run(options, config)

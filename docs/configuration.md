@@ -15,6 +15,26 @@ Invalid startup config currently fails startup with a parse/load error. Runtime
 reload is non-destructive: invalid reloads keep the last-good in-memory config
 and show the error in the status bar.
 
+For a one-off run that ignores live config and sidecar state, use:
+
+```sh
+bootty --defaults
+```
+
+To load a specific config file instead of the XDG path, use:
+
+```sh
+bootty --config /path/to/config.toml
+```
+
+Startup flags can override common config values after the file is loaded:
+
+```sh
+bootty --defaults --backend native --fullscreen non-native --titlebar hidden --window-decoration none --no-sidebar
+```
+
+Run `bootty --help` for the full flag list.
+
 ## Example
 
 See `docs/sample-config.toml` for a complete sample with every supported

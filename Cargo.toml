@@ -30,6 +30,7 @@ ab_glyph = "0.2"
 anyhow = "1"
 arboard = "3"
 base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
 criterion = "0.8"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "deref",

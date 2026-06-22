@@ -9,6 +9,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
+clap.workspace = true
 eframe.workspace = true
 iconflow.workspace = true
 fontdb.workspace = true

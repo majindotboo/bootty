@@ -2,6 +2,7 @@ pub mod app;
 pub mod app_actions;
 mod assets;
 pub use bootty_config::{color, config, config_reload};
+pub mod cli;
 pub mod diagnostics;
 pub use bootty_render::{
     geometry, paint_plan, renderer_frame, selection, terminal_font_backend, terminal_font_face,
