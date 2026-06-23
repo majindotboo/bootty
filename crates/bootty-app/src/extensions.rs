@@ -484,17 +484,18 @@ impl ExtensionHost {
     }
 
     /// Publishes the latest mux snapshot for modules to render. Cheap; the UI calls it per frame.
-    /// A change to the session order/set or window order/set wakes the worker to re-render right
-    /// away; selection-only changes don't, since the UI reflects those natively.
+    /// A change to keep-awake state, session order/set, or window order/set wakes the worker to
+    /// re-render right away; selection-only changes don't, since the UI reflects those natively.
     pub fn update_mux(&self, view: MuxView) {
         if let Ok(mut current) = self.mux.write()
             && *current != view
         {
-            let structural = current
-                .sessions
-                .iter()
-                .map(|session| session.name.as_str())
-                .ne(view.sessions.iter().map(|session| session.name.as_str()))
+            let should_force_render = current.keep_awake != view.keep_awake
+                || current
+                    .sessions
+                    .iter()
+                    .map(|session| session.name.as_str())
+                    .ne(view.sessions.iter().map(|session| session.name.as_str()))
                 || current
                     .windows
                     .iter()
@@ -502,7 +503,7 @@ impl ExtensionHost {
                     .ne(view.windows.iter().map(|window| window.id.as_str()));
             *current = view;
             drop(current);
-            if structural {
+            if should_force_render {
                 self.waker.force();
             }
         }
@@ -1615,6 +1616,43 @@ mod tests {
     }
 
     #[test]
+    fn keep_awake_mux_change_forces_status_module_rerender() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("awake_probe.luau"),
+            "return { interval = 60, render = function() return tostring(bootty.awake()) end }",
+        )
+        .expect("write awake probe module");
+        let host = ExtensionHost::spawn_status(
+            dir.path().to_path_buf(),
+            egui::Context::default(),
+            Vec::new(),
+        );
+        host.set_active(["awake_probe".to_owned()]);
+        host.update_mux(MuxView {
+            keep_awake: false,
+            ..MuxView::default()
+        });
+
+        assert!(wait_for_host_text(
+            &host,
+            "awake_probe",
+            "false",
+            Duration::from_secs(2)
+        ));
+
+        host.update_mux(MuxView {
+            keep_awake: true,
+            ..MuxView::default()
+        });
+
+        assert!(
+            wait_for_host_text(&host, "awake_probe", "true", Duration::from_millis(500)),
+            "keep-awake changes should re-render without waiting for the module interval"
+        );
+    }
+
+    #[test]
     fn dropping_extension_host_does_not_wait_for_blocked_run_callback() {
         let dir = tempfile::tempdir().expect("tempdir");
         let started = dir.path().join("started");
@@ -1671,6 +1709,22 @@ mod tests {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn wait_for_host_text(
+        host: &ExtensionHost,
+        module: &str,
+        expected: &str,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if host.items(module).iter().any(|item| item.text == expected) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(10));
