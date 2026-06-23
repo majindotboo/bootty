@@ -8,10 +8,10 @@
 //! environment. We reproduce that here by running the login shell once and
 //! importing what it exports.
 
-#[cfg(target_os = "macos")]
-use std::io::IsTerminal;
-
 use bootty_runtime::terminal_session::{BOOTTY_SHELL_ENV, configured_user_shell};
+#[cfg(target_os = "macos")]
+static LOGIN_SHELL_ENVIRONMENT: std::sync::OnceLock<Option<Vec<(String, String)>>> =
+    std::sync::OnceLock::new();
 
 /// Align `$SHELL` with the OS account login shell before bootty spawns anything.
 ///
@@ -43,23 +43,28 @@ fn aligned_shell(override_shell: Option<String>, login_shell: Option<String>) ->
         .find(|shell| std::path::Path::new(shell).is_absolute())
 }
 
-/// Import the login shell's environment when the process was launched outside a
-/// terminal (the GUI-launch case). No-op when already attached to a tty, so
-/// terminal launches keep the environment the user already has.
+/// Import the login shell's environment before Bootty spawns child processes.
+///
+/// Terminal launches often already carry a useful environment, but that is not a reliable proxy
+/// for the account login shell's environment. Always importing the login shell PATH keeps
+/// `bootty.run`, mux backends, and terminal sessions on the same command lookup surface.
 #[cfg(target_os = "macos")]
 pub fn hydrate_from_login_shell() {
-    // A real terminal launch already carries the user's environment; only the
-    // GUI launch path (no controlling tty) needs hydration.
-    if std::io::stdin().is_terminal() {
-        return;
-    }
-
-    let shell = login_shell();
-    let Some(vars) = capture_login_env(&shell) else {
+    let Some(vars) = login_shell_environment() else {
         return;
     };
 
     apply_env(vars);
+}
+
+#[cfg(target_os = "macos")]
+pub fn login_shell_environment() -> Option<Vec<(String, String)>> {
+    LOGIN_SHELL_ENVIRONMENT
+        .get_or_init(|| {
+            let shell = login_shell();
+            capture_login_env(&shell)
+        })
+        .clone()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -126,7 +131,7 @@ fn parse_null_delimited_env(raw: &str) -> Vec<(String, String)> {
 #[cfg(target_os = "macos")]
 fn apply_env(vars: Vec<(String, String)>) {
     for (key, value) in vars {
-        if key == "PATH" || std::env::var_os(&key).is_none() {
+        if should_apply_login_env(&key, std::env::var_os(&key).is_some()) {
             // SAFETY: hydration runs at startup before any threads are spawned.
             unsafe {
                 std::env::set_var(&key, &value);
@@ -135,10 +140,17 @@ fn apply_env(vars: Vec<(String, String)>) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn should_apply_login_env(key: &str, current_present: bool) -> bool {
+    key == "PATH" || !current_present
+}
+
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
-    use super::{aligned_shell, login_shell_from, parse_null_delimited_env};
+    use super::{
+        aligned_shell, login_shell_from, parse_null_delimited_env, should_apply_login_env,
+    };
 
     #[test]
     fn aligned_shell_prefers_override_then_login_and_requires_absolute() {
@@ -173,6 +185,14 @@ mod tests {
     #[test]
     fn login_shell_falls_back_to_portable_unix_shell() {
         assert_eq!(login_shell_from(None, Some("zsh".to_string())), "/bin/sh");
+    }
+
+    #[test]
+    fn login_env_policy_always_adopts_path() {
+        assert!(should_apply_login_env("PATH", true));
+        assert!(should_apply_login_env("PATH", false));
+        assert!(should_apply_login_env("BOOTTY_ENV_PROBE", false));
+        assert!(!should_apply_login_env("HOME", true));
     }
 
     #[test]

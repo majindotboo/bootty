@@ -44,8 +44,28 @@ impl<R: CommandRunner> TmuxBackend<R> {
         require_success(&self.program, &args, output)
     }
 
+    fn run_snapshot(&self, args: &[&str]) -> Result<Option<String>> {
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let output = self.runner.run(&self.program, &args)?;
+        if output.success {
+            return Ok(Some(output.stdout));
+        }
+        if tmux_server_exited(&output.stderr) {
+            return Ok(None);
+        }
+        require_success(&self.program, &args, output).map(Some)
+    }
+
     fn run_owned(&self, args: Vec<String>) -> Result<String> {
         let output = self.runner.run(&self.program, &args)?;
+        require_success(&self.program, &args, output)
+    }
+
+    fn run_owned_allow_server_exit(&self, args: Vec<String>) -> Result<String> {
+        let output = self.runner.run(&self.program, &args)?;
+        if !output.success && tmux_server_exited(&output.stderr) {
+            return Ok(String::new());
+        }
         require_success(&self.program, &args, output)
     }
 
@@ -61,17 +81,21 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
     }
 
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        let sessions = self.run(&[
+        let Some(sessions) = self.run_snapshot(&[
             "list-sessions",
             "-F",
             "#{session_id}\x1f#{session_name}\x1f#{session_attached}\x1f#{session_windows}\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_current_command}",
-        ])?;
-        let panes = self.run(&[
+        ])? else {
+            return Ok(MuxSnapshot::default());
+        };
+        let Some(panes) = self.run_snapshot(&[
             "list-panes",
             "-a",
             "-F",
             "#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_current_path}\x1f#{pane_current_command}",
-        ])?;
+        ])? else {
+            return Ok(MuxSnapshot::default());
+        };
         parse_tmux_snapshot(&sessions, &panes)
     }
 
@@ -98,7 +122,11 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                 self.run_owned(vec!["rename-session".into(), "-t".into(), session_id, name])?;
             }
             MuxCommand::DitchSession { session_id } => {
-                self.run_owned(vec!["kill-session".into(), "-t".into(), session_id])?;
+                self.run_owned_allow_server_exit(vec![
+                    "kill-session".into(),
+                    "-t".into(),
+                    session_id,
+                ])?;
             }
             MuxCommand::NewWindow { session_id, cwd } => {
                 let mut args = vec!["new-window".to_owned(), "-t".to_owned(), session_id];
@@ -163,7 +191,11 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                 ])?;
             }
             MuxCommand::KillPane { session_id } | MuxCommand::ClosePane { session_id } => {
-                self.run_owned(vec!["kill-pane".into(), "-t".into(), session_id])?;
+                self.run_owned_allow_server_exit(vec![
+                    "kill-pane".into(),
+                    "-t".into(),
+                    session_id,
+                ])?;
             }
             MuxCommand::TogglePaneZoom { session_id } => {
                 self.run_owned(vec![
@@ -176,6 +208,10 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
         }
         Ok(())
     }
+}
+
+fn tmux_server_exited(stderr: &str) -> bool {
+    stderr.contains("no server running")
 }
 
 fn tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
@@ -348,6 +384,8 @@ mod tests {
     struct RecordingRunner {
         calls: Rc<RefCell<Vec<RecordedCall>>>,
         stdout: Rc<RefCell<VecDeque<String>>>,
+        stderr: Rc<RefCell<VecDeque<String>>>,
+        success: Rc<RefCell<VecDeque<bool>>>,
     }
 
     impl CommandRunner for RecordingRunner {
@@ -374,9 +412,9 @@ mod tests {
                 argv: call,
             });
             Ok(CommandOutput {
-                success: true,
+                success: self.success.borrow_mut().pop_front().unwrap_or(true),
                 stdout: self.stdout.borrow_mut().pop_front().unwrap_or_default(),
-                stderr: String::new(),
+                stderr: self.stderr.borrow_mut().pop_front().unwrap_or_default(),
             })
         }
     }
@@ -421,6 +459,24 @@ mod tests {
             ]
             .as_slice()
         );
+    }
+
+    #[test]
+    fn tmux_close_cleanup_tolerates_server_already_exited() {
+        let runner = RecordingRunner {
+            success: Rc::new(RefCell::new(VecDeque::from([false]))),
+            stderr: Rc::new(RefCell::new(VecDeque::from([
+                "no server running on /tmp/tmux-501/default".to_owned(),
+            ]))),
+            ..Default::default()
+        };
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "$1".to_owned(),
+            })
+            .unwrap();
     }
 
     #[test]
@@ -477,6 +533,7 @@ mod tests {
                 "$1\t@1\t0\teditor\t1\t1\t%3\t/repo\tnvim\n$1\t@2\t1\tshell\t0\t1\t%5\t/repo\tzsh\n$2\t@3\t0\tlogs\t1\t1\t%4\t/tmp\tfish\n"
                     .to_owned(),
             ]))),
+            ..Default::default()
         };
         let backend = TmuxBackend::with_runner("tmux", runner);
 
@@ -495,6 +552,24 @@ mod tests {
             Some("%3")
         );
         assert_eq!(snapshot.sessions[0].windows[1].name, "shell");
+    }
+
+    #[test]
+    fn tmux_snapshot_returns_empty_when_server_has_exited() {
+        let runner = RecordingRunner {
+            success: Rc::new(RefCell::new(VecDeque::from([false]))),
+            stderr: Rc::new(RefCell::new(VecDeque::from([
+                "no server running on /tmp/tmux-501/default".to_owned(),
+            ]))),
+            ..Default::default()
+        };
+        let calls = runner.calls.clone();
+        let backend = TmuxBackend::with_runner("tmux", runner);
+
+        let snapshot = backend.snapshot().unwrap();
+
+        assert_eq!(snapshot, MuxSnapshot::default());
+        assert_eq!(calls.borrow().len(), 1);
     }
 
     #[test]

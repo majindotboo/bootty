@@ -51,6 +51,9 @@ static DISOWNED_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
 const DISOWNED_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(target_os = "macos")]
+const LAUNCHD_START_GRACE: Duration = Duration::from_millis(50);
+
+#[cfg(target_os = "macos")]
 const LAUNCHD_SUBMIT_SCRIPT: &str = r#"program=$1
 shift
 exec "$program" "$@"
@@ -93,15 +96,25 @@ fn launchd_submit_script() -> String {
 
 #[cfg(target_os = "macos")]
 pub fn macos_shell_environment_prelude() -> String {
+    macos_shell_environment_prelude_from(env::vars_os())
+}
+
+#[cfg(target_os = "macos")]
+pub fn macos_shell_environment_prelude_from<I, K, V>(vars: I) -> String
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
     let mut script = String::new();
-    for (key, value) in env::vars_os() {
-        let key = key.to_string_lossy();
+    for (key, value) in vars {
+        let key = key.as_ref().to_string_lossy();
         if !is_shell_identifier(&key) {
             continue;
         }
         script.push_str(&key);
         script.push('=');
-        script.push_str(&shell_single_quote(&value.to_string_lossy()));
+        script.push_str(&shell_single_quote(&value.as_ref().to_string_lossy()));
         script.push_str("; export ");
         script.push_str(&key);
         script.push('\n');
@@ -126,11 +139,15 @@ fn shell_single_quote(value: &str) -> String {
 
 #[cfg(target_os = "macos")]
 pub fn wait_for_launchd_exit(launchctl: &str, label: &str, timeout: Duration) -> Result<i32> {
-    let deadline = Instant::now() + timeout;
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut observed_pid = false;
     while Instant::now() < deadline {
         let output = Command::new(launchctl).args(["list", label]).output()?;
         let text = String::from_utf8_lossy(&output.stdout);
-        if !text.contains("\"PID\"") {
+        if text.contains("\"PID\"") {
+            observed_pid = true;
+        } else if observed_pid || start.elapsed() >= LAUNCHD_START_GRACE {
             return parse_launchd_exit_status(&text)
                 .with_context(|| format!("parse launchd status for {label}"));
         }

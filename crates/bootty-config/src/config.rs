@@ -324,6 +324,7 @@ pub enum MultiplexerBackendConfig {
 pub struct InputConfig {
     pub modifier_remap: Vec<String>,
     pub macos_option_as_alt: MacosOptionAsAltConfig,
+    pub hide_mouse_pointer_while_typing: bool,
     pub keybind: Vec<String>,
     pub sidebar_keybind: Vec<String>,
     pub backend_keybinds: BackendKeybindConfig,
@@ -365,6 +366,7 @@ pub struct BackendKeybindConfig {
 struct InputPatch {
     modifier_remap: Option<Vec<String>>,
     macos_option_as_alt: Option<MacosOptionAsAltConfig>,
+    hide_mouse_pointer_while_typing: Option<bool>,
     keybind: Option<Vec<String>>,
     sidebar_keybind: Option<Vec<String>>,
     backend_keybind: Option<BackendKeybindPatch>,
@@ -937,6 +939,7 @@ impl Default for InputConfig {
         Self {
             modifier_remap: Vec::new(),
             macos_option_as_alt: MacosOptionAsAltConfig::default(),
+            hide_mouse_pointer_while_typing: true,
             keybind: {
                 let mut keybind = owned_keybinds(common_keybinds());
                 keybind.extend(owned_keybinds(navigation_keybinds()));
@@ -1606,6 +1609,10 @@ fn apply_partial_multiplexer(multiplexer: &mut MultiplexerConfig, partial: Multi
 fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
     apply_value(&mut input.modifier_remap, partial.modifier_remap);
     apply_value(&mut input.macos_option_as_alt, partial.macos_option_as_alt);
+    apply_value(
+        &mut input.hide_mouse_pointer_while_typing,
+        partial.hide_mouse_pointer_while_typing,
+    );
     if let Some(value) = partial.keybind {
         input.keybind = merge_keybind_entries(&input.keybind, value);
     }

@@ -152,7 +152,7 @@ const MODIFIER_TOKENS: &[&str] = &[
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
-    modifiers_section(win, ui);
+    input_section(win, ui);
 
     super::section(ui, palette, "KEYBINDINGS");
     ui.label(
@@ -369,16 +369,23 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     });
 }
 
-/// Modifier-level input settings that sit above the keybind lists: the macOS Option-as-Alt mode
-/// and the modifier-remap table.
-fn modifiers_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+/// Input settings that sit above the keybind lists.
+fn input_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
-    super::section(ui, palette, "MODIFIERS");
+    super::section(ui, palette, "INPUT");
 
-    egui::Grid::new("settings_modifiers_grid")
+    egui::Grid::new("settings_input_grid")
         .num_columns(2)
         .spacing([16.0, 10.0])
         .show(ui, |ui| {
+            ui.label("Hide mouse pointer while typing");
+            let mut hide_pointer = win.config.input.hide_mouse_pointer_while_typing;
+            if ui.checkbox(&mut hide_pointer, "").changed() {
+                win.config.input.hide_mouse_pointer_while_typing = hide_pointer;
+                win.set_bool(&["input", "hide-mouse-pointer-while-typing"], hide_pointer);
+            }
+            ui.end_row();
+
             ui.label("Option as Alt (macOS)");
             let tokens = ["none", "left", "right", "both"];
             let current = match win.config.input.macos_option_as_alt {

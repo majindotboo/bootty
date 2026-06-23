@@ -627,7 +627,7 @@ fn clip_axis(axis: AxisSlice<'_>, bounds: AxisBounds) {
     if *axis.source_offset < bounds.image_offset {
         let offset = bounds.image_offset - *axis.source_offset;
         *axis.source_size -= offset;
-        *axis.dest_offset = offset;
+        *axis.dest_offset = offset * bounds.scale;
         *axis.dest_size -= offset * bounds.scale;
         *axis.source_offset = 0.0;
         if *axis.source_size > bounds.image_size {

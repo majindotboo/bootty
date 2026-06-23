@@ -1660,6 +1660,13 @@ fn terminal_engine_decodes_timg_tmux_rgb_unicode_placeholder() -> Result<()> {
         .expect("timg rgb placeholder placement");
     assert_eq!(placement.source.width, 20);
     assert_eq!(placement.source.height, 20);
+    assert_eq!(placement.destination.min_y, 4.0);
+    assert_eq!(placement.destination.height(), 8.0);
+    assert!(
+        placement.destination.max_y <= 16.0,
+        "virtual placement must stay inside the placeholder row: {:?}",
+        placement.destination
+    );
     Ok(())
 }
 

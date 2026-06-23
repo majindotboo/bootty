@@ -629,6 +629,22 @@ fn documented_sample_config_loads() {
 }
 
 #[test]
+fn input_hide_mouse_pointer_while_typing_defaults_on_and_can_be_disabled() {
+    assert!(
+        BoottyConfig::default()
+            .input
+            .hide_mouse_pointer_while_typing
+    );
+
+    let config = load_config_source(indoc! {r#"
+        [input]
+        hide-mouse-pointer-while-typing = false
+    "#});
+
+    assert!(!config.input.hide_mouse_pointer_while_typing);
+}
+
+#[test]
 fn config_maps_macos_option_as_alt_to_terminal_session_config() {
     let config = load_config_source(indoc! {r#"
         [input]

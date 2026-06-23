@@ -70,6 +70,7 @@ pub struct BoottyApp {
     status_extensions: crate::extensions::ExtensionHost,
     sidebar_extensions: crate::extensions::ExtensionHost,
     keep_awake: Option<keepawake::KeepAwake>,
+    terminal_cursor_icon: egui::CursorIcon,
 }
 
 impl BoottyApp {
@@ -139,6 +140,7 @@ impl BoottyApp {
             status_extensions,
             sidebar_extensions,
             keep_awake: None,
+            terminal_cursor_icon: egui::CursorIcon::Default,
         })
     }
 
@@ -192,6 +194,7 @@ impl BoottyApp {
                     self.terminal_widget.set_text_config(text_config);
                 }
                 AppEffect::SetTerminalCursorIcon(icon) => {
+                    self.terminal_cursor_icon = icon;
                     self.terminal_widget.set_terminal_cursor_icon(icon);
                 }
                 AppEffect::SetWindowFocus => {
@@ -865,6 +868,7 @@ impl eframe::App for BoottyApp {
         };
         let effects = self.state.update_frame(inputs);
         self.apply_effects(ctx, effects);
+        ctx.set_cursor_icon(self.terminal_cursor_icon);
 
         if crate::menu::settings_requested() {
             self.open_settings(ctx);
