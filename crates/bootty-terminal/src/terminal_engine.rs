@@ -2514,8 +2514,13 @@ impl TerminalEngine {
                             &mut self.row_cache[index],
                         )?;
                     }
+                    // Clear the render-state row dirty flag so the next update
+                    // reports only newly-changed rows. libghostty's update does
+                    // not unset dirty state; the caller must.
+                    row.set_dirty(false)?;
                     row_index += 1;
                 }
+                snapshot.set_dirty(Dirty::Clean)?;
                 return self.assemble_cached_frame(
                     extract_start,
                     render_state_update_us,
@@ -2545,6 +2550,7 @@ impl TerminalEngine {
                 self.frame.stats.dirty_rows += 1;
             }
             self.frame.row_dirty.push(row_dirty);
+            row.set_dirty(false)?;
             if let Some(selection) = row.selection()? {
                 self.frame.selections.push(FrameSelection {
                     row: row_index,
@@ -2623,6 +2629,8 @@ impl TerminalEngine {
 
             row_index += 1;
         }
+
+        snapshot.set_dirty(Dirty::Clean)?;
 
         self.frame.stats.render_state_update_us = render_state_update_us;
         if self.kitty_graphics_touched || !virtual_cells.is_empty() {
