@@ -251,6 +251,49 @@ fn bench_paint_plan(c: &mut Criterion) {
     }
 }
 
+/// Contrasts planning a fully dirty frame against a frame where only a single
+/// row changed.
+///
+/// NOTE: bootty currently reports `Dirty::Full` with every row dirty for any
+/// edit (see the `dirty_tracking` characterization test in bootty-terminal), so
+/// the `one_row` arm exercises a full-dirty frame and tracks `full` today. It
+/// becomes a real incremental-vs-full contrast only once localized edits report
+/// `Dirty::Partial`. Kept as standing measurement scaffolding for that work.
+fn bench_paint_plan_dirty_scope(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let (cols, rows) = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame");
+            engine.grid_size()
+        };
+        let surface = surface_for(cols, rows);
+
+        let full_frame = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame").clone()
+        };
+
+        let one_row_frame = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame");
+            mutate_single_row(&mut engine, 1);
+            engine.extract_frame().expect("frame").clone()
+        };
+
+        let mut group = c.benchmark_group(format!("paint_plan_dirty_{name}"));
+        group.bench_function("full", |b| {
+            let mut planner = PaintPlanner::default();
+            b.iter(|| black_box(planner.plan(surface, &full_frame, 16.0).text_runs.len()))
+        });
+        group.bench_function("one_row", |b| {
+            let mut planner = PaintPlanner::default();
+            planner.plan(surface, &full_frame, 16.0);
+            b.iter(|| black_box(planner.plan(surface, &one_row_frame, 16.0).text_runs.len()))
+        });
+        group.finish();
+    }
+}
+
 fn bench_extract_frame(c: &mut Criterion) {
     for (name, builder) in scenario_builders() {
         let mut engine = builder();
@@ -620,6 +663,7 @@ name = benches;
 config = Criterion::default().noise_threshold(0.15);
 targets =
     bench_paint_plan,
+    bench_paint_plan_dirty_scope,
     bench_extract_frame,
     bench_extract_frame_one_row_mutate,
     bench_terminal_write_vt,
