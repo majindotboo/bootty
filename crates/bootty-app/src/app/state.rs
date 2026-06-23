@@ -38,7 +38,7 @@ use crate::{
     platform::{
         apply_macos_non_native_fullscreen_presentation, macos_handles_non_native_fullscreen_frame,
         read_clipboard_text, restore_macos_presentation, show_desktop_notification,
-        spawn_new_window, write_clipboard_text,
+        write_clipboard_text,
     },
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
@@ -1212,14 +1212,10 @@ impl AppState {
                 }
             }
             KeybindAction::App(AppAction::Ignore) => {}
-            KeybindAction::App(AppAction::NewWindow) => {
-                if let Err(error) = spawn_new_window() {
-                    self.last_error = Some(error.to_string());
-                }
-            }
-            KeybindAction::App(AppAction::NewMuxSession) => {
+            KeybindAction::App(AppAction::NewWindow | AppAction::NewMuxSession) => {
                 self.open_new_mux_session_dialog();
             }
+
             KeybindAction::App(AppAction::SessionPicker) => {
                 self.toggle_session_picker_dialog();
                 effects.push(AppEffect::RequestRepaint);
@@ -1924,12 +1920,26 @@ mod tests {
     #[test]
     fn new_mux_session_request_uses_configured_working_directory() {
         let mut config = BoottyConfig::default();
-        config.session.working_directory = Some("/tmp/bootty-project".into());
+        config.session.working_directory = Some("tmp/bootty-project".into());
 
         let request = new_mux_session_request_with_name(&config, "review-session");
 
         assert_eq!(request.session_id, "review-session");
-        assert_eq!(request.cwd, "/tmp/bootty-project");
+        assert_eq!(request.cwd, "tmp/bootty-project");
+    }
+
+    #[test]
+    fn new_window_action_opens_new_session_picker() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::NewWindow),
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+
+        assert!(state.take_dialog().is_some());
     }
 
     fn test_state() -> AppState {
@@ -2043,7 +2053,7 @@ mod tests {
         state.mux.create_project_session(
             crate::mux::controller::NewMuxSessionRequest {
                 session_id: "project".to_owned(),
-                cwd: "/repo".to_owned(),
+                cwd: "repo".to_owned(),
             },
             &state.repaint,
             &mux_config,
@@ -2068,7 +2078,7 @@ mod tests {
         state.mux.create_project_session(
             crate::mux::controller::NewMuxSessionRequest {
                 session_id: alpha.clone(),
-                cwd: "/repo/a".to_owned(),
+                cwd: "repo/a".to_owned(),
             },
             &state.repaint,
             &mux_config,
@@ -2076,7 +2086,7 @@ mod tests {
         state.mux.create_project_session(
             crate::mux::controller::NewMuxSessionRequest {
                 session_id: beta.clone(),
-                cwd: "/repo/b".to_owned(),
+                cwd: "repo/b".to_owned(),
             },
             &state.repaint,
             &mux_config,

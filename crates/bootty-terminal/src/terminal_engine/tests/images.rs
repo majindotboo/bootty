@@ -1589,6 +1589,22 @@ fn terminal_engine_decodes_timg_style_kitty_png_payload_into_image_frame() -> Re
 }
 
 #[test]
+fn terminal_engine_decodes_chafa_style_empty_initial_rgba_chunk() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+
+    engine.write_vt(b"\x1b_Ga=T,f=32,s=2,v=1,c=2,r=1,m=1,q=2\x1b\\");
+    engine.write_vt(b"\x1b_Gm=1;////");
+    engine.write_vt(b"//////8=\x1b\\");
+    engine.write_vt(b"\x1b_Gm=0\x1b\\");
+    let frame = engine.extract_frame()?;
+
+    assert_eq!(frame.images.placements.len(), 1);
+    assert_eq!(frame.images.placements[0].image_width, 2);
+    assert_eq!(frame.images.placements[0].image_height, 1);
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_decodes_tmux_passthrough_kitty_payloads() -> Result<()> {
     let mut engine = test_terminal_engine()?;
 

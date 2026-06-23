@@ -22,8 +22,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
     terminal_engine::{
-        TERMINAL_TERM, TerminalColorConfig, TerminalCursorConfig, TerminalEngine,
-        TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+        TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM, TerminalColorConfig,
+        TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent,
+        TerminalSelectionFormat, TerminalSideEffect,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
@@ -44,6 +45,8 @@ pub const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
 const TERM_ENV: &str = "TERM";
 const COLORTERM_ENV: &str = "COLORTERM";
 const TERMINFO_ENV: &str = "TERMINFO";
+const TERM_PROGRAM_ENV: &str = "TERM_PROGRAM";
+const TERM_PROGRAM_VERSION_ENV: &str = "TERM_PROGRAM_VERSION";
 #[cfg(windows)]
 const DEFAULT_SHELL: &str = "powershell.exe";
 #[cfg(not(windows))]
@@ -97,7 +100,7 @@ pub struct TerminalSession {
     pending_pty_len: Arc<AtomicUsize>,
     geometry: TerminalGeometry,
     pty_master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Option<Box<dyn Child + Send + Sync>>,
     tty_name: Option<String>,
 }
 
@@ -110,11 +113,20 @@ impl Drop for TerminalSession {
     // smallest stale client pins the window so the live terminal can no longer grow
     // it. Switching sessions drops a fresh session every time, so these accumulate.
     // Kill the child on drop to detach the client (the tmux session itself
-    // survives) and to reap the native shell when a terminal is closed.
+    // survives) and to reap the native shell when a terminal is closed. Reap on
+    // a background thread so a slow child wait cannot beachball app shutdown.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = self.child.take() {
+            terminate_child_without_blocking(child);
+        }
     }
+}
+
+fn terminate_child_without_blocking(mut child: Box<dyn Child + Send + Sync>) {
+    let _ = child.kill();
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 type SpawnedPty = (
@@ -237,7 +249,7 @@ impl TerminalSession {
             pending_pty_len,
             geometry,
             pty_master,
-            child,
+            child: Some(child),
             tty_name,
         })
     }
@@ -289,10 +301,13 @@ impl TerminalSession {
     }
 
     pub fn child_exited(&mut self) -> Result<bool> {
-        self.child
-            .try_wait()
-            .map(|status| status.is_some())
-            .context("poll shell child process")
+        match self.child.as_mut() {
+            Some(child) => child
+                .try_wait()
+                .map(|status| status.is_some())
+                .context("poll shell child process"),
+            None => Ok(true),
+        }
     }
 
     pub fn tty_name(&self) -> Option<&str> {
@@ -1185,6 +1200,8 @@ struct ResolvedLaunchEnvironment {
     term: String,
     colorterm: String,
     terminfo: Option<PathBuf>,
+    term_program: String,
+    term_program_version: String,
     env: Vec<(String, String)>,
 }
 
@@ -1211,12 +1228,17 @@ fn resolve_launch_environment(
         term,
         colorterm: config.colorterm.clone(),
         terminfo,
+        term_program: TERMINAL_PROGRAM.to_owned(),
+        term_program_version: TERMINAL_PROGRAM_VERSION.to_owned(),
         env,
     }
 }
 
 fn is_managed_launch_env(name: &str) -> bool {
-    matches!(name, TERM_ENV | COLORTERM_ENV | TERMINFO_ENV)
+    matches!(
+        name,
+        TERM_ENV | COLORTERM_ENV | TERMINFO_ENV | TERM_PROGRAM_ENV | TERM_PROGRAM_VERSION_ENV
+    )
 }
 
 fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Result<SpawnedPty> {
@@ -1243,6 +1265,8 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
     }
     command.env(TERM_ENV, &launch_env.term);
     command.env(COLORTERM_ENV, &launch_env.colorterm);
+    command.env(TERM_PROGRAM_ENV, &launch_env.term_program);
+    command.env(TERM_PROGRAM_VERSION_ENV, &launch_env.term_program_version);
     if let Some(terminfo) = &launch_env.terminfo {
         command.env(TERMINFO_ENV, terminfo.to_string_lossy().into_owned());
     }
@@ -1750,6 +1774,8 @@ mod tests {
                 ("TERM".to_owned(), "xterm-256color".to_owned()),
                 ("COLORTERM".to_owned(), "false".to_owned()),
                 ("TERMINFO".to_owned(), "/wrong".to_owned()),
+                ("TERM_PROGRAM".to_owned(), "WezTerm".to_owned()),
+                ("TERM_PROGRAM_VERSION".to_owned(), "wrong".to_owned()),
                 ("EDITOR".to_owned(), "nvim".to_owned()),
             ],
             ..Default::default()
@@ -1763,6 +1789,8 @@ mod tests {
             resolved.terminfo.as_deref(),
             Some(Path::new("/bootty/terminfo"))
         );
+        assert_eq!(resolved.term_program, TERMINAL_PROGRAM);
+        assert_eq!(resolved.term_program_version, TERMINAL_PROGRAM_VERSION);
         assert_eq!(resolved.env, [("EDITOR".to_owned(), "nvim".to_owned())]);
     }
 
@@ -1773,6 +1801,8 @@ mod tests {
         assert_eq!(resolved.term, "xterm-256color");
         assert_eq!(resolved.colorterm, "truecolor");
         assert_eq!(resolved.terminfo, None);
+        assert_eq!(resolved.term_program, TERMINAL_PROGRAM);
+        assert_eq!(resolved.term_program_version, TERMINAL_PROGRAM_VERSION);
     }
 
     /// Absolute shell path fixture that passes `normalize_shell_path` on the
@@ -2042,6 +2072,107 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct BlockingWaitChild {
+        killed: Arc<AtomicUsize>,
+        wait_started: mpsc::Sender<()>,
+        wait_gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl portable_pty::ChildKiller for BlockingWaitChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(BlockingWaitKiller {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    impl Child for BlockingWaitChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            let _ = self.wait_started.send(());
+            let (lock, cvar) = &*self.wait_gate;
+            let mut released = lock.lock().expect("wait gate lock");
+            while !*released {
+                released = cvar.wait(released).expect("wait gate condvar");
+            }
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingWaitKiller {
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl portable_pty::ChildKiller for BlockingWaitKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn terminal_child_reap_runs_after_kill_on_background_thread() {
+        let killed = Arc::new(AtomicUsize::new(0));
+        let wait_gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (wait_started_tx, wait_started_rx) = mpsc::channel();
+        let child = Box::new(BlockingWaitChild {
+            killed: killed.clone(),
+            wait_started: wait_started_tx,
+            wait_gate: wait_gate.clone(),
+        });
+        let (returned_tx, returned_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            terminate_child_without_blocking(child);
+            returned_tx.send(()).expect("return signal");
+        });
+
+        let returned = returned_rx.recv_timeout(Duration::from_millis(100));
+        {
+            let (lock, cvar) = &*wait_gate;
+            *lock.lock().expect("wait gate lock") = true;
+            cvar.notify_all();
+        }
+
+        assert_eq!(killed.load(Ordering::SeqCst), 1);
+        assert!(wait_started_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(
+            returned.is_ok(),
+            "kill returns before the child reap completes"
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_until_process_exits(pid: u32) -> bool {
+        for _ in 0..100 {
+            if !process_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     // A shell on a fresh PTY blocks waiting for input, so it stays alive until the
     // session is dropped. The drop must kill it: for the tmux/zellij backends the
     // child is an `attach-session` client, and a leaked client pins the window
@@ -2056,7 +2187,11 @@ mod tests {
             cell_height: 16,
         })
         .expect("spawn terminal session");
-        let pid = session.child.process_id().expect("pty child pid");
+        let pid = session
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .expect("pty child pid");
         assert!(
             process_alive(pid),
             "child should run before the session is dropped"
@@ -2065,7 +2200,7 @@ mod tests {
         drop(session);
 
         assert!(
-            !process_alive(pid),
+            wait_until_process_exits(pid),
             "dropping the session must kill its PTY child to avoid leaking a mux client"
         );
     }

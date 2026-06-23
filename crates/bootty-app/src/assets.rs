@@ -8,9 +8,6 @@ use eframe::egui;
 #[cfg(not(target_os = "macos"))]
 const NATIVE_APP_ICON_PNG: &[u8] = MASCOT_ICON_PNG;
 const MASCOT_ICON_PNG: &[u8] = include_bytes!("../assets/bootty-mascot.png");
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_DOCK_ICON_ICNS: &[u8] =
-    include_bytes!("../assets/bootty-icon-macos-dock.icns");
 
 pub(crate) fn title_icon_color_image() -> egui::ColorImage {
     let icon = decode_png(MASCOT_ICON_PNG);
@@ -134,9 +131,6 @@ mod tests {
 
     #[test]
     fn native_icon_decodes_to_rgba8_bytes() {
-        #[cfg(target_os = "macos")]
-        assert!(!MACOS_DOCK_ICON_ICNS.is_empty());
-
         #[cfg(not(target_os = "macos"))]
         {
             let icon = native_app_icon_data();

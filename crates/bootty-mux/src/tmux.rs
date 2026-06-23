@@ -48,6 +48,11 @@ impl<R: CommandRunner> TmuxBackend<R> {
         let output = self.runner.run(&self.program, &args)?;
         require_success(&self.program, &args, output)
     }
+
+    fn run_disowned_owned(&self, args: Vec<String>) -> Result<String> {
+        let output = self.runner.run_disowned(&self.program, &args)?;
+        require_success(&self.program, &args, output)
+    }
 }
 
 impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
@@ -80,7 +85,7 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
             }
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
-                self.run_owned(vec![
+                self.run_disowned_owned(vec![
                     "new-session".into(),
                     "-d".into(),
                     "-s".into(),
@@ -318,17 +323,56 @@ mod tests {
     use super::*;
     use crate::process::{CommandOutput, CommandRunner};
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedCall {
+        disowned: bool,
+        argv: Vec<String>,
+    }
+
+    impl RecordedCall {
+        fn foreground<const N: usize>(argv: [&str; N]) -> Self {
+            Self {
+                disowned: false,
+                argv: argv.into_iter().map(str::to_owned).collect(),
+            }
+        }
+
+        fn disowned<const N: usize>(argv: [&str; N]) -> Self {
+            Self {
+                disowned: true,
+                argv: argv.into_iter().map(str::to_owned).collect(),
+            }
+        }
+    }
     #[derive(Clone, Default)]
     struct RecordingRunner {
-        calls: Rc<RefCell<Vec<Vec<String>>>>,
+        calls: Rc<RefCell<Vec<RecordedCall>>>,
         stdout: Rc<RefCell<VecDeque<String>>>,
     }
 
     impl CommandRunner for RecordingRunner {
         fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+            self.record_call(program, args, false)
+        }
+
+        fn run_disowned(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+            self.record_call(program, args, true)
+        }
+    }
+
+    impl RecordingRunner {
+        fn record_call(
+            &self,
+            program: &str,
+            args: &[String],
+            disowned: bool,
+        ) -> anyhow::Result<CommandOutput> {
             let mut call = vec![program.to_owned()];
             call.extend(args.iter().cloned());
-            self.calls.borrow_mut().push(call);
+            self.calls.borrow_mut().push(RecordedCall {
+                disowned,
+                argv: call,
+            });
             Ok(CommandOutput {
                 success: true,
                 stdout: self.stdout.borrow_mut().pop_front().unwrap_or_default(),
@@ -369,15 +413,12 @@ mod tests {
 
         assert_eq!(
             calls.borrow().as_slice(),
-            vec![
-                vec!["tmux", "select-window", "-t", "@2"],
-                vec!["tmux", "new-session", "-d", "-s", "proj", "-c", "/repo"],
-                vec!["tmux", "rename-session", "-t", "proj", "next"],
-                vec!["tmux", "kill-session", "-t", "next"],
+            [
+                RecordedCall::foreground(["tmux", "select-window", "-t", "@2"]),
+                RecordedCall::disowned(["tmux", "new-session", "-d", "-s", "proj", "-c", "/repo"]),
+                RecordedCall::foreground(["tmux", "rename-session", "-t", "proj", "next"]),
+                RecordedCall::foreground(["tmux", "kill-session", "-t", "next"]),
             ]
-            .into_iter()
-            .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
-            .collect::<Vec<_>>()
             .as_slice()
         );
     }
@@ -416,15 +457,12 @@ mod tests {
         assert_eq!(
             calls.borrow().as_slice(),
             [
-                vec!["tmux", "new-window", "-t", "$1", "-c", "/repo"],
-                vec!["tmux", "select-window", "-t", "$1:3"],
-                vec!["tmux", "next-window", "-t", "$1"],
-                vec!["tmux", "select-pane", "-t", "$1", "-L"],
-                vec!["tmux", "resize-pane", "-Z", "-t", "$1"],
+                RecordedCall::foreground(["tmux", "new-window", "-t", "$1", "-c", "/repo"]),
+                RecordedCall::foreground(["tmux", "select-window", "-t", "$1:3"]),
+                RecordedCall::foreground(["tmux", "next-window", "-t", "$1"]),
+                RecordedCall::foreground(["tmux", "select-pane", "-t", "$1", "-L"]),
+                RecordedCall::foreground(["tmux", "resize-pane", "-Z", "-t", "$1"]),
             ]
-            .into_iter()
-            .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
-            .collect::<Vec<_>>()
             .as_slice()
         );
     }
