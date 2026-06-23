@@ -62,6 +62,10 @@ name = "paint_plan"
 harness = false
 
 [[bench]]
+name = "pipeline_resources"
+harness = false
+
+[[bench]]
 name = "paint_plan_wgpu"
 harness = false
 
