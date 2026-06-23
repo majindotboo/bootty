@@ -22,8 +22,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
     terminal_engine::{
-        TERMINAL_TERM, TerminalColorConfig, TerminalCursorConfig, TerminalEngine,
-        TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+        TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM, TerminalColorConfig,
+        TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent,
+        TerminalSelectionFormat, TerminalSideEffect,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
@@ -44,6 +45,8 @@ pub const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
 const TERM_ENV: &str = "TERM";
 const COLORTERM_ENV: &str = "COLORTERM";
 const TERMINFO_ENV: &str = "TERMINFO";
+const TERM_PROGRAM_ENV: &str = "TERM_PROGRAM";
+const TERM_PROGRAM_VERSION_ENV: &str = "TERM_PROGRAM_VERSION";
 #[cfg(windows)]
 const DEFAULT_SHELL: &str = "powershell.exe";
 #[cfg(not(windows))]
@@ -1185,6 +1188,8 @@ struct ResolvedLaunchEnvironment {
     term: String,
     colorterm: String,
     terminfo: Option<PathBuf>,
+    term_program: String,
+    term_program_version: String,
     env: Vec<(String, String)>,
 }
 
@@ -1211,12 +1216,17 @@ fn resolve_launch_environment(
         term,
         colorterm: config.colorterm.clone(),
         terminfo,
+        term_program: TERMINAL_PROGRAM.to_owned(),
+        term_program_version: TERMINAL_PROGRAM_VERSION.to_owned(),
         env,
     }
 }
 
 fn is_managed_launch_env(name: &str) -> bool {
-    matches!(name, TERM_ENV | COLORTERM_ENV | TERMINFO_ENV)
+    matches!(
+        name,
+        TERM_ENV | COLORTERM_ENV | TERMINFO_ENV | TERM_PROGRAM_ENV | TERM_PROGRAM_VERSION_ENV
+    )
 }
 
 fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Result<SpawnedPty> {
@@ -1243,6 +1253,8 @@ fn spawn_shell(geometry: TerminalGeometry, config: &SessionLaunchConfig) -> Resu
     }
     command.env(TERM_ENV, &launch_env.term);
     command.env(COLORTERM_ENV, &launch_env.colorterm);
+    command.env(TERM_PROGRAM_ENV, &launch_env.term_program);
+    command.env(TERM_PROGRAM_VERSION_ENV, &launch_env.term_program_version);
     if let Some(terminfo) = &launch_env.terminfo {
         command.env(TERMINFO_ENV, terminfo.to_string_lossy().into_owned());
     }
@@ -1750,6 +1762,8 @@ mod tests {
                 ("TERM".to_owned(), "xterm-256color".to_owned()),
                 ("COLORTERM".to_owned(), "false".to_owned()),
                 ("TERMINFO".to_owned(), "/wrong".to_owned()),
+                ("TERM_PROGRAM".to_owned(), "WezTerm".to_owned()),
+                ("TERM_PROGRAM_VERSION".to_owned(), "wrong".to_owned()),
                 ("EDITOR".to_owned(), "nvim".to_owned()),
             ],
             ..Default::default()
@@ -1763,6 +1777,8 @@ mod tests {
             resolved.terminfo.as_deref(),
             Some(Path::new("/bootty/terminfo"))
         );
+        assert_eq!(resolved.term_program, TERMINAL_PROGRAM);
+        assert_eq!(resolved.term_program_version, TERMINAL_PROGRAM_VERSION);
         assert_eq!(resolved.env, [("EDITOR".to_owned(), "nvim".to_owned())]);
     }
 
@@ -1773,6 +1789,8 @@ mod tests {
         assert_eq!(resolved.term, "xterm-256color");
         assert_eq!(resolved.colorterm, "truecolor");
         assert_eq!(resolved.terminfo, None);
+        assert_eq!(resolved.term_program, TERMINAL_PROGRAM);
+        assert_eq!(resolved.term_program_version, TERMINAL_PROGRAM_VERSION);
     }
 
     /// Absolute shell path fixture that passes `normalize_shell_path` on the
