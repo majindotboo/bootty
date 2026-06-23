@@ -1,14 +1,13 @@
 --!strict
 -- Built-in sidebar `codexbar` module. Override with ~/.config/bootty/sidebar/codexbar.luau.
--- Backed by the CodexBar CLI, which is multi-provider, so this renders a 5h/7d usage meter
--- per entry in PROVIDERS. Add a row to surface any other provider CodexBar can fetch.
+-- Backed by the CodexBar CLI. The built-in default only probes Codex; add rows to PROVIDERS
+-- in a user override to surface other configured providers.
 local ui = bootty.ui
 
 -- base color is the healthy-meter color; the icon distinguishes the provider. Keep it clear of
 -- ORANGE_COLOR/RED_COLOR below so a full quota never reads as a warning.
 local PROVIDERS = {
 	{ id = "codex", label = "codex", icon = "openai", color = "#74c7ec" },
-	{ id = "claude", label = "claude", icon = "claude", color = "#d97757" },
 }
 
 local ORANGE_COLOR = "#fab387"
@@ -17,6 +16,7 @@ local GREEN_COLOR = "#a6e3a1"
 local TRACK_COLOR = "#313244"
 local TEXT_COLOR = "#cdd6f4"
 local MUTED_COLOR = "#6c7086"
+local empty_renders = 0
 
 local function parse_window(data, key, fallback_window_secs)
 	local window = data[key]
@@ -97,14 +97,53 @@ local function usage_item(provider, label, window)
 	})
 end
 
+local function status_item(label)
+	return {
+		kind = "footer",
+		text = "codexbar " .. label,
+		fg = MUTED_COLOR,
+	}
+end
+
+local function short_status(value)
+	local first = string.match(value, "^[^\n]*") or value
+	if #first > 42 then
+		return string.sub(first, 1, 39) .. "..."
+	end
+	return first
+end
+
+local function error_message(data)
+	local err = data.error
+	if not err and data[1] then
+		err = data[1].error
+	end
+	if err and err.message then
+		return short_status(err.message)
+	end
+	return nil
+end
+
+
+local function usage_command(provider)
+	local command = "codexbar usage --provider " .. provider.id .. " --format json --json-only 2>&1"
+	return "out=$(" .. command .. "); status=$?; if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf 'codexbar exited %s with empty output' \"$status\"; fi"
+end
+
 local function provider_items(provider)
+	local raw = bootty.run(usage_command(provider))
+	if raw == "" then
+		return {}, nil
+	end
 	local ok, data = pcall(function()
-		return bootty.json.decode(
-			bootty.run("codexbar usage --provider " .. provider.id .. " --format json --json-only")
-		)
+		return bootty.json.decode(raw)
 	end)
 	if not ok or not data then
-		return {}
+		return {}, short_status(raw)
+	end
+	local err = error_message(data)
+	if err then
+		return {}, err
 	end
 	data = data[1] or data
 	data = data.usage or data
@@ -117,17 +156,25 @@ local function provider_items(provider)
 	if secondary then
 		items[#items + 1] = usage_item(provider, "7d", secondary)
 	end
-	return items
+	return items, nil
 end
 
 local function usage_items()
 	local items = {}
+	local status = nil
 	for _, provider in ipairs(PROVIDERS) do
-		for _, item in ipairs(provider_items(provider)) do
+		local provider_items_result, provider_status = provider_items(provider)
+		status = status or provider_status
+		for _, item in ipairs(provider_items_result) do
 			items[#items + 1] = item
 		end
 	end
-	return items
+	if #items > 0 then
+		empty_renders = 0
+		return items
+	end
+	empty_renders += 1
+	return { status_item(if status then status else "loading") }
 end
 
 return {

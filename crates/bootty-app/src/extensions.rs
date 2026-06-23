@@ -11,6 +11,8 @@
 //! never block the UI.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicU64;
@@ -309,7 +311,7 @@ impl RunCache {
         std::thread::spawn(move || {
             let output = shell_run_output(&cmd, &cache.run_jobs, &cache.shutdown)
                 .map(|output| output.trim().to_owned())
-                .unwrap_or_default();
+                .unwrap_or_else(|error| format!("bootty.run: {error}"));
             if let Ok(mut entries) = cache.entries.lock() {
                 let entry = entries.entry(cmd).or_default();
                 entry.output = output;
@@ -652,7 +654,7 @@ fn run_loop(
                     .last_run
                     .is_none_or(|last| now.duration_since(last) >= module.interval)
             {
-                module.last_run = Some(now);
+                record_module_interval_run(force, &mut module.last_run, now);
                 let produced = run_module(&module.body);
                 if let Ok(mut map) = items.write()
                     && map.get(&module.name) != Some(&produced)
@@ -665,6 +667,12 @@ fn run_loop(
         // Back to Live so the next iteration's `on_reorder` mutations always execute and never cache.
         run_cache.set_mode(RunMode::Live);
         waker.wait(TICK);
+    }
+}
+
+fn record_module_interval_run(force: bool, last_run: &mut Option<Instant>, now: Instant) {
+    if !force {
+        *last_run = Some(now);
     }
 }
 
@@ -859,14 +867,14 @@ static RUN_OUTPUT_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Default)]
 struct PlatformRunJobs {
     #[cfg(target_os = "macos")]
-    jobs: Mutex<BTreeMap<String, PathBuf>>,
+    jobs: Mutex<BTreeMap<String, Vec<PathBuf>>>,
 }
 
 impl PlatformRunJobs {
     #[cfg(target_os = "macos")]
-    fn register(&self, label: &str, output_path: PathBuf) {
+    fn register(&self, label: &str, paths: Vec<PathBuf>) {
         if let Ok(mut jobs) = self.jobs.lock() {
-            jobs.insert(label.to_owned(), output_path);
+            jobs.insert(label.to_owned(), paths);
         }
     }
 
@@ -886,8 +894,12 @@ impl PlatformRunJobs {
 const MACOS_BACKGROUND_SHELL_SCRIPT: &str = r#"cwd=$1
 shell=$2
 command=$3
+status_path=$4
 cd "$cwd" 2>/dev/null || true
-exec "$shell" -c "$command"
+"$shell" -c "$command"
+status=$?
+printf '%s' "$status" > "$status_path"
+exit "$status"
 "#;
 
 fn shell_run_output(
@@ -907,17 +919,21 @@ fn platform_shell_run_output(
     let id = RUN_OUTPUT_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let output_path =
         std::env::temp_dir().join(format!("bootty-run-{}-{id}.out", std::process::id()));
+    let status_path =
+        std::env::temp_dir().join(format!("bootty-run-{}-{id}.status", std::process::id()));
     let output_path_arg = output_path.to_string_lossy().into_owned();
+    let status_path_arg = status_path.to_string_lossy().into_owned();
     let label = format!("dev.bootty.run.{}.{}", std::process::id(), id);
     let launchctl = resolve_shell_program("launchctl")?;
     let shell = resolve_shell_program("sh")?;
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
-    run_jobs.register(&label, output_path.clone());
+    run_jobs.register(&label, vec![output_path.clone(), status_path.clone()]);
     if shutdown.load(Ordering::Relaxed) {
         run_jobs.unregister(&label);
         let _ = std::fs::remove_file(&output_path);
+        let _ = std::fs::remove_file(&status_path);
         return Err(std::io::Error::other("extension host stopped"));
     }
     let script = macos_shell_run_script();
@@ -929,12 +945,14 @@ fn platform_shell_run_output(
                 &label,
                 "-o",
                 &output_path_arg,
+                "-e",
+                &output_path_arg,
                 "--",
                 &shell,
                 "-c",
             ])
             .arg(script)
-            .args(["bootty-run", &cwd, &shell, cmd])
+            .args(["bootty-run", &cwd, &shell, cmd, &status_path_arg])
             .status()?;
         if !status.success() {
             return Err(std::io::Error::other(format!(
@@ -942,7 +960,7 @@ fn platform_shell_run_output(
             )));
         }
 
-        wait_for_launchd_exit(&launchctl, &label)?;
+        wait_for_run_status(&status_path, shutdown, Duration::from_secs(60 * 60))?;
         std::fs::read_to_string(&output_path)
     })();
     run_jobs.unregister(&label);
@@ -950,7 +968,30 @@ fn platform_shell_run_output(
         .args(["remove", &label])
         .status();
     let _ = std::fs::remove_file(&output_path);
+    let _ = std::fs::remove_file(&status_path);
     result
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_run_status(
+    status_path: &Path,
+    shutdown: &AtomicBool,
+    timeout: Duration,
+) -> std::io::Result<i32> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if shutdown.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("extension host stopped"));
+        }
+        if let Ok(raw) = std::fs::read_to_string(status_path) {
+            return raw.trim().parse::<i32>().map_err(std::io::Error::other);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "bootty.run command did not finish before timeout",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -964,13 +1005,15 @@ fn cleanup_platform_shell_run_jobs(run_jobs: &PlatformRunJobs) {
         return;
     }
     let launchctl = resolve_shell_program("launchctl").ok();
-    for (label, output_path) in jobs {
+    for (label, paths) in jobs {
         if let Some(launchctl) = &launchctl {
             let _ = std::process::Command::new(launchctl)
                 .args(["remove", &label])
                 .status();
         }
-        let _ = std::fs::remove_file(output_path);
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
         run_jobs.unregister(&label);
     }
 }
@@ -979,16 +1022,38 @@ fn cleanup_platform_shell_run_jobs(run_jobs: &PlatformRunJobs) {
 fn cleanup_platform_shell_run_jobs(_run_jobs: &PlatformRunJobs) {}
 
 #[cfg(target_os = "macos")]
-fn macos_shell_run_script() -> String {
-    let mut script = bootty_mux::process::macos_shell_environment_prelude();
-    script.push_str(MACOS_BACKGROUND_SHELL_SCRIPT);
-    script
+fn macos_shell_run_environment_from<I, K, V>(
+    current: I,
+    login_env: Option<Vec<(String, String)>>,
+) -> BTreeMap<OsString, OsString>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let mut env = current
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect::<BTreeMap<OsString, OsString>>();
+    if let Some(login_env) = login_env {
+        for (key, value) in login_env {
+            if key == "PATH" || !env.contains_key(&OsString::from(&key)) {
+                env.insert(OsString::from(key), OsString::from(value));
+            }
+        }
+    }
+    env
 }
 
 #[cfg(target_os = "macos")]
-fn wait_for_launchd_exit(launchctl: &str, label: &str) -> std::io::Result<i32> {
-    bootty_mux::process::wait_for_launchd_exit(launchctl, label, Duration::from_secs(60 * 60))
-        .map_err(std::io::Error::other)
+fn macos_shell_run_script() -> String {
+    let env = macos_shell_run_environment_from(
+        std::env::vars_os(),
+        crate::shell_env::login_shell_environment(),
+    );
+    let mut script = bootty_mux::process::macos_shell_environment_prelude_from(env);
+    script.push_str(MACOS_BACKGROUND_SHELL_SCRIPT);
+    script
 }
 
 #[cfg(target_os = "macos")]
@@ -1573,6 +1638,8 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn run_source(source: &str) -> Vec<ModuleItem> {
         let theme = [("accent".to_owned(), "#89b4fa".to_owned())];
@@ -1587,6 +1654,31 @@ mod tests {
         let value = lua.load(source).eval::<Value>().unwrap();
         let module = loaded_module_from_value("test".to_owned(), value).unwrap();
         run_module(&module.body)
+    }
+
+    #[cfg(unix)]
+    struct PathGuard(std::ffi::OsString);
+
+    #[cfg(unix)]
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::set_var("PATH", &self.0);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn prepend_path(path: &Path) -> PathGuard {
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let next_path = std::env::join_paths(
+            std::iter::once(path.to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join PATH");
+        unsafe {
+            std::env::set_var("PATH", next_path);
+        }
+        PathGuard(old_path)
     }
 
     #[test]
@@ -1613,6 +1705,128 @@ mod tests {
             BUILTIN_SIDEBAR_EXTENSIONS,
             &["sessions", "codexbar"],
         );
+    }
+
+    #[test]
+    fn forced_cached_render_does_not_delay_next_interval_refresh() {
+        let now = Instant::now();
+        let mut last_run = None;
+
+        record_module_interval_run(true, &mut last_run, now);
+        assert_eq!(last_run, None);
+
+        record_module_interval_run(false, &mut last_run, now);
+        assert_eq!(last_run, Some(now));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_shell_run_environment_uses_login_path_without_clobbering_existing_vars() {
+        let env = macos_shell_run_environment_from(
+            [
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from("HOME"), OsString::from("/Users/live")),
+            ],
+            Some(vec![
+                ("PATH".to_owned(), "/opt/bin:/usr/bin".to_owned()),
+                ("HOME".to_owned(), "/Users/login".to_owned()),
+                ("BOOTTY_ENV_PROBE".to_owned(), "login".to_owned()),
+            ]),
+        );
+
+        assert_eq!(
+            env.get(&OsString::from("PATH")),
+            Some(&OsString::from("/opt/bin:/usr/bin"))
+        );
+        assert_eq!(
+            env.get(&OsString::from("HOME")),
+            Some(&OsString::from("/Users/live"))
+        );
+        assert_eq!(
+            env.get(&OsString::from("BOOTTY_ENV_PROBE")),
+            Some(&OsString::from("login"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codexbar_builtin_renders_codex_without_probe_for_unconfigured_providers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("codexbar");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+provider=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --provider)
+            shift
+            provider="$1"
+            ;;
+    esac
+    shift
+done
+
+case "$provider" in
+    codex)
+        printf '%s' '[{"usage":{"primary":{"usedPercent":25,"windowMinutes":300},"secondary":{"usedPercent":50,"windowMinutes":10080}}}]'
+        ;;
+    *)
+        exit 2
+        ;;
+esac
+"#,
+        )
+        .expect("write fake codexbar");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake codexbar executable");
+        let _path = prepend_path(dir.path());
+        let run_cache = Arc::new(RunCache::default());
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::clone(&run_cache),
+        )
+        .expect("setup lua");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_SIDEBAR_EXTENSIONS);
+        let codexbar = modules
+            .iter()
+            .find(|module| module.name == "codexbar")
+            .expect("codexbar builtin loaded");
+
+        run_cache.set_mode(RunMode::Refresh);
+        let loading = run_module(&codexbar.body)
+            .into_iter()
+            .map(|item| item.text)
+            .collect::<Vec<_>>();
+        assert_eq!(loading, vec!["codexbar loading"]);
+        assert!(wait_for_cached_output_containing(
+            &run_cache,
+            "usedPercent",
+            Duration::from_secs(2)
+        ));
+        let commands = run_cache
+            .entries
+            .lock()
+            .expect("run cache entries")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(commands.iter().all(|cmd| cmd.contains("--provider codex")));
+        assert!(commands.iter().all(|cmd| !cmd.contains("claude")));
+        assert!(commands.iter().all(|cmd| !cmd.contains("/opt/homebrew")));
+        assert!(commands.iter().all(|cmd| !cmd.contains("/usr/local")));
+        assert!(commands.iter().all(|cmd| !cmd.contains(".local/bin")));
+
+        run_cache.set_mode(RunMode::Cached);
+        let texts = run_module(&codexbar.body)
+            .into_iter()
+            .map(|item| item.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["codex 5h", "codex 7d"]);
     }
 
     #[test]
@@ -1747,6 +1961,25 @@ mod tests {
         false
     }
 
+    fn wait_for_cached_output_containing(
+        cache: &RunCache,
+        needle: &str,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cache
+                .entries
+                .lock()
+                .is_ok_and(|entries| entries.values().any(|entry| entry.output.contains(needle)))
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     #[test]
     fn shell_run_output_returns_stdout_text() {
         assert_eq!(
@@ -1760,33 +1993,45 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shell_run_output_captures_launchd_job_stderr() {
+        assert_eq!(
+            shell_run_output(
+                "printf bootty-stderr >&2",
+                &PlatformRunJobs::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            "bootty-stderr"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shell_run_output_waits_for_fast_launchd_jobs_to_start() {
+        for index in 0..20 {
+            assert_eq!(
+                shell_run_output(
+                    &format!("printf fast-{index}"),
+                    &PlatformRunJobs::default(),
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+                format!("fast-{index}")
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn shell_run_output_preserves_path_lookup() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let program = dir.path().join("bootty-path-probe");
         std::fs::write(&program, "#!/bin/sh\nprintf path-ok").expect("write path probe");
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
             .expect("make path probe executable");
-        let old_path = std::env::var_os("PATH").unwrap_or_default();
-        let next_path = std::env::join_paths(
-            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
-        )
-        .expect("join PATH");
-        struct PathGuard(std::ffi::OsString);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    std::env::set_var("PATH", &self.0);
-                }
-            }
-        }
-        let _guard = PathGuard(old_path);
-        unsafe {
-            std::env::set_var("PATH", next_path);
-        }
+        let _path = prepend_path(dir.path());
 
         assert_eq!(
             shell_run_output(
@@ -2177,6 +2422,25 @@ mod tests {
         run_cache.set_mode(RunMode::Live);
         assert_eq!(run(), "3", "live always executes, ignoring the cache");
         assert_eq!(run(), "4", "live never serves a cached result");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn run_cache_refresh_keeps_shell_out_errors_visible() {
+        let cmd = "printf ignored".to_owned();
+        let run_cache = Arc::new(RunCache {
+            shutdown: Arc::new(AtomicBool::new(true)),
+            ..RunCache::default()
+        });
+
+        run_cache.set_mode(RunMode::Refresh);
+        assert_eq!(run_cache.run(&cmd).unwrap(), "");
+
+        assert!(wait_for_cached_output_containing(
+            &run_cache,
+            "bootty.run: extension host stopped",
+            Duration::from_secs(2)
+        ));
     }
 
     #[test]
