@@ -12,9 +12,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Color32};
@@ -221,26 +222,45 @@ enum RunMode {
     /// Outside a render (e.g. an `on_reorder` mutation): always shell out, never cache. Keeps
     /// side-effecting commands like `tmux move-window` out of the cache and always executed.
     Live = 0,
-    /// Interval render: shell out and store the result, refreshing the cache.
+    /// Interval render: return the last cached value immediately and refresh it in the background.
     Refresh = 1,
-    /// Forced render (a reorder or structural mux change): serve the last render's cached output so
-    /// the render is instant. A reorder changes only order, so the cached query results still hold;
-    /// only commands missing from the cache actually run.
+    /// Forced render (a reorder, structural mux change, or completed background refresh): serve
+    /// cached output only so the render is instant and side-effect free.
     Cached = 2,
 }
 
-/// Caches `bootty.run` query output across renders so a forced re-render reuses the previous
-/// render's shell-outs instead of re-running every `git`/`tmux` query. Shared between the worker
-/// loop (which sets the mode each phase) and the `bootty.run` host function.
+/// Caches `bootty.run` query output across renders and refreshes shell-outs off the extension
+/// worker so one slow provider/command cannot block unrelated modules.
 #[derive(Default)]
 struct RunCache {
-    /// Query command -> trimmed stdout from the most recent interval render.
-    entries: Mutex<HashMap<String, String>>,
+    entries: Mutex<HashMap<String, RunEntry>>,
     /// Current behavior, a `RunMode` discriminant; defaults to `Live`.
     mode: AtomicU8,
+    waker: Option<Arc<Waker>>,
+    run_jobs: Arc<PlatformRunJobs>,
+    shutdown: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct RunEntry {
+    output: String,
+    refreshing: bool,
 }
 
 impl RunCache {
+    fn with_waker(
+        waker: Arc<Waker>,
+        run_jobs: Arc<PlatformRunJobs>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            waker: Some(waker),
+            run_jobs,
+            shutdown,
+            ..Self::default()
+        }
+    }
+
     fn set_mode(&self, mode: RunMode) {
         self.mode.store(mode as u8, Ordering::Relaxed);
     }
@@ -251,6 +271,54 @@ impl RunCache {
             x if x == RunMode::Refresh as u8 => RunMode::Refresh,
             _ => RunMode::Live,
         }
+    }
+
+    fn run(self: &Arc<Self>, cmd: &str) -> std::io::Result<String> {
+        match self.mode() {
+            RunMode::Live => shell_run_output(cmd, &self.run_jobs, &self.shutdown)
+                .map(|output| output.trim().to_owned()),
+            RunMode::Cached => Ok(self.cached(cmd).unwrap_or_default()),
+            RunMode::Refresh => {
+                let output = self.cached(cmd).unwrap_or_default();
+                self.refresh(cmd.to_owned());
+                Ok(output)
+            }
+        }
+    }
+
+    fn cached(&self, cmd: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(cmd).map(|entry| entry.output.clone()))
+    }
+
+    fn refresh(self: &Arc<Self>, cmd: String) {
+        {
+            let Ok(mut entries) = self.entries.lock() else {
+                return;
+            };
+            let entry = entries.entry(cmd.clone()).or_default();
+            if entry.refreshing {
+                return;
+            }
+            entry.refreshing = true;
+        }
+
+        let cache = Arc::clone(self);
+        std::thread::spawn(move || {
+            let output = shell_run_output(&cmd, &cache.run_jobs, &cache.shutdown)
+                .map(|output| output.trim().to_owned())
+                .unwrap_or_default();
+            if let Ok(mut entries) = cache.entries.lock() {
+                let entry = entries.entry(cmd).or_default();
+                entry.output = output;
+                entry.refreshing = false;
+            }
+            if let Some(waker) = &cache.waker {
+                waker.force();
+            }
+        });
     }
 }
 
@@ -306,8 +374,8 @@ pub struct ExtensionHost {
     /// Session-order changes modules requested via `bootty.reorder_session`, drained by the app.
     session_reorders: Arc<RwLock<Vec<SessionReorder>>>,
     waker: Arc<Waker>,
+    run_jobs: Arc<PlatformRunJobs>,
     shutdown: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl ExtensionHost {
@@ -341,8 +409,9 @@ impl ExtensionHost {
         let pending_reorders: Arc<RwLock<Vec<ReorderRequest>>> = Arc::default();
         let session_reorders: Arc<RwLock<Vec<SessionReorder>>> = Arc::default();
         let waker: Arc<Waker> = Arc::default();
+        let run_jobs = Arc::new(PlatformRunJobs::default());
         let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = std::thread::Builder::new()
+        let _handle = std::thread::Builder::new()
             .name(thread_name.to_owned())
             .spawn({
                 let items = Arc::clone(&items);
@@ -353,6 +422,7 @@ impl ExtensionHost {
                 let session_reorders = Arc::clone(&session_reorders);
                 let waker = Arc::clone(&waker);
                 let shutdown = Arc::clone(&shutdown);
+                let run_jobs = Arc::clone(&run_jobs);
                 move || {
                     run_loop(
                         &dir,
@@ -367,6 +437,7 @@ impl ExtensionHost {
                         &session_reorders,
                         &waker,
                         &shutdown,
+                        &run_jobs,
                     )
                 }
             })
@@ -380,7 +451,7 @@ impl ExtensionHost {
             session_reorders,
             waker,
             shutdown,
-            handle,
+            run_jobs,
         }
     }
 
@@ -465,9 +536,7 @@ impl Drop for ExtensionHost {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.waker.wake();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.run_jobs.cleanup();
     }
 }
 
@@ -483,10 +552,15 @@ fn run_loop(
     items: &RwLock<HashMap<String, Vec<ModuleItem>>>,
     pending_reorders: &RwLock<Vec<ReorderRequest>>,
     session_reorders: &Arc<RwLock<Vec<SessionReorder>>>,
-    waker: &Waker,
-    shutdown: &AtomicBool,
+    waker: &Arc<Waker>,
+    shutdown: &Arc<AtomicBool>,
+    run_jobs: &Arc<PlatformRunJobs>,
 ) {
-    let run_cache = Arc::new(RunCache::default());
+    let run_cache = Arc::new(RunCache::with_waker(
+        Arc::clone(waker),
+        Arc::clone(run_jobs),
+        Arc::clone(shutdown),
+    ));
     let Ok(lua) = setup_lua(
         theme,
         Arc::clone(mux),
@@ -563,7 +637,6 @@ fn run_loop(
         } else {
             RunMode::Refresh
         });
-        let mut changed = false;
         for module in &mut modules {
             // Only run modules a segment references, so an unused module never
             // shells out on its interval.
@@ -584,15 +657,12 @@ fn run_loop(
                     && map.get(&module.name) != Some(&produced)
                 {
                     map.insert(module.name.clone(), produced);
-                    changed = true;
+                    ctx.request_repaint();
                 }
             }
         }
         // Back to Live so the next iteration's `on_reorder` mutations always execute and never cache.
         run_cache.set_mode(RunMode::Live);
-        if changed {
-            ctx.request_repaint();
-        }
         waker.wait(TICK);
     }
 }
@@ -782,6 +852,167 @@ fn json_value_to_lua(lua: &Lua, value: serde_json::Value) -> mlua::Result<Value>
     }
 }
 
+#[cfg(target_os = "macos")]
+static RUN_OUTPUT_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct PlatformRunJobs {
+    #[cfg(target_os = "macos")]
+    jobs: Mutex<BTreeMap<String, PathBuf>>,
+}
+
+impl PlatformRunJobs {
+    #[cfg(target_os = "macos")]
+    fn register(&self, label: &str, output_path: PathBuf) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(label.to_owned(), output_path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn unregister(&self, label: &str) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(label);
+        }
+    }
+
+    fn cleanup(&self) {
+        cleanup_platform_shell_run_jobs(self);
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_BACKGROUND_SHELL_SCRIPT: &str = r#"cwd=$1
+shell=$2
+command=$3
+cd "$cwd" 2>/dev/null || true
+exec "$shell" -c "$command"
+"#;
+
+fn shell_run_output(
+    cmd: &str,
+    run_jobs: &PlatformRunJobs,
+    shutdown: &AtomicBool,
+) -> std::io::Result<String> {
+    platform_shell_run_output(cmd, run_jobs, shutdown)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_shell_run_output(
+    cmd: &str,
+    run_jobs: &PlatformRunJobs,
+    shutdown: &AtomicBool,
+) -> std::io::Result<String> {
+    let id = RUN_OUTPUT_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let output_path =
+        std::env::temp_dir().join(format!("bootty-run-{}-{id}.out", std::process::id()));
+    let output_path_arg = output_path.to_string_lossy().into_owned();
+    let label = format!("dev.bootty.run.{}.{}", std::process::id(), id);
+    let launchctl = resolve_shell_program("launchctl")?;
+    let shell = resolve_shell_program("sh")?;
+    let cwd = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    run_jobs.register(&label, output_path.clone());
+    if shutdown.load(Ordering::Relaxed) {
+        run_jobs.unregister(&label);
+        let _ = std::fs::remove_file(&output_path);
+        return Err(std::io::Error::other("extension host stopped"));
+    }
+    let script = macos_shell_run_script();
+    let result = (|| {
+        let status = std::process::Command::new(&launchctl)
+            .args([
+                "submit",
+                "-l",
+                &label,
+                "-o",
+                &output_path_arg,
+                "--",
+                &shell,
+                "-c",
+            ])
+            .arg(script)
+            .args(["bootty-run", &cwd, &shell, cmd])
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "launchctl submit failed with {status}"
+            )));
+        }
+
+        wait_for_launchd_exit(&launchctl, &label)?;
+        std::fs::read_to_string(&output_path)
+    })();
+    run_jobs.unregister(&label);
+    let _ = std::process::Command::new(&launchctl)
+        .args(["remove", &label])
+        .status();
+    let _ = std::fs::remove_file(&output_path);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_platform_shell_run_jobs(run_jobs: &PlatformRunJobs) {
+    let jobs = run_jobs
+        .jobs
+        .lock()
+        .map(|jobs| jobs.clone())
+        .unwrap_or_default();
+    if jobs.is_empty() {
+        return;
+    }
+    let launchctl = resolve_shell_program("launchctl").ok();
+    for (label, output_path) in jobs {
+        if let Some(launchctl) = &launchctl {
+            let _ = std::process::Command::new(launchctl)
+                .args(["remove", &label])
+                .status();
+        }
+        let _ = std::fs::remove_file(output_path);
+        run_jobs.unregister(&label);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cleanup_platform_shell_run_jobs(_run_jobs: &PlatformRunJobs) {}
+
+#[cfg(target_os = "macos")]
+fn macos_shell_run_script() -> String {
+    let mut script = bootty_mux::process::macos_shell_environment_prelude();
+    script.push_str(MACOS_BACKGROUND_SHELL_SCRIPT);
+    script
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_launchd_exit(launchctl: &str, label: &str) -> std::io::Result<i32> {
+    bootty_mux::process::wait_for_launchd_exit(launchctl, label, Duration::from_secs(60 * 60))
+        .map_err(std::io::Error::other)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_shell_program(program: &str) -> std::io::Result<String> {
+    bootty_mux::process::resolve_program(program).map_err(std::io::Error::other)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_shell_run_output(
+    cmd: &str,
+    _run_jobs: &PlatformRunJobs,
+    _shutdown: &AtomicBool,
+) -> std::io::Result<String> {
+    let (program, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let output = std::process::Command::new(program)
+        .arg(flag)
+        .arg(cmd)
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn setup_lua(
     theme: &[(String, String)],
     mux: Arc<RwLock<MuxView>>,
@@ -794,38 +1025,12 @@ fn setup_lua(
 
     // Shell out and return trimmed stdout, via the platform shell. Prefer
     // `bootty.metrics()` for system stats, which is native and cross-platform.
-    // A forced (reorder) re-render serves the previous render's output from `run_cache`,
-    // so reordering doesn't re-run every per-session `git`/`tmux` query.
+    // Render phases return cached output immediately and refresh in the background,
+    // so a slow provider/command cannot block unrelated modules.
     bootty.set(
         "run",
         lua.create_function(move |_, cmd: String| {
-            let mode = run_cache.mode();
-            if mode == RunMode::Cached
-                && let Some(output) = run_cache
-                    .entries
-                    .lock()
-                    .ok()
-                    .and_then(|entries| entries.get(&cmd).cloned())
-            {
-                return Ok(output);
-            }
-            let (program, flag) = if cfg!(windows) {
-                ("cmd", "/C")
-            } else {
-                ("sh", "-c")
-            };
-            let output = std::process::Command::new(program)
-                .arg(flag)
-                .arg(&cmd)
-                .output()
-                .map_err(mlua::Error::external)?;
-            let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if mode != RunMode::Live
-                && let Ok(mut entries) = run_cache.entries.lock()
-            {
-                entries.insert(cmd, trimmed.clone());
-            }
-            Ok(trimmed)
+            run_cache.run(&cmd).map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -1409,6 +1614,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dropping_extension_host_does_not_wait_for_blocked_run_callback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = dir.path().join("started");
+        let gate = dir.path().join("gate");
+        let done = dir.path().join("done");
+        let command = format!(
+            "touch {}; while [ ! -f {} ]; do sleep 0.05; done; touch {}",
+            shell_quote(&started),
+            shell_quote(&gate),
+            shell_quote(&done),
+        );
+        std::fs::write(
+            dir.path().join("blocker.luau"),
+            format!(
+                "return {{ interval = 0, render = function() return bootty.run({command:?}) end }}"
+            ),
+        )
+        .expect("write blocking module");
+        let host = ExtensionHost::spawn_status(
+            dir.path().to_path_buf(),
+            egui::Context::default(),
+            Vec::new(),
+        );
+        host.set_active(["blocker".to_owned()]);
+
+        assert!(wait_for_path(&started, Duration::from_secs(2)));
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(host);
+            dropped_tx.send(()).expect("drop signal");
+        });
+
+        let dropped_before_gate = dropped_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        std::fs::write(&gate, "").expect("open blocking command gate");
+
+        assert!(
+            dropped_before_gate,
+            "ExtensionHost drop must not join a worker blocked in bootty.run"
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            !wait_for_path(&done, Duration::from_millis(200)),
+            "dropping the host should cancel macOS launchd shell jobs"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(wait_for_path(&done, Duration::from_secs(2)));
+    }
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+    fn wait_for_cached_output(
+        cache: &RunCache,
+        cmd: &str,
+        expected: &str,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cache.cached(cmd).as_deref() == Some(expected) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn shell_run_output_returns_stdout_text() {
+        assert_eq!(
+            shell_run_output(
+                "printf bootty-run",
+                &PlatformRunJobs::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            "bootty-run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_run_output_preserves_path_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let program = dir.path().join("bootty-path-probe");
+        std::fs::write(&program, "#!/bin/sh\nprintf path-ok").expect("write path probe");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make path probe executable");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let next_path = std::env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join PATH");
+        struct PathGuard(std::ffi::OsString);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::set_var("PATH", &self.0);
+                }
+            }
+        }
+        let _guard = PathGuard(old_path);
+        unsafe {
+            std::env::set_var("PATH", next_path);
+        }
+
+        assert_eq!(
+            shell_run_output(
+                "bootty-path-probe",
+                &PlatformRunJobs::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+            "path-ok"
+        );
+    }
     fn assert_builtins_load(
         lua: &Lua,
         dir: &Path,
@@ -1733,16 +2068,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_cache_serves_query_output_only_during_forced_render() {
-        // A reorder forces a re-render whose shell-outs return the same data as the last render,
-        // so `Cached` mode must serve the stored output instead of re-running every git/tmux query
-        // (the lag this fixes). `Refresh` must re-run to pick up real changes, and `Live` (an
-        // `on_reorder` mutation phase) must never serve a cached, side-effect-free result.
+    fn run_cache_refreshes_query_output_without_blocking_render() {
+        // Render-mode `bootty.run` must not block the extension worker: it returns cached output
+        // immediately and refreshes the command in the background. Live mode is still synchronous
+        // for side-effecting calls such as `on_reorder` handlers.
         let dir = tempfile::tempdir().expect("tempdir");
         let counter = dir.path().join("n");
+        let counter_arg = shell_quote(&counter);
         let cmd = format!(
             "n=$(cat {0} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {0}; printf %s $n",
-            counter.display()
+            counter_arg
         );
         let run_cache = Arc::new(RunCache::default());
         let lua = setup_lua(
@@ -1753,23 +2088,38 @@ mod tests {
             Arc::clone(&run_cache),
         )
         .unwrap();
+        let run_cmd = cmd.clone();
         let run = move || {
-            lua.load(format!("return bootty.run({cmd:?})"))
+            lua.load(format!("return bootty.run({run_cmd:?})"))
                 .eval::<String>()
                 .unwrap()
         };
 
         run_cache.set_mode(RunMode::Refresh);
-        assert_eq!(run(), "1", "refresh executes and caches the output");
-        run_cache.set_mode(RunMode::Cached);
         assert_eq!(
             run(),
-            "1",
-            "cached serves the stored output without re-running"
+            "",
+            "first refresh returns the empty cache immediately"
         );
+        assert!(wait_for_cached_output(
+            &run_cache,
+            &cmd,
+            "1",
+            Duration::from_secs(2)
+        ));
+        run_cache.set_mode(RunMode::Cached);
+        assert_eq!(run(), "1", "cached serves background-refreshed output");
         assert_eq!(run(), "1", "cached keeps serving on repeat");
         run_cache.set_mode(RunMode::Refresh);
-        assert_eq!(run(), "2", "refresh re-executes and updates the cache");
+        assert_eq!(run(), "1", "refresh returns stale output while updating");
+        assert!(wait_for_cached_output(
+            &run_cache,
+            &cmd,
+            "2",
+            Duration::from_secs(2)
+        ));
+        run_cache.set_mode(RunMode::Cached);
+        assert_eq!(run(), "2", "cached sees completed background refresh");
         run_cache.set_mode(RunMode::Live);
         assert_eq!(run(), "3", "live always executes, ignoring the cache");
         assert_eq!(run(), "4", "live never serves a cached result");

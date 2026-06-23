@@ -81,11 +81,6 @@ fn read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
     None
 }
 
-pub fn spawn_new_window() -> Result<()> {
-    std::process::Command::new(std::env::current_exe()?).spawn()?;
-    Ok(())
-}
-
 pub fn apply_macos_non_native_fullscreen_presentation(window: &WindowConfig) -> bool {
     set_macos_non_native_fullscreen_presentation(
         window.non_native_fullscreen_enabled()
@@ -280,16 +275,6 @@ pub fn native_options_for_config(config: &BoottyConfig) -> eframe::NativeOptions
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn install_macos_app_icon() -> bool {
-    macos_app_icon::install()
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn install_macos_app_icon() -> bool {
-    true
-}
-
 // macOS automatic window tabbing claims Cmd+T (newWindowForTab:) at the OS level before it reaches
 // the app, which would shadow Bootty's new-tab shortcut. Opt out so the key reaches us. Must run
 // before any window is created, since the class flag is read at window-creation time.
@@ -329,7 +314,7 @@ pub fn new_tab_shortcut_hint() -> &'static str {
 fn apply_native_icon_to_viewport(
     viewport: eframe::egui::ViewportBuilder,
 ) -> eframe::egui::ViewportBuilder {
-    viewport
+    viewport.with_icon(eframe::egui::IconData::default())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -575,34 +560,6 @@ mod macos_presentation {
     }
 }
 
-#[cfg(target_os = "macos")]
-mod macos_app_icon {
-    use objc2::{AnyThread as _, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
-
-    use crate::assets;
-
-    pub fn install() -> bool {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return false;
-        };
-        let app = NSApplication::sharedApplication(mtm);
-        let data = unsafe {
-            NSData::dataWithBytes_length(
-                assets::MACOS_DOCK_ICON_ICNS.as_ptr().cast(),
-                assets::MACOS_DOCK_ICON_ICNS.len(),
-            )
-        };
-        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
-            return false;
-        };
-        unsafe {
-            app.setApplicationIconImage(Some(&image));
-        }
-        true
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,7 +587,7 @@ mod tests {
         assert_eq!(options.viewport.decorations, Some(false));
         assert_eq!(options.viewport.title_shown, Some(false));
         assert_eq!(options.viewport.titlebar_buttons_shown, Some(false));
-        assert_eq!(options.viewport.icon.is_some(), !cfg!(target_os = "macos"));
+        assert!(viewport_has_expected_platform_icon(&options.viewport));
     }
 
     #[test]
@@ -650,11 +607,21 @@ mod tests {
         let config = BoottyConfig::default();
         let options = native_options_for_config(&config);
 
-        if cfg!(target_os = "macos") {
-            assert!(options.viewport.icon.is_none());
-        } else {
+        assert!(viewport_has_expected_platform_icon(&options.viewport));
+        if !cfg!(target_os = "macos") {
             let icon = options.viewport.icon.expect("native app icon");
             assert_eq!((icon.width, icon.height), (256, 256));
+        }
+    }
+
+    fn viewport_has_expected_platform_icon(viewport: &egui::ViewportBuilder) -> bool {
+        if cfg!(target_os = "macos") {
+            viewport
+                .icon
+                .as_deref()
+                .is_some_and(|icon| *icon == egui::IconData::default())
+        } else {
+            viewport.icon.is_some()
         }
     }
 }

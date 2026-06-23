@@ -100,7 +100,7 @@ pub struct TerminalSession {
     pending_pty_len: Arc<AtomicUsize>,
     geometry: TerminalGeometry,
     pty_master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Option<Box<dyn Child + Send + Sync>>,
     tty_name: Option<String>,
 }
 
@@ -113,11 +113,20 @@ impl Drop for TerminalSession {
     // smallest stale client pins the window so the live terminal can no longer grow
     // it. Switching sessions drops a fresh session every time, so these accumulate.
     // Kill the child on drop to detach the client (the tmux session itself
-    // survives) and to reap the native shell when a terminal is closed.
+    // survives) and to reap the native shell when a terminal is closed. Reap on
+    // a background thread so a slow child wait cannot beachball app shutdown.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = self.child.take() {
+            terminate_child_without_blocking(child);
+        }
     }
+}
+
+fn terminate_child_without_blocking(mut child: Box<dyn Child + Send + Sync>) {
+    let _ = child.kill();
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 type SpawnedPty = (
@@ -240,7 +249,7 @@ impl TerminalSession {
             pending_pty_len,
             geometry,
             pty_master,
-            child,
+            child: Some(child),
             tty_name,
         })
     }
@@ -292,10 +301,13 @@ impl TerminalSession {
     }
 
     pub fn child_exited(&mut self) -> Result<bool> {
-        self.child
-            .try_wait()
-            .map(|status| status.is_some())
-            .context("poll shell child process")
+        match self.child.as_mut() {
+            Some(child) => child
+                .try_wait()
+                .map(|status| status.is_some())
+                .context("poll shell child process"),
+            None => Ok(true),
+        }
     }
 
     pub fn tty_name(&self) -> Option<&str> {
@@ -2060,6 +2072,107 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct BlockingWaitChild {
+        killed: Arc<AtomicUsize>,
+        wait_started: mpsc::Sender<()>,
+        wait_gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl portable_pty::ChildKiller for BlockingWaitChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(BlockingWaitKiller {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    impl Child for BlockingWaitChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            let _ = self.wait_started.send(());
+            let (lock, cvar) = &*self.wait_gate;
+            let mut released = lock.lock().expect("wait gate lock");
+            while !*released {
+                released = cvar.wait(released).expect("wait gate condvar");
+            }
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingWaitKiller {
+        killed: Arc<AtomicUsize>,
+    }
+
+    impl portable_pty::ChildKiller for BlockingWaitKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn terminal_child_reap_runs_after_kill_on_background_thread() {
+        let killed = Arc::new(AtomicUsize::new(0));
+        let wait_gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (wait_started_tx, wait_started_rx) = mpsc::channel();
+        let child = Box::new(BlockingWaitChild {
+            killed: killed.clone(),
+            wait_started: wait_started_tx,
+            wait_gate: wait_gate.clone(),
+        });
+        let (returned_tx, returned_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            terminate_child_without_blocking(child);
+            returned_tx.send(()).expect("return signal");
+        });
+
+        let returned = returned_rx.recv_timeout(Duration::from_millis(100));
+        {
+            let (lock, cvar) = &*wait_gate;
+            *lock.lock().expect("wait gate lock") = true;
+            cvar.notify_all();
+        }
+
+        assert_eq!(killed.load(Ordering::SeqCst), 1);
+        assert!(wait_started_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(
+            returned.is_ok(),
+            "kill returns before the child reap completes"
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_until_process_exits(pid: u32) -> bool {
+        for _ in 0..100 {
+            if !process_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     // A shell on a fresh PTY blocks waiting for input, so it stays alive until the
     // session is dropped. The drop must kill it: for the tmux/zellij backends the
     // child is an `attach-session` client, and a leaked client pins the window
@@ -2074,7 +2187,11 @@ mod tests {
             cell_height: 16,
         })
         .expect("spawn terminal session");
-        let pid = session.child.process_id().expect("pty child pid");
+        let pid = session
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .expect("pty child pid");
         assert!(
             process_alive(pid),
             "child should run before the session is dropped"
@@ -2083,7 +2200,7 @@ mod tests {
         drop(session);
 
         assert!(
-            !process_alive(pid),
+            wait_until_process_exits(pid),
             "dropping the session must kill its PTY child to avoid leaking a mux client"
         );
     }

@@ -14,7 +14,7 @@ use crate::{
     app::BoottyApp,
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, direct_key_input_from_winit_event},
-    platform::{disable_automatic_window_tabbing, install_macos_app_icon},
+    platform::disable_automatic_window_tabbing,
 };
 
 pub fn run(options: eframe::NativeOptions, config: BoottyConfig) -> Result<()> {
@@ -101,7 +101,6 @@ impl NativeInputState {
 impl ApplicationHandler<UserEvent> for BoottyNativeHost<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.inner.resumed(event_loop);
-        install_macos_app_icon();
     }
 
     fn window_event(

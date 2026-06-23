@@ -8,7 +8,6 @@ DIST_DIR="${BOOTTY_DIST_DIR:-dist}"
 TARGET_ROOT="${CARGO_TARGET_DIR:-target}"
 MACOS_ICON_NAME="bootty"
 MACOS_ICON_SOURCE="crates/bootty-app/assets/$MACOS_ICON_NAME.icon"
-MACOS_ICON_FALLBACK="crates/bootty-app/assets/bootty-icon-macos-dock.icns"
 VERSION="${BOOTTY_VERSION:-$(awk '
   $0 == "[workspace.package]" { in_workspace_package = 1; next }
   /^\[/ { in_workspace_package = 0 }
@@ -39,7 +38,6 @@ ensure_project_zig() {
 }
 
 ensure_project_zig
-
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
@@ -56,9 +54,13 @@ case "$(uname -s)" in
     mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
     cp "$TARGET_ROOT/release/$BINARY_NAME" "$MACOS_DIR/$BINARY_NAME"
     ACTOOL="$(xcrun --find actool 2>/dev/null || true)"
+    if [[ -z "$ACTOOL" ]]; then
+      echo "Xcode actool is required to package the macOS app icon" >&2
+      exit 1
+    fi
     ICON_PARTIAL_INFO="$CONTENTS_DIR/assetcatalog-info.plist"
     ACTOOL_LOG="$(mktemp)"
-    if [[ -n "$ACTOOL" ]] && "$ACTOOL" "$MACOS_ICON_SOURCE" \
+    if ! "$ACTOOL" "$MACOS_ICON_SOURCE" \
       --compile "$RESOURCES_DIR" \
       --app-icon "$MACOS_ICON_NAME" \
       --enable-on-demand-resources NO \
@@ -70,27 +72,12 @@ case "$(uname -s)" in
       --minimum-deployment-target 13.0 \
       --output-partial-info-plist "$ICON_PARTIAL_INFO" \
       >"$ACTOOL_LOG" 2>&1; then
+      echo "actool failed compiling the app icon:" >&2
+      cat "$ACTOOL_LOG" >&2
       rm -f "$ICON_PARTIAL_INFO" "$ACTOOL_LOG"
-    else
-      if [[ "${BOOTTY_STRICT_MACOS_ICON:-0}" == "1" ]]; then
-        if [[ -z "$ACTOOL" ]]; then
-          echo "Xcode 26 actool is required to package the macOS Liquid Glass app icon" >&2
-        else
-          echo "actool failed compiling the app icon:" >&2
-          cat "$ACTOOL_LOG" >&2
-        fi
-        rm -f "$ICON_PARTIAL_INFO" "$ACTOOL_LOG"
-        exit 1
-      fi
-      if [[ -z "$ACTOOL" ]]; then
-        echo "Xcode 26 actool not found; using legacy macOS .icns fallback" >&2
-      else
-        echo "actool failed compiling the app icon; using legacy macOS .icns fallback" >&2
-        cat "$ACTOOL_LOG" >&2
-      fi
-      rm -f "$ICON_PARTIAL_INFO" "$ACTOOL_LOG"
-      cp "$MACOS_ICON_FALLBACK" "$RESOURCES_DIR/$MACOS_ICON_NAME.icns"
+      exit 1
     fi
+    rm -f "$ICON_PARTIAL_INFO" "$ACTOOL_LOG"
     chmod +x "$MACOS_DIR/$BINARY_NAME"
 
     cat > "$CONTENTS_DIR/Info.plist" <<PLIST
