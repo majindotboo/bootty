@@ -79,6 +79,7 @@ backend = "rmux"
 [input]
 keybind = ["cmd+shift+,=reload_config"]
 sidebar-keybind = ["Enter=activate_session", "j=next_session", "k=previous_session"]
+hide-mouse-pointer-while-typing = true
 macos-option-as-alt = "both" # none, left, right, or both
 modifier-remap = ["right_alt=left_ctrl"]
 

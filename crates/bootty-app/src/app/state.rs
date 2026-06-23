@@ -132,6 +132,7 @@ pub struct AppState {
     wheel_scroll_state: WheelScrollState,
     modifier_remaps: ModifierRemapSet,
     terminal_cursor_icon: egui::CursorIcon,
+    mouse_pointer_hidden_while_typing: bool,
     macos_option_as_alt: crate::terminal::MacosOptionAsAlt,
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
@@ -414,6 +415,7 @@ impl AppState {
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
+            mouse_pointer_hidden_while_typing: false,
             macos_option_as_alt,
             stability_trace,
             config_hot_reload,
@@ -698,7 +700,9 @@ impl AppState {
             TerminalSideEffect::MouseShape(shape) => {
                 if let Some(icon) = terminal_cursor_icon_for_mouse_shape(&shape) {
                     self.terminal_cursor_icon = icon;
-                    effects.push(AppEffect::SetTerminalCursorIcon(icon));
+                    effects.push(AppEffect::SetTerminalCursorIcon(
+                        self.effective_terminal_cursor_icon(),
+                    ));
                 }
             }
             TerminalSideEffect::OpenUrl(url) => effects.push(AppEffect::OpenUrl(url)),
@@ -728,6 +732,46 @@ impl AppState {
             | TerminalSideEffect::Iterm2Control(_)
             | TerminalSideEffect::Iterm2File(_)
             | TerminalSideEffect::UnsupportedHostCommand { .. } => {}
+        }
+    }
+
+    fn effective_terminal_cursor_icon(&self) -> egui::CursorIcon {
+        if self.mouse_pointer_hidden_while_typing {
+            egui::CursorIcon::None
+        } else {
+            self.terminal_cursor_icon
+        }
+    }
+
+    fn set_mouse_pointer_hidden_while_typing(
+        &mut self,
+        hidden: bool,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        let hidden = hidden && self.config().input.hide_mouse_pointer_while_typing;
+        if self.mouse_pointer_hidden_while_typing == hidden {
+            return;
+        }
+        self.mouse_pointer_hidden_while_typing = hidden;
+        effects.push(AppEffect::SetTerminalCursorIcon(
+            self.effective_terminal_cursor_icon(),
+        ));
+    }
+
+    fn hide_mouse_pointer_for_terminal_typing(&mut self, effects: &mut Vec<AppEffect>) {
+        self.set_mouse_pointer_hidden_while_typing(true, effects);
+    }
+
+    fn restore_mouse_pointer_after_pointer_moved(
+        &mut self,
+        events: &[egui::Event],
+        effects: &mut Vec<AppEffect>,
+    ) {
+        if events
+            .iter()
+            .any(|event| matches!(event, egui::Event::PointerMoved(_)))
+        {
+            self.set_mouse_pointer_hidden_while_typing(false, effects);
         }
     }
 
@@ -949,6 +993,7 @@ impl AppState {
         self.has_new_session_config_changes = new_session_only_config_changed(&previous, &next)
             || self.has_new_session_config_changes;
         self.config_state.accept(next);
+        self.set_mouse_pointer_hidden_while_typing(self.mouse_pointer_hidden_while_typing, effects);
         self.session_order = SessionOrderStore::lazy_for_config_path(&self.config().config_path);
         self.sync_session_order();
         self.last_error = if self.has_new_session_config_changes {
@@ -1049,6 +1094,7 @@ impl AppState {
         if suppress_next_egui_paste {
             remove_first_paste_event(&mut events);
         }
+        self.restore_mouse_pointer_after_pointer_moved(&events, effects);
         let terminal_input_enabled = self.direct_terminal_input_enabled();
         let selection_surface = terminal_input_enabled
             .then_some(self.terminal_surface)
@@ -1099,7 +1145,7 @@ impl AppState {
         }
 
         for command in commands {
-            self.apply_terminal_input(command);
+            self.apply_terminal_input(command, effects);
         }
 
         count
@@ -1153,7 +1199,7 @@ impl AppState {
             if input.mods.command {
                 continue;
             }
-            self.apply_terminal_input(TerminalInputCommand::Key(input));
+            self.apply_terminal_input(TerminalInputCommand::Key(input), effects);
         }
         count
     }
@@ -1283,6 +1329,8 @@ impl AppState {
             KeybindAction::Write(bytes) => {
                 if let Err(error) = self.terminal.write_input(&bytes) {
                     self.last_error = Some(error.to_string());
+                } else {
+                    self.hide_mouse_pointer_for_terminal_typing(effects);
                 }
             }
             KeybindAction::Font(action) => self.apply_font_size_action(action, effects),
@@ -1528,11 +1576,17 @@ impl AppState {
         }
     }
 
-    fn apply_terminal_input(&mut self, command: TerminalInputCommand) {
+    fn apply_terminal_input(
+        &mut self,
+        command: TerminalInputCommand,
+        effects: &mut Vec<AppEffect>,
+    ) {
         match command {
             TerminalInputCommand::Text(text) => {
                 if let Err(error) = self.terminal.write_input(text.as_bytes()) {
                     self.last_error = Some(error.to_string());
+                } else {
+                    self.hide_mouse_pointer_for_terminal_typing(effects);
                 }
             }
             TerminalInputCommand::Paste(text) => {
@@ -1548,6 +1602,8 @@ impl AppState {
             TerminalInputCommand::Key(input) => {
                 if let Err(error) = self.terminal.encode_key(input) {
                     self.last_error = Some(error.to_string());
+                } else {
+                    self.hide_mouse_pointer_for_terminal_typing(effects);
                 }
             }
             TerminalInputCommand::Mouse(input) => {
@@ -1851,6 +1907,45 @@ mod tests {
     }
 
     #[test]
+    fn terminal_typing_hides_mouse_pointer_until_pointer_moves() {
+        let mut state = test_state();
+        state.terminal_cursor_icon = egui::CursorIcon::PointingHand;
+        let mut effects = Vec::new();
+
+        state.apply_terminal_input(TerminalInputCommand::Text("x".to_owned()), &mut effects);
+
+        assert_eq!(
+            effects,
+            vec![AppEffect::SetTerminalCursorIcon(egui::CursorIcon::None)]
+        );
+
+        effects.clear();
+        state.restore_mouse_pointer_after_pointer_moved(
+            &[egui::Event::PointerMoved(egui::Pos2::new(1.0, 1.0))],
+            &mut effects,
+        );
+
+        assert_eq!(
+            effects,
+            vec![AppEffect::SetTerminalCursorIcon(
+                egui::CursorIcon::PointingHand
+            )]
+        );
+    }
+
+    #[test]
+    fn hide_mouse_pointer_while_typing_setting_can_disable_typing_hide() {
+        let mut state = test_state_with_config(|config| {
+            config.input.hide_mouse_pointer_while_typing = false;
+        });
+        let mut effects = Vec::new();
+
+        state.apply_terminal_input(TerminalInputCommand::Text("x".to_owned()), &mut effects);
+
+        assert!(effects.is_empty());
+    }
+
+    #[test]
     fn bell_side_effect_requests_host_bell() {
         let mut state = test_state();
         let mut effects = Vec::new();
@@ -1943,14 +2038,19 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        test_state_with_config(|_| {})
+    }
+
+    fn test_state_with_config(mutate: impl FnOnce(&mut BoottyConfig)) -> AppState {
         let repaint: RepaintHandle = std::sync::Arc::new(|| {});
         let unique = unique_test_id();
         let config_dir = std::env::temp_dir().join(format!("bootty-test-{unique}"));
         std::fs::create_dir_all(&config_dir).expect("create app state test config dir");
-        let config = BoottyConfig {
+        let mut config = BoottyConfig {
             config_path: config_dir.join("config.toml"),
             ..BoottyConfig::default()
         };
+        mutate(&mut config);
         AppState::new(config, repaint, None, None).expect("state")
     }
 

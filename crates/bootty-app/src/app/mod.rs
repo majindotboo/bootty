@@ -193,6 +193,7 @@ impl BoottyApp {
                 }
                 AppEffect::SetTerminalCursorIcon(icon) => {
                     self.terminal_widget.set_terminal_cursor_icon(icon);
+                    ctx.set_cursor_icon(icon);
                 }
                 AppEffect::SetWindowFocus => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
