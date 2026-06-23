@@ -6,24 +6,18 @@ local quote = ui.shell_quote
 
 local MUTED_COLOR = "#6c7086"
 local SUCCESS_COLOR = "#a6e3a1"
-local WARNING_COLOR = "#f9e2af"
 local DESTRUCTIVE_COLOR = "#f38ba8"
-local TRACK_COLOR = "#313244"
 local CODEX_COLOR = "#74c7ec"
 local CLAUDE_COLOR = "#fab387"
 local OPENCODE_COLOR = "#9a8fbf"
+local WAITING_COLOR = "#f9e2af"
+local PERC_BASE = "#d78787"
+local PERC_SHINE = "#ffaf87"
 
-local PROCESS_STYLE = {
-	git = { icon = "git-branch", color = DESTRUCTIVE_COLOR },
-	nvim = { icon = "square-pen", color = CODEX_COLOR },
-	vim = { icon = "square-pen", color = CODEX_COLOR },
-	cargo = { icon = "package", color = WARNING_COLOR },
-	rustc = { icon = "package", color = WARNING_COLOR },
-	["rust-analyzer"] = { icon = "package", color = WARNING_COLOR },
-	node = { icon = "terminal", color = SUCCESS_COLOR },
-	bun = { icon = "terminal", color = SUCCESS_COLOR },
-	deno = { icon = "terminal", color = SUCCESS_COLOR },
-}
+local PULSE_PERIOD = 2.0
+local FACT_REFRESH_INTERVAL = 0.5
+local CODEX_VERBS = { "Codexing…", "Working…", "Thingamabobbing…" }
+local OPENCODE_VERBS = { "Opencodding…", "Opendoing…", "Shming Shmopenig…" }
 
 local AGENT_STYLE = {
 	codex = { icon = "openai", color = CODEX_COLOR },
@@ -34,6 +28,7 @@ local AGENT_STYLE = {
 local FACTS_CACHE = {}
 local first_render = true
 local refresh_index = 1
+local last_fact_refresh = 0
 
 local function tmux_session(session)
 	return string.sub(session.id, 1, 1) == "$"
@@ -57,14 +52,6 @@ local function tmux_active_pane(session)
 	return nil, nil, nil
 end
 
-local function tmux_option(session, option)
-	if not tmux_session(session) then
-		return nil
-	end
-	local value = bootty.run("tmux show-options -t " .. quote(session.id) .. " -qv " .. quote(option) .. " 2>/dev/null")
-	return if value == "" then nil else value
-end
-
 local function captured_pane(pane_id)
 	return if pane_id and pane_id ~= ""
 		then bootty.run("tmux capture-pane -t " .. quote(pane_id) .. " -p -S -30 2>/dev/null")
@@ -76,8 +63,12 @@ local function git_branch(cwd)
 		return nil
 	end
 	local branch = bootty.run("git -C " .. quote(cwd) .. " rev-parse --abbrev-ref HEAD 2>/dev/null")
-	return if branch == "" or branch == "HEAD" then nil else branch
+	if branch == "" or branch == "HEAD" or ui.starts_with(branch, "bootty.run:") or string.find(branch, "\n", 1, true) then
+		return nil
+	end
+	return branch
 end
+
 
 local function git_diff(cwd)
 	if not cwd or cwd == "" then
@@ -194,20 +185,58 @@ local function descendant_agent(children, root_pid)
 	return nil
 end
 
-local function parse_star_activity(text)
+local function is_input_separator(line)
+	local count = 0
+	for char in string.gmatch(line, utf8.charpattern) do
+		if char ~= "─" then
+			return false
+		end
+		count += 1
+	end
+	return count >= 20
+end
+
+local function gerund_from_line(line)
 	local marks = { "·", "•", "✻", "⋆", "✦", "✧", "✶", "✢", "✽", "✳" }
+	for _, mark in ipairs(marks) do
+		local prefix = mark .. " "
+		if ui.starts_with(line, prefix) then
+			local rest = string.sub(line, #prefix + 1)
+			if string.find(rest, "…", 1, true) then
+				local word = string.match(rest, "^(%S+)") or ""
+				word = string.gsub(word, "…$", "")
+				return if #word >= 2 then word .. "…" else nil
+			end
+		end
+	end
+	return nil
+end
+
+local function parse_star_activity(text)
 	local lines = {}
 	for line in string.gmatch(text, "[^\n]+") do
-		lines[#lines + 1] = ui.trim(line)
+		lines[#lines + 1] = line
 	end
+	local scan_until = #lines
 	for index = #lines, 1, -1 do
-		for _, mark in ipairs(marks) do
-			local prefix = mark .. " "
-			if ui.starts_with(lines[index], prefix) then
-				local rest = string.sub(lines[index], #prefix + 1)
-				if string.find(rest, "…", 1, true) then
-					return string.gsub(string.match(rest, "^(%S+)") or "working", "…$", "") .. "…"
+		if is_input_separator(ui.trim(lines[index])) then
+			scan_until = index - 1
+			for top = index - 1, 1, -1 do
+				if is_input_separator(ui.trim(lines[top])) then
+					scan_until = top - 1
+					break
 				end
+			end
+			break
+		end
+	end
+	for index = scan_until, 1, -1 do
+		local line = lines[index]
+		local trimmed = ui.trim(line)
+		if trimmed ~= "" and not string.find(trimmed, "٪", 1, true) then
+			local first = string.sub(line, 1, 1)
+			if first ~= " " and first ~= "\t" then
+				return gerund_from_line(trimmed)
 			end
 		end
 	end
@@ -265,28 +294,72 @@ local function agent_status(agent, text)
 			and string.find(lower, "submit", 1, true) ~= nil
 			and string.find(lower, "dismiss", 1, true) ~= nil
 	end
-	if asking then
-		return "asking"
-	end
-	return "active"
+	return if asking then "Waiting…" else nil
 end
 
-local function animated(detail)
-	if not string.find(detail, "…", 1, true) and detail ~= "Working" then
-		return detail
+local function hex_to_rgb(color)
+	local r, g, b = string.match(color or "", "^#(%x%x)(%x%x)(%x%x)$")
+	if not r then
+		return 255, 255, 255
 	end
-	return string.gsub(detail, "…", string.rep(".", math.floor(bootty.time() * 5) % 4 + 1))
+	return tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)
+end
+
+local function rgb_to_hex(r, g, b)
+	return string.format(
+		"#%02x%02x%02x",
+		ui.clamp(math.floor(r + 0.5), 0, 255),
+		ui.clamp(math.floor(g + 0.5), 0, 255),
+		ui.clamp(math.floor(b + 0.5), 0, 255)
+	)
+end
+
+local function scale_color(color, factor)
+	local r, g, b = hex_to_rgb(color)
+	return rgb_to_hex(r * factor, g * factor, b * factor)
+end
+
+local function mix_color(from_color, to_color, amount)
+	local ar, ag, ab = hex_to_rgb(from_color)
+	local br, bg, bb = hex_to_rgb(to_color)
+	return rgb_to_hex(ar + (br - ar) * amount, ag + (bg - ag) * amount, ab + (bb - ab) * amount)
+end
+
+local function pulse_amount()
+	local t = (bootty.time() % PULSE_PERIOD) / PULSE_PERIOD
+	return 1 - math.abs(2 * t - 1)
+end
+
+local function activity_color(facts)
+	local amount = pulse_amount()
+	if facts.agent_detail == "Waiting…" then
+		return mix_color(scale_color(WAITING_COLOR, 0.7), scale_color(WAITING_COLOR, 1.25), amount)
+	elseif facts.agent_name == "claude" then
+		return mix_color(PERC_BASE, PERC_SHINE, amount)
+	elseif facts.agent_style then
+		return mix_color(scale_color(facts.agent_style.color, 0.6), scale_color(facts.agent_style.color, 1.5), amount)
+	end
+	return MUTED_COLOR
+end
+
+local function cycled_activity(facts)
+	if facts.agent_detail == "Waiting…" then
+		return facts.agent_detail
+	end
+	if facts.agent_name == "codex" then
+		return CODEX_VERBS[math.floor(bootty.time() / 8) % #CODEX_VERBS + 1]
+	elseif facts.agent_name == "opencode" then
+		return OPENCODE_VERBS[math.floor(bootty.time() / 8) % #OPENCODE_VERBS + 1]
+	end
+	return facts.agent_detail
 end
 
 local function minimal_facts()
-	return {
-		process_style = { icon = "terminal", color = MUTED_COLOR },
-	}
+	return {}
 end
 
 local function refreshed_session_facts(session)
 	local process, pane_id, pane_pid = tmux_active_pane(session)
-	local progress_text = tmux_option(session, "@sidebar_progress")
 	local agent_name = agent_command(process)
 	if not agent_name and pane_pid then
 		agent_name = descendant_agent(process_snapshot(), pane_pid)
@@ -294,14 +367,10 @@ local function refreshed_session_facts(session)
 	local agent_detail = if agent_name then agent_status(agent_name, captured_pane(pane_id)) else nil
 	local diff_added, diff_removed = git_diff(session.cwd)
 	return {
-		process = process,
 		display_process = agent_name or process,
-		process_style = PROCESS_STYLE[command_basename(process)] or { icon = "terminal", color = MUTED_COLOR },
 		branch = git_branch(session.cwd),
 		diff_added = diff_added,
 		diff_removed = diff_removed,
-		status = tmux_option(session, "@sidebar_status"),
-		progress = if progress_text then ui.clamp(tonumber(progress_text) or 0, 0, 100) else nil,
 		agent_name = agent_name,
 		agent_detail = agent_detail,
 		agent_style = AGENT_STYLE[agent_name],
@@ -346,7 +415,12 @@ local function refresh_one_session(sessions)
 	if not session then
 		return
 	end
-	FACTS_CACHE[session.id] = refreshed_session_facts(session)
+	local previous = FACTS_CACHE[session.id]
+	local refreshed = refreshed_session_facts(session)
+	if previous and refreshed.branch == nil then
+		refreshed.branch = previous.branch
+	end
+	FACTS_CACHE[session.id] = refreshed
 end
 
 local function session_right(_, facts)
@@ -375,45 +449,30 @@ end
 local function session_details(_, facts)
 	return {
 		{
-			key = "process",
-			icon = facts.process_style.icon,
-			label = if facts.agent_name then nil else facts.process,
-			color = facts.process_style.color,
-		},
-		{
 			key = "agent",
 			icon = if facts.agent_style then facts.agent_style.icon else nil,
 			label = facts.agent_name,
 			color = if facts.agent_style then facts.agent_style.color else nil,
-			right = if facts.agent_detail then animated(facts.agent_detail) else nil,
-			right_color = MUTED_COLOR,
+			right = if facts.agent_detail then cycled_activity(facts) else nil,
+			right_color = if facts.agent_detail then activity_color(facts) else nil,
 		},
 		{ key = "branch", icon = "git-branch", label = facts.branch, color = MUTED_COLOR },
-		{ key = "status", icon = "info", label = facts.status, color = MUTED_COLOR },
 	}
 end
 
-local function session_progress(ctx, facts)
-	if not facts.progress then
-		return nil
-	end
-	return {
-		key = "progress",
-		value = facts.progress,
-		track = TRACK_COLOR,
-		fill = if facts.progress >= 100 then SUCCESS_COLOR else ctx.session.dim_color,
-		label_color = ctx.session.dim_color,
-	}
-end
 
 return {
-	interval = 0.5,
+	interval = 0.1,
 	render = function()
 		local sessions = bootty.sessions()
+		local now = bootty.time()
 		prune_fact_cache(sessions)
 		if first_render then
 			first_render = false
-		else
+			last_fact_refresh = now
+			refresh_one_session(sessions)
+		elseif now - last_fact_refresh >= FACT_REFRESH_INTERVAL then
+			last_fact_refresh = now
 			refresh_one_session(sessions)
 		end
 		return ui.session_items({
@@ -421,7 +480,6 @@ return {
 			facts = cached_session_facts,
 			right = session_right,
 			details = session_details,
-			progress = session_progress,
 		})
 	end,
 }

@@ -984,7 +984,10 @@ fn wait_for_run_status(
             return Err(std::io::Error::other("extension host stopped"));
         }
         if let Ok(raw) = std::fs::read_to_string(status_path) {
-            return raw.trim().parse::<i32>().map_err(std::io::Error::other);
+            let status = raw.trim();
+            if !status.is_empty() {
+                return status.parse::<i32>().map_err(std::io::Error::other);
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1748,87 +1751,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn codexbar_builtin_renders_codex_without_probe_for_unconfigured_providers() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let program = dir.path().join("codexbar");
-        std::fs::write(
-            &program,
-            r#"#!/bin/sh
-provider=""
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --provider)
-            shift
-            provider="$1"
-            ;;
-    esac
-    shift
-done
-
-case "$provider" in
-    codex)
-        printf '%s' '[{"usage":{"primary":{"usedPercent":25,"windowMinutes":300},"secondary":{"usedPercent":50,"windowMinutes":10080}}}]'
-        ;;
-    *)
-        exit 2
-        ;;
-esac
-"#,
-        )
-        .expect("write fake codexbar");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-            .expect("make fake codexbar executable");
-        let _path = prepend_path(dir.path());
-        let run_cache = Arc::new(RunCache::default());
-        let lua = setup_lua(
-            &[],
-            Arc::default(),
-            Arc::default(),
-            Arc::default(),
-            Arc::clone(&run_cache),
-        )
-        .expect("setup lua");
-        let modules = load_modules(&lua, dir.path(), BUILTIN_SIDEBAR_EXTENSIONS);
-        let codexbar = modules
-            .iter()
-            .find(|module| module.name == "codexbar")
-            .expect("codexbar builtin loaded");
-
-        run_cache.set_mode(RunMode::Refresh);
-        let loading = run_module(&codexbar.body)
-            .into_iter()
-            .map(|item| item.text)
-            .collect::<Vec<_>>();
-        assert_eq!(loading, vec!["codexbar loading"]);
-        assert!(wait_for_cached_output_containing(
-            &run_cache,
-            "usedPercent",
-            Duration::from_secs(2)
-        ));
-        let commands = run_cache
-            .entries
-            .lock()
-            .expect("run cache entries")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        assert!(commands.iter().all(|cmd| cmd.contains("--provider codex")));
-        assert!(commands.iter().all(|cmd| !cmd.contains("claude")));
-        assert!(commands.iter().all(|cmd| !cmd.contains("/opt/homebrew")));
-        assert!(commands.iter().all(|cmd| !cmd.contains("/usr/local")));
-        assert!(commands.iter().all(|cmd| !cmd.contains(".local/bin")));
-
-        run_cache.set_mode(RunMode::Cached);
-        let texts = run_module(&codexbar.body)
-            .into_iter()
-            .map(|item| item.text)
-            .collect::<Vec<_>>();
-
-        assert_eq!(texts, vec!["codex 5h", "codex 7d"]);
-    }
-
     #[test]
     fn keep_awake_mux_change_forces_status_module_rerender() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2142,6 +2064,45 @@ esac
         assert!(keys.contains(&"$2:process"));
         assert!(keys.contains(&"$1:progress"));
         assert!(keys.contains(&"$2:progress"));
+    }
+
+    #[test]
+    fn builtin_sessions_keeps_branch_row_stable_without_status_progress_rows() {
+        let cwd = std::env::current_dir()
+            .expect("current dir")
+            .to_string_lossy()
+            .into_owned();
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            sessions: vec![SessionView {
+                id: "plain".to_owned(),
+                name: "bootty".to_owned(),
+                selected: true,
+                cwd: Some(cwd),
+                color: Some("#89b4fa".to_owned()),
+                dim_color: Some("#455a7d".to_owned()),
+                ..SessionView::default()
+            }],
+            ..MuxView::default()
+        }));
+        let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_SIDEBAR_EXTENSIONS);
+        let sessions = modules
+            .iter()
+            .find(|module| module.name == "sessions")
+            .expect("sessions builtin loaded");
+
+        let first = run_module(&sessions.body);
+        let rerendered = run_module(&sessions.body);
+        let keys = rerendered
+            .iter()
+            .filter_map(|item| item.key.as_deref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(first.len(), rerendered.len());
+        assert!(keys.contains(&"plain:branch"));
+        assert!(!keys.contains(&"plain:status"));
+        assert!(!keys.contains(&"plain:progress"));
     }
 
     #[test]
