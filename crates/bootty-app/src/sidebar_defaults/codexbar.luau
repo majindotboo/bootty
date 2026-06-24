@@ -1,17 +1,30 @@
 --!strict
 -- Built-in sidebar `codexbar` module. Override with ~/.config/bootty/sidebar/codexbar.luau.
--- Backed by the CodexBar CLI. The built-in default only probes Codex; add rows to PROVIDERS
--- in a user override to surface other configured providers.
+-- Backed by the CodexBar CLI. Provider fetches are independent; a missing provider
+-- should not suppress rows from another configured provider.
 local ui = bootty.ui
 
--- base color is the healthy-meter color; the icon distinguishes the provider. Keep it clear of
--- ORANGE_COLOR/RED_COLOR below so a full quota never reads as a warning.
+-- Provider colors are intentionally hue-preserving: warning/critical states should read as
+-- quota severity without making one provider look like another.
 local PROVIDERS = {
-	{ id = "codex", label = "codex", icon = "openai", color = "#74c7ec" },
+	{
+		id = "codex",
+		label = "codex",
+		icon = "openai",
+		color = "#74c7ec",
+		warning = "#4ea8de",
+		critical = "#2f8cc8",
+	},
+	{
+		id = "claude",
+		label = "claude",
+		icon = "claude",
+		color = "#fab387",
+		warning = "#d9915f",
+		critical = "#c9654c",
+	},
 }
 
-local ORANGE_COLOR = "#fab387"
-local RED_COLOR = "#ef4444"
 local GREEN_COLOR = "#a6e3a1"
 local TRACK_COLOR = "#313244"
 local TEXT_COLOR = "#cdd6f4"
@@ -33,23 +46,33 @@ local function parse_window(data, key, fallback_window_secs)
 	}
 end
 
-local function quota_color(window, base_color)
-	local remaining_pct = math.max(0, math.min(100, 100 - window.used_percent))
-	if remaining_pct <= 5 then
-		return RED_COLOR
-	elseif remaining_pct <= 15 then
-		return ORANGE_COLOR
-	end
-	return base_color
+local function provider_color(provider, key)
+	return provider[key] or provider.color
 end
 
-local function marker_color(remaining_percent, expected_remaining_percent)
-	if remaining_percent >= expected_remaining_percent then
-		return GREEN_COLOR
-	elseif expected_remaining_percent - remaining_percent < 10 then
-		return ORANGE_COLOR
+local function quota_color(window, provider)
+	local remaining_pct = math.max(0, math.min(100, 100 - window.used_percent))
+	if remaining_pct <= 5 then
+		return provider_color(provider, "critical")
+	elseif remaining_pct <= 15 then
+		return provider_color(provider, "warning")
 	end
-	return ORANGE_COLOR
+	return provider.color
+end
+
+local function deficit_color(provider, deficit)
+	if deficit >= 25 then
+		return provider_color(provider, "critical")
+	end
+	return provider_color(provider, "warning")
+end
+
+local function marker_color(provider, remaining_percent, expected_remaining_percent)
+	local deficit = expected_remaining_percent - remaining_percent
+	if deficit <= 0 then
+		return GREEN_COLOR
+	end
+	return deficit_color(provider, deficit)
 end
 
 local function expected_remaining_percent(window)
@@ -59,13 +82,13 @@ local function expected_remaining_percent(window)
 	return math.max(0, math.min(100, window.reset_secs / window.window_secs * 100))
 end
 
-local function pace_label(window, remaining_pct, expected_remaining_pct)
+local function pace_label(provider, remaining_pct, expected_remaining_pct)
 	if not expected_remaining_pct then
 		return "", nil
 	end
 	local deficit = math.floor(expected_remaining_pct - remaining_pct + 0.5)
 	if deficit > 0 then
-		return string.format("%d%% def", deficit), ORANGE_COLOR
+		return string.format("%d%% def", deficit), deficit_color(provider, deficit)
 	end
 	local ahead = math.floor(remaining_pct - expected_remaining_pct + 0.5)
 	if ahead > 0 then
@@ -77,8 +100,8 @@ end
 local function usage_item(provider, label, window)
 	local remaining_pct = math.max(0, math.min(100, 100 - window.used_percent))
 	local expected_remaining_pct = expected_remaining_percent(window)
-	local color = quota_color(window, provider.color)
-	local pace, pace_color = pace_label(window, remaining_pct, expected_remaining_pct)
+	local color = quota_color(window, provider)
+	local pace, pace_color = pace_label(provider, remaining_pct, expected_remaining_pct)
 	local reset = if window.reset_secs and window.reset_secs > 0 then ui.format_duration(window.reset_secs) else ""
 	return ui.footer_meter({
 		text = provider.label .. " " .. label,
@@ -93,7 +116,7 @@ local function usage_item(provider, label, window)
 		pace_color = pace_color,
 		reset = reset,
 		marker = if expected_remaining_pct then expected_remaining_pct / 100 else nil,
-		marker_color = if expected_remaining_pct then marker_color(remaining_pct, expected_remaining_pct) else nil,
+		marker_color = if expected_remaining_pct then marker_color(provider, remaining_pct, expected_remaining_pct) else nil,
 	})
 end
 

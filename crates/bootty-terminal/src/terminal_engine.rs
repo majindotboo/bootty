@@ -2482,173 +2482,49 @@ impl TerminalEngine {
             return Ok(&self.frame);
         }
 
-        if dirty == Dirty::Partial {
-            let mut row_dirty = Vec::with_capacity(usize::from(rows));
-            let mut dirty_rows = 0_usize;
+        // Extract through the row cache for any non-clean frame. A cold cache (first
+        // frame, resize, or a full redraw) re-extracts every row once and leaves the
+        // cache warm, so the *next* localized edit extracts incrementally instead of
+        // paying a full re-extraction (the §5.4 cold-cache cliff). A warm cache touches
+        // only the rows that changed. `extract_render_row` is the row-decomposed form of
+        // the former inline full-frame loop, reassembled by `assemble_cached_frame`.
+        let full = dirty == Dirty::Full;
+        let mut row_dirty = Vec::with_capacity(usize::from(rows));
+        {
             let mut row_iter = self.rows.update(&snapshot)?;
             while let Some(row) = row_iter.next() {
-                let is_dirty = row.dirty()?;
-                if is_dirty {
-                    dirty_rows += 1;
-                }
-                row_dirty.push(is_dirty);
-            }
-
-            if cache_matches_frame || dirty_rows.saturating_mul(2) <= usize::from(rows) {
-                self.row_cache
-                    .resize_with(usize::from(rows), CachedRenderRow::default);
-                let update_all_rows = !cache_matches_frame;
-                let mut row_iter = self.rows.update(&snapshot)?;
-                let mut row_index = 0_u16;
-                let mut hyperlink_scratch = Vec::new();
-                while let Some(row) = row_iter.next() {
-                    let index = usize::from(row_index);
-                    if update_all_rows || row_dirty.get(index).copied().unwrap_or(false) {
-                        extract_render_row(
-                            &self.terminal,
-                            &mut self.cells,
-                            &mut self.grapheme_scratch,
-                            &mut hyperlink_scratch,
-                            row,
-                            row_index,
-                            &mut self.row_cache[index],
-                        )?;
-                    }
-                    row_index += 1;
-                }
-                return self.assemble_cached_frame(
-                    extract_start,
-                    render_state_update_us,
-                    row_dirty,
-                );
+                row_dirty.push(full || row.dirty()?);
             }
         }
 
-        self.row_cache.clear();
-
-        self.frame.row_dirty.clear();
-        self.frame.selections.clear();
-        self.frame.cells.clear();
-        self.frame.text.clear();
-        self.frame.images = KittyImageFrame::default();
-        self.frame.stats = FrameStats::default();
-
+        self.row_cache
+            .resize_with(usize::from(rows), CachedRenderRow::default);
+        // A cold cache can't trust per-row dirty flags against stale/absent rows, so
+        // re-extract everything; a warm cache extracts only the rows reported dirty.
+        let update_all_rows = full || !cache_matches_frame;
         let mut row_iter = self.rows.update(&snapshot)?;
         let mut row_index = 0_u16;
-        let mut virtual_placeholder_rows = Vec::new();
-        let mut virtual_cells = Vec::new();
         let mut hyperlink_scratch = Vec::new();
-
         while let Some(row) = row_iter.next() {
-            let row_dirty = row.dirty()?;
-            if row_dirty {
-                self.frame.stats.dirty_rows += 1;
+            let index = usize::from(row_index);
+            if update_all_rows || row_dirty.get(index).copied().unwrap_or(false) {
+                extract_render_row(
+                    &self.terminal,
+                    &mut self.cells,
+                    &mut self.grapheme_scratch,
+                    &mut hyperlink_scratch,
+                    row,
+                    row_index,
+                    &mut self.row_cache[index],
+                )?;
             }
-            self.frame.row_dirty.push(row_dirty);
-            if let Some(selection) = row.selection()? {
-                self.frame.selections.push(FrameSelection {
-                    row: row_index,
-                    start_col: selection.start_x,
-                    end_col: selection.end_x,
-                });
-            }
-            let raw_row = row.raw_row()?;
-            let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
-            if raw_row.has_kitty_virtual_placeholder()? {
-                virtual_placeholder_rows.push(row_index);
-            }
-            let mut cell_iter = self.cells.update(row)?;
-            let mut col_index = 0_u16;
-
-            while let Some(cell) = cell_iter.next() {
-                let style = cell.style()?;
-                let grapheme_len = cell.graphemes_len()?;
-                self.grapheme_scratch.resize(grapheme_len, '\0');
-                if grapheme_len > 0 {
-                    cell.graphemes_buf(&mut self.grapheme_scratch)?;
-                }
-
-                let is_virtual_placeholder = self.grapheme_scratch.first() == Some(&'\u{10EEEE}');
-                if is_virtual_placeholder {
-                    virtual_cells.push(KittyVirtualCell {
-                        x: col_index,
-                        y: row_index,
-                        grapheme: self.grapheme_scratch[..grapheme_len].to_vec(),
-                        foreground: style.fg_color,
-                        underline_color: style.underline_color,
-                    });
-                }
-
-                let text_start = self.frame.text.len();
-                let text_len = if is_virtual_placeholder {
-                    0
-                } else {
-                    self.frame
-                        .text
-                        .extend_from_slice(&self.grapheme_scratch[..grapheme_len]);
-                    self.frame.stats.chars += grapheme_len;
-                    grapheme_len
-                };
-
-                let hyperlink = if row_has_hyperlink {
-                    hyperlink_uri_at(&self.terminal, col_index, row_index, &mut hyperlink_scratch)
-                } else {
-                    None
-                };
-
-                self.frame.stats.cells += 1;
-                self.frame.cells.push(RenderCell {
-                    x: col_index,
-                    y: row_index,
-                    text_start,
-                    text_len,
-                    fg: cell.fg_color()?,
-                    bg: cell.bg_color()?,
-                    style: CellStyle {
-                        bold: style.bold,
-                        italic: style.italic,
-                        faint: style.faint,
-                        blink: style.blink,
-                        inverse: style.inverse,
-                        invisible: style.invisible,
-                        strikethrough: style.strikethrough,
-                        overline: style.overline,
-                        underline: style.underline,
-                    },
-                    hyperlink,
-                });
-
-                col_index += 1;
-            }
-
+            // Clear the render-state row dirty flag so the next update reports only
+            // newly-changed rows. libghostty's update does not unset dirty state.
+            row.set_dirty(false)?;
             row_index += 1;
         }
-
-        self.frame.stats.render_state_update_us = render_state_update_us;
-        if self.kitty_graphics_touched || !virtual_cells.is_empty() {
-            let surface = TerminalSurface::for_logical_size(
-                f32::from(self.geometry.pixel_width()),
-                f32::from(self.geometry.pixel_height()),
-                CellMetrics::new(
-                    self.geometry.cell_width as f32,
-                    self.geometry.cell_height as f32,
-                ),
-                TerminalPadding::default(),
-            );
-            let mut images = collect_kitty_image_frame(
-                &self.terminal,
-                surface,
-                &mut self.image_placements,
-                &mut self.image_data_cache,
-            )
-            .unwrap_or_default();
-            append_virtual_image_placements(&self.terminal, surface, &mut images, &virtual_cells)?;
-            images.virtual_placeholder_rows = virtual_placeholder_rows;
-            self.frame.images = images;
-        }
-        self.frame.stats.extraction_us = extract_start.elapsed().as_micros() as u64;
-        self.extracted_content_epoch = self.content_epoch;
-        Ok(&self.frame)
+        snapshot.set_dirty(Dirty::Clean)?;
+        self.assemble_cached_frame(extract_start, render_state_update_us, row_dirty)
     }
 }
 

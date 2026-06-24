@@ -14,10 +14,11 @@ use crate::{
         CellMetrics, CoordinateSpace, SurfacePoint, SurfaceRect, TerminalCoordinate,
         TerminalSurface, ViewTransform, fit_cell_height_to_available_space,
     },
-    paint_plan::{CursorBlinkPhase, PaintPlanner},
+    paint_plan::{CursorBlinkPhase, PaintPlanner, TerminalPaintPlan},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
     terminal::{CursorSnapshot, RenderFrame},
-    terminal_render::{TerminalRenderCommand, TerminalRenderFrame},
+    terminal_image::KittyImageFrame,
+    terminal_render::{RenderFramePool, TerminalRenderCommand, TerminalRenderFrame},
     terminal_text::{TerminalTextConfig, TerminalTextContract},
     terminal_wgpu::{terminal_render_callback, terminal_text_cell_metrics},
 };
@@ -226,10 +227,14 @@ impl TerminalWidget {
             let text_contract =
                 TerminalTextContract::for_terminal_paint_plan(plan, &self.text_config);
             let text_runs = plan.text_runs.len();
-            let render_frame =
-                TerminalRenderFrame::from_plan_and_images(plan, &text_contract, &frame.images);
-            self.render_cache
-                .store(surface, &frame, render_frame, text_runs);
+            self.render_cache.rebuild(
+                surface,
+                &frame,
+                plan,
+                &text_contract,
+                &frame.images,
+                text_runs,
+            );
         }
         self.render_cache.apply_cursor_phase(cursor_blink_phase);
         paint_terminal_content(
@@ -364,6 +369,7 @@ struct TerminalRenderCache {
     frame: Option<Arc<RenderFrame>>,
     surface: Option<TerminalSurface>,
     render_frame: TerminalRenderFrame,
+    pool: RenderFramePool,
     visible_cursor_tail: Vec<TerminalRenderCommand>,
     cursor_tail_start: Option<usize>,
     cursor_alpha: Option<u8>,
@@ -379,6 +385,7 @@ impl Default for TerminalRenderCache {
                 surface: SurfaceRect::from_min_size(0.0, 0.0, 0.0, 0.0),
                 commands: Vec::new(),
             },
+            pool: RenderFramePool::default(),
             visible_cursor_tail: Vec::new(),
             cursor_tail_start: None,
             cursor_alpha: None,
@@ -418,6 +425,10 @@ impl TerminalRenderCache {
         }
     }
 
+    /// Inject a pre-built render frame and refresh bookkeeping. Used by tests that
+    /// exercise cursor-blink and transition handling against a hand-built frame; the
+    /// production repaint path goes through [`Self::rebuild`].
+    #[cfg(test)]
     fn store(
         &mut self,
         surface: TerminalSurface,
@@ -425,17 +436,46 @@ impl TerminalRenderCache {
         render_frame: TerminalRenderFrame,
         text_runs: usize,
     ) {
-        self.cursor_tail_start = render_frame
+        self.render_frame = render_frame;
+        self.finish_store(surface, frame, text_runs);
+    }
+
+    /// Rebuild the cached render frame in place from `plan`, recycling the previous
+    /// frame's command buffer and text strings via the pool, then refresh the cache
+    /// bookkeeping. This is the hot repaint path; it avoids the ~500 allocations a
+    /// fresh `from_plan_and_images` churns per changed frame.
+    fn rebuild(
+        &mut self,
+        surface: TerminalSurface,
+        frame: &Arc<RenderFrame>,
+        plan: &TerminalPaintPlan,
+        text_contract: &TerminalTextContract,
+        images: &KittyImageFrame,
+        text_runs: usize,
+    ) {
+        self.pool
+            .rebuild_from_plan_and_images(&mut self.render_frame, plan, text_contract, images);
+        self.finish_store(surface, frame, text_runs);
+    }
+
+    fn finish_store(
+        &mut self,
+        surface: TerminalSurface,
+        frame: &Arc<RenderFrame>,
+        text_runs: usize,
+    ) {
+        self.cursor_tail_start = self
+            .render_frame
             .commands
             .iter()
             .position(|command| matches!(command, TerminalRenderCommand::Cursor(_)));
-        self.visible_cursor_tail = self
-            .cursor_tail_start
-            .map(|start| render_frame.commands[start..].to_vec())
-            .unwrap_or_default();
+        self.visible_cursor_tail.clear();
+        if let Some(start) = self.cursor_tail_start {
+            self.visible_cursor_tail
+                .extend_from_slice(&self.render_frame.commands[start..]);
+        }
         self.frame = Some(Arc::clone(frame));
         self.surface = Some(surface);
-        self.render_frame = render_frame;
         self.cursor_alpha = None;
         self.text_runs = text_runs;
     }

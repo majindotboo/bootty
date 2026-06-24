@@ -251,6 +251,49 @@ fn bench_paint_plan(c: &mut Criterion) {
     }
 }
 
+/// Contrasts planning a fully dirty frame against a frame where only a single
+/// row changed.
+///
+/// NOTE: bootty currently reports `Dirty::Full` with every row dirty for any
+/// edit (see the `dirty_tracking` characterization test in bootty-terminal), so
+/// the `one_row` arm exercises a full-dirty frame and tracks `full` today. It
+/// becomes a real incremental-vs-full contrast only once localized edits report
+/// `Dirty::Partial`. Kept as standing measurement scaffolding for that work.
+fn bench_paint_plan_dirty_scope(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let (cols, rows) = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame");
+            engine.grid_size()
+        };
+        let surface = surface_for(cols, rows);
+
+        let full_frame = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame").clone()
+        };
+
+        let one_row_frame = {
+            let mut engine = builder();
+            engine.extract_frame().expect("frame");
+            mutate_single_row(&mut engine, 1);
+            engine.extract_frame().expect("frame").clone()
+        };
+
+        let mut group = c.benchmark_group(format!("paint_plan_dirty_{name}"));
+        group.bench_function("full", |b| {
+            let mut planner = PaintPlanner::default();
+            b.iter(|| black_box(planner.plan(surface, &full_frame, 16.0).text_runs.len()))
+        });
+        group.bench_function("one_row", |b| {
+            let mut planner = PaintPlanner::default();
+            planner.plan(surface, &full_frame, 16.0);
+            b.iter(|| black_box(planner.plan(surface, &one_row_frame, 16.0).text_runs.len()))
+        });
+        group.finish();
+    }
+}
+
 fn bench_extract_frame(c: &mut Criterion) {
     for (name, builder) in scenario_builders() {
         let mut engine = builder();
@@ -269,6 +312,72 @@ fn bench_extract_frame_one_row_mutate(c: &mut Criterion) {
                 tick = tick.wrapping_add(1);
                 mutate_single_row(&mut engine, tick);
                 black_box(engine.extract_frame().expect("frame").stats.dirty_rows)
+            })
+        });
+    }
+}
+
+// Rewrite the entire screen, forcing a Dirty::Full extraction (which clears the row
+// cache). Used to set up the cold-cache state the next localized edit must extract from.
+fn full_repaint(engine: &mut bootty_app::terminal::TerminalEngine, tick: u32) {
+    let rows = engine.grid_size().1;
+    engine.write_vt(b"\x1b[2J");
+    for row in 1..=rows {
+        engine.write_vt(
+            format!("\x1b[{row};1Hfull repaint {tick:08x} row {row:03} content abcdef 0123")
+                .as_bytes(),
+        );
+    }
+}
+
+// The full-extraction cost itself (every row dirty). Unifying the full path through the
+// row cache adds a row-cache assemble pass here in exchange for keeping the cache warm so
+// the *next* edit is incremental — this bench quantifies that full-frame side of the trade.
+fn bench_extract_full_redraw(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let mut engine = builder();
+        let mut tick = 0_u32;
+        c.bench_function(&format!("extract_full_redraw_{name}"), |b| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    tick = tick.wrapping_add(1);
+                    full_repaint(&mut engine, tick);
+                    let start = std::time::Instant::now();
+                    black_box(engine.extract_frame().expect("frame").stats.cells);
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+    }
+}
+
+// The §5.4 cold-cache cliff: the first localized edit after a full redraw. The full
+// redraw takes the Dirty::Full path, which clears the row cache, so the following
+// single-row edit can't extract incrementally and re-reads the whole grid. `iter_custom`
+// times ONLY that edit's extraction, excluding the full-redraw setup.
+fn bench_extract_edit_after_full_redraw(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let mut engine = builder();
+        for tick in 0..40 {
+            mutate_single_row(&mut engine, tick);
+            black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+        }
+        let mut tick = 1_000_u32;
+        c.bench_function(&format!("extract_edit_after_full_redraw_{name}"), |b| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    tick = tick.wrapping_add(1);
+                    full_repaint(&mut engine, tick);
+                    black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+                    mutate_single_row(&mut engine, tick);
+                    let start = std::time::Instant::now();
+                    black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+                    total += start.elapsed();
+                }
+                total
             })
         });
     }
@@ -620,8 +729,11 @@ name = benches;
 config = Criterion::default().noise_threshold(0.15);
 targets =
     bench_paint_plan,
+    bench_paint_plan_dirty_scope,
     bench_extract_frame,
     bench_extract_frame_one_row_mutate,
+    bench_extract_edit_after_full_redraw,
+    bench_extract_full_redraw,
     bench_terminal_write_vt,
     bench_terminal_input_pipeline,
     bench_render_commands,
