@@ -63,8 +63,19 @@ local function git_branch(cwd)
 		return nil
 	end
 	local branch = bootty.run("git -C " .. quote(cwd) .. " rev-parse --abbrev-ref HEAD 2>/dev/null")
-	if branch == "" or branch == "HEAD" or ui.starts_with(branch, "bootty.run:") or string.find(branch, "\n", 1, true) then
+	local function unusable(value)
+		return value == "" or ui.starts_with(value, "bootty.run:") or string.find(value, "\n", 1, true) ~= nil
+	end
+	if unusable(branch) then
 		return nil
+	end
+	-- Detached HEAD reports "HEAD" here. Return the short commit (not nil) so the
+	-- caller does not preserve the last real branch name, which would read as a stale
+	-- branch with no sign the session has detached. nil stays reserved for the
+	-- error/empty case, where preserving the previous branch is correct.
+	if branch == "HEAD" then
+		local short = bootty.run("git -C " .. quote(cwd) .. " rev-parse --short HEAD 2>/dev/null")
+		return if unusable(short) then "detached" else "detached " .. short
 	end
 	return branch
 end

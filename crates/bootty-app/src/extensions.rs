@@ -1903,6 +1903,65 @@ mod tests {
     }
 
     #[test]
+    fn codexbar_builtin_renders_a_row_per_configured_provider() {
+        // Exercise the render against pre-seeded provider output (Cached mode) rather
+        // than a real shell-out, so the test is deterministic and touches no PATH/launchd
+        // state shared with other tests. The builtin must emit a 5h and a 7d row per
+        // entry in its PROVIDERS table, in order: guards the multi-provider default
+        // (codex + claude) against a provider being dropped, mislabeled, or misordered —
+        // which the removed single-provider test could not.
+        let run_cache = Arc::new(RunCache::default());
+        let lua = setup_lua(
+            &[],
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::clone(&run_cache),
+        )
+        .expect("setup lua");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_SIDEBAR_EXTENSIONS);
+        let codexbar = modules
+            .iter()
+            .find(|module| module.name == "codexbar")
+            .expect("codexbar builtin loaded");
+
+        // Mirror the shell snippet codexbar.luau builds in usage_command(provider); the
+        // cache is keyed by the exact command string, so this must stay in sync with it.
+        let usage_command = |provider: &str| {
+            let command =
+                format!("codexbar usage --provider {provider} --format json --json-only 2>&1");
+            format!(
+                "out=$({command}); status=$?; if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf 'codexbar exited %s with empty output' \"$status\"; fi"
+            )
+        };
+        const PROBE_JSON: &str = r#"[{"usage":{"primary":{"usedPercent":25,"windowMinutes":300},"secondary":{"usedPercent":50,"windowMinutes":10080}}}]"#;
+        {
+            let mut entries = run_cache.entries.lock().expect("run cache entries");
+            for provider in ["codex", "claude"] {
+                entries.insert(
+                    usage_command(provider),
+                    RunEntry {
+                        output: PROBE_JSON.to_owned(),
+                        refreshing: false,
+                    },
+                );
+            }
+        }
+
+        run_cache.set_mode(RunMode::Cached);
+        let texts = run_module(&codexbar.body)
+            .into_iter()
+            .map(|item| item.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            texts,
+            vec!["codex 5h", "codex 7d", "claude 5h", "claude 7d"]
+        );
+    }
+
+    #[test]
     fn shell_run_output_returns_stdout_text() {
         assert_eq!(
             shell_run_output(
