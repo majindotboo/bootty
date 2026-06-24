@@ -21,10 +21,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use bootty_app::{
-    geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface},
+    geometry::{CellMetrics, SurfaceRect, TerminalGeometry, TerminalPadding, TerminalSurface},
     paint_plan::PaintPlanner,
     terminal::TerminalEngine,
-    terminal_render::TerminalRenderFrame,
+    terminal_render::{RenderFramePool, TerminalRenderFrame},
     terminal_text::{TerminalTextConfig, TerminalTextContract},
 };
 use eframe::egui::Vec2;
@@ -95,7 +95,10 @@ fn filled_engine(cols: u16, rows: u16, colored: bool) -> TerminalEngine {
                 16 + row % 216,
             )
         } else {
-            format!("\x1b[{};1Hrow {row:03}  abcdefghijklmnopqrstuvwxyz  0123456789", row + 1)
+            format!(
+                "\x1b[{};1Hrow {row:03}  abcdefghijklmnopqrstuvwxyz  0123456789",
+                row + 1
+            )
         };
         engine.write_vt(line.as_bytes());
     }
@@ -115,17 +118,26 @@ fn report_scenario(name: &str, cols: u16, rows: u16, colored: bool) {
     let surface = surface_for(cols, rows);
     let mut planner = PaintPlanner::default();
     let config = TerminalTextConfig::default();
+    // Persistent render frame + pool, mirroring the production render cache: the pool
+    // recycles the previous frame's command buffer and text strings, so a warm steady
+    // state should rebuild `from_plan` with zero allocations.
+    let mut pool = RenderFramePool::default();
+    let mut render_frame = TerminalRenderFrame {
+        surface: SurfaceRect::from_min_size(0.0, 0.0, 0.0, 0.0),
+        commands: Vec::new(),
+    };
 
-    // Warm steady state: drive several consecutive localized edits so the
-    // run-string pool AND the incremental-extraction row cache are populated.
-    // (A no-op extract takes the clean-reuse path and never warms row_cache, so
-    // each warm pass must actually mutate a row.)
+    // Warm steady state: drive several consecutive localized edits so the run-string
+    // pool, the incremental-extraction row cache, AND the render-frame pool are all
+    // populated. (A no-op extract takes the clean-reuse path and never warms
+    // row_cache, so each warm pass must actually mutate a row.)
     for i in 0..6 {
         engine.write_vt(format!("\x1b[{};1Hwarm{i:02}", (u32::from(rows) / 3) + i + 1).as_bytes());
         let frame = engine.extract_frame().expect("frame").clone();
         let plan = planner.plan(surface, &frame, 16.0).clone();
         let contract = TerminalTextContract::for_terminal_paint_plan(&plan, &config);
-        black_box(TerminalRenderFrame::from_plan(&plan, &contract).commands.len());
+        pool.rebuild_from_plan(&mut render_frame, &plan, &contract);
+        black_box(render_frame.commands.len());
     }
 
     // Apply a localized edit: rewrite one row's leading cells.
@@ -140,8 +152,10 @@ fn report_scenario(name: &str, cols: u16, rows: u16, colored: bool) {
     let (_, plan_sample) = measure(|| planner.plan(surface, &frame, 16.0).text_runs.len());
     let plan = planner.plan(surface, &frame, 16.0).clone();
     let contract = TerminalTextContract::for_terminal_paint_plan(&plan, &config);
-    let (_, render_sample) =
-        measure(|| TerminalRenderFrame::from_plan(&plan, &contract).commands.len());
+    let (_, render_sample) = measure(|| {
+        pool.rebuild_from_plan(&mut render_frame, &plan, &contract);
+        render_frame.commands.len()
+    });
 
     let work_ratio = dirty_rows as f64 / f64::from(rows).max(1.0);
     println!(

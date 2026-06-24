@@ -51,30 +51,44 @@ impl TerminalRenderFrame {
             surface: plan.surface,
             commands: Vec::with_capacity(command_capacity_for_plan(plan, images)),
         };
+        // One-shot path: no pooled strings, so every text command allocates fresh.
+        frame.populate(plan, text_contract, images, &mut Vec::new());
+        frame
+    }
 
-        frame.push_fill(
+    /// Build the command list for `plan` into `self.commands`, drawing text-command
+    /// string buffers from `text_pool`. The pool is empty on the one-shot path (each
+    /// command allocates fresh) and pre-filled by [`RenderFramePool`] on the reuse
+    /// path so a steady stream of frames allocates nothing.
+    fn populate(
+        &mut self,
+        plan: &TerminalPaintPlan,
+        text_contract: &TerminalTextContract,
+        images: &KittyImageFrame,
+        text_pool: &mut Vec<String>,
+    ) {
+        self.surface = plan.surface;
+        self.push_fill(
             plan.surface,
             plan.default_background,
             FillRole::SurfaceBackground,
         );
-        frame.push_image_layer(images, KittyImageLayer::BelowBackground);
+        self.push_image_layer(images, KittyImageLayer::BelowBackground);
         for background in &plan.backgrounds {
-            frame.push_background(background);
+            self.push_background(background);
         }
-        frame.push_image_layer(images, KittyImageLayer::BelowText);
+        self.push_image_layer(images, KittyImageLayer::BelowText);
         for run in &plan.text_runs {
-            frame.push_text_run(run, text_contract);
+            self.push_text_run(run, text_contract, text_pool);
         }
         for decoration in &plan.decorations {
-            frame.push_decoration(decoration);
+            self.push_decoration(decoration);
         }
-        frame.push_image_layer(images, KittyImageLayer::AboveText);
-        frame.push_virtual_placements(images);
+        self.push_image_layer(images, KittyImageLayer::AboveText);
+        self.push_virtual_placements(images);
         if let Some(cursor) = &plan.cursor {
-            frame.push_cursor(cursor, text_contract);
+            self.push_cursor(cursor, text_contract, text_pool);
         }
-
-        frame
     }
 
     fn push_background(&mut self, background: &BackgroundRect) {
@@ -111,7 +125,12 @@ impl TerminalRenderFrame {
         );
     }
 
-    fn push_text_run(&mut self, run: &TextRun, text_contract: &TerminalTextContract) {
+    fn push_text_run(
+        &mut self,
+        run: &TextRun,
+        text_contract: &TerminalTextContract,
+        text_pool: &mut Vec<String>,
+    ) {
         let cell_width = run.rect.width() / f32::from(run.cells.max(1));
         if run.text.is_ascii() || !text_contract.has_native_symbol_fragments(&run.text) {
             let face = text_contract.resolve_face_handle_for_run(run);
@@ -123,8 +142,11 @@ impl TerminalRenderFrame {
                     width: run.cells,
                 },
                 &run.text,
-                Arc::clone(&face),
-                text_contract.config.font_size,
+                RunFont {
+                    face,
+                    font_size: text_contract.config.font_size,
+                },
+                text_pool,
             );
             return;
         }
@@ -149,8 +171,11 @@ impl TerminalRenderFrame {
                             width: cell.saturating_sub(text_start_cell),
                         },
                         &run.text[text_start_byte..byte_index],
-                        face,
-                        text_contract.config.font_size,
+                        RunFont {
+                            face,
+                            font_size: text_contract.config.font_size,
+                        },
+                        text_pool,
                     );
                     text_active = false;
                 }
@@ -179,8 +204,11 @@ impl TerminalRenderFrame {
                     width: cell.saturating_sub(text_start_cell),
                 },
                 &run.text[text_start_byte..],
-                face,
-                text_contract.config.font_size,
+                RunFont {
+                    face,
+                    font_size: text_contract.config.font_size,
+                },
+                text_pool,
             );
         }
     }
@@ -191,8 +219,8 @@ impl TerminalRenderFrame {
         cell_width: f32,
         cells: TextCellSpan,
         text: &str,
-        face: Arc<ResolvedFontFace>,
-        font_size: f32,
+        font: RunFont,
+        text_pool: &mut Vec<String>,
     ) {
         let mut fragment_start_byte = 0_usize;
         let mut fragment_start_cell = 0_u16;
@@ -209,8 +237,8 @@ impl TerminalRenderFrame {
                         width: cell.saturating_sub(fragment_start_cell),
                     },
                     &text[fragment_start_byte..byte_index],
-                    Arc::clone(&face),
-                    font_size,
+                    font.clone(),
+                    text_pool,
                 );
                 fragment_start_byte = byte_index;
                 fragment_start_cell = cell;
@@ -227,8 +255,8 @@ impl TerminalRenderFrame {
                 width: cell.saturating_sub(fragment_start_cell),
             },
             &text[fragment_start_byte..],
-            face,
-            font_size,
+            font,
+            text_pool,
         );
     }
 
@@ -238,18 +266,22 @@ impl TerminalRenderFrame {
         cell_width: f32,
         cells: TextCellSpan,
         text: &str,
-        face: Arc<ResolvedFontFace>,
-        font_size: f32,
+        font: RunFont,
+        text_pool: &mut Vec<String>,
     ) {
         if text.is_empty() {
             return;
         }
+        // Reuse a reclaimed buffer when the pool has one (warm reuse path), else
+        // allocate. Pooled buffers were cleared on reclaim, so just append.
+        let mut owned = text_pool.pop().unwrap_or_default();
+        owned.push_str(text);
         self.commands.push(TerminalRenderCommand::Text(TextCommand {
             rect: cell_rect(run.rect, cell_width, cells.start, cells.width),
-            text: text.to_owned(),
+            text: owned,
             attrs: run.attrs,
-            face,
-            font_size,
+            face: font.face,
+            font_size: font.font_size,
         }));
     }
 
@@ -285,7 +317,12 @@ impl TerminalRenderFrame {
             }));
     }
 
-    fn push_cursor(&mut self, cursor: &CursorPlan, text_contract: &TerminalTextContract) {
+    fn push_cursor(
+        &mut self,
+        cursor: &CursorPlan,
+        text_contract: &TerminalTextContract,
+        text_pool: &mut Vec<String>,
+    ) {
         self.commands
             .push(TerminalRenderCommand::Cursor(CursorCommand {
                 rect: cursor.rect,
@@ -308,8 +345,53 @@ impl TerminalRenderFrame {
                     overline: false,
                 },
             };
-            self.push_text_run(&run, text_contract);
+            self.push_text_run(&run, text_contract, text_pool);
         }
+    }
+}
+
+/// Reusable scratch that rebuilds a [`TerminalRenderFrame`] in place, reclaiming the
+/// previous frame's command buffer and text-command string allocations.
+///
+/// The render cache keeps the last frame alive between repaints, so a localized edit
+/// can rebuild on top of it: the command `Vec` keeps its capacity and the `String`
+/// behind each text command is recycled instead of freed and reallocated. After the
+/// pool warms, a steady stream of same-shaped frames allocates nothing.
+#[derive(Default)]
+pub struct RenderFramePool {
+    text_strings: Vec<String>,
+}
+
+impl RenderFramePool {
+    pub fn rebuild_from_plan(
+        &mut self,
+        frame: &mut TerminalRenderFrame,
+        plan: &TerminalPaintPlan,
+        text_contract: &TerminalTextContract,
+    ) {
+        self.rebuild_from_plan_and_images(frame, plan, text_contract, &KittyImageFrame::default());
+    }
+
+    pub fn rebuild_from_plan_and_images(
+        &mut self,
+        frame: &mut TerminalRenderFrame,
+        plan: &TerminalPaintPlan,
+        text_contract: &TerminalTextContract,
+        images: &KittyImageFrame,
+    ) {
+        // Reclaim the previous frame's text buffers into the pool, then clear the
+        // command Vec while keeping its capacity. `drain` empties the Vec in place.
+        for command in frame.commands.drain(..) {
+            if let TerminalRenderCommand::Text(text) = command {
+                let mut buffer = text.text;
+                buffer.clear();
+                self.text_strings.push(buffer);
+            }
+        }
+        frame
+            .commands
+            .reserve(command_capacity_for_plan(plan, images));
+        frame.populate(plan, text_contract, images, &mut self.text_strings);
     }
 }
 
@@ -317,6 +399,13 @@ impl TerminalRenderFrame {
 struct TextCellSpan {
     start: u16,
     width: u16,
+}
+
+/// The font identity shared by every command split out of one text run.
+#[derive(Clone)]
+struct RunFont {
+    face: Arc<ResolvedFontFace>,
+    font_size: f32,
 }
 
 fn command_capacity_for_plan(plan: &TerminalPaintPlan, images: &KittyImageFrame) -> usize {
@@ -624,6 +713,59 @@ mod tests {
                 frame.commands.len(),
                 1 + background_count + expected_text_commands + decoration_count
             );
+        }
+    }
+
+    fn plan_from_runs(runs: &[Vec<u8>]) -> TerminalPaintPlan {
+        let text_runs = runs
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| TextRun {
+                rect: SurfaceRect::from_min_size(
+                    0.0,
+                    index as f32 * 10.0,
+                    bytes.len() as f32 * 10.0,
+                    10.0,
+                ),
+                cells: bytes.len() as u16,
+                text: String::from_utf8(bytes.clone()).expect("generated ascii"),
+                attrs: attrs(),
+            })
+            .collect::<Vec<_>>();
+        TerminalPaintPlan {
+            surface: SurfaceRect::from_min_size(0.0, 0.0, 200.0, 120.0),
+            default_background: color(0),
+            backgrounds: Vec::new(),
+            text_runs,
+            decorations: Vec::new(),
+            cursor: None,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn pooled_rebuild_matches_one_shot_builder(
+            first in proptest::collection::vec(proptest::collection::vec(b'a'..=b'z', 1..16), 0..8),
+            second in proptest::collection::vec(proptest::collection::vec(b'a'..=b'z', 1..16), 0..8),
+        ) {
+            let contract = text_contract();
+            let plan_first = plan_from_runs(&first);
+            let plan_second = plan_from_runs(&second);
+            let canonical_first = TerminalRenderFrame::from_plan(&plan_first, &contract);
+            let canonical_second = TerminalRenderFrame::from_plan(&plan_second, &contract);
+
+            let mut pool = RenderFramePool::default();
+            let mut frame = TerminalRenderFrame {
+                surface: SurfaceRect::from_min_size(0.0, 0.0, 0.0, 0.0),
+                commands: Vec::new(),
+            };
+            // Cold pool: first rebuild allocates its strings fresh.
+            pool.rebuild_from_plan(&mut frame, &plan_first, &contract);
+            prop_assert_eq!(&frame, &canonical_first);
+            // Warm pool: second rebuild recycles the first frame's reclaimed buffers.
+            // A stale-buffer bug (skipped clear, appended text) diverges here.
+            pool.rebuild_from_plan(&mut frame, &plan_second, &contract);
+            prop_assert_eq!(&frame, &canonical_second);
         }
     }
 }

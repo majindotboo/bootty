@@ -107,15 +107,16 @@ frame, warmed pools.
 |---|---:|---:|---:|---:|---:|---|
 | extract_frame | 41µs | 1 | 80 B | 0 | ~1µs | allocs ✅ · time ❌ |
 | PaintPlanner::plan | 38µs | 95 | 1.75 KB | 0 | ~1µs | allocs ❌ · time ❌ |
-| from_plan (render cmds) | 18µs | 491 | 87 KB | 0 | ~0.5µs | allocs ❌❌ · time ❌ |
+| from_plan (render cmds) | 13µs | 42 | 1.3 KB | 0 | ~0.5µs | allocs ✅ pooled (§5.1 DONE) · time ❌ |
 | wgpu prepare (changing text 240×90) | ~22 ms | not yet instrumented | — | — | — | ❌ + suspected cliff |
 
-Raw per-scenario resource numbers (from `pipeline_resources`, warm, 2 dirty rows):
+Raw per-scenario resource numbers (from `pipeline_resources`, warm, 2 dirty rows;
+from_plan columns reflect the §5.1 pooling fix):
 
 ```
-plain_shell   120x40  4800 cells  wr 0.050  extract 1/40B/16µs  plan 1/8B/12µs    from_plan 84/8KB/4.6µs
-colored_shell 180x80 14400 cells  wr 0.025  extract 1/80B/41µs  plan 95/1.75KB/38µs from_plan 491/87KB/18µs
-wide_colored  240x90 21600 cells  wr 0.022  extract 1/90B/58µs  plan 107/2KB/48µs   from_plan 551/97KB/20µs
+plain_shell   120x40  4800 cells  wr 0.050  extract 1/40B/15µs  plan 1/8B/10µs     from_plan 1/1B/2.8µs
+colored_shell 180x80 14400 cells  wr 0.025  extract 1/80B/40µs  plan 95/1.75KB/36µs from_plan 42/1.3KB/13µs
+wide_colored  240x90 21600 cells  wr 0.022  extract 1/90B/57µs  plan 107/2KB/48µs   from_plan 47/1.5KB/17µs
 ```
 
 CPU timing benches (criterion, full-screen frames — none of plan/from_plan/wgpu honor
@@ -144,14 +145,24 @@ Achieved vs floor today: `extract` is at the allocation floor but not the time f
 
 ## 5. Open optimization targets (prioritized; each needs measure → change → re-measure)
 
-### 5.1 `from_plan` allocation churn — highest leverage, clearly below floor
-- **Evidence:** ~500 allocs and **87–97 KB churned every frame** (`pipeline_resources`),
-  even though its time (18–20µs) looks harmless. Floor is 0.
-- **Where:** `crates/bootty-render/src/terminal_render.rs` — `TerminalRenderFrame::from_plan`
-  (and `from_plan_and_images`). Find what allocates per command/run and pool/reuse it
-  (the `PaintPlanner` already pools run strings; mirror that pattern).
-- **Bench:** `render_commands_*` (time) + `pipeline_resources` (allocs). Add an
-  allocation assertion once pooled.
+### 5.1 `from_plan` allocation churn — DONE
+- **Was:** ~500 allocs and **87–97 KB churned every frame** (`pipeline_resources`),
+  dominated by `text.to_owned()` per text command plus a fresh `commands` Vec. Floor is 0.
+- **Fix:** added `RenderFramePool` in `crates/bootty-render/src/terminal_render.rs`. It
+  rebuilds a `TerminalRenderFrame` in place: `drain`s the previous frame's commands,
+  reclaiming each text command's `String` into a pool, keeps the `commands` Vec
+  capacity, and `push_str`s into recycled buffers instead of `to_owned`. Wired into the
+  production hot path via `TerminalRenderCache::rebuild` (`crates/bootty-app/src/renderer.rs`),
+  which the repaint path calls on a cache miss; the cache already holds the prior frame,
+  so its buffers are the pool's backing store. `store` is now `#[cfg(test)]`.
+- **Measured (`pipeline_resources`, warm, 2 dirty rows):** colored 180×80 from_plan
+  491 → 42 allocs, 87 KB → 1.3 KB (−98.5%), 30 → 13µs; wide 240×90 551 → 47 allocs,
+  97 KB → 1.5 KB, 21 → 17µs; plain 84 → 1 alloc. Guarded by the proptest
+  `pooled_rebuild_matches_one_shot_builder` (rebuild twice, assert equal to one-shot
+  `from_plan` — catches stale recycled-buffer bugs).
+- **Remaining headroom:** ~45 allocs persist because LIFO buffer reuse hands back a
+  too-small `String` for a longer run (realloc). A capacity-aware pool (pop the
+  best-fit, or reserve to the row's max byte length) could reach the 0 floor.
 
 ### 5.2 `plan` allocation churn on styled content
 - **Evidence:** 95–107 allocs/frame on colored scenarios vs **1** on plain. The
