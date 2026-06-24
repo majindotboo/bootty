@@ -127,11 +127,15 @@ fn report_scenario(name: &str, cols: u16, rows: u16, colored: bool) {
         commands: Vec::new(),
     };
 
-    // Warm steady state: drive several consecutive localized edits so the run-string
-    // pool, the incremental-extraction row cache, AND the render-frame pool are all
-    // populated. (A no-op extract takes the clean-reuse path and never warms
-    // row_cache, so each warm pass must actually mutate a row.)
-    for i in 0..6 {
+    // Warm steady state: drive many consecutive localized edits so the run-string pool,
+    // the incremental-extraction row cache, AND the render-frame pool are all populated.
+    // (A no-op extract takes the clean-reuse path and never warms row_cache, so each
+    // warm pass must actually mutate a row.) The iteration count must be high enough to
+    // SATURATE the string pools: pooled buffers grow to the longest run they ever hold,
+    // and LIFO reuse means a buffer must be handed to a long run at least once before it
+    // stops reallocating. Too few passes (e.g. 6) reports dozens of phantom allocations
+    // that are pure warm-up churn, not the steady-state floor a long-running renderer hits.
+    for i in 0..60 {
         engine.write_vt(format!("\x1b[{};1Hwarm{i:02}", (u32::from(rows) / 3) + i + 1).as_bytes());
         let frame = engine.extract_frame().expect("frame").clone();
         let plan = planner.plan(surface, &frame, 16.0).clone();

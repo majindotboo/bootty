@@ -165,12 +165,16 @@ Achieved vs floor today: `extract` is at the allocation floor but not the time f
   too-small `String` for a longer run (realloc). A capacity-aware pool (pop the
   best-fit, or reserve to the row's max byte length) could reach the 0 floor.
 
-### 5.2 `plan` allocation churn on styled content
-- **Evidence:** 95–107 allocs/frame on colored scenarios vs **1** on plain. The
-  run-string pool (`PaintPlanner.run_text_pool`) isn't covering style-split runs.
-- **Where:** `crates/bootty-render/src/paint_plan.rs` `PaintPlanner::plan` /
-  `plan_text_runs`. Investigate whether it's `text_runs`/`backgrounds`/`decorations`
-  Vec growth or per-run String growth. Target ~0 allocs.
+### 5.2 `plan` allocation churn on styled content — RESOLVED (warm-up artifact, already at floor)
+- **Was:** 95–107 allocs/frame on colored scenarios under a 6-iteration warm-up.
+- **Finding:** this was pure warm-up churn, not a steady-state miss. `recycle_plan`
+  already pools run strings; the residual allocs are LIFO reuse handing a short buffer to
+  a long run, which reallocs **once** then stays large. Deepening the resource bench's
+  warm loop (6 → 60 mutating extracts) saturates the pool and the count drops to **1
+  alloc / 8 B** for `plan` and **1 alloc / 1 B** for `from_plan` — i.e. the 0/frame floor.
+- **Conclusion:** no code change. A long-running renderer is always deeply warmed, so it
+  already sits at the allocation floor. The §5.1 "remaining headroom" note is likewise a
+  warm-up artifact. Fixed the bench to measure representative steady state.
 
 ### 5.3 `extract_frame` is allocation-incremental but still time-O(all cells)
 - **Evidence:** 1 alloc / 80 B (excellent) but 41–58µs because `assemble_cached_frame`
