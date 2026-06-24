@@ -652,6 +652,27 @@ struct PreparedTextCommandCacheEntry {
     quads: Vec<TexturedGlyphQuad>,
 }
 
+/// Identity of a shaped run: shaping output depends only on the text, the resolved
+/// face, and the font size, so a run that merely moved (scrolling) or reappeared keys
+/// to the same entry. Position, color, and atlas state are deliberately excluded.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ShapedRunCacheKey {
+    text: String,
+    face: GlyphAtlasFaceKey,
+    font_size_bits: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ShapedRunCacheEntry {
+    total_cells: u16,
+    clusters: Vec<ShapedCluster>,
+}
+
+/// Bounds the shaped-run cache so unbounded unique output (e.g. streaming a huge log)
+/// can't grow it without limit; the cache clears wholesale when the cap is hit. The
+/// working set of interactive use and scrollback stays well under this.
+const SHAPED_RUN_CACHE_CAP: usize = 1024;
+
 #[derive(Clone, Debug)]
 pub struct TextAtlasBuilder {
     shaper: TerminalTextShaper,
@@ -664,6 +685,7 @@ pub struct TextAtlasBuilder {
     char_cache: HashMap<char, GlyphAtlasTextKey>,
     sprite_face_key: GlyphAtlasFaceKey,
     clusters: Vec<ShapedCluster>,
+    shaped_run_cache: HashMap<ShapedRunCacheKey, ShapedRunCacheEntry>,
     prepared_text_cache: Vec<PreparedTextCommandCacheEntry>,
     prepared_text_cache_cursor: usize,
     prepared_text_frame_active: bool,
@@ -694,6 +716,7 @@ impl TextAtlasBuilder {
                 style: FontStyle::Regular,
             }),
             clusters: Vec::new(),
+            shaped_run_cache: HashMap::new(),
             prepared_text_cache: Vec::new(),
             prepared_text_cache_cursor: 0,
             prepared_text_frame_active: false,
@@ -866,31 +889,49 @@ impl TextAtlasBuilder {
         quads: &mut Vec<TexturedGlyphQuad>,
     ) {
         let mut clusters = std::mem::take(&mut self.clusters);
-        let features = self.shaper.font_features.clone();
-        let shaped = self.fonts.shape_into_clusters(
-            &command.face,
-            &command.text,
-            command.font_size,
-            &features,
-            &mut clusters,
-        );
-        let (total_cells, cluster_len) = match shaped {
-            Some(result) => result,
-            None => {
-                // The font carries no ligature/contextual features (or shaping is
-                // unavailable): keep the per-character fast paths unchanged.
-                if is_printable_ascii(&command.text) {
-                    self.clusters = clusters;
-                    self.prepare_ascii_text_command_into_uncached_with_face(
-                        command,
-                        pixels_per_point,
-                        face_key,
-                        quads,
-                    );
-                    return;
+        // Shaping depends only on (text, face, font_size), so memoize it: scrolled or
+        // repeated text reuses the shape and skips rustybuzz. Positioning and
+        // (atlas-cached) rasterization still run per command, so output is identical.
+        let cache_key = ShapedRunCacheKey {
+            text: command.text.clone(),
+            face: face_key.clone(),
+            font_size_bits: command.font_size.to_bits(),
+        };
+        let (total_cells, cluster_len) = if let Some(entry) = self.shaped_run_cache.get(&cache_key)
+        {
+            clusters.clear();
+            clusters.extend_from_slice(&entry.clusters);
+            (entry.total_cells, entry.clusters.len())
+        } else {
+            let features = self.shaper.font_features.clone();
+            let shaped = self.fonts.shape_into_clusters(
+                &command.face,
+                &command.text,
+                command.font_size,
+                &features,
+                &mut clusters,
+            );
+            match shaped {
+                Some((total_cells, cluster_len)) => {
+                    self.insert_shaped_run(cache_key, total_cells, &clusters[..cluster_len]);
+                    (total_cells, cluster_len)
                 }
-                self.shaper
-                    .shape_into_retained(&command.text, 0, &mut clusters)
+                None => {
+                    // The font carries no ligature/contextual features (or shaping is
+                    // unavailable): keep the per-character fast paths unchanged.
+                    if is_printable_ascii(&command.text) {
+                        self.clusters = clusters;
+                        self.prepare_ascii_text_command_into_uncached_with_face(
+                            command,
+                            pixels_per_point,
+                            face_key,
+                            quads,
+                        );
+                        return;
+                    }
+                    self.shaper
+                        .shape_into_retained(&command.text, 0, &mut clusters)
+                }
             }
         };
         let active_clusters = &clusters[..cluster_len];
@@ -947,6 +988,24 @@ impl TextAtlasBuilder {
             });
         }
         self.clusters = clusters;
+    }
+
+    fn insert_shaped_run(
+        &mut self,
+        key: ShapedRunCacheKey,
+        total_cells: u16,
+        clusters: &[ShapedCluster],
+    ) {
+        if self.shaped_run_cache.len() >= SHAPED_RUN_CACHE_CAP {
+            self.shaped_run_cache.clear();
+        }
+        self.shaped_run_cache.insert(
+            key,
+            ShapedRunCacheEntry {
+                total_cells,
+                clusters: clusters.to_vec(),
+            },
+        );
     }
 
     fn prepare_ascii_cluster(

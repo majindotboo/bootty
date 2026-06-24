@@ -108,7 +108,8 @@ frame, warmed pools.
 | extract_frame | 41µs | 1 | 80 B | 0 | ~1µs | allocs ✅ · time ❌ |
 | PaintPlanner::plan | 38µs | 95 | 1.75 KB | 0 | ~1µs | allocs ❌ · time ❌ |
 | from_plan (render cmds) | 13µs | 42 | 1.3 KB | 0 | ~0.5µs | allocs ✅ pooled (§5.1 DONE) · time ❌ |
-| wgpu prepare (changing text 240×90) | ~22 ms | not yet instrumented | — | — | — | ❌ + suspected cliff |
+| wgpu prepare (scroll 240×90) | 6.26 → 1.29 ms | — | — | — | — | shaping cached (§5.6 DONE) |
+| wgpu prepare (unique text 240×90) | ~22 ms | — | — | — | — | shaping-bound, irreducible |
 
 Raw per-scenario resource numbers (from `pipeline_resources`, warm, 2 dirty rows;
 from_plan columns reflect the §5.1 pooling fix):
@@ -199,18 +200,33 @@ Achieved vs floor today: `extract` is at the allocation floor but not the time f
   cost the same; an incremental planner should make `one_row` drop toward the work-ratio
   floor. Consider adding a bench that feeds a genuinely Partial frame.
 
-### 5.6 wgpu changing-text cliff — DIAGNOSE before optimizing
-- **Evidence:** `wgpu_prepare_dirty_ascii_text_240x90` ≈ **22.5 ms** vs µs when the frame
-  is unchanged, and ~30× a 160×60 changing frame despite 2.25× the cells (super-linear).
-- **Likely causes to attribute:** the renderer rebuilds ALL text vertices + re-uploads
-  the whole vertex buffer when content changes (`crates/bootty-render/src/terminal_wgpu.rs`:
-  `TerminalBackgroundFrameResources::update` ~343 only `write_buffer`s when
-  `self.vertices.as_slice() != vertices`, an O(n) compare; `prepare_terminal_frame` ~471;
-  `write_buffer` sites at 366/969/1014; glyph atlas grow/rebuild path ~510). Confirm
-  whether 22ms is real per-frame cost or a microbench artifact (it calls `queue.write_buffer`
-  in a tight loop with no present). Instrument GPU bytes uploaded (see §7) to attribute.
-- The bench source: `crates/bootty-app/benches/paint_plan_wgpu.rs:381`
-  (`bench_wgpu_dirty_text_prepare`), frame gen `ascii_dirty_text_frame` at :299.
+### 5.6 wgpu changing-text cliff — DIAGNOSED + scroll case DONE
+- **Diagnosis:** the ~22ms is **rustybuzz shaping redone for every text command, every
+  frame**. `prepare_terminal_frame` (`terminal_wgpu.rs` ~471) has a `prepared_text_cache`
+  but it is keyed by the *entire* `TextCommand` (including `rect`), so any change OR move
+  misses and falls to `prepare_text_command_into_uncached_with_face` →
+  `shape_into_clusters` → `shape_run` (HarfBuzz). 90 rows × 240-char runs reshaped per
+  frame. GPU upload (~4 MB vertices) and rasterization (atlas-cached) are minor.
+- **Synthetic `wgpu_prepare_dirty_ascii_text_240x90` (~22ms) is irreducible:** its text
+  is unique every frame (tick counter), so no cache can help — genuinely new glyphs.
+- **Real win — scrolled/repeated text:** when content scrolls, a run moves to a new rect
+  but its string is unchanged, so it was shaped on a prior frame. Added a
+  **position-independent shaped-run cache** keyed `(text, face, font_size)` in
+  `crates/bootty-render/src/terminal_text_atlas.rs` (`ShapedRunCacheKey` /
+  `shaped_run_cache`, consulted in `prepare_text_command_into_uncached_with_face`). It
+  memoizes only the shape (clusters + total_cells); positioning and atlas-cached
+  rasterization still run per command, so output is byte-identical (guarded by
+  `shaped_run_cache_reuses_shaping_for_moved_text_without_changing_output`). Bounded at
+  `SHAPED_RUN_CACHE_CAP = 1024` entries (clears wholesale on overflow).
+- **Measured:** new bench `wgpu_prepare_scroll_ascii_text_240x90`
+  (`paint_plan_wgpu.rs`, `ascii_scroll_text_frame`, ring of 128 stable lines windowed +
+  scrolled): **6.26 ms → ~1.29 ms median (−87%)**. Worst-case dirty bench unchanged
+  (p=0.43); static `wgpu_prepare_*` unaffected.
+- **Remaining headroom:** on a cache hit the clusters are cloned into the scratch and the
+  lookup clones `command.text` for the key — both allocate. A borrow-keyed lookup or
+  storing relative quads (skipping the per-command quad rebuild too) could push further;
+  measure against the scroll bench. The unique-text full-redraw (cat) case stays
+  shaping-bound — that is fundamental shaping cost, not waste.
 
 ---
 

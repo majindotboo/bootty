@@ -399,6 +399,89 @@ fn bench_wgpu_dirty_text_prepare(c: &mut Criterion) {
         })
     });
 }
+// Forward-scroll workload: a fixed ring of distinct line strings, windowed onto the
+// screen and shifted up by one row each tick. Every row's rect is stable but its text
+// changes, so the positional prepared-text cache misses on all 90 rows; yet 89 of those
+// strings were shaped on the previous frame (one row higher), so a position-independent
+// shaping cache turns them into hits. This is the common streaming-output case.
+fn ascii_scroll_text_frame(tick: u32) -> TerminalRenderFrame {
+    const COLS: u16 = 240;
+    const ROWS: u16 = 90;
+    const RING: u32 = 128;
+    const CELL_WIDTH: f32 = 9.0;
+    const CELL_HEIGHT: f32 = 22.0;
+
+    let surface = SurfaceRect::from_min_size(
+        0.0,
+        0.0,
+        f32::from(COLS) * CELL_WIDTH,
+        f32::from(ROWS) * CELL_HEIGHT,
+    );
+    let text_runs = (0..ROWS)
+        .map(|row| {
+            let doc_line = (tick + u32::from(row)) % RING;
+            let mut text = format!(
+                "scrollback line {doc_line:05} streaming output alpha beta gamma delta epsilon "
+            );
+            while text.len() < COLS as usize {
+                text.push_str("more ascii content ");
+            }
+            text.truncate(COLS as usize);
+            text_run(
+                SurfaceRect::from_min_size(
+                    0.0,
+                    f32::from(row) * CELL_HEIGHT,
+                    f32::from(COLS) * CELL_WIDTH,
+                    CELL_HEIGHT,
+                ),
+                COLS,
+                &text,
+                color(180, 210, 255),
+            )
+        })
+        .collect();
+    let plan = TerminalPaintPlan {
+        surface,
+        default_background: color(8, 10, 16),
+        backgrounds: Vec::new(),
+        text_runs,
+        decorations: Vec::new(),
+        cursor: None,
+    };
+    let text_contract = TerminalTextContract::new(
+        TerminalTextConfig::default(),
+        NativeSymbolPolicy::terminal_glyph_primitives(),
+    );
+
+    TerminalRenderFrame::from_plan(&plan, &text_contract)
+}
+
+fn bench_wgpu_scroll_text_prepare(c: &mut Criterion) {
+    const RING: u32 = 128;
+    let context = create_wgpu_bench_context();
+    let frames = (0..RING).map(ascii_scroll_text_frame).collect::<Vec<_>>();
+    let mut renderer = TerminalWgpuRenderer::new(&context.device, context.format);
+    // Warm every distinct line so the steady state measures scroll reuse, not the
+    // one-time first-shape cost of each line.
+    for frame in &frames {
+        warm_wgpu_renderer(&context, &mut renderer, frame);
+    }
+    let mut tick = 0_usize;
+
+    c.bench_function("wgpu_prepare_scroll_ascii_text_240x90", |b| {
+        b.iter(|| {
+            tick = tick.wrapping_add(1);
+            let frame = &frames[tick % frames.len()];
+            black_box(renderer.prepare_terminal_frame(
+                &context.device,
+                &context.queue,
+                frame,
+                1.0,
+                ViewTransform::IDENTITY,
+            ))
+        })
+    });
+}
 fn bench_terminal_text_draws_dirty_ascii(c: &mut Criterion) {
     let frames = (0..16).map(ascii_dirty_text_frame).collect::<Vec<_>>();
     let mut tick = 0_usize;
@@ -523,6 +606,7 @@ config = Criterion::default().noise_threshold(0.15);
 targets =
     bench_wgpu_prepare,
     bench_wgpu_dirty_text_prepare,
+    bench_wgpu_scroll_text_prepare,
     bench_terminal_text_draws_dirty_ascii,
     bench_text_atlas_prepare_dirty_ascii,
     bench_wgpu_render_pass,

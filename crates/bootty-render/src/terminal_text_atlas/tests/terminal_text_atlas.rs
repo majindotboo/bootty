@@ -801,6 +801,44 @@ fn contextual_operator_ligature_rasterizes_across_merged_cells() {
 }
 
 #[test]
+fn shaped_run_cache_reuses_shaping_for_moved_text_without_changing_output() {
+    // A ligature-bearing run forces the cached (Some) shaping path rather than the
+    // per-character ascii fast path, so the shaped-run cache is actually exercised.
+    let text = "fn area() -> i32 { a != b && c == d }";
+    let command_at = |x: f32, y: f32| {
+        let mut command = text_command(text);
+        command.rect = SurfaceRect::from_min_size(x, y, text.len() as f32 * 9.0, 22.0);
+        command
+    };
+
+    // Fresh builder shapes the run directly at the target position.
+    let mut fresh = TextAtlasBuilder::new(512, 512);
+    fresh.fonts = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let mut expected = Vec::new();
+    fresh.prepare_text_command_into(&command_at(30.0, 44.0), 1.0, &mut expected);
+
+    // Reused builder shapes the run once elsewhere (warming the cache), then prepares
+    // it at the target position, which must hit the cache and translate, not reshape.
+    let mut reused = TextAtlasBuilder::new(512, 512);
+    reused.fonts = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let mut warm = Vec::new();
+    reused.prepare_text_command_into(&command_at(0.0, 0.0), 1.0, &mut warm);
+    assert_eq!(
+        reused.shaped_run_cache.len(),
+        1,
+        "the ligature run shaped through the Some path and populated the cache"
+    );
+    let mut actual = Vec::new();
+    reused.prepare_text_command_into(&command_at(30.0, 44.0), 1.0, &mut actual);
+
+    assert_eq!(
+        actual, expected,
+        "cached shaping must produce the same quads as fresh shaping at the new position"
+    );
+    assert!(!actual.is_empty(), "the run produced glyph quads");
+}
+
+#[test]
 fn configured_variants_and_style_sets_shape_feature_heavy_samples() {
     let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
     let face = regular_face("Maple Mono", &[]);
