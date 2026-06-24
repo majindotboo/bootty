@@ -317,6 +317,72 @@ fn bench_extract_frame_one_row_mutate(c: &mut Criterion) {
     }
 }
 
+// Rewrite the entire screen, forcing a Dirty::Full extraction (which clears the row
+// cache). Used to set up the cold-cache state the next localized edit must extract from.
+fn full_repaint(engine: &mut bootty_app::terminal::TerminalEngine, tick: u32) {
+    let rows = engine.grid_size().1;
+    engine.write_vt(b"\x1b[2J");
+    for row in 1..=rows {
+        engine.write_vt(
+            format!("\x1b[{row};1Hfull repaint {tick:08x} row {row:03} content abcdef 0123")
+                .as_bytes(),
+        );
+    }
+}
+
+// The full-extraction cost itself (every row dirty). Unifying the full path through the
+// row cache adds a row-cache assemble pass here in exchange for keeping the cache warm so
+// the *next* edit is incremental — this bench quantifies that full-frame side of the trade.
+fn bench_extract_full_redraw(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let mut engine = builder();
+        let mut tick = 0_u32;
+        c.bench_function(&format!("extract_full_redraw_{name}"), |b| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    tick = tick.wrapping_add(1);
+                    full_repaint(&mut engine, tick);
+                    let start = std::time::Instant::now();
+                    black_box(engine.extract_frame().expect("frame").stats.cells);
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+    }
+}
+
+// The §5.4 cold-cache cliff: the first localized edit after a full redraw. The full
+// redraw takes the Dirty::Full path, which clears the row cache, so the following
+// single-row edit can't extract incrementally and re-reads the whole grid. `iter_custom`
+// times ONLY that edit's extraction, excluding the full-redraw setup.
+fn bench_extract_edit_after_full_redraw(c: &mut Criterion) {
+    for (name, builder) in scenario_builders() {
+        let mut engine = builder();
+        for tick in 0..40 {
+            mutate_single_row(&mut engine, tick);
+            black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+        }
+        let mut tick = 1_000_u32;
+        c.bench_function(&format!("extract_edit_after_full_redraw_{name}"), |b| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    tick = tick.wrapping_add(1);
+                    full_repaint(&mut engine, tick);
+                    black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+                    mutate_single_row(&mut engine, tick);
+                    let start = std::time::Instant::now();
+                    black_box(engine.extract_frame().expect("frame").stats.dirty_rows);
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+    }
+}
+
 fn bench_terminal_write_vt(c: &mut Criterion) {
     let mut plain = terminal_engine(120, 40);
     c.bench_function("terminal_write_vt_plain_carriage_return", |b| {
@@ -666,6 +732,8 @@ targets =
     bench_paint_plan_dirty_scope,
     bench_extract_frame,
     bench_extract_frame_one_row_mutate,
+    bench_extract_edit_after_full_redraw,
+    bench_extract_full_redraw,
     bench_terminal_write_vt,
     bench_terminal_input_pipeline,
     bench_render_commands,

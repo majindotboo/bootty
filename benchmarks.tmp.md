@@ -184,15 +184,25 @@ Achieved vs floor today: `extract` is at the allocation floor but not the time f
   in `self.frame.cells` rather than rebuilding the whole vector. This is delicate —
   downstream consumers expect a complete `frame.cells`.
 
-### 5.4 Cold-cache cliff (the first edit after any full redraw)
-- **Evidence:** found via a harness bug — a Partial extract whose `row_cache` isn't warm
-  re-extracts everything (~1.5 MB / 130–500µs). The Full path (`terminal_engine.rs:2527`)
-  does `self.row_cache.clear()`, and the clean-reuse early return doesn't populate it.
-- **Impact:** every full repaint (resize, clear, alt-screen swap, scroll-region change)
-  forfeits the incremental win for the next frame.
-- **Idea:** keep the row cache valid across a single full redraw, or repopulate it during
-  the full path so the next edit is immediately incremental. Measure with a "full frame
-  then one edit" bench (does not exist yet).
+### 5.4 Cold-cache cliff (the first edit after any full redraw) — DONE
+- **Measured cliff:** new bench `extract_edit_after_full_redraw` (`paint_plan.rs`,
+  `iter_custom` timing only the post-redraw edit) showed the first localized edit after a
+  full redraw cost **7–8× a warm edit**: simple 14→104µs, complex 39→300µs, ai 41→312µs,
+  tmux 54→430µs. Cause: the Full path did `row_cache.clear()` and rebuilt `frame.cells`
+  inline without populating the cache, so the next edit re-extracted every row.
+- **Fix:** unified extraction through the row cache. `extract_frame` now routes *every*
+  non-clean frame (Partial and Full) through `extract_render_row` + `assemble_cached_frame`
+  — `extract_render_row` is the row-decomposed form of the deleted inline full-frame loop,
+  so output is identical (194 bootty-terminal tests pass). A full/cold frame re-extracts
+  all rows once and leaves the cache warm; the next edit is incremental.
+- **Result:** post-redraw edit drops to the warm-edit cost (104→14, 300→37, 312→40,
+  430→53µs, **−86 to −88%**). Tradeoff: a full extraction itself costs **+16%** (A/B via
+  `git stash`: 79→92, 233→275, 246→296, 346→415µs) because it now does the row-cache
+  assemble pass. Net strongly positive: a full redraw is normally followed by many edits
+  (clear/resize/quit-pager → keep working), so ~+50µs once buys ~−260µs per later edit.
+  Only back-to-back full redraws with no edits between (resize-drag) pay without benefit.
+- **Note:** the §6.3 "1.5 MB / 130–500µs" figure was the old harness bug; the real warm
+  vs cold gap is the 7–8× above.
 
 ### 5.5 `PaintPlanner::plan` does a full re-plan every frame (ignores `row_dirty`)
 - Now that frames carry real `Partial` dirtiness (post §2 fix), making plan incremental
