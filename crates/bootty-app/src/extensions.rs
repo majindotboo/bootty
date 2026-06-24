@@ -1883,6 +1883,9 @@ mod tests {
         false
     }
 
+    // Only the macOS-gated run_cache_refresh_keeps_shell_out_errors_visible calls this;
+    // gate it identically so non-macOS targets don't see it as dead code.
+    #[cfg(target_os = "macos")]
     fn wait_for_cached_output_containing(
         cache: &RunCache,
         needle: &str,
