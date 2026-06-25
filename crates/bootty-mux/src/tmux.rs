@@ -190,7 +190,7 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     format!("{session_id}:.+"),
                 ])?;
             }
-            MuxCommand::KillPane { session_id } | MuxCommand::ClosePane { session_id } => {
+            MuxCommand::KillPane { session_id, .. } | MuxCommand::ClosePane { session_id, .. } => {
                 self.run_owned_allow_server_exit(vec![
                     "kill-pane".into(),
                     "-t".into(),
@@ -479,6 +479,7 @@ mod tests {
         backend
             .execute(MuxCommand::ClosePane {
                 session_id: "$1".to_owned(),
+                pane_id: None,
             })
             .unwrap();
     }

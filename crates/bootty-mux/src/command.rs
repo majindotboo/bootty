@@ -47,11 +47,15 @@ pub enum MuxCommand {
     },
     KillPane {
         session_id: String,
+        /// The pane to remove. `None` targets the window's active pane.
+        pane_id: Option<String>,
     },
     // Close the active pane and cascade: an emptied window (tab) is removed; a session whose last
     // window is removed is left empty rather than deleted.
     ClosePane {
         session_id: String,
+        /// The pane to close. `None` targets the window's active pane.
+        pane_id: Option<String>,
     },
     TogglePaneZoom {
         session_id: String,

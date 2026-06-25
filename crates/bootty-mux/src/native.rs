@@ -211,6 +211,14 @@ impl NativeMuxState {
         }
     }
 
+    fn set_active_pane(&mut self, session_id: &str, pane_id: &str) {
+        if let Some(window) = self.active_window_mut(session_id)
+            && window.panes.iter().any(|pane| pane.id == pane_id)
+        {
+            window.active_pane_id = pane_id.to_owned();
+        }
+    }
+
     fn select_relative_pane(&mut self, session_id: &str, delta: i32) {
         if let Some(window) = self.active_window_mut(session_id)
             && let Some(index) = window
@@ -461,8 +469,24 @@ impl MuxBackend for NativeBackend {
                 }
             },
             MuxCommand::SelectNextPane { session_id } => state.select_relative_pane(&session_id, 1),
-            MuxCommand::KillPane { session_id } => state.kill_active_pane(&session_id),
-            MuxCommand::ClosePane { session_id } => state.close_active_pane(&session_id),
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            } => {
+                if let Some(pane_id) = pane_id {
+                    state.set_active_pane(&session_id, &pane_id);
+                }
+                state.kill_active_pane(&session_id);
+            }
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => {
+                if let Some(pane_id) = pane_id {
+                    state.set_active_pane(&session_id, &pane_id);
+                }
+                state.close_active_pane(&session_id);
+            }
             MuxCommand::TogglePaneZoom { .. } => {}
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
@@ -527,6 +551,7 @@ mod tests {
         backend
             .execute(MuxCommand::ClosePane {
                 session_id: "local".to_owned(),
+                pane_id: None,
             })
             .unwrap();
 
@@ -542,6 +567,36 @@ mod tests {
         );
         // No pane means sync_mux_anchor renders idle instead of spawning a fresh shell.
         assert!(snapshot.sessions[0].anchor.pane_id.is_none());
+    }
+
+    #[test]
+    fn close_pane_command_targets_the_named_pane_not_just_the_active_one() {
+        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+        backend
+            .execute(MuxCommand::SplitPane {
+                session_id: "local".to_owned(),
+                pane_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            backend.snapshot().unwrap().sessions[0].windows[0]
+                .panes
+                .len(),
+            2
+        );
+
+        // The split made pane-2 active; closing pane-1 by id must remove pane-1, leaving pane-2.
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "local".to_owned(),
+                pane_id: Some("pane-1".to_owned()),
+            })
+            .unwrap();
+
+        let snapshot = backend.snapshot().unwrap();
+        let panes = &snapshot.sessions[0].windows[0].panes;
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].pane_id.as_deref(), Some("pane-2"));
     }
 
     #[test]

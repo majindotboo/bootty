@@ -494,6 +494,45 @@ impl BackendPaneTerminal {
             .map(MuxPaneTarget::input_selector)
     }
 
+    /// Pane ids in the active window whose shell has exited (focused or background), so the layout
+    /// can close them. Checked across every live pane, not just the focused one.
+    pub fn native_exited_panes(&mut self) -> Vec<String> {
+        let mut exited = Vec::new();
+        if matches!(self.terminal.child_exited(), Ok(true))
+            && let Some(id) = self.focused_pane_id()
+        {
+            exited.push(id.to_owned());
+        }
+        let targets = self.native_window_targets.clone();
+        for target in &targets {
+            if self.active_target.as_ref() == Some(target) {
+                continue;
+            }
+            if let Some(runtime) = self.native_terminals.get_mut(target)
+                && matches!(runtime.child_exited(), Ok(true))
+            {
+                exited.push(target.input_selector().to_owned());
+            }
+        }
+        exited
+    }
+
+    /// Drop a pane's runtime (killing its PTY) whether it is the focused runtime or a parked sibling.
+    pub fn discard_pane(&mut self, pane_id: &str) {
+        if self.focused_pane_id() == Some(pane_id) {
+            self.discard_active_pane();
+            return;
+        }
+        if let Some(target) = self
+            .native_window_targets
+            .iter()
+            .find(|target| target.input_selector() == pane_id)
+            .cloned()
+        {
+            self.native_terminals.remove(&target);
+        }
+    }
+
     /// Drain the focused pane and every parked sibling in the active window so background panes keep
     /// processing PTY output and repaint. Returns the focused pane's drain stats.
     pub fn drain_native_window(&mut self) -> DrainStats {

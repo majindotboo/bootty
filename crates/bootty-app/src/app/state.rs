@@ -658,6 +658,11 @@ impl AppState {
             .pane_layouts
             .entry(key)
             .or_insert_with(|| PaneLayout::single(pane_ids[0].clone()));
+        // A window id can be reused after its window is closed (native names tabs `tab-N`). If none
+        // of the cached layout's panes still exist, it belongs to the old window — start fresh.
+        if layout.panes().iter().all(|pane| !pane_ids.contains(pane)) {
+            *layout = PaneLayout::single(pane_ids[0].clone());
+        }
         layout.reconcile(&pane_ids);
         let focused_id = layout.focused().to_owned();
         let focused_anchor = panes
@@ -1211,11 +1216,18 @@ impl AppState {
             terminal_cell_height,
             terminal_scale_factor,
         );
-        match self.terminal.child_exited() {
-            // A shell exiting closes its pane, cascading to the tab, instead of the whole window.
-            Ok(true) => self.close_active_pane(),
-            Ok(false) => {}
-            Err(error) => self.last_error = Some(error.to_string()),
+        // A shell exiting closes its pane, collapsing the split (or cascading to the tab when it was
+        // the last pane). On native, any pane's shell can exit, not just the focused one.
+        if self.is_native() {
+            for pane in self.terminal.native_exited_panes() {
+                self.close_pane(&pane);
+            }
+        } else {
+            match self.terminal.child_exited() {
+                Ok(true) => self.close_active_pane(),
+                Ok(false) => {}
+                Err(error) => self.last_error = Some(error.to_string()),
+            }
         }
 
         if let Some(error) = self
@@ -1937,14 +1949,44 @@ impl AppState {
     // active terminal is dropped here so its PTY is reaped; sync_mux_anchor then attaches whatever
     // pane the mux selected next (or idle when the session has no tabs left).
     fn close_active_pane(&mut self) {
+        if self.is_native() {
+            if let Some(focused) = self.focused_pane() {
+                self.close_pane(&focused);
+            }
+            return;
+        }
         let session_id = self.mux.selected_session().unwrap_or("local").to_owned();
         let mux_config = self.config().multiplexer.clone();
         self.mux.execute_command(
             &self.repaint,
             &mux_config,
-            MuxCommand::ClosePane { session_id },
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id: None,
+            },
         );
         self.terminal.discard_active_pane();
+    }
+
+    /// Close a specific native pane: remove it from the backend window, kill its PTY, collapse the
+    /// split layout, and re-activate the surviving focused pane this frame so it doesn't flash idle.
+    fn close_pane(&mut self, pane_id: &str) {
+        let session_id = self.mux.selected_session().unwrap_or("local").to_owned();
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id: Some(pane_id.to_owned()),
+            },
+        );
+        self.terminal.discard_pane(pane_id);
+        let key = self.current_window_key();
+        if let Some(layout) = self.pane_layouts.get_mut(&key) {
+            layout.remove(pane_id);
+        }
+        let _ = self.sync_terminal_panes();
     }
 
     fn apply_mux_key_action(&mut self, action: MuxKeyAction) {
@@ -1956,6 +1998,12 @@ impl AppState {
             return;
         }
         if matches!(action, MuxKeyAction::ClosePane) {
+            self.close_active_pane();
+            return;
+        }
+        // On the native engine, killing a pane means removing the focused split leaf and collapsing
+        // the layout, same as closing it. Other backends keep tmux/zellij kill-pane semantics.
+        if self.is_native() && matches!(action, MuxKeyAction::KillPane) {
             self.close_active_pane();
             return;
         }
@@ -2006,6 +2054,7 @@ impl AppState {
             },
             MuxKeyAction::KillPane => MuxCommand::KillPane {
                 session_id: selected_session,
+                pane_id: None,
             },
             MuxKeyAction::ClosePane => {
                 unreachable!("close pane is handled before the command match")
