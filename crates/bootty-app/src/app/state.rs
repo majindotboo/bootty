@@ -708,8 +708,14 @@ impl AppState {
 
     pub fn focus_pane(&mut self, pane_id: &str) {
         let key = self.current_window_key();
-        if let Some(layout) = self.pane_layouts.get_mut(&key) {
-            layout.set_focus(pane_id);
+        let moved = match self.pane_layouts.get_mut(&key) {
+            Some(layout) if layout.focused() != pane_id => layout.set_focus(pane_id),
+            _ => false,
+        };
+        // Make the new pane the input runtime this frame so its rect doesn't briefly render the
+        // previously focused pane (the deref runtime would otherwise lag until the next frame's sync).
+        if moved {
+            let _ = self.sync_terminal_panes();
         }
     }
 
@@ -780,11 +786,12 @@ impl AppState {
             return;
         };
         let gap = self.config().chrome.pane_divider_width;
-        if let Some(layout) = self.pane_layouts.get_mut(&key) {
-            let focused = layout.focused().to_owned();
-            if let Some(neighbor) = layout.neighbor(&focused, direction, area, gap) {
-                layout.set_focus(&neighbor);
-            }
+        let neighbor = self
+            .pane_layouts
+            .get(&key)
+            .and_then(|layout| layout.neighbor(layout.focused(), direction, area, gap));
+        if let Some(neighbor) = neighbor {
+            self.focus_pane(&neighbor);
         }
     }
 

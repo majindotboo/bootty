@@ -57,6 +57,13 @@ fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32
     }
 }
 
+/// Pane corner radius in px from a 0–100% setting, scaled to the pane's shorter half-extent.
+fn pane_corner_radius(rect: Rect, percent: f32) -> egui::CornerRadius {
+    let max = (rect.width().min(rect.height()) / 2.0).max(0.0);
+    let px = (percent.clamp(0.0, 100.0) / 100.0) * max;
+    egui::CornerRadius::same(px.round().clamp(0.0, 255.0) as u8)
+}
+
 fn fullscreen_notch_layout_offset(configured_offset: Option<f32>, measured_band: f32) -> f32 {
     if let Some(offset) = configured_offset {
         return offset.max(0.0);
@@ -460,15 +467,28 @@ impl BoottyApp {
         area: Rect,
         palette: bootty_ui::ThemePalette,
     ) {
-        let gap = self.state.config().chrome.pane_divider_width;
+        let chrome = &self.state.config().chrome;
+        let gap = chrome.pane_divider_width;
+        let border_width = chrome.pane_focus_border_width;
+        let border_color = chrome
+            .pane_focus_border_color
+            .map(crate::theme::config_color32)
+            .unwrap_or(palette.primary);
+        let corner_percent = chrome.pane_corner_radius;
+        let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
         let rects = self.state.pane_rects(area, gap);
-        let focused = self.state.focused_pane();
 
+        // Handle click-to-focus before snapshotting focus so this frame already renders the clicked
+        // pane (focus_pane re-syncs the input runtime), avoiding a one-frame stale-pane flash.
         if ui.input(|input| input.pointer.primary_pressed())
             && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
             && let Some((pane_id, _)) = rects.iter().find(|(_, rect)| rect.contains(pos))
         {
             self.state.focus_pane(pane_id);
+        }
+        let focused = self.state.focused_pane();
+        if let Some(focused) = &focused {
+            self.focus_pane_widget(focused);
         }
 
         let current_ids: std::collections::HashSet<String> =
@@ -514,11 +534,19 @@ impl BoottyApp {
                 Some(Err(error)) => state.record_render_error(error),
                 None => {}
             }
-            if is_focused {
+            let corner = pane_corner_radius(*rect, corner_percent);
+            if !is_focused && inactive_dim > 0.0 {
+                ui.painter().rect_filled(
+                    *rect,
+                    corner,
+                    egui::Color32::from_black_alpha((inactive_dim * 255.0) as u8),
+                );
+            }
+            if is_focused && border_width > 0.0 {
                 ui.painter().rect_stroke(
                     *rect,
-                    0.0,
-                    egui::Stroke::new(1.0, palette.primary),
+                    corner,
+                    egui::Stroke::new(border_width, border_color),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1001,13 +1029,14 @@ impl BoottyApp {
             if native_backend {
                 // Native panes render through per-pane widgets keyed by pane id; keep the focused
                 // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
-                if let Some(focused) = self.state.focused_pane() {
-                    self.focus_pane_widget(&focused);
-                }
                 if self.state.native_multi_pane() {
+                    // show_split_panes swaps in the focused widget itself (after click-to-focus).
                     self.show_split_panes(ui, terminal_rect, palette);
                     self.show_pane_dividers(ui, terminal_rect, palette);
                 } else {
+                    if let Some(focused) = self.state.focused_pane() {
+                        self.focus_pane_widget(&focused);
+                    }
                     self.show_single_terminal(ui, terminal_rect);
                 }
             } else {

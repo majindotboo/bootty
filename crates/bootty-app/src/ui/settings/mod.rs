@@ -643,6 +643,59 @@ impl SettingsSurface {
                 settings_value_chip(ui, self.palette, &format!("{width:.0} px"));
             },
         );
+        settings_row(
+            ui,
+            self.palette,
+            "Pane focus border",
+            "Border drawn around the focused split pane (0 hides it).",
+            |ui| {
+                let mut width = self.config.chrome.pane_focus_border_width;
+                if settings_slider(ui, self.palette, &mut width, 0.0..=8.0) {
+                    self.config.chrome.pane_focus_border_width = width;
+                    self.set_f32(&["chrome", "pane-focus-border-width"], width);
+                }
+                settings_value_chip(ui, self.palette, &format!("{width:.0} px"));
+            },
+        );
+        settings_row(
+            ui,
+            self.palette,
+            "Focus border color",
+            "Color of the focused-pane border; unset uses the theme accent.",
+            |ui| {
+                let seed = self.palette.primary;
+                let current = self.config.chrome.pane_focus_border_color;
+                let mut rgb = current.map_or([seed.r(), seed.g(), seed.b()], |color| {
+                    [color.r, color.g, color.b]
+                });
+                if settings_color_picker(ui, self.palette, &mut rgb).changed() {
+                    self.config.chrome.pane_focus_border_color = Some(Color {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                    });
+                    self.set_color(&["chrome", "pane-focus-border-color"], rgb);
+                }
+                if current.is_some() && settings_button(ui, self.palette, "Reset").clicked() {
+                    self.config.chrome.pane_focus_border_color = None;
+                    self.remove(&["chrome", "pane-focus-border-color"]);
+                }
+            },
+        );
+        settings_row(
+            ui,
+            self.palette,
+            "Pane corner radius",
+            "Rounding of split pane corners.",
+            |ui| {
+                let mut percent = self.config.chrome.pane_corner_radius;
+                if settings_slider(ui, self.palette, &mut percent, 0.0..=100.0) {
+                    self.config.chrome.pane_corner_radius = percent;
+                    self.set_f32(&["chrome", "pane-corner-radius"], percent);
+                }
+                settings_value_chip(ui, self.palette, &format!("{percent:.0}%"));
+            },
+        );
     }
 
     fn config_ui(&mut self, ui: &mut egui::Ui) {

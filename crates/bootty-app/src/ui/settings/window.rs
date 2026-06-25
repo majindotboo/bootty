@@ -217,6 +217,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             path: ["chrome", "gap"],
             range: 0.0..=24.0,
             suffix: " px",
+            percent: false,
             field: |chrome| &mut chrome.gap,
         },
     );
@@ -229,6 +230,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             path: ["chrome", "unfocused-sidebar-dim"],
             range: 0.0..=1.0,
             suffix: "",
+            percent: true,
             field: |chrome| &mut chrome.unfocused_sidebar_dim,
         },
     );
@@ -241,6 +243,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             path: ["chrome", "unfocused-terminal-dim"],
             range: 0.0..=1.0,
             suffix: "",
+            percent: true,
             field: |chrome| &mut chrome.unfocused_terminal_dim,
         },
     );
@@ -309,6 +312,8 @@ struct ChromeSliderRow {
     path: [&'static str; 2],
     range: std::ops::RangeInclusive<f32>,
     suffix: &'static str,
+    /// Render the chip as a 0–100% value (the stored value is a 0.0–1.0 fraction).
+    percent: bool,
     field: fn(&mut crate::config::ChromeConfig) -> &mut f32,
 }
 
@@ -319,7 +324,12 @@ fn chrome_slider(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: ChromeSlider
             *(spec.field)(&mut win.config.chrome) = value;
             win.set_f32(&spec.path, value);
         }
-        super::settings_value_chip(ui, win.palette, &format!("{value:.0}{}", spec.suffix));
+        let chip = if spec.percent {
+            format!("{:.0}%", value * 100.0)
+        } else {
+            format!("{value:.0}{}", spec.suffix)
+        };
+        super::settings_value_chip(ui, win.palette, &chip);
     });
 }
 
