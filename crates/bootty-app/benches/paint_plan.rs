@@ -75,6 +75,7 @@ fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
                         name: format!("window-{window}"),
                         active: window == 0,
                         anchor: anchor.clone(),
+                        panes: Vec::new(),
                     })
                     .collect(),
             }
