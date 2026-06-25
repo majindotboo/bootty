@@ -13,6 +13,7 @@ use crate::{
     geometry::{
         CellMetrics, CoordinateSpace, SurfacePoint, SurfaceRect, TerminalCoordinate,
         TerminalSurface, ViewTransform, fit_cell_height_to_available_space,
+        fit_cell_width_to_available_space,
     },
     paint_plan::{CursorBlinkPhase, PaintPlanner, TerminalPaintPlan},
     scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
@@ -163,11 +164,14 @@ impl TerminalWidget {
     }
 
     fn cell_metrics_for_rect(&self, rect: Rect) -> CellMetrics {
+        let mut cell = self.base_cell;
         if self.text_config.fit_cell_height {
-            fit_cell_height_to_available_space(rect.height(), self.base_cell, Default::default())
-        } else {
-            self.base_cell
+            cell = fit_cell_height_to_available_space(rect.height(), cell, Default::default());
         }
+        if self.text_config.fit_cell_width {
+            cell = fit_cell_width_to_available_space(rect.width(), cell, Default::default());
+        }
+        cell
     }
 
     fn handle_hyperlink_interaction(
@@ -975,6 +979,7 @@ mod tests {
             cell_width: Some(9.0),
             cell_height: Some(21.0),
             fit_cell_height: true,
+            fit_cell_width: true,
             baseline_adjustment: -1.0,
             underline_position: 3.0,
             underline_thickness: 2.0,
@@ -1004,12 +1009,29 @@ mod tests {
         let mut widget = TerminalWidget::new(None);
         widget.base_cell = CellMetrics::new(10.0, 22.0);
         widget.text_config.fit_cell_height = true;
+        // Isolate the height fit: column fitting is exercised separately.
+        widget.text_config.fit_cell_width = false;
 
         let cell = widget
             .cell_metrics_for_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1159.0)));
 
         assert_eq!(cell.width, 10.0);
         assert!((cell.height - 22.288_462).abs() < 0.001);
+    }
+
+    #[test]
+    fn widget_fit_cell_width_uses_rect_width_without_changing_rows() {
+        let mut widget = TerminalWidget::new(None);
+        widget.base_cell = CellMetrics::new(10.0, 22.0);
+        widget.text_config.fit_cell_height = false;
+        widget.text_config.fit_cell_width = true;
+
+        let cell =
+            widget.cell_metrics_for_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(1007.0, 800.0)));
+
+        assert_eq!(cell.height, 22.0);
+        // 100 columns stretched to fill 1007px with no trailing gap.
+        assert!((cell.width - 10.07).abs() < 0.001);
     }
 
     #[test]

@@ -624,6 +624,23 @@ pub fn fit_cell_height_to_available_space(
     CellMetrics::new(cell.width, available_height / rows)
 }
 
+/// Stretch the cell width so the whole-number column count exactly fills the available width,
+/// distributing the trailing remainder across columns instead of leaving a dead strip on the right.
+/// This matters most with split panes, where arbitrary widths rarely divide evenly.
+pub fn fit_cell_width_to_available_space(
+    width: f32,
+    cell: CellMetrics,
+    padding: TerminalPadding,
+) -> CellMetrics {
+    let available_width = (width - padding.horizontal()).max(0.0);
+    if !available_width.is_finite() || available_width <= 0.0 {
+        return cell;
+    }
+
+    let cols = f32::from(geometry_for_pixels(width, 0.0, cell, padding).cols);
+    CellMetrics::new(available_width / cols, cell.height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +702,25 @@ mod tests {
         assert_eq!(fitted_cell.width, 10.0);
         assert!((fitted_cell.height - 22.288_462).abs() < 0.001);
         assert!((fitted_cell.height * 52.0 - 1159.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fitted_cell_width_distributes_horizontal_remainder_across_columns() {
+        let base_cell = CellMetrics::new(10.0, 22.0);
+        let fitted_cell =
+            fit_cell_width_to_available_space(1007.0, base_cell, TerminalPadding::default());
+
+        let base_geometry =
+            geometry_for_pixels(1007.0, 800.0, base_cell, TerminalPadding::default());
+        let fitted_geometry =
+            geometry_for_pixels(1007.0, 800.0, fitted_cell, TerminalPadding::default());
+
+        // Column count is preserved; the width stretches to fill the leftover 7px with no gap.
+        assert_eq!(base_geometry.cols, 100);
+        assert_eq!(fitted_geometry.cols, 100);
+        assert_eq!(fitted_cell.height, 22.0);
+        assert!((fitted_cell.width - 10.07).abs() < 0.001);
+        assert!((fitted_cell.width * 100.0 - 1007.0).abs() < 0.001);
     }
 
     #[test]

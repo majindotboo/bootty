@@ -120,6 +120,19 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             }
         },
     );
+    let mut fit_cell_width = win.config.font.fit_cell_width;
+    super::settings_row(
+        ui,
+        palette,
+        "Fit columns to window",
+        "Stretch column spacing so terminal content fills available width (avoids a gap on the right, common with split panes).",
+        |ui| {
+            if super::settings_toggle(ui, palette, &mut fit_cell_width) {
+                win.config.font.fit_cell_width = fit_cell_width;
+                win.set_bool(&["font", "fit-cell-width"], fit_cell_width);
+            }
+        },
+    );
 
     super::section(ui, palette, "GLYPH BEHAVIOR");
     slider(
