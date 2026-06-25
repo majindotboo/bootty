@@ -154,6 +154,8 @@ pub enum MacosTitlebarStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontConfig {
     pub family: Vec<String>,
+    pub ui_family: Vec<String>,
+    pub ui_use_terminal_family: bool,
     pub features: Vec<FontFeature>,
     pub size: f32,
     pub cell_width: Option<f32>,
@@ -168,6 +170,8 @@ pub struct FontConfig {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct FontPatch {
     family: Option<Vec<String>>,
+    ui_family: Option<Vec<String>>,
+    ui_use_terminal_family: Option<bool>,
     features: Option<Vec<String>>,
     size: Option<f32>,
     cell_width: Option<f32>,
@@ -530,6 +534,8 @@ impl Default for FontConfig {
         let text = TerminalTextConfig::default();
         Self {
             family: text.families,
+            ui_family: Vec::new(),
+            ui_use_terminal_family: true,
             features: text.font_features,
             size: text.font_size,
             cell_width: text.cell_width,
@@ -543,6 +549,14 @@ impl Default for FontConfig {
 }
 
 impl FontConfig {
+    pub fn ui_families(&self) -> &[String] {
+        if self.ui_use_terminal_family {
+            &self.family
+        } else {
+            &self.ui_family
+        }
+    }
+
     pub fn terminal_text_config(&self) -> TerminalTextConfig {
         TerminalTextConfig {
             families: self.family.clone(),
@@ -1552,6 +1566,11 @@ fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
 
 fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) -> ConfigResult<()> {
     apply_value(&mut font.family, partial.family);
+    apply_value(&mut font.ui_family, partial.ui_family);
+    apply_value(
+        &mut font.ui_use_terminal_family,
+        partial.ui_use_terminal_family,
+    );
     apply_value(&mut font.size, partial.size);
     apply_present(&mut font.cell_width, partial.cell_width);
     apply_present(&mut font.cell_height, partial.cell_height);
