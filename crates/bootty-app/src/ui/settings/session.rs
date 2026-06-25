@@ -7,14 +7,15 @@ use super::SettingsWindow;
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
-    super::section(ui, palette, "SESSION");
-    egui::Grid::new("settings_session_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Shell");
+    super::section(ui, palette, "SHELL");
+    super::settings_row(
+        ui,
+        palette,
+        "Shell",
+        "Empty uses the macOS account login shell. Applies to new sessions.",
+        |ui| {
             let mut shell = win.config.session.shell.clone().unwrap_or_default();
-            if text_field(ui, &mut shell, "default login shell").changed() {
+            if text_field(ui, palette, &mut shell, "default login shell").changed() {
                 if shell.trim().is_empty() {
                     win.config.session.shell = None;
                     win.remove(&["session", "shell"]);
@@ -23,9 +24,14 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     win.set_str(&["session", "shell"], &shell);
                 }
             }
-            ui.end_row();
-
-            ui.label("Working directory");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Working directory",
+        "Empty inherits from the launching process. Applies to new sessions.",
+        |ui| {
             let mut cwd = win
                 .config
                 .session
@@ -33,7 +39,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default();
-            if text_field(ui, &mut cwd, "inherit from launcher").changed() {
+            if text_field(ui, palette, &mut cwd, "inherit from launcher").changed() {
                 if cwd.trim().is_empty() {
                     win.config.session.working_directory = None;
                     win.remove(&["session", "working-directory"]);
@@ -42,11 +48,18 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     win.set_str(&["session", "working-directory"], &cwd);
                 }
             }
-            ui.end_row();
+        },
+    );
 
-            ui.label("TERM");
+    super::section(ui, palette, "TERMINAL IDENTITY");
+    super::settings_row(
+        ui,
+        palette,
+        "TERM",
+        "Advertised terminal type for new shells.",
+        |ui| {
             let mut term = win.config.session.term.clone();
-            if text_field(ui, &mut term, "xterm-256color").changed() {
+            if text_field(ui, palette, &mut term, "xterm-256color").changed() {
                 win.config.session.term = term.clone();
                 if term.trim().is_empty() {
                     win.remove(&["session", "term"]);
@@ -54,11 +67,16 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     win.set_str(&["session", "term"], &term);
                 }
             }
-            ui.end_row();
-
-            ui.label("COLORTERM");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "COLORTERM",
+        "Advertised color capability for new shells.",
+        |ui| {
             let mut colorterm = win.config.session.colorterm.clone();
-            if text_field(ui, &mut colorterm, "truecolor").changed() {
+            if text_field(ui, palette, &mut colorterm, "truecolor").changed() {
                 win.config.session.colorterm = colorterm.clone();
                 if colorterm.trim().is_empty() {
                     win.remove(&["session", "colorterm"]);
@@ -66,9 +84,14 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     win.set_str(&["session", "colorterm"], &colorterm);
                 }
             }
-            ui.end_row();
-
-            ui.label("Max scrollback");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Max scrollback",
+        "Lines retained per pane. 0 disables scrollback.",
+        |ui| {
             let mut scrollback = win.config.session.max_scrollback as i64;
             if ui
                 .add(
@@ -82,19 +105,25 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 win.config.session.max_scrollback = value as usize;
                 win.set_i64(&["session", "max-scrollback"], value);
             }
-            ui.end_row();
-        });
-    ui.label(
-        egui::RichText::new("Lines retained per pane. 0 disables scrollback.")
-            .color(palette.muted)
-            .size(12.0),
+        },
+    );
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Glyph protocol",
+        "Expose terminal image/glyph protocol support to new sessions.",
+        win.config.session.glyph_protocol,
+        |enabled| {
+            win.config.session.glyph_protocol = enabled;
+            win.set_bool(&["session", "glyph-protocol"], enabled);
+        },
     );
 
     super::section(ui, palette, "ENVIRONMENT");
-    ui.label(
-        egui::RichText::new("Extra variables exported to every shell.")
-            .color(palette.muted)
-            .size(12.0),
+    super::settings_notice(
+        ui,
+        palette.muted,
+        "Extra variables exported to every new shell. Incomplete rows are ignored while editing.",
     );
     ui.add_space(6.0);
 
@@ -102,31 +131,15 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let mut changed = false;
     let mut remove: Option<usize> = None;
     for (index, (name, value)) in env.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            if ui
-                .add_sized(
-                    [200.0, 26.0],
-                    egui::TextEdit::singleline(name)
-                        .hint_text("NAME")
-                        .vertical_align(egui::Align::Center),
-                )
-                .changed()
-            {
+        super::settings_row(ui, palette, "Variable", "NAME=value", |ui| {
+            if super::settings_text_edit(ui, palette, name, "NAME").changed() {
                 changed = true;
             }
             ui.label("=");
-            if ui
-                .add_sized(
-                    [240.0, 26.0],
-                    egui::TextEdit::singleline(value)
-                        .hint_text("value")
-                        .vertical_align(egui::Align::Center),
-                )
-                .changed()
-            {
+            if super::settings_text_edit(ui, palette, value, "value").changed() {
                 changed = true;
             }
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("Remove").clicked() {
                 remove = Some(index);
             }
         });
@@ -135,14 +148,12 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         env.remove(index);
         changed = true;
     }
-    ui.add_space(4.0);
     if ui.button("+ Add variable").clicked() {
         env.push((String::new(), String::new()));
         changed = true;
     }
     if changed {
         win.config.session.env = env.clone();
-        // Skip rows without a name so a half-typed variable never breaks the reload.
         let valid: Vec<(String, String)> = env
             .into_iter()
             .filter(|(name, _)| !name.trim().is_empty())
@@ -153,45 +164,13 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             win.set_env(&["session", "env"], &valid);
         }
     }
-
-    super::section(ui, palette, "DIAGNOSTICS");
-    egui::Grid::new("settings_diagnostics_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Stability trace");
-            let mut trace = win
-                .config
-                .diagnostics
-                .stability_trace
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
-            if text_field(ui, &mut trace, "path to write trace log").changed() {
-                if trace.trim().is_empty() {
-                    win.config.diagnostics.stability_trace = None;
-                    win.remove(&["diagnostics", "stability-trace"]);
-                } else {
-                    win.config.diagnostics.stability_trace = Some(PathBuf::from(trace.clone()));
-                    win.set_str(&["diagnostics", "stability-trace"], &trace);
-                }
-            }
-            ui.end_row();
-        });
-    ui.label(
-        egui::RichText::new(
-            "Writes frame-timing diagnostics to this file. Leave empty to disable.",
-        )
-        .color(palette.muted)
-        .size(12.0),
-    );
 }
 
-fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
-    ui.add_sized(
-        [300.0, 26.0],
-        egui::TextEdit::singleline(value)
-            .hint_text(hint)
-            .vertical_align(egui::Align::Center),
-    )
+fn text_field(
+    ui: &mut egui::Ui,
+    palette: bootty_ui::ThemePalette,
+    value: &mut String,
+    hint: &str,
+) -> egui::Response {
+    super::settings_text_edit(ui, palette, value, hint)
 }

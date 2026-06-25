@@ -1,65 +1,31 @@
 use eframe::egui;
 
 use super::SettingsWindow;
-use crate::config::{
-    MacosTitlebarStyle, MultiplexerBackendConfig, SidebarPosition, WindowDecoration,
-    WindowFullscreen,
-};
+use crate::config::{MacosTitlebarStyle, WindowDecoration, WindowFullscreen};
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
-    super::section(ui, palette, "MULTIPLEXER");
-    egui::Grid::new("settings_multiplexer_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Backend");
-            let mut backend = win.config.multiplexer.backend;
-            if enum_combo(
-                ui,
-                palette,
-                "settings_backend",
-                &mut backend,
-                &[
-                    (MultiplexerBackendConfig::Native, "native"),
-                    (MultiplexerBackendConfig::Rmux, "rmux"),
-                    (MultiplexerBackendConfig::Tmux, "tmux"),
-                    (MultiplexerBackendConfig::Zellij, "zellij"),
-                ],
-            ) {
-                win.config.multiplexer.backend = backend;
-                win.set_str(&["multiplexer", "backend"], backend_token(backend));
-            }
-            ui.end_row();
-        });
-    ui.label(
-        egui::RichText::new("Applies to new sessions.")
-            .color(palette.muted)
-            .size(12.0),
-    );
-
     super::section(ui, palette, "WINDOW");
-
-    egui::Grid::new("settings_window_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Title");
+    super::settings_row(
+        ui,
+        palette,
+        "Title",
+        "Shown in native window chrome.",
+        |ui| {
             let mut title = win.config.window.title.clone();
-            if ui
-                .add_sized(
-                    [300.0, 26.0],
-                    egui::TextEdit::singleline(&mut title).vertical_align(egui::Align::Center),
-                )
-                .changed()
-            {
+            if super::settings_text_edit(ui, palette, &mut title, "Bootty").changed() {
                 win.config.window.title = title.clone();
                 win.set_str(&["window", "title"], &title);
             }
-            ui.end_row();
-
-            ui.label("Titlebar (macOS)");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Titlebar style",
+        "macOS window chrome treatment.",
+        |ui| {
             let mut style = win.config.window.macos_titlebar_style;
             if enum_combo(
                 ui,
@@ -67,29 +33,55 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 "settings_titlebar",
                 &mut style,
                 &[
-                    (MacosTitlebarStyle::Native, "native"),
-                    (MacosTitlebarStyle::Transparent, "transparent"),
-                    (MacosTitlebarStyle::Hidden, "hidden"),
+                    (MacosTitlebarStyle::Native, "System titlebar"),
+                    (MacosTitlebarStyle::Transparent, "Transparent"),
+                    (MacosTitlebarStyle::Hidden, "Hidden"),
                 ],
             ) {
                 win.config.window.macos_titlebar_style = style;
                 win.set_str(&["window", "macos-titlebar-style"], titlebar_token(style));
             }
-            ui.end_row();
-
-            ui.label("Decoration");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Decoration",
+        "Choose who draws the outer window border.",
+        |ui| {
             let mut decoration = win.config.window.window_decoration;
-            if enum_combo(
+            if super::described_combo(
                 ui,
                 palette,
                 "settings_decoration",
                 &mut decoration,
                 &[
-                    (WindowDecoration::Auto, "auto"),
-                    (WindowDecoration::None, "none"),
-                    (WindowDecoration::Client, "client"),
-                    (WindowDecoration::Server, "server"),
+                    (
+                        WindowDecoration::Auto,
+                        "Automatic",
+                        "Let the platform pick based on the titlebar style.",
+                    ),
+                    (
+                        WindowDecoration::None,
+                        "Borderless",
+                        "No outer border or system window controls.",
+                    ),
+                    (
+                        WindowDecoration::Client,
+                        "Drawn by Bootty",
+                        "Bootty paints the window border and controls.",
+                    ),
+                    (
+                        WindowDecoration::Server,
+                        "Drawn by system",
+                        "The OS paints the native window border.",
+                    ),
                 ],
+                super::ComboStyle {
+                    width: 260.0,
+                    searchable: false,
+                    placeholder: "",
+                },
             ) {
                 win.config.window.window_decoration = decoration;
                 win.set_str(
@@ -97,149 +89,161 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     decoration_token(decoration),
                 );
             }
-            ui.end_row();
-
-            ui.label("Fullscreen");
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Fullscreen mode",
+        "Controls native fullscreen and notch-aware non-native modes.",
+        |ui| {
             let mut fullscreen = win.config.window.fullscreen;
-            if enum_combo(
+            if super::described_combo(
                 ui,
                 palette,
                 "settings_fullscreen",
                 &mut fullscreen,
                 &[
-                    (WindowFullscreen::Disabled, "disabled"),
-                    (WindowFullscreen::Native, "native"),
-                    (WindowFullscreen::NonNative, "non_native"),
+                    (
+                        WindowFullscreen::Disabled,
+                        "Disabled",
+                        "Never enter fullscreen.",
+                    ),
+                    (
+                        WindowFullscreen::Native,
+                        "Native",
+                        "Use macOS native Spaces fullscreen.",
+                    ),
+                    (
+                        WindowFullscreen::NonNative,
+                        "Borderless",
+                        "Fill the display without native Spaces.",
+                    ),
                     (
                         WindowFullscreen::NonNativeVisibleMenu,
-                        "non_native_visible_menu",
+                        "Borderless + menu bar",
+                        "Keep the menu bar visible in borderless fullscreen.",
                     ),
                     (
                         WindowFullscreen::NonNativePaddedNotch,
-                        "non_native_padded_notch",
+                        "Borderless + notch padding",
+                        "Reserve space for a notched display.",
                     ),
                 ],
+                super::ComboStyle {
+                    width: 260.0,
+                    searchable: false,
+                    placeholder: "",
+                },
             ) {
                 win.config.window.fullscreen = fullscreen;
                 win.set_str(&["window", "fullscreen"], fullscreen_token(fullscreen));
             }
-            ui.end_row();
-        });
-
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Default size applies to new windows.")
-            .color(palette.muted)
-            .size(12.0),
+        },
     );
-    egui::Grid::new("settings_window_size_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Default width");
-            let mut width = win.config.window.width;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut width)
-                        .speed(4.0)
-                        .range(400.0..=6000.0),
-                )
-                .changed()
-            {
-                win.config.window.width = width;
-                win.set_f32(&["window", "width"], width);
-            }
-            ui.end_row();
 
-            ui.label("Default height");
-            let mut height = win.config.window.height;
+    super::section(ui, palette, "DEFAULT SIZE");
+    numeric_window_row(
+        win,
+        ui,
+        WindowNumberRow {
+            label: "Width",
+            help: "Applies to newly created windows.",
+            path: ["window", "width"],
+            range: 400.0..=6000.0,
+            field: |window| &mut window.width,
+        },
+    );
+    numeric_window_row(
+        win,
+        ui,
+        WindowNumberRow {
+            label: "Height",
+            help: "Applies to newly created windows.",
+            path: ["window", "height"],
+            range: 300.0..=4000.0,
+            field: |window| &mut window.height,
+        },
+    );
+
+    super::section(ui, palette, "FULLSCREEN NOTCH");
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Tabs in notch band",
+        "Allow terminal chrome to occupy the notch/menu-bar band.",
+        win.config.window.fullscreen_tabs_in_notch,
+        |enabled| {
+            win.config.window.fullscreen_tabs_in_notch = enabled;
+            win.set_bool(&["window", "fullscreen-tabs-in-notch"], enabled);
+        },
+    );
+    super::settings_row(
+        ui,
+        palette,
+        "Top offset",
+        "Leave automatic unless a notched display needs an exact override.",
+        |ui| {
+            let mut auto = win.config.window.fullscreen_top_offset.is_none();
+            if super::settings_toggle(ui, palette, &mut auto) && auto {
+                win.config.window.fullscreen_top_offset = None;
+                win.remove(&["window", "fullscreen-top-offset"]);
+            }
+            ui.label(egui::RichText::new("Auto").color(palette.muted));
+            let mut offset = win.config.window.fullscreen_top_offset.unwrap_or(0.0);
             if ui
-                .add(
-                    egui::DragValue::new(&mut height)
-                        .speed(4.0)
-                        .range(300.0..=4000.0),
+                .add_enabled(
+                    !auto,
+                    egui::DragValue::new(&mut offset)
+                        .speed(1.0)
+                        .range(0.0..=160.0)
+                        .suffix(" px"),
                 )
                 .changed()
             {
-                win.config.window.height = height;
-                win.set_f32(&["window", "height"], height);
+                win.config.window.fullscreen_top_offset = Some(offset);
+                win.set_f32(&["window", "fullscreen-top-offset"], offset);
             }
-            ui.end_row();
-        });
+        },
+    );
 
     super::section(ui, palette, "CHROME");
-    egui::Grid::new("settings_chrome_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            checkbox(ui, win, "Sidebar", &["chrome", "sidebar"], |chrome| {
-                &mut chrome.sidebar
-            });
-            checkbox(ui, win, "Status bar", &["chrome", "status-bar"], |chrome| {
-                &mut chrome.status_bar
-            });
-            slider(
-                ui,
-                win,
-                "Sidebar width",
-                &["chrome", "sidebar-width"],
-                120.0..=600.0,
-                " px",
-                |chrome| &mut chrome.sidebar_width,
-            );
-            ui.label("Sidebar position");
-            let mut position = win.config.sidebar.position;
-            if enum_combo(
-                ui,
-                palette,
-                "settings_sidebar_position",
-                &mut position,
-                &[
-                    (SidebarPosition::Left, "left"),
-                    (SidebarPosition::Right, "right"),
-                ],
-            ) {
-                win.config.sidebar.position = position;
-                win.set_str(&["sidebar", "position"], position_token(position));
-            }
-            ui.end_row();
-            slider(
-                ui,
-                win,
-                "Status height",
-                &["chrome", "status-height"],
-                0.0..=80.0,
-                " px",
-                |chrome| &mut chrome.status_height,
-            );
-            slider(
-                ui,
-                win,
-                "Gap",
-                &["chrome", "gap"],
-                0.0..=24.0,
-                " px",
-                |chrome| &mut chrome.gap,
-            );
-            slider(
-                ui,
-                win,
-                "Unfocused sidebar dim",
-                &["chrome", "unfocused-sidebar-dim"],
-                0.0..=1.0,
-                "",
-                |chrome| &mut chrome.unfocused_sidebar_dim,
-            );
-            slider(
-                ui,
-                win,
-                "Unfocused terminal dim",
-                &["chrome", "unfocused-terminal-dim"],
-                0.0..=1.0,
-                "",
-                |chrome| &mut chrome.unfocused_terminal_dim,
-            );
-        });
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Chrome gap",
+            help: "Spacing between sidebar, status, and terminal content.",
+            path: ["chrome", "gap"],
+            range: 0.0..=24.0,
+            suffix: " px",
+            field: |chrome| &mut chrome.gap,
+        },
+    );
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Inactive sidebar dim",
+            help: "Opacity reduction when the window is not focused.",
+            path: ["chrome", "unfocused-sidebar-dim"],
+            range: 0.0..=1.0,
+            suffix: "",
+            field: |chrome| &mut chrome.unfocused_sidebar_dim,
+        },
+    );
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Inactive terminal dim",
+            help: "Opacity reduction when the window is not focused.",
+            path: ["chrome", "unfocused-terminal-dim"],
+            range: 0.0..=1.0,
+            suffix: "",
+            field: |chrome| &mut chrome.unfocused_terminal_dim,
+        },
+    );
 }
 
 fn enum_combo<T: Copy + PartialEq>(
@@ -251,57 +255,72 @@ fn enum_combo<T: Copy + PartialEq>(
 ) -> bool {
     let labels: Vec<&str> = options.iter().map(|(_, label)| *label).collect();
     let current_index = options.iter().position(|(value, _)| *value == *current);
-    let selected_text = current_index.map_or("", |index| labels[index]);
-    if let Some(index) = super::searchable_combo(
-        ui,
-        palette,
-        id,
-        selected_text,
-        220.0,
-        &labels,
-        current_index,
-    ) {
+    let Some(selected) = current_index else {
+        return false;
+    };
+    let next = if labels.len() <= 5 {
+        super::settings_segmented(ui, palette, &labels, selected)
+    } else {
+        super::searchable_combo(
+            ui,
+            palette,
+            id,
+            labels[selected],
+            220.0,
+            &labels,
+            Some(selected),
+        )
+    };
+    if let Some(index) = next {
         *current = options[index].0;
         return true;
     }
     false
 }
 
-fn checkbox(
-    ui: &mut egui::Ui,
-    win: &mut SettingsWindow,
-    label: &str,
-    path: &[&str],
-    field: fn(&mut crate::config::ChromeConfig) -> &mut bool,
-) {
-    ui.label(label);
-    let mut value = *field(&mut win.config.chrome);
-    if ui.checkbox(&mut value, "").changed() {
-        *field(&mut win.config.chrome) = value;
-        win.set_bool(path, value);
-    }
-    ui.end_row();
+struct WindowNumberRow {
+    label: &'static str,
+    help: &'static str,
+    path: [&'static str; 2],
+    range: std::ops::RangeInclusive<f32>,
+    field: fn(&mut crate::config::WindowConfig) -> &mut f32,
 }
 
-fn slider(
-    ui: &mut egui::Ui,
-    win: &mut SettingsWindow,
-    label: &str,
-    path: &[&str],
+fn numeric_window_row(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: WindowNumberRow) {
+    super::settings_row(ui, win.palette, spec.label, spec.help, |ui| {
+        let mut value = *(spec.field)(&mut win.config.window);
+        if ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .speed(4.0)
+                    .range(spec.range),
+            )
+            .changed()
+        {
+            *(spec.field)(&mut win.config.window) = value;
+            win.set_f32(&spec.path, value);
+        }
+    });
+}
+
+struct ChromeSliderRow {
+    label: &'static str,
+    help: &'static str,
+    path: [&'static str; 2],
     range: std::ops::RangeInclusive<f32>,
-    suffix: &str,
+    suffix: &'static str,
     field: fn(&mut crate::config::ChromeConfig) -> &mut f32,
-) {
-    ui.label(label);
-    let mut value = *field(&mut win.config.chrome);
-    if ui
-        .add(egui::Slider::new(&mut value, range).suffix(suffix))
-        .changed()
-    {
-        *field(&mut win.config.chrome) = value;
-        win.set_f32(path, value);
-    }
-    ui.end_row();
+}
+
+fn chrome_slider(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: ChromeSliderRow) {
+    super::settings_row(ui, win.palette, spec.label, spec.help, |ui| {
+        let mut value = *(spec.field)(&mut win.config.chrome);
+        if super::settings_slider(ui, win.palette, &mut value, spec.range) {
+            *(spec.field)(&mut win.config.chrome) = value;
+            win.set_f32(&spec.path, value);
+        }
+        super::settings_value_chip(ui, win.palette, &format!("{value:.0}{}", spec.suffix));
+    });
 }
 
 fn titlebar_token(style: MacosTitlebarStyle) -> &'static str {
@@ -318,22 +337,6 @@ fn decoration_token(decoration: WindowDecoration) -> &'static str {
         WindowDecoration::Auto => "auto",
         WindowDecoration::Client => "client",
         WindowDecoration::Server => "server",
-    }
-}
-
-fn backend_token(backend: MultiplexerBackendConfig) -> &'static str {
-    match backend {
-        MultiplexerBackendConfig::Native => "native",
-        MultiplexerBackendConfig::Rmux => "rmux",
-        MultiplexerBackendConfig::Tmux => "tmux",
-        MultiplexerBackendConfig::Zellij => "zellij",
-    }
-}
-
-fn position_token(position: SidebarPosition) -> &'static str {
-    match position {
-        SidebarPosition::Left => "left",
-        SidebarPosition::Right => "right",
     }
 }
 

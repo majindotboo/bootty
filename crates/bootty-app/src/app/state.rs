@@ -103,9 +103,15 @@ pub enum AppEffect {
     RepaintAfter(Duration),
     SetTerminalTextConfig(TerminalTextConfig),
     SetTerminalCursorIcon(egui::CursorIcon),
+    /// Reinstall egui's UI-chrome fonts (settings/sidebar/status) so a `font.ui-family` edit applies
+    /// live, mirroring how `SetTerminalTextConfig` re-fonts the terminal.
+    SetUiFonts(Vec<String>),
     SetWindowFocus,
     OpenUrl(String),
     OpenSettings,
+    /// Open settings to the keybindings page focused on the given action name,
+    /// adding an editable row for it if none exists yet.
+    ConfigureKeybind(String),
 }
 
 pub struct AppState {
@@ -132,6 +138,9 @@ pub struct AppState {
     modifier_sides: ModifierSideState,
     pending_direct_input: Vec<DirectKeyInput>,
     suppress_next_egui_paste: bool,
+    /// While the settings overlay is open the terminal behind it must receive no input, so the
+    /// direct (winit) input path is gated on this just like it is on the modal mux dialogs.
+    settings_open: bool,
     /// Mirrors whether a Luau-opened floating window is showing. That window lives on `BoottyApp`
     /// rather than here, so input gating reads this mirror to stop feeding the terminal behind it.
     lua_window_open: bool,
@@ -294,6 +303,24 @@ fn direct_copy_shortcut_pressed(input: KeyInput) -> bool {
         && !input.repeat
 }
 
+/// Lowercase a single-letter key in a recorded chord (the physical-key serializer emits uppercase
+/// letters, but bootty's default keybinds and the egui-path recorder use lowercase, e.g. `cmd+x`).
+/// Multi-character key names like `Tab`/`F5` and non-letters are left untouched.
+fn normalize_recorded_chord(chord: String) -> String {
+    match chord.rsplit_once('+') {
+        Some((mods, key)) if is_single_ascii_letter(key) => {
+            format!("{mods}+{}", key.to_ascii_lowercase())
+        }
+        None if is_single_ascii_letter(&chord) => chord.to_ascii_lowercase(),
+        _ => chord,
+    }
+}
+
+fn is_single_ascii_letter(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_alphabetic())
+}
+
 fn terminal_cursor_icon_for_mouse_shape(shape: &str) -> Option<egui::CursorIcon> {
     let normalized = shape.to_ascii_lowercase().replace('_', "-");
     for token in normalized
@@ -426,6 +453,7 @@ impl AppState {
             modifier_sides: ModifierSideState::default(),
             pending_direct_input: Vec::new(),
             suppress_next_egui_paste: false,
+            settings_open: false,
             lua_window_open: false,
             terminal_selection_drag_active: false,
             wheel_scroll_state: WheelScrollState::default(),
@@ -507,6 +535,12 @@ impl AppState {
     }
     pub fn direct_input_suppresses_egui_events(&self) -> bool {
         self.direct_terminal_input_enabled()
+    }
+
+    /// Mirror the settings overlay's open/closed state so the direct input path stops feeding the
+    /// terminal behind it (otherwise shortcuts like ⌘V paste into the hidden terminal).
+    pub fn set_settings_open(&mut self, open: bool) {
+        self.settings_open = open;
     }
 
     /// Mirror whether a Luau floating window is showing so the direct input path stops feeding the
@@ -933,6 +967,22 @@ impl AppState {
         &self.pending_direct_input
     }
 
+    /// Drain the pending direct-input chords as binding-trigger strings for the settings keybind
+    /// recorder. This is how the recorder captures cmd-modified chords like ⌘V and ⌘⌥X: egui
+    /// collapses those into copy/cut/paste events with no key event, but bootty's direct winit path
+    /// keeps the full key + modifiers. Only meaningful while settings is open (the terminal is not
+    /// consuming this input).
+    pub fn take_settings_capture_chords(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_direct_input)
+            .into_iter()
+            .map(|direct| {
+                let chord = crate::input_binding::BindingTrigger::from_key_input(direct.input())
+                    .format_entry();
+                normalize_recorded_chord(chord)
+            })
+            .collect()
+    }
+
     pub fn update_frame(&mut self, inputs: FrameInputs) -> Vec<AppEffect> {
         let FrameInputs {
             now,
@@ -1124,6 +1174,7 @@ impl AppState {
             && self.keybind_help_dialog.is_none()
             && self.command_palette_dialog.is_none()
             && !self.lua_window_open
+            && !self.settings_open
     }
 
     fn reload_config(&mut self, effects: &mut Vec<AppEffect>) -> bool {
@@ -1195,6 +1246,9 @@ impl AppState {
             effects.push(AppEffect::SetTerminalTextConfig(
                 next.font.terminal_text_config(),
             ));
+            if previous.font.ui_families() != next.font.ui_families() {
+                effects.push(AppEffect::SetUiFonts(next.font.ui_families().to_vec()));
+            }
         }
         if previous.window.title != next.window.title {
             effects.push(AppEffect::SetWindowTitle(next.window.title.clone()));
@@ -1243,6 +1297,37 @@ impl AppState {
         events: Vec<egui::Event>,
     ) -> (Vec<egui::Event>, Vec<KeybindAction>) {
         split_app_actions_for_bindings(&mut self.app_key_bindings, events)
+    }
+
+    /// While the command palette is open, find and remove the configure-keybinding
+    /// chord (`cmd+shift+,` on macOS, `ctrl+shift+,` elsewhere) from `events` so it
+    /// doesn't also trigger whatever global binding shares that chord. Returns
+    /// whether one was consumed.
+    fn take_configure_keybind_chord(&self, events: &mut Vec<egui::Event>) -> bool {
+        if self.command_palette_dialog.is_none() {
+            return false;
+        }
+        let macos = cfg!(target_os = "macos");
+        let Some(index) = events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Comma,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if if macos {
+                    modifiers.shift && (modifiers.command || modifiers.mac_cmd)
+                        && !modifiers.alt && !modifiers.ctrl
+                } else {
+                    modifiers.shift && modifiers.ctrl && !modifiers.alt
+                }
+            )
+        }) else {
+            return false;
+        };
+        events.remove(index);
+        true
     }
 
     fn terminal_mouse_tracking_for_selection(
@@ -1330,6 +1415,20 @@ impl AppState {
         );
         let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
         let copy_selection_count = self.consume_copy_shortcut_for_terminal_selection(&mut events);
+        // `cmd+shift+,` over a palette row jumps to that command's keybinding editor.
+        // Consume it here so it doesn't also fire its own global binding.
+        if self.take_configure_keybind_chord(&mut events) {
+            let action = self
+                .command_palette_dialog
+                .as_ref()
+                .and_then(CommandPaletteDialog::current_action)
+                .map(str::to_owned);
+            self.close_overlay_dialogs();
+            self.input_focus = InputFocus::Terminal;
+            if let Some(action) = action {
+                effects.push(AppEffect::ConfigureKeybind(action));
+            }
+        }
         let (events, actions) = self.split_app_actions(events);
         let routed = route_events(self.input_focus, events);
         let sidebar_count = self.handle_sidebar_input(routed.ui_events);
@@ -1397,6 +1496,11 @@ impl AppState {
         viewport: ViewportSnapshot,
         effects: &mut Vec<AppEffect>,
     ) -> usize {
+        // While settings is open, leave the pending direct input untouched so the keybind recorder
+        // can read it in the UI pass; the terminal behind settings must not consume it.
+        if self.settings_open {
+            return self.pending_direct_input.len();
+        }
         let inputs = std::mem::take(&mut self.pending_direct_input);
         let count = inputs.len();
         if !self.direct_terminal_input_enabled() {
@@ -1929,6 +2033,21 @@ mod tests {
     use super::*;
     use crate::config::{MultiplexerBackendConfig, WindowFullscreen};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn recorded_chord_lowercases_letters_but_keeps_named_keys() {
+        // The physical-key serializer emits uppercase letters; recorded chords are lowercased to
+        // match the default keybind convention (cmd+alt+x), while named keys keep their casing so
+        // they still parse and match.
+        assert_eq!(
+            normalize_recorded_chord("cmd+alt+X".to_owned()),
+            "cmd+alt+x"
+        );
+        assert_eq!(normalize_recorded_chord("cmd+V".to_owned()), "cmd+v");
+        assert_eq!(normalize_recorded_chord("ctrl+Tab".to_owned()), "ctrl+Tab");
+        assert_eq!(normalize_recorded_chord("cmd+F5".to_owned()), "cmd+F5");
+        assert_eq!(normalize_recorded_chord("cmd+=".to_owned()), "cmd+=");
+    }
 
     static TEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 

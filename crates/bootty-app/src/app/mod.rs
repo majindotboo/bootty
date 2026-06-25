@@ -18,7 +18,7 @@ use crate::{
     theme::theme_palette_from_config,
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
-        settings::{self, SettingsWindow},
+        settings::{SettingsAction, SettingsSurface},
     },
 };
 
@@ -72,7 +72,8 @@ pub struct BoottyApp {
     state: AppState,
     terminal_widget: TerminalWidget,
     app_icon_texture: Option<TextureHandle>,
-    settings: Option<SettingsWindow>,
+    settings_open: bool,
+    settings: SettingsSurface,
     // Held for the process lifetime so the native menu stays installed.
     _menu: Option<AppMenu>,
     status_extensions: crate::extensions::ExtensionHost,
@@ -107,7 +108,7 @@ impl BoottyApp {
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     ) -> Result<Self> {
         if uses_custom_egui_fonts(&config) {
-            configure_egui_fonts(&cc.egui_ctx, &config.font.family);
+            configure_egui_fonts(&cc.egui_ctx, config.font.ui_families());
         } else {
             crate::ui::icons::install_icon_fonts(&cc.egui_ctx);
         }
@@ -141,10 +142,11 @@ impl BoottyApp {
         );
 
         Ok(Self {
-            state: AppState::new(config, repaint, direct_input_rx, modifier_side_rx)?,
+            state: AppState::new(config.clone(), repaint, direct_input_rx, modifier_side_rx)?,
             terminal_widget,
             app_icon_texture: None,
-            settings: None,
+            settings_open: false,
+            settings: SettingsSurface::new(config.clone()),
             _menu: crate::menu::install(),
             status_extensions,
             sidebar_extensions,
@@ -155,20 +157,25 @@ impl BoottyApp {
     }
 
     fn open_settings(&mut self, ctx: &egui::Context) {
-        if self.settings.is_some() {
-            // Already open: raise the existing window instead of spawning a second one.
-            ctx.send_viewport_cmd_to(settings::viewport_id(), egui::ViewportCommand::Focus);
-        } else {
-            self.settings = Some(SettingsWindow::new(self.state.config().clone()));
-        }
+        self.settings_open = true;
+        self.state.set_settings_open(true);
+        ctx.request_repaint();
     }
 
-    fn show_settings(&mut self, ctx: &egui::Context) {
+    fn show_settings(&mut self, ui: &mut egui::Ui) {
+        if !self.settings_open {
+            // Covers closes that bypass the Close return below (e.g. a toggle
+            // keybind); idempotent once the style is already restored.
+            self.settings.restore_global_style(ui.ctx());
+            return;
+        }
         let theme = self.state.ui_theme();
-        if let Some(settings) = self.settings.as_mut()
-            && !settings.show(ctx, theme)
-        {
-            self.settings = None;
+        let captured_chords = self.state.take_settings_capture_chords();
+        if self.settings.show(ui, theme, captured_chords) == SettingsAction::Close {
+            self.settings_open = false;
+            self.state.set_settings_open(false);
+            self.settings.restore_global_style(ui.ctx());
+            ui.ctx().request_repaint();
         }
     }
 
@@ -207,6 +214,9 @@ impl BoottyApp {
                     self.terminal_cursor_icon = icon;
                     self.terminal_widget.set_terminal_cursor_icon(icon);
                 }
+                AppEffect::SetUiFonts(families) => {
+                    configure_egui_fonts(ctx, &families);
+                }
                 AppEffect::SetWindowFocus => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -214,6 +224,10 @@ impl BoottyApp {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
                 AppEffect::OpenSettings => self.open_settings(ctx),
+                AppEffect::ConfigureKeybind(action) => {
+                    self.open_settings(ctx);
+                    self.settings.focus_keybinding(&action);
+                }
             }
         }
     }
@@ -918,6 +932,16 @@ impl eframe::App for BoottyApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.state.drain_direct_input();
         self.state.set_lua_window_open(self.lua_window.is_some());
+        if self.settings_open {
+            // Drop egui key events that have a direct-input counterpart so the keybind recorder reads
+            // each cmd-chord once — from the direct path (which keeps full modifiers) rather than
+            // also from egui (or its collapsed copy/cut/paste).
+            suppress_egui_events_for_direct_input(
+                &mut raw_input.events,
+                self.state.pending_direct_input(),
+            );
+            return;
+        }
         if self.state.direct_input_suppresses_egui_events() {
             suppress_egui_events_for_direct_input(
                 &mut raw_input.events,
@@ -929,7 +953,7 @@ impl eframe::App for BoottyApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let (
             mut events,
-            dropped_file_paths,
+            mut dropped_file_paths,
             modifiers,
             hover_pos,
             pressed_mouse_button,
@@ -957,13 +981,16 @@ impl eframe::App for BoottyApp {
                 input.zoom_delta(),
             )
         });
+        if self.settings_open {
+            suppress_terminal_payload_for_settings(&mut events, &mut dropped_file_paths);
+        }
 
         let (terminal_cell_width, terminal_cell_height) = self.terminal_widget.cell_dimensions();
 
-        if (zoom_delta - 1.0).abs() > f32::EPSILON {
+        if !self.settings_open && (zoom_delta - 1.0).abs() > f32::EPSILON {
             self.terminal_widget.apply_pinch(zoom_delta, hover_pos);
         }
-        if self.terminal_widget.is_zoomed() {
+        if !self.settings_open && self.terminal_widget.is_zoomed() {
             let pan = take_scroll_for_pan(&mut events, terminal_cell_height);
             if pan != Vec2::ZERO {
                 self.terminal_widget.apply_pan(pan);
@@ -997,21 +1024,34 @@ impl eframe::App for BoottyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let palette = self.state.ui_theme().palette;
         egui::Frame::NONE.fill(palette.mantle).show(ui, |ui| {
-            self.show_fixed_layout(ui);
+            if self.settings_open {
+                self.show_settings(ui);
+            } else {
+                self.show_fixed_layout(ui);
+            }
         });
-        self.show_new_mux_session_dialog(ui.ctx());
-        self.show_session_picker_dialog(ui.ctx());
-        self.show_rename_session_dialog(ui.ctx());
-        self.show_ditch_session_dialog(ui.ctx());
-        self.show_keybind_help_dialog(ui.ctx());
-        self.show_command_palette_dialog(ui.ctx());
-        self.drive_lua_windows(ui.ctx());
-        self.show_settings(ui.ctx());
+        if !self.settings_open {
+            self.show_new_mux_session_dialog(ui.ctx());
+            self.show_session_picker_dialog(ui.ctx());
+            self.show_rename_session_dialog(ui.ctx());
+            self.show_ditch_session_dialog(ui.ctx());
+            self.show_keybind_help_dialog(ui.ctx());
+            self.show_command_palette_dialog(ui.ctx());
+            self.drive_lua_windows(ui.ctx());
+        }
     }
 }
 
 fn uses_custom_egui_fonts(config: &BoottyConfig) -> bool {
     config.chrome.sidebar || config.chrome.status_bar
+}
+
+fn suppress_terminal_payload_for_settings(
+    events: &mut Vec<egui::Event>,
+    dropped_file_paths: &mut Vec<PathBuf>,
+) {
+    events.clear();
+    dropped_file_paths.clear();
 }
 
 // egui's wheel `delta` already points the way content should move, so it is the pan delta as-is.
@@ -1113,5 +1153,16 @@ mod tests {
             chrome::STATUS_EDGE_PAD
         );
         assert_eq!(status_bar_left_padding(true, true), chrome::STATUS_EDGE_PAD);
+    }
+
+    #[test]
+    fn settings_mode_suppresses_terminal_events_and_file_drops() {
+        let mut events = vec![egui::Event::Text("typed into settings".to_owned())];
+        let mut drops = vec![PathBuf::from("/tmp/example.txt")];
+
+        suppress_terminal_payload_for_settings(&mut events, &mut drops);
+
+        assert!(events.is_empty());
+        assert!(drops.is_empty());
     }
 }

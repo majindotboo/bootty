@@ -10,52 +10,33 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
     super::section(ui, palette, "STATUS BAR");
-    egui::Grid::new("settings_statusbar_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label("Show status bar");
-            let mut enabled = win.config.chrome.status_bar;
-            if ui.checkbox(&mut enabled, "").changed() {
-                win.config.chrome.status_bar = enabled;
-                win.set_bool(&["chrome", "status-bar"], enabled);
-            }
-            ui.end_row();
-
-            ui.label("Height");
-            let mut height = win.config.chrome.status_height;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut height)
-                        .range(20.0..=48.0)
-                        .suffix(" px"),
-                )
-                .changed()
-            {
-                win.config.chrome.status_height = height;
-                win.set_f32(&["chrome", "status-height"], height);
-            }
-            ui.end_row();
-
-            ui.label("Hide tmux's own bar");
-            let mut hide = win.config.multiplexer.hide_tmux_status;
-            if ui.checkbox(&mut hide, "tmux backend only").changed() {
-                win.config.multiplexer.hide_tmux_status = hide;
-                win.set_bool(&["multiplexer", "hide-tmux-status"], hide);
-            }
-            ui.end_row();
-        });
-
-    super::section(ui, palette, "SEGMENTS");
-    ui.label(
-        RichText::new(
-            "Each segment renders a Luau module, grouped by alignment. Reorder with the arrows; \
-             fg/bg/icon fill fields the module leaves unset.",
-        )
-        .color(palette.muted)
-        .size(12.0),
+    super::settings_row(ui, palette, "Height", "Status strip height.", |ui| {
+        let mut height = win.config.chrome.status_height;
+        if super::settings_slider(ui, palette, &mut height, 20.0..=80.0) {
+            win.config.chrome.status_height = height;
+            win.set_f32(&["chrome", "status-height"], height);
+        }
+        super::settings_value_chip(ui, palette, &format!("{height:.0} px"));
+    });
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Hide tmux's own bar",
+        "Avoid duplicate status bars when the tmux backend is active.",
+        win.config.multiplexer.hide_tmux_status,
+        |enabled| {
+            win.config.multiplexer.hide_tmux_status = enabled;
+            win.set_bool(&["multiplexer", "hide-tmux-status"], enabled);
+        },
     );
-    ui.add_space(8.0);
+
+    super::section(ui, palette, "MODULES");
+    super::settings_notice(
+        ui,
+        palette.muted,
+        "Segments can use built-ins or Luau files from the config/status directory.",
+    );
+    ui.add_space(6.0);
 
     let available = win
         .config_path
@@ -64,92 +45,104 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         .unwrap_or_default();
 
     let mut changed = false;
-    let mut remove_index = None;
-    let mut move_action: Option<(usize, isize)> = None;
+    let mut remove_index: Option<usize> = None;
     let count = win.config.chrome.status_segments.len();
+    let selected_id = ui.make_persistent_id("settings_status_selected_segment");
+    let mut selected: usize = ui
+        .memory(|memory| memory.data.get_temp(selected_id).unwrap_or(0usize))
+        .min(count.saturating_sub(1));
 
-    for index in 0..count {
-        ui.horizontal(|ui| {
-            let segment = &mut win.config.chrome.status_segments[index];
-
-            let aligns = [
-                SegmentAlign::Left,
-                SegmentAlign::Center,
-                SegmentAlign::Right,
-            ];
-            let labels = ["left", "center", "right"];
-            let current = aligns.iter().position(|a| *a == segment.align).unwrap_or(0);
-            if let Some(selected) = super::searchable_combo(
+    let available_width = ui.available_width();
+    let render_list = |ui: &mut egui::Ui,
+                       win: &mut SettingsWindow,
+                       selected: &mut usize,
+                       remove_index: &mut Option<usize>| {
+        super::reorderable_list(
+            ui,
+            palette,
+            "status_segments",
+            count,
+            |ui, index, handle| {
+                segment_list_row(
+                    win,
+                    ui,
+                    SegmentListContext {
+                        index,
+                        selected,
+                        remove_index,
+                        handle,
+                    },
+                );
+            },
+        )
+    };
+    let reorder = if available_width >= 920.0 {
+        // Two columns: the reorderable list on the left, the detail editor in its own top-down
+        // column on the right. Allocating the detail column top-down is what keeps its labels
+        // stacking vertically instead of smearing across one row.
+        let detail_width = 360.0;
+        let list_width = (available_width - detail_width - 18.0).max(420.0);
+        ui.horizontal_top(|ui| {
+            let reorder = ui
+                .allocate_ui_with_layout(
+                    egui::Vec2::new(list_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| render_list(ui, win, &mut selected, &mut remove_index),
+                )
+                .inner;
+            ui.add_space(18.0);
+            if count > 0 {
+                ui.allocate_ui_with_layout(
+                    egui::Vec2::new(detail_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        segment_detail_panel(
+                            win,
+                            ui,
+                            SegmentDetailContext {
+                                available: &available,
+                                index: selected,
+                                changed: &mut changed,
+                            },
+                        );
+                    },
+                );
+            }
+            reorder
+        })
+        .inner
+    } else {
+        let reorder = render_list(ui, win, &mut selected, &mut remove_index);
+        if count > 0 {
+            ui.add_space(12.0);
+            segment_detail_panel(
+                win,
                 ui,
-                palette,
-                &format!("seg_align_{index}"),
-                labels[current],
-                88.0,
-                &labels,
-                Some(current),
-            ) && aligns[selected] != segment.align
-            {
-                segment.align = aligns[selected];
-                changed = true;
-            }
+                SegmentDetailContext {
+                    available: &available,
+                    index: selected,
+                    changed: &mut changed,
+                },
+            );
+        }
+        reorder
+    };
 
-            let mut module = segment.module.clone();
-            if ui
-                .add_sized(
-                    [140.0, 24.0],
-                    egui::TextEdit::singleline(&mut module).hint_text("module"),
-                )
-                .changed()
-            {
-                segment.module = module;
-                changed = true;
-            }
-
-            changed |= optional_color(ui, "fg", &mut segment.fg, palette.subtext);
-            changed |= optional_color(ui, "bg", &mut segment.bg, palette.surface);
-
-            let mut icon = segment.icon.clone().unwrap_or_default();
-            if ui
-                .add_sized(
-                    [44.0, 24.0],
-                    egui::TextEdit::singleline(&mut icon).hint_text("icon"),
-                )
-                .changed()
-            {
-                segment.icon = (!icon.is_empty()).then_some(icon);
-                changed = true;
-            }
-
-            if ui
-                .add_enabled(index > 0, egui::Button::new("↑").small())
-                .clicked()
-            {
-                move_action = Some((index, -1));
-            }
-            if ui
-                .add_enabled(index + 1 < count, egui::Button::new("↓").small())
-                .clicked()
-            {
-                move_action = Some((index, 1));
-            }
-            if ui.button("×").clicked() {
-                remove_index = Some(index);
-            }
-        });
-    }
-
-    if let Some((index, delta)) = move_action {
-        let target = index.saturating_add_signed(delta);
-        win.config.chrome.status_segments.swap(index, target);
+    if let Some((from, slot)) = reorder {
+        super::apply_reorder(&mut win.config.chrome.status_segments, from, slot);
         changed = true;
     }
     if let Some(index) = remove_index {
         win.config.chrome.status_segments.remove(index);
+        if selected >= win.config.chrome.status_segments.len() {
+            selected = selected.saturating_sub(1);
+        }
         changed = true;
     }
+    ui.memory_mut(|memory| memory.data.insert_temp(selected_id, selected));
 
-    ui.add_space(10.0);
-    if ui.button("+ Add segment").clicked() {
+    ui.add_space(8.0);
+    if super::settings_button(ui, palette, "+ Add segment").clicked() {
         let module = available
             .first()
             .cloned()
@@ -167,7 +160,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     }
 
     if !available.is_empty() {
-        ui.add_space(10.0);
+        ui.add_space(8.0);
         ui.label(
             RichText::new(format!("Available modules: {}", available.join(", ")))
                 .color(palette.muted)
@@ -176,10 +169,258 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     }
 }
 
-/// A small color button with a clear (`×`) affordance, editing an optional override in place.
-/// Returns whether the value changed this frame.
+fn segment_list_row(win: &mut SettingsWindow, ui: &mut egui::Ui, ctx: SegmentListContext<'_>) {
+    let palette = win.palette;
+    let selected = *ctx.selected == ctx.index;
+    // Allocate the row's clickable surface first so its interaction registers before the inner
+    // controls; egui then lets the Remove button claim its own clicks while clicks anywhere else on
+    // the row fall through to selection.
+    let row_height = 54.0;
+    let (rect, response) = ui.allocate_exact_size(
+        egui::Vec2::new(ui.available_width(), row_height),
+        egui::Sense::click(),
+    );
+    let fill = if selected {
+        palette.surface
+    } else if response.hovered() {
+        palette.hover
+    } else {
+        palette.pane
+    };
+    let radius = egui::CornerRadius::same(palette.radius);
+    ui.painter().rect_filled(rect, radius, fill);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                palette.primary
+            } else {
+                palette.border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let segment = &win.config.chrome.status_segments[ctx.index];
+    let module_name = module_label(segment.module.as_str()).to_owned();
+    let module_id = segment.module.clone();
+    let icon_slug = segment.icon.clone();
+    let align_text = align_label(segment.align);
+
+    let content_rect = rect.shrink2(egui::Vec2::new(12.0, 8.0));
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    content.set_min_width(content_rect.width());
+    content.spacing_mut().item_spacing.x = 8.0;
+    content.add_space(22.0); // reserve the handle gutter; the grip is overlaid after
+    segment_marker(&mut content, palette, icon_slug.as_deref());
+    content.vertical(|ui| {
+        ui.label(RichText::new(module_name).color(palette.text).strong());
+        ui.label(
+            RichText::new(module_id)
+                .color(palette.muted)
+                .size(11.0)
+                .monospace(),
+        );
+    });
+    content.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if super::settings_icon_button(ui, palette, "x", "Remove segment").clicked() {
+            *ctx.remove_index = Some(ctx.index);
+        }
+        ui.add_space(6.0);
+        super::settings_value_chip(ui, palette, align_text);
+    });
+
+    // Overlay the grip centered in the row's left gutter, registered last so it wins drags there
+    // while the rest of the row stays click-to-select.
+    let gutter = egui::Rect::from_min_max(
+        content_rect.left_top(),
+        egui::Pos2::new(content_rect.left() + 22.0, content_rect.bottom()),
+    );
+    ctx.handle.paint_in(ui, palette, gutter);
+
+    if response.clicked() {
+        *ctx.selected = ctx.index;
+    }
+    ui.add_space(8.0);
+}
+
+/// The segment's leading marker: a resolved iconflow icon when its slug is a known id, the literal
+/// text when the user typed a glyph, or a small painted dot when no icon is set. The empty case is a
+/// drawn shape rather than a font bullet so it always renders regardless of the UI font.
+fn segment_marker(ui: &mut egui::Ui, palette: bootty_ui::ThemePalette, icon: Option<&str>) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::hover());
+    match icon {
+        Some(slug) if crate::ui::icons::has_slug(slug) => {
+            crate::ui::icons::paint_icon_slug(
+                ui.painter(),
+                slug,
+                rect.center(),
+                15.0,
+                palette.primary,
+            );
+        }
+        Some(literal) if !literal.is_empty() => {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                literal,
+                egui::FontId::proportional(15.0),
+                palette.primary,
+            );
+        }
+        _ => {
+            ui.painter()
+                .circle_filled(rect.center(), 4.0, palette.primary);
+        }
+    }
+}
+
+fn segment_detail_panel(
+    win: &mut SettingsWindow,
+    ui: &mut egui::Ui,
+    ctx: SegmentDetailContext<'_>,
+) {
+    let palette = win.palette;
+    // Fill whatever column we were allocated; control widths derive from this so nothing spills past
+    // the frame regardless of which layout branch placed us.
+    let panel_width = ui.available_width();
+    let control_width = (panel_width - 24.0).max(120.0);
+    egui::Frame::NONE
+        .fill(palette.pane)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(egui::CornerRadius::same(palette.radius))
+        .inner_margin(egui::Margin::symmetric(12, 12))
+        .show(ui, |ui| {
+            ui.set_min_width(control_width);
+            let segment = &mut win.config.chrome.status_segments[ctx.index];
+            ui.label(
+                RichText::new("Module details")
+                    .color(palette.subtext)
+                    .strong()
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(module_label(segment.module.as_str()))
+                    .color(palette.text)
+                    .strong(),
+            );
+            ui.add_space(12.0);
+            ui.label(RichText::new("Module").color(palette.muted).size(11.0));
+            if ctx.available.is_empty() {
+                let mut module = segment.module.clone();
+                if super::settings_text_edit_width(
+                    ui,
+                    palette,
+                    &mut module,
+                    "module",
+                    control_width,
+                )
+                .changed()
+                {
+                    segment.module = module;
+                    *ctx.changed = true;
+                }
+            } else {
+                let options: Vec<&str> = ctx.available.iter().map(String::as_str).collect();
+                let selected = if segment.module.is_empty() {
+                    "module"
+                } else {
+                    segment.module.as_str()
+                };
+                let current = options.iter().position(|option| *option == segment.module);
+                if let Some(choice) = super::searchable_combo(
+                    ui,
+                    palette,
+                    &format!("status_module_{}", ctx.index),
+                    selected,
+                    control_width,
+                    &options,
+                    current,
+                ) {
+                    segment.module = options[choice].to_owned();
+                    *ctx.changed = true;
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.label(RichText::new("Alignment").color(palette.muted).size(11.0));
+            let aligns = [
+                SegmentAlign::Left,
+                SegmentAlign::Center,
+                SegmentAlign::Right,
+            ];
+            let labels = ["Left", "Center", "Right"];
+            let current = aligns.iter().position(|a| *a == segment.align).unwrap_or(0);
+            if let Some(selected) = super::settings_segmented_ltr(ui, palette, &labels, current)
+                && aligns[selected] != segment.align
+            {
+                segment.align = aligns[selected];
+                *ctx.changed = true;
+            }
+
+            ui.add_space(12.0);
+            ui.label(RichText::new("Icon").color(palette.muted).size(11.0));
+            let mut icon = segment.icon.clone().unwrap_or_default();
+            if super::settings_text_edit_width(ui, palette, &mut icon, "icon", control_width)
+                .changed()
+            {
+                segment.icon = (!icon.is_empty()).then_some(icon);
+                *ctx.changed = true;
+            }
+
+            ui.add_space(12.0);
+            *ctx.changed |=
+                optional_color(ui, palette, "Foreground", &mut segment.fg, palette.subtext);
+            ui.add_space(8.0);
+            *ctx.changed |=
+                optional_color(ui, palette, "Background", &mut segment.bg, palette.surface);
+        });
+}
+
+struct SegmentListContext<'a> {
+    index: usize,
+    selected: &'a mut usize,
+    remove_index: &'a mut Option<usize>,
+    handle: &'a super::DragHandle,
+}
+
+struct SegmentDetailContext<'a> {
+    available: &'a [String],
+    index: usize,
+    changed: &'a mut bool,
+}
+
+fn module_label(module: &str) -> &str {
+    match module {
+        "session" => "Session",
+        "windows" => "Windows",
+        "sysinfo" => "System info",
+        "clock" => "Clock",
+        other => other,
+    }
+}
+
+fn align_label(align: SegmentAlign) -> &'static str {
+    match align {
+        SegmentAlign::Left => "Left",
+        SegmentAlign::Center => "Center",
+        SegmentAlign::Right => "Right",
+    }
+}
+
 fn optional_color(
     ui: &mut egui::Ui,
+    palette: bootty_ui::ThemePalette,
     label: &str,
     slot: &mut Option<Color>,
     seed: egui::Color32,
@@ -189,7 +430,7 @@ fn optional_color(
         [color.r, color.g, color.b]
     });
     let mut changed = false;
-    if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+    if super::settings_color_picker(ui, palette, &mut rgb).changed() {
         *slot = Some(Color {
             r: rgb[0],
             g: rgb[1],
@@ -197,7 +438,7 @@ fn optional_color(
         });
         changed = true;
     }
-    if slot.is_some() && ui.small_button("×").clicked() {
+    if slot.is_some() && super::settings_icon_button(ui, palette, "x", "Clear color").clicked() {
         *slot = None;
         changed = true;
     }
