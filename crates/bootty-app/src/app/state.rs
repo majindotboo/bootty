@@ -145,6 +145,10 @@ pub struct AppState {
     /// rather than here, so input gating reads this mirror to stop feeding the terminal behind it.
     lua_window_open: bool,
     terminal_selection_drag_active: bool,
+    /// Screen rects of chrome resize handles (sidebar edge, pane dividers) registered during the
+    /// previous frame's UI build. A primary press inside one of these must not begin a terminal
+    /// text selection — the handle owns that drag. Populated each frame in `show_fixed_layout`.
+    chrome_handle_rects: Vec<egui::Rect>,
     wheel_scroll_state: WheelScrollState,
     modifier_remaps: ModifierRemapSet,
     terminal_cursor_icon: egui::CursorIcon,
@@ -203,6 +207,7 @@ fn route_terminal_selection_events(
     active: &mut bool,
     mouse_tracking: bool,
     frame_modifiers: egui::Modifiers,
+    chrome_handle_rects: &[egui::Rect],
 ) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
     let Some(surface) = surface else {
         *active = false;
@@ -219,6 +224,7 @@ fn route_terminal_selection_events(
                 pressed: true,
                 modifiers,
             } if surface.rect.contains(pos)
+                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos))
                 && (modifiers.shift || frame_modifiers.shift || !mouse_tracking) =>
             {
                 let rectangle = modifiers.alt || frame_modifiers.alt;
@@ -438,6 +444,7 @@ impl AppState {
             status_metrics: StatusMetrics::default(),
             last_status_metrics_sample: Instant::now() - STATUS_METRICS_SAMPLE_INTERVAL,
             terminal_surface: None,
+            chrome_handle_rects: Vec::new(),
             terminal_view_transform: ViewTransform::IDENTITY,
             config_state: ConfigState::new(config),
             input_focus: InputFocus::Terminal,
@@ -572,6 +579,16 @@ impl AppState {
 
     pub fn record_render_error(&mut self, error: impl ToString) {
         self.last_error = Some(error.to_string());
+    }
+
+    /// Reset the registered chrome-handle rects at the start of a UI build; handles re-register
+    /// themselves via `register_chrome_handle` as they are drawn.
+    pub fn reset_chrome_handles(&mut self) {
+        self.chrome_handle_rects.clear();
+    }
+
+    pub fn register_chrome_handle(&mut self, rect: egui::Rect) {
+        self.chrome_handle_rects.push(rect);
     }
 
     pub fn activate_session_from_ui(&mut self, session_id: &str) {
@@ -1412,6 +1429,7 @@ impl AppState {
             &mut self.terminal_selection_drag_active,
             mouse_tracking,
             modifiers,
+            &self.chrome_handle_rects,
         );
         let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
         let copy_selection_count = self.consume_copy_shortcut_for_terminal_selection(&mut events);
@@ -2109,6 +2127,7 @@ mod tests {
             &mut active,
             false,
             egui::Modifiers::default(),
+            &[],
         );
 
         assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
@@ -2125,6 +2144,44 @@ mod tests {
             selection_actions[2],
             TerminalSelectionAction::End(_)
         ));
+        assert!(!active);
+    }
+
+    #[test]
+    fn press_over_chrome_handle_does_not_begin_selection() {
+        // Dragging a resize handle (sidebar edge / pane divider) that overlaps the terminal must
+        // not start a text selection, even with no mouse tracking active.
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let handle =
+            egui::Rect::from_min_size(egui::Pos2::new(4.0, 0.0), egui::Vec2::new(8.0, 80.0));
+        let press_pos = egui::Pos2::new(8.0, 10.0);
+        assert!(surface.rect.contains(press_pos));
+        assert!(handle.contains(press_pos));
+        let mut active = false;
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: press_pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(egui::Pos2::new(40.0, 10.0)),
+        ];
+
+        let (_, selection_actions) = route_terminal_selection_events(
+            events,
+            Some(surface),
+            ViewTransform::IDENTITY,
+            &mut active,
+            false,
+            egui::Modifiers::default(),
+            &[handle],
+        );
+
+        assert!(selection_actions.is_empty());
         assert!(!active);
     }
 
@@ -2150,6 +2207,7 @@ mod tests {
             &mut active,
             true,
             egui::Modifiers::default(),
+            &[],
         );
 
         assert_eq!(terminal_events, original);
@@ -2182,6 +2240,7 @@ mod tests {
             &mut active,
             true,
             shift,
+            &[],
         );
 
         assert!(terminal_events.is_empty());
@@ -2218,6 +2277,7 @@ mod tests {
             &mut active,
             true,
             shift,
+            &[],
         );
 
         assert!(terminal_events.is_empty());

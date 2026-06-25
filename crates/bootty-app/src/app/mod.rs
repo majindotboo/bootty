@@ -391,6 +391,9 @@ impl BoottyApp {
     }
 
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
+        // Chrome handles re-register their rects below; clearing here keeps the set to this frame's
+        // handles so the next frame's input pass suppresses selection only over live handles.
+        self.state.reset_chrome_handles();
         let rect = ui.max_rect();
         let palette = theme_palette_from_config(self.state.config());
         let chrome_config = &self.state.config().chrome;
@@ -652,6 +655,7 @@ impl BoottyApp {
                     Pos2::new(handle_x, rect.center().y),
                     egui::vec2(SIDEBAR_RESIZE_HANDLE_WIDTH, rect.height()),
                 );
+                self.state.register_chrome_handle(handle_rect);
                 let response = egui::Area::new(egui::Id::new("bootty-sidebar-resize"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(handle_rect.min)
