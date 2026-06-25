@@ -14,9 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -199,6 +197,107 @@ pub struct SessionReorder {
     pub before: Option<String>,
 }
 
+/// One selectable row in a Luau-declared floating window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LuaWindowRow {
+    pub key: String,
+    pub text: String,
+    pub icon: Option<String>,
+    pub description: Option<String>,
+}
+
+/// The renderable description of a window a module opened via `bootty.window.open`.
+/// Carries no Lua closures, so it can cross to the main thread; the `on_action`
+/// handler stays worker-side keyed by `id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LuaWindowSpec {
+    pub id: u64,
+    /// `"list"` (default) or `"prompt"`.
+    pub kind: String,
+    pub title: String,
+    pub icon: Option<String>,
+    pub hint: Option<String>,
+    pub placeholder: Option<String>,
+    pub rows: Vec<LuaWindowRow>,
+}
+
+/// A window open/close request a module made via `bootty.window`, drained by the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowRequest {
+    Open(LuaWindowSpec),
+    Close,
+}
+
+/// The fate of a Luau window, routed back to its worker so the `on_action` handler
+/// is invoked on a choice and always dropped (freeing its slot) once the window goes
+/// away — whether chosen, dismissed, or superseded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WindowOutcome {
+    /// The user picked a row (`key`) or submitted a prompt (`value`).
+    Chosen {
+        id: u64,
+        key: String,
+        value: Option<String>,
+    },
+    /// The window closed without a choice; the handler is dropped, not called.
+    Dismissed { id: u64 },
+}
+
+impl WindowOutcome {
+    fn id(&self) -> u64 {
+        match self {
+            Self::Chosen { id, .. } | Self::Dismissed { id } => *id,
+        }
+    }
+}
+
+/// The worker's window request queue and id source; aliased to keep the
+/// thread-local declaration legible.
+type WindowQueue = (Arc<RwLock<Vec<WindowRequest>>>, Arc<AtomicU64>);
+
+thread_local! {
+    /// Per-worker `window id -> on_action` handlers. Lives thread-local because an
+    /// mlua `Function` is `!Send`; the worker that owns the Lua VM also dispatches it.
+    static WINDOW_HANDLERS: std::cell::RefCell<HashMap<u64, Function>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// The worker's window request queue + id source, installed by `run_loop` so the
+    /// `bootty.window` host fns reach them without widening `setup_lua`'s signature.
+    static WINDOW_QUEUE: std::cell::RefCell<Option<WindowQueue>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Parse a `bootty.window.open` spec table into the renderable [`LuaWindowSpec`].
+fn parse_window_spec(id: u64, spec: &Table) -> LuaWindowSpec {
+    let rows = spec
+        .get::<Table>("rows")
+        .ok()
+        .map(|rows| {
+            rows.sequence_values::<Table>()
+                .filter_map(Result::ok)
+                .map(|row| LuaWindowRow {
+                    key: row.get::<String>("key").unwrap_or_default(),
+                    text: row.get::<String>("text").unwrap_or_default(),
+                    icon: string_field(&row, "icon"),
+                    description: string_field(&row, "description"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    LuaWindowSpec {
+        id,
+        kind: spec
+            .get::<String>("kind")
+            .ok()
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or_else(|| "list".to_owned()),
+        title: spec.get::<String>("title").unwrap_or_default(),
+        icon: string_field(spec, "icon"),
+        hint: string_field(spec, "hint"),
+        placeholder: string_field(spec, "placeholder"),
+        rows,
+    }
+}
+
 /// How often native metrics are sampled (CPU needs a gap between samples).
 const METRICS_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -375,6 +474,10 @@ pub struct ExtensionHost {
     pending_reorders: Arc<RwLock<Vec<ReorderRequest>>>,
     /// Session-order changes modules requested via `bootty.reorder_session`, drained by the app.
     session_reorders: Arc<RwLock<Vec<SessionReorder>>>,
+    /// Floating-window open/close requests modules made via `bootty.window`, drained by the app.
+    window_requests: Arc<RwLock<Vec<WindowRequest>>>,
+    /// Fates of Luau windows, awaiting their `on_action` handler on the worker.
+    pending_window_actions: Arc<RwLock<Vec<WindowOutcome>>>,
     waker: Arc<Waker>,
     run_jobs: Arc<PlatformRunJobs>,
     shutdown: Arc<AtomicBool>,
@@ -410,6 +513,9 @@ impl ExtensionHost {
         let active: Arc<RwLock<BTreeSet<String>>> = Arc::default();
         let pending_reorders: Arc<RwLock<Vec<ReorderRequest>>> = Arc::default();
         let session_reorders: Arc<RwLock<Vec<SessionReorder>>> = Arc::default();
+        let window_requests: Arc<RwLock<Vec<WindowRequest>>> = Arc::default();
+        let pending_window_actions: Arc<RwLock<Vec<WindowOutcome>>> = Arc::default();
+        let next_window_id = Arc::new(AtomicU64::new(1));
         let waker: Arc<Waker> = Arc::default();
         let run_jobs = Arc::new(PlatformRunJobs::default());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -422,6 +528,9 @@ impl ExtensionHost {
                 let active = Arc::clone(&active);
                 let pending_reorders = Arc::clone(&pending_reorders);
                 let session_reorders = Arc::clone(&session_reorders);
+                let window_requests = Arc::clone(&window_requests);
+                let pending_window_actions = Arc::clone(&pending_window_actions);
+                let next_window_id = Arc::clone(&next_window_id);
                 let waker = Arc::clone(&waker);
                 let shutdown = Arc::clone(&shutdown);
                 let run_jobs = Arc::clone(&run_jobs);
@@ -437,6 +546,9 @@ impl ExtensionHost {
                         &items,
                         &pending_reorders,
                         &session_reorders,
+                        &window_requests,
+                        &pending_window_actions,
+                        &next_window_id,
                         &waker,
                         &shutdown,
                         &run_jobs,
@@ -451,6 +563,8 @@ impl ExtensionHost {
             active,
             pending_reorders,
             session_reorders,
+            window_requests,
+            pending_window_actions,
             waker,
             shutdown,
             run_jobs,
@@ -533,6 +647,35 @@ impl ExtensionHost {
             .map(|mut queue| std::mem::take(&mut *queue))
             .unwrap_or_default()
     }
+
+    /// Drains floating-window open/close requests modules made via `bootty.window`,
+    /// for the app to render with the native overlay framework.
+    #[must_use]
+    pub fn take_window_requests(&self) -> Vec<WindowRequest> {
+        self.window_requests
+            .write()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
+    }
+
+    /// Routes a user's window choice back to the owning window's `on_action`
+    /// handler on this host's worker thread (where the Lua VM lives).
+    pub fn push_window_action(&self, id: u64, key: String, value: Option<String>) {
+        self.queue_window_outcome(WindowOutcome::Chosen { id, key, value });
+    }
+
+    /// Tells the worker a window closed without a choice so its `on_action` handler
+    /// is dropped (not called), preventing a slow leak in `WINDOW_HANDLERS`.
+    pub fn close_window(&self, id: u64) {
+        self.queue_window_outcome(WindowOutcome::Dismissed { id });
+    }
+
+    fn queue_window_outcome(&self, outcome: WindowOutcome) {
+        if let Ok(mut queue) = self.pending_window_actions.write() {
+            queue.push(outcome);
+        }
+        self.waker.wake();
+    }
 }
 
 impl Drop for ExtensionHost {
@@ -555,6 +698,9 @@ fn run_loop(
     items: &RwLock<HashMap<String, Vec<ModuleItem>>>,
     pending_reorders: &RwLock<Vec<ReorderRequest>>,
     session_reorders: &Arc<RwLock<Vec<SessionReorder>>>,
+    window_requests: &Arc<RwLock<Vec<WindowRequest>>>,
+    pending_window_actions: &RwLock<Vec<WindowOutcome>>,
+    next_window_id: &Arc<AtomicU64>,
     waker: &Arc<Waker>,
     shutdown: &Arc<AtomicBool>,
     run_jobs: &Arc<PlatformRunJobs>,
@@ -573,6 +719,11 @@ fn run_loop(
     ) else {
         return;
     };
+    // Hand the worker its window channels so `bootty.window.open` (registered inside
+    // `setup_lua`) can reach them without widening that function's signature.
+    WINDOW_QUEUE.with(|queue| {
+        *queue.borrow_mut() = Some((Arc::clone(window_requests), Arc::clone(next_window_id)));
+    });
     let mut modules = load_modules(&lua, dir, builtins);
     let mut signature = dir_signature(dir);
     let mut last_scan = Instant::now();
@@ -632,6 +783,20 @@ fn run_loop(
             // Nudge the UI to apply the resulting state change (e.g. the session-order commit),
             // which republishes the mux and forces the re-render via `update_mux`.
             ctx.request_repaint();
+        }
+        // Once a window closes, drop its `on_action` handler; only a real choice
+        // calls it. A stale id whose handler is already gone is simply ignored.
+        let window_outcomes = pending_window_actions
+            .write()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        for outcome in window_outcomes {
+            let handler =
+                WINDOW_HANDLERS.with(|handlers| handlers.borrow_mut().remove(&outcome.id()));
+            if let (Some(handler), WindowOutcome::Chosen { key, value, .. }) = (handler, outcome) {
+                let _ = handler.call::<()>((key, value));
+                ctx.request_repaint();
+            }
         }
         // A forced render reuses cached shell-out results (the reorder/structural change that
         // forced it didn't alter any query's output); an interval render refreshes the cache.
@@ -1213,6 +1378,44 @@ fn setup_lua(
         })?,
     )?;
 
+    // Floating windows: a module opens a native picker/prompt via `bootty.window.open{...}`
+    // and receives the user's choice through the spec's `on_action(key, value)` handler.
+    // The handler stays on this worker; only renderable data crosses to the UI thread.
+    let window_table = lua.create_table()?;
+    window_table.set(
+        "open",
+        lua.create_function(|_, spec: Table| {
+            Ok(WINDOW_QUEUE.with(|queue| {
+                let Some((requests, next_id)) = queue.borrow().clone() else {
+                    return 0u64;
+                };
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                if let Ok(handler) = spec.get::<Function>("on_action") {
+                    WINDOW_HANDLERS.with(|handlers| handlers.borrow_mut().insert(id, handler));
+                }
+                if let Ok(mut requests) = requests.write() {
+                    requests.push(WindowRequest::Open(parse_window_spec(id, &spec)));
+                }
+                id
+            }))
+        })?,
+    )?;
+    window_table.set(
+        "close",
+        lua.create_function(|_, ()| {
+            WINDOW_QUEUE.with(|queue| {
+                if let Some((requests, _)) = queue.borrow().as_ref()
+                    && let Ok(mut requests) = requests.write()
+                {
+                    requests.push(WindowRequest::Close);
+                }
+            });
+            Ok(())
+        })?,
+    )?;
+    window_table.set_readonly(true);
+    bootty.set("window", window_table)?;
+
     // Native, cross-platform system metrics. `load1` is 0 where the OS has no load
     // average (e.g. Windows); fall back to `cpu` there. `mem_pct` is the used
     // percentage (real memory pressure on macOS); `mem_used`/`mem_total` are GiB
@@ -1643,6 +1846,27 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn parse_window_spec_defaults_kind_and_reads_rows() {
+        let lua = Lua::new();
+        let spec = lua.create_table().expect("spec table");
+        spec.set("title", "Pick a server").expect("title");
+        let rows = lua.create_table().expect("rows table");
+        let row = lua.create_table().expect("row table");
+        row.set("key", "restart").expect("key");
+        row.set("text", "Restart").expect("text");
+        rows.set(1, row).expect("push row");
+        spec.set("rows", rows).expect("rows");
+
+        let parsed = parse_window_spec(7, &spec);
+        assert_eq!(parsed.id, 7);
+        assert_eq!(parsed.kind, "list"); // defaulted when the module omits `kind`
+        assert_eq!(parsed.title, "Pick a server");
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].key, "restart");
+        assert_eq!(parsed.rows[0].text, "Restart");
+    }
 
     fn run_source(source: &str) -> Vec<ModuleItem> {
         let theme = [("accent".to_owned(), "#89b4fa".to_owned())];
@@ -2165,6 +2389,105 @@ mod tests {
         assert!(keys.contains(&"plain:branch"));
         assert!(!keys.contains(&"plain:status"));
         assert!(!keys.contains(&"plain:progress"));
+    }
+
+    // Drives the real `sessions` builtin through the Refresh-mode cache path (what the app uses),
+    // re-rendering until the branch row settles. Returns the branch row's text, or None if the
+    // row is absent. Synchronizes on the rendered value rather than sleeping a fixed duration.
+    fn settle_branch_row(
+        sessions: &LoadedModule,
+        run_cache: &RunCache,
+        want: impl Fn(&str) -> bool,
+        timeout: Duration,
+    ) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        let mut last = None;
+        while Instant::now() < deadline {
+            run_cache.set_mode(RunMode::Refresh);
+            let items = run_module(&sessions.body);
+            run_cache.set_mode(RunMode::Live);
+            last = items
+                .iter()
+                .find(|item| item.key.as_deref() == Some("plain:branch"))
+                .map(|item| item.text.clone());
+            if last.as_deref().is_some_and(&want) {
+                return last;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        last
+    }
+
+    #[test]
+    fn builtin_sessions_branch_row_tracks_live_head_through_changes() {
+        fn git(repo: &std::path::Path, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        let repo = tempfile::tempdir().expect("tempdir");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "alpha"]);
+        git(path, &["config", "user.email", "t@t.t"]);
+        git(path, &["config", "user.name", "t"]);
+        git(path, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(path, &["commit", "-q", "--allow-empty", "-m", "two"]);
+
+        let mux: Arc<RwLock<MuxView>> = Arc::new(RwLock::new(MuxView {
+            sessions: vec![SessionView {
+                id: "plain".to_owned(),
+                name: "bootty".to_owned(),
+                selected: true,
+                cwd: Some(path.to_string_lossy().into_owned()),
+                ..SessionView::default()
+            }],
+            ..MuxView::default()
+        }));
+        let run_cache = Arc::new(RunCache::default());
+        let lua = setup_lua(
+            &[],
+            mux,
+            Arc::default(),
+            Arc::default(),
+            Arc::clone(&run_cache),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_SIDEBAR_EXTENSIONS);
+        let sessions = modules
+            .iter()
+            .find(|module| module.name == "sessions")
+            .expect("sessions builtin loaded");
+
+        let timeout = Duration::from_secs(5);
+        assert_eq!(
+            settle_branch_row(sessions, &run_cache, |b| b == "alpha", timeout).as_deref(),
+            Some("alpha"),
+            "branch row should report the starting branch",
+        );
+
+        // Switch to another branch: the row must follow, not freeze on the first value.
+        git(path, &["checkout", "-q", "-b", "beta"]);
+        assert_eq!(
+            settle_branch_row(sessions, &run_cache, |b| b == "beta", timeout).as_deref(),
+            Some("beta"),
+            "branch row must update when the live branch changes",
+        );
+
+        // Detach HEAD: the row must report detached, not the stale branch name.
+        git(path, &["checkout", "-q", "HEAD~1"]);
+        let detached =
+            settle_branch_row(sessions, &run_cache, |b| b.starts_with("detached"), timeout);
+        assert!(
+            detached
+                .as_deref()
+                .is_some_and(|b| b.starts_with("detached")),
+            "branch row must report detached when HEAD detaches, got {detached:?}",
+        );
     }
 
     #[test]

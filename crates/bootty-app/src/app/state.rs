@@ -11,7 +11,7 @@ use crate::{
     app_actions::{
         AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction, SidebarAction,
         SidebarKeyBindings, TerminalScrollAction, builtin_app_action_for_direct_key,
-        split_app_actions_for_bindings,
+        keybind_action_for_name, split_app_actions_for_bindings,
     },
     config::{
         BoottyConfig, ConfigState, WindowConfig, load_config_from_path,
@@ -47,7 +47,11 @@ use crate::{
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
+        command_palette::{CommandPaletteDialog, CommandPaletteEvent},
+        ditch::{DitchAction, DitchSessionDialog, DitchSessionEvent},
+        keybind_help::{KeybindHelpDialog, KeybindHelpEvent},
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
+        rename::{RenameSessionDialog, RenameSessionEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
     },
 };
@@ -128,11 +132,15 @@ pub struct AppState {
     modifier_sides: ModifierSideState,
     pending_direct_input: Vec<DirectKeyInput>,
     suppress_next_egui_paste: bool,
+    /// Mirrors whether a Luau-opened floating window is showing. That window lives on `BoottyApp`
+    /// rather than here, so input gating reads this mirror to stop feeding the terminal behind it.
+    lua_window_open: bool,
     terminal_selection_drag_active: bool,
     wheel_scroll_state: WheelScrollState,
     modifier_remaps: ModifierRemapSet,
     terminal_cursor_icon: egui::CursorIcon,
     mouse_pointer_hidden_while_typing: bool,
+    last_mouse_hover_pos: Option<Pos2>,
     macos_option_as_alt: crate::terminal::MacosOptionAsAlt,
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
@@ -140,6 +148,13 @@ pub struct AppState {
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
+    rename_session_dialog: Option<RenameSessionDialog>,
+    ditch_session_dialog: Option<DitchSessionDialog>,
+    keybind_help_dialog: Option<KeybindHelpDialog>,
+    command_palette_dialog: Option<CommandPaletteDialog>,
+    /// A command-palette choice waiting to be dispatched on the next input pass,
+    /// where the viewport snapshot and effect sink are in scope.
+    pending_command: Option<KeybindAction>,
     macos_non_native_fullscreen_active: bool,
     macos_non_native_fullscreen_pending_apply: bool,
 }
@@ -411,11 +426,13 @@ impl AppState {
             modifier_sides: ModifierSideState::default(),
             pending_direct_input: Vec::new(),
             suppress_next_egui_paste: false,
+            lua_window_open: false,
             terminal_selection_drag_active: false,
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
             mouse_pointer_hidden_while_typing: false,
+            last_mouse_hover_pos: None,
             macos_option_as_alt,
             stability_trace,
             config_hot_reload,
@@ -423,6 +440,11 @@ impl AppState {
             new_mux_session_dialog: None,
             sidebar_hovered_session: None,
             session_picker_dialog: None,
+            rename_session_dialog: None,
+            command_palette_dialog: None,
+            pending_command: None,
+            ditch_session_dialog: None,
+            keybind_help_dialog: None,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
         })
@@ -485,6 +507,12 @@ impl AppState {
     }
     pub fn direct_input_suppresses_egui_events(&self) -> bool {
         self.direct_terminal_input_enabled()
+    }
+
+    /// Mirror whether a Luau floating window is showing so the direct input path stops feeding the
+    /// terminal behind it, matching how the native overlays gate input.
+    pub fn set_lua_window_open(&mut self, open: bool) {
+        self.lua_window_open = open;
     }
 
     pub fn macos_non_native_fullscreen_active(&self) -> bool {
@@ -605,6 +633,114 @@ impl AppState {
         }
     }
 
+    pub fn take_rename_session_dialog(&mut self) -> Option<RenameSessionDialog> {
+        self.rename_session_dialog.take()
+    }
+
+    pub fn apply_rename_session_event(
+        &mut self,
+        dialog: RenameSessionDialog,
+        event: RenameSessionEvent,
+    ) {
+        match event {
+            RenameSessionEvent::None => {
+                self.rename_session_dialog = Some(dialog);
+            }
+            RenameSessionEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+            RenameSessionEvent::Rename { session_id, name } => {
+                let mux_config = self.config().multiplexer.clone();
+                self.mux.execute_command(
+                    &self.repaint,
+                    &mux_config,
+                    MuxCommand::RenameSession { session_id, name },
+                );
+                self.input_focus = InputFocus::Terminal;
+            }
+        }
+    }
+
+    pub fn take_ditch_session_dialog(&mut self) -> Option<DitchSessionDialog> {
+        self.ditch_session_dialog.take()
+    }
+
+    pub fn apply_ditch_session_event(
+        &mut self,
+        dialog: DitchSessionDialog,
+        event: DitchSessionEvent,
+    ) {
+        match event {
+            DitchSessionEvent::None => {
+                self.ditch_session_dialog = Some(dialog);
+            }
+            DitchSessionEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+            DitchSessionEvent::Ditch {
+                session_id,
+                cwd,
+                action,
+            } => {
+                if let Err(error) = run_ditch_cleanup(cwd.as_deref(), &action) {
+                    // The git cleanup failed; keep the session alive and re-show the
+                    // dialog so the user sees the error instead of losing the session
+                    // on top of an orphaned worktree.
+                    self.last_error = Some(format!("ditch: {error}"));
+                    self.ditch_session_dialog = Some(dialog);
+                    return;
+                }
+                let mux_config = self.config().multiplexer.clone();
+                self.mux.execute_command(
+                    &self.repaint,
+                    &mux_config,
+                    MuxCommand::DitchSession { session_id },
+                );
+                self.input_focus = InputFocus::Terminal;
+            }
+        }
+    }
+
+    pub fn take_keybind_help_dialog(&mut self) -> Option<KeybindHelpDialog> {
+        self.keybind_help_dialog.take()
+    }
+
+    pub fn apply_keybind_help_event(&mut self, dialog: KeybindHelpDialog, event: KeybindHelpEvent) {
+        match event {
+            KeybindHelpEvent::None => {
+                self.keybind_help_dialog = Some(dialog);
+            }
+            KeybindHelpEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+        }
+    }
+
+    pub fn take_command_palette_dialog(&mut self) -> Option<CommandPaletteDialog> {
+        self.command_palette_dialog.take()
+    }
+
+    pub fn apply_command_palette_event(
+        &mut self,
+        dialog: CommandPaletteDialog,
+        event: CommandPaletteEvent,
+    ) {
+        match event {
+            CommandPaletteEvent::None => {
+                self.command_palette_dialog = Some(dialog);
+            }
+            CommandPaletteEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+            CommandPaletteEvent::Run(action) => {
+                // Close the palette now; run the command on the next input pass,
+                // where the viewport snapshot and effect sink are available.
+                self.input_focus = InputFocus::Terminal;
+                self.pending_command = keybind_action_for_name(action);
+            }
+        }
+    }
+
     pub fn apply_picker_event(
         &mut self,
         dialog: NewMuxSessionDialog,
@@ -617,9 +753,23 @@ impl AppState {
             NewSessionPickerEvent::Close => {
                 self.input_focus = InputFocus::Terminal;
             }
-            NewSessionPickerEvent::NewWorktreeUnavailable => {
-                self.last_error = Some("new worktree creation is not wired yet".to_owned());
-                self.new_mux_session_dialog = Some(dialog);
+            NewSessionPickerEvent::CreateWorktree { repo, branch } => {
+                match crate::git::add_worktree(&repo, &branch) {
+                    Ok(path) => {
+                        let request = crate::ui::new_session_picker::NewMuxSessionRequest {
+                            session_id: crate::strings::session_name_for_path(&path),
+                            cwd: path,
+                        };
+                        let mux_config = self.config().multiplexer.clone();
+                        self.mux
+                            .create_project_session(request, &self.repaint, &mux_config);
+                        self.input_focus = InputFocus::Terminal;
+                    }
+                    Err(error) => {
+                        self.last_error = Some(format!("worktree: {error}"));
+                        self.new_mux_session_dialog = Some(dialog);
+                    }
+                }
             }
             NewSessionPickerEvent::CreateSession(request) => {
                 let mux_config = self.config().multiplexer.clone();
@@ -765,12 +915,16 @@ impl AppState {
     fn restore_mouse_pointer_after_pointer_moved(
         &mut self,
         events: &[egui::Event],
+        hover_pos: Option<Pos2>,
         effects: &mut Vec<AppEffect>,
     ) {
-        if events
+        let moved_by_event = events
             .iter()
-            .any(|event| matches!(event, egui::Event::PointerMoved(_)))
-        {
+            .any(|event| matches!(event, egui::Event::PointerMoved(_)));
+        let moved_by_hover_pos = hover_pos.is_some() && hover_pos != self.last_mouse_hover_pos;
+        self.last_mouse_hover_pos = hover_pos;
+
+        if moved_by_event || moved_by_hover_pos {
             self.set_mouse_pointer_hidden_while_typing(false, effects);
         }
     }
@@ -833,6 +987,7 @@ impl AppState {
         }
         self.hot_reload_config_if_changed(&mut effects, now);
         self.terminal_view_transform = terminal_view_transform;
+        self.restore_mouse_pointer_after_pointer_moved(&events, hover_pos, &mut effects);
         let input_commands = self.handle_direct_input(viewport, &mut effects)
             + self.handle_egui_input(
                 events,
@@ -883,27 +1038,92 @@ impl AppState {
         effects
     }
 
-    fn open_new_mux_session_dialog(&mut self) {
+    /// Only one floating dialog is shown at a time; opening one closes the rest.
+    fn close_overlay_dialogs(&mut self) {
+        self.new_mux_session_dialog = None;
         self.session_picker_dialog = None;
+        self.rename_session_dialog = None;
+        self.ditch_session_dialog = None;
+        self.keybind_help_dialog = None;
+        self.command_palette_dialog = None;
+    }
+
+    fn open_new_mux_session_dialog(&mut self) {
+        self.close_overlay_dialogs();
         self.new_mux_session_dialog = Some(NewMuxSessionDialog::open());
         self.input_focus = InputFocus::Picker;
     }
 
     fn toggle_session_picker_dialog(&mut self) {
-        self.new_mux_session_dialog = None;
         if self.session_picker_dialog.is_some() {
             self.session_picker_dialog = None;
             self.input_focus = InputFocus::Terminal;
         } else {
+            self.close_overlay_dialogs();
             self.session_picker_dialog = Some(SessionPickerDialog::open());
             self.input_focus = InputFocus::Picker;
         }
+    }
+
+    fn open_rename_session_dialog(&mut self) {
+        let Some(selected) = self.mux.selected_session().map(str::to_owned) else {
+            return;
+        };
+        let name = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == selected || session.name == selected)
+            .map_or_else(|| selected.clone(), |session| session.name.clone());
+        self.close_overlay_dialogs();
+        self.rename_session_dialog = Some(RenameSessionDialog::open(selected, name));
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn open_ditch_session_dialog(&mut self) {
+        let Some(selected) = self.mux.selected_session().map(str::to_owned) else {
+            return;
+        };
+        let cwd = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == selected || session.name == selected)
+            .and_then(|session| session.anchor.cwd.clone());
+        self.close_overlay_dialogs();
+        self.ditch_session_dialog = Some(DitchSessionDialog::open(selected, cwd));
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn open_keybind_help_dialog(&mut self) {
+        let config = self.config();
+        let bindings = config
+            .input
+            .keybinds_for_backend(config.multiplexer.backend);
+        self.close_overlay_dialogs();
+        self.keybind_help_dialog = Some(KeybindHelpDialog::open(&bindings));
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn open_command_palette_dialog(&mut self) {
+        let config = self.config();
+        let bindings = config
+            .input
+            .keybinds_for_backend(config.multiplexer.backend);
+        self.close_overlay_dialogs();
+        self.command_palette_dialog = Some(CommandPaletteDialog::open(&bindings));
+        self.input_focus = InputFocus::Picker;
     }
 
     fn direct_terminal_input_enabled(&self) -> bool {
         self.input_focus.terminal_owns_input()
             && self.new_mux_session_dialog.is_none()
             && self.session_picker_dialog.is_none()
+            && self.rename_session_dialog.is_none()
+            && self.ditch_session_dialog.is_none()
+            && self.keybind_help_dialog.is_none()
+            && self.command_palette_dialog.is_none()
+            && !self.lua_window_open
     }
 
     fn reload_config(&mut self, effects: &mut Vec<AppEffect>) -> bool {
@@ -1094,7 +1314,6 @@ impl AppState {
         if suppress_next_egui_paste {
             remove_first_paste_event(&mut events);
         }
-        self.restore_mouse_pointer_after_pointer_moved(&events, effects);
         let terminal_input_enabled = self.direct_terminal_input_enabled();
         let selection_surface = terminal_input_enabled
             .then_some(self.terminal_surface)
@@ -1141,6 +1360,12 @@ impl AppState {
             commands.len() + actions.len() + sidebar_count + selection_count + copy_selection_count;
 
         for action in actions {
+            self.apply_keybind_action(action, viewport, effects);
+        }
+
+        // A command-palette choice from last frame runs here, where viewport and
+        // effects are in scope.
+        if let Some(action) = self.pending_command.take() {
             self.apply_keybind_action(action, viewport, effects);
         }
 
@@ -1266,6 +1491,22 @@ impl AppState {
                 self.toggle_session_picker_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
+            KeybindAction::App(AppAction::CommandPalette) => {
+                self.open_command_palette_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
+            KeybindAction::App(AppAction::RenameSession) => {
+                self.open_rename_session_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
+            KeybindAction::App(AppAction::DitchSession) => {
+                self.open_ditch_session_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
+            KeybindAction::App(AppAction::ShowKeybinds) => {
+                self.open_keybind_help_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
             KeybindAction::App(AppAction::Close) => {
                 effects.push(AppEffect::CloseWindow);
             }
@@ -1296,8 +1537,7 @@ impl AppState {
                 }
             }
             KeybindAction::App(AppAction::ToggleSidebarFocus) => {
-                self.session_picker_dialog = None;
-                self.new_mux_session_dialog = None;
+                self.close_overlay_dialogs();
                 if self.input_focus == InputFocus::Sidebar {
                     self.input_focus = InputFocus::Terminal;
                 } else {
@@ -1468,9 +1708,6 @@ impl AppState {
             | MuxKeyAction::MoveSession(_) => {
                 unreachable!("session actions are handled by Bootty state")
             }
-            MuxKeyAction::DitchSession => MuxCommand::DitchSession {
-                session_id: selected_session,
-            },
         };
         let mux_config = self.config().multiplexer.clone();
         self.mux
@@ -1537,12 +1774,15 @@ impl AppState {
             MuxKeyAction::NextSession => self.relative_session(1),
             MuxKeyAction::PreviousSession => self.relative_session(-1),
             MuxKeyAction::LastSession => self.mux.previous_selected_session().map(str::to_owned),
-            _ => None,
+            // Not a session-navigation action: let the caller route it.
+            _ => return false,
         };
-        let Some(target) = target else {
-            return false;
-        };
-        self.mux.activate_session(&target);
+        // Activate when there is a target, but always report the action as handled. Missing a
+        // target (e.g. last_session with no prior session) is a no-op here; falling through would
+        // reach the command builder's `unreachable!` for these Bootty-owned actions and panic.
+        if let Some(target) = target {
+            self.mux.activate_session(&target);
+        }
         true
     }
 
@@ -1652,6 +1892,35 @@ fn next_non_native_fullscreen_state(
         !tracked_active
     } else {
         !viewport_maximized
+    }
+}
+
+/// Run the git side of a ditch before the session is killed. The main worktree is
+/// resolved up front because `cwd` stops resolving inside the repo once the linked
+/// worktree is removed. Any git failure is returned (the session stays alive) so a
+/// running session is never orphaned alongside half-finished cleanup.
+fn run_ditch_cleanup(cwd: Option<&str>, action: &DitchAction) -> Result<(), String> {
+    let Some(cwd) = cwd else {
+        return Ok(());
+    };
+    match action {
+        DitchAction::KillOnly => Ok(()),
+        DitchAction::RemoveWorktree { force } => crate::git::remove_worktree(cwd, *force),
+        DitchAction::RemoveWorktreeAndBranch {
+            force,
+            branch,
+            repo,
+        } => {
+            // Skip the worktree removal when its directory is already gone: a
+            // prior attempt removed it but failed to delete the branch (e.g. it
+            // was checked out elsewhere). Retrying the remove would error on a
+            // missing path; instead finish by deleting the branch from `repo`,
+            // resolved while the worktree still existed.
+            if std::path::Path::new(cwd).exists() {
+                crate::git::remove_worktree(cwd, *force)?;
+            }
+            crate::git::delete_branch(repo, branch, *force)
+        }
     }
 }
 
@@ -1922,6 +2191,7 @@ mod tests {
         effects.clear();
         state.restore_mouse_pointer_after_pointer_moved(
             &[egui::Event::PointerMoved(egui::Pos2::new(1.0, 1.0))],
+            Some(egui::Pos2::new(1.0, 1.0)),
             &mut effects,
         );
 
@@ -1930,6 +2200,28 @@ mod tests {
             vec![AppEffect::SetTerminalCursorIcon(
                 egui::CursorIcon::PointingHand
             )]
+        );
+    }
+
+    #[test]
+    fn terminal_typing_restores_mouse_pointer_when_hover_position_changes_without_event() {
+        let mut state = test_state();
+        state.terminal_cursor_icon = egui::CursorIcon::Text;
+        state.last_mouse_hover_pos = Some(egui::Pos2::new(1.0, 1.0));
+        let mut effects = Vec::new();
+
+        state.apply_terminal_input(TerminalInputCommand::Text("x".to_owned()), &mut effects);
+        effects.clear();
+
+        state.restore_mouse_pointer_after_pointer_moved(
+            &[],
+            Some(egui::Pos2::new(2.0, 1.0)),
+            &mut effects,
+        );
+
+        assert_eq!(
+            effects,
+            vec![AppEffect::SetTerminalCursorIcon(egui::CursorIcon::Text)]
         );
     }
 
@@ -2166,6 +2458,16 @@ mod tests {
 
         state.apply_mux_key_action(MuxKeyAction::LastSession);
         assert_eq!(state.mux.selected_session(), Some("project"));
+    }
+
+    #[test]
+    fn last_session_without_a_prior_session_is_a_no_op_not_a_panic() {
+        // A fresh state has only the initial session and no previous selection; last_session must be
+        // consumed silently instead of falling through to the command builder's `unreachable!`.
+        let mut state = test_state();
+        let before = state.mux.selected_session().map(str::to_owned);
+        state.apply_mux_key_action(MuxKeyAction::LastSession);
+        assert_eq!(state.mux.selected_session().map(str::to_owned), before);
     }
 
     #[test]

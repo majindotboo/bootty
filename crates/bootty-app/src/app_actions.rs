@@ -8,7 +8,7 @@ use crate::{
     input::terminal_key,
     input_binding::{
         BindingAction, BindingElement, BindingKey, BindingMods, BindingTrigger, PaneDirection,
-        parse_binding_elements,
+        parse_action, parse_binding_elements,
     },
     mux::command::MuxDirection,
     terminal::{KeyInput, TerminalKey},
@@ -21,11 +21,15 @@ pub enum AppAction {
     NewWindow,
     NewMuxSession,
     SessionPicker,
+    CommandPalette,
     Close,
     ToggleFullscreen,
     ToggleSidebarFocus,
     ToggleSidebarVisibility,
     OpenSettings,
+    RenameSession,
+    DitchSession,
+    ShowKeybinds,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,7 +62,6 @@ pub enum MuxKeyAction {
     LastSession,
     SelectSession(u32),
     MoveSession(i32),
-    DitchSession,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +336,14 @@ pub fn builtin_app_action_for_direct_key(input: KeyInput) -> Option<KeybindActio
     (input.key == TerminalKey::N && matches).then_some(KeybindAction::App(AppAction::NewMuxSession))
 }
 
+/// Resolve a snake_case binding-action name (e.g. `"rename_session"`) to its
+/// runnable [`KeybindAction`], or `None` if it is unknown or has no app behavior.
+/// The command palette uses this to dispatch its catalog entries through the same
+/// path as keybindings.
+pub fn keybind_action_for_name(name: &str) -> Option<KeybindAction> {
+    keybind_action(parse_action(name).ok()?).ok()
+}
+
 fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
     match action {
         BindingAction::ReloadConfig => Ok(KeybindAction::App(AppAction::ReloadConfig)),
@@ -340,6 +351,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::NewWindow => Ok(KeybindAction::App(AppAction::NewWindow)),
         BindingAction::NewMuxSession => Ok(KeybindAction::App(AppAction::NewMuxSession)),
         BindingAction::SessionPicker => Ok(KeybindAction::App(AppAction::SessionPicker)),
+        BindingAction::CommandPalette => Ok(KeybindAction::App(AppAction::CommandPalette)),
         BindingAction::CloseWindow | BindingAction::Quit => {
             Ok(KeybindAction::App(AppAction::Close))
         }
@@ -350,6 +362,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             Ok(KeybindAction::App(AppAction::ToggleSidebarVisibility))
         }
         BindingAction::OpenSettings => Ok(KeybindAction::App(AppAction::OpenSettings)),
+        BindingAction::RenameSession => Ok(KeybindAction::App(AppAction::RenameSession)),
         BindingAction::NewTab => Ok(KeybindAction::Mux(MuxKeyAction::NewTab)),
         BindingAction::NextTab => Ok(KeybindAction::Mux(MuxKeyAction::NextTab)),
         BindingAction::PreviousTab => Ok(KeybindAction::Mux(MuxKeyAction::PreviousTab)),
@@ -374,7 +387,8 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::MoveSession(delta) => {
             Ok(KeybindAction::Mux(MuxKeyAction::MoveSession(delta)))
         }
-        BindingAction::DitchSession => Ok(KeybindAction::Mux(MuxKeyAction::DitchSession)),
+        BindingAction::DitchSession => Ok(KeybindAction::App(AppAction::DitchSession)),
+        BindingAction::ShowKeybinds => Ok(KeybindAction::App(AppAction::ShowKeybinds)),
         BindingAction::ScrollToTop => Ok(KeybindAction::Scroll(TerminalScrollAction::Top)),
         BindingAction::ScrollToBottom => Ok(KeybindAction::Scroll(TerminalScrollAction::Bottom)),
         BindingAction::ScrollPageUp => Ok(KeybindAction::Scroll(TerminalScrollAction::PageUp)),
@@ -597,7 +611,7 @@ mod tests {
                 ..Default::default()
             }
         };
-        let picker_modifiers = if cfg!(target_os = "macos") {
+        let palette_modifiers = if cfg!(target_os = "macos") {
             egui::Modifiers {
                 command: true,
                 ..Default::default()
@@ -609,13 +623,31 @@ mod tests {
                 ..Default::default()
             }
         };
+        let picker_modifiers = if cfg!(target_os = "macos") {
+            egui::Modifiers {
+                command: true,
+                shift: true,
+                ..Default::default()
+            }
+        } else {
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: true,
+                ..Default::default()
+            }
+        };
 
         let action = bindings.action_for_key(egui::Key::R, reload_modifiers);
 
         assert_eq!(action, Some(KeybindAction::App(AppAction::ReloadConfig)));
 
         assert_eq!(
-            bindings.action_for_key(egui::Key::P, picker_modifiers),
+            bindings.action_for_key(egui::Key::P, palette_modifiers),
+            Some(KeybindAction::App(AppAction::CommandPalette))
+        );
+        assert_eq!(
+            bindings.action_for_key(egui::Key::O, picker_modifiers),
             Some(KeybindAction::App(AppAction::SessionPicker))
         );
     }

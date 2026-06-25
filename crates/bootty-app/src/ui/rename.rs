@@ -1,0 +1,79 @@
+use bootty_ui::Theme;
+use eframe::egui;
+
+use crate::ui::overlay::{self, FloatingWindow, TextPrompt};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameSessionDialog {
+    session_id: String,
+    name: String,
+    focus: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenameSessionEvent {
+    None,
+    Close,
+    Rename { session_id: String, name: String },
+}
+
+impl RenameSessionDialog {
+    pub fn open(session_id: String, current_name: String) -> Self {
+        Self {
+            session_id,
+            name: current_name,
+            focus: true,
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, theme: Theme) -> RenameSessionEvent {
+        let normalized = normalized_name(&self.name);
+        let validation = normalized.is_none().then_some("name cannot be empty");
+
+        let result = FloatingWindow::new("rename-session-dialog", "Rename Session")
+            .icon("square-pen")
+            .hint("Enter rename   Esc close")
+            .width(overlay::panel_width(ctx, 520.0, 360.0))
+            .show(ctx, theme, |ui, _palette| {
+                TextPrompt::new("rename-session-field")
+                    .caption("session name")
+                    .hint("new session name...")
+                    .validation(validation)
+                    .submit_disabled(normalized.is_none())
+                    .show(ui, theme, &mut self.name, &mut self.focus)
+            });
+
+        if result.inner.submitted
+            && let Some(name) = normalized
+        {
+            return RenameSessionEvent::Rename {
+                session_id: self.session_id.clone(),
+                name,
+            };
+        }
+        if result.escaped || result.clicked_outside {
+            return RenameSessionEvent::Close;
+        }
+        RenameSessionEvent::None
+    }
+}
+
+/// Trim the raw input; reject empty/whitespace-only names so we never rename a
+/// session to a blank label.
+fn normalized_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_name_trims_and_rejects_blank() {
+        assert_eq!(normalized_name("bootty"), Some("bootty".to_owned()));
+        assert_eq!(normalized_name("  spaced  "), Some("spaced".to_owned()));
+        assert_eq!(normalized_name(""), None);
+        assert_eq!(normalized_name("   "), None);
+    }
+}

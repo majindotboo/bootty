@@ -1,8 +1,12 @@
 pub mod chrome;
-pub mod dialogs;
+pub mod command_palette;
+pub mod ditch;
 pub mod icons;
+pub mod keybind_help;
+pub mod lua_window;
 pub mod new_session_picker;
-pub mod picker;
+pub mod overlay;
+pub mod rename;
 pub mod session_picker;
 pub mod settings;
 pub mod sidebar;
