@@ -52,7 +52,6 @@ pub enum MuxKeyAction {
     SelectTab(u32),
     MoveTab(i32),
     SplitPane(crate::layout::SplitDirection),
-    FocusPane(crate::layout::Direction),
     SelectPane(MuxDirection),
     NextPane,
     KillPane,

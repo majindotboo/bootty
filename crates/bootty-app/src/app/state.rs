@@ -201,6 +201,16 @@ fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
     }
 }
 
+fn layout_direction(direction: crate::mux::command::MuxDirection) -> Direction {
+    use crate::mux::command::MuxDirection;
+    match direction {
+        MuxDirection::Left => Direction::Left,
+        MuxDirection::Right => Direction::Right,
+        MuxDirection::Up => Direction::Up,
+        MuxDirection::Down => Direction::Down,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum TerminalSelectionAction {
     Begin(TerminalSelectionEvent),
@@ -2011,8 +2021,12 @@ impl AppState {
             self.split_focused_pane(direction);
             return;
         }
-        if let MuxKeyAction::FocusPane(direction) = action {
-            self.focus_pane_neighbor(direction);
+        // On the native engine, directional pane selection moves focus geometrically across the
+        // egui split layout. Other backends keep their own (cycling) pane selection.
+        if let MuxKeyAction::SelectPane(direction) = action
+            && self.is_native()
+        {
+            self.focus_pane_neighbor(layout_direction(direction));
             return;
         }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
@@ -2042,8 +2056,8 @@ impl AppState {
                 session_id: selected_session,
                 delta,
             },
-            MuxKeyAction::SplitPane(_) | MuxKeyAction::FocusPane(_) => {
-                unreachable!("split and focus-pane are handled before the command match")
+            MuxKeyAction::SplitPane(_) => {
+                unreachable!("split pane is handled before the command match")
             }
             MuxKeyAction::SelectPane(direction) => MuxCommand::SelectPane {
                 session_id: selected_session,
