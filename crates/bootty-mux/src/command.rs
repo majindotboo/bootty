@@ -35,6 +35,8 @@ pub enum MuxCommand {
     },
     SplitPane {
         session_id: String,
+        /// The pane to split (its cwd seeds the new pane). `None` splits the window's active pane.
+        pane_id: Option<String>,
     },
     SelectPane {
         session_id: String,

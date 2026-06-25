@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
-use eframe::egui::{self, Pos2};
+use eframe::egui::{self, Pos2, Rect};
 
 use crate::{
     app_actions::{
@@ -27,13 +28,15 @@ use crate::{
         InputSnapshot, TerminalInputCommand, WheelScrollState, focus::InputFocus,
         router::route_events, terminal_input_commands_with_wheel_state,
     },
+    layout::{Direction, Divider, PaneLayout, SplitDirection},
     modifier_remap::ModifierRemapSet,
     mux::{
         RepaintHandle,
         command::MuxCommand,
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
-        terminal::ActiveTerminal,
+        snapshot::MuxPaneAnchor,
+        terminal::{ActiveTerminal, ActiveTerminalRuntime},
     },
     platform::{
         apply_macos_non_native_fullscreen_presentation, macos_handles_non_native_fullscreen_frame,
@@ -123,6 +126,11 @@ pub struct AppState {
     status_metrics: StatusMetrics,
     last_status_metrics_sample: Instant,
     terminal_surface: Option<TerminalSurface>,
+    /// Per native window (session id, window id) split layout. Drives multi-pane rendering, focus,
+    /// and divider geometry. Non-native backends own their own layout and never populate this.
+    pane_layouts: HashMap<(String, String), PaneLayout>,
+    /// The full terminal area the panes were last laid out within, for geometric neighbor lookup.
+    last_pane_area: Option<Rect>,
     terminal_view_transform: ViewTransform,
     config_state: ConfigState,
     input_focus: InputFocus,
@@ -444,6 +452,8 @@ impl AppState {
             status_metrics: StatusMetrics::default(),
             last_status_metrics_sample: Instant::now() - STATUS_METRICS_SAMPLE_INTERVAL,
             terminal_surface: None,
+            pane_layouts: HashMap::new(),
+            last_pane_area: None,
             chrome_handle_rects: Vec::new(),
             terminal_view_transform: ViewTransform::IDENTITY,
             config_state: ConfigState::new(config),
@@ -589,6 +599,179 @@ impl AppState {
 
     pub fn register_chrome_handle(&mut self, rect: egui::Rect) {
         self.chrome_handle_rects.push(rect);
+    }
+
+    fn is_native(&self) -> bool {
+        matches!(
+            self.config().multiplexer.backend,
+            crate::config::MultiplexerBackendConfig::Native
+        )
+    }
+
+    fn current_window_key(&self) -> (String, String) {
+        let session = self.mux.selected_session().unwrap_or("local").to_owned();
+        let window = self
+            .mux
+            .selected_window()
+            .map(str::to_owned)
+            .or_else(|| {
+                self.mux
+                    .sessions()
+                    .iter()
+                    .find(|candidate| candidate.id == session || candidate.name == session)
+                    .and_then(|candidate| candidate.active_window_id.clone())
+            })
+            .unwrap_or_default();
+        (session, window)
+    }
+
+    fn current_pane_layout(&self) -> Option<&PaneLayout> {
+        if !self.is_native() {
+            return None;
+        }
+        self.pane_layouts.get(&self.current_window_key())
+    }
+
+    /// Reconcile the active native window's split layout against the backend's pane list, then make
+    /// the layout's focused pane the input runtime and keep its siblings live. Non-native backends
+    /// fall back to attaching the single selected anchor.
+    fn sync_terminal_panes(&mut self) -> Result<()> {
+        let config = self.config_state.current().multiplexer.clone();
+        if !self.is_native() {
+            return self
+                .terminal
+                .sync_mux_anchor(&config, self.mux.selected_session_anchor());
+        }
+        let panes: Vec<MuxPaneAnchor> = self.mux.selected_window_panes().to_vec();
+        let pane_ids: Vec<String> = panes
+            .iter()
+            .filter_map(|pane| pane.pane_id.clone())
+            .collect();
+        if pane_ids.is_empty() {
+            // Idle native session (all tabs closed): nothing to render.
+            return self
+                .terminal
+                .sync_mux_anchor(&config, self.mux.selected_session_anchor());
+        }
+        let key = self.current_window_key();
+        let layout = self
+            .pane_layouts
+            .entry(key)
+            .or_insert_with(|| PaneLayout::single(pane_ids[0].clone()));
+        layout.reconcile(&pane_ids);
+        let focused_id = layout.focused().to_owned();
+        let focused_anchor = panes
+            .iter()
+            .find(|pane| pane.pane_id.as_deref() == Some(focused_id.as_str()))
+            .cloned();
+        self.terminal
+            .sync_native_window(&panes, focused_anchor.as_ref(), config.hide_tmux_status)
+    }
+
+    /// True when the active native window holds more than one pane and should render as a split.
+    pub fn native_multi_pane(&self) -> bool {
+        self.current_pane_layout()
+            .is_some_and(|layout| !layout.is_single())
+    }
+
+    pub fn focused_pane(&self) -> Option<String> {
+        self.current_pane_layout()
+            .map(|layout| layout.focused().to_owned())
+    }
+
+    pub fn pane_rects(&self, area: Rect, gap: f32) -> Vec<(String, Rect)> {
+        self.current_pane_layout()
+            .map(|layout| layout.rects(area, gap))
+            .unwrap_or_default()
+    }
+
+    pub fn pane_dividers(&self, area: Rect, gap: f32) -> Vec<Divider> {
+        self.current_pane_layout()
+            .map(|layout| layout.dividers(area, gap))
+            .unwrap_or_default()
+    }
+
+    pub fn focus_pane(&mut self, pane_id: &str) {
+        let key = self.current_window_key();
+        if let Some(layout) = self.pane_layouts.get_mut(&key) {
+            layout.set_focus(pane_id);
+        }
+    }
+
+    pub fn set_pane_ratio(&mut self, path: &[u8], ratio: f32, min_fraction: f32) {
+        let key = self.current_window_key();
+        if let Some(layout) = self.pane_layouts.get_mut(&key) {
+            layout.set_ratio_at(path, ratio, min_fraction, min_fraction);
+        }
+    }
+
+    pub fn render_source_for_pane(&mut self, pane_id: &str) -> Option<&mut ActiveTerminalRuntime> {
+        self.terminal.render_source_for_pane(pane_id)
+    }
+
+    fn split_focused_pane(&mut self, direction: SplitDirection) {
+        let session = self.mux.selected_session().unwrap_or("local").to_owned();
+        let mux_config = self.config().multiplexer.clone();
+        if !self.is_native() {
+            self.mux.execute_command(
+                &self.repaint,
+                &mux_config,
+                MuxCommand::SplitPane {
+                    session_id: session,
+                    pane_id: None,
+                },
+            );
+            return;
+        }
+        let key = self.current_window_key();
+        let focused = self
+            .pane_layouts
+            .get(&key)
+            .map(|layout| layout.focused().to_owned());
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::SplitPane {
+                session_id: session,
+                pane_id: focused.clone(),
+            },
+        );
+        // The native split synchronously sets the new pane active, so the refreshed anchor names it.
+        let new_pane = self
+            .mux
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.clone());
+        if let Some(new_pane) = new_pane {
+            let layout = self
+                .pane_layouts
+                .entry(key)
+                .or_insert_with(|| PaneLayout::single(new_pane.clone()));
+            if let Some(focused) = &focused {
+                layout.set_focus(focused);
+            }
+            if !layout.contains(&new_pane) {
+                layout.split_focused(new_pane, direction);
+            }
+        }
+    }
+
+    pub fn record_pane_area(&mut self, area: Rect) {
+        self.last_pane_area = Some(area);
+    }
+
+    fn focus_pane_neighbor(&mut self, direction: Direction) {
+        let key = self.current_window_key();
+        let Some(area) = self.last_pane_area else {
+            return;
+        };
+        if let Some(layout) = self.pane_layouts.get_mut(&key) {
+            let focused = layout.focused().to_owned();
+            if let Some(neighbor) =
+                layout.neighbor(&focused, direction, area, crate::layout::PANE_GAP)
+            {
+                layout.set_focus(&neighbor);
+            }
+        }
     }
 
     pub fn activate_session_from_ui(&mut self, session_id: &str) {
@@ -1019,7 +1202,9 @@ impl AppState {
         let mut effects = Vec::new();
 
         self.sync_macos_non_native_fullscreen_presentation();
-        self.last_drain = self.terminal.drain_pty();
+        // Drain the focused pane plus every live sibling in the active native window so background
+        // panes keep processing output. For non-native this is just the single attach surface.
+        self.last_drain = self.terminal.drain_native_window();
         self.drain_terminal_side_effects(
             &mut effects,
             terminal_cell_width,
@@ -1046,10 +1231,7 @@ impl AppState {
             effects.push(AppEffect::RepaintAfter(after));
         }
         self.sync_session_order();
-        if let Err(error) = self.terminal.sync_mux_anchor(
-            &self.config_state.current().multiplexer,
-            self.mux.selected_session_anchor(),
-        ) {
+        if let Err(error) = self.sync_terminal_panes() {
             self.last_error = Some(error.to_string());
         }
         self.hot_reload_config_if_changed(&mut effects, now);
@@ -1777,6 +1959,14 @@ impl AppState {
             self.close_active_pane();
             return;
         }
+        if let MuxKeyAction::SplitPane(direction) = action {
+            self.split_focused_pane(direction);
+            return;
+        }
+        if let MuxKeyAction::FocusPane(direction) = action {
+            self.focus_pane_neighbor(direction);
+            return;
+        }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
         let selected_cwd = self
             .mux
@@ -1804,9 +1994,9 @@ impl AppState {
                 session_id: selected_session,
                 delta,
             },
-            MuxKeyAction::SplitPane => MuxCommand::SplitPane {
-                session_id: selected_session,
-            },
+            MuxKeyAction::SplitPane(_) | MuxKeyAction::FocusPane(_) => {
+                unreachable!("split and focus-pane are handled before the command match")
+            }
             MuxKeyAction::SelectPane(direction) => MuxCommand::SelectPane {
                 session_id: selected_session,
                 direction,

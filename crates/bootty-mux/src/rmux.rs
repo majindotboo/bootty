@@ -206,12 +206,14 @@ fn session_from_info(name: &SessionName, info: &InfoSnapshot) -> MuxSession {
                 .iter()
                 .find(|pane| pane.window_id == window.id && pane.index == 0)
                 .or_else(|| panes.iter().find(|pane| pane.window_id == window.id));
+            let anchor = anchor_for_pane(&name, pane);
             MuxWindow {
                 id: window.id.to_string(),
                 index: window.index,
                 name: window.name.clone().unwrap_or_default(),
                 active: window.index == 0,
-                anchor: anchor_for_pane(&name, pane),
+                panes: vec![anchor.clone()],
+                anchor,
             }
         })
         .collect::<Vec<_>>();
@@ -330,6 +332,7 @@ mod tests {
                             cwd: None,
                             process: None,
                         },
+                        panes: Vec::new(),
                     }],
                 }],
             })

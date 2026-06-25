@@ -21,6 +21,9 @@ pub struct MuxWindow {
     pub name: String,
     pub active: bool,
     pub anchor: MuxPaneAnchor,
+    /// Every pane in the window, in order. The native engine renders these as an egui split layout;
+    /// other backends own their own layout and expose only the single attach anchor here.
+    pub panes: Vec<MuxPaneAnchor>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

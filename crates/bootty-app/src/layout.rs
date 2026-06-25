@@ -9,6 +9,9 @@
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
+/// Pixel gap reserved between split children for the draggable divider handle.
+pub const PANE_GAP: f32 = 6.0;
+
 pub type PaneId = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +125,22 @@ impl PaneLayout {
             }
             // RemovedLeaf at the root means `pane` is the only pane; keep it.
             Removal::RemovedLeaf | Removal::NotFound => false,
+        }
+    }
+
+    /// Bring the tree in line with the backend's pane set: drop leaves whose pane has gone away
+    /// (closed or exited elsewhere) and adopt any pane that appeared outside the UI split path by
+    /// splitting the focused leaf to the right. No-ops when already in sync.
+    pub fn reconcile(&mut self, pane_ids: &[PaneId]) {
+        for existing in self.panes() {
+            if !pane_ids.contains(&existing) {
+                self.remove(&existing);
+            }
+        }
+        for id in pane_ids {
+            if !self.contains(id) {
+                self.split_focused(id.clone(), SplitDirection::Right);
+            }
         }
     }
 
@@ -522,6 +541,24 @@ mod tests {
         layout.set_ratio_at(&[], 0.99, 0.1, 0.2);
         let rects = layout.rects(area(), 0.0);
         approx(rect_for(&rects, "a").width(), 80.0); // clamped to 1 - 0.2
+    }
+
+    #[test]
+    fn reconcile_drops_closed_panes_and_adopts_new_ones() {
+        let mut layout = PaneLayout::single("a".to_owned());
+        layout.split_focused("b".to_owned(), SplitDirection::Right);
+        layout.split_focused("c".to_owned(), SplitDirection::Down);
+        // Backend now reports b gone and d added; a and c remain.
+        layout.reconcile(&["a".to_owned(), "c".to_owned(), "d".to_owned()]);
+        let mut panes = layout.panes();
+        panes.sort();
+        assert_eq!(panes, vec!["a".to_owned(), "c".to_owned(), "d".to_owned()]);
+        assert!(layout.contains("d"));
+        assert!(!layout.contains("b"));
+        // An in-sync reconcile is a no-op.
+        let before = layout.clone();
+        layout.reconcile(&["a".to_owned(), "c".to_owned(), "d".to_owned()]);
+        assert_eq!(layout, before);
     }
 
     #[test]

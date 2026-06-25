@@ -189,12 +189,20 @@ impl NativeMuxState {
             .find(|window| window.id == active_window_id)
     }
 
-    fn split_pane(&mut self, session_id: &str) {
+    fn split_pane(&mut self, session_id: &str, source_pane_id: Option<&str>) {
         let pane_id = self.next_pane_id();
         if let Some(window) = self.active_window_mut(session_id) {
-            let cwd = window
-                .panes
-                .first()
+            // Seed the new pane's cwd from the pane being split (the focused one), falling back to
+            // the active pane and then the first pane.
+            let cwd = source_pane_id
+                .and_then(|id| window.panes.iter().find(|pane| pane.id == id))
+                .or_else(|| {
+                    window
+                        .panes
+                        .iter()
+                        .find(|pane| pane.id == window.active_pane_id)
+                })
+                .or_else(|| window.panes.first())
                 .map(|pane| pane.cwd.clone())
                 .unwrap_or_else(|| PathBuf::from("."));
             window.active_pane_id = pane_id.clone();
@@ -296,12 +304,18 @@ impl NativeMuxState {
             .iter()
             .map(|window| {
                 let anchor = anchor_for_window(&session.id, window);
+                let panes = window
+                    .panes
+                    .iter()
+                    .map(|pane| anchor_for_pane(&session.id, pane))
+                    .collect();
                 MuxWindow {
                     id: window.id.clone(),
                     index: window.index,
                     name: window.name.clone(),
                     active: active && window.id == session.active_window_id,
                     anchor,
+                    panes,
                 }
             })
             .collect::<Vec<_>>();
@@ -344,6 +358,15 @@ fn anchor_for_window(session_id: &str, window: &NativeWindow) -> MuxPaneAnchor {
         session_id: session_id.to_owned(),
         pane_id: pane.map(|pane| pane.id.clone()),
         cwd: pane.map(|pane| pane.cwd.to_string_lossy().into_owned()),
+        process: Some("shell".to_owned()),
+    }
+}
+
+fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
+    MuxPaneAnchor {
+        session_id: session_id.to_owned(),
+        pane_id: Some(pane.id.clone()),
+        cwd: Some(pane.cwd.to_string_lossy().into_owned()),
         process: Some("shell".to_owned()),
     }
 }
@@ -422,7 +445,10 @@ impl MuxBackend for NativeBackend {
             MuxCommand::MoveWindow { session_id, delta } => {
                 state.move_active_window(&session_id, delta);
             }
-            MuxCommand::SplitPane { session_id } => state.split_pane(&session_id),
+            MuxCommand::SplitPane {
+                session_id,
+                pane_id,
+            } => state.split_pane(&session_id, pane_id.as_deref()),
             MuxCommand::SelectPane {
                 session_id,
                 direction,
@@ -521,7 +547,7 @@ mod tests {
     #[test]
     fn close_pane_in_a_split_tab_keeps_the_tab() {
         let mut state = NativeMuxState::new();
-        state.split_pane("local");
+        state.split_pane("local", None);
 
         state.close_active_pane("local");
 

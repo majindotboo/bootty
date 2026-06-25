@@ -1,10 +1,13 @@
 mod state;
 
-use std::{path::PathBuf, sync::mpsc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc, time::Instant};
 
 use anyhow::Result;
-use eframe::egui::{
-    self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder, Vec2,
+use eframe::{
+    egui::{
+        self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder, Vec2,
+    },
+    wgpu,
 };
 
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
@@ -12,9 +15,11 @@ pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 use crate::{
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
+    layout::PANE_GAP,
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
+    terminal_text::TerminalTextConfig,
     theme::theme_palette_from_config,
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
@@ -70,7 +75,19 @@ enum LuaWindowOwner {
 
 pub struct BoottyApp {
     state: AppState,
+    /// The focused pane's renderer (and the sole renderer for non-native backends). Keeping the
+    /// focused widget here means all the zoom/metrics/cell-size logic that reads `terminal_widget`
+    /// keeps targeting the focused pane.
     terminal_widget: TerminalWidget,
+    /// Renderers for the non-focused panes of a native split, keyed by pane id. On a focus change
+    /// the relevant widget is swapped in/out of `terminal_widget` so each pane keeps its own caches.
+    pane_widgets: HashMap<String, TerminalWidget>,
+    /// Pane id currently held by `terminal_widget` (native split only); `None` for the single-surface
+    /// path.
+    focused_widget_key: Option<String>,
+    /// Held so freshly-split panes get a renderer with the right WGPU target and text config.
+    terminal_target_format: Option<wgpu::TextureFormat>,
+    terminal_text_config: TerminalTextConfig,
     app_icon_texture: Option<TextureHandle>,
     settings_open: bool,
     settings: SettingsSurface,
@@ -116,12 +133,12 @@ impl BoottyApp {
         let repaint: crate::mux::RepaintHandle =
             std::sync::Arc::new(move || repaint_ctx.request_repaint());
         let text_config = config.font.terminal_text_config();
-        let terminal_widget = TerminalWidget::new(
-            cc.wgpu_render_state
-                .as_ref()
-                .map(|render_state| render_state.target_format),
-        )
-        .with_text_config(text_config);
+        let target_format = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|render_state| render_state.target_format);
+        let terminal_widget =
+            TerminalWidget::new(target_format).with_text_config(text_config.clone());
 
         // User extensions live beside the config file. Built-ins are Luau modules;
         // user `.lua` / `.luau` files override same-named defaults per extension surface.
@@ -144,6 +161,10 @@ impl BoottyApp {
         Ok(Self {
             state: AppState::new(config.clone(), repaint, direct_input_rx, modifier_side_rx)?,
             terminal_widget,
+            pane_widgets: HashMap::new(),
+            focused_widget_key: None,
+            terminal_target_format: target_format,
+            terminal_text_config: text_config,
             app_icon_texture: None,
             settings_open: false,
             settings: SettingsSurface::new(config.clone()),
@@ -208,11 +229,18 @@ impl BoottyApp {
                 }
                 AppEffect::RepaintAfter(after) => ctx.request_repaint_after(after),
                 AppEffect::SetTerminalTextConfig(text_config) => {
-                    self.terminal_widget.set_text_config(text_config);
+                    self.terminal_text_config = text_config.clone();
+                    self.terminal_widget.set_text_config(text_config.clone());
+                    for widget in self.pane_widgets.values_mut() {
+                        widget.set_text_config(text_config.clone());
+                    }
                 }
                 AppEffect::SetTerminalCursorIcon(icon) => {
                     self.terminal_cursor_icon = icon;
                     self.terminal_widget.set_terminal_cursor_icon(icon);
+                    for widget in self.pane_widgets.values_mut() {
+                        widget.set_terminal_cursor_icon(icon);
+                    }
                 }
                 AppEffect::SetUiFonts(families) => {
                     configure_egui_fonts(ctx, &families);
@@ -388,6 +416,110 @@ impl BoottyApp {
             self.state.config().chrome.sidebar,
             self.state.config().chrome.status_bar,
         );
+    }
+
+    /// Make `terminal_widget` the renderer for pane `key`, swapping the previous focused pane's
+    /// widget back into `pane_widgets` so each pane keeps its own render caches.
+    fn focus_pane_widget(&mut self, key: &str) {
+        if self.focused_widget_key.as_deref() == Some(key) {
+            return;
+        }
+        let mut incoming = self.pane_widgets.remove(key).unwrap_or_else(|| {
+            TerminalWidget::new(self.terminal_target_format)
+                .with_text_config(self.terminal_text_config.clone())
+        });
+        incoming.set_terminal_cursor_icon(self.terminal_cursor_icon);
+        let outgoing = std::mem::replace(&mut self.terminal_widget, incoming);
+        if let Some(old_key) = self.focused_widget_key.replace(key.to_owned()) {
+            self.pane_widgets.insert(old_key, outgoing);
+        }
+    }
+
+    fn show_single_terminal(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
+                Ok(surface) => self.state.record_surface(surface),
+                Err(error) => self.state.record_render_error(error),
+            },
+        );
+    }
+
+    /// Render every pane of the active native window into its split sub-rect: the focused pane via
+    /// `terminal_widget`, the rest via their own `pane_widgets`. A primary press inside a pane
+    /// focuses it. The focused pane gets a thin accent border.
+    fn show_split_panes(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: Rect,
+        palette: bootty_ui::ThemePalette,
+    ) {
+        let rects = self.state.pane_rects(area, PANE_GAP);
+        let focused = self.state.focused_pane();
+
+        if ui.input(|input| input.pointer.primary_pressed())
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+            && let Some((pane_id, _)) = rects.iter().find(|(_, rect)| rect.contains(pos))
+        {
+            self.state.focus_pane(pane_id);
+        }
+
+        let current_ids: std::collections::HashSet<String> =
+            rects.iter().map(|(id, _)| id.clone()).collect();
+        let Self {
+            state,
+            terminal_widget,
+            pane_widgets,
+            terminal_target_format,
+            terminal_text_config,
+            terminal_cursor_icon,
+            ..
+        } = self;
+        for (pane_id, rect) in &rects {
+            let is_focused = focused.as_deref() == Some(pane_id.as_str());
+            let result = ui
+                .scope_builder(
+                    UiBuilder::new()
+                        .max_rect(*rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        if is_focused {
+                            Some(terminal_widget.show(ui, state.terminal_mut()))
+                        } else {
+                            let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
+                                TerminalWidget::new(*terminal_target_format)
+                                    .with_text_config(terminal_text_config.clone())
+                            });
+                            widget.set_terminal_cursor_icon(*terminal_cursor_icon);
+                            state
+                                .render_source_for_pane(pane_id)
+                                .map(|source| widget.show(ui, source))
+                        }
+                    },
+                )
+                .inner;
+            match result {
+                Some(Ok(surface)) => {
+                    if is_focused {
+                        state.record_surface(surface);
+                    }
+                }
+                Some(Err(error)) => state.record_render_error(error),
+                None => {}
+            }
+            if is_focused {
+                ui.painter().rect_stroke(
+                    *rect,
+                    0.0,
+                    egui::Stroke::new(1.0, palette.primary),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        // Drop renderers for panes that have closed so their caches don't linger.
+        pane_widgets.retain(|key, _| current_ids.contains(key));
     }
 
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
@@ -767,17 +899,24 @@ impl BoottyApp {
                 .selected_session_anchor()
                 .is_some_and(|anchor| anchor.pane_id.is_some());
         if has_terminal {
-            self.terminal_widget
-                .set_transition_key(terminal_transition_key);
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(terminal_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                    Ok(surface) => self.state.record_surface(surface),
-                    Err(error) => self.state.record_render_error(error),
-                },
-            );
+            self.state.record_pane_area(terminal_rect);
+            if native_backend {
+                // Native panes render through per-pane widgets keyed by pane id; keep the focused
+                // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
+                if let Some(focused) = self.state.focused_pane() {
+                    self.focus_pane_widget(&focused);
+                }
+                if self.state.native_multi_pane() {
+                    self.show_split_panes(ui, terminal_rect, palette);
+                } else {
+                    self.show_single_terminal(ui, terminal_rect);
+                }
+            } else {
+                self.focused_widget_key = None;
+                self.terminal_widget
+                    .set_transition_key(terminal_transition_key);
+                self.show_single_terminal(ui, terminal_rect);
+            }
             if !self.state.terminal_focused() {
                 let dim = self.state.config().chrome.unfocused_terminal_dim;
                 ui.painter().rect_filled(

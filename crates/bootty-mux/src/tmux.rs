@@ -163,7 +163,7 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     self.run(&["select-window", "-t", target])?;
                 }
             }
-            MuxCommand::SplitPane { session_id } => {
+            MuxCommand::SplitPane { session_id, .. } => {
                 self.run_owned(vec!["split-window".into(), "-t".into(), session_id])?;
             }
             MuxCommand::SelectPane {
@@ -333,17 +333,21 @@ fn add_tmux_windows(sessions: &mut [MuxSession], panes_output: &str) -> Result<(
             }
             continue;
         }
+        let anchor = MuxPaneAnchor {
+            session_id,
+            pane_id,
+            cwd,
+            process,
+        };
         session.windows.push(MuxWindow {
             id: window_id,
             index: window_index,
             name: window_name,
             active: window_active,
-            anchor: MuxPaneAnchor {
-                session_id,
-                pane_id,
-                cwd,
-                process,
-            },
+            // tmux owns its own pane layout; bootty renders the single attach surface, so expose
+            // just the attach anchor here.
+            panes: vec![anchor.clone()],
+            anchor,
         });
     }
     for session in sessions {

@@ -43,6 +43,9 @@ pub struct BackendPaneTerminal {
     terminal_config: TerminalSessionConfig,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     native_terminals: HashMap<MuxPaneTarget, ActiveTerminalRuntime>,
+    /// The active native window's panes (focused + the parked siblings rendered alongside it). Empty
+    /// for non-native backends, which render a single attach surface.
+    native_window_targets: Vec<MuxPaneTarget>,
     /// Session whose tmux `status` option bootty has toggled off so its own
     /// status bar is the only one shown; restored when bootty stops showing it.
     status_hidden_session: Option<String>,
@@ -59,6 +62,38 @@ pub struct ActiveTerminalRuntime(Box<dyn TerminalRuntime>);
 impl ActiveTerminalRuntime {
     fn idle() -> Self {
         Self(Box::new(IdleRenderSource))
+    }
+}
+
+// Lets a non-focused pane's runtime be rendered directly by a per-pane `TerminalWidget` without
+// going through `BackendPaneTerminal` (which only ever exposes the focused pane).
+impl TerminalRenderSource for ActiveTerminalRuntime {
+    fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
+        self.0.resize(geometry)
+    }
+
+    fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
+        self.0.extract_frame()
+    }
+
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        self.0.is_mouse_tracking()
+    }
+
+    fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
+        self.0.scroll_viewport_delta(delta)
+    }
+
+    fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.0.begin_selection(event)
+    }
+
+    fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.0.update_selection(event)
+    }
+
+    fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        self.0.end_selection(event)
     }
 }
 
@@ -241,6 +276,7 @@ impl BackendPaneTerminal {
             terminal_config,
             repaint_wakeup,
             native_terminals: HashMap::new(),
+            native_window_targets: Vec::new(),
             status_hidden_session: None,
             terminal: ActiveTerminalRuntime::idle(),
         }
@@ -337,15 +373,7 @@ impl BackendPaneTerminal {
                 terminal.resize(self.geometry)?;
                 return Ok(terminal);
             }
-            let mut config = self.terminal_config.clone();
-            config.launch.working_directory = target.cwd().map(Path::new).map(Path::to_path_buf);
-            Ok(ActiveTerminalRuntime(Box::new(
-                TerminalSession::new_with_config(
-                    self.geometry,
-                    config,
-                    Arc::clone(&self.repaint_wakeup),
-                )?,
-            )))
+            self.spawn_native_runtime(target)
         } else if matches!(backend, MuxBackendKind::Tmux | MuxBackendKind::Zellij) {
             let config = backend_attach_session_config(
                 self.terminal_config.clone(),
@@ -377,6 +405,109 @@ impl BackendPaneTerminal {
                 Arc::clone(&self.repaint_wakeup),
             )?)))
         }
+    }
+
+    fn spawn_native_runtime(&self, target: &MuxPaneTarget) -> Result<ActiveTerminalRuntime> {
+        let mut config = self.terminal_config.clone();
+        config.launch.working_directory = target.cwd().map(Path::new).map(Path::to_path_buf);
+        Ok(ActiveTerminalRuntime(Box::new(
+            TerminalSession::new_with_config(
+                self.geometry,
+                config,
+                Arc::clone(&self.repaint_wakeup),
+            )?,
+        )))
+    }
+
+    /// Reconcile the live native runtimes against the active window's panes: make `focused` the
+    /// deref (input) runtime and keep every other pane alive in the parked map so it renders and
+    /// drains alongside. Panes are only torn down on explicit close, so switching focus or tabs
+    /// never kills a shell.
+    pub fn sync_native_window(
+        &mut self,
+        window_panes: &[MuxPaneAnchor],
+        focused: Option<&MuxPaneAnchor>,
+        hide_tmux_status: bool,
+    ) -> Result<()> {
+        self.backend = MuxBackendKind::Native;
+        let targets: Vec<MuxPaneTarget> = window_panes
+            .iter()
+            .cloned()
+            .map(MuxPaneTarget::from)
+            .filter(|target| matches!(target, MuxPaneTarget::Pane { .. }))
+            .collect();
+        let focused_target = focused
+            .cloned()
+            .map(MuxPaneTarget::from)
+            .filter(|target| matches!(target, MuxPaneTarget::Pane { .. }))
+            .or_else(|| targets.first().cloned());
+
+        if self.active_target.as_ref() != focused_target.as_ref() {
+            self.park_native_terminal();
+            let terminal = self
+                .start_terminal(MuxBackendKind::Native, focused_target.as_ref())
+                .inspect_err(|_| {
+                    self.active_target = None;
+                    self.clear_terminal();
+                })?;
+            self.active_target = focused_target;
+            self.terminal = terminal;
+        }
+
+        for target in &targets {
+            if self.active_target.as_ref() == Some(target) {
+                continue;
+            }
+            if !self.native_terminals.contains_key(target) {
+                let runtime = self.spawn_native_runtime(target)?;
+                self.native_terminals.insert(target.clone(), runtime);
+            }
+        }
+        self.native_window_targets = targets;
+        self.sync_status_bar(hide_tmux_status);
+        Ok(())
+    }
+
+    /// A non-focused window pane's render source, for painting it into its own sub-rect. The focused
+    /// pane is rendered through `BackendPaneTerminal` itself (which keeps `geometry` in sync).
+    pub fn render_source_for_pane(&mut self, pane_id: &str) -> Option<&mut ActiveTerminalRuntime> {
+        if self
+            .active_target
+            .as_ref()
+            .map(MuxPaneTarget::input_selector)
+            == Some(pane_id)
+        {
+            return None;
+        }
+        let target = self
+            .native_window_targets
+            .iter()
+            .find(|target| target.input_selector() == pane_id)?
+            .clone();
+        self.native_terminals.get_mut(&target)
+    }
+
+    /// The focused pane's id (the deref/input runtime), if any.
+    pub fn focused_pane_id(&self) -> Option<&str> {
+        self.active_target
+            .as_ref()
+            .map(MuxPaneTarget::input_selector)
+    }
+
+    /// Drain the focused pane and every parked sibling in the active window so background panes keep
+    /// processing PTY output and repaint. Returns the focused pane's drain stats.
+    pub fn drain_native_window(&mut self) -> DrainStats {
+        let stats = self.terminal.drain_pty();
+        let targets = self.native_window_targets.clone();
+        for target in &targets {
+            if self.active_target.as_ref() == Some(target) {
+                continue;
+            }
+            if let Some(runtime) = self.native_terminals.get_mut(target) {
+                runtime.drain_pty();
+            }
+        }
+        stats
     }
 
     pub fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
