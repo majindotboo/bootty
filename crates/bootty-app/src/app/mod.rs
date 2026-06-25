@@ -95,17 +95,43 @@ fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg:
             std::f32::consts::FRAC_PI_2,
         ), // bottom-left
     ];
+    // The cutout (square corner minus the rounded arc) is concave, so fan it into triangles from
+    // the corner — each triangle is convex and the region is star-shaped from the corner — rather
+    // than filling one polygon (which egui would collapse to its diagonal hull).
+    let steps = 8;
     for (center, corner, start) in corners {
-        let mut points = vec![corner];
-        let steps = 8;
-        for step in 0..=steps {
+        let arc = |step: usize| {
             let angle = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
-            points.push(Pos2::new(
-                center.x + r * angle.cos(),
-                center.y + r * angle.sin(),
+            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
+        };
+        for step in 0..steps {
+            painter.add(egui::Shape::convex_polygon(
+                vec![corner, arc(step), arc(step + 1)],
+                bg,
+                egui::Stroke::NONE,
             ));
         }
-        painter.add(egui::Shape::convex_polygon(points, bg, egui::Stroke::NONE));
+    }
+}
+
+/// Shrink a divider's visual rect along its long axis by the pane corner radius (per end), so it
+/// stops where the adjacent panes round off rather than crossing the rounded corners.
+fn inset_divider_for_radius(rect: Rect, direction: SplitDirection, radius: f32) -> Rect {
+    match direction {
+        SplitDirection::Right => {
+            let inset = radius.clamp(0.0, rect.height() / 2.0);
+            Rect::from_min_max(
+                Pos2::new(rect.min.x, rect.min.y + inset),
+                Pos2::new(rect.max.x, rect.max.y - inset),
+            )
+        }
+        SplitDirection::Down => {
+            let inset = radius.clamp(0.0, rect.width() / 2.0);
+            Rect::from_min_max(
+                Pos2::new(rect.min.x + inset, rect.min.y),
+                Pos2::new(rect.max.x - inset, rect.max.y),
+            )
+        }
     }
 }
 
@@ -612,7 +638,13 @@ impl BoottyApp {
         area: Rect,
         palette: bootty_ui::ThemePalette,
     ) {
-        let gap = self.state.config().chrome.pane_divider_width;
+        let chrome = &self.state.config().chrome;
+        let gap = chrome.pane_divider_width;
+        let corner_radius = chrome.pane_corner_radius;
+        let divider_color = chrome
+            .pane_divider_color
+            .map(crate::theme::config_color32)
+            .unwrap_or(palette.mantle);
         let dividers = self.state.pane_dividers(area, gap);
         for divider in &dividers {
             let direction = divider.direction;
@@ -634,10 +666,12 @@ impl BoottyApp {
                 ),
             };
             self.state.register_chrome_handle(handle_rect);
-            // Always paint the divider at its configured width so it's visible, not just on hover
-            // (the gap would otherwise blend into the window background).
-            if divider.rect.width() >= 1.0 && divider.rect.height() >= 1.0 {
-                ui.painter().rect_filled(divider.rect, 0.0, palette.border);
+            // Always paint the divider at its configured width so it's visible, not just on hover.
+            // Inset its long axis by the pane corner radius so it stops where the rounded panes
+            // start, instead of cutting straight across the rounded corners.
+            let visual = inset_divider_for_radius(divider.rect, direction, corner_radius);
+            if visual.width() >= 1.0 && visual.height() >= 1.0 {
+                ui.painter().rect_filled(visual, 0.0, divider_color);
             }
             let response = egui::Area::new(egui::Id::new((
                 "bootty-pane-divider",

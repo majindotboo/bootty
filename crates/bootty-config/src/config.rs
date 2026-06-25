@@ -194,6 +194,9 @@ pub struct ChromeConfig {
     /// Visual width (px) of the gap/divider between native split panes. The grab area is widened
     /// past this so thin dividers stay draggable.
     pub pane_divider_width: f32,
+    /// Divider color; falls back to the window background (the sidebar's default background) so the
+    /// gap reads as a cohesive backdrop behind the rounded panes.
+    pub pane_divider_color: Option<Color>,
     /// Border (px) drawn around the focused native split pane. 0 hides it.
     pub pane_focus_border_width: f32,
     /// Color of the focused-pane border; falls back to the theme accent when unset.
@@ -217,6 +220,7 @@ struct ChromePatch {
     status_height: Option<f32>,
     gap: Option<f32>,
     pane_divider_width: Option<f32>,
+    pane_divider_color: Option<Color>,
     pane_focus_border_width: Option<f32>,
     pane_focus_border_color: Option<Color>,
     pane_corner_radius: Option<f32>,
@@ -607,6 +611,7 @@ impl Default for ChromeConfig {
             status_height: 30.0,
             gap: 1.0,
             pane_divider_width: 3.0,
+            pane_divider_color: None,
             pane_focus_border_width: 1.0,
             pane_focus_border_color: None,
             pane_corner_radius: 0.0,
@@ -1626,6 +1631,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_value(&mut chrome.gap, partial.gap);
     apply_value(&mut chrome.pane_divider_width, partial.pane_divider_width);
+    apply_present(&mut chrome.pane_divider_color, partial.pane_divider_color);
     apply_value(
         &mut chrome.pane_focus_border_width,
         partial.pane_focus_border_width,

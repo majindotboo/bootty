@@ -160,6 +160,15 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     super::chrome_color_row(
         win,
         ui,
+        "Divider",
+        "Color of the gap between split panes; unset uses the window background.",
+        &["chrome", "pane-divider-color"],
+        palette.mantle,
+        |chrome| &mut chrome.pane_divider_color,
+    );
+    super::chrome_color_row(
+        win,
+        ui,
         "Focus border",
         "Border around the focused split pane; unset uses the theme accent.",
         &["chrome", "pane-focus-border-color"],
