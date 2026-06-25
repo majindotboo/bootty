@@ -15,6 +15,7 @@ pub use bootty_terminal::{terminal_engine, terminal_frame, terminal_image, termi
 pub use bootty_winit::{direct_input, input_binding, input_binding_set, modifier_remap};
 pub mod git;
 pub mod input;
+pub mod layout;
 pub mod menu;
 pub use bootty_mux as mux;
 pub mod extensions;
