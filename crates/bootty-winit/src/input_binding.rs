@@ -219,6 +219,7 @@ pub enum BindingAction {
     NewWindow,
     NewMuxSession,
     SessionPicker,
+    CommandPalette,
     CloseWindow,
     CloseSurface,
     Quit,
@@ -276,6 +277,8 @@ pub enum BindingAction {
     SelectSession(u32),
     MoveSession(i32),
     DitchSession,
+    RenameSession,
+    ShowKeybinds,
     WriteScreenFile(WriteScreen),
     WriteSelectionFile(WriteScreen),
     ToggleMouseReporting,
@@ -417,6 +420,7 @@ impl BindingAction {
             Self::NewWindow => "new_window".to_owned(),
             Self::NewMuxSession => "new_mux_session".to_owned(),
             Self::SessionPicker => "session_picker".to_owned(),
+            Self::CommandPalette => "command_palette".to_owned(),
             Self::CloseWindow => "close_window".to_owned(),
             Self::CloseSurface => "close_surface".to_owned(),
             Self::Quit => "quit".to_owned(),
@@ -473,6 +477,8 @@ impl BindingAction {
             Self::SelectSession(value) => format!("select_session:{value}"),
             Self::MoveSession(value) => format!("move_session:{value}"),
             Self::DitchSession => "ditch_session".to_owned(),
+            Self::RenameSession => "rename_session".to_owned(),
+            Self::ShowKeybinds => "show_keybinds".to_owned(),
             Self::AdjustSelection(value) => format!("adjust_selection:{}", value.as_str()),
             Self::JumpToPrompt(value) => format!("jump_to_prompt:{value}"),
             Self::WriteScrollbackFile(value) => {
@@ -619,7 +625,7 @@ fn split_binding(input: &str) -> Result<(&str, &str), BindingParseError> {
     Err(BindingParseError::InvalidFormat)
 }
 
-fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
+pub fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
     let (name, value) = match input.split_once(':') {
         Some((name, value)) => (name, Some(value)),
         None => (input, None),
@@ -632,6 +638,7 @@ fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
         "new_window" => parse_unit(value, BindingAction::NewWindow),
         "new_mux_session" => parse_unit(value, BindingAction::NewMuxSession),
         "session_picker" => parse_unit(value, BindingAction::SessionPicker),
+        "command_palette" => parse_unit(value, BindingAction::CommandPalette),
         "close_window" => parse_unit(value, BindingAction::CloseWindow),
         "close_surface" => parse_unit(value, BindingAction::CloseSurface),
         "quit" => parse_unit(value, BindingAction::Quit),
@@ -722,6 +729,8 @@ fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
             Ok(BindingAction::MoveSession(parse_i32(value)?))
         }),
         "ditch_session" => parse_unit(value, BindingAction::DitchSession),
+        "rename_session" => parse_unit(value, BindingAction::RenameSession),
+        "show_keybinds" => parse_unit(value, BindingAction::ShowKeybinds),
         "jump_to_prompt" => parse_required(value, |value| {
             Ok(BindingAction::JumpToPrompt(parse_i16(value)?))
         }),

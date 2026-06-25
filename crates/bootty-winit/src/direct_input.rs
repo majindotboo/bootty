@@ -538,4 +538,24 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn cmd_alt_letter_formats_as_trigger_for_keybind_recorder() {
+        // egui collapses cmd+x into a Cut event with no key event, so the settings recorder builds
+        // its trigger string from this direct input instead. cmd+alt+x must produce a trigger with
+        // the alt preserved (the combo the recorder previously could not capture). The serializer
+        // emits the canonical uppercase letter; the app lowercases it to match the default keybinds.
+        let direct = direct_key_input_from_winit_code(
+            KeyCode::KeyX,
+            ModifiersState::SUPER | ModifiersState::ALT,
+            ModifierSideState::default(),
+            false,
+        )
+        .expect("cmd+alt+x maps to direct terminal input");
+
+        assert_eq!(
+            BindingTrigger::from_key_input(direct.input).format_entry(),
+            "cmd+alt+X"
+        );
+    }
 }

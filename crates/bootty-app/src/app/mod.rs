@@ -60,6 +60,14 @@ fn fullscreen_notch_layout_offset(configured_offset: Option<f32>, measured_band:
     }
 }
 
+/// Which extension worker owns the currently-shown Luau window, so its action
+/// routes back to the right host (window ids are only unique within a host).
+#[derive(Clone, Copy)]
+enum LuaWindowOwner {
+    Sidebar,
+    Status,
+}
+
 pub struct BoottyApp {
     state: AppState,
     terminal_widget: TerminalWidget,
@@ -69,6 +77,7 @@ pub struct BoottyApp {
     _menu: Option<AppMenu>,
     status_extensions: crate::extensions::ExtensionHost,
     sidebar_extensions: crate::extensions::ExtensionHost,
+    lua_window: Option<(LuaWindowOwner, crate::ui::lua_window::LuaWindowDialog)>,
     keep_awake: Option<keepawake::KeepAwake>,
     terminal_cursor_icon: egui::CursorIcon,
 }
@@ -139,6 +148,7 @@ impl BoottyApp {
             _menu: crate::menu::install(),
             status_extensions,
             sidebar_extensions,
+            lua_window: None,
             keep_awake: None,
             terminal_cursor_icon: egui::CursorIcon::Default,
         })
@@ -777,7 +787,15 @@ impl BoottyApp {
         let Some(mut dialog) = self.state.take_dialog() else {
             return;
         };
-        let event = dialog.show(ctx, self.state.ui_theme());
+        let theme = self.state.ui_theme();
+        let open_cwds: Vec<String> = self
+            .state
+            .mux()
+            .sessions()
+            .iter()
+            .filter_map(|session| session.anchor.cwd.clone())
+            .collect();
+        let event = dialog.show(ctx, theme, &open_cwds);
         self.state.apply_picker_event(dialog, event);
     }
 
@@ -795,11 +813,111 @@ impl BoottyApp {
         );
         self.state.apply_session_picker_event(dialog, event);
     }
+
+    fn show_rename_session_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_rename_session_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        self.state.apply_rename_session_event(dialog, event);
+    }
+
+    fn show_ditch_session_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_ditch_session_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        self.state.apply_ditch_session_event(dialog, event);
+    }
+
+    fn show_keybind_help_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_keybind_help_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        self.state.apply_keybind_help_event(dialog, event);
+    }
+
+    fn show_command_palette_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_command_palette_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        let run = matches!(
+            event,
+            crate::ui::command_palette::CommandPaletteEvent::Run(_)
+        );
+        self.state.apply_command_palette_event(dialog, event);
+        // The chosen command runs on the next input pass; make sure that pass
+        // happens even if no further input arrives.
+        if run {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Drain Luau `bootty.window` requests from both workers, render the active
+    /// window through the overlay framework, and route the user's choice back to
+    /// the owning worker's `on_action` handler.
+    fn drive_lua_windows(&mut self, ctx: &egui::Context) {
+        use crate::extensions::WindowRequest;
+        use crate::ui::lua_window::{LuaWindowDialog, LuaWindowEvent};
+
+        // Drain both hosts every frame so a programmatic close() or a replacement
+        // open() is honored even while a window is already up. A window that goes
+        // away without a user choice notifies its owner to drop its handler.
+        for (owner, requests) in [
+            (
+                LuaWindowOwner::Sidebar,
+                self.sidebar_extensions.take_window_requests(),
+            ),
+            (
+                LuaWindowOwner::Status,
+                self.status_extensions.take_window_requests(),
+            ),
+        ] {
+            for request in requests {
+                match request {
+                    WindowRequest::Open(spec) => {
+                        self.dismiss_lua_window();
+                        self.lua_window = Some((owner, LuaWindowDialog::new(spec)));
+                    }
+                    WindowRequest::Close => self.dismiss_lua_window(),
+                }
+            }
+        }
+
+        let Some((owner, mut dialog)) = self.lua_window.take() else {
+            return;
+        };
+        match dialog.show(ctx, self.state.ui_theme()) {
+            LuaWindowEvent::None => self.lua_window = Some((owner, dialog)),
+            LuaWindowEvent::Close => self.lua_host(owner).close_window(dialog.id()),
+            LuaWindowEvent::Action { key, value } => {
+                self.lua_host(owner)
+                    .push_window_action(dialog.id(), key, value);
+            }
+        }
+    }
+
+    /// Close any open Luau window and tell its owning worker to drop the handler.
+    fn dismiss_lua_window(&mut self) {
+        if let Some((owner, dialog)) = self.lua_window.take() {
+            self.lua_host(owner).close_window(dialog.id());
+        }
+    }
+
+    fn lua_host(&self, owner: LuaWindowOwner) -> &crate::extensions::ExtensionHost {
+        match owner {
+            LuaWindowOwner::Sidebar => &self.sidebar_extensions,
+            LuaWindowOwner::Status => &self.status_extensions,
+        }
+    }
 }
 
 impl eframe::App for BoottyApp {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.state.drain_direct_input();
+        self.state.set_lua_window_open(self.lua_window.is_some());
         if self.state.direct_input_suppresses_egui_events() {
             suppress_egui_events_for_direct_input(
                 &mut raw_input.events,
@@ -839,6 +957,7 @@ impl eframe::App for BoottyApp {
                 input.zoom_delta(),
             )
         });
+
         let (terminal_cell_width, terminal_cell_height) = self.terminal_widget.cell_dimensions();
 
         if (zoom_delta - 1.0).abs() > f32::EPSILON {
@@ -882,6 +1001,11 @@ impl eframe::App for BoottyApp {
         });
         self.show_new_mux_session_dialog(ui.ctx());
         self.show_session_picker_dialog(ui.ctx());
+        self.show_rename_session_dialog(ui.ctx());
+        self.show_ditch_session_dialog(ui.ctx());
+        self.show_keybind_help_dialog(ui.ctx());
+        self.show_command_palette_dialog(ui.ctx());
+        self.drive_lua_windows(ui.ctx());
         self.show_settings(ui.ctx());
     }
 }

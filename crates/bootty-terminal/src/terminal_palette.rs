@@ -2,6 +2,25 @@ use libghostty_vt::style::RgbColor;
 
 pub type Palette = [RgbColor; 256];
 
+/// Bootty's built-in base 16 ANSI colors — the default terminal palette before user overrides.
+/// Exposed so settings can seed its ANSI override grid from the colors the terminal actually uses
+/// rather than a generic VGA palette.
+pub fn default_base16() -> [RgbColor; 16] {
+    [
+        0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x414868,
+        0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
+    ]
+    .map(rgb_from_u24)
+}
+
+fn rgb_from_u24(value: u32) -> RgbColor {
+    RgbColor {
+        r: ((value >> 16) & 0xff) as u8,
+        g: ((value >> 8) & 0xff) as u8,
+        b: (value & 0xff) as u8,
+    }
+}
+
 pub fn generate_256_palette(
     base: &Palette,
     skip: &[bool; 256],

@@ -529,20 +529,8 @@ fn color_scheme_for_background(color: RgbColor) -> ColorScheme {
     }
 }
 
-fn rgb_hex(value: u32) -> RgbColor {
-    RgbColor {
-        r: ((value >> 16) & 0xff) as u8,
-        g: ((value >> 8) & 0xff) as u8,
-        b: (value & 0xff) as u8,
-    }
-}
-
 fn default_palette16() -> [RgbColor; 16] {
-    [
-        0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x414868,
-        0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
-    ]
-    .map(rgb_hex)
+    crate::terminal_palette::default_base16()
 }
 
 fn default_device_attributes() -> DeviceAttributes {

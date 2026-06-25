@@ -1,18 +1,16 @@
-use bootty_ui::{Theme, ThemePalette};
-use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, UiBuilder};
+use bootty_ui::Theme;
+use eframe::egui;
 
 use crate::{
     project_catalog::{ProjectPickerEntry, discover_project_picker_entries},
     strings::{display_path, session_name_for_path},
+    ui::overlay::{self, FloatingWindow, ListRow, ListView, list},
     worktree_catalog::{WorktreePickerEntry, discover_worktree_picker_entries},
 };
 
 mod model;
 
-use model::{
-    NewMuxSessionStep, filtered_project_entries, filtered_worktree_entries,
-    picker_selection_after_navigation,
-};
+use model::{NewMuxSessionStep, filtered_project_entries, filtered_worktree_entries};
 
 pub use crate::mux::controller::NewMuxSessionRequest;
 
@@ -25,13 +23,14 @@ pub struct NewMuxSessionDialog {
     worktrees: Vec<WorktreePickerEntry>,
     selected_project: Option<ProjectPickerEntry>,
     focus_filter: bool,
+    branch: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NewSessionPickerEvent {
     None,
     Close,
-    NewWorktreeUnavailable,
+    CreateWorktree { repo: String, branch: String },
     CreateSession(NewMuxSessionRequest),
 }
 
@@ -45,315 +44,300 @@ impl NewMuxSessionDialog {
             worktrees: Vec::new(),
             selected_project: None,
             focus_filter: true,
+            branch: String::new(),
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, theme: Theme) -> NewSessionPickerEvent {
-        let palette = theme.palette;
-        let mut event = NewSessionPickerEvent::None;
-        let mut selected_project: Option<ProjectPickerEntry> = None;
-        let mut selected_worktree: Option<WorktreePickerEntry> = None;
-        egui::Area::new(egui::Id::new("new-mux-session-dialog"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                bootty_ui::configure_style(ui.style_mut(), theme);
-                let size = picker_panel_size(ctx, self.step);
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, CornerRadius::ZERO, palette.mantle);
-                painter.rect_stroke(
-                    rect,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, palette.border),
-                    egui::StrokeKind::Inside,
-                );
-
-                let header = Rect::from_min_size(rect.min, egui::vec2(rect.width(), 52.0));
-                painter.text(
-                    Pos2::new(header.min.x + 16.0, header.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    self.title(),
-                    egui::FontId::monospace(15.0),
-                    palette.warning,
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(rect.min.x + 16.0, header.max.y),
-                        Pos2::new(rect.max.x - 16.0, header.max.y),
-                    ],
-                    Stroke::new(1.0, palette.border),
-                );
-
-                let filter_rect = Rect::from_min_max(
-                    Pos2::new(rect.min.x + 16.0, header.max.y + 10.0),
-                    Pos2::new(rect.max.x - 16.0, header.max.y + 36.0),
-                );
-                self.draw_filter(ctx, ui, filter_rect, theme, palette);
-
-                let footer_height = 34.0;
-                let list_rect = Rect::from_min_max(
-                    Pos2::new(rect.min.x + 16.0, filter_rect.max.y + 8.0),
-                    Pos2::new(rect.max.x - 16.0, rect.max.y - footer_height - 12.0),
-                );
-                self.handle_row_navigation(ui);
-                match self.step {
-                    NewMuxSessionStep::Project => {
-                        let entries = filtered_project_entries(&self.projects, &self.filter);
-                        if ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            && let Some(entry) = entries.get(self.selected).cloned()
-                        {
-                            selected_project = Some(entry);
-                        }
-                        draw_project_picker_rows(ui, list_rect, palette, &entries, self.selected);
-                    }
-                    NewMuxSessionStep::Worktree => {
-                        let entries = filtered_worktree_entries(&self.worktrees, &self.filter);
-                        if ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            && let Some(entry) = entries.get(self.selected).cloned()
-                        {
-                            selected_worktree = Some(entry);
-                        }
-                        draw_worktree_picker_rows(ui, list_rect, palette, &entries, self.selected);
-                    }
-                }
-
-                let footer = Rect::from_min_max(
-                    Pos2::new(rect.min.x + 16.0, rect.max.y - footer_height),
-                    Pos2::new(rect.max.x - 16.0, rect.max.y),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(footer.min.x, footer.min.y),
-                        Pos2::new(footer.max.x, footer.min.y),
-                    ],
-                    Stroke::new(1.0, palette.border),
-                );
-                draw_picker_footer(ui, footer, palette, self.step);
-                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                    event = NewSessionPickerEvent::Close;
-                }
-            });
-
-        if let Some(project) = selected_project {
-            self.open_worktrees(project);
-        }
-        if let Some(worktree) = selected_worktree {
-            event = if worktree.is_new {
-                NewSessionPickerEvent::NewWorktreeUnavailable
-            } else if let Some(cwd) = worktree.path {
-                NewSessionPickerEvent::CreateSession(NewMuxSessionRequest {
-                    session_id: session_name_for_path(&cwd),
-                    cwd,
-                })
-            } else {
-                NewSessionPickerEvent::Close
-            };
-        }
-        event
-    }
-
-    fn title(&self) -> &'static str {
-        match self.step {
-            NewMuxSessionStep::Project => "Project",
-            NewMuxSessionStep::Worktree => "Worktree",
-        }
-    }
-
-    fn draw_filter(
+    /// `open_cwds` lists the working directories of sessions already open, so the
+    /// worktree step can default away from worktrees that are already in use.
+    pub fn show(
         &mut self,
         ctx: &egui::Context,
-        ui: &mut egui::Ui,
-        rect: Rect,
         theme: Theme,
-        palette: ThemePalette,
-    ) {
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                let filter_id = egui::Id::new("new-session-picker-filter");
-                let response =
-                    bootty_ui::flat_text_edit_singleline(ui, &mut self.filter, theme, |edit| {
-                        edit.id(filter_id)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("filter...")
-                    });
-                if self.focus_filter {
-                    response.request_focus();
-                    self.focus_filter = false;
-                }
-            },
-        );
-        let focus_color =
-            if ctx.memory(|memory| memory.has_focus(egui::Id::new("new-session-picker-filter"))) {
-                palette.accent
-            } else {
-                palette.border
-            };
-        ui.painter().line_segment(
-            [
-                Pos2::new(rect.min.x, rect.max.y - 2.0),
-                Pos2::new(rect.max.x, rect.max.y - 2.0),
-            ],
-            Stroke::new(1.0, focus_color),
-        );
+        open_cwds: &[String],
+    ) -> NewSessionPickerEvent {
+        match self.step {
+            NewMuxSessionStep::Project => self.show_project_step(ctx, theme, open_cwds),
+            NewMuxSessionStep::Worktree => self.show_worktree_step(ctx, theme),
+            NewMuxSessionStep::BranchName => self.show_branch_step(ctx, theme),
+        }
     }
 
-    fn handle_row_navigation(&mut self, ui: &egui::Ui) {
-        let row_count = self.row_count();
-        if row_count > 0 {
-            let (next, previous) = ui.input(|input| {
-                (
-                    input.key_pressed(egui::Key::ArrowDown)
-                        || input.key_pressed(egui::Key::N) && input.modifiers.ctrl,
-                    input.key_pressed(egui::Key::ArrowUp)
-                        || input.key_pressed(egui::Key::P) && input.modifiers.ctrl,
+    fn show_project_step(
+        &mut self,
+        ctx: &egui::Context,
+        theme: Theme,
+        open_cwds: &[String],
+    ) -> NewSessionPickerEvent {
+        let entries = filtered_project_entries(&self.projects, &self.filter);
+        self.selected = list::clamp_selection(self.selected, entries.len());
+        let rows = project_rows(&entries);
+
+        let result = self
+            .frame(ctx, "Directory", "folder", "Enter open   Esc close")
+            .show(ctx, theme, |ui, palette| {
+                self.body(
+                    ui,
+                    palette,
+                    theme,
+                    "filter directories...",
+                    &rows,
+                    "no matching directories",
                 )
             });
-            self.selected =
-                picker_selection_after_navigation(self.selected, row_count, next, previous);
+
+        if let Some(index) = result.inner.activated
+            && let Some(entry) = entries.get(index).cloned()
+        {
+            return self.activate_project(entry, open_cwds);
+        }
+        self.close_if_dismissed(&result)
+    }
+
+    fn show_worktree_step(&mut self, ctx: &egui::Context, theme: Theme) -> NewSessionPickerEvent {
+        let entries = filtered_worktree_entries(&self.worktrees, &self.filter);
+        self.selected = list::clamp_selection(self.selected, entries.len());
+        let rows = worktree_rows(&entries, theme);
+
+        let result = self
+            .frame(
+                ctx,
+                "Worktree",
+                "git-branch",
+                "Enter create session   Esc close",
+            )
+            .show(ctx, theme, |ui, palette| {
+                self.body(
+                    ui,
+                    palette,
+                    theme,
+                    "filter worktrees...",
+                    &rows,
+                    "no matching worktrees",
+                )
+            });
+
+        if let Some(index) = result.inner.activated
+            && let Some(entry) = entries.get(index).cloned()
+        {
+            return self.activate_worktree(entry);
+        }
+        self.close_if_dismissed(&result)
+    }
+
+    fn show_branch_step(&mut self, ctx: &egui::Context, theme: Theme) -> NewSessionPickerEvent {
+        let Some(repo) = self
+            .selected_project
+            .as_ref()
+            .map(|project| project.path.clone())
+        else {
+            return NewSessionPickerEvent::Close;
+        };
+        let caption = format!("new branch in {}", display_path(&repo));
+        let branch = self.branch.trim().to_owned();
+
+        let result = self
+            .frame(
+                ctx,
+                "New Worktree",
+                "git-branch",
+                "Enter create   Esc cancel",
+            )
+            .show(ctx, theme, |ui, _palette| {
+                overlay::TextPrompt::new("new-worktree-branch")
+                    .caption(&caption)
+                    .hint("branch name...")
+                    .submit_disabled(branch.is_empty())
+                    .show(ui, theme, &mut self.branch, &mut self.focus_filter)
+            });
+
+        if result.inner.submitted && !branch.is_empty() {
+            return NewSessionPickerEvent::CreateWorktree { repo, branch };
+        }
+        self.close_if_dismissed(&result)
+    }
+
+    /// Build the shell for the current step; `id` is stable across steps so the
+    /// panel stays centered and the filter keeps focus as the body swaps.
+    fn frame(
+        &self,
+        ctx: &egui::Context,
+        title: &'static str,
+        icon: &'static str,
+        hint: &'static str,
+    ) -> FloatingWindow {
+        FloatingWindow::new("new-mux-session-dialog", title)
+            .icon(icon)
+            .hint(hint)
+            .width(overlay::panel_width(ctx, 860.0, 560.0))
+    }
+
+    fn body(
+        &mut self,
+        ui: &mut egui::Ui,
+        palette: bootty_ui::ThemePalette,
+        theme: Theme,
+        hint: &str,
+        rows: &[ListRow],
+        empty_text: &str,
+    ) -> overlay::ListOutcome {
+        let filter = overlay::filter_field(
+            ui,
+            egui::Id::new("new-session-picker-filter"),
+            &mut self.filter,
+            theme,
+            hint,
+        );
+        if self.focus_filter {
+            filter.request_focus();
+            self.focus_filter = false;
+        }
+        ui.add_space(8.0);
+        let outcome = ListView::new("new-session-picker-list", rows, self.selected)
+            .max_height(overlay::list_max_height(ui.ctx(), 150.0, 520.0))
+            .empty_text(empty_text)
+            .show(ui, palette);
+        self.selected = outcome.selected;
+        outcome
+    }
+
+    fn close_if_dismissed<R>(&self, result: &overlay::OverlayResult<R>) -> NewSessionPickerEvent {
+        if result.escaped || result.clicked_outside {
+            NewSessionPickerEvent::Close
         } else {
-            self.selected = 0;
+            NewSessionPickerEvent::None
         }
     }
 
-    fn row_count(&self) -> usize {
-        match self.step {
-            NewMuxSessionStep::Project => {
-                filtered_project_entries(&self.projects, &self.filter).len()
-            }
-            NewMuxSessionStep::Worktree => {
-                filtered_worktree_entries(&self.worktrees, &self.filter).len()
-            }
+    /// Discover the project's worktrees and decide what to show next. A directory
+    /// with a single worktree (or no git at all) skips straight to session
+    /// creation; a repo with several worktrees opens the worktree step, defaulting
+    /// to the first worktree that has no session open yet.
+    fn activate_project(
+        &mut self,
+        project: ProjectPickerEntry,
+        open_cwds: &[String],
+    ) -> NewSessionPickerEvent {
+        let worktrees = discover_worktree_picker_entries(&project.path);
+        let real: Vec<&WorktreePickerEntry> =
+            worktrees.iter().filter(|entry| !entry.is_new).collect();
+        if let [only] = real.as_slice()
+            && let Some(cwd) = only.path.clone()
+        {
+            return NewSessionPickerEvent::CreateSession(NewMuxSessionRequest {
+                session_id: session_name_for_path(&cwd),
+                cwd,
+            });
         }
-    }
 
-    fn open_worktrees(&mut self, project: ProjectPickerEntry) {
+        self.selected = default_worktree_selection(&worktrees, open_cwds);
         self.step = NewMuxSessionStep::Worktree;
         self.filter.clear();
-        self.selected = 0;
         self.focus_filter = true;
-        self.worktrees = discover_worktree_picker_entries(&project.path);
+        self.worktrees = worktrees;
         self.selected_project = Some(project);
+        NewSessionPickerEvent::None
     }
-}
 
-fn picker_panel_size(ctx: &egui::Context, step: NewMuxSessionStep) -> egui::Vec2 {
-    let viewport = ctx.input(|input| input.content_rect().size());
-    let desired = match step {
-        NewMuxSessionStep::Project => egui::vec2(860.0, 560.0),
-        NewMuxSessionStep::Worktree => egui::vec2(860.0, 430.0),
-    };
-    egui::vec2(
-        desired.x.min((viewport.x - 72.0).max(560.0)),
-        desired.y.min((viewport.y - 96.0).max(360.0)),
-    )
-}
-
-fn draw_project_picker_rows(
-    ui: &egui::Ui,
-    rect: Rect,
-    palette: ThemePalette,
-    entries: &[ProjectPickerEntry],
-    selected: usize,
-) {
-    let painter = ui.painter_at(rect);
-    let row_h = 30.0;
-    let max = ((rect.height() / row_h).floor() as usize).min(entries.len());
-    for (index, entry) in entries.iter().take(max).enumerate() {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.min.x, rect.min.y + index as f32 * row_h),
-            egui::vec2(rect.width(), row_h),
-        );
-        draw_picker_row_background(&painter, row, palette, index == selected);
-        painter.text(
-            Pos2::new(row.min.x + 14.0, row.center().y),
-            egui::Align2::LEFT_CENTER,
-            if entry.favorite { "★" } else { "✦" },
-            egui::FontId::monospace(13.0),
-            if index == selected {
-                palette.warning
-            } else {
-                palette.muted
-            },
-        );
-        painter.text(
-            Pos2::new(row.min.x + 42.0, row.center().y),
-            egui::Align2::LEFT_CENTER,
-            display_path(&entry.path),
-            egui::FontId::monospace(13.0),
-            if index == selected {
-                palette.warning
-            } else {
-                palette.muted
-            },
-        );
-    }
-}
-
-fn draw_worktree_picker_rows(
-    ui: &egui::Ui,
-    rect: Rect,
-    palette: ThemePalette,
-    entries: &[WorktreePickerEntry],
-    selected: usize,
-) {
-    let painter = ui.painter_at(rect);
-    let row_h = 30.0;
-    let max = ((rect.height() / row_h).floor() as usize).min(entries.len());
-    for (index, entry) in entries.iter().take(max).enumerate() {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.min.x, rect.min.y + index as f32 * row_h),
-            egui::vec2(rect.width(), row_h),
-        );
-        draw_picker_row_background(&painter, row, palette, index == selected);
-        painter.text(
-            Pos2::new(row.min.x + 14.0, row.center().y),
-            egui::Align2::LEFT_CENTER,
-            &entry.label,
-            egui::FontId::monospace(13.0),
-            if entry.is_new {
-                palette.accent
-            } else if index == selected {
-                palette.warning
-            } else {
-                palette.muted
-            },
-        );
-    }
-}
-
-fn draw_picker_row_background(
-    painter: &egui::Painter,
-    row: Rect,
-    palette: ThemePalette,
-    selected: bool,
-) {
-    if selected {
-        painter.rect_filled(row, 0.0, palette.hover);
-        painter.rect_filled(
-            Rect::from_min_size(row.min, egui::vec2(2.0, row.height())),
-            0.0,
-            palette.accent,
-        );
-    }
-}
-
-fn draw_picker_footer(ui: &egui::Ui, rect: Rect, palette: ThemePalette, step: NewMuxSessionStep) {
-    let painter = ui.painter_at(rect);
-    let left = match step {
-        NewMuxSessionStep::Project => {
-            "ctrl-f ★  │  1 ~  │  2 ~/.config  │  3 ~/src  │  0 all  │  alt-enter worktree"
+    /// Selecting the "+ New worktree" row advances to the branch-name prompt;
+    /// an existing worktree creates a session directly.
+    fn activate_worktree(&mut self, entry: WorktreePickerEntry) -> NewSessionPickerEvent {
+        if entry.is_new {
+            self.step = NewMuxSessionStep::BranchName;
+            self.branch.clear();
+            self.focus_filter = true;
+            NewSessionPickerEvent::None
+        } else if let Some(cwd) = entry.path {
+            NewSessionPickerEvent::CreateSession(NewMuxSessionRequest {
+                session_id: session_name_for_path(&cwd),
+                cwd,
+            })
+        } else {
+            NewSessionPickerEvent::Close
         }
-        NewMuxSessionStep::Worktree => "enter select  │  esc cancel",
-    };
-    painter.text(
-        Pos2::new(rect.min.x, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        left,
-        egui::FontId::monospace(12.0),
-        palette.muted,
-    );
+    }
+}
+
+/// Index of the first worktree without an open session, or 0 ("+ New worktree")
+/// when every existing worktree is already in use.
+fn default_worktree_selection(entries: &[WorktreePickerEntry], open_cwds: &[String]) -> usize {
+    entries
+        .iter()
+        .position(|entry| {
+            !entry.is_new
+                && entry
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| !open_cwds.iter().any(|cwd| same_dir(cwd, path)))
+        })
+        .unwrap_or(0)
+}
+
+/// Compare two directory paths, tolerating symlinks and trailing slashes.
+fn same_dir(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
+    }
+}
+
+fn project_rows(entries: &[ProjectPickerEntry]) -> Vec<ListRow> {
+    entries
+        .iter()
+        .map(|entry| ListRow {
+            icon: Some(if entry.favorite { "star" } else { "folder" }.to_owned()),
+            primary: display_path(&entry.path),
+            ..ListRow::default()
+        })
+        .collect()
+}
+
+fn worktree_rows(entries: &[WorktreePickerEntry], theme: Theme) -> Vec<ListRow> {
+    entries
+        .iter()
+        .map(|entry| ListRow {
+            icon: Some(if entry.is_new { "plus" } else { "git-branch" }.to_owned()),
+            primary: entry.label.clone(),
+            // The "create new" row stands out in the accent color.
+            primary_tint: entry.is_new.then_some(theme.palette.accent),
+            ..ListRow::default()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_row() -> WorktreePickerEntry {
+        WorktreePickerEntry {
+            label: "+ New worktree".to_owned(),
+            path: None,
+            is_new: true,
+        }
+    }
+
+    fn worktree(path: &str) -> WorktreePickerEntry {
+        WorktreePickerEntry {
+            label: path.to_owned(),
+            path: Some(path.to_owned()),
+            is_new: false,
+        }
+    }
+
+    #[test]
+    fn defaults_to_first_worktree_without_an_open_session() {
+        let entries = vec![new_row(), worktree("/repo/a"), worktree("/repo/b")];
+        // /repo/a is in use, so the cursor lands on /repo/b at index 2.
+        let selected = default_worktree_selection(&entries, &["/repo/a".to_owned()]);
+        assert_eq!(selected, 2);
+    }
+
+    #[test]
+    fn defaults_to_new_worktree_when_every_worktree_is_in_use() {
+        let entries = vec![new_row(), worktree("/repo/a"), worktree("/repo/b")];
+        // A trailing slash on a session cwd still counts as occupying the worktree.
+        let open = vec!["/repo/a".to_owned(), "/repo/b/".to_owned()];
+        assert_eq!(default_worktree_selection(&entries, &open), 0);
+    }
 }
