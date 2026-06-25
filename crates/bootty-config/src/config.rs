@@ -191,6 +191,9 @@ pub struct ChromeConfig {
     pub sidebar_width: f32,
     pub status_height: f32,
     pub gap: f32,
+    /// Visual width (px) of the gap/divider between native split panes. The grab area is widened
+    /// past this so thin dividers stay draggable.
+    pub pane_divider_width: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,
     /// Ordered status-bar segments. Composed left/center/right; builtins plus Lua modules.
@@ -207,6 +210,7 @@ struct ChromePatch {
     sidebar_width: Option<f32>,
     status_height: Option<f32>,
     gap: Option<f32>,
+    pane_divider_width: Option<f32>,
     unfocused_sidebar_dim: Option<f32>,
     unfocused_terminal_dim: Option<f32>,
     status_segment: Option<Vec<StatusSegment>>,
@@ -593,6 +597,7 @@ impl Default for ChromeConfig {
             sidebar_width: 286.0,
             status_height: 30.0,
             gap: 1.0,
+            pane_divider_width: 3.0,
             unfocused_sidebar_dim: 0.16,
             unfocused_terminal_dim: 0.08,
             status_segments: default_status_segments(),
@@ -1608,6 +1613,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_value(&mut chrome.gap, partial.gap);
+    apply_value(&mut chrome.pane_divider_width, partial.pane_divider_width);
     apply_value(
         &mut chrome.unfocused_sidebar_dim,
         partial.unfocused_sidebar_dim,

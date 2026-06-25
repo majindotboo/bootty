@@ -779,11 +779,10 @@ impl AppState {
         let Some(area) = self.last_pane_area else {
             return;
         };
+        let gap = self.config().chrome.pane_divider_width;
         if let Some(layout) = self.pane_layouts.get_mut(&key) {
             let focused = layout.focused().to_owned();
-            if let Some(neighbor) =
-                layout.neighbor(&focused, direction, area, crate::layout::PANE_GAP)
-            {
+            if let Some(neighbor) = layout.neighbor(&focused, direction, area, gap) {
                 layout.set_focus(&neighbor);
             }
         }

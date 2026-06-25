@@ -9,9 +9,6 @@
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-/// Pixel gap reserved between split children for the draggable divider handle.
-pub const PANE_GAP: f32 = 6.0;
-
 pub type PaneId = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

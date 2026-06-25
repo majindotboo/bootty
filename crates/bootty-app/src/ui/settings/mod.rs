@@ -629,6 +629,20 @@ impl SettingsSurface {
                 ui.label(RichText::new("Status bar").color(self.palette.subtext));
             },
         );
+        settings_row(
+            ui,
+            self.palette,
+            "Pane divider width",
+            "Thickness of the divider between split panes.",
+            |ui| {
+                let mut width = self.config.chrome.pane_divider_width;
+                if settings_slider(ui, self.palette, &mut width, 0.0..=16.0) {
+                    self.config.chrome.pane_divider_width = width;
+                    self.set_f32(&["chrome", "pane-divider-width"], width);
+                }
+                settings_value_chip(ui, self.palette, &format!("{width:.0} px"));
+            },
+        );
     }
 
     fn config_ui(&mut self, ui: &mut egui::Ui) {

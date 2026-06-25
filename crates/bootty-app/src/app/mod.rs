@@ -15,7 +15,7 @@ pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 use crate::{
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
-    layout::{PANE_GAP, SplitDirection},
+    layout::SplitDirection,
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
@@ -38,6 +38,8 @@ const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 /// Minimum on-screen size of a pane (px) enforced while dragging a split divider.
 const MIN_PANE_PX: f32 = 80.0;
+/// Minimum grab width (px) for a split divider handle, so a thin configured divider stays draggable.
+const MIN_PANE_DIVIDER_GRAB: f32 = 8.0;
 
 fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visible: bool) -> bool {
     !(sidebar_visible && segment.module == "session")
@@ -458,7 +460,8 @@ impl BoottyApp {
         area: Rect,
         palette: bootty_ui::ThemePalette,
     ) {
-        let rects = self.state.pane_rects(area, PANE_GAP);
+        let gap = self.state.config().chrome.pane_divider_width;
+        let rects = self.state.pane_rects(area, gap);
         let focused = self.state.focused_pane();
 
         if ui.input(|input| input.pointer.primary_pressed())
@@ -533,11 +536,28 @@ impl BoottyApp {
         area: Rect,
         palette: bootty_ui::ThemePalette,
     ) {
-        let dividers = self.state.pane_dividers(area, PANE_GAP);
+        let gap = self.state.config().chrome.pane_divider_width;
+        let dividers = self.state.pane_dividers(area, gap);
         for divider in &dividers {
-            self.state.register_chrome_handle(divider.rect);
-            let handle_rect = divider.rect;
             let direction = divider.direction;
+            // Widen the grab area past the (possibly thin) visual divider so it stays draggable.
+            let handle_rect = match direction {
+                SplitDirection::Right => Rect::from_center_size(
+                    divider.rect.center(),
+                    egui::vec2(
+                        divider.rect.width().max(MIN_PANE_DIVIDER_GRAB),
+                        divider.rect.height(),
+                    ),
+                ),
+                SplitDirection::Down => Rect::from_center_size(
+                    divider.rect.center(),
+                    egui::vec2(
+                        divider.rect.width(),
+                        divider.rect.height().max(MIN_PANE_DIVIDER_GRAB),
+                    ),
+                ),
+            };
+            self.state.register_chrome_handle(handle_rect);
             let response = egui::Area::new(egui::Id::new((
                 "bootty-pane-divider",
                 divider.path.as_slice(),
@@ -587,12 +607,12 @@ impl BoottyApp {
                 let extent = match direction {
                     SplitDirection::Right => divider.area.width(),
                     SplitDirection::Down => divider.area.height(),
-                } - PANE_GAP;
+                } - gap;
                 if extent > 1.0 {
                     let min_fraction = (MIN_PANE_PX / extent).clamp(0.05, 0.45);
                     self.state.set_pane_ratio(
                         &divider.path,
-                        divider.ratio_at(pos, PANE_GAP),
+                        divider.ratio_at(pos, gap),
                         min_fraction,
                     );
                 }
