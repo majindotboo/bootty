@@ -52,6 +52,25 @@ pub struct Divider {
     pub direction: SplitDirection,
     /// Screen rect of the gap strip the user grabs.
     pub rect: Rect,
+    /// The full area this split divides, for converting a pointer position into a new ratio.
+    pub area: Rect,
+}
+
+impl Divider {
+    /// The ratio (fraction for the first/left/top child) implied by dragging this divider to
+    /// `pointer`, before any min-size clamping.
+    pub fn ratio_at(&self, pointer: Pos2, gap: f32) -> f32 {
+        match self.direction {
+            SplitDirection::Right => {
+                let extent = (self.area.width() - gap).max(1.0);
+                (pointer.x - self.area.min.x) / extent
+            }
+            SplitDirection::Down => {
+                let extent = (self.area.height() - gap).max(1.0);
+                (pointer.y - self.area.min.y) / extent
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -327,6 +346,7 @@ impl PaneLayout {
                 path: path.clone(),
                 direction: *direction,
                 rect: divider_rect(area, *direction, *ratio, gap),
+                area,
             });
             let (first_area, second_area) = split_area(area, *direction, *ratio, gap);
             path.push(0);
@@ -526,6 +546,22 @@ mod tests {
         assert_eq!(dividers[0].direction, SplitDirection::Right);
         assert_eq!(dividers[1].path, vec![1]);
         assert_eq!(dividers[1].direction, SplitDirection::Down);
+    }
+
+    #[test]
+    fn divider_ratio_at_maps_pointer_to_fraction() {
+        let mut layout = PaneLayout::single("a".to_owned());
+        layout.split_focused("b".to_owned(), SplitDirection::Right);
+        let gap = 0.0;
+        let divider = layout.dividers(area(), gap).remove(0);
+        // Dragging the vertical divider to x=75 over a 100-wide area gives a 0.75 ratio.
+        approx(divider.ratio_at(Pos2::new(75.0, 40.0), gap), 0.75);
+
+        let mut down = PaneLayout::single("a".to_owned());
+        down.split_focused("b".to_owned(), SplitDirection::Down);
+        let divider = down.dividers(area(), gap).remove(0);
+        // 80-tall area, pointer at y=20 → 0.25.
+        approx(divider.ratio_at(Pos2::new(50.0, 20.0), gap), 0.25);
     }
 
     #[test]

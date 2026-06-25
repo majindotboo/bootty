@@ -15,7 +15,7 @@ pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 use crate::{
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
-    layout::PANE_GAP,
+    layout::{PANE_GAP, SplitDirection},
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
@@ -36,6 +36,8 @@ const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 8.0;
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+/// Minimum on-screen size of a pane (px) enforced while dragging a split divider.
+const MIN_PANE_PX: f32 = 80.0;
 
 fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visible: bool) -> bool {
     !(sidebar_visible && segment.module == "session")
@@ -522,6 +524,82 @@ impl BoottyApp {
         pane_widgets.retain(|key, _| current_ids.contains(key));
     }
 
+    /// Draw a draggable handle over each split divider (mirroring the sidebar splitter). Dragging
+    /// adjusts that split's ratio, clamped so neither child shrinks below `MIN_PANE_PX`; the handle
+    /// rect is registered so the drag never starts a terminal text selection.
+    fn show_pane_dividers(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: Rect,
+        palette: bootty_ui::ThemePalette,
+    ) {
+        let dividers = self.state.pane_dividers(area, PANE_GAP);
+        for divider in &dividers {
+            self.state.register_chrome_handle(divider.rect);
+            let handle_rect = divider.rect;
+            let direction = divider.direction;
+            let response = egui::Area::new(egui::Id::new((
+                "bootty-pane-divider",
+                divider.path.as_slice(),
+            )))
+            .order(egui::Order::Foreground)
+            .fixed_pos(handle_rect.min)
+            .show(ui.ctx(), |ui| {
+                let response = ui.allocate_rect(handle_rect, egui::Sense::drag());
+                if response.hovered() || response.dragged() {
+                    let stroke = egui::Stroke::new(2.0, palette.primary);
+                    let painter = ui.painter();
+                    match direction {
+                        SplitDirection::Right => {
+                            let x = handle_rect.center().x;
+                            painter.line_segment(
+                                [
+                                    Pos2::new(x, handle_rect.min.y),
+                                    Pos2::new(x, handle_rect.max.y),
+                                ],
+                                stroke,
+                            );
+                        }
+                        SplitDirection::Down => {
+                            let y = handle_rect.center().y;
+                            painter.line_segment(
+                                [
+                                    Pos2::new(handle_rect.min.x, y),
+                                    Pos2::new(handle_rect.max.x, y),
+                                ],
+                                stroke,
+                            );
+                        }
+                    }
+                }
+                response
+            })
+            .inner;
+            if response.hovered() || response.dragged() {
+                ui.set_cursor_icon(match direction {
+                    SplitDirection::Right => egui::CursorIcon::ResizeHorizontal,
+                    SplitDirection::Down => egui::CursorIcon::ResizeVertical,
+                });
+            }
+            if response.dragged()
+                && let Some(pos) = ui.ctx().pointer_interact_pos()
+            {
+                let extent = match direction {
+                    SplitDirection::Right => divider.area.width(),
+                    SplitDirection::Down => divider.area.height(),
+                } - PANE_GAP;
+                if extent > 1.0 {
+                    let min_fraction = (MIN_PANE_PX / extent).clamp(0.05, 0.45);
+                    self.state.set_pane_ratio(
+                        &divider.path,
+                        divider.ratio_at(pos, PANE_GAP),
+                        min_fraction,
+                    );
+                }
+            }
+        }
+    }
+
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
         // Chrome handles re-register their rects below; clearing here keeps the set to this frame's
         // handles so the next frame's input pass suppresses selection only over live handles.
@@ -908,6 +986,7 @@ impl BoottyApp {
                 }
                 if self.state.native_multi_pane() {
                     self.show_split_panes(ui, terminal_rect, palette);
+                    self.show_pane_dividers(ui, terminal_rect, palette);
                 } else {
                     self.show_single_terminal(ui, terminal_rect);
                 }
