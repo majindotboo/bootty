@@ -218,6 +218,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=24.0,
             suffix: " px",
             percent: false,
+            precision: 0,
             field: |chrome| &mut chrome.gap,
         },
     );
@@ -231,6 +232,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=1.0,
             suffix: "",
             percent: true,
+            precision: 0,
             field: |chrome| &mut chrome.unfocused_sidebar_dim,
         },
     );
@@ -244,7 +246,52 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=1.0,
             suffix: "",
             percent: true,
+            precision: 0,
             field: |chrome| &mut chrome.unfocused_terminal_dim,
+        },
+    );
+
+    super::section(ui, palette, "SPLIT PANES");
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Divider width",
+            help: "Thickness of the divider between split panes.",
+            path: ["chrome", "pane-divider-width"],
+            range: 0.0..=16.0,
+            suffix: " px",
+            percent: false,
+            precision: 1,
+            field: |chrome| &mut chrome.pane_divider_width,
+        },
+    );
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Focus border width",
+            help: "Border drawn around the focused split pane (0 hides it).",
+            path: ["chrome", "pane-focus-border-width"],
+            range: 0.0..=8.0,
+            suffix: " px",
+            percent: false,
+            precision: 1,
+            field: |chrome| &mut chrome.pane_focus_border_width,
+        },
+    );
+    chrome_slider(
+        win,
+        ui,
+        ChromeSliderRow {
+            label: "Corner radius",
+            help: "Rounding of split pane corners.",
+            path: ["chrome", "pane-corner-radius"],
+            range: 0.0..=40.0,
+            suffix: " px",
+            percent: false,
+            precision: 1,
+            field: |chrome| &mut chrome.pane_corner_radius,
         },
     );
 }
@@ -314,6 +361,8 @@ struct ChromeSliderRow {
     suffix: &'static str,
     /// Render the chip as a 0–100% value (the stored value is a 0.0–1.0 fraction).
     percent: bool,
+    /// Decimal places in the chip (these sliders accept fractional px, so 0 reads as misleading).
+    precision: usize,
     field: fn(&mut crate::config::ChromeConfig) -> &mut f32,
 }
 
@@ -327,7 +376,7 @@ fn chrome_slider(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: ChromeSlider
         let chip = if spec.percent {
             format!("{:.0}%", value * 100.0)
         } else {
-            format!("{value:.0}{}", spec.suffix)
+            format!("{value:.prec$}{}", spec.suffix, prec = spec.precision)
         };
         super::settings_value_chip(ui, win.palette, &chip);
     });

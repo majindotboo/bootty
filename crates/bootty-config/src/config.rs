@@ -198,7 +198,7 @@ pub struct ChromeConfig {
     pub pane_focus_border_width: f32,
     /// Color of the focused-pane border; falls back to the theme accent when unset.
     pub pane_focus_border_color: Option<Color>,
-    /// Corner radius of split panes as a percentage (0–100) of the pane's shorter half-extent.
+    /// Corner radius (px) of split panes, clamped to the pane's shorter half-extent.
     pub pane_corner_radius: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,

@@ -57,11 +57,56 @@ fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32
     }
 }
 
-/// Pane corner radius in px from a 0–100% setting, scaled to the pane's shorter half-extent.
-fn pane_corner_radius(rect: Rect, percent: f32) -> egui::CornerRadius {
+/// Pane corner radius (px), clamped so it never exceeds the pane's shorter half-extent.
+fn pane_corner_radius_px(rect: Rect, px: f32) -> f32 {
     let max = (rect.width().min(rect.height()) / 2.0).max(0.0);
-    let px = (percent.clamp(0.0, 100.0) / 100.0) * max;
-    egui::CornerRadius::same(px.round().clamp(0.0, 255.0) as u8)
+    px.clamp(0.0, max)
+}
+
+fn pane_corner_radius(rect: Rect, px: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(pane_corner_radius_px(rect, px).round().clamp(0.0, 255.0) as u8)
+}
+
+/// Paint the four corner wedges between each square corner and its rounded arc with `bg`, so a pane
+/// reads as rounded (the window background shows through the corners) even though the terminal
+/// content itself isn't clipped.
+fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg: egui::Color32) {
+    let r = pane_corner_radius_px(rect, radius);
+    if r <= 0.5 {
+        return;
+    }
+    // (arc center, square-corner point, start angle) for each corner, angles in egui screen space
+    // (y down), sweeping a quarter turn.
+    let corners = [
+        (
+            Pos2::new(rect.min.x + r, rect.min.y + r),
+            rect.min,
+            std::f32::consts::PI,
+        ), // top-left
+        (
+            Pos2::new(rect.max.x - r, rect.min.y + r),
+            Pos2::new(rect.max.x, rect.min.y),
+            std::f32::consts::FRAC_PI_2 * 3.0,
+        ), // top-right
+        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0), // bottom-right
+        (
+            Pos2::new(rect.min.x + r, rect.max.y - r),
+            Pos2::new(rect.min.x, rect.max.y),
+            std::f32::consts::FRAC_PI_2,
+        ), // bottom-left
+    ];
+    for (center, corner, start) in corners {
+        let mut points = vec![corner];
+        let steps = 8;
+        for step in 0..=steps {
+            let angle = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
+            points.push(Pos2::new(
+                center.x + r * angle.cos(),
+                center.y + r * angle.sin(),
+            ));
+        }
+        painter.add(egui::Shape::convex_polygon(points, bg, egui::Stroke::NONE));
+    }
 }
 
 fn fullscreen_notch_layout_offset(configured_offset: Option<f32>, measured_band: f32) -> f32 {
@@ -474,8 +519,9 @@ impl BoottyApp {
             .pane_focus_border_color
             .map(crate::theme::config_color32)
             .unwrap_or(palette.primary);
-        let corner_percent = chrome.pane_corner_radius;
+        let corner_radius_px = chrome.pane_corner_radius;
         let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
+        let background = palette.mantle;
         let rects = self.state.pane_rects(area, gap);
 
         // Handle click-to-focus before snapshotting focus so this frame already renders the clicked
@@ -534,7 +580,7 @@ impl BoottyApp {
                 Some(Err(error)) => state.record_render_error(error),
                 None => {}
             }
-            let corner = pane_corner_radius(*rect, corner_percent);
+            let corner = pane_corner_radius(*rect, corner_radius_px);
             if !is_focused && inactive_dim > 0.0 {
                 ui.painter().rect_filled(
                     *rect,
@@ -542,6 +588,8 @@ impl BoottyApp {
                     egui::Color32::from_black_alpha((inactive_dim * 255.0) as u8),
                 );
             }
+            // Round the pane by masking its corners with the window background.
+            paint_pane_corner_masks(ui.painter(), *rect, corner_radius_px, background);
             if is_focused && border_width > 0.0 {
                 ui.painter().rect_stroke(
                     *rect,
@@ -586,6 +634,11 @@ impl BoottyApp {
                 ),
             };
             self.state.register_chrome_handle(handle_rect);
+            // Always paint the divider at its configured width so it's visible, not just on hover
+            // (the gap would otherwise blend into the window background).
+            if divider.rect.width() >= 1.0 && divider.rect.height() >= 1.0 {
+                ui.painter().rect_filled(divider.rect, 0.0, palette.border);
+            }
             let response = egui::Area::new(egui::Id::new((
                 "bootty-pane-divider",
                 divider.path.as_slice(),
