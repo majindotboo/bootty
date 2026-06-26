@@ -30,14 +30,10 @@ $RuntimeDlls = @("ghostty-vt.dll")
 foreach ($DllName in $RuntimeDlls) {
     $Candidates = @(Get-ChildItem -LiteralPath $ReleaseDir -Recurse -File -Filter $DllName -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTimeUtc -Descending)
-    if ($Candidates.Count -gt 0) {
-        Copy-Item -LiteralPath $Candidates[0].FullName -Destination (Join-Path $BundleRoot $DllName)
-    } else {
-        $BinaryText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($BinaryPath))
-        if ($BinaryText.IndexOf($DllName, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            throw "Expected runtime DLL $DllName for $BinaryPath"
-        }
+    if ($Candidates.Count -eq 0) {
+        throw "Expected runtime DLL $DllName under $ReleaseDir"
     }
+    Copy-Item -LiteralPath $Candidates[0].FullName -Destination (Join-Path $BundleRoot $DllName)
 }
 
 $ArchivePath = Join-Path $DistDir "$BundleName.zip"

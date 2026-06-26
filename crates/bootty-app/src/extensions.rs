@@ -2263,7 +2263,7 @@ mod tests {
 
     #[cfg(windows)]
     fn stdout_command(text: &str) -> String {
-        format!("<nul set /p={text}")
+        format!("echo|set /p x={text}")
     }
 
     #[cfg(not(windows))]
