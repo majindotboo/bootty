@@ -175,6 +175,15 @@ fn missing_config_file_loads_with_selected_path() {
     let config = sandbox.load().unwrap();
 
     assert_eq!(config.config_path, sandbox.path);
+    assert_eq!(
+        config.appearance.light.theme.as_deref(),
+        Some("Catppuccin Latte")
+    );
+    assert_eq!(
+        config.appearance.dark.theme.as_deref(),
+        Some("Catppuccin Mocha")
+    );
+    assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
 }
 
 #[test]
@@ -289,27 +298,87 @@ fn config_resolves_theme_and_color_overrides(
 }
 
 #[test]
-fn config_resolves_sidebar_section() {
+fn appearance_branches_resolve_separate_themes_and_overrides() {
     let config = load_config_source(indoc! {r##"
+        [appearance]
+        mode = "light"
+
+        [appearance.light]
+        theme = "Atom One Light"
+
+        [appearance.light.colors]
+        background = "#fefefe"
+
+        [appearance.dark]
+        theme = "Dracula"
+    "##});
+
+    assert_eq!(config.appearance.mode, AppearanceMode::Light);
+    assert_eq!(
+        config.appearance.light.theme.as_deref(),
+        Some("Atom One Light")
+    );
+    assert_eq!(
+        config.appearance.light.colors.background,
+        Some(Color::from_hex("#fefefe").unwrap())
+    );
+    assert_eq!(config.appearance.dark.theme.as_deref(), Some("Dracula"));
+    assert_eq!(
+        config.appearance.dark.colors.background,
+        Some(Color::from_hex("#282a36").unwrap())
+    );
+}
+
+#[test]
+fn legacy_theme_and_colors_seed_appearance_branches() {
+    let config = load_config_source(indoc! {r##"
+        theme = "Catppuccin Mocha"
+
+        [colors]
+        background = "#101112"
+    "##});
+
+    for branch in [&config.appearance.light, &config.appearance.dark] {
+        assert_eq!(branch.theme.as_deref(), Some("Catppuccin Mocha"));
+        assert_eq!(
+            branch.colors.background,
+            Some(Color::from_hex("#101112").unwrap())
+        );
+    }
+    assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
+    assert_eq!(config.colors, config.appearance.dark.colors);
+}
+
+#[test]
+fn config_resolves_sidebar_and_status_chrome_colors() {
+    let config = load_config_source(indoc! {r##"
+        [chrome]
+        status-background = "#090909"
+        notched-fullscreen-black-chrome = false
+        pane-focus-border-color = "#9e75c780"
+
         [sidebar]
         position = "right"
         background = "#11131a"
-        fullscreen-background = "#0a0b0f"
         foreground = "#cdd6f4"
         selected = "#2a2f3d"
         hover = "#1e222c"
-        fullscreen-hover = "#252a36"
         border = "#313244"
     "##});
 
     assert_eq!(config.sidebar.position, SidebarPosition::Right);
     assert_eq!(
-        config.sidebar.background,
-        Some(Color::from_hex("#11131a").unwrap())
+        config.chrome.status_background,
+        Some(Color::from_hex("#090909").unwrap())
     );
     assert_eq!(
-        config.sidebar.fullscreen_background,
-        Some(Color::from_hex("#0a0b0f").unwrap())
+        config.chrome.pane_focus_border_color,
+        Some(Color::from_hex("#9e75c780").unwrap())
+    );
+    assert!(!config.chrome.notched_fullscreen_black_chrome);
+    assert_eq!(
+        config.sidebar.background,
+        Some(Color::from_hex("#11131a").unwrap())
     );
     assert_eq!(
         config.sidebar.foreground,
@@ -324,10 +393,6 @@ fn config_resolves_sidebar_section() {
         Some(Color::from_hex("#1e222c").unwrap())
     );
     assert_eq!(
-        config.sidebar.fullscreen_hover,
-        Some(Color::from_hex("#252a36").unwrap())
-    );
-    assert_eq!(
         config.sidebar.border,
         Some(Color::from_hex("#313244").unwrap())
     );
@@ -339,7 +404,20 @@ fn config_defaults_sidebar_to_left_without_overrides() {
 
     assert_eq!(config.sidebar.position, SidebarPosition::Left);
     assert_eq!(config.sidebar.background, None);
-    assert_eq!(config.sidebar.fullscreen_background, None);
+    assert_eq!(config.chrome.status_background, None);
+    assert!(config.chrome.notched_fullscreen_black_chrome);
+}
+
+#[test]
+fn legacy_sidebar_fullscreen_colors_are_accepted_but_ignored() {
+    let config = load_config_source(indoc! {r##"
+        [sidebar]
+        fullscreen-background = "#000000"
+        fullscreen-hover = "#111111"
+    "##});
+
+    assert_eq!(config.sidebar.background, None);
+    assert_eq!(config.sidebar.hover, None);
 }
 
 #[test]

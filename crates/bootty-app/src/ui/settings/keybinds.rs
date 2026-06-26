@@ -699,10 +699,9 @@ fn binding_editor_row(
 
                 ui.label(egui::RichText::new("→").color(palette.muted));
 
-                let (base, params) = match row.action.split_once(':') {
-                    Some((base, params)) => (base.to_owned(), params.to_owned()),
-                    None => (row.action.clone(), String::new()),
-                };
+                // Title + description picker, drawn from the shared action catalog.
+                let options = action_options(ctx.scope);
+                let (base, params) = split_action_for_editor(&row.action, &options);
 
                 // Spread the action + value across the leftover width, reserving a right cluster for
                 // the status, flags, and remove controls so the row uses its full width.
@@ -711,8 +710,6 @@ fn binding_editor_row(
                 let action_width = (fields * 0.58 - 8.0).clamp(150.0, 320.0);
                 let value_width = (fields - action_width - 8.0).clamp(90.0, 240.0);
 
-                // Title + description picker, drawn from the shared action catalog.
-                let options = action_options(ctx.scope);
                 let mut chosen_action: &'static str = options
                     .iter()
                     .find(|(name, _, _)| *name == base)
@@ -947,7 +944,13 @@ fn record_cell(
                 palette.muted,
             );
         } else {
-            let galley = trigger_galley(ui, palette, trigger, palette.text, rect.width() - 20.0);
+            let galley = crate::ui::keycaps::trigger_galley(
+                ui,
+                palette,
+                trigger,
+                palette.text,
+                rect.width() - 20.0,
+            );
             let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5);
             ui.painter().galley(pos, galley, palette.text);
         }
@@ -999,134 +1002,10 @@ fn keycap_chip(ui: &mut egui::Ui, palette: bootty_ui::ThemePalette, trigger: &st
         .corner_radius(egui::CornerRadius::same(palette.radius))
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
-            let galley = trigger_galley(ui, palette, trigger, palette.text, 320.0);
+            let galley =
+                crate::ui::keycaps::trigger_galley(ui, palette, trigger, palette.text, 320.0);
             ui.add(egui::Label::new(galley).selectable(false));
         });
-}
-
-/// Lay a trigger out as keycaps. On macOS the modifier symbols come from the icon font (the UI font
-/// has no ⌘/⌥/⌃ glyphs, which is why bare text rendered blanks); elsewhere modifiers fall back to
-/// text joined with `+`.
-fn trigger_galley(
-    ui: &egui::Ui,
-    palette: bootty_ui::ThemePalette,
-    trigger: &str,
-    color: egui::Color32,
-    max_width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    use egui::text::{LayoutJob, TextFormat};
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = max_width;
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    let mut first_combo = true;
-    for combo in trigger.split('>') {
-        let combo = combo.trim();
-        if combo.is_empty() {
-            continue;
-        }
-        if !first_combo {
-            job.append(
-                " ▸ ",
-                2.0,
-                TextFormat {
-                    font_id: egui::FontId::proportional(12.0),
-                    color: palette.muted,
-                    ..Default::default()
-                },
-            );
-        }
-        first_combo = false;
-        append_combo(&mut job, palette, combo, color);
-    }
-    ui.painter().layout_job(job)
-}
-
-fn append_combo(
-    job: &mut egui::text::LayoutJob,
-    palette: bootty_ui::ThemePalette,
-    combo: &str,
-    color: egui::Color32,
-) {
-    use egui::text::TextFormat;
-    let tokens: Vec<&str> = combo
-        .split('+')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect();
-    for (index, &token) in tokens.iter().enumerate() {
-        let leading = if index == 0 { 0.0 } else { 3.0 };
-        if cfg!(target_os = "macos") {
-            if let Some((glyph, family)) =
-                modifier_icon(token).and_then(crate::ui::icons::icon_glyph)
-            {
-                job.append(
-                    &glyph.to_string(),
-                    leading,
-                    TextFormat {
-                        font_id: egui::FontId::new(15.0, egui::FontFamily::Name(family.into())),
-                        color,
-                        ..Default::default()
-                    },
-                );
-                continue;
-            }
-            job.append(
-                &key_label(token),
-                leading,
-                TextFormat {
-                    font_id: egui::FontId::monospace(13.0),
-                    color,
-                    ..Default::default()
-                },
-            );
-        } else {
-            if index > 0 {
-                job.append(
-                    "+",
-                    2.0,
-                    TextFormat {
-                        font_id: egui::FontId::proportional(12.0),
-                        color: palette.muted,
-                        ..Default::default()
-                    },
-                );
-            }
-            job.append(
-                &key_label(token),
-                if index == 0 { 0.0 } else { 2.0 },
-                TextFormat {
-                    font_id: egui::FontId::monospace(13.0),
-                    color,
-                    ..Default::default()
-                },
-            );
-        }
-    }
-}
-
-/// Icon-font slug for a modifier token, so ⌘/⌥/⇧/⌃ render from the icon font instead of relying on
-/// the UI font (which lacks them).
-fn modifier_icon(token: &str) -> Option<&'static str> {
-    match token {
-        "cmd" | "super" => Some("command"),
-        "alt" | "option" => Some("option"),
-        "shift" => Some("arrow-big-up"),
-        "ctrl" | "control" => Some("chevron-up"),
-        _ => None,
-    }
-}
-
-fn key_label(token: &str) -> String {
-    match token {
-        "cmd" | "super" => "Cmd".to_owned(),
-        "ctrl" | "control" => "Ctrl".to_owned(),
-        "alt" | "option" => "Alt".to_owned(),
-        "shift" => "Shift".to_owned(),
-        "space" => "Space".to_owned(),
-        other if other.chars().count() == 1 => other.to_uppercase(),
-        other => other.to_owned(),
-    }
 }
 
 struct BindingEditorContext<'a> {
@@ -1317,10 +1196,26 @@ fn split_entry(entry: &str) -> (String, String) {
     (entry.to_owned(), String::new())
 }
 
+fn split_action_for_editor(
+    action: &str,
+    options: &[(&'static str, &'static str, &'static str)],
+) -> (String, String) {
+    if options.iter().any(|(name, _, _)| *name == action) {
+        return (action.to_owned(), String::new());
+    }
+    match action.split_once(':') {
+        Some((base, params)) => (base.to_owned(), params.to_owned()),
+        None => (action.to_owned(), String::new()),
+    }
+}
+
 /// A human-readable label for an action string, preferring the shared action catalog's title (the
 /// same titles the command palette shows) and falling back to sentence-casing the name for actions
 /// the catalog doesn't know (sidebar actions, `text`/`csi`/…). Keeps any trailing `:param` suffix.
 fn action_title(action: &str) -> String {
+    if let Some(command) = crate::action_catalog::Command::from_action(action) {
+        return command.title().to_owned();
+    }
     let (base, param) = match action.split_once(':') {
         Some((base, param)) => (base, Some(param)),
         None => (action, None),
@@ -1463,8 +1358,24 @@ mod tests {
             action_title("decrease_font_size:1"),
             "Decrease Font Size: 1"
         );
+        assert_eq!(
+            action_title("change_appearance:dark"),
+            "Use Dark Appearance"
+        );
     }
 
+    #[test]
+    fn editor_action_split_keeps_catalog_actions_with_colons_whole() {
+        let options = action_options(KeybindScope::Global);
+        assert_eq!(
+            split_action_for_editor("change_appearance:dark", &options),
+            ("change_appearance:dark".to_owned(), String::new())
+        );
+        assert_eq!(
+            split_action_for_editor("csi:\u{1b}[1;5D", &options),
+            ("csi".to_owned(), "\u{1b}[1;5D".to_owned())
+        );
+    }
     #[test]
     fn humanize_action_sentence_cases_names_off_the_catalog() {
         // Fallback for actions the catalog doesn't carry (sidebar actions, text/csi/…).

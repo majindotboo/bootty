@@ -5,15 +5,15 @@ local ui = bootty.ui
 local quote = ui.shell_quote
 local stderr_null = ui.stderr_null
 
-local MUTED_COLOR = "#6c7086"
-local SUCCESS_COLOR = "#a6e3a1"
-local DESTRUCTIVE_COLOR = "#f38ba8"
-local CODEX_COLOR = "#74c7ec"
-local CLAUDE_COLOR = "#fab387"
-local OPENCODE_COLOR = "#9a8fbf"
-local WAITING_COLOR = "#f9e2af"
-local PERC_BASE = "#d78787"
-local PERC_SHINE = "#ffaf87"
+local MUTED_COLOR = bootty.theme.muted
+local SUCCESS_COLOR = bootty.theme.success
+local DESTRUCTIVE_COLOR = bootty.theme.destructive
+local CODEX_COLOR = bootty.theme.accent
+local CLAUDE_COLOR = bootty.theme.warning
+local OPENCODE_COLOR = bootty.theme.primary
+local WAITING_COLOR = bootty.theme.warning
+local PERC_BASE = bootty.theme.destructive
+local PERC_SHINE = bootty.theme.warning
 
 local PULSE_PERIOD = 2.0
 local FACT_REFRESH_INTERVAL = 0.5

@@ -89,6 +89,42 @@ fn raw_rgb_command_with_options(image_id: u32, placement_id: u32, options: &str)
     )
 }
 
+fn raw_rgb_command_dimensions_with_options(
+    image_id: u32,
+    placement_id: u32,
+    width: u32,
+    height: u32,
+    options: &str,
+) -> String {
+    format!(
+        "\x1b_Ga=T,t=d,f=24,i={image_id},p={placement_id},s={width},v={height},{options};{}\x1b\\",
+        base64_encode_bytes(&vec![0xff; width as usize * height as usize * 3])
+    )
+}
+
+fn unicode_placeholder_row(width: usize) -> String {
+    std::iter::repeat_n('\u{10EEEE}', width).collect()
+}
+
+fn unicode_placeholder_cell(row: usize, col: usize) -> String {
+    const FIRST_DIACRITICS: [char; 25] = [
+        '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}',
+        '\u{033F}', '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}',
+        '\u{0352}', '\u{0357}', '\u{035B}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}',
+        '\u{0367}', '\u{0368}', '\u{0369}', '\u{036A}',
+    ];
+    let mut cell = String::new();
+    cell.push('\u{10EEEE}');
+    cell.push(FIRST_DIACRITICS[row]);
+    cell.push(FIRST_DIACRITICS[col]);
+    cell
+}
+fn unicode_placeholder_grid_row(row: usize, width: usize) -> String {
+    (0..width)
+        .map(|col| unicode_placeholder_cell(row, col))
+        .collect()
+}
+
 fn raw_rgb_transmit_command(image_id: u32, width: u32, height: u32) -> String {
     let bytes = vec![0xee; width as usize * height as usize * 3];
     format!(
@@ -303,6 +339,16 @@ fn terminal_engine_reports_ghostty_compatible_xtversion() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_reports_cell_size_for_timg_queries() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b[16t");
+
+    assert_eq!(lock_pty_output(&output).as_slice(), b"\x1b[6;16;8t");
+    Ok(())
+}
+
+#[test]
 fn terminal_apc_handler_ports_unknown_overflow_limit_and_valid_kitty() -> Result<()> {
     let (mut engine, output) = captured_pty_engine()?;
 
@@ -347,6 +393,30 @@ fn terminal_engine_decodes_kitty_png_payloads_into_image_frame() -> Result<()> {
     assert_eq!(frame.images.placements.len(), 1);
     assert_eq!(frame.images.placements[0].image_width, 1);
     assert_eq!(frame.images.placements[0].image_height, 1);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_direct_kitty_image_uses_full_intrinsic_height() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    engine.write_vt(raw_rgb_command_dimensions_with_options(90, 1, 400, 66, "q=1").as_bytes());
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 90)
+        .context("direct image placement")?;
+
+    assert_eq!(placement.source.y, 0);
+    assert_eq!(placement.source.height, 66);
+    assert_eq!(placement.destination.height(), 66.0);
     Ok(())
 }
 
@@ -1427,7 +1497,7 @@ fn terminal_engine_exposes_kitty_virtual_placement_metadata() -> Result<()> {
 
     engine.write_vt(b"\x1b_Ga=T,t=d,f=24,i=31,s=1,v=1,q=1;////\x1b\\");
     engine.write_vt(b"\x1b_Ga=p,U=1,i=31,p=7,c=2,r=1,q=1\x1b\\");
-    engine.write_vt("\u{10EEEE}".as_bytes());
+    engine.write_vt("\x1b[38;5;31m\u{10EEEE}\x1b[39m".as_bytes());
     let frame = engine.extract_frame()?;
 
     assert_eq!(frame.images.virtual_placements.len(), 1);
@@ -1440,6 +1510,797 @@ fn terminal_engine_exposes_kitty_virtual_placement_metadata() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_engine_resolves_palette_colored_virtual_placeholder_when_storage_is_unique()
+-> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 10,
+        rows: 3,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let image_id = 525_626_113;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(image_id, 0, 10, 20, "U=1,c=1,r=1,q=1").as_bytes(),
+    );
+    engine.write_vt("\x1b[38;5;70m\u{10EEEE}\x1b[39m".as_bytes());
+    let frame = engine.extract_frame()?;
+
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == image_id),
+        "unique virtual storage placement should tolerate palette-colored placeholder ids: {:?}",
+        frame.images.placements
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_only_rows_with_actual_virtual_placeholder_cells() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 10,
+        rows: 3,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(raw_rgb_transmit_command(93, 10, 20).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=93,c=1,r=1,q=1\x1b\\");
+    engine.write_vt("\x1b[38;5;93m\u{10EEEE}\x1b[39m\nEND\n>".as_bytes());
+    let frame = engine.extract_frame()?;
+
+    for row in &frame.images.virtual_placeholder_rows {
+        assert!(
+            frame
+                .images
+                .placements
+                .iter()
+                .any(|placement| placement.destination.min_y == f32::from(*row) * 20.0),
+            "virtual placeholder row {row} must have an actual placement"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_keeps_timg_sized_virtual_image_out_of_following_text_row() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 213,
+        rows: 51,
+        cell_width: 8,
+        cell_height: 16,
+    })?;
+    let image_id = 94;
+    let placeholder_row = unicode_placeholder_row(121);
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(image_id, 1, 121, 98, "U=1,c=121,r=49,q=1")
+            .as_bytes(),
+    );
+    engine.write_vt(b"\x1b[38;5;94m");
+    for _ in 0..49 {
+        engine.write_vt(placeholder_row.as_bytes());
+        engine.write_vt(b"\r\n");
+    }
+    engine.write_vt(b"\x1b[39mEND_MARKER\r\n");
+    let frame = engine.extract_frame()?;
+
+    let marker_row_top = 49.0 * 16.0;
+    let placements = frame
+        .images
+        .placements
+        .iter()
+        .filter(|placement| placement.image_id == image_id)
+        .collect::<Vec<_>>();
+    assert!(!placements.is_empty());
+    assert!(
+        placements
+            .iter()
+            .all(|placement| placement.destination.max_y <= marker_row_top),
+        "virtual image placement leaked into marker row: {:?}",
+        placements
+            .iter()
+            .map(|placement| placement.destination)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        frame
+            .cells
+            .iter()
+            .find(|cell| frame.cell_text(cell).starts_with(&['E']))
+            .map(|cell| cell.y),
+        Some(49)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_keeps_real_timg_tmux_canvas_out_of_two_line_prompt() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 213,
+        rows: 52,
+        cell_width: 7,
+        cell_height: 23,
+    })?;
+    let image_id = 95;
+    let placeholder_row = unicode_placeholder_row(123);
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(image_id, 1, 123, 164, "U=1,c=123,r=50,q=1")
+            .as_bytes(),
+    );
+    engine.write_vt(b"\x1b[38;5;95m");
+    for _ in 0..50 {
+        engine.write_vt(placeholder_row.as_bytes());
+        engine.write_vt(b"\r\n");
+    }
+    engine.write_vt(b"\x1b[39m~/Downloads\r\n\x1b[32m\xe2\x9d\xaf\x1b[39m");
+    let frame = engine.extract_frame()?;
+
+    let prompt_top = 50.0 * 23.0;
+    let placements = frame
+        .images
+        .placements
+        .iter()
+        .filter(|placement| placement.image_id == image_id)
+        .collect::<Vec<_>>();
+    assert!(!placements.is_empty());
+    assert!(
+        placements
+            .iter()
+            .all(|placement| placement.destination.max_y <= prompt_top),
+        "virtual image placement leaked into prompt rows: {:?}",
+        placements
+            .iter()
+            .map(|placement| placement.destination)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        frame
+            .cells
+            .iter()
+            .find(|cell| frame.cell_text(cell).starts_with(&['~']))
+            .map(|cell| cell.y),
+        Some(50)
+    );
+    assert_eq!(
+        frame
+            .cells
+            .iter()
+            .find(|cell| frame.cell_text(cell).starts_with(&['❯']))
+            .map(|cell| cell.y),
+        Some(51)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_virtual_wide_image_slices_merge_to_full_source_height() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let image_id = 96;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(image_id, 1, 400, 66, "U=1,c=25,r=3,q=1")
+            .as_bytes(),
+    );
+    engine.write_vt(b"\x1b[38;5;96m");
+    for row in 0..3 {
+        engine.write_vt(unicode_placeholder_grid_row(row, 25).as_bytes());
+        engine.write_vt(b"\r\n");
+    }
+
+    let frame = engine.extract_frame()?;
+    let placements = frame
+        .images
+        .placements
+        .iter()
+        .filter(|placement| placement.image_id == image_id)
+        .collect::<Vec<_>>();
+    let summary = placements
+        .iter()
+        .map(|placement| (placement.source, placement.destination))
+        .collect::<Vec<_>>();
+    assert_eq!(placements.len(), 1, "slices should merge: {summary:?}");
+    assert_eq!(placements[0].source.y, 0);
+    assert_eq!(placements[0].source.height, 66);
+    assert_eq!(placements[0].destination.min_y, 0.0);
+    assert_eq!(placements[0].destination.max_y, 60.0);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_merges_adjacent_virtual_image_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 4,
+        rows: 3,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    let row0 = format!(
+        "{}{}",
+        unicode_placeholder_cell(0, 0),
+        unicode_placeholder_cell(0, 1)
+    );
+    let row1 = format!(
+        "{}{}",
+        unicode_placeholder_cell(1, 0),
+        unicode_placeholder_cell(1, 1)
+    );
+    engine.write_vt(raw_rgb_transmit_command(97, 20, 40).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=97,c=2,r=2,q=1\x1b\\");
+    engine.write_vt(format!("\x1b[38;5;97m{row0}\r\n{row1}\x1b[39m").as_bytes());
+
+    let frame = engine.extract_frame()?;
+    let placements = frame
+        .images
+        .placements
+        .iter()
+        .filter(|placement| placement.image_id == 97)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        placements.len(),
+        1,
+        "adjacent rows should share one image placement"
+    );
+    assert_eq!(placements[0].destination.min_y, 0.0);
+    assert_eq!(placements[0].destination.max_y, 40.0);
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_disappears_after_screen_clear() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(99, 1, 40, 60, "c=4,r=3,C=1,q=1").as_bytes(),
+    );
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 99)
+    );
+
+    engine.write_vt(b"\x1b[H\x1b[2JAFTER_CLEAR");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 99),
+        "native image should not survive a screen clear/redraw: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_survives_reserved_rows_before_first_frame() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(101, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    engine.write_vt(b"\r\n\r\n");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 101),
+        "reserved rows that arrive before first paint must not hide the image: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_survives_preceding_command_text_and_reserved_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 6,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(b"clear; show-image\r\n");
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(104, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    engine.write_vt(b"\r\n\r\nPI_STYLE_DONE");
+    let placements = engine.extract_frame()?.images.placements.clone();
+    let rows = engine
+        .row_cache
+        .iter()
+        .map(|row| row.text.iter().collect::<String>())
+        .collect::<Vec<_>>();
+    assert!(
+        placements.iter().any(|placement| placement.image_id == 104),
+        "preceding shell text and reserved rows must not hide the image; rows={rows:?}; placements={placements:?}",
+    );
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_excludes_marker_after_declared_reserved_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 40,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(105, 1, 600, 480, "c=60,r=24,C=1,q=1").as_bytes(),
+    );
+    engine.write_vt(b"\r\n".repeat(24).as_slice());
+    engine.write_vt(b"PI_STYLE_DONE");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 105),
+        "marker after declared reserved rows must not hide the image: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+#[test]
+fn native_kitty_image_survives_blank_reserved_rows_after_first_frame() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(102, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 102)
+    );
+
+    engine.write_vt(b"\r\n\r\n");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 102),
+        "blank reserved rows must not hide an already-painted image: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+#[test]
+fn native_kitty_image_reappears_after_temporary_text_overlap() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(100, 1, 40, 60, "c=4,r=3,C=1,q=1").as_bytes(),
+    );
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 100)
+    );
+
+    engine.write_vt(b"\x1b[1;1Hcopy-mode\r\n------------\r\n------------");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 100),
+        "native image should hide while text overlaps its declared rows: {:?}",
+        frame.images.placements
+    );
+
+    engine.write_vt(b"\x1b[1;1H\x1b[J");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 100),
+        "native image should reappear when its declared rows are blank again: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_survives_same_row_text_outside_declared_columns() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(101, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 101)
+    );
+
+    engine.write_vt(b"\x1b[1;10HOK");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 101),
+        "native image should stay visible when same-row text is outside its columns: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+#[test]
+fn native_kitty_image_tracks_scrollback_viewport_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 12,
+            rows: 4,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(98, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    engine.write_vt(b"\r\n\r\n\r\nrow3\r\nrow4\r\nrow5\r\nrow6");
+
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 98),
+        "image should start outside the bottom viewport: {:?}",
+        frame.images.placements
+    );
+
+    engine.scroll_viewport_delta(-6);
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 98)
+        .expect("scrolled viewport should expose native Kitty image");
+    assert_eq!(placement.destination.min_y, 0.0);
+    assert_eq!(placement.destination.max_y, 40.0);
+
+    engine.scroll_viewport_bottom();
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 98),
+        "image should leave the viewport instead of staying screen-absolute: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn native_kitty_image_reappears_when_scrolled_back_to_reserved_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 12,
+            rows: 4,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(103, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    engine.write_vt(b"\r\n\r\n\r\nrow3");
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 103)
+    );
+
+    engine.write_vt(b"\r\nrow4\r\nrow5\r\nrow6");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 103),
+        "image should leave the bottom viewport: {:?}",
+        frame.images.placements
+    );
+
+    engine.scroll_viewport_delta(-6);
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 103),
+        "scrolling back to the image rows should show it again: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn virtual_image_tracks_scrollback_viewport_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 12,
+            rows: 3,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )?;
+
+    engine.write_vt(raw_rgb_transmit_command(96, 10, 20).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=96,c=1,r=1,q=1\x1b\\");
+    engine.write_vt("\x1b[38;5;96m\u{10EEEE}\x1b[39m\r\nrow1\r\nrow2\r\nrow3".as_bytes());
+
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 96),
+        "image should start outside the bottom viewport: {:?}",
+        frame.images.placements
+    );
+
+    engine.scroll_viewport_delta(-3);
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 96)
+        .expect("scrolled viewport should expose virtual image");
+    assert_eq!(placement.destination.min_y, 0.0);
+
+    engine.scroll_viewport_bottom();
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != 96),
+        "image should leave the viewport instead of staying screen-absolute: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_style_virtual_image_transmit_tracks_scrollback_viewport_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 12,
+            rows: 3,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )?;
+    let image_id = 97;
+    let path = write_temp_fixture(
+        "kitty-file-image.png",
+        &base64_decode_ascii(ONE_PIXEL_PNG_BASE64)?,
+    )?;
+    let command = format!(
+        "\x1b_Ga=T,t=f,f=100,U=1,i={image_id},c=2,r=2,q=1;{}\x1b\\",
+        file_payload(&path)?,
+    );
+    let first_row = unicode_placeholder_grid_row(0, 2);
+    let second_row = unicode_placeholder_grid_row(1, 2);
+
+    engine.write_vt(command.as_bytes());
+    engine.write_vt(format!("\x1b[38;2;0;0;{image_id}m{first_row}\x1b[39m\r\n").as_bytes());
+    engine.write_vt(format!("\x1b[38;2;0;0;{image_id}m{second_row}\x1b[39m\r\n").as_bytes());
+    engine.write_vt(b"row2\r\nrow3\r\nrow4");
+
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != image_id),
+        "image should start outside the bottom viewport: {:?}",
+        frame.images.placements
+    );
+
+    engine.scroll_viewport_delta(-4);
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == image_id)
+        .expect("scrolled viewport should expose tmux-style virtual image");
+    assert!(placement.destination.min_y >= 0.0);
+    assert!(placement.destination.max_y <= 60.0);
+
+    engine.scroll_viewport_bottom();
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .all(|placement| placement.image_id != image_id),
+        "image should leave the viewport instead of staying screen-absolute: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn tmux_style_virtual_image_clears_when_placeholder_cells_are_removed() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 3,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    let image_id = 99;
+    let first_row = unicode_placeholder_grid_row(0, 2);
+    let second_row = unicode_placeholder_grid_row(1, 2);
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(image_id, 1, 20, 40, "U=1,c=2,r=2,q=1").as_bytes(),
+    );
+    engine.write_vt(format!("\x1b[38;2;0;0;{image_id}m{first_row}\x1b[39m\r\n").as_bytes());
+    engine.write_vt(format!("\x1b[38;2;0;0;{image_id}m{second_row}\x1b[39m").as_bytes());
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == image_id)
+    );
+
+    engine.write_vt(b"\x1b[2J\x1b[Hnew-window");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame.images.placements.is_empty(),
+        "clearing placeholder cells must remove virtual image placements: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
+
+#[test]
+fn virtual_image_reuses_cached_pixels_across_dirty_frames() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(raw_rgb_transmit_command(104, 20, 20).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=104,c=2,r=1,q=1\x1b\\");
+    engine.write_vt("\x1b[38;5;104m\u{10EEEE}\u{10EEEE}\x1b[39m\r\n".as_bytes());
+    let first = engine
+        .extract_frame()?
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 104)
+        .expect("virtual image placement")
+        .data
+        .clone();
+
+    engine.write_vt(b"\x1b[4;1Hstatus");
+    let second = engine
+        .extract_frame()?
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 104)
+        .expect("virtual image placement after unrelated redraw")
+        .data
+        .clone();
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "virtual images should not re-copy/re-upload pixels on unrelated redraws"
+    );
+
+    Ok(())
+}
 #[test]
 fn terminal_engine_ports_kitty_unicode_placeholder_runs() -> Result<()> {
     let mut engine = TerminalEngine::new(TerminalGeometry {
@@ -1514,7 +2375,7 @@ fn terminal_engine_ports_kitty_unicode_high_bits_and_placement_id() -> Result<()
     assert_eq!(placement.source.width, 1);
     assert_eq!(placement.source.height, 1);
     assert_eq!(placement.destination.width(), 8.0);
-    assert_eq!(placement.destination.height(), 8.0);
+    assert_eq!(placement.destination.height(), 16.0);
 
     Ok(())
 }
@@ -1660,8 +2521,8 @@ fn terminal_engine_decodes_timg_tmux_rgb_unicode_placeholder() -> Result<()> {
         .expect("timg rgb placeholder placement");
     assert_eq!(placement.source.width, 20);
     assert_eq!(placement.source.height, 20);
-    assert_eq!(placement.destination.min_y, 4.0);
-    assert_eq!(placement.destination.height(), 8.0);
+    assert_eq!(placement.destination.min_y, 0.0);
+    assert_eq!(placement.destination.height(), 16.0);
     assert!(
         placement.destination.max_y <= 16.0,
         "virtual placement must stay inside the placeholder row: {:?}",

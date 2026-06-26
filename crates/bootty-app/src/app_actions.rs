@@ -7,8 +7,8 @@ use crate::{
     config::InputConfig,
     input::terminal_key,
     input_binding::{
-        BindingAction, BindingElement, BindingKey, BindingMods, BindingTrigger, PaneDirection,
-        parse_action, parse_binding_elements,
+        AppearanceChoice, BindingAction, BindingElement, BindingKey, BindingMods, BindingTrigger,
+        PaneDirection, parse_action, parse_binding_elements,
     },
     mux::command::MuxDirection,
     terminal::{KeyInput, TerminalKey},
@@ -27,6 +27,8 @@ pub enum AppAction {
     ToggleSidebarFocus,
     ToggleSidebarVisibility,
     OpenSettings,
+    ChangeAppearance(crate::config::AppearanceMode),
+    SwitchTheme,
     RenameSession,
     DitchSession,
     ShowKeybinds,
@@ -362,6 +364,10 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             Ok(KeybindAction::App(AppAction::ToggleSidebarVisibility))
         }
         BindingAction::OpenSettings => Ok(KeybindAction::App(AppAction::OpenSettings)),
+        BindingAction::ChangeAppearance(choice) => Ok(KeybindAction::App(
+            AppAction::ChangeAppearance(appearance_mode(choice)),
+        )),
+        BindingAction::SwitchTheme => Ok(KeybindAction::App(AppAction::SwitchTheme)),
         BindingAction::RenameSession => Ok(KeybindAction::App(AppAction::RenameSession)),
         BindingAction::NewTab => Ok(KeybindAction::Mux(MuxKeyAction::NewTab)),
         BindingAction::NextTab => Ok(KeybindAction::Mux(MuxKeyAction::NextTab)),
@@ -413,6 +419,14 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::CopyToClipboard(_) => Ok(KeybindAction::CopyToClipboard),
         BindingAction::PasteFromClipboard => Ok(KeybindAction::PasteFromClipboard),
         unsupported => anyhow::bail!("{} has no Bootty app behavior", unsupported.format_entry()),
+    }
+}
+
+fn appearance_mode(choice: AppearanceChoice) -> crate::config::AppearanceMode {
+    match choice {
+        AppearanceChoice::System => crate::config::AppearanceMode::System,
+        AppearanceChoice::Light => crate::config::AppearanceMode::Light,
+        AppearanceChoice::Dark => crate::config::AppearanceMode::Dark,
     }
 }
 

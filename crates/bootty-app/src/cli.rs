@@ -285,10 +285,6 @@ struct ConfigOverrides {
     #[arg(long, value_name = "#RRGGBB", value_parser = parse_color)]
     sidebar_background: Option<Color>,
 
-    /// Force sidebar fullscreen background color.
-    #[arg(long, value_name = "#RRGGBB", value_parser = parse_color)]
-    sidebar_fullscreen_background: Option<Color>,
-
     /// Force sidebar foreground color.
     #[arg(long, value_name = "#RRGGBB", value_parser = parse_color)]
     sidebar_foreground: Option<Color>,
@@ -548,9 +544,6 @@ impl ConfigOverrides {
         }
         if let Some(background) = self.sidebar_background {
             config.sidebar.background = Some(background);
-        }
-        if let Some(background) = self.sidebar_fullscreen_background {
-            config.sidebar.fullscreen_background = Some(background);
         }
         if let Some(foreground) = self.sidebar_foreground {
             config.sidebar.foreground = Some(foreground);
@@ -949,8 +942,6 @@ mod tests {
             "244",
             "--sidebar-background",
             "#202122",
-            "--sidebar-fullscreen-background",
-            "#232425",
             "--sidebar-foreground",
             "#262728",
             "--sidebar-selected",
@@ -1046,10 +1037,6 @@ mod tests {
         assert_eq!(
             config.sidebar.background,
             Some(Color::from_hex("#202122").unwrap())
-        );
-        assert_eq!(
-            config.sidebar.fullscreen_background,
-            Some(Color::from_hex("#232425").unwrap())
         );
         assert_eq!(
             config.sidebar.foreground,

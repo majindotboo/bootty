@@ -42,6 +42,8 @@ fn kitty_placement_destination_uses_viewport_cell_position_and_offsets() {
         },
         3,
         5,
+        3,
+        2,
     );
 
     assert_eq!(rect.min_x, 45.0);

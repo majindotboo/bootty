@@ -19,7 +19,7 @@ use bootty_runtime::{
 };
 use bootty_terminal::{
     terminal_engine::{
-        TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
+        TerminalColorConfig, TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
         TerminalSelectionFormat,
     },
     terminal_input_model::{KeyInput, MouseInput},
@@ -49,6 +49,10 @@ pub struct BackendPaneTerminal {
     /// Session whose tmux `status` option bootty has toggled off so its own
     /// status bar is the only one shown; restored when bootty stops showing it.
     status_hidden_session: Option<String>,
+    /// Pane whose `allow-passthrough` option bootty has temporarily set to `all` so
+    /// Kitty graphics reach the attached Bootty client even when tmux does not
+    /// classify the pane as visible for `allow-passthrough on`.
+    passthrough_all_pane: Option<TmuxPanePassthroughOverride>,
     #[deref]
     #[deref_mut]
     terminal: ActiveTerminalRuntime,
@@ -116,10 +120,7 @@ pub trait TerminalRuntime: TerminalRenderSource {
     fn set_feature_config(&mut self, _features: TerminalFeatureConfig) -> Result<()> {
         Ok(())
     }
-    fn set_colors(
-        &mut self,
-        colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()>;
+    fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()>;
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
     fn write_paste(&mut self, text: &str) -> Result<()>;
     fn encode_key(&mut self, input: KeyInput) -> Result<()>;
@@ -152,10 +153,7 @@ impl TerminalRuntime for IdleRenderSource {
         Ok(false)
     }
 
-    fn set_colors(
-        &mut self,
-        _colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()> {
+    fn set_colors(&mut self, _colors: TerminalColorConfig) -> Result<()> {
         Ok(())
     }
 
@@ -181,6 +179,16 @@ impl TerminalRuntime for IdleRenderSource {
     fn handle_mouse_wheel(&mut self, _input: MouseInput, _scroll_delta: isize) -> Result<()> {
         Ok(())
     }
+}
+
+struct TmuxPanePassthroughOverride {
+    pane_id: String,
+    previous: TmuxOptionValue,
+}
+
+struct TmuxOptionValue {
+    value: String,
+    local: bool,
 }
 
 impl TerminalRuntime for TerminalSession {
@@ -216,10 +224,7 @@ impl TerminalRuntime for TerminalSession {
         Self::set_feature_config(self, features)
     }
 
-    fn set_colors(
-        &mut self,
-        colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()> {
+    fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
         Self::set_colors(self, colors)
     }
 
@@ -278,6 +283,7 @@ impl BackendPaneTerminal {
             native_terminals: HashMap::new(),
             native_window_targets: Vec::new(),
             status_hidden_session: None,
+            passthrough_all_pane: None,
             terminal: ActiveTerminalRuntime::idle(),
         }
     }
@@ -288,16 +294,19 @@ impl BackendPaneTerminal {
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
         let backend = selected_backend(config);
+        let target = anchor.cloned().map(MuxPaneTarget::from);
         if self.backend == backend
             && target_matches_anchor(backend, self.active_target.as_ref(), anchor)
         {
-            // Attach and target unchanged; still reconcile the status override so a
-            // runtime toggle of hide-tmux-status takes effect without a re-attach.
+            // The tmux attach client follows pane/window changes server-side, so avoid
+            // restarting it. Still update Bootty's tracked target so pane-local option
+            // overrides follow the pane currently being rendered.
+            self.active_target = target;
+            self.sync_tmux_passthrough_override();
             self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
 
-        let target = anchor.cloned().map(MuxPaneTarget::from);
         if self.backend == MuxBackendKind::Tmux
             && backend == MuxBackendKind::Tmux
             && target.is_some()
@@ -307,6 +316,7 @@ impl BackendPaneTerminal {
                 .is_ok()
         {
             self.active_target = target;
+            self.sync_tmux_passthrough_override();
             self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
@@ -316,14 +326,42 @@ impl BackendPaneTerminal {
             .inspect_err(|_| {
                 self.backend = backend;
                 self.active_target = None;
+                self.sync_tmux_passthrough_override();
                 self.clear_terminal();
             })?;
 
         self.backend = backend;
         self.active_target = target;
         self.terminal = terminal;
+        self.sync_tmux_passthrough_override();
         self.sync_status_bar(config.hide_tmux_status);
         Ok(())
+    }
+
+    fn sync_tmux_passthrough_override(&mut self) {
+        let want = passthrough_override_target(self.backend, self.active_target.as_ref());
+        if self
+            .passthrough_all_pane
+            .as_ref()
+            .map(|override_| override_.pane_id.as_str())
+            == want
+        {
+            return;
+        }
+
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = restore_pane_allow_passthrough(&previous);
+        }
+
+        if let Some(pane_id) = want
+            && let Ok(previous) = pane_allow_passthrough(pane_id)
+            && set_pane_allow_passthrough(pane_id, "all").is_ok()
+        {
+            self.passthrough_all_pane = Some(TmuxPanePassthroughOverride {
+                pane_id: pane_id.to_owned(),
+                previous,
+            });
+        }
     }
 
     /// Toggle tmux's per-session `status` option so only bootty's own status bar
@@ -352,6 +390,15 @@ impl BackendPaneTerminal {
 
     pub fn set_terminal_config(&mut self, terminal_config: TerminalSessionConfig) {
         self.terminal_config = terminal_config;
+    }
+
+    pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
+        self.terminal.set_colors(colors.clone())?;
+        for terminal in self.native_terminals.values_mut() {
+            terminal.set_colors(colors.clone())?;
+        }
+        self.terminal_config.colors = colors;
+        Ok(())
     }
 
     fn start_terminal(
@@ -595,6 +642,9 @@ impl BackendPaneTerminal {
     // sync_mux_anchor attaches the surviving pane instead of parking the closed one.
     pub fn discard_active_pane(&mut self) {
         self.terminal = ActiveTerminalRuntime::idle();
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = restore_pane_allow_passthrough(&previous);
+        }
         self.active_target = None;
     }
 
@@ -619,6 +669,9 @@ impl Drop for BackendPaneTerminal {
         // Bring the tmux status bar back when bootty stops showing the session
         // (window closed, app quit). Best-effort: a hard kill skips this, and a
         // later attach re-hides while a clean detach restores.
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = restore_pane_allow_passthrough(&previous);
+        }
         if let Some(session) = self.status_hidden_session.take() {
             let _ = set_session_status_hidden(&session, false);
         }
@@ -842,6 +895,100 @@ fn resolve_launch_program_with_path(program: &str, path: Option<&OsStr>) -> Resu
     anyhow::bail!("backend attach program {program:?} not found in PATH")
 }
 
+fn passthrough_override_target(
+    backend: MuxBackendKind,
+    target: Option<&MuxPaneTarget>,
+) -> Option<&str> {
+    if backend != MuxBackendKind::Tmux {
+        return None;
+    }
+    target.map(|target| match target {
+        MuxPaneTarget::Pane { pane_id, .. } => pane_id.as_str(),
+        MuxPaneTarget::Session { session_id, .. } => session_id.as_str(),
+    })
+}
+
+fn pane_allow_passthrough(pane_id: &str) -> Result<TmuxOptionValue> {
+    if let Some(value) =
+        tmux_option_value(&["show-options", "-p", "-t", pane_id, "allow-passthrough"])?
+    {
+        return Ok(TmuxOptionValue { value, local: true });
+    }
+    let value = tmux_option_value(&["show-options", "-g", "allow-passthrough"])?
+        .ok_or_else(|| anyhow::anyhow!("tmux global allow-passthrough option had no value"))?;
+    Ok(TmuxOptionValue {
+        value,
+        local: false,
+    })
+}
+
+fn tmux_option_value(args: &[&str]) -> Result<Option<String>> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux option command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_whitespace();
+    if fields.next().is_none() {
+        return Ok(None);
+    }
+    Ok(fields.next().map(str::to_owned))
+}
+
+fn set_pane_allow_passthrough(pane_id: &str, value: &str) -> Result<()> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            "allow-passthrough",
+            value,
+        ])
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux set-option allow-passthrough failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn restore_pane_allow_passthrough(previous: &TmuxPanePassthroughOverride) -> Result<()> {
+    if previous.previous.local {
+        return set_pane_allow_passthrough(&previous.pane_id, &previous.previous.value);
+    }
+    unset_pane_allow_passthrough(&previous.pane_id)
+}
+
+fn unset_pane_allow_passthrough(pane_id: &str) -> Result<()> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args(["set-option", "-u", "-p", "-t", pane_id, "allow-passthrough"])
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux unset-option allow-passthrough failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// The session whose tmux status bar should be hidden: only with the feature on,
 /// the tmux backend, and a session attached. Native/rmux/zellij are never
 /// touched, so this can only ever issue a `set-option` against a tmux server.
@@ -883,7 +1030,10 @@ fn set_session_status_hidden(session_id: &str, hidden: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
     use bootty_terminal::terminal_engine::TerminalColorConfig;
+    use bootty_terminal::terminal_frame::RenderFrame;
     use tempfile::TempDir;
 
     use bootty_config::config::{MultiplexerBackendConfig, MultiplexerConfig};
@@ -913,6 +1063,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn passthrough_override_targets_only_tmux_targets() {
+        let target = MuxPaneTarget::Pane {
+            session_id: "$1".to_owned(),
+            pane_id: "%3".to_owned(),
+            cwd: None,
+        };
+
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Tmux, Some(&target)),
+            Some("%3")
+        );
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Native, Some(&target)),
+            None
+        );
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Tmux, None),
+            None
+        );
+        assert_eq!(
+            passthrough_override_target(
+                MuxBackendKind::Tmux,
+                Some(&MuxPaneTarget::Session {
+                    session_id: "$1".to_owned(),
+                    cwd: None,
+                })
+            ),
+            Some("$1")
+        );
+    }
+
     fn terminal_config() -> TerminalSessionConfig {
         TerminalSessionConfig {
             launch: Default::default(),
@@ -930,6 +1112,114 @@ mod tests {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join(program), "").unwrap();
         temp
+    }
+
+    struct ColorRecordingRuntime {
+        colors: Arc<Mutex<Vec<(u8, u8, u8)>>>,
+    }
+
+    impl TerminalRenderSource for ColorRecordingRuntime {
+        fn resize(&mut self, _geometry: TerminalGeometry) -> Result<()> {
+            Ok(())
+        }
+
+        fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
+            Ok(Arc::new(RenderFrame::default()))
+        }
+    }
+
+    impl TerminalRuntime for ColorRecordingRuntime {
+        fn drain_pty(&mut self) -> DrainStats {
+            DrainStats::default()
+        }
+
+        fn pending_pty_len(&self) -> usize {
+            0
+        }
+
+        fn child_exited(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
+            self.colors.lock().unwrap().push((
+                colors.background.r,
+                colors.background.g,
+                colors.background.b,
+            ));
+            Ok(())
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_paste(&mut self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_key(&mut self, _input: KeyInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_focus(&mut self, _gained: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_mouse(&mut self, _input: MouseInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn handle_mouse_wheel(&mut self, _input: MouseInput, _scroll_delta: isize) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn color_config(background: (u8, u8, u8)) -> TerminalColorConfig {
+        let mut colors = TerminalColorConfig::default();
+        colors.background.r = background.0;
+        colors.background.g = background.1;
+        colors.background.b = background.2;
+        colors
+    }
+
+    #[test]
+    fn set_colors_updates_focused_and_parked_native_panes() {
+        let geometry = TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            geometry,
+            MuxBackendKind::Native,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        let active_colors = Arc::new(Mutex::new(Vec::new()));
+        terminal.terminal = ActiveTerminalRuntime(Box::new(ColorRecordingRuntime {
+            colors: Arc::clone(&active_colors),
+        }));
+        let parked_colors = Arc::new(Mutex::new(Vec::new()));
+        terminal.native_terminals.insert(
+            MuxPaneTarget::Pane {
+                session_id: "agents".to_owned(),
+                pane_id: "%4".to_owned(),
+                cwd: None,
+            },
+            ActiveTerminalRuntime(Box::new(ColorRecordingRuntime {
+                colors: Arc::clone(&parked_colors),
+            })),
+        );
+
+        terminal.set_colors(color_config((1, 2, 3))).unwrap();
+
+        assert_eq!(*active_colors.lock().unwrap(), vec![(1, 2, 3)]);
+        assert_eq!(*parked_colors.lock().unwrap(), vec![(1, 2, 3)]);
+        assert_eq!(terminal.terminal_config.colors.background.r, 1);
+        assert_eq!(terminal.terminal_config.colors.background.g, 2);
+        assert_eq!(terminal.terminal_config.colors.background.b, 3);
     }
 
     #[test]

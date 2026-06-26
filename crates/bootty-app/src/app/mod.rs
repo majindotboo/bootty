@@ -13,14 +13,14 @@ use eframe::{
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 
 use crate::{
-    config::BoottyConfig,
+    config::{AppearanceVariant, BoottyConfig},
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
     layout::SplitDirection,
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
     terminal_text::TerminalTextConfig,
-    theme::theme_palette_from_config,
+    theme::{theme_palette_from_config, theme_tokens},
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
         settings::{SettingsAction, SettingsSurface},
@@ -31,7 +31,7 @@ use crate::{
 /// be measured. This intentionally targets the physical notch, not the slightly lower menu-bar
 /// drop-down line reported by macOS safe-area APIs.
 const FALLBACK_NOTCH_LAYOUT_OFFSET: f32 = 24.0;
-const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 8.0;
+const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 7.0;
 /// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
@@ -49,12 +49,8 @@ fn color_hex(color: egui::Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
 }
 
-fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32 {
-    if sidebar_visible && !sidebar_on_right {
-        0.0
-    } else {
-        chrome::STATUS_EDGE_PAD
-    }
+fn status_bar_left_padding(_sidebar_visible: bool, _sidebar_on_right: bool) -> f32 {
+    chrome::STATUS_EDGE_PAD
 }
 
 /// Pane corner radius (px), clamped so it never exceeds the pane's shorter half-extent.
@@ -71,47 +67,48 @@ fn pane_corner_radius(rect: Rect, px: f32) -> egui::CornerRadius {
 /// reads as rounded (the window background shows through the corners) even though the terminal
 /// content itself isn't clipped.
 fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg: egui::Color32) {
-    let r = pane_corner_radius_px(rect, radius);
+    let r = pane_corner_radius_px(rect, radius).round();
     if r <= 0.5 {
         return;
     }
     // (arc center, square-corner point, start angle) for each corner, angles in egui screen space
-    // (y down), sweeping a quarter turn.
+    // (y down), sweeping a quarter turn. A single mesh avoids anti-aliased cracks between the
+    // triangles; separate convex polygons showed one-pixel seams at the pane corners.
     let corners = [
         (
             Pos2::new(rect.min.x + r, rect.min.y + r),
             rect.min,
             std::f32::consts::PI,
-        ), // top-left
+        ),
         (
             Pos2::new(rect.max.x - r, rect.min.y + r),
             Pos2::new(rect.max.x, rect.min.y),
             std::f32::consts::FRAC_PI_2 * 3.0,
-        ), // top-right
-        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0), // bottom-right
+        ),
+        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0),
         (
             Pos2::new(rect.min.x + r, rect.max.y - r),
             Pos2::new(rect.min.x, rect.max.y),
             std::f32::consts::FRAC_PI_2,
-        ), // bottom-left
+        ),
     ];
-    // The cutout (square corner minus the rounded arc) is concave, so fan it into triangles from
-    // the corner — each triangle is convex and the region is star-shaped from the corner — rather
-    // than filling one polygon (which egui would collapse to its diagonal hull).
-    let steps = 8;
+    let steps = 16;
+    let mut mesh = egui::epaint::Mesh::default();
     for (center, corner, start) in corners {
-        let arc = |step: usize| {
-            let angle = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
-            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
-        };
         for step in 0..steps {
-            painter.add(egui::Shape::convex_polygon(
-                vec![corner, arc(step), arc(step + 1)],
-                bg,
-                egui::Stroke::NONE,
-            ));
+            let idx = mesh.vertices.len() as u32;
+            mesh.colored_vertex(corner, bg);
+            for arc_step in [step, step + 1] {
+                let angle = start + std::f32::consts::FRAC_PI_2 * (arc_step as f32 / steps as f32);
+                mesh.colored_vertex(
+                    Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin()),
+                    bg,
+                );
+            }
+            mesh.add_triangle(idx, idx + 1, idx + 2);
         }
     }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Shrink a divider's visual rect along its long axis by the pane corner radius (per end), so it
@@ -177,6 +174,7 @@ pub struct BoottyApp {
     _menu: Option<AppMenu>,
     status_extensions: crate::extensions::ExtensionHost,
     sidebar_extensions: crate::extensions::ExtensionHost,
+    extension_theme: Vec<(String, String)>,
     lua_window: Option<(LuaWindowOwner, crate::ui::lua_window::LuaWindowDialog)>,
     keep_awake: Option<keepawake::KeepAwake>,
     terminal_cursor_icon: egui::CursorIcon,
@@ -224,7 +222,8 @@ impl BoottyApp {
 
         // User extensions live beside the config file. Built-ins are Luau modules;
         // user `.lua` / `.luau` files override same-named defaults per extension surface.
-        let theme_tokens = crate::theme::theme_tokens(&config);
+        let startup_variant = config.appearance.mode.variant(AppearanceVariant::Dark);
+        let extension_theme = theme_tokens(&config, startup_variant);
         let config_dir = config
             .config_path
             .parent()
@@ -232,12 +231,12 @@ impl BoottyApp {
         let status_extensions = crate::extensions::ExtensionHost::spawn_status(
             config_dir.join("status"),
             cc.egui_ctx.clone(),
-            theme_tokens.clone(),
+            extension_theme.clone(),
         );
         let sidebar_extensions = crate::extensions::ExtensionHost::spawn_sidebar(
             config_dir.join("sidebar"),
             cc.egui_ctx.clone(),
-            theme_tokens,
+            extension_theme.clone(),
         );
 
         Ok(Self {
@@ -253,10 +252,41 @@ impl BoottyApp {
             _menu: crate::menu::install(),
             status_extensions,
             sidebar_extensions,
+            extension_theme,
             lua_window: None,
             keep_awake: None,
             terminal_cursor_icon: egui::CursorIcon::Default,
         })
+    }
+
+    fn sync_extension_theme(&mut self, ctx: &egui::Context) {
+        if self.state.theme_picker_preview_active() {
+            return;
+        }
+        let next = theme_tokens(self.state.config(), self.state.active_appearance_variant());
+        if self.extension_theme == next {
+            return;
+        }
+        self.dismiss_lua_window();
+        self.extension_theme = next.clone();
+        let config_dir = self
+            .state
+            .config()
+            .config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        self.status_extensions = crate::extensions::ExtensionHost::spawn_status(
+            config_dir.join("status"),
+            ctx.clone(),
+            next.clone(),
+        );
+        self.sidebar_extensions = crate::extensions::ExtensionHost::spawn_sidebar(
+            config_dir.join("sidebar"),
+            ctx.clone(),
+            next,
+        );
+        ctx.request_repaint();
     }
 
     fn open_settings(&mut self, ctx: &egui::Context) {
@@ -401,11 +431,7 @@ impl BoottyApp {
             self.state.mux().selected_session(),
         )
         .map(str::to_owned);
-        let session_color = crate::ui::sidebar::session_accent_color(
-            self.state.mux().sessions(),
-            self.state.mux().selected_session(),
-        )
-        .map(color_hex);
+        let session_color = Some(color_hex(self.state.ui_theme().palette.accent));
         crate::extensions::MuxView {
             windows,
             sessions: self.current_extension_sessions(),
@@ -416,17 +442,15 @@ impl BoottyApp {
     }
 
     fn current_extension_sessions(&self) -> Vec<crate::extensions::SessionView> {
+        let palette = self.state.ui_theme().palette;
+        let session_color = color_hex(palette.accent);
+        let dim_color = color_hex(palette.muted);
         let selected_session = self.state.mux().selected_session();
-        let sidebar_items =
-            crate::ui::sidebar::build_sidebar_items(self.state.mux().sessions(), selected_session);
         self.state
             .mux()
             .sessions()
             .iter()
             .map(|session| {
-                let row = sidebar_items
-                    .iter()
-                    .find(|item| item.session_id == Some(session.id.as_str()));
                 let selected = if selected_session.is_some() {
                     selected_session == Some(session.id.as_str())
                         || selected_session == Some(session.name.as_str())
@@ -439,8 +463,8 @@ impl BoottyApp {
                     active: session.active,
                     selected,
                     cwd: session.anchor.cwd.clone(),
-                    color: row.map(|item| color_hex(item.color)),
-                    dim_color: row.map(|item| color_hex(item.dim_color)),
+                    color: Some(session_color.clone()),
+                    dim_color: Some(dim_color.clone()),
                 }
             })
             .collect()
@@ -506,6 +530,10 @@ impl BoottyApp {
         if self.focused_widget_key.as_deref() == Some(key) {
             return;
         }
+        if self.focused_widget_key.is_none() {
+            self.focused_widget_key = Some(key.to_owned());
+            return;
+        }
         let mut incoming = self.pane_widgets.remove(key).unwrap_or_else(|| {
             TerminalWidget::new(self.terminal_target_format)
                 .with_text_config(self.terminal_text_config.clone())
@@ -517,16 +545,23 @@ impl BoottyApp {
         }
     }
 
-    fn show_single_terminal(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                Ok(surface) => self.state.record_surface(surface),
-                Err(error) => self.state.record_render_error(error),
-            },
-        );
+    fn show_single_terminal(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        corner_radius_px: f32,
+        background: egui::Color32,
+    ) {
+        match self.terminal_widget.show_at_rect(
+            ui,
+            rect,
+            "primary-terminal",
+            self.state.terminal_mut(),
+        ) {
+            Ok(surface) => self.state.record_surface(surface),
+            Err(error) => self.state.record_render_error(error),
+        }
+        paint_pane_corner_masks(ui.painter(), rect, corner_radius_px, background);
     }
 
     /// Render every pane of the active native window into its split sub-rect: the focused pane via
@@ -537,6 +572,7 @@ impl BoottyApp {
         ui: &mut egui::Ui,
         area: Rect,
         palette: bootty_ui::ThemePalette,
+        background: egui::Color32,
     ) {
         let chrome = &self.state.config().chrome;
         let gap = chrome.pane_divider_width;
@@ -544,10 +580,9 @@ impl BoottyApp {
         let border_color = chrome
             .pane_focus_border_color
             .map(crate::theme::config_color32)
-            .unwrap_or(palette.primary);
+            .unwrap_or(palette.accent);
         let corner_radius_px = chrome.pane_corner_radius;
         let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
-        let background = palette.mantle;
         let rects = self.state.pane_rects(area, gap);
 
         // Handle click-to-focus before snapshotting focus so this frame already renders the clicked
@@ -576,27 +611,23 @@ impl BoottyApp {
         } = self;
         for (pane_id, rect) in &rects {
             let is_focused = focused.as_deref() == Some(pane_id.as_str());
-            let result = ui
-                .scope_builder(
-                    UiBuilder::new()
-                        .max_rect(*rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| {
-                        if is_focused {
-                            Some(terminal_widget.show(ui, state.terminal_mut()))
-                        } else {
-                            let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
-                                TerminalWidget::new(*terminal_target_format)
-                                    .with_text_config(terminal_text_config.clone())
-                            });
-                            widget.set_terminal_cursor_icon(*terminal_cursor_icon);
-                            state
-                                .render_source_for_pane(pane_id)
-                                .map(|source| widget.show(ui, source))
-                        }
-                    },
-                )
-                .inner;
+            let result = if is_focused {
+                Some(terminal_widget.show_at_rect(
+                    ui,
+                    *rect,
+                    ("native-pane", pane_id),
+                    state.terminal_mut(),
+                ))
+            } else {
+                let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
+                    TerminalWidget::new(*terminal_target_format)
+                        .with_text_config(terminal_text_config.clone())
+                });
+                widget.set_terminal_cursor_icon(*terminal_cursor_icon);
+                state
+                    .render_source_for_pane(pane_id)
+                    .map(|source| widget.show_at_rect(ui, *rect, ("native-pane", pane_id), source))
+            };
             match result {
                 Some(Ok(surface)) => {
                     if is_focused {
@@ -637,14 +668,17 @@ impl BoottyApp {
         ui: &mut egui::Ui,
         area: Rect,
         palette: bootty_ui::ThemePalette,
+        divider_color_override: Option<egui::Color32>,
     ) {
         let chrome = &self.state.config().chrome;
         let gap = chrome.pane_divider_width;
         let corner_radius = chrome.pane_corner_radius;
-        let divider_color = chrome
-            .pane_divider_color
-            .map(crate::theme::config_color32)
-            .unwrap_or(palette.mantle);
+        let divider_color = divider_color_override.unwrap_or_else(|| {
+            chrome
+                .pane_divider_color
+                .map(crate::theme::config_color32)
+                .unwrap_or(palette.mantle)
+        });
         let dividers = self.state.pane_dividers(area, gap);
         for divider in &dividers {
             let direction = divider.direction;
@@ -740,8 +774,9 @@ impl BoottyApp {
         // handles so the next frame's input pass suppresses selection only over live handles.
         self.state.reset_chrome_handles();
         let rect = ui.max_rect();
-        let palette = theme_palette_from_config(self.state.config());
-        let chrome_config = &self.state.config().chrome;
+        let palette =
+            theme_palette_from_config(self.state.config(), self.state.active_appearance_variant());
+        let chrome_config = self.state.config().chrome.clone();
         let sidebar = chrome_config.sidebar;
         let status_bar = chrome_config.status_bar;
         let configured_sidebar_width = chrome_config.sidebar_width;
@@ -751,10 +786,9 @@ impl BoottyApp {
             || ui
                 .ctx()
                 .input(|input| input.viewport().fullscreen.unwrap_or(false));
-        // Reserve a top offset in fullscreen to clear the notch and switch the sidebar to its
-        // fullscreen background. The explicit override applies whenever fullscreen so it works even
-        // when auto-detection can't read the notch (a hidden menu bar zeroes safeAreaInsets); the
-        // safe-area auto value only fills in when the override is unset. No objc calls when windowed.
+        // Reserve a top offset in fullscreen to clear the notch. The explicit override applies
+        // whenever fullscreen so it works even when auto-detection can't read the notch (a hidden
+        // menu bar zeroes safeAreaInsets); the safe-area auto value only fills in when unset.
         if fullscreen_chrome {
             crate::platform::macos_disable_titlebar_separator();
         }
@@ -764,6 +798,10 @@ impl BoottyApp {
         // Detect the notch by display name (stable across fullscreen/menu-bar state) rather than the
         // safe-area inset, which zeroes out when the menu bar is hidden in non-native fullscreen.
         let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_is_notched();
+        let black_notch_chrome = notch_context
+            && chrome_config.notched_fullscreen_black_chrome
+            && self.state.active_appearance_variant() == crate::config::AppearanceVariant::Dark;
+        let notch_chrome_color = black_notch_chrome.then_some(egui::Color32::BLACK);
         // Pixel height for the layout offset: the config override, else the measured macOS band
         // calibrated to the physical notch, else a fallback when the band is unreadable.
         let measured_band = crate::platform::macos_active_screen_notch_height();
@@ -776,16 +814,9 @@ impl BoottyApp {
             0.0
         };
         // When enabled, the terminal/tab bar sits inside the notch band instead of being pushed
-        // entirely below it; the band reuses the sidebar's fullscreen background either way.
+        // entirely below it.
         let tabs_in_notch = notch_context && self.state.config().window.fullscreen_tabs_in_notch;
-        let sidebar_fullscreen_bg = {
-            let sidebar_cfg = &self.state.config().sidebar;
-            sidebar_cfg
-                .fullscreen_background
-                .or(sidebar_cfg.background)
-                .map(crate::theme::config_color32)
-        };
-        let notch_band_color = sidebar_fullscreen_bg.unwrap_or(palette.base);
+        let notch_band_color = notch_chrome_color.unwrap_or(palette.base);
         let sidebar_width = if sidebar {
             configured_sidebar_width
         } else {
@@ -919,18 +950,14 @@ impl BoottyApp {
                             .reserves_macos_titlebar_button_area();
                     // Shared with the content stack so the sidebar header clears the notch too.
                     let top_inset = fullscreen_top_offset;
-                    // Resolve `[sidebar]` color overrides on top of the theme. `base`/`text` feed the
-                    // derived hover/current/border tints; the notch background applies only in
-                    // fullscreen on a notched screen.
+                    // Resolve `[sidebar]` color overrides on top of the theme. In dark notched
+                    // fullscreen the shared notch chrome color overrides all panel backgrounds.
                     let sidebar_cfg = self.state.config().sidebar.clone();
-                    let sidebar_background = if notch_context {
-                        sidebar_cfg.fullscreen_background.or(sidebar_cfg.background)
-                    } else {
-                        sidebar_cfg.background
-                    };
+                    let sidebar_background = notch_chrome_color
+                        .or_else(|| sidebar_cfg.background.map(crate::theme::config_color32));
                     let mut sidebar_palette = palette;
                     if let Some(color) = sidebar_background {
-                        sidebar_palette.base = crate::theme::config_color32(color);
+                        sidebar_palette.base = color;
                     }
                     if let Some(color) = sidebar_cfg.foreground {
                         sidebar_palette.text = crate::theme::config_color32(color);
@@ -958,9 +985,6 @@ impl BoottyApp {
                             unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
                             fullscreen: fullscreen_chrome,
                             hover_override: sidebar_cfg.hover.map(crate::theme::config_color32),
-                            fullscreen_hover_override: sidebar_cfg
-                                .fullscreen_hover
-                                .map(crate::theme::config_color32),
                             current_override: sidebar_cfg
                                 .selected
                                 .map(crate::theme::config_color32),
@@ -1044,11 +1068,13 @@ impl BoottyApp {
             // Tick once a second so the clock advances and module output refreshes when idle.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs(1));
-            let status_background = if notch_context {
-                notch_band_color
-            } else {
-                palette.base
-            };
+            let status_background = notch_chrome_color
+                .or_else(|| {
+                    chrome_config
+                        .status_background
+                        .map(crate::theme::config_color32)
+                })
+                .unwrap_or(palette.base);
             let segments = self.resolve_status_segments(sidebar);
             let mut status_event = None;
             ui.scope_builder(
@@ -1111,6 +1137,9 @@ impl BoottyApp {
                 .mux()
                 .selected_session_anchor()
                 .is_some_and(|anchor| anchor.pane_id.is_some());
+        let pane_backing_color = notch_chrome_color.unwrap_or(palette.mantle);
+        ui.painter()
+            .rect_filled(terminal_rect, 0.0, pane_backing_color);
         if has_terminal {
             self.state.record_pane_area(terminal_rect);
             if native_backend {
@@ -1118,8 +1147,8 @@ impl BoottyApp {
                 // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
                 if self.state.native_multi_pane() {
                     // show_split_panes swaps in the focused widget itself (after click-to-focus).
-                    self.show_split_panes(ui, terminal_rect, palette);
-                    self.show_pane_dividers(ui, terminal_rect, palette);
+                    self.show_split_panes(ui, terminal_rect, palette, pane_backing_color);
+                    self.show_pane_dividers(ui, terminal_rect, palette, notch_chrome_color);
                 } else {
                     if let Some(focused) = self.state.focused_pane() {
                         self.focus_pane_widget(&focused);
@@ -1128,13 +1157,23 @@ impl BoottyApp {
                     // set the transition key on it so native tab-switches cross-fade like non-native.
                     self.terminal_widget
                         .set_transition_key(terminal_transition_key);
-                    self.show_single_terminal(ui, terminal_rect);
+                    self.show_single_terminal(
+                        ui,
+                        terminal_rect,
+                        chrome_config.pane_corner_radius,
+                        pane_backing_color,
+                    );
                 }
             } else {
                 self.focused_widget_key = None;
                 self.terminal_widget
                     .set_transition_key(terminal_transition_key);
-                self.show_single_terminal(ui, terminal_rect);
+                self.show_single_terminal(
+                    ui,
+                    terminal_rect,
+                    chrome_config.pane_corner_radius,
+                    pane_backing_color,
+                );
             }
             if !self.state.terminal_focused() {
                 let dim = self.state.config().chrome.unfocused_terminal_dim;
@@ -1229,6 +1268,17 @@ impl BoottyApp {
         if run {
             ctx.request_repaint();
         }
+    }
+
+    fn show_theme_picker_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_theme_picker_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        let mut effects = Vec::new();
+        self.state
+            .apply_theme_picker_event(dialog, event, &mut effects);
+        self.apply_effects(ctx, effects);
     }
 
     /// Drain Luau `bootty.window` requests from both workers, render the active
@@ -1384,6 +1434,13 @@ impl eframe::App for BoottyApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let system_variant = match ui.ctx().system_theme().unwrap_or(egui::Theme::Dark) {
+            egui::Theme::Light => AppearanceVariant::Light,
+            egui::Theme::Dark => AppearanceVariant::Dark,
+        };
+        let variant = self.state.config().appearance.mode.variant(system_variant);
+        self.state.set_appearance_variant(variant);
+        self.sync_extension_theme(ui.ctx());
         let palette = self.state.ui_theme().palette;
         egui::Frame::NONE.fill(palette.mantle).show(ui, |ui| {
             if self.settings_open {
@@ -1399,6 +1456,7 @@ impl eframe::App for BoottyApp {
             self.show_ditch_session_dialog(ui.ctx());
             self.show_keybind_help_dialog(ui.ctx());
             self.show_command_palette_dialog(ui.ctx());
+            self.show_theme_picker_dialog(ui.ctx());
             self.drive_lua_windows(ui.ctx());
         }
     }
@@ -1508,8 +1566,11 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_left_padding_is_flush_next_to_left_sidebar() {
-        assert_eq!(status_bar_left_padding(true, false), 0.0);
+    fn status_bar_left_padding_keeps_edge_spacing() {
+        assert_eq!(
+            status_bar_left_padding(true, false),
+            chrome::STATUS_EDGE_PAD
+        );
         assert_eq!(
             status_bar_left_padding(false, false),
             chrome::STATUS_EDGE_PAD

@@ -57,7 +57,7 @@ impl CommandPaletteDialog {
         let matches = filtered(&self.commands, &self.filter);
         matches
             .get(self.selected)
-            .and_then(|&index| self.commands.get(index))
+            .and_then(|matched| self.commands.get(matched.index))
             .map(|command| command.action())
     }
 
@@ -66,15 +66,25 @@ impl CommandPaletteDialog {
         self.selected = list::clamp_selection(self.selected, matches.len());
         let rows: Vec<ListRow> = matches
             .iter()
-            .filter_map(|&index| self.commands.get(index))
-            .map(|command| ListRow {
-                icon: Some(command.icon().to_owned()),
-                primary: command.title().to_owned(),
-                secondary: Some(command.description().to_owned()),
-                trailing: command
+            .filter_map(|matched| {
+                self.commands
+                    .get(matched.index)
+                    .map(|command| (matched, command))
+            })
+            .map(|(matched, command)| {
+                let trailing = command
                     .palette_action()
-                    .and_then(|action| self.bindings.get(action).cloned()),
-                ..ListRow::default()
+                    .and_then(|action| self.bindings.get(action).cloned());
+                ListRow {
+                    icon: Some(command.icon().to_owned()),
+                    primary: command.title().to_owned(),
+                    primary_matches: matched.title_indices.clone(),
+                    secondary: Some(command.description().to_owned()),
+                    secondary_matches: matched.description_indices.clone(),
+                    trailing_matches: matched.action_indices.clone(),
+                    trailing_keybind: trailing,
+                    ..ListRow::default()
+                }
             })
             .collect();
         let list_max = overlay::list_max_height(ctx, 220.0, 560.0);
@@ -113,7 +123,7 @@ impl CommandPaletteDialog {
         if let Some(index) = result.inner
             && let Some(action) = matches
                 .get(index)
-                .and_then(|&i| self.commands.get(i))
+                .and_then(|matched| self.commands.get(matched.index))
                 .and_then(|command| command.palette_action())
         {
             return CommandPaletteEvent::Run(action);
@@ -125,20 +135,54 @@ impl CommandPaletteDialog {
     }
 }
 
-/// Indices of commands matching `filter` (fuzzy over title, action, description).
-fn filtered(commands: &[Command], filter: &str) -> Vec<usize> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchedCommand {
+    index: usize,
+    score: i32,
+    title_indices: Vec<usize>,
+    description_indices: Vec<usize>,
+    action_indices: Vec<usize>,
+}
+
+/// Commands matching `filter` (fuzzy over title, action, description), best-ranked first.
+fn filtered(commands: &[Command], filter: &str) -> Vec<MatchedCommand> {
     let filter = filter.trim();
-    commands
+    let mut matches = commands
         .iter()
         .enumerate()
-        .filter_map(|(index, command)| {
-            (filter.is_empty()
-                || overlay::fuzzy_match(command.title(), filter)
-                || overlay::fuzzy_match(command.action(), filter)
-                || overlay::fuzzy_match(command.description(), filter))
-            .then_some(index)
-        })
-        .collect()
+        .filter_map(|(index, command)| match_command(index, *command, filter))
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+    matches
+}
+
+fn match_command(index: usize, command: Command, filter: &str) -> Option<MatchedCommand> {
+    if filter.is_empty() {
+        return Some(MatchedCommand {
+            index,
+            score: 0,
+            title_indices: Vec::new(),
+            description_indices: Vec::new(),
+            action_indices: Vec::new(),
+        });
+    }
+    let title = overlay::fuzzy_match_info(command.title(), filter);
+    let action = overlay::fuzzy_match_info(command.action(), filter);
+    let description = overlay::fuzzy_match_info(command.description(), filter);
+    let score = title
+        .as_ref()
+        .map(|matched| matched.score + 5_000)
+        .into_iter()
+        .chain(action.as_ref().map(|matched| matched.score + 3_000))
+        .chain(description.as_ref().map(|matched| matched.score + 1_000))
+        .max()?;
+    Some(MatchedCommand {
+        index,
+        score,
+        title_indices: title.map_or_else(Vec::new, |matched| matched.indices),
+        description_indices: description.map_or_else(Vec::new, |matched| matched.indices),
+        action_indices: action.map_or_else(Vec::new, |matched| matched.indices),
+    })
 }
 
 #[cfg(test)]
@@ -154,5 +198,16 @@ mod tests {
         assert!(!filtered(&commands, "split").is_empty());
         assert!(filtered(&commands, "zzzznotacommand").is_empty());
         assert_eq!(filtered(&commands, "").len(), commands.len());
+    }
+
+    #[test]
+    fn filter_ranks_title_matches_before_description_matches() {
+        let commands: Vec<Command> = Command::all()
+            .filter(|command| command.palette_action().is_some())
+            .collect();
+        let matches = filtered(&commands, "theme");
+        let first = commands[matches[0].index];
+        assert_eq!(first, Command::SwitchTheme);
+        assert!(!matches[0].title_indices.is_empty());
     }
 }

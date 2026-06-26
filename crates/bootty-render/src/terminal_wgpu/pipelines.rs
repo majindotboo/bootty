@@ -156,6 +156,21 @@ pub(super) fn text_pipeline(
     })
 }
 
+fn premultiplied_alpha_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
 pub(super) fn image_pipeline(
     device: &wgpu::Device,
     target_format: wgpu::TextureFormat,
@@ -192,7 +207,7 @@ pub(super) fn image_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format: target_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(premultiplied_alpha_blend()),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),

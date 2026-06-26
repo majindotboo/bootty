@@ -203,7 +203,6 @@ fn sidebar_ui_frame(ui: &mut egui::Ui, sessions: &[MuxSession], selected: Option
                     unfocused_dim: 0.0,
                     fullscreen: false,
                     hover_override: None,
-                    fullscreen_hover_override: None,
                     current_override: None,
                     border_override: None,
                 },

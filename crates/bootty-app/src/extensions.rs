@@ -2884,7 +2884,7 @@ mod tests {
     #[test]
     fn windows_module_anchors_each_tab_to_its_window_id() {
         let theme = [
-            ("primary".to_owned(), "#89b4fa".to_owned()),
+            ("accent".to_owned(), "#89b4fa".to_owned()),
             ("surface".to_owned(), "#313244".to_owned()),
             ("base".to_owned(), "#1e1e2e".to_owned()),
             ("subtext".to_owned(), "#a6adc8".to_owned()),

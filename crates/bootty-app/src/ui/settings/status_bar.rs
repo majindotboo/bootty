@@ -12,11 +12,21 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     super::section(ui, palette, "STATUS BAR");
     super::settings_row(ui, palette, "Height", "Status strip height.", |ui| {
         let mut height = win.config.chrome.status_height;
-        if super::settings_slider(ui, palette, &mut height, 20.0..=80.0) {
+        if super::settings_slider_with_edit(
+            ui,
+            palette,
+            &mut height,
+            super::NumberEditSpec {
+                path: &["chrome", "status-height"],
+                range: 20.0..=80.0,
+                suffix: " px",
+                precision: 1,
+                display_scale: 1.0,
+            },
+        ) {
             win.config.chrome.status_height = height;
             win.set_f32(&["chrome", "status-height"], height);
         }
-        super::settings_value_chip(ui, palette, &format!("{height:.0} px"));
     });
     super::settings_toggle_row(
         ui,
@@ -435,6 +445,7 @@ fn optional_color(
             r: rgb[0],
             g: rgb[1],
             b: rgb[2],
+            a: 0xff,
         });
         changed = true;
     }

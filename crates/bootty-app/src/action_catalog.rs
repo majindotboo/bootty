@@ -144,6 +144,26 @@ pub enum Command {
         detailed_message = "Browse the active keybindings"
     )]
     KeyboardShortcuts,
+    #[strum(
+        message = "Use System Appearance",
+        detailed_message = "Follow the operating system light/dark appearance"
+    )]
+    UseSystemAppearance,
+    #[strum(
+        message = "Use Light Appearance",
+        detailed_message = "Switch Bootty to the configured light appearance branch"
+    )]
+    UseLightAppearance,
+    #[strum(
+        message = "Use Dark Appearance",
+        detailed_message = "Switch Bootty to the configured dark appearance branch"
+    )]
+    UseDarkAppearance,
+    #[strum(
+        message = "Switch Theme",
+        detailed_message = "Pick a theme for the active light or dark appearance branch"
+    )]
+    SwitchTheme,
     #[strum(message = "Settings", detailed_message = "Open the settings surface")]
     OpenSettings,
     #[strum(
@@ -280,6 +300,10 @@ impl Command {
             Self::DecreaseFontSize => "decrease_font_size",
             Self::ResetFontSize => "reset_font_size",
             Self::KeyboardShortcuts => "show_keybinds",
+            Self::UseSystemAppearance => "change_appearance:system",
+            Self::UseLightAppearance => "change_appearance:light",
+            Self::UseDarkAppearance => "change_appearance:dark",
+            Self::SwitchTheme => "switch_theme",
             Self::OpenSettings => "open_settings",
             Self::ReloadConfig => "reload_config",
             Self::Quit => "quit",
@@ -333,6 +357,10 @@ impl Command {
             Self::DecreaseFontSize => "zoom-out",
             Self::ResetFontSize | Self::SetFontSize => "type",
             Self::KeyboardShortcuts => "keyboard",
+            Self::UseSystemAppearance | Self::UseLightAppearance | Self::UseDarkAppearance => {
+                "sun-moon"
+            }
+            Self::SwitchTheme => "palette",
             Self::OpenSettings => "settings",
             Self::ReloadConfig => "refresh-cw",
             Self::Quit => "power",

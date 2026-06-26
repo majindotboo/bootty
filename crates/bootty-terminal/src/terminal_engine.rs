@@ -12,8 +12,8 @@ use crate::{
         CellMetrics, GridPoint, SurfacePoint, TerminalGeometry, TerminalPadding, TerminalSurface,
     },
     terminal_image::{
-        KittyImageDataCache, KittyImageFrame, KittyVirtualCell, append_virtual_image_placements,
-        collect_kitty_image_frame,
+        KittyImageDataCache, KittyImageFrame, KittyImagePlacement, KittyVirtualCell,
+        append_virtual_image_placements, collect_kitty_image_frame,
     },
     terminal_png_decoder::BoottyPngDecoder,
 };
@@ -232,7 +232,6 @@ struct CachedRenderRow {
     text: Vec<char>,
     virtual_cells: Vec<KittyVirtualCell>,
     selection: Option<FrameSelection>,
-    has_virtual_placeholder: bool,
 }
 
 impl CachedRenderRow {
@@ -241,7 +240,6 @@ impl CachedRenderRow {
         self.text.clear();
         self.virtual_cells.clear();
         self.selection = None;
-        self.has_virtual_placeholder = false;
     }
 }
 
@@ -257,7 +255,6 @@ fn extract_render_row(
     out.clear();
     let raw_row = row.raw_row()?;
     let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
-    out.has_virtual_placeholder = raw_row.has_kitty_virtual_placeholder()?;
     out.selection = row.selection()?.map(|selection| FrameSelection {
         row: row_index,
         start_col: selection.start_x,
@@ -1262,6 +1259,45 @@ fn hyperlink_uri_at(
             Err(_) => return None,
         }
     }
+}
+
+fn placement_rows_overlap_content(
+    placement: &KittyImagePlacement,
+    surface: TerminalSurface,
+    rows: &[CachedRenderRow],
+) -> bool {
+    let origin = surface.content_origin();
+    let min_y = placement.destination.min_y - origin.y;
+    let max_y = placement.destination.max_y - origin.y;
+    let min_x = placement.destination.min_x - origin.x;
+    let max_x = placement.destination.max_x - origin.x;
+    if max_y <= 0.0
+        || min_y >= rows.len() as f32 * surface.cell.height
+        || max_x <= 0.0
+        || surface.cell.width <= 0.0
+        || surface.cell.height <= 0.0
+    {
+        return false;
+    }
+
+    let start = (min_y.max(0.0) / surface.cell.height).floor() as usize;
+    let end = (max_y.max(0.0) / surface.cell.height).ceil() as usize;
+    let end = end.saturating_sub(1).min(rows.len().saturating_sub(1));
+    let start_col = (min_x.max(0.0) / surface.cell.width).floor() as u16;
+    let end_col = (max_x.max(0.0) / surface.cell.width).ceil().max(1.0) as u16;
+    let end_col = end_col.saturating_sub(1);
+    (start..=end).any(|index| {
+        rows.get(index).is_some_and(|row| {
+            row.cells.iter().any(|cell| {
+                cell.x >= start_col
+                    && cell.x <= end_col
+                    && row
+                        .text
+                        .get(cell.text_start..cell.text_start + cell.text_len)
+                        .is_some_and(|text| text.iter().any(|ch| !ch.is_whitespace()))
+            })
+        })
+    })
 }
 
 impl TerminalEngine {
@@ -2345,12 +2381,8 @@ impl TerminalEngine {
             ..FrameStats::default()
         };
 
-        let mut virtual_placeholder_rows = Vec::new();
         let mut virtual_cells = Vec::new();
-        for (row_index, row) in self.row_cache.iter().enumerate() {
-            if row.has_virtual_placeholder {
-                virtual_placeholder_rows.push(row_index as u16);
-            }
+        for row in &self.row_cache {
             if let Some(selection) = row.selection {
                 self.frame.selections.push(selection);
             }
@@ -2385,8 +2417,17 @@ impl TerminalEngine {
                 &mut self.image_data_cache,
             )
             .unwrap_or_default();
-            append_virtual_image_placements(&self.terminal, surface, &mut images, &virtual_cells)?;
-            images.virtual_placeholder_rows = virtual_placeholder_rows;
+            images.placements.retain(|placement| {
+                !placement_rows_overlap_content(placement, surface, &self.row_cache)
+            });
+            images.virtual_placeholder_rows = append_virtual_image_placements(
+                &self.terminal,
+                surface,
+                &mut images,
+                &virtual_cells,
+                &mut self.image_data_cache,
+            )?;
+            self.image_data_cache.retain_frame(&images);
             self.frame.images = images;
         }
 

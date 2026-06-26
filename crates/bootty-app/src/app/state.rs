@@ -15,8 +15,8 @@ use crate::{
         keybind_action_for_name, split_app_actions_for_bindings,
     },
     config::{
-        BoottyConfig, ConfigState, WindowConfig, load_config_from_path,
-        load_or_create_config_document,
+        AppearanceMode, AppearanceVariant, BoottyConfig, ConfigState, WindowConfig,
+        load_config_from_path, load_or_create_config_document,
     },
     config_reload::{CONFIG_HOT_RELOAD_INTERVAL, ConfigHotReload, new_session_only_config_changed},
     diagnostics::{
@@ -56,6 +56,7 @@ use crate::{
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
         rename::{RenameSessionDialog, RenameSessionEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
+        theme_picker::{ThemePickerDialog, ThemePickerEvent},
     },
 };
 use bootty_terminal::terminal_engine::{
@@ -133,6 +134,7 @@ pub struct AppState {
     last_pane_area: Option<Rect>,
     terminal_view_transform: ViewTransform,
     config_state: ConfigState,
+    active_appearance_variant: AppearanceVariant,
     input_focus: InputFocus,
     app_key_bindings: AppKeyBindings,
     sidebar_key_bindings: SidebarKeyBindings,
@@ -173,6 +175,8 @@ pub struct AppState {
     ditch_session_dialog: Option<DitchSessionDialog>,
     keybind_help_dialog: Option<KeybindHelpDialog>,
     command_palette_dialog: Option<CommandPaletteDialog>,
+    theme_picker_dialog: Option<ThemePickerDialog>,
+    theme_picker_restore_config: Option<BoottyConfig>,
     /// A command-palette choice waiting to be dispatched on the next input pass,
     /// where the viewport snapshot and effect sink are in scope.
     pending_command: Option<KeybindAction>,
@@ -182,9 +186,13 @@ pub struct AppState {
 
 fn terminal_session_config_with_side_effects(
     config: &BoottyConfig,
+    variant: AppearanceVariant,
     side_effect_tx: &mpsc::Sender<TerminalSideEffect>,
 ) -> TerminalSessionConfig {
     let mut session_config = config.terminal_session_config();
+    session_config.colors = config
+        .colors_for_appearance(variant)
+        .terminal_color_config();
     session_config.side_effect_tx = Some(side_effect_tx.clone());
     session_config
 }
@@ -456,8 +464,12 @@ impl AppState {
             SidebarKeyBindings::from_keybinds(&config.input.sidebar_keybind)?;
         let stability_trace = StabilityTrace::from_config(&config);
         let (terminal_side_effect_tx, terminal_side_effect_rx) = mpsc::channel();
-        let session_config =
-            terminal_session_config_with_side_effects(&config, &terminal_side_effect_tx);
+        let active_appearance_variant = config.appearance.mode.variant(AppearanceVariant::Dark);
+        let session_config = terminal_session_config_with_side_effects(
+            &config,
+            active_appearance_variant,
+            &terminal_side_effect_tx,
+        );
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
         let session_order = SessionOrderStore::lazy_for_config_path(&config.config_path);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
@@ -485,6 +497,7 @@ impl AppState {
             chrome_handle_rects: Vec::new(),
             terminal_view_transform: ViewTransform::IDENTITY,
             config_state: ConfigState::new(config),
+            active_appearance_variant,
             input_focus: InputFocus::Terminal,
             app_key_bindings,
             sidebar_key_bindings,
@@ -515,6 +528,8 @@ impl AppState {
             session_picker_dialog: None,
             rename_session_dialog: None,
             command_palette_dialog: None,
+            theme_picker_dialog: None,
+            theme_picker_restore_config: None,
             pending_command: None,
             ditch_session_dialog: None,
             keybind_help_dialog: None,
@@ -551,8 +566,129 @@ impl AppState {
         }
     }
 
+    fn persist_appearance_mode(&mut self, mode: AppearanceMode, effects: &mut Vec<AppEffect>) {
+        let path = self.config().config_path.clone();
+        let token = match mode {
+            AppearanceMode::System => "system",
+            AppearanceMode::Light => "light",
+            AppearanceMode::Dark => "dark",
+        };
+        let result = (|| {
+            let mut document = load_or_create_config_document(&path)?;
+            document.set_item(
+                &["appearance", "mode"],
+                bootty_config::toml_edit::value(token),
+            )?;
+            document.write_to_disk()
+        })();
+        match result {
+            Ok(()) => {
+                self.config_hot_reload.refresh_after_reload(&path);
+                self.reload_config(effects);
+            }
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
+    fn persist_active_theme(&mut self, theme: &str, effects: &mut Vec<AppEffect>) {
+        let path = self.config().config_path.clone();
+        let branch = match self.active_appearance_variant {
+            AppearanceVariant::Light => "light",
+            AppearanceVariant::Dark => "dark",
+        };
+        let result = (|| {
+            let mut document = load_or_create_config_document(&path)?;
+            document.set_item(
+                &["appearance", branch, "theme"],
+                bootty_config::toml_edit::value(theme),
+            )?;
+            document.write_to_disk()
+        })();
+        match result {
+            Ok(()) => {
+                self.config_hot_reload.refresh_after_reload(&path);
+                self.reload_config(effects);
+            }
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
+    fn preview_active_theme(&mut self, theme: &str, effects: &mut Vec<AppEffect>) {
+        let path = self.config().config_path.clone();
+        let Some(config_dir) = path.parent() else {
+            return;
+        };
+        let resolved = match bootty_config::config::resolve_theme(theme, config_dir) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                return;
+            }
+        };
+        let variant = self.active_appearance_variant;
+        let config = self.config_state.current_mut();
+        let branch = match variant {
+            AppearanceVariant::Light => &mut config.appearance.light,
+            AppearanceVariant::Dark => &mut config.appearance.dark,
+        };
+        branch.theme = Some(theme.to_owned());
+        branch.colors = resolved.colors;
+        let colors = self
+            .config()
+            .colors_for_appearance(variant)
+            .terminal_color_config();
+        match self.terminal.set_colors(colors) {
+            Ok(()) => effects.push(AppEffect::RequestRepaint),
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
+    fn restore_theme_picker_preview(&mut self) -> bool {
+        let Some(config) = self.theme_picker_restore_config.clone() else {
+            return false;
+        };
+        self.config_state.accept(config);
+        let colors = self
+            .config()
+            .colors_for_appearance(self.active_appearance_variant)
+            .terminal_color_config();
+        match self.terminal.set_colors(colors) {
+            Ok(()) => true,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    pub fn theme_picker_preview_active(&self) -> bool {
+        self.theme_picker_restore_config.is_some() && self.theme_picker_dialog.is_some()
+    }
+
+    pub fn set_appearance_variant(&mut self, variant: AppearanceVariant) {
+        if self.active_appearance_variant == variant {
+            return;
+        }
+        let colors = self
+            .config()
+            .colors_for_appearance(variant)
+            .terminal_color_config();
+        match self.terminal.set_colors(colors) {
+            Ok(()) => {
+                self.active_appearance_variant = variant;
+            }
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+            }
+        }
+    }
+
+    pub fn active_appearance_variant(&self) -> AppearanceVariant {
+        self.active_appearance_variant
+    }
+
     pub fn ui_theme(&self) -> bootty_ui::Theme {
-        theme_from_config(self.config())
+        theme_from_config(self.config(), self.active_appearance_variant)
     }
 
     pub fn mux(&self) -> &MuxController {
@@ -810,6 +946,7 @@ impl AppState {
             if !layout.contains(&new_pane) {
                 layout.split_focused(new_pane, direction);
             }
+            let _ = self.sync_terminal_panes();
         }
     }
 
@@ -1029,6 +1166,45 @@ impl AppState {
                 // where the viewport snapshot and effect sink are available.
                 self.input_focus = InputFocus::Terminal;
                 self.pending_command = keybind_action_for_name(action);
+            }
+        }
+    }
+
+    pub fn take_theme_picker_dialog(&mut self) -> Option<ThemePickerDialog> {
+        self.theme_picker_dialog.take()
+    }
+
+    pub fn apply_theme_picker_event(
+        &mut self,
+        dialog: ThemePickerDialog,
+        event: ThemePickerEvent,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        match event {
+            ThemePickerEvent::None => {
+                self.theme_picker_dialog = Some(dialog);
+            }
+            ThemePickerEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+                if self.restore_theme_picker_preview() {
+                    effects.push(AppEffect::RequestRepaint);
+                }
+                self.theme_picker_restore_config = None;
+            }
+            ThemePickerEvent::RestorePreview => {
+                if self.restore_theme_picker_preview() {
+                    effects.push(AppEffect::RequestRepaint);
+                }
+                self.theme_picker_dialog = Some(dialog);
+            }
+            ThemePickerEvent::Preview(theme) => {
+                self.preview_active_theme(&theme, effects);
+                self.theme_picker_dialog = Some(dialog);
+            }
+            ThemePickerEvent::Select(theme) => {
+                self.input_focus = InputFocus::Terminal;
+                self.theme_picker_restore_config = None;
+                self.persist_active_theme(&theme, effects);
             }
         }
     }
@@ -1353,13 +1529,17 @@ impl AppState {
     }
 
     /// Only one floating dialog is shown at a time; opening one closes the rest.
-    fn close_overlay_dialogs(&mut self) {
+    fn close_overlay_dialogs(&mut self) -> bool {
+        let restored_preview = self.restore_theme_picker_preview();
+        self.theme_picker_restore_config = None;
         self.new_mux_session_dialog = None;
         self.session_picker_dialog = None;
         self.rename_session_dialog = None;
         self.ditch_session_dialog = None;
         self.keybind_help_dialog = None;
         self.command_palette_dialog = None;
+        self.theme_picker_dialog = None;
+        restored_preview
     }
 
     fn open_new_mux_session_dialog(&mut self) {
@@ -1429,6 +1609,27 @@ impl AppState {
         self.input_focus = InputFocus::Picker;
     }
 
+    fn open_theme_picker_dialog(&mut self) {
+        let config = self.config();
+        let branch = match self.active_appearance_variant {
+            AppearanceVariant::Light => "Light appearance",
+            AppearanceVariant::Dark => "Dark appearance",
+        };
+        let current = config
+            .theme_for_appearance(self.active_appearance_variant)
+            .map(str::to_owned);
+        let config_path = config.config_path.clone();
+        let restore_config = config.clone();
+        self.close_overlay_dialogs();
+        self.theme_picker_restore_config = Some(restore_config);
+        self.theme_picker_dialog = Some(ThemePickerDialog::open(
+            &config_path,
+            current.as_deref(),
+            branch,
+        ));
+        self.input_focus = InputFocus::Picker;
+    }
+
     fn direct_terminal_input_enabled(&self) -> bool {
         self.input_focus.terminal_owns_input()
             && self.new_mux_session_dialog.is_none()
@@ -1437,6 +1638,7 @@ impl AppState {
             && self.ditch_session_dialog.is_none()
             && self.keybind_help_dialog.is_none()
             && self.command_palette_dialog.is_none()
+            && self.theme_picker_dialog.is_none()
             && !self.lua_window_open
             && !self.settings_open
     }
@@ -1479,10 +1681,12 @@ impl AppState {
                 }
             };
 
-        if previous.colors != next.colors
+        let previous_colors = previous.colors_for_appearance(self.active_appearance_variant);
+        let next_colors = next.colors_for_appearance(self.active_appearance_variant);
+        if previous_colors != next_colors
             && let Err(error) = self
                 .terminal
-                .set_colors(next.colors.terminal_color_config())
+                .set_colors(next_colors.terminal_color_config())
         {
             self.config_state.reject(error.to_string());
             self.last_error = self.config_state.last_error().map(str::to_owned);
@@ -1525,8 +1729,11 @@ impl AppState {
         self.macos_option_as_alt = next.input.macos_option_as_alt.into();
         self.app_key_bindings = app_key_bindings;
         self.sidebar_key_bindings = sidebar_key_bindings;
-        let session_config =
-            terminal_session_config_with_side_effects(&next, &self.terminal_side_effect_tx);
+        let session_config = terminal_session_config_with_side_effects(
+            &next,
+            self.active_appearance_variant,
+            &self.terminal_side_effect_tx,
+        );
         self.terminal.set_terminal_config(session_config);
         self.has_new_session_config_changes = new_session_only_config_changed(&previous, &next)
             || self.has_new_session_config_changes;
@@ -1862,6 +2069,13 @@ impl AppState {
             }
             KeybindAction::App(AppAction::CommandPalette) => {
                 self.open_command_palette_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
+            KeybindAction::App(AppAction::ChangeAppearance(mode)) => {
+                self.persist_appearance_mode(mode, effects);
+            }
+            KeybindAction::App(AppAction::SwitchTheme) => {
+                self.open_theme_picker_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
             KeybindAction::App(AppAction::RenameSession) => {

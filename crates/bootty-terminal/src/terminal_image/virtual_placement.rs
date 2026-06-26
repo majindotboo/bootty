@@ -4,7 +4,8 @@ use anyhow::Result;
 use libghostty_vt::{Terminal, kitty::graphics::SourceRect, style::StyleColor};
 
 use super::{
-    KittyImageFrame, KittyImageLayer, KittyImagePlacement, KittyVirtualCell, KittyVirtualPlacement,
+    KittyImageDataCache, KittyImageFrame, KittyImageLayer, KittyImagePlacement, KittyVirtualCell,
+    KittyVirtualPlacement,
 };
 use crate::geometry::{SurfaceRect, TerminalSurface};
 
@@ -314,17 +315,27 @@ pub(super) fn append_virtual_image_placements(
     surface: TerminalSurface,
     frame: &mut KittyImageFrame,
     cells: &[KittyVirtualCell],
-) -> Result<()> {
+    image_cache: &mut KittyImageDataCache,
+) -> Result<Vec<u16>> {
     let graphics = terminal.kitty_graphics()?;
     let storage = virtual_storage(&frame.virtual_placements);
-    let mut image_data = HashMap::<u32, Arc<Vec<u8>>>::new();
+    let placement_start = frame.placements.len();
+    let mut rendered_rows = Vec::new();
     let mut run: Option<IncompletePlacement> = None;
 
     for cell in cells {
         let current = IncompletePlacement::from_cell(cell);
         let Some(current) = current else {
             if let Some(done) = run.take() {
-                append_run(surface, frame, &graphics, &storage, &mut image_data, done)?;
+                append_run(
+                    surface,
+                    frame,
+                    &graphics,
+                    &storage,
+                    image_cache,
+                    done,
+                    &mut rendered_rows,
+                )?;
             }
             continue;
         };
@@ -334,16 +345,36 @@ pub(super) fn append_virtual_image_placements(
                 continue;
             }
             let done = run.take().expect("run exists");
-            append_run(surface, frame, &graphics, &storage, &mut image_data, done)?;
+            append_run(
+                surface,
+                frame,
+                &graphics,
+                &storage,
+                image_cache,
+                done,
+                &mut rendered_rows,
+            )?;
         }
         run = Some(current.with_default_origin());
     }
 
     if let Some(done) = run {
-        append_run(surface, frame, &graphics, &storage, &mut image_data, done)?;
+        append_run(
+            surface,
+            frame,
+            &graphics,
+            &storage,
+            image_cache,
+            done,
+            &mut rendered_rows,
+        )?;
     }
 
-    Ok(())
+    merge_adjacent_virtual_image_rows(&mut frame.placements, placement_start);
+
+    rendered_rows.sort_unstable();
+    rendered_rows.dedup();
+    Ok(rendered_rows)
 }
 
 fn virtual_storage(
@@ -361,30 +392,33 @@ fn append_run(
     frame: &mut KittyImageFrame,
     graphics: &libghostty_vt::kitty::graphics::Graphics<'_>,
     storage: &HashMap<(u32, u32), KittyVirtualPlacement>,
-    image_data: &mut HashMap<u32, Arc<Vec<u8>>>,
+    image_cache: &mut KittyImageDataCache,
     run: IncompletePlacement,
+    rendered_rows: &mut Vec<u16>,
 ) -> Result<()> {
     let placement = run.complete();
     let Some(storage_placement) = find_storage_placement(storage, &placement) else {
         return Ok(());
     };
-    let Some(image) = graphics.image(placement.image_id) else {
+    let image_id = storage_placement.image_id;
+    let Some(image) = graphics.image(image_id) else {
         return Ok(());
     };
     let grid = placement.grid(storage_placement, image.width()?, image.height()?, surface)?;
     let Some(rendered) = placement.render(grid, image.width()?, image.height()?, surface) else {
         return Ok(());
     };
-    let data = if let Some(data) = image_data.get(&placement.image_id) {
-        data.clone()
-    } else {
-        let data = Arc::new(image.data()?.to_vec());
-        image_data.insert(placement.image_id, data.clone());
-        data
-    };
+    let data = image_cache.data_for_image(
+        image_id,
+        image.number()?,
+        image.width()?,
+        image.height()?,
+        image.format()?,
+        image.data()?,
+    );
 
     frame.placements.push(KittyImagePlacement {
-        image_id: placement.image_id,
+        image_id,
         placement_id: placement.placement_id,
         layer: KittyImageLayer::from_z(storage_placement.z),
         image_width: image.width()?,
@@ -394,8 +428,54 @@ fn append_run(
         destination: rendered.destination,
         data,
     });
+    rendered_rows.push(placement.y);
 
     Ok(())
+}
+
+fn merge_adjacent_virtual_image_rows(placements: &mut Vec<KittyImagePlacement>, start: usize) {
+    if placements.len().saturating_sub(start) < 2 {
+        return;
+    }
+
+    let mut merged = Vec::with_capacity(placements.len() - start);
+    for placement in placements.drain(start..) {
+        if let Some(previous) = merged.last_mut()
+            && can_merge_virtual_image_rows(previous, &placement)
+        {
+            previous.source.height += placement.source.height;
+            previous.destination.max_y = placement.destination.max_y;
+            continue;
+        }
+        merged.push(placement);
+    }
+    placements.extend(merged);
+}
+
+fn can_merge_virtual_image_rows(
+    previous: &KittyImagePlacement,
+    next: &KittyImagePlacement,
+) -> bool {
+    previous.image_id == next.image_id
+        && previous.placement_id == next.placement_id
+        && previous.layer == next.layer
+        && previous.image_width == next.image_width
+        && previous.image_height == next.image_height
+        && previous.image_format == next.image_format
+        && Arc::ptr_eq(&previous.data, &next.data)
+        && previous.source.x == next.source.x
+        && previous.source.width == next.source.width
+        && previous.source.y + previous.source.height == next.source.y
+        && rect_edges_equal(previous.destination.min_x, next.destination.min_x)
+        && rect_edges_touch_or_overlap(previous.destination.max_y, next.destination.min_y)
+}
+
+fn rect_edges_equal(left: f32, right: f32) -> bool {
+    (left - right).abs() <= f32::EPSILON
+}
+
+fn rect_edges_touch_or_overlap(previous_max: f32, next_min: f32) -> bool {
+    next_min <= previous_max + f32::EPSILON
 }
 
 fn find_storage_placement(
@@ -403,14 +483,35 @@ fn find_storage_placement(
     placement: &Placement,
 ) -> Option<KittyVirtualPlacement> {
     if placement.placement_id > 0 {
-        return storage
+        if let Some(stored) = storage
             .get(&(placement.image_id, placement.placement_id))
-            .copied();
+            .copied()
+        {
+            return Some(stored);
+        }
+        return unique_storage_placement(storage, |stored| {
+            stored.placement_id == placement.placement_id
+        });
     }
     storage
         .values()
         .find(|stored| stored.image_id == placement.image_id)
         .copied()
+        .or_else(|| unique_storage_placement(storage, |_| true))
+}
+
+fn unique_storage_placement(
+    storage: &HashMap<(u32, u32), KittyVirtualPlacement>,
+    mut matches: impl FnMut(&KittyVirtualPlacement) -> bool,
+) -> Option<KittyVirtualPlacement> {
+    let mut found = None;
+    for stored in storage.values().filter(|stored| matches(stored)) {
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*stored);
+    }
+    found
 }
 
 #[derive(Clone, Debug)]
@@ -488,7 +589,6 @@ impl IncompletePlacement {
             col: self.col.unwrap_or(0),
             row: self.row.unwrap_or(0),
             width: self.width,
-            height: 1,
         }
     }
 }
@@ -502,7 +602,6 @@ struct Placement {
     col: u32,
     row: u32,
     width: u32,
-    height: u32,
 }
 
 impl Placement {
@@ -531,153 +630,52 @@ impl Placement {
         image_height: u32,
         surface: TerminalSurface,
     ) -> Option<RenderedPlacement> {
+        if grid.columns == 0 || grid.rows == 0 || image_width == 0 || image_height == 0 {
+            return None;
+        }
+
         let image_width = f64::from(image_width);
         let image_height = f64::from(image_height);
-        let grid_width = f64::from(grid.columns) * f64::from(surface.cell.width);
-        let grid_height = f64::from(grid.rows) * f64::from(surface.cell.height);
-
-        let scale = if image_width * grid_height > image_height * grid_width {
-            let scale = grid_width / image_width.max(1.0);
-            Scale {
-                x: scale,
-                y: scale,
-                x_offset: 0.0,
-                y_offset: (grid_height - image_height * scale) / 2.0,
-            }
-        } else {
-            let scale = grid_height / image_height.max(1.0);
-            Scale {
-                x: scale,
-                y: scale,
-                x_offset: (grid_width - image_width * scale) / 2.0,
-                y_offset: 0.0,
-            }
+        let source = FloatRect {
+            x: image_width * (f64::from(self.col) / f64::from(grid.columns)),
+            y: image_height * (f64::from(self.row) / f64::from(grid.rows)),
+            width: image_width * (f64::from(self.width) / f64::from(grid.columns)),
+            height: image_height / f64::from(grid.rows),
         };
-
-        let image_scaled = ScaledImage {
-            x_offset: scale.x_offset / scale.x,
-            y_offset: scale.y_offset / scale.y,
-            width: image_width + (scale.x_offset / scale.x * 2.0),
-            height: image_height + (scale.y_offset / scale.y * 2.0),
-        };
-        let mut source = FloatRect {
-            x: image_scaled.width * (f64::from(self.col) / f64::from(grid.columns)),
-            y: image_scaled.height * (f64::from(self.row) / f64::from(grid.rows)),
-            width: image_scaled.width * (f64::from(self.width) / f64::from(grid.columns)),
-            height: image_scaled.height * (f64::from(self.height) / f64::from(grid.rows)),
-        };
-        let mut destination = FloatRect {
-            x: 0.0,
-            y: 0.0,
-            width: f64::from(self.width) * f64::from(surface.cell.width),
-            height: f64::from(self.height) * f64::from(surface.cell.height),
-        };
-
-        clip_axis(
-            AxisSlice {
-                source_offset: &mut source.y,
-                source_size: &mut source.height,
-                dest_offset: &mut destination.y,
-                dest_size: &mut destination.height,
-            },
-            AxisBounds {
-                image_offset: image_scaled.y_offset,
-                scaled_size: image_scaled.height,
-                image_size: image_height,
-                scale: scale.y,
-            },
-        );
-        clip_axis(
-            AxisSlice {
-                source_offset: &mut source.x,
-                source_size: &mut source.width,
-                dest_offset: &mut destination.x,
-                dest_size: &mut destination.width,
-            },
-            AxisBounds {
-                image_offset: image_scaled.x_offset,
-                scaled_size: image_scaled.width,
-                image_size: image_width,
-                scale: scale.x,
-            },
-        );
         if source.width <= 0.0 || source.height <= 0.0 {
             return None;
         }
 
         let origin = surface.content_origin();
         Some(RenderedPlacement {
-            source: SourceRect {
-                x: source.x.round() as u32,
-                y: source.y.round() as u32,
-                width: source.width.round() as u32,
-                height: source.height.round() as u32,
-            },
+            source: source_rect_from_float(source)?,
             destination: SurfaceRect::from_min_size(
-                origin.x + f32::from(self.x) * surface.cell.width + destination.x as f32,
-                origin.y + f32::from(self.y) * surface.cell.height + destination.y as f32,
-                destination.width.round() as f32,
-                destination.height.round() as f32,
+                origin.x + f32::from(self.x) * surface.cell.width,
+                origin.y + f32::from(self.y) * surface.cell.height,
+                self.width as f32 * surface.cell.width,
+                surface.cell.height,
             ),
         })
     }
 }
 
-fn clip_axis(axis: AxisSlice<'_>, bounds: AxisBounds) {
-    if *axis.source_offset < bounds.image_offset {
-        let offset = bounds.image_offset - *axis.source_offset;
-        *axis.source_size -= offset;
-        *axis.dest_offset = offset * bounds.scale;
-        *axis.dest_size -= offset * bounds.scale;
-        *axis.source_offset = 0.0;
-        if *axis.source_size > bounds.image_size {
-            *axis.source_size = bounds.image_size;
-            *axis.dest_size = bounds.image_size * bounds.scale;
-        }
-    } else if *axis.source_offset + *axis.source_size > bounds.scaled_size - bounds.image_offset {
-        *axis.source_offset -= bounds.image_offset;
-        *axis.source_size = bounds.scaled_size - bounds.image_offset - *axis.source_offset;
-        *axis.source_size -= bounds.image_offset;
-        *axis.dest_size = *axis.source_size * bounds.scale;
-    } else {
-        *axis.source_offset -= bounds.image_offset;
-    }
-}
-
-struct AxisSlice<'a> {
-    source_offset: &'a mut f64,
-    source_size: &'a mut f64,
-    dest_offset: &'a mut f64,
-    dest_size: &'a mut f64,
-}
-
-struct AxisBounds {
-    image_offset: f64,
-    scaled_size: f64,
-    image_size: f64,
-    scale: f64,
+fn source_rect_from_float(source: FloatRect) -> Option<SourceRect> {
+    let x = source.x.round() as u32;
+    let y = source.y.round() as u32;
+    let max_x = (source.x + source.width).round() as u32;
+    let max_y = (source.y + source.height).round() as u32;
+    Some(SourceRect {
+        x,
+        y,
+        width: max_x.checked_sub(x)?,
+        height: max_y.checked_sub(y)?,
+    })
 }
 
 #[derive(Clone, Copy)]
 struct GridSize {
     rows: u32,
     columns: u32,
-}
-
-#[derive(Clone, Copy)]
-struct Scale {
-    x: f64,
-    y: f64,
-    x_offset: f64,
-    y_offset: f64,
-}
-
-#[derive(Clone, Copy)]
-struct ScaledImage {
-    x_offset: f64,
-    y_offset: f64,
-    width: f64,
-    height: f64,
 }
 
 #[derive(Clone, Copy)]
