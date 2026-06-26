@@ -553,11 +553,21 @@ fn normalized_feature(value: &str) -> Option<String> {
 fn slider(ui: &mut egui::Ui, win: &mut SettingsWindow, row: MetricSliderRow<'_>) {
     super::settings_row(ui, win.palette, row.label, row.help, |ui| {
         let mut value = *(row.field)(&mut win.config.font);
-        if super::settings_slider(ui, win.palette, &mut value, row.range) {
+        if super::settings_slider_with_edit(
+            ui,
+            win.palette,
+            &mut value,
+            super::NumberEditSpec {
+                path: row.path,
+                range: row.range,
+                suffix: row.suffix,
+                precision: 1,
+                display_scale: 1.0,
+            },
+        ) {
             *(row.field)(&mut win.config.font) = value;
             win.set_f32(row.path, value);
         }
-        super::settings_value_chip(ui, win.palette, &format!("{value:.1} {}", row.suffix));
     });
 }
 
@@ -584,11 +594,21 @@ fn optional_slider(ui: &mut egui::Ui, win: &mut SettingsWindow, row: MetricOverr
     super::settings_row(ui, win.palette, row.label, row.help, |ui| {
         let current = *(row.field)(&mut win.config.font);
         let mut value = current.unwrap_or(row.default_value);
-        if super::settings_slider(ui, win.palette, &mut value, row.range.clone()) {
+        if super::settings_slider_with_edit(
+            ui,
+            win.palette,
+            &mut value,
+            super::NumberEditSpec {
+                path: row.path,
+                range: row.range.clone(),
+                suffix: row.suffix,
+                precision: 1,
+                display_scale: 1.0,
+            },
+        ) {
             *(row.field)(&mut win.config.font) = Some(value);
             win.set_f32(row.path, value);
         }
-        super::settings_value_chip(ui, win.palette, &format!("{value:.0} {}", row.suffix));
         let mut automatic = current.is_none();
         if super::settings_toggle(ui, win.palette, &mut automatic) {
             if automatic {

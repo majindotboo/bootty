@@ -199,7 +199,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         palette.mantle,
         |chrome| &mut chrome.pane_divider_color,
     );
-    super::chrome_color_row(
+    super::chrome_color_row_with_alpha(
         win,
         ui,
         "Focus border",
@@ -382,6 +382,7 @@ fn terminal_color_row(
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
+                a: 0xff,
             });
             win.set_color(&["appearance", branch_key(variant), path[0], path[1]], rgb);
         }
@@ -492,7 +493,12 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: Appeara
                     changed = true;
                 }
                 if super::settings_button(ui, palette, "Add empty slot").clicked() {
-                    colors.push(Color { r: 0, g: 0, b: 0 });
+                    colors.push(Color {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 0xff,
+                    });
                     changed = true;
                 }
                 if !colors.is_empty()
@@ -532,6 +538,7 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: Appeara
                                         r: rgb[0],
                                         g: rgb[1],
                                         b: rgb[2],
+                                        a: 0xff,
                                     };
                                     changed = true;
                                 }
@@ -618,6 +625,7 @@ fn rgb_to_color(color: RgbColor) -> Color {
         r: color.r,
         g: color.g,
         b: color.b,
+        a: 0xff,
     }
 }
 

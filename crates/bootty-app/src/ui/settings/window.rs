@@ -191,19 +191,23 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             }
             ui.label(egui::RichText::new("Auto").color(palette.muted));
             let mut offset = win.config.window.fullscreen_top_offset.unwrap_or(0.0);
-            if ui
-                .add_enabled(
-                    !auto,
-                    egui::DragValue::new(&mut offset)
-                        .speed(1.0)
-                        .range(0.0..=160.0)
-                        .suffix(" px"),
-                )
-                .changed()
-            {
-                win.config.window.fullscreen_top_offset = Some(offset);
-                win.set_f32(&["window", "fullscreen-top-offset"], offset);
-            }
+            ui.add_enabled_ui(!auto, |ui| {
+                if super::settings_number_edit(
+                    ui,
+                    palette,
+                    &mut offset,
+                    super::NumberEditSpec {
+                        path: &["window", "fullscreen-top-offset"],
+                        range: 0.0..=160.0,
+                        suffix: " px",
+                        precision: 1,
+                        display_scale: 1.0,
+                    },
+                ) {
+                    win.config.window.fullscreen_top_offset = Some(offset);
+                    win.set_f32(&["window", "fullscreen-top-offset"], offset);
+                }
+            });
         },
     );
 
@@ -218,7 +222,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=24.0,
             suffix: " px",
             percent: false,
-            precision: 0,
+            precision: 1,
             field: |chrome| &mut chrome.gap,
         },
     );
@@ -232,7 +236,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=1.0,
             suffix: "",
             percent: true,
-            precision: 0,
+            precision: 1,
             field: |chrome| &mut chrome.unfocused_sidebar_dim,
         },
     );
@@ -246,7 +250,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             range: 0.0..=1.0,
             suffix: "",
             percent: true,
-            precision: 0,
+            precision: 1,
             field: |chrome| &mut chrome.unfocused_terminal_dim,
         },
     );
@@ -339,14 +343,18 @@ struct WindowNumberRow {
 fn numeric_window_row(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: WindowNumberRow) {
     super::settings_row(ui, win.palette, spec.label, spec.help, |ui| {
         let mut value = *(spec.field)(&mut win.config.window);
-        if ui
-            .add(
-                egui::DragValue::new(&mut value)
-                    .speed(4.0)
-                    .range(spec.range),
-            )
-            .changed()
-        {
+        if super::settings_number_edit(
+            ui,
+            win.palette,
+            &mut value,
+            super::NumberEditSpec {
+                path: &spec.path,
+                range: spec.range,
+                suffix: " px",
+                precision: 1,
+                display_scale: 1.0,
+            },
+        ) {
             *(spec.field)(&mut win.config.window) = value;
             win.set_f32(&spec.path, value);
         }
@@ -369,16 +377,23 @@ struct ChromeSliderRow {
 fn chrome_slider(win: &mut SettingsWindow, ui: &mut egui::Ui, spec: ChromeSliderRow) {
     super::settings_row(ui, win.palette, spec.label, spec.help, |ui| {
         let mut value = *(spec.field)(&mut win.config.chrome);
-        if super::settings_slider(ui, win.palette, &mut value, spec.range) {
+        let suffix = if spec.percent { "%" } else { spec.suffix };
+        let display_scale = if spec.percent { 100.0 } else { 1.0 };
+        if super::settings_slider_with_edit(
+            ui,
+            win.palette,
+            &mut value,
+            super::NumberEditSpec {
+                path: &spec.path,
+                range: spec.range,
+                suffix,
+                precision: spec.precision,
+                display_scale,
+            },
+        ) {
             *(spec.field)(&mut win.config.chrome) = value;
             win.set_f32(&spec.path, value);
         }
-        let chip = if spec.percent {
-            format!("{:.0}%", value * 100.0)
-        } else {
-            format!("{value:.prec$}{}", spec.suffix, prec = spec.precision)
-        };
-        super::settings_value_chip(ui, win.palette, &chip);
     });
 }
 

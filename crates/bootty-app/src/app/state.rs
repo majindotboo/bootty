@@ -643,9 +643,9 @@ impl AppState {
         }
     }
 
-    fn restore_theme_picker_preview(&mut self, effects: &mut Vec<AppEffect>) {
+    fn restore_theme_picker_preview(&mut self) -> bool {
         let Some(config) = self.theme_picker_restore_config.clone() else {
-            return;
+            return false;
         };
         self.config_state.accept(config);
         let colors = self
@@ -653,9 +653,16 @@ impl AppState {
             .colors_for_appearance(self.active_appearance_variant)
             .terminal_color_config();
         match self.terminal.set_colors(colors) {
-            Ok(()) => effects.push(AppEffect::RequestRepaint),
-            Err(error) => self.last_error = Some(error.to_string()),
+            Ok(()) => true,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
         }
+    }
+
+    pub fn theme_picker_preview_active(&self) -> bool {
+        self.theme_picker_restore_config.is_some() && self.theme_picker_dialog.is_some()
     }
 
     pub fn set_appearance_variant(&mut self, variant: AppearanceVariant) {
@@ -1179,11 +1186,15 @@ impl AppState {
             }
             ThemePickerEvent::Close => {
                 self.input_focus = InputFocus::Terminal;
-                self.restore_theme_picker_preview(effects);
+                if self.restore_theme_picker_preview() {
+                    effects.push(AppEffect::RequestRepaint);
+                }
                 self.theme_picker_restore_config = None;
             }
             ThemePickerEvent::RestorePreview => {
-                self.restore_theme_picker_preview(effects);
+                if self.restore_theme_picker_preview() {
+                    effects.push(AppEffect::RequestRepaint);
+                }
                 self.theme_picker_dialog = Some(dialog);
             }
             ThemePickerEvent::Preview(theme) => {
@@ -1518,7 +1529,9 @@ impl AppState {
     }
 
     /// Only one floating dialog is shown at a time; opening one closes the rest.
-    fn close_overlay_dialogs(&mut self) {
+    fn close_overlay_dialogs(&mut self) -> bool {
+        let restored_preview = self.restore_theme_picker_preview();
+        self.theme_picker_restore_config = None;
         self.new_mux_session_dialog = None;
         self.session_picker_dialog = None;
         self.rename_session_dialog = None;
@@ -1526,6 +1539,7 @@ impl AppState {
         self.keybind_help_dialog = None;
         self.command_palette_dialog = None;
         self.theme_picker_dialog = None;
+        restored_preview
     }
 
     fn open_new_mux_session_dialog(&mut self) {

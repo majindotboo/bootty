@@ -36,7 +36,7 @@ fn ui_color_config_from_colors(colors: &ColorConfig) -> UiColorConfig {
 }
 
 pub(crate) fn config_color32(color: Color) -> Color32 {
-    Color32::from_rgb(color.r, color.g, color.b)
+    Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a)
 }
 
 /// Named theme colors as `#rrggbb` strings, exposed to Lua extensions as `bootty.theme.*` so
@@ -72,26 +72,54 @@ mod tests {
     #[test]
     fn ui_theme_uses_configured_terminal_colors_and_palette_accents() {
         let mut config = BoottyConfig::default();
-        config.colors.background = Some(Color { r: 1, g: 2, b: 3 });
+        config.colors.background = Some(Color {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 0xff,
+        });
         config.colors.foreground = Some(Color {
             r: 240,
             g: 241,
             b: 242,
+            a: 0xff,
         });
         config.colors.palette = vec![
-            Color { r: 0, g: 0, b: 0 },
-            Color { r: 100, g: 0, b: 0 },
-            Color { r: 0, g: 100, b: 0 },
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0xff,
+            },
+            Color {
+                r: 100,
+                g: 0,
+                b: 0,
+                a: 0xff,
+            },
+            Color {
+                r: 0,
+                g: 100,
+                b: 0,
+                a: 0xff,
+            },
             Color {
                 r: 100,
                 g: 80,
                 b: 0,
+                a: 0xff,
             },
-            Color { r: 0, g: 0, b: 100 },
+            Color {
+                r: 0,
+                g: 0,
+                b: 100,
+                a: 0xff,
+            },
             Color {
                 r: 80,
                 g: 0,
                 b: 100,
+                a: 0xff,
             },
         ];
 

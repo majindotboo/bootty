@@ -711,11 +711,21 @@ impl SettingsSurface {
             "Width of the session sidebar.",
             |ui| {
                 let mut width = self.config.chrome.sidebar_width;
-                if settings_slider(ui, self.palette, &mut width, 120.0..=600.0) {
+                if settings_slider_with_edit(
+                    ui,
+                    self.palette,
+                    &mut width,
+                    NumberEditSpec {
+                        path: &["chrome", "sidebar-width"],
+                        range: 120.0..=600.0,
+                        suffix: " px",
+                        precision: 1,
+                        display_scale: 1.0,
+                    },
+                ) {
                     self.config.chrome.sidebar_width = width;
                     self.set_f32(&["chrome", "sidebar-width"], width);
                 }
-                settings_value_chip(ui, self.palette, &format!("{width:.0} px"));
             },
         );
         settings_notice(
@@ -817,7 +827,19 @@ impl SettingsSurface {
     }
 
     fn set_color(&mut self, path: &[&str], rgb: [u8; 3]) {
-        let hex = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+        self.set_color_value(
+            path,
+            Color {
+                r: rgb[0],
+                g: rgb[1],
+                b: rgb[2],
+                a: 0xff,
+            },
+        );
+    }
+
+    fn set_color_value(&mut self, path: &[&str], color: Color) {
+        let hex = color_hex(color);
         self.write(move |document| document.set_item(path, bootty_config::toml_edit::value(hex)));
     }
 
@@ -903,7 +925,14 @@ fn page_matches(meta: PageMeta, query: &str) -> bool {
 }
 
 fn color_hex(color: Color) -> String {
-    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+    if color.a == 0xff {
+        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            color.r, color.g, color.b, color.a
+        )
+    }
 }
 
 #[cfg(windows)]
@@ -1669,6 +1698,138 @@ fn swatch_border_color(palette: ThemePalette, swatch: Color32) -> Color32 {
         .unwrap_or(Color32::BLACK)
 }
 
+pub(super) struct NumberEditSpec<'a> {
+    pub path: &'a [&'a str],
+    pub range: std::ops::RangeInclusive<f32>,
+    pub suffix: &'a str,
+    pub precision: usize,
+    pub display_scale: f32,
+}
+
+pub(super) fn settings_slider_with_edit(
+    ui: &mut egui::Ui,
+    palette: ThemePalette,
+    value: &mut f32,
+    spec: NumberEditSpec<'_>,
+) -> bool {
+    let edit_id = number_edit_id(ui, spec.path);
+    let group_width = 190.0 + 8.0 + number_edit_outer_width(&spec);
+    ui.allocate_ui_with_layout(
+        Vec2::new(group_width, 34.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let mut changed = settings_number_edit_with_id(ui, palette, value, &spec, edit_id);
+            ui.add_space(8.0);
+            if settings_slider(ui, palette, value, spec.range.clone()) {
+                ui.memory_mut(|memory| {
+                    memory
+                        .data
+                        .insert_temp(edit_id, format_number_value(*value, &spec));
+                });
+                changed = true;
+            }
+            changed
+        },
+    )
+    .inner
+}
+
+pub(super) fn settings_number_edit(
+    ui: &mut egui::Ui,
+    palette: ThemePalette,
+    value: &mut f32,
+    spec: NumberEditSpec<'_>,
+) -> bool {
+    let edit_id = number_edit_id(ui, spec.path);
+    settings_number_edit_with_id(ui, palette, value, &spec, edit_id)
+}
+
+fn number_edit_id(ui: &mut egui::Ui, path: &[&str]) -> egui::Id {
+    ui.make_persistent_id(("settings-number-edit", path.join(".")))
+}
+
+fn settings_number_edit_with_id(
+    ui: &mut egui::Ui,
+    palette: ThemePalette,
+    value: &mut f32,
+    spec: &NumberEditSpec<'_>,
+    edit_id: egui::Id,
+) -> bool {
+    let focused = ui.memory(|memory| memory.has_focus(edit_id));
+    let mut text = ui
+        .memory(|memory| memory.data.get_temp::<String>(edit_id))
+        .unwrap_or_else(|| format_number_value(*value, spec));
+    if !focused {
+        text = format_number_value(*value, spec);
+    }
+
+    let fill = palette.surface;
+    let response = egui::Frame::NONE
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(egui::CornerRadius::same(palette.radius))
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.add_sized(
+                [number_edit_inner_width(spec), 22.0],
+                egui::TextEdit::singleline(&mut text)
+                    .id(edit_id)
+                    .text_color(readable_color(fill, palette.text))
+                    .horizontal_align(egui::Align::RIGHT)
+                    .vertical_align(egui::Align::Center)
+                    .background_color(fill)
+                    .frame(egui::Frame::NONE),
+            )
+        })
+        .inner;
+
+    ui.memory_mut(|memory| memory.data.insert_temp(edit_id, text.clone()));
+    if response.changed()
+        && let Some(parsed) = parse_number_value(&text, spec)
+    {
+        *value = parsed;
+        return true;
+    }
+    if response.lost_focus() {
+        ui.memory_mut(|memory| {
+            memory
+                .data
+                .insert_temp(edit_id, format_number_value(*value, spec));
+        });
+    }
+    false
+}
+
+fn number_edit_outer_width(spec: &NumberEditSpec<'_>) -> f32 {
+    number_edit_inner_width(spec) + 16.0
+}
+
+fn number_edit_inner_width(spec: &NumberEditSpec<'_>) -> f32 {
+    let start = format_number_value(*spec.range.start(), spec);
+    let end = format_number_value(*spec.range.end(), spec);
+    let widest = start.len().max(end.len()).max(6) as f32;
+    (widest * 8.0 + 8.0).clamp(74.0, 112.0)
+}
+
+fn parse_number_value(text: &str, spec: &NumberEditSpec<'_>) -> Option<f32> {
+    let trimmed = text.trim();
+    let without_suffix = if spec.suffix.trim().is_empty() {
+        trimmed
+    } else {
+        trimmed
+            .strip_suffix(spec.suffix.trim())
+            .unwrap_or(trimmed)
+            .trim()
+    };
+    let number = without_suffix.parse::<f32>().ok()? / spec.display_scale;
+    Some(number.clamp(*spec.range.start(), *spec.range.end()))
+}
+
+fn format_number_value(value: f32, spec: &NumberEditSpec<'_>) -> String {
+    let displayed = value * spec.display_scale;
+    format!("{:.*}{}", spec.precision, displayed, spec.suffix)
+}
+
 fn settings_slider(
     ui: &mut egui::Ui,
     palette: ThemePalette,
@@ -1679,12 +1840,12 @@ fn settings_slider(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let start = *range.start();
     let end = *range.end();
-    let normalized = ((*value - start) / (end - start)).clamp(0.0, 1.0);
+    let mut normalized = ((*value - start) / (end - start)).clamp(0.0, 1.0);
     if (response.dragged() || response.clicked())
         && let Some(pos) = response.interact_pointer_pos()
     {
-        let next = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        *value = start + (end - start) * next;
+        normalized = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        *value = start + (end - start) * normalized;
     }
     let rail = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 9.0));
     ui.painter()
@@ -1750,6 +1911,7 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
                 egui::CornerRadius::same(palette.radius),
                 status_background,
             );
+
             for (align, x_anchor) in [
                 (crate::config::SegmentAlign::Left, bar.left() + 10.0),
                 (crate::config::SegmentAlign::Center, bar.center().x),
@@ -1800,7 +1962,7 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
 }
 
 fn color_to_egui(color: Color) -> Color32 {
-    Color32::from_rgb(color.r, color.g, color.b)
+    Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a)
 }
 
 fn sidebar_color_row(
@@ -1822,6 +1984,7 @@ fn sidebar_color_row(
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
+                a: 0xff,
             });
             win.set_color(path, rgb);
         }
@@ -1851,8 +2014,62 @@ fn chrome_color_row(
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
+                a: 0xff,
             });
             win.set_color(path, rgb);
+        }
+        if current.is_some() && settings_button(ui, win.palette, "Reset").clicked() {
+            *field(&mut win.config.chrome) = None;
+            win.remove(path);
+        }
+    });
+}
+
+fn chrome_color_row_with_alpha(
+    win: &mut SettingsSurface,
+    ui: &mut egui::Ui,
+    label: &str,
+    help: &str,
+    path: &[&str],
+    seed: Color32,
+    field: fn(&mut crate::config::ChromeConfig) -> &mut Option<Color>,
+) {
+    settings_row(ui, win.palette, label, help, |ui| {
+        let current = *field(&mut win.config.chrome);
+        let mut next = current.unwrap_or(Color {
+            r: seed.r(),
+            g: seed.g(),
+            b: seed.b(),
+            a: seed.a(),
+        });
+        let mut rgb = [next.r, next.g, next.b];
+        let mut changed = false;
+        if settings_color_picker(ui, win.palette, &mut rgb).changed() {
+            next.r = rgb[0];
+            next.g = rgb[1];
+            next.b = rgb[2];
+            changed = true;
+        }
+        ui.label(RichText::new("Opacity").color(win.palette.muted));
+        let mut opacity = f32::from(next.a) / 255.0;
+        if settings_number_edit(
+            ui,
+            win.palette,
+            &mut opacity,
+            NumberEditSpec {
+                path,
+                range: 0.0..=1.0,
+                suffix: "%",
+                precision: 0,
+                display_scale: 100.0,
+            },
+        ) {
+            next.a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            changed = true;
+        }
+        if changed {
+            *field(&mut win.config.chrome) = Some(next);
+            win.set_color_value(path, next);
         }
         if current.is_some() && settings_button(ui, win.palette, "Reset").clicked() {
             *field(&mut win.config.chrome) = None;
@@ -1904,5 +2121,28 @@ mod tests {
             page_meta(SettingsPage::Window),
             "record shortcut"
         ));
+    }
+
+    #[test]
+    fn number_edit_parser_handles_scaled_suffix_values() {
+        let percent = NumberEditSpec {
+            path: &["chrome", "unfocused-terminal-dim"],
+            range: 0.0..=1.0,
+            suffix: "%",
+            precision: 1,
+            display_scale: 100.0,
+        };
+        assert_eq!(parse_number_value("12.5%", &percent), Some(0.125));
+        assert_eq!(parse_number_value("250%", &percent), Some(1.0));
+
+        let pixels = NumberEditSpec {
+            path: &["chrome", "pane-divider-width"],
+            range: 0.0..=16.0,
+            suffix: " px",
+            precision: 1,
+            display_scale: 1.0,
+        };
+        assert_eq!(parse_number_value("3.5 px", &pixels), Some(3.5));
+        assert_eq!(format_number_value(3.5, &pixels), "3.5 px");
     }
 }

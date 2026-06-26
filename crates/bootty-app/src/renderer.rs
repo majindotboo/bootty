@@ -125,7 +125,19 @@ impl TerminalWidget {
     ) -> Result<TerminalSurface> {
         let available = ui.available_size_before_wrap();
         let desired = Vec2::new(available.x.max(320.0), available.y.max(240.0));
-        let (rect, response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+        let (rect, _) = ui.allocate_exact_size(desired, Sense::click_and_drag());
+        self.show_at_rect(ui, rect, "terminal", terminal)
+    }
+
+    pub fn show_at_rect(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        id_salt: impl std::hash::Hash,
+        terminal: &mut dyn TerminalRenderSource,
+    ) -> Result<TerminalSurface> {
+        let widget_id = ui.make_persistent_id(("terminal-widget", id_salt));
+        let response = ui.interact(rect, widget_id, Sense::click_and_drag());
         if response.clicked() || response.drag_started() {
             response.request_focus();
         }
@@ -139,7 +151,7 @@ impl TerminalWidget {
         self.metrics.extract_total_us = extract_start.elapsed().as_micros() as u64;
         // Match the grid rect the renderer projects through, so pinch/pan math agrees with it.
         self.last_surface = Some(surface.grid_rect(frame.cols, frame.rows));
-        self.handle_scrollbar_interaction(ui, surface, frame.as_ref(), terminal)?;
+        self.handle_scrollbar_interaction(ui, widget_id, surface, frame.as_ref(), terminal)?;
         self.handle_hyperlink_interaction(ui, surface, frame.as_ref(), &response);
         self.paint(ui, surface, &frame)?;
         self.metrics.render_state_update_us = frame.stats.render_state_update_us;
@@ -285,6 +297,7 @@ impl TerminalWidget {
     fn handle_scrollbar_interaction(
         &mut self,
         ui: &mut egui::Ui,
+        widget_id: egui::Id,
         surface: TerminalSurface,
         frame: &crate::terminal::RenderFrame,
         terminal: &mut dyn TerminalRenderSource,
@@ -303,7 +316,7 @@ impl TerminalWidget {
 
         let area_response = ui.interact(
             scrollbar_hit_rect(surface),
-            ui.make_persistent_id("terminal-scrollbar-area"),
+            widget_id.with("terminal-scrollbar-area"),
             Sense::hover(),
         );
         if area_response.hovered() {
@@ -322,7 +335,7 @@ impl TerminalWidget {
         let thumb = scrollbar_thumb_rect(surface, scrollbar, false);
         let response = ui.interact(
             thumb.expand(6.0),
-            ui.make_persistent_id("terminal-scrollbar-thumb"),
+            widget_id.with("terminal-scrollbar-thumb"),
             Sense::click_and_drag(),
         );
         self.scrollbar.thumb_hovered = response.hovered();

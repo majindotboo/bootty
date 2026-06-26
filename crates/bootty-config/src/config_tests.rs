@@ -355,6 +355,7 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
         [chrome]
         status-background = "#090909"
         notched-fullscreen-black-chrome = false
+        pane-focus-border-color = "#9e75c780"
 
         [sidebar]
         position = "right"
@@ -369,6 +370,10 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
     assert_eq!(
         config.chrome.status_background,
         Some(Color::from_hex("#090909").unwrap())
+    );
+    assert_eq!(
+        config.chrome.pane_focus_border_color,
+        Some(Color::from_hex("#9e75c780").unwrap())
     );
     assert!(!config.chrome.notched_fullscreen_black_chrome);
     assert_eq!(

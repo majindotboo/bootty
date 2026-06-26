@@ -31,7 +31,7 @@ use crate::{
 /// be measured. This intentionally targets the physical notch, not the slightly lower menu-bar
 /// drop-down line reported by macOS safe-area APIs.
 const FALLBACK_NOTCH_LAYOUT_OFFSET: f32 = 24.0;
-const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 8.0;
+const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 7.0;
 /// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
@@ -260,6 +260,9 @@ impl BoottyApp {
     }
 
     fn sync_extension_theme(&mut self, ctx: &egui::Context) {
+        if self.state.theme_picker_preview_active() {
+            return;
+        }
         let next = theme_tokens(self.state.config(), self.state.active_appearance_variant());
         if self.extension_theme == next {
             return;
@@ -549,15 +552,15 @@ impl BoottyApp {
         corner_radius_px: f32,
         background: egui::Color32,
     ) {
-        ui.scope_builder(
-            UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                Ok(surface) => self.state.record_surface(surface),
-                Err(error) => self.state.record_render_error(error),
-            },
-        );
+        match self.terminal_widget.show_at_rect(
+            ui,
+            rect,
+            "primary-terminal",
+            self.state.terminal_mut(),
+        ) {
+            Ok(surface) => self.state.record_surface(surface),
+            Err(error) => self.state.record_render_error(error),
+        }
         paint_pane_corner_masks(ui.painter(), rect, corner_radius_px, background);
     }
 
@@ -608,27 +611,23 @@ impl BoottyApp {
         } = self;
         for (pane_id, rect) in &rects {
             let is_focused = focused.as_deref() == Some(pane_id.as_str());
-            let result = ui
-                .scope_builder(
-                    UiBuilder::new()
-                        .max_rect(*rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| {
-                        if is_focused {
-                            Some(terminal_widget.show(ui, state.terminal_mut()))
-                        } else {
-                            let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
-                                TerminalWidget::new(*terminal_target_format)
-                                    .with_text_config(terminal_text_config.clone())
-                            });
-                            widget.set_terminal_cursor_icon(*terminal_cursor_icon);
-                            state
-                                .render_source_for_pane(pane_id)
-                                .map(|source| widget.show(ui, source))
-                        }
-                    },
-                )
-                .inner;
+            let result = if is_focused {
+                Some(terminal_widget.show_at_rect(
+                    ui,
+                    *rect,
+                    ("native-pane", pane_id),
+                    state.terminal_mut(),
+                ))
+            } else {
+                let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
+                    TerminalWidget::new(*terminal_target_format)
+                        .with_text_config(terminal_text_config.clone())
+                });
+                widget.set_terminal_cursor_icon(*terminal_cursor_icon);
+                state
+                    .render_source_for_pane(pane_id)
+                    .map(|source| widget.show_at_rect(ui, *rect, ("native-pane", pane_id), source))
+            };
             match result {
                 Some(Ok(surface)) => {
                     if is_focused {
