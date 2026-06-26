@@ -1741,10 +1741,14 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
                 Vec2::new(ui.available_width(), height),
                 egui::Sense::hover(),
             );
+            let status_background = config
+                .chrome
+                .status_background
+                .map_or(palette.surface, color_to_egui);
             ui.painter().rect_filled(
                 bar,
                 egui::CornerRadius::same(palette.radius),
-                palette.surface,
+                status_background,
             );
             for (align, x_anchor) in [
                 (crate::config::SegmentAlign::Left, bar.left() + 10.0),

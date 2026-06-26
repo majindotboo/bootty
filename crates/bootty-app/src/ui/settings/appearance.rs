@@ -130,14 +130,14 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         palette.mantle,
         |sidebar| &mut sidebar.background,
     );
-    super::sidebar_color_row(
+    super::chrome_color_row(
         win,
         ui,
-        "Fullscreen background",
-        "Sidebar background while the window is fullscreen or in the notch band.",
-        &["sidebar", "fullscreen-background"],
+        "Status bar background",
+        "Status strip background; unset uses the active theme background.",
+        &["chrome", "status-background"],
         palette.base,
-        |sidebar| &mut sidebar.fullscreen_background,
+        |chrome| &mut chrome.status_background,
     );
     super::sidebar_color_row(
         win,
@@ -174,6 +174,19 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         &["sidebar", "border"],
         palette.border,
         |sidebar| &mut sidebar.border,
+    );
+
+    super::section(ui, palette, "FULLSCREEN NOTCH");
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Use black notch chrome",
+        "In dark mode on notched fullscreen displays, paint sidebar, status bar, and split dividers solid black.",
+        win.config.chrome.notched_fullscreen_black_chrome,
+        |enabled| {
+            win.config.chrome.notched_fullscreen_black_chrome = enabled;
+            win.set_bool(&["chrome", "notched-fullscreen-black-chrome"], enabled);
+        },
     );
 
     super::section(ui, palette, "SPLIT PANES");

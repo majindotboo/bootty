@@ -341,27 +341,30 @@ fn legacy_theme_and_colors_seed_appearance_branches() {
 }
 
 #[test]
-fn config_resolves_sidebar_section() {
+fn config_resolves_sidebar_and_status_chrome_colors() {
     let config = load_config_source(indoc! {r##"
+        [chrome]
+        status-background = "#090909"
+        notched-fullscreen-black-chrome = false
+
         [sidebar]
         position = "right"
         background = "#11131a"
-        fullscreen-background = "#0a0b0f"
         foreground = "#cdd6f4"
         selected = "#2a2f3d"
         hover = "#1e222c"
-        fullscreen-hover = "#252a36"
         border = "#313244"
     "##});
 
     assert_eq!(config.sidebar.position, SidebarPosition::Right);
     assert_eq!(
+        config.chrome.status_background,
+        Some(Color::from_hex("#090909").unwrap())
+    );
+    assert!(!config.chrome.notched_fullscreen_black_chrome);
+    assert_eq!(
         config.sidebar.background,
         Some(Color::from_hex("#11131a").unwrap())
-    );
-    assert_eq!(
-        config.sidebar.fullscreen_background,
-        Some(Color::from_hex("#0a0b0f").unwrap())
     );
     assert_eq!(
         config.sidebar.foreground,
@@ -376,10 +379,6 @@ fn config_resolves_sidebar_section() {
         Some(Color::from_hex("#1e222c").unwrap())
     );
     assert_eq!(
-        config.sidebar.fullscreen_hover,
-        Some(Color::from_hex("#252a36").unwrap())
-    );
-    assert_eq!(
         config.sidebar.border,
         Some(Color::from_hex("#313244").unwrap())
     );
@@ -391,7 +390,20 @@ fn config_defaults_sidebar_to_left_without_overrides() {
 
     assert_eq!(config.sidebar.position, SidebarPosition::Left);
     assert_eq!(config.sidebar.background, None);
-    assert_eq!(config.sidebar.fullscreen_background, None);
+    assert_eq!(config.chrome.status_background, None);
+    assert!(config.chrome.notched_fullscreen_black_chrome);
+}
+
+#[test]
+fn legacy_sidebar_fullscreen_colors_are_accepted_but_ignored() {
+    let config = load_config_source(indoc! {r##"
+        [sidebar]
+        fullscreen-background = "#000000"
+        fullscreen-hover = "#111111"
+    "##});
+
+    assert_eq!(config.sidebar.background, None);
+    assert_eq!(config.sidebar.hover, None);
 }
 
 #[test]

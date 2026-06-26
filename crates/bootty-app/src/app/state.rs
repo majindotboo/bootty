@@ -939,6 +939,7 @@ impl AppState {
             if !layout.contains(&new_pane) {
                 layout.split_focused(new_pane, direction);
             }
+            let _ = self.sync_terminal_panes();
         }
     }
 

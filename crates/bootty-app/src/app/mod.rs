@@ -526,6 +526,10 @@ impl BoottyApp {
         if self.focused_widget_key.as_deref() == Some(key) {
             return;
         }
+        if self.focused_widget_key.is_none() {
+            self.focused_widget_key = Some(key.to_owned());
+            return;
+        }
         let mut incoming = self.pane_widgets.remove(key).unwrap_or_else(|| {
             TerminalWidget::new(self.terminal_target_format)
                 .with_text_config(self.terminal_text_config.clone())
@@ -537,7 +541,13 @@ impl BoottyApp {
         }
     }
 
-    fn show_single_terminal(&mut self, ui: &mut egui::Ui, rect: Rect) {
+    fn show_single_terminal(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        corner_radius_px: f32,
+        background: egui::Color32,
+    ) {
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(rect)
@@ -547,6 +557,7 @@ impl BoottyApp {
                 Err(error) => self.state.record_render_error(error),
             },
         );
+        paint_pane_corner_masks(ui.painter(), rect, corner_radius_px, background);
     }
 
     /// Render every pane of the active native window into its split sub-rect: the focused pane via
@@ -657,14 +668,17 @@ impl BoottyApp {
         ui: &mut egui::Ui,
         area: Rect,
         palette: bootty_ui::ThemePalette,
+        divider_color_override: Option<egui::Color32>,
     ) {
         let chrome = &self.state.config().chrome;
         let gap = chrome.pane_divider_width;
         let corner_radius = chrome.pane_corner_radius;
-        let divider_color = chrome
-            .pane_divider_color
-            .map(crate::theme::config_color32)
-            .unwrap_or(palette.mantle);
+        let divider_color = divider_color_override.unwrap_or_else(|| {
+            chrome
+                .pane_divider_color
+                .map(crate::theme::config_color32)
+                .unwrap_or(palette.mantle)
+        });
         let dividers = self.state.pane_dividers(area, gap);
         for divider in &dividers {
             let direction = divider.direction;
@@ -762,7 +776,7 @@ impl BoottyApp {
         let rect = ui.max_rect();
         let palette =
             theme_palette_from_config(self.state.config(), self.state.active_appearance_variant());
-        let chrome_config = &self.state.config().chrome;
+        let chrome_config = self.state.config().chrome.clone();
         let sidebar = chrome_config.sidebar;
         let status_bar = chrome_config.status_bar;
         let configured_sidebar_width = chrome_config.sidebar_width;
@@ -772,10 +786,9 @@ impl BoottyApp {
             || ui
                 .ctx()
                 .input(|input| input.viewport().fullscreen.unwrap_or(false));
-        // Reserve a top offset in fullscreen to clear the notch and switch the sidebar to its
-        // fullscreen background. The explicit override applies whenever fullscreen so it works even
-        // when auto-detection can't read the notch (a hidden menu bar zeroes safeAreaInsets); the
-        // safe-area auto value only fills in when the override is unset. No objc calls when windowed.
+        // Reserve a top offset in fullscreen to clear the notch. The explicit override applies
+        // whenever fullscreen so it works even when auto-detection can't read the notch (a hidden
+        // menu bar zeroes safeAreaInsets); the safe-area auto value only fills in when unset.
         if fullscreen_chrome {
             crate::platform::macos_disable_titlebar_separator();
         }
@@ -785,6 +798,10 @@ impl BoottyApp {
         // Detect the notch by display name (stable across fullscreen/menu-bar state) rather than the
         // safe-area inset, which zeroes out when the menu bar is hidden in non-native fullscreen.
         let notch_context = fullscreen_chrome && crate::platform::macos_active_screen_is_notched();
+        let black_notch_chrome = notch_context
+            && chrome_config.notched_fullscreen_black_chrome
+            && self.state.active_appearance_variant() == crate::config::AppearanceVariant::Dark;
+        let notch_chrome_color = black_notch_chrome.then_some(egui::Color32::BLACK);
         // Pixel height for the layout offset: the config override, else the measured macOS band
         // calibrated to the physical notch, else a fallback when the band is unreadable.
         let measured_band = crate::platform::macos_active_screen_notch_height();
@@ -797,16 +814,9 @@ impl BoottyApp {
             0.0
         };
         // When enabled, the terminal/tab bar sits inside the notch band instead of being pushed
-        // entirely below it; the band reuses the sidebar's fullscreen background either way.
+        // entirely below it.
         let tabs_in_notch = notch_context && self.state.config().window.fullscreen_tabs_in_notch;
-        let sidebar_fullscreen_bg = {
-            let sidebar_cfg = &self.state.config().sidebar;
-            sidebar_cfg
-                .fullscreen_background
-                .or(sidebar_cfg.background)
-                .map(crate::theme::config_color32)
-        };
-        let notch_band_color = sidebar_fullscreen_bg.unwrap_or(palette.base);
+        let notch_band_color = notch_chrome_color.unwrap_or(palette.base);
         let sidebar_width = if sidebar {
             configured_sidebar_width
         } else {
@@ -940,18 +950,14 @@ impl BoottyApp {
                             .reserves_macos_titlebar_button_area();
                     // Shared with the content stack so the sidebar header clears the notch too.
                     let top_inset = fullscreen_top_offset;
-                    // Resolve `[sidebar]` color overrides on top of the theme. `base`/`text` feed the
-                    // derived hover/current/border tints; the notch background applies only in
-                    // fullscreen on a notched screen.
+                    // Resolve `[sidebar]` color overrides on top of the theme. In dark notched
+                    // fullscreen the shared notch chrome color overrides all panel backgrounds.
                     let sidebar_cfg = self.state.config().sidebar.clone();
-                    let sidebar_background = if notch_context {
-                        sidebar_cfg.fullscreen_background.or(sidebar_cfg.background)
-                    } else {
-                        sidebar_cfg.background
-                    };
+                    let sidebar_background = notch_chrome_color
+                        .or_else(|| sidebar_cfg.background.map(crate::theme::config_color32));
                     let mut sidebar_palette = palette;
                     if let Some(color) = sidebar_background {
-                        sidebar_palette.base = crate::theme::config_color32(color);
+                        sidebar_palette.base = color;
                     }
                     if let Some(color) = sidebar_cfg.foreground {
                         sidebar_palette.text = crate::theme::config_color32(color);
@@ -979,9 +985,6 @@ impl BoottyApp {
                             unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
                             fullscreen: fullscreen_chrome,
                             hover_override: sidebar_cfg.hover.map(crate::theme::config_color32),
-                            fullscreen_hover_override: sidebar_cfg
-                                .fullscreen_hover
-                                .map(crate::theme::config_color32),
                             current_override: sidebar_cfg
                                 .selected
                                 .map(crate::theme::config_color32),
@@ -1065,11 +1068,13 @@ impl BoottyApp {
             // Tick once a second so the clock advances and module output refreshes when idle.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs(1));
-            let status_background = if notch_context {
-                notch_band_color
-            } else {
-                palette.base
-            };
+            let status_background = notch_chrome_color
+                .or_else(|| {
+                    chrome_config
+                        .status_background
+                        .map(crate::theme::config_color32)
+                })
+                .unwrap_or(palette.base);
             let segments = self.resolve_status_segments(sidebar);
             let mut status_event = None;
             ui.scope_builder(
@@ -1140,7 +1145,7 @@ impl BoottyApp {
                 if self.state.native_multi_pane() {
                     // show_split_panes swaps in the focused widget itself (after click-to-focus).
                     self.show_split_panes(ui, terminal_rect, palette);
-                    self.show_pane_dividers(ui, terminal_rect, palette);
+                    self.show_pane_dividers(ui, terminal_rect, palette, notch_chrome_color);
                 } else {
                     if let Some(focused) = self.state.focused_pane() {
                         self.focus_pane_widget(&focused);
@@ -1149,13 +1154,23 @@ impl BoottyApp {
                     // set the transition key on it so native tab-switches cross-fade like non-native.
                     self.terminal_widget
                         .set_transition_key(terminal_transition_key);
-                    self.show_single_terminal(ui, terminal_rect);
+                    self.show_single_terminal(
+                        ui,
+                        terminal_rect,
+                        chrome_config.pane_corner_radius,
+                        palette.mantle,
+                    );
                 }
             } else {
                 self.focused_widget_key = None;
                 self.terminal_widget
                     .set_transition_key(terminal_transition_key);
-                self.show_single_terminal(ui, terminal_rect);
+                self.show_single_terminal(
+                    ui,
+                    terminal_rect,
+                    chrome_config.pane_corner_radius,
+                    palette.mantle,
+                );
             }
             if !self.state.terminal_focused() {
                 let dim = self.state.config().chrome.unfocused_terminal_dim;

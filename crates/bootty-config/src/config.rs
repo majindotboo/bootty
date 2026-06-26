@@ -193,6 +193,7 @@ struct FontPatch {
 pub struct ChromeConfig {
     pub sidebar: bool,
     pub status_bar: bool,
+    pub status_background: Option<Color>,
     pub sidebar_width: f32,
     pub status_height: f32,
     pub gap: f32,
@@ -202,6 +203,9 @@ pub struct ChromeConfig {
     /// Divider color; falls back to the window background (the sidebar's default background) so the
     /// gap reads as a cohesive backdrop behind the rounded panes.
     pub pane_divider_color: Option<Color>,
+    /// In dark appearance on a notched fullscreen display, paint the notch-integrated chrome
+    /// (sidebar, status bar, and pane dividers) solid black.
+    pub notched_fullscreen_black_chrome: bool,
     /// Border (px) drawn around the focused native split pane. 0 hides it.
     pub pane_focus_border_width: f32,
     /// Color of the focused-pane border; falls back to the theme accent when unset.
@@ -223,9 +227,11 @@ struct ChromePatch {
     _window_tabs: Option<bool>,
     sidebar_width: Option<f32>,
     status_height: Option<f32>,
+    status_background: Option<Color>,
     gap: Option<f32>,
     pane_divider_width: Option<f32>,
     pane_divider_color: Option<Color>,
+    notched_fullscreen_black_chrome: Option<bool>,
     pane_focus_border_width: Option<f32>,
     pane_focus_border_color: Option<Color>,
     pane_corner_radius: Option<f32>,
@@ -240,13 +246,9 @@ struct ChromePatch {
 pub struct SidebarConfig {
     pub position: SidebarPosition,
     pub background: Option<Color>,
-    /// Background used when the sidebar extends into the notch/menu-bar area in non-native
-    /// fullscreen; falls back to `background` when unset.
-    pub fullscreen_background: Option<Color>,
     pub foreground: Option<Color>,
     pub selected: Option<Color>,
     pub hover: Option<Color>,
-    pub fullscreen_hover: Option<Color>,
     pub border: Option<Color>,
 }
 
@@ -263,11 +265,13 @@ pub enum SidebarPosition {
 struct SidebarPatch {
     position: Option<SidebarPosition>,
     background: Option<Color>,
-    fullscreen_background: Option<Color>,
+    #[serde(rename = "fullscreen-background")]
+    _fullscreen_background: Option<Color>,
     foreground: Option<Color>,
     selected: Option<Color>,
     hover: Option<Color>,
-    fullscreen_hover: Option<Color>,
+    #[serde(rename = "fullscreen-hover")]
+    _fullscreen_hover: Option<Color>,
     border: Option<Color>,
 }
 
@@ -659,11 +663,13 @@ impl Default for ChromeConfig {
         Self {
             sidebar: true,
             status_bar: true,
+            status_background: None,
             sidebar_width: 286.0,
             status_height: 30.0,
             gap: 1.0,
             pane_divider_width: 3.0,
             pane_divider_color: None,
+            notched_fullscreen_black_chrome: true,
             pane_focus_border_width: 1.0,
             pane_focus_border_color: None,
             pane_corner_radius: 0.0,
@@ -1806,9 +1812,14 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.status_bar, partial.status_bar);
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
+    apply_present(&mut chrome.status_background, partial.status_background);
     apply_value(&mut chrome.gap, partial.gap);
     apply_value(&mut chrome.pane_divider_width, partial.pane_divider_width);
     apply_present(&mut chrome.pane_divider_color, partial.pane_divider_color);
+    apply_value(
+        &mut chrome.notched_fullscreen_black_chrome,
+        partial.notched_fullscreen_black_chrome,
+    );
     apply_value(
         &mut chrome.pane_focus_border_width,
         partial.pane_focus_border_width,
@@ -1834,14 +1845,9 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_value(&mut sidebar.position, partial.position);
     apply_present(&mut sidebar.background, partial.background);
-    apply_present(
-        &mut sidebar.fullscreen_background,
-        partial.fullscreen_background,
-    );
     apply_present(&mut sidebar.foreground, partial.foreground);
     apply_present(&mut sidebar.selected, partial.selected);
     apply_present(&mut sidebar.hover, partial.hover);
-    apply_present(&mut sidebar.fullscreen_hover, partial.fullscreen_hover);
     apply_present(&mut sidebar.border, partial.border);
 }
 

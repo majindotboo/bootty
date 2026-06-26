@@ -74,7 +74,6 @@ pub struct SidebarModel<'a> {
     /// Explicit color overrides from `[sidebar]`; each falls back to a theme-derived tint.
     pub fullscreen: bool,
     pub hover_override: Option<egui::Color32>,
-    pub fullscreen_hover_override: Option<egui::Color32>,
     pub current_override: Option<egui::Color32>,
     pub border_override: Option<egui::Color32>,
 }
@@ -886,17 +885,15 @@ pub fn show_sidebar(
     model: SidebarModel<'_>,
 ) -> Option<SidebarEvent> {
     // `palette` arrives with `base`/`foreground` already overridden. Windowed hover derives from
-    // the sidebar background; fullscreen uses a stronger lift so a black fullscreen background still
-    // has a visible, non-muddy hover state. Explicit mode-specific overrides win outright.
-    let hover_color = if model.fullscreen {
-        model
-            .fullscreen_hover_override
-            .unwrap_or_else(|| sidebar_fullscreen_hover_color(palette))
-    } else {
-        model
-            .hover_override
-            .unwrap_or_else(|| sidebar_hover_color(palette))
-    };
+    // the sidebar background; fullscreen uses a stronger lift so a black notch background still
+    // has a visible, non-muddy hover state. Explicit hover override wins outright.
+    let hover_color = model.hover_override.unwrap_or_else(|| {
+        if model.fullscreen {
+            sidebar_fullscreen_hover_color(palette)
+        } else {
+            sidebar_hover_color(palette)
+        }
+    });
     let current_color = model
         .current_override
         .unwrap_or_else(|| sidebar_current_color(palette));
@@ -2099,7 +2096,6 @@ mod tests {
                 unfocused_dim: 0.0,
                 fullscreen: false,
                 hover_override: None,
-                fullscreen_hover_override: None,
                 current_override: None,
                 border_override: None,
             },
@@ -2214,7 +2210,6 @@ mod tests {
                     unfocused_dim: 0.0,
                     fullscreen: false,
                     hover_override: None,
-                    fullscreen_hover_override: None,
                     current_override: None,
                     border_override: None,
                 },

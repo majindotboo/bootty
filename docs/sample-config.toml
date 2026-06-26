@@ -58,6 +58,10 @@ sidebar = true
 status-bar = true
 sidebar-width = 286
 status-height = 30
+# status-background = "#11131a"
+# In dark mode on notched fullscreen displays, use solid black for sidebar,
+# status bar, and split dividers so the notch band blends into the screen.
+notched-fullscreen-black-chrome = true
 gap = 1
 # Dim inactive panes by overlay opacity in the 0.0-1.0 range.
 unfocused-sidebar-dim = 0.16
@@ -91,9 +95,6 @@ module = "clock"
 # any unset slot falls back to the theme-derived value.
 position = "left" # or "right"
 # background = "#11131a"
-# Background used when the sidebar extends into the notch/menu-bar area in
-# non-native fullscreen; falls back to background when unset.
-# fullscreen-background = "#0a0b0f"
 # foreground = "#cdd6f4"
 # selected = "#2a2f3d" # active session row tint
 # hover = "#1e222c"
