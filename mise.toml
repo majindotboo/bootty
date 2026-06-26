@@ -2,9 +2,6 @@
 rust = "stable"
 zig = "0.15.2"
 
-[settings]
-disable_tools = ["zig"]
-
 [tasks.build]
 description = "Build the bootty app in release mode"
 run = "cargo build --release -p bootty-app --bin bootty"
@@ -92,16 +89,6 @@ description = "Package the Windows zip"
 run = "pwsh ./scripts/package-bootty-windows.ps1"
 
 [tasks.install]
-description = "Package and install Bootty.app into /Applications (macOS)"
-depends = ["package"]
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "install is macOS-only" >&2
-  exit 1
-fi
-rm -rf /Applications/Bootty.app
-cp -R dist/Bootty.app /Applications/Bootty.app
-echo "Installed /Applications/Bootty.app"
-"""
+description = "Package and install Bootty for the current OS"
+run = "./scripts/install-bootty-unix.sh"
+run_windows = "pwsh ./scripts/install-bootty-windows.ps1"

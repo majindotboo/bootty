@@ -63,6 +63,7 @@ pub fn direct_key_input_from_winit_code_with_remaps(
     let suppress_egui_key = collapsed_egui_key_for_direct_code(code)
         .or_else(|| side_sensitive_egui_key_for_direct_code(code, modifiers, side_state))
         .or_else(|| command_egui_key_for_direct_code(code, modifiers, side_state))
+        .or_else(|| windows_terminal_shortcut_egui_key_for_direct_code(code, modifiers))
         .or_else(|| modifier_egui_key_for_direct_code(code))?;
     let mut input = bare_terminal_key_input(code, modifiers, repeat)?;
     side_state.apply_to_key_input(&mut input);
@@ -151,6 +152,25 @@ fn command_egui_key_for_direct_code(
     (modifiers.super_key() || side_state.has_command())
         .then(|| egui_key_for_direct_code(code).map(Some))
         .flatten()
+}
+
+#[cfg(windows)]
+fn windows_terminal_shortcut_egui_key_for_direct_code(
+    code: KeyCode,
+    modifiers: ModifiersState,
+) -> Option<Option<egui::Key>> {
+    if modifiers.control_key() || (code == KeyCode::Insert && modifiers.shift_key()) {
+        return egui_key_for_direct_code(code).map(Some);
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn windows_terminal_shortcut_egui_key_for_direct_code(
+    _code: KeyCode,
+    _modifiers: ModifiersState,
+) -> Option<Option<egui::Key>> {
+    None
 }
 
 fn egui_key_for_direct_code(code: KeyCode) -> Option<egui::Key> {
@@ -419,6 +439,50 @@ mod tests {
         assert_eq!(direct.suppress_egui_key, Some(egui::Key::B));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn direct_input_preserves_control_modified_regular_keys_for_windows_bindings() {
+        let direct = direct_key_input_from_winit_code(
+            KeyCode::KeyV,
+            ModifiersState::CONTROL,
+            ModifierSideState::default(),
+            false,
+        )
+        .expect("control-modified regular key maps to direct terminal input on Windows");
+
+        assert_eq!(direct.input.key, TerminalKey::V);
+        assert_eq!(
+            direct.input.mods,
+            KeyMods {
+                ctrl: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(direct.suppress_egui_key, Some(egui::Key::V));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn direct_input_preserves_shift_insert_for_windows_paste_binding() {
+        let direct = direct_key_input_from_winit_code(
+            KeyCode::Insert,
+            ModifiersState::SHIFT,
+            ModifierSideState::default(),
+            false,
+        )
+        .expect("shift-insert maps to direct terminal input on Windows");
+
+        assert_eq!(direct.input.key, TerminalKey::Insert);
+        assert_eq!(
+            direct.input.mods,
+            KeyMods {
+                shift: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(direct.suppress_egui_key, Some(egui::Key::Insert));
+    }
+
     #[test]
     fn direct_input_synthesizes_left_command_when_modifier_state_is_stale() {
         let direct = direct_key_input_from_winit_code(
@@ -555,7 +619,7 @@ mod tests {
 
         assert_eq!(
             BindingTrigger::from_key_input(direct.input).format_entry(),
-            "cmd+alt+X"
+            "cmd+alt+KeyX"
         );
     }
 }

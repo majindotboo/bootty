@@ -1,5 +1,8 @@
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use crate::strings::session_name_for_path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,9 +18,10 @@ pub fn discover_worktree_picker_entries(project_path: &str) -> Vec<WorktreePicke
         path: None,
         is_new: true,
     }];
-    let output = Command::new("git")
-        .args(["-C", project_path, "worktree", "list", "--porcelain"])
-        .output();
+    let mut command = Command::new("git");
+    command.args(["-C", project_path, "worktree", "list", "--porcelain"]);
+    hide_command_window(&mut command);
+    let output = command.output();
     let Ok(output) = output else {
         entries.push(WorktreePickerEntry {
             label: format!("{} ← main", session_name_for_path(project_path)),
@@ -31,6 +35,14 @@ pub fn discover_worktree_picker_entries(project_path: &str) -> Vec<WorktreePicke
     )));
     entries
 }
+
+#[cfg(windows)]
+fn hide_command_window(command: &mut Command) {
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_command_window(_command: &mut Command) {}
 
 fn parse_git_worktree_list(text: &str) -> Vec<WorktreePickerEntry> {
     let mut entries = Vec::new();

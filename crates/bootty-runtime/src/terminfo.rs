@@ -71,7 +71,7 @@ fn bootty_state_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".local/state/bootty"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

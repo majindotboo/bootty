@@ -10,17 +10,28 @@ pub(super) enum KeybindScope {
     Global,
     Native,
     Rmux,
+    #[cfg(not(windows))]
     Tmux,
     Zellij,
     Sidebar,
 }
 
 impl KeybindScope {
-    const ALL: [(KeybindScope, &'static str); 6] = [
+    #[cfg(not(windows))]
+    const ALL: &'static [(KeybindScope, &'static str)] = &[
         (Self::Global, "Global"),
         (Self::Native, "Native"),
         (Self::Rmux, "Rmux"),
         (Self::Tmux, "Tmux"),
+        (Self::Zellij, "Zellij"),
+        (Self::Sidebar, "Sidebar"),
+    ];
+
+    #[cfg(windows)]
+    const ALL: &'static [(KeybindScope, &'static str)] = &[
+        (Self::Global, "Global"),
+        (Self::Native, "Native"),
+        (Self::Rmux, "Rmux"),
         (Self::Zellij, "Zellij"),
         (Self::Sidebar, "Sidebar"),
     ];
@@ -30,6 +41,7 @@ impl KeybindScope {
             Self::Global => &["input", "keybind"],
             Self::Native => &["input", "backend-keybind", "native"],
             Self::Rmux => &["input", "backend-keybind", "rmux"],
+            #[cfg(not(windows))]
             Self::Tmux => &["input", "backend-keybind", "tmux"],
             Self::Zellij => &["input", "backend-keybind", "zellij"],
             Self::Sidebar => &["input", "sidebar-keybind"],
@@ -192,6 +204,12 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Scope").color(palette.subtext));
         let mut scope = win.keybind_scope;
+        if !KeybindScope::ALL
+            .iter()
+            .any(|(candidate, _)| *candidate == scope)
+        {
+            scope = KeybindScope::Global;
+        }
         let labels: Vec<&str> = KeybindScope::ALL.iter().map(|(_, label)| *label).collect();
         let current = KeybindScope::ALL
             .iter()
@@ -1345,6 +1363,7 @@ fn effective_bindings(win: &SettingsWindow, scope: KeybindScope) -> Vec<String> 
         KeybindScope::Global => input.keybind.clone(),
         KeybindScope::Native => input.backend_keybinds.native.clone(),
         KeybindScope::Rmux => input.backend_keybinds.rmux.clone(),
+        #[cfg(not(windows))]
         KeybindScope::Tmux => input.backend_keybinds.tmux.clone(),
         KeybindScope::Zellij => input.backend_keybinds.zellij.clone(),
         KeybindScope::Sidebar => input.sidebar_keybind.clone(),

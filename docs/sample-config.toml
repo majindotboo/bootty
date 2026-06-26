@@ -44,7 +44,7 @@ fullscreen-tabs-in-notch = true
 
 [font]
 # Live-reloaded terminal text metrics.
-family = ["Maple Mono", "Font Awesome 7 Brands", "Maple Mono NF", "monospace"]
+family = ["monospace"]
 size = 15
 # Optional fixed cell metric overrides; omit to derive from font size.
 # cell-width = 10

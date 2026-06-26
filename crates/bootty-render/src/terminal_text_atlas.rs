@@ -9,6 +9,8 @@ use smallvec::SmallVec;
 
 mod coretext;
 mod shaping;
+#[cfg(windows)]
+mod windows_gdi;
 
 use shaping::{ShapedGlyph, font_has_ligature_features, harfbuzz_features, shape_run};
 
@@ -1192,6 +1194,11 @@ fn single_ascii_cluster(cluster: &ShapedCluster) -> Option<u8> {
     (bytes.len() == 1 && bytes[0].is_ascii()).then_some(bytes[0])
 }
 
+#[cfg(windows)]
+fn windows_gdi_candidate(cluster: &ShapedCluster) -> bool {
+    single_ascii_cluster(cluster).is_some_and(|ch| ch.is_ascii_graphic())
+}
+
 fn cluster_constraint_cells(
     previous: Option<&ShapedCluster>,
     cluster: &ShapedCluster,
@@ -1399,6 +1406,24 @@ impl FontLibrary {
                 color: false,
             };
         }
+        #[cfg(windows)]
+        if windows_gdi_candidate(cluster)
+            && let Some(family) =
+                self.font_family_name_for_cluster(face, cluster, font_size * pixels_per_point)
+            && let Some(alpha) = windows_gdi::rasterize_text_cluster(
+                &family,
+                face.style,
+                cluster,
+                font_size * pixels_per_point,
+                width,
+                height,
+            )
+        {
+            return RasterizedCluster {
+                pixels: alpha_to_atlas_pixels(format, alpha),
+                color: false,
+            };
+        }
         if !cluster.glyphs.is_empty()
             && let Some(font) = self.font_for_face(face)
             && let Some(alpha) = rasterize_glyph_cluster(RasterizeGlyphClusterRequest {
@@ -1567,6 +1592,65 @@ impl FontLibrary {
         }
 
         Some(font)
+    }
+
+    #[cfg(windows)]
+    fn font_family_name_for_cluster(
+        &mut self,
+        face: &ResolvedFontFace,
+        cluster: &ShapedCluster,
+        physical_font_size: f32,
+    ) -> Option<String> {
+        let id = self.font_id_for_cluster(face, cluster, physical_font_size)?;
+        self.database
+            .face(id)
+            .and_then(|info| info.families.first())
+            .map(|(family, _)| family.clone())
+    }
+
+    #[cfg(windows)]
+    fn font_id_for_cluster(
+        &mut self,
+        face: &ResolvedFontFace,
+        cluster: &ShapedCluster,
+        physical_font_size: f32,
+    ) -> Option<fontdb::ID> {
+        let ch = cluster
+            .text
+            .chars()
+            .find(|ch| !is_combining_mark(*ch) && !is_variation_selector(*ch))?;
+        if let Some(id) = self.primary_font_id(face)
+            && let Some(font) = self.font_for_id(id)
+            && font_supports_char(&font, ch)
+        {
+            return Some(id);
+        }
+
+        for family in &face.fallback_families {
+            let candidate = ResolvedFontFace {
+                family: family.clone(),
+                fallback_families: Vec::new(),
+                style: face.style,
+            };
+            if let Some(id) = self.primary_font_id(&candidate)
+                && let Some(font) = self.font_for_id(id)
+                && font_supports_char(&font, ch)
+            {
+                return Some(id);
+            }
+        }
+
+        let fallback_key = FallbackFontKey {
+            face: face.clone(),
+            ch,
+            physical_font_size_bits: physical_font_size.to_bits(),
+        };
+        if !self.fallback_font_ids.contains_key(&fallback_key) {
+            let fallback_id = font_id_supporting_char(self.database, face, ch, physical_font_size);
+            self.fallback_font_ids
+                .insert(fallback_key.clone(), fallback_id);
+        }
+        self.fallback_font_ids.get(&fallback_key).copied().flatten()
     }
 
     fn font_for_face(&mut self, face: &ResolvedFontFace) -> Option<FontArc> {

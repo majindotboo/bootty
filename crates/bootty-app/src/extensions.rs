@@ -1229,19 +1229,44 @@ fn resolve_shell_program(program: &str) -> std::io::Result<String> {
     bootty_mux::process::resolve_program(program).map_err(std::io::Error::other)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn platform_shell_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+#[cfg(not(windows))]
+fn platform_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
 fn platform_shell_run_output(
     cmd: &str,
     _run_jobs: &PlatformRunJobs,
     _shutdown: &AtomicBool,
 ) -> std::io::Result<String> {
-    let (program, flag) = if cfg!(windows) {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let output = std::process::Command::new(program)
-        .arg(flag)
+    use std::os::windows::process::CommandExt;
+
+    let output = std::process::Command::new("cmd")
+        .creation_flags(windows_no_window_flag())
+        .raw_arg(format!("/S /C {cmd}"))
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(windows)]
+const fn windows_no_window_flag() -> u32 {
+    0x0800_0000
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn platform_shell_run_output(
+    cmd: &str,
+    _run_jobs: &PlatformRunJobs,
+    _shutdown: &AtomicBool,
+) -> std::io::Result<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
         .arg(cmd)
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1451,6 +1476,18 @@ fn setup_lua(
         .load(EXTENSION_UI_PRELUDE)
         .set_name("bootty.ui")
         .eval()?;
+    ui_table.set(
+        "shell_quote",
+        lua.create_function(|_, value: String| Ok(platform_shell_quote(&value)))?,
+    )?;
+    ui_table.set(
+        "stderr_null",
+        if cfg!(windows) {
+            "2>nul"
+        } else {
+            "2>/dev/null"
+        },
+    )?;
     ui_table.set_readonly(true);
     bootty.set("ui", ui_table)?;
 
@@ -2018,12 +2055,7 @@ mod tests {
         let started = dir.path().join("started");
         let gate = dir.path().join("gate");
         let done = dir.path().join("done");
-        let command = format!(
-            "touch {}; while [ ! -f {} ]; do sleep 0.05; done; touch {}",
-            shell_quote(&started),
-            shell_quote(&gate),
-            shell_quote(&done),
-        );
+        let command = blocking_file_command(&started, &gate, &done);
         std::fs::write(
             dir.path().join("blocker.luau"),
             format!(
@@ -2061,8 +2093,34 @@ mod tests {
         assert!(wait_for_path(&done, Duration::from_secs(2)));
     }
 
+    #[cfg(unix)]
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    #[cfg(windows)]
+    fn cmd_quote(path: &Path) -> String {
+        platform_shell_quote(&path.display().to_string())
+    }
+
+    #[cfg(windows)]
+    fn blocking_file_command(started: &Path, gate: &Path, done: &Path) -> String {
+        format!(
+            "type nul > {} & for /l %i in (0,0,1) do @if exist {} (type nul > {} & exit /b 0) else (ping -n 2 127.0.0.1 >nul)",
+            cmd_quote(started),
+            cmd_quote(gate),
+            cmd_quote(done),
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn blocking_file_command(started: &Path, gate: &Path, done: &Path) -> String {
+        format!(
+            "touch {}; while [ ! -f {} ]; do sleep 0.05; done; touch {}",
+            shell_quote(started),
+            shell_quote(gate),
+            shell_quote(done),
+        )
     }
 
     fn wait_for_path(path: &Path, timeout: Duration) -> bool {
@@ -2091,6 +2149,7 @@ mod tests {
         }
         false
     }
+    #[cfg(unix)]
     fn wait_for_cached_output(
         cache: &RunCache,
         cmd: &str,
@@ -2156,11 +2215,12 @@ mod tests {
         // Mirror the shell snippet codexbar.luau builds in usage_command(provider); the
         // cache is keyed by the exact command string, so this must stay in sync with it.
         let usage_command = |provider: &str| {
-            let command =
-                format!("codexbar usage --provider {provider} --format json --json-only 2>&1");
-            format!(
-                "out=$({command}); status=$?; if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf 'codexbar exited %s with empty output' \"$status\"; fi"
-            )
+            let stderr_null = if cfg!(windows) {
+                "2>nul"
+            } else {
+                "2>/dev/null"
+            };
+            format!("codexbar usage --provider {provider} --format json --json-only {stderr_null}")
         };
         const PROBE_JSON: &str = r#"[{"usage":{"primary":{"usedPercent":25,"windowMinutes":300},"secondary":{"usedPercent":50,"windowMinutes":10080}}}]"#;
         {
@@ -2192,13 +2252,23 @@ mod tests {
     fn shell_run_output_returns_stdout_text() {
         assert_eq!(
             shell_run_output(
-                "printf bootty-run",
+                stdout_command("bootty-run").as_str(),
                 &PlatformRunJobs::default(),
                 &AtomicBool::new(false),
             )
             .unwrap(),
             "bootty-run"
         );
+    }
+
+    #[cfg(windows)]
+    fn stdout_command(text: &str) -> String {
+        format!("echo|set /p x={text}")
+    }
+
+    #[cfg(not(windows))]
+    fn stdout_command(text: &str) -> String {
+        format!("printf {}", platform_shell_quote(text))
     }
 
     #[cfg(target_os = "macos")]

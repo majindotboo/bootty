@@ -442,7 +442,7 @@ height = 760
 fullscreen = false
 
 [font]
-family = ["Maple Mono", "Font Awesome 7 Brands", "Maple Mono NF", "monospace"]
+family = ["monospace"]
 size = 15.666
 features = ["calt", "liga"]
 

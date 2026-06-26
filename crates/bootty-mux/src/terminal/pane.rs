@@ -788,13 +788,29 @@ fn backend_attach_env_remove(backend: MuxBackendKind) -> Vec<String> {
 }
 
 fn backend_attach_session_config(
-    mut config: TerminalSessionConfig,
+    config: TerminalSessionConfig,
     backend: MuxBackendKind,
     attach_session: &str,
     bootty_terminfo_available: bool,
 ) -> Result<TerminalSessionConfig> {
+    backend_attach_session_config_with_path(
+        config,
+        backend,
+        attach_session,
+        bootty_terminfo_available,
+        env::var_os("PATH").as_deref(),
+    )
+}
+
+fn backend_attach_session_config_with_path(
+    mut config: TerminalSessionConfig,
+    backend: MuxBackendKind,
+    attach_session: &str,
+    bootty_terminfo_available: bool,
+    path: Option<&OsStr>,
+) -> Result<TerminalSessionConfig> {
     let (program, args) = backend_attach_launch(backend, attach_session);
-    config.launch.shell = Some(resolve_launch_program(&program)?);
+    config.launch.shell = Some(resolve_launch_program_with_path(&program, path)?);
     config.launch.args = args;
     config.launch.env_remove = backend_attach_env_remove(backend);
     // The attach client hard-fails on a TERM it cannot resolve. xterm-bootty
@@ -908,6 +924,12 @@ mod tests {
             side_effect_tx: None,
             benchmark_trace: None,
         }
+    }
+
+    fn fake_backend_path(program: &str) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join(program), "").unwrap();
+        temp
     }
 
     #[test]
@@ -1104,14 +1126,25 @@ mod tests {
             benchmark_trace: None,
         };
 
-        let with_terminfo =
-            backend_attach_session_config(config.clone(), MuxBackendKind::Tmux, "agents", true)
-                .expect("attach config");
+        let path = fake_backend_path("tmux");
+        let with_terminfo = backend_attach_session_config_with_path(
+            config.clone(),
+            MuxBackendKind::Tmux,
+            "agents",
+            true,
+            Some(path.path().as_os_str()),
+        )
+        .expect("attach config");
         assert_eq!(with_terminfo.launch.term, "xterm-bootty");
 
-        let without_terminfo =
-            backend_attach_session_config(config, MuxBackendKind::Tmux, "agents", false)
-                .expect("attach config");
+        let without_terminfo = backend_attach_session_config_with_path(
+            config,
+            MuxBackendKind::Tmux,
+            "agents",
+            false,
+            Some(path.path().as_os_str()),
+        )
+        .expect("attach config");
         assert_eq!(without_terminfo.launch.term, "xterm-256color");
     }
 
@@ -1131,8 +1164,15 @@ mod tests {
             benchmark_trace: None,
         };
 
-        let attach = backend_attach_session_config(config, MuxBackendKind::Tmux, "agents", true)
-            .expect("attach config");
+        let path = fake_backend_path("tmux");
+        let attach = backend_attach_session_config_with_path(
+            config,
+            MuxBackendKind::Tmux,
+            "agents",
+            true,
+            Some(path.path().as_os_str()),
+        )
+        .expect("attach config");
         assert_eq!(attach.launch.term, "xterm-256color");
     }
 

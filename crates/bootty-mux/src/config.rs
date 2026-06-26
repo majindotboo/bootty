@@ -25,6 +25,9 @@ impl From<MultiplexerBackendConfig> for MuxBackendKind {
 }
 
 pub fn selected_backend(config: &MultiplexerConfig) -> MuxBackendKind {
+    if cfg!(windows) && config.backend == MultiplexerBackendConfig::Tmux {
+        return MuxBackendKind::Native;
+    }
     config.backend.into()
 }
 
@@ -43,11 +46,18 @@ mod tests {
     use bootty_config::config::MultiplexerConfig;
 
     #[test]
-    fn selected_backend_preserves_configured_backend_without_fallback() {
+    fn selected_backend_resolves_configured_backend() {
         for (backend, expected) in [
             (MultiplexerBackendConfig::Rmux, MuxBackendKind::Rmux),
             (MultiplexerBackendConfig::Native, MuxBackendKind::Native),
-            (MultiplexerBackendConfig::Tmux, MuxBackendKind::Tmux),
+            (
+                MultiplexerBackendConfig::Tmux,
+                if cfg!(windows) {
+                    MuxBackendKind::Native
+                } else {
+                    MuxBackendKind::Tmux
+                },
+            ),
             (MultiplexerBackendConfig::Zellij, MuxBackendKind::Zellij),
         ] {
             let config = MultiplexerConfig {
@@ -60,11 +70,18 @@ mod tests {
     }
 
     #[test]
-    fn backend_factory_instantiates_configured_backend_without_fallback() {
+    fn backend_factory_instantiates_selected_backend() {
         for (backend, expected) in [
             (MultiplexerBackendConfig::Rmux, MuxBackendKind::Rmux),
             (MultiplexerBackendConfig::Native, MuxBackendKind::Native),
-            (MultiplexerBackendConfig::Tmux, MuxBackendKind::Tmux),
+            (
+                MultiplexerBackendConfig::Tmux,
+                if cfg!(windows) {
+                    MuxBackendKind::Native
+                } else {
+                    MuxBackendKind::Tmux
+                },
+            ),
             (MultiplexerBackendConfig::Zellij, MuxBackendKind::Zellij),
         ] {
             let config = MultiplexerConfig {

@@ -146,6 +146,29 @@ fn config_path_prefers_xdg_then_home(
 }
 
 #[test]
+fn empty_session_working_directory_resolves_to_home() {
+    let expected_home = default_working_directory().expect("home directory should be discoverable");
+
+    assert_eq!(
+        SessionConfig::default().launch_config().working_directory,
+        Some(expected_home)
+    );
+}
+
+#[test]
+fn configured_session_working_directory_overrides_home_default() {
+    let config = SessionConfig {
+        working_directory: Some(PathBuf::from("tmp/bootty-project")),
+        ..SessionConfig::default()
+    };
+
+    assert_eq!(
+        config.launch_config().working_directory,
+        Some(PathBuf::from("tmp/bootty-project"))
+    );
+}
+
+#[test]
 fn missing_config_file_loads_with_selected_path() {
     let sandbox = ConfigSandbox::new();
 
@@ -816,6 +839,7 @@ fn default_keybind_tables_parse() {
     let tables: &[&[&str]] = &[
         common_keybinds_macos(),
         common_keybinds_other(),
+        common_keybinds_windows(),
         native_keybinds(),
         native_scroll_keybinds_macos(),
         native_scroll_keybinds_other(),
@@ -837,6 +861,7 @@ fn default_keybind_tables_parse() {
 fn non_macos_default_keybinds_never_require_super() {
     let mut entries = Vec::new();
     entries.extend_from_slice(common_keybinds_other());
+    entries.extend_from_slice(common_keybinds_windows());
     entries.extend_from_slice(native_scroll_keybinds_other());
     for trigger in binding_triggers(&entries) {
         assert!(
@@ -850,7 +875,11 @@ fn non_macos_default_keybinds_never_require_super() {
 // trigger unique (the `cmd+w`/`cmd+shift+w` style collisions that motivated separate tables).
 #[test]
 fn common_keybind_triggers_are_unique_per_platform() {
-    for table in [common_keybinds_macos(), common_keybinds_other()] {
+    for table in [
+        common_keybinds_macos(),
+        common_keybinds_other(),
+        common_keybinds_windows(),
+    ] {
         let triggers = binding_triggers(table);
         for (index, trigger) in triggers.iter().enumerate() {
             assert!(
@@ -879,5 +908,29 @@ fn non_macos_session_shortcuts_use_ctrl_shift() {
     assert_eq!(
         set.get_trigger(&BindingAction::NextSession),
         Some(&BindingTrigger::from_str("ctrl+shift+]").unwrap())
+    );
+}
+
+#[test]
+fn windows_paste_defaults_include_standard_terminal_shortcuts() {
+    let mut set = BindingSet::default();
+    for entry in common_keybinds_windows() {
+        set.parse_and_put(entry).unwrap();
+    }
+
+    assert_eq!(
+        set.get(&BindingTrigger::from_str("ctrl+v").unwrap())
+            .map(|binding| &binding.action),
+        Some(&BindingAction::PasteFromClipboard)
+    );
+    assert_eq!(
+        set.get(&BindingTrigger::from_str("ctrl+shift+v").unwrap())
+            .map(|binding| &binding.action),
+        Some(&BindingAction::PasteFromClipboard)
+    );
+    assert_eq!(
+        set.get(&BindingTrigger::from_str("shift+Insert").unwrap())
+            .map(|binding| &binding.action),
+        Some(&BindingAction::PasteFromClipboard)
     );
 }
