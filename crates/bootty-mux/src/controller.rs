@@ -154,6 +154,31 @@ impl MuxController {
             .unwrap_or_default()
     }
 
+    /// Panes of the selected window (the active window of the selected session unless a specific
+    /// window is selected). Native renders these as a split layout; other backends report a single
+    /// attach anchor.
+    pub fn selected_window_panes(&self) -> &[crate::snapshot::MuxPaneAnchor] {
+        let Some(selected) = self.selected_session.as_deref() else {
+            return &[];
+        };
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| session.id == selected || session.name == selected)
+        else {
+            return &[];
+        };
+        let window_id = self
+            .selected_window
+            .as_deref()
+            .or(session.active_window_id.as_deref());
+        window_id
+            .and_then(|id| session.windows.iter().find(|window| window.id == id))
+            .or_else(|| session.windows.first())
+            .map(|window| window.panes.as_slice())
+            .unwrap_or_default()
+    }
+
     pub fn apply_session_order(&mut self, ordered_names: &[String]) {
         self.sessions = order_sessions_by_names(&self.sessions, ordered_names);
     }
@@ -494,6 +519,7 @@ mod tests {
                         cwd: None,
                         process: Some("nvim".to_owned()),
                     },
+                    panes: Vec::new(),
                 }],
             }],
             selected_session: Some("piu".to_owned()),
@@ -630,6 +656,7 @@ mod tests {
             name: format!("w{index}"),
             active: false,
             anchor: MuxPaneAnchor::default(),
+            panes: Vec::new(),
         }
     }
 

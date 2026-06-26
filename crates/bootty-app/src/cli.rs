@@ -193,6 +193,14 @@ struct ConfigOverrides {
     #[arg(long)]
     no_fit_cell_height: bool,
 
+    /// Stretch column spacing to fit the available terminal width.
+    #[arg(long, conflicts_with = "no_fit_cell_width")]
+    fit_cell_width: bool,
+
+    /// Disable column spacing stretch-to-fit.
+    #[arg(long)]
+    no_fit_cell_width: bool,
+
     /// Force font baseline adjustment.
     #[arg(long, value_name = "PX")]
     font_baseline_adjustment: Option<f32>,
@@ -448,6 +456,9 @@ impl ConfigOverrides {
         if let Some(fit_cell_height) = bool_override(self.fit_cell_height, self.no_fit_cell_height)
         {
             config.font.fit_cell_height = fit_cell_height;
+        }
+        if let Some(fit_cell_width) = bool_override(self.fit_cell_width, self.no_fit_cell_width) {
+            config.font.fit_cell_width = fit_cell_width;
         }
         if let Some(adjustment) = self.font_baseline_adjustment {
             config.font.baseline_adjustment = adjustment;

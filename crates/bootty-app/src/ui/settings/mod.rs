@@ -690,56 +690,10 @@ impl SettingsSurface {
                 settings_value_chip(ui, self.palette, &format!("{width:.0} px"));
             },
         );
-        section(ui, self.palette, "COLOR OVERRIDES");
         settings_notice(
             ui,
             self.palette.muted,
-            "Unset colors inherit from the active theme.",
-        );
-        sidebar_color_row(
-            self,
-            ui,
-            "Background",
-            "Sidebar panel background.",
-            &["sidebar", "background"],
-            self.palette.mantle,
-            |sidebar| &mut sidebar.background,
-        );
-        sidebar_color_row(
-            self,
-            ui,
-            "Foreground",
-            "Sidebar text and icons.",
-            &["sidebar", "foreground"],
-            self.palette.text,
-            |sidebar| &mut sidebar.foreground,
-        );
-        sidebar_color_row(
-            self,
-            ui,
-            "Selected row",
-            "Selected session fill.",
-            &["sidebar", "selected"],
-            self.palette.surface,
-            |sidebar| &mut sidebar.selected,
-        );
-        sidebar_color_row(
-            self,
-            ui,
-            "Hover row",
-            "Hovered session fill.",
-            &["sidebar", "hover"],
-            self.palette.hover,
-            |sidebar| &mut sidebar.hover,
-        );
-        sidebar_color_row(
-            self,
-            ui,
-            "Border",
-            "Separator between sidebar and terminal content.",
-            &["sidebar", "border"],
-            self.palette.border,
-            |sidebar| &mut sidebar.border,
+            "Sidebar colors are edited in the Appearance pane.",
         );
         section(ui, self.palette, "KEYBOARD");
         settings_notice(
@@ -1708,6 +1662,35 @@ fn sidebar_color_row(
         }
         if current.is_some() && settings_button(ui, win.palette, "Reset").clicked() {
             *field(&mut win.config.sidebar) = None;
+            win.remove(path);
+        }
+    });
+}
+
+fn chrome_color_row(
+    win: &mut SettingsSurface,
+    ui: &mut egui::Ui,
+    label: &str,
+    help: &str,
+    path: &[&str],
+    seed: Color32,
+    field: fn(&mut crate::config::ChromeConfig) -> &mut Option<Color>,
+) {
+    settings_row(ui, win.palette, label, help, |ui| {
+        let current = *field(&mut win.config.chrome);
+        let mut rgb = current.map_or([seed.r(), seed.g(), seed.b()], |color| {
+            [color.r, color.g, color.b]
+        });
+        if settings_color_picker(ui, win.palette, &mut rgb).changed() {
+            *field(&mut win.config.chrome) = Some(Color {
+                r: rgb[0],
+                g: rgb[1],
+                b: rgb[2],
+            });
+            win.set_color(path, rgb);
+        }
+        if current.is_some() && settings_button(ui, win.palette, "Reset").clicked() {
+            *field(&mut win.config.chrome) = None;
             win.remove(path);
         }
     });

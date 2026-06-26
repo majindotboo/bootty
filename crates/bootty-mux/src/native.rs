@@ -189,17 +189,33 @@ impl NativeMuxState {
             .find(|window| window.id == active_window_id)
     }
 
-    fn split_pane(&mut self, session_id: &str) {
+    fn split_pane(&mut self, session_id: &str, source_pane_id: Option<&str>) {
         let pane_id = self.next_pane_id();
         if let Some(window) = self.active_window_mut(session_id) {
-            let cwd = window
-                .panes
-                .first()
+            // Seed the new pane's cwd from the pane being split (the focused one), falling back to
+            // the active pane and then the first pane.
+            let cwd = source_pane_id
+                .and_then(|id| window.panes.iter().find(|pane| pane.id == id))
+                .or_else(|| {
+                    window
+                        .panes
+                        .iter()
+                        .find(|pane| pane.id == window.active_pane_id)
+                })
+                .or_else(|| window.panes.first())
                 .map(|pane| pane.cwd.clone())
                 .unwrap_or_else(|| PathBuf::from("."));
             window.active_pane_id = pane_id.clone();
             window.panes.push(NativePane { id: pane_id, cwd });
             self.active_session_id = session_id.to_owned();
+        }
+    }
+
+    fn set_active_pane(&mut self, session_id: &str, pane_id: &str) {
+        if let Some(window) = self.active_window_mut(session_id)
+            && window.panes.iter().any(|pane| pane.id == pane_id)
+        {
+            window.active_pane_id = pane_id.to_owned();
         }
     }
 
@@ -296,12 +312,18 @@ impl NativeMuxState {
             .iter()
             .map(|window| {
                 let anchor = anchor_for_window(&session.id, window);
+                let panes = window
+                    .panes
+                    .iter()
+                    .map(|pane| anchor_for_pane(&session.id, pane))
+                    .collect();
                 MuxWindow {
                     id: window.id.clone(),
                     index: window.index,
                     name: window.name.clone(),
                     active: active && window.id == session.active_window_id,
                     anchor,
+                    panes,
                 }
             })
             .collect::<Vec<_>>();
@@ -344,6 +366,15 @@ fn anchor_for_window(session_id: &str, window: &NativeWindow) -> MuxPaneAnchor {
         session_id: session_id.to_owned(),
         pane_id: pane.map(|pane| pane.id.clone()),
         cwd: pane.map(|pane| pane.cwd.to_string_lossy().into_owned()),
+        process: Some("shell".to_owned()),
+    }
+}
+
+fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
+    MuxPaneAnchor {
+        session_id: session_id.to_owned(),
+        pane_id: Some(pane.id.clone()),
+        cwd: Some(pane.cwd.to_string_lossy().into_owned()),
         process: Some("shell".to_owned()),
     }
 }
@@ -422,7 +453,10 @@ impl MuxBackend for NativeBackend {
             MuxCommand::MoveWindow { session_id, delta } => {
                 state.move_active_window(&session_id, delta);
             }
-            MuxCommand::SplitPane { session_id } => state.split_pane(&session_id),
+            MuxCommand::SplitPane {
+                session_id,
+                pane_id,
+            } => state.split_pane(&session_id, pane_id.as_deref()),
             MuxCommand::SelectPane {
                 session_id,
                 direction,
@@ -435,8 +469,24 @@ impl MuxBackend for NativeBackend {
                 }
             },
             MuxCommand::SelectNextPane { session_id } => state.select_relative_pane(&session_id, 1),
-            MuxCommand::KillPane { session_id } => state.kill_active_pane(&session_id),
-            MuxCommand::ClosePane { session_id } => state.close_active_pane(&session_id),
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            } => {
+                if let Some(pane_id) = pane_id {
+                    state.set_active_pane(&session_id, &pane_id);
+                }
+                state.kill_active_pane(&session_id);
+            }
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => {
+                if let Some(pane_id) = pane_id {
+                    state.set_active_pane(&session_id, &pane_id);
+                }
+                state.close_active_pane(&session_id);
+            }
             MuxCommand::TogglePaneZoom { .. } => {}
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
@@ -501,6 +551,7 @@ mod tests {
         backend
             .execute(MuxCommand::ClosePane {
                 session_id: "local".to_owned(),
+                pane_id: None,
             })
             .unwrap();
 
@@ -519,9 +570,39 @@ mod tests {
     }
 
     #[test]
+    fn close_pane_command_targets_the_named_pane_not_just_the_active_one() {
+        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+        backend
+            .execute(MuxCommand::SplitPane {
+                session_id: "local".to_owned(),
+                pane_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            backend.snapshot().unwrap().sessions[0].windows[0]
+                .panes
+                .len(),
+            2
+        );
+
+        // The split made pane-2 active; closing pane-1 by id must remove pane-1, leaving pane-2.
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "local".to_owned(),
+                pane_id: Some("pane-1".to_owned()),
+            })
+            .unwrap();
+
+        let snapshot = backend.snapshot().unwrap();
+        let panes = &snapshot.sessions[0].windows[0].panes;
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0].pane_id.as_deref(), Some("pane-2"));
+    }
+
+    #[test]
     fn close_pane_in_a_split_tab_keeps_the_tab() {
         let mut state = NativeMuxState::new();
-        state.split_pane("local");
+        state.split_pane("local", None);
 
         state.close_active_pane("local");
 

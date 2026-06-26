@@ -104,6 +104,78 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         |colors| &mut colors.pointer_background,
     );
 
+    super::section(ui, palette, "SIDEBAR COLORS");
+    super::settings_notice(
+        ui,
+        palette.muted,
+        "Unset colors inherit from the active theme.",
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
+        "Background",
+        "Sidebar panel background.",
+        &["sidebar", "background"],
+        palette.mantle,
+        |sidebar| &mut sidebar.background,
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
+        "Foreground",
+        "Sidebar text and icons.",
+        &["sidebar", "foreground"],
+        palette.text,
+        |sidebar| &mut sidebar.foreground,
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
+        "Selected row",
+        "Selected session fill.",
+        &["sidebar", "selected"],
+        palette.surface,
+        |sidebar| &mut sidebar.selected,
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
+        "Hover row",
+        "Hovered session fill.",
+        &["sidebar", "hover"],
+        palette.hover,
+        |sidebar| &mut sidebar.hover,
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
+        "Border",
+        "Separator between sidebar and terminal content.",
+        &["sidebar", "border"],
+        palette.border,
+        |sidebar| &mut sidebar.border,
+    );
+
+    super::section(ui, palette, "SPLIT PANES");
+    super::chrome_color_row(
+        win,
+        ui,
+        "Divider",
+        "Color of the gap between split panes; unset uses the window background.",
+        &["chrome", "pane-divider-color"],
+        palette.mantle,
+        |chrome| &mut chrome.pane_divider_color,
+    );
+    super::chrome_color_row(
+        win,
+        ui,
+        "Focus border",
+        "Border around the focused split pane; unset uses the theme accent.",
+        &["chrome", "pane-focus-border-color"],
+        palette.primary,
+        |chrome| &mut chrome.pane_focus_border_color,
+    );
+
     palette_section(win, ui);
 }
 

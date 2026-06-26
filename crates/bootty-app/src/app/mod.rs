@@ -1,10 +1,13 @@
 mod state;
 
-use std::{path::PathBuf, sync::mpsc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::mpsc, time::Instant};
 
 use anyhow::Result;
-use eframe::egui::{
-    self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder, Vec2,
+use eframe::{
+    egui::{
+        self, FontData, FontDefinitions, FontFamily, Pos2, Rect, TextureHandle, UiBuilder, Vec2,
+    },
+    wgpu,
 };
 
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
@@ -12,9 +15,11 @@ pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 use crate::{
     config::BoottyConfig,
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
+    layout::SplitDirection,
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
+    terminal_text::TerminalTextConfig,
     theme::theme_palette_from_config,
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
@@ -31,6 +36,10 @@ const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 8.0;
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+/// Minimum on-screen size of a pane (px) enforced while dragging a split divider.
+const MIN_PANE_PX: f32 = 80.0;
+/// Minimum grab width (px) for a split divider handle, so a thin configured divider stays draggable.
+const MIN_PANE_DIVIDER_GRAB: f32 = 8.0;
 
 fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visible: bool) -> bool {
     !(sidebar_visible && segment.module == "session")
@@ -45,6 +54,84 @@ fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32
         0.0
     } else {
         chrome::STATUS_EDGE_PAD
+    }
+}
+
+/// Pane corner radius (px), clamped so it never exceeds the pane's shorter half-extent.
+fn pane_corner_radius_px(rect: Rect, px: f32) -> f32 {
+    let max = (rect.width().min(rect.height()) / 2.0).max(0.0);
+    px.clamp(0.0, max)
+}
+
+fn pane_corner_radius(rect: Rect, px: f32) -> egui::CornerRadius {
+    egui::CornerRadius::same(pane_corner_radius_px(rect, px).round().clamp(0.0, 255.0) as u8)
+}
+
+/// Paint the four corner wedges between each square corner and its rounded arc with `bg`, so a pane
+/// reads as rounded (the window background shows through the corners) even though the terminal
+/// content itself isn't clipped.
+fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg: egui::Color32) {
+    let r = pane_corner_radius_px(rect, radius);
+    if r <= 0.5 {
+        return;
+    }
+    // (arc center, square-corner point, start angle) for each corner, angles in egui screen space
+    // (y down), sweeping a quarter turn.
+    let corners = [
+        (
+            Pos2::new(rect.min.x + r, rect.min.y + r),
+            rect.min,
+            std::f32::consts::PI,
+        ), // top-left
+        (
+            Pos2::new(rect.max.x - r, rect.min.y + r),
+            Pos2::new(rect.max.x, rect.min.y),
+            std::f32::consts::FRAC_PI_2 * 3.0,
+        ), // top-right
+        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0), // bottom-right
+        (
+            Pos2::new(rect.min.x + r, rect.max.y - r),
+            Pos2::new(rect.min.x, rect.max.y),
+            std::f32::consts::FRAC_PI_2,
+        ), // bottom-left
+    ];
+    // The cutout (square corner minus the rounded arc) is concave, so fan it into triangles from
+    // the corner — each triangle is convex and the region is star-shaped from the corner — rather
+    // than filling one polygon (which egui would collapse to its diagonal hull).
+    let steps = 8;
+    for (center, corner, start) in corners {
+        let arc = |step: usize| {
+            let angle = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
+            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
+        };
+        for step in 0..steps {
+            painter.add(egui::Shape::convex_polygon(
+                vec![corner, arc(step), arc(step + 1)],
+                bg,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+}
+
+/// Shrink a divider's visual rect along its long axis by the pane corner radius (per end), so it
+/// stops where the adjacent panes round off rather than crossing the rounded corners.
+fn inset_divider_for_radius(rect: Rect, direction: SplitDirection, radius: f32) -> Rect {
+    match direction {
+        SplitDirection::Right => {
+            let inset = radius.clamp(0.0, rect.height() / 2.0);
+            Rect::from_min_max(
+                Pos2::new(rect.min.x, rect.min.y + inset),
+                Pos2::new(rect.max.x, rect.max.y - inset),
+            )
+        }
+        SplitDirection::Down => {
+            let inset = radius.clamp(0.0, rect.width() / 2.0);
+            Rect::from_min_max(
+                Pos2::new(rect.min.x + inset, rect.min.y),
+                Pos2::new(rect.max.x - inset, rect.max.y),
+            )
+        }
     }
 }
 
@@ -70,7 +157,19 @@ enum LuaWindowOwner {
 
 pub struct BoottyApp {
     state: AppState,
+    /// The focused pane's renderer (and the sole renderer for non-native backends). Keeping the
+    /// focused widget here means all the zoom/metrics/cell-size logic that reads `terminal_widget`
+    /// keeps targeting the focused pane.
     terminal_widget: TerminalWidget,
+    /// Renderers for the non-focused panes of a native split, keyed by pane id. On a focus change
+    /// the relevant widget is swapped in/out of `terminal_widget` so each pane keeps its own caches.
+    pane_widgets: HashMap<String, TerminalWidget>,
+    /// Pane id currently held by `terminal_widget` (native split only); `None` for the single-surface
+    /// path.
+    focused_widget_key: Option<String>,
+    /// Held so freshly-split panes get a renderer with the right WGPU target and text config.
+    terminal_target_format: Option<wgpu::TextureFormat>,
+    terminal_text_config: TerminalTextConfig,
     app_icon_texture: Option<TextureHandle>,
     settings_open: bool,
     settings: SettingsSurface,
@@ -116,12 +215,12 @@ impl BoottyApp {
         let repaint: crate::mux::RepaintHandle =
             std::sync::Arc::new(move || repaint_ctx.request_repaint());
         let text_config = config.font.terminal_text_config();
-        let terminal_widget = TerminalWidget::new(
-            cc.wgpu_render_state
-                .as_ref()
-                .map(|render_state| render_state.target_format),
-        )
-        .with_text_config(text_config);
+        let target_format = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|render_state| render_state.target_format);
+        let terminal_widget =
+            TerminalWidget::new(target_format).with_text_config(text_config.clone());
 
         // User extensions live beside the config file. Built-ins are Luau modules;
         // user `.lua` / `.luau` files override same-named defaults per extension surface.
@@ -144,6 +243,10 @@ impl BoottyApp {
         Ok(Self {
             state: AppState::new(config.clone(), repaint, direct_input_rx, modifier_side_rx)?,
             terminal_widget,
+            pane_widgets: HashMap::new(),
+            focused_widget_key: None,
+            terminal_target_format: target_format,
+            terminal_text_config: text_config,
             app_icon_texture: None,
             settings_open: false,
             settings: SettingsSurface::new(config.clone()),
@@ -208,11 +311,18 @@ impl BoottyApp {
                 }
                 AppEffect::RepaintAfter(after) => ctx.request_repaint_after(after),
                 AppEffect::SetTerminalTextConfig(text_config) => {
-                    self.terminal_widget.set_text_config(text_config);
+                    self.terminal_text_config = text_config.clone();
+                    self.terminal_widget.set_text_config(text_config.clone());
+                    for widget in self.pane_widgets.values_mut() {
+                        widget.set_text_config(text_config.clone());
+                    }
                 }
                 AppEffect::SetTerminalCursorIcon(icon) => {
                     self.terminal_cursor_icon = icon;
                     self.terminal_widget.set_terminal_cursor_icon(icon);
+                    for widget in self.pane_widgets.values_mut() {
+                        widget.set_terminal_cursor_icon(icon);
+                    }
                 }
                 AppEffect::SetUiFonts(families) => {
                     configure_egui_fonts(ctx, &families);
@@ -390,7 +500,245 @@ impl BoottyApp {
         );
     }
 
+    /// Make `terminal_widget` the renderer for pane `key`, swapping the previous focused pane's
+    /// widget back into `pane_widgets` so each pane keeps its own render caches.
+    fn focus_pane_widget(&mut self, key: &str) {
+        if self.focused_widget_key.as_deref() == Some(key) {
+            return;
+        }
+        let mut incoming = self.pane_widgets.remove(key).unwrap_or_else(|| {
+            TerminalWidget::new(self.terminal_target_format)
+                .with_text_config(self.terminal_text_config.clone())
+        });
+        incoming.set_terminal_cursor_icon(self.terminal_cursor_icon);
+        let outgoing = std::mem::replace(&mut self.terminal_widget, incoming);
+        if let Some(old_key) = self.focused_widget_key.replace(key.to_owned()) {
+            self.pane_widgets.insert(old_key, outgoing);
+        }
+    }
+
+    fn show_single_terminal(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
+                Ok(surface) => self.state.record_surface(surface),
+                Err(error) => self.state.record_render_error(error),
+            },
+        );
+    }
+
+    /// Render every pane of the active native window into its split sub-rect: the focused pane via
+    /// `terminal_widget`, the rest via their own `pane_widgets`. A primary press inside a pane
+    /// focuses it. The focused pane gets a thin accent border.
+    fn show_split_panes(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: Rect,
+        palette: bootty_ui::ThemePalette,
+    ) {
+        let chrome = &self.state.config().chrome;
+        let gap = chrome.pane_divider_width;
+        let border_width = chrome.pane_focus_border_width;
+        let border_color = chrome
+            .pane_focus_border_color
+            .map(crate::theme::config_color32)
+            .unwrap_or(palette.primary);
+        let corner_radius_px = chrome.pane_corner_radius;
+        let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
+        let background = palette.mantle;
+        let rects = self.state.pane_rects(area, gap);
+
+        // Handle click-to-focus before snapshotting focus so this frame already renders the clicked
+        // pane (focus_pane re-syncs the input runtime), avoiding a one-frame stale-pane flash.
+        if ui.input(|input| input.pointer.primary_pressed())
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+            && let Some((pane_id, _)) = rects.iter().find(|(_, rect)| rect.contains(pos))
+        {
+            self.state.focus_pane(pane_id);
+        }
+        let focused = self.state.focused_pane();
+        if let Some(focused) = &focused {
+            self.focus_pane_widget(focused);
+        }
+
+        let current_ids: std::collections::HashSet<String> =
+            rects.iter().map(|(id, _)| id.clone()).collect();
+        let Self {
+            state,
+            terminal_widget,
+            pane_widgets,
+            terminal_target_format,
+            terminal_text_config,
+            terminal_cursor_icon,
+            ..
+        } = self;
+        for (pane_id, rect) in &rects {
+            let is_focused = focused.as_deref() == Some(pane_id.as_str());
+            let result = ui
+                .scope_builder(
+                    UiBuilder::new()
+                        .max_rect(*rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        if is_focused {
+                            Some(terminal_widget.show(ui, state.terminal_mut()))
+                        } else {
+                            let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
+                                TerminalWidget::new(*terminal_target_format)
+                                    .with_text_config(terminal_text_config.clone())
+                            });
+                            widget.set_terminal_cursor_icon(*terminal_cursor_icon);
+                            state
+                                .render_source_for_pane(pane_id)
+                                .map(|source| widget.show(ui, source))
+                        }
+                    },
+                )
+                .inner;
+            match result {
+                Some(Ok(surface)) => {
+                    if is_focused {
+                        state.record_surface(surface);
+                    }
+                }
+                Some(Err(error)) => state.record_render_error(error),
+                None => {}
+            }
+            let corner = pane_corner_radius(*rect, corner_radius_px);
+            if !is_focused && inactive_dim > 0.0 {
+                ui.painter().rect_filled(
+                    *rect,
+                    corner,
+                    egui::Color32::from_black_alpha((inactive_dim * 255.0) as u8),
+                );
+            }
+            // Round the pane by masking its corners with the window background.
+            paint_pane_corner_masks(ui.painter(), *rect, corner_radius_px, background);
+            if is_focused && border_width > 0.0 {
+                ui.painter().rect_stroke(
+                    *rect,
+                    corner,
+                    egui::Stroke::new(border_width, border_color),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        // Drop renderers for panes that have closed so their caches don't linger.
+        pane_widgets.retain(|key, _| current_ids.contains(key));
+    }
+
+    /// Draw a draggable handle over each split divider (mirroring the sidebar splitter). Dragging
+    /// adjusts that split's ratio, clamped so neither child shrinks below `MIN_PANE_PX`; the handle
+    /// rect is registered so the drag never starts a terminal text selection.
+    fn show_pane_dividers(
+        &mut self,
+        ui: &mut egui::Ui,
+        area: Rect,
+        palette: bootty_ui::ThemePalette,
+    ) {
+        let chrome = &self.state.config().chrome;
+        let gap = chrome.pane_divider_width;
+        let corner_radius = chrome.pane_corner_radius;
+        let divider_color = chrome
+            .pane_divider_color
+            .map(crate::theme::config_color32)
+            .unwrap_or(palette.mantle);
+        let dividers = self.state.pane_dividers(area, gap);
+        for divider in &dividers {
+            let direction = divider.direction;
+            // Widen the grab area past the (possibly thin) visual divider so it stays draggable.
+            let handle_rect = match direction {
+                SplitDirection::Right => Rect::from_center_size(
+                    divider.rect.center(),
+                    egui::vec2(
+                        divider.rect.width().max(MIN_PANE_DIVIDER_GRAB),
+                        divider.rect.height(),
+                    ),
+                ),
+                SplitDirection::Down => Rect::from_center_size(
+                    divider.rect.center(),
+                    egui::vec2(
+                        divider.rect.width(),
+                        divider.rect.height().max(MIN_PANE_DIVIDER_GRAB),
+                    ),
+                ),
+            };
+            self.state.register_chrome_handle(handle_rect);
+            // Always paint the divider at its configured width so it's visible, not just on hover.
+            // Inset its long axis by the pane corner radius so it stops where the rounded panes
+            // start, instead of cutting straight across the rounded corners.
+            let visual = inset_divider_for_radius(divider.rect, direction, corner_radius);
+            if visual.width() >= 1.0 && visual.height() >= 1.0 {
+                ui.painter().rect_filled(visual, 0.0, divider_color);
+            }
+            let response = egui::Area::new(egui::Id::new((
+                "bootty-pane-divider",
+                divider.path.as_slice(),
+            )))
+            .order(egui::Order::Foreground)
+            .fixed_pos(handle_rect.min)
+            .show(ui.ctx(), |ui| {
+                let response = ui.allocate_rect(handle_rect, egui::Sense::drag());
+                if response.hovered() || response.dragged() {
+                    let stroke = egui::Stroke::new(2.0, palette.primary);
+                    let painter = ui.painter();
+                    match direction {
+                        SplitDirection::Right => {
+                            let x = handle_rect.center().x;
+                            painter.line_segment(
+                                [
+                                    Pos2::new(x, handle_rect.min.y),
+                                    Pos2::new(x, handle_rect.max.y),
+                                ],
+                                stroke,
+                            );
+                        }
+                        SplitDirection::Down => {
+                            let y = handle_rect.center().y;
+                            painter.line_segment(
+                                [
+                                    Pos2::new(handle_rect.min.x, y),
+                                    Pos2::new(handle_rect.max.x, y),
+                                ],
+                                stroke,
+                            );
+                        }
+                    }
+                }
+                response
+            })
+            .inner;
+            if response.hovered() || response.dragged() {
+                ui.set_cursor_icon(match direction {
+                    SplitDirection::Right => egui::CursorIcon::ResizeHorizontal,
+                    SplitDirection::Down => egui::CursorIcon::ResizeVertical,
+                });
+            }
+            if response.dragged()
+                && let Some(pos) = ui.ctx().pointer_interact_pos()
+            {
+                let extent = match direction {
+                    SplitDirection::Right => divider.area.width(),
+                    SplitDirection::Down => divider.area.height(),
+                } - gap;
+                if extent > 1.0 {
+                    let min_fraction = (MIN_PANE_PX / extent).clamp(0.05, 0.45);
+                    self.state.set_pane_ratio(
+                        &divider.path,
+                        divider.ratio_at(pos, gap),
+                        min_fraction,
+                    );
+                }
+            }
+        }
+    }
+
     fn show_fixed_layout(&mut self, ui: &mut egui::Ui) {
+        // Chrome handles re-register their rects below; clearing here keeps the set to this frame's
+        // handles so the next frame's input pass suppresses selection only over live handles.
+        self.state.reset_chrome_handles();
         let rect = ui.max_rect();
         let palette = theme_palette_from_config(self.state.config());
         let chrome_config = &self.state.config().chrome;
@@ -652,6 +1000,7 @@ impl BoottyApp {
                     Pos2::new(handle_x, rect.center().y),
                     egui::vec2(SIDEBAR_RESIZE_HANDLE_WIDTH, rect.height()),
                 );
+                self.state.register_chrome_handle(handle_rect);
                 let response = egui::Area::new(egui::Id::new("bootty-sidebar-resize"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(handle_rect.min)
@@ -763,17 +1112,30 @@ impl BoottyApp {
                 .selected_session_anchor()
                 .is_some_and(|anchor| anchor.pane_id.is_some());
         if has_terminal {
-            self.terminal_widget
-                .set_transition_key(terminal_transition_key);
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(terminal_rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-                |ui| match self.terminal_widget.show(ui, self.state.terminal_mut()) {
-                    Ok(surface) => self.state.record_surface(surface),
-                    Err(error) => self.state.record_render_error(error),
-                },
-            );
+            self.state.record_pane_area(terminal_rect);
+            if native_backend {
+                // Native panes render through per-pane widgets keyed by pane id; keep the focused
+                // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
+                if self.state.native_multi_pane() {
+                    // show_split_panes swaps in the focused widget itself (after click-to-focus).
+                    self.show_split_panes(ui, terminal_rect, palette);
+                    self.show_pane_dividers(ui, terminal_rect, palette);
+                } else {
+                    if let Some(focused) = self.state.focused_pane() {
+                        self.focus_pane_widget(&focused);
+                    }
+                    // focus_pane_widget swapped the focused pane's widget into terminal_widget;
+                    // set the transition key on it so native tab-switches cross-fade like non-native.
+                    self.terminal_widget
+                        .set_transition_key(terminal_transition_key);
+                    self.show_single_terminal(ui, terminal_rect);
+                }
+            } else {
+                self.focused_widget_key = None;
+                self.terminal_widget
+                    .set_transition_key(terminal_transition_key);
+                self.show_single_terminal(ui, terminal_rect);
+            }
             if !self.state.terminal_focused() {
                 let dim = self.state.config().chrome.unfocused_terminal_dim;
                 ui.painter().rect_filled(

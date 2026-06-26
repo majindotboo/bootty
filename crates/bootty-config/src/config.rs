@@ -161,6 +161,7 @@ pub struct FontConfig {
     pub cell_width: Option<f32>,
     pub cell_height: Option<f32>,
     pub fit_cell_height: bool,
+    pub fit_cell_width: bool,
     pub baseline_adjustment: f32,
     pub underline_position: f32,
     pub underline_thickness: f32,
@@ -177,6 +178,7 @@ struct FontPatch {
     cell_width: Option<f32>,
     cell_height: Option<f32>,
     fit_cell_height: Option<bool>,
+    fit_cell_width: Option<bool>,
     baseline_adjustment: Option<f32>,
     underline_position: Option<f32>,
     underline_thickness: Option<f32>,
@@ -189,6 +191,18 @@ pub struct ChromeConfig {
     pub sidebar_width: f32,
     pub status_height: f32,
     pub gap: f32,
+    /// Visual width (px) of the gap/divider between native split panes. The grab area is widened
+    /// past this so thin dividers stay draggable.
+    pub pane_divider_width: f32,
+    /// Divider color; falls back to the window background (the sidebar's default background) so the
+    /// gap reads as a cohesive backdrop behind the rounded panes.
+    pub pane_divider_color: Option<Color>,
+    /// Border (px) drawn around the focused native split pane. 0 hides it.
+    pub pane_focus_border_width: f32,
+    /// Color of the focused-pane border; falls back to the theme accent when unset.
+    pub pane_focus_border_color: Option<Color>,
+    /// Corner radius (px) of split panes, clamped to the pane's shorter half-extent.
+    pub pane_corner_radius: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,
     /// Ordered status-bar segments. Composed left/center/right; builtins plus Lua modules.
@@ -205,6 +219,11 @@ struct ChromePatch {
     sidebar_width: Option<f32>,
     status_height: Option<f32>,
     gap: Option<f32>,
+    pane_divider_width: Option<f32>,
+    pane_divider_color: Option<Color>,
+    pane_focus_border_width: Option<f32>,
+    pane_focus_border_color: Option<Color>,
+    pane_corner_radius: Option<f32>,
     unfocused_sidebar_dim: Option<f32>,
     unfocused_terminal_dim: Option<f32>,
     status_segment: Option<Vec<StatusSegment>>,
@@ -541,6 +560,7 @@ impl Default for FontConfig {
             cell_width: text.cell_width,
             cell_height: text.cell_height,
             fit_cell_height: text.fit_cell_height,
+            fit_cell_width: text.fit_cell_width,
             baseline_adjustment: text.baseline_adjustment,
             underline_position: text.underline_position,
             underline_thickness: text.underline_thickness,
@@ -565,6 +585,7 @@ impl FontConfig {
             cell_width: self.cell_width,
             cell_height: self.cell_height,
             fit_cell_height: self.fit_cell_height,
+            fit_cell_width: self.fit_cell_width,
             baseline_adjustment: self.baseline_adjustment,
             underline_position: self.underline_position,
             underline_thickness: self.underline_thickness,
@@ -589,6 +610,11 @@ impl Default for ChromeConfig {
             sidebar_width: 286.0,
             status_height: 30.0,
             gap: 1.0,
+            pane_divider_width: 3.0,
+            pane_divider_color: None,
+            pane_focus_border_width: 1.0,
+            pane_focus_border_color: None,
+            pane_corner_radius: 0.0,
             unfocused_sidebar_dim: 0.16,
             unfocused_terminal_dim: 0.08,
             status_segments: default_status_segments(),
@@ -833,6 +859,10 @@ fn native_keybinds() -> &'static [&'static str] {
         "ctrl+space>c=new_tab",
         "ctrl+space>v=split_right",
         "ctrl+space>-=split_down",
+        "ctrl+space>h=select_pane:left",
+        "ctrl+space>j=select_pane:down",
+        "ctrl+space>k=select_pane:up",
+        "ctrl+space>l=select_pane:right",
         "ctrl+space>s=new_mux_session",
         "ctrl+space>x=ditch_session",
         "ctrl+space>shift+x=ditch_session",
@@ -1575,6 +1605,7 @@ fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) -> ConfigResult
     apply_present(&mut font.cell_width, partial.cell_width);
     apply_present(&mut font.cell_height, partial.cell_height);
     apply_value(&mut font.fit_cell_height, partial.fit_cell_height);
+    apply_value(&mut font.fit_cell_width, partial.fit_cell_width);
     apply_value(&mut font.baseline_adjustment, partial.baseline_adjustment);
     apply_value(&mut font.underline_position, partial.underline_position);
     apply_value(&mut font.underline_thickness, partial.underline_thickness);
@@ -1599,6 +1630,17 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_value(&mut chrome.gap, partial.gap);
+    apply_value(&mut chrome.pane_divider_width, partial.pane_divider_width);
+    apply_present(&mut chrome.pane_divider_color, partial.pane_divider_color);
+    apply_value(
+        &mut chrome.pane_focus_border_width,
+        partial.pane_focus_border_width,
+    );
+    apply_present(
+        &mut chrome.pane_focus_border_color,
+        partial.pane_focus_border_color,
+    );
+    apply_value(&mut chrome.pane_corner_radius, partial.pane_corner_radius);
     apply_value(
         &mut chrome.unfocused_sidebar_dim,
         partial.unfocused_sidebar_dim,

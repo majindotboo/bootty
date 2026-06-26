@@ -51,7 +51,7 @@ pub enum MuxKeyAction {
     LastTab,
     SelectTab(u32),
     MoveTab(i32),
-    SplitPane,
+    SplitPane(crate::layout::SplitDirection),
     SelectPane(MuxDirection),
     NextPane,
     KillPane,
@@ -369,9 +369,12 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::LastTab => Ok(KeybindAction::Mux(MuxKeyAction::LastTab)),
         BindingAction::SelectTab(index) => Ok(KeybindAction::Mux(MuxKeyAction::SelectTab(index))),
         BindingAction::MoveTab(delta) => Ok(KeybindAction::Mux(MuxKeyAction::MoveTab(delta))),
-        BindingAction::SplitRight | BindingAction::SplitDown => {
-            Ok(KeybindAction::Mux(MuxKeyAction::SplitPane))
-        }
+        BindingAction::SplitRight => Ok(KeybindAction::Mux(MuxKeyAction::SplitPane(
+            crate::layout::SplitDirection::Right,
+        ))),
+        BindingAction::SplitDown => Ok(KeybindAction::Mux(MuxKeyAction::SplitPane(
+            crate::layout::SplitDirection::Down,
+        ))),
         BindingAction::SelectPane(direction) => Ok(KeybindAction::Mux(MuxKeyAction::SelectPane(
             mux_direction(direction),
         ))),
