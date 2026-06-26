@@ -1961,6 +1961,42 @@ fn native_kitty_image_reappears_after_temporary_text_overlap() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn native_kitty_image_survives_same_row_text_outside_declared_columns() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 12,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(101, 1, 40, 40, "c=4,r=2,C=1,q=1").as_bytes(),
+    );
+    assert!(
+        engine
+            .extract_frame()?
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 101)
+    );
+
+    engine.write_vt(b"\x1b[1;10HOK");
+    let frame = engine.extract_frame()?;
+    assert!(
+        frame
+            .images
+            .placements
+            .iter()
+            .any(|placement| placement.image_id == 101),
+        "native image should stay visible when same-row text is outside its columns: {:?}",
+        frame.images.placements
+    );
+
+    Ok(())
+}
 #[test]
 fn native_kitty_image_tracks_scrollback_viewport_rows() -> Result<()> {
     let mut engine = TerminalEngine::new_with_scrollback(

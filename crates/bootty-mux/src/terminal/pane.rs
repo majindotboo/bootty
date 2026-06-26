@@ -189,7 +189,12 @@ impl TerminalRuntime for IdleRenderSource {
 
 struct TmuxPanePassthroughOverride {
     pane_id: String,
-    previous: String,
+    previous: TmuxOptionValue,
+}
+
+struct TmuxOptionValue {
+    value: String,
+    local: bool,
 }
 
 impl TerminalRuntime for TerminalSession {
@@ -354,7 +359,7 @@ impl BackendPaneTerminal {
         }
 
         if let Some(previous) = self.passthrough_all_pane.take() {
-            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+            let _ = restore_pane_allow_passthrough(&previous);
         }
 
         if let Some(pane_id) = want
@@ -638,7 +643,7 @@ impl BackendPaneTerminal {
     pub fn discard_active_pane(&mut self) {
         self.terminal = ActiveTerminalRuntime::idle();
         if let Some(previous) = self.passthrough_all_pane.take() {
-            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+            let _ = restore_pane_allow_passthrough(&previous);
         }
         self.active_target = None;
     }
@@ -665,7 +670,7 @@ impl Drop for BackendPaneTerminal {
         // (window closed, app quit). Best-effort: a hard kill skips this, and a
         // later attach re-hides while a clean detach restores.
         if let Some(previous) = self.passthrough_all_pane.take() {
-            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+            let _ = restore_pane_allow_passthrough(&previous);
         }
         if let Some(session) = self.status_hidden_session.take() {
             let _ = set_session_status_hidden(&session, false);
@@ -903,13 +908,18 @@ fn passthrough_override_target(
     })
 }
 
-fn pane_allow_passthrough(pane_id: &str) -> Result<String> {
-    let local = tmux_option_value(&["show-options", "-p", "-t", pane_id, "allow-passthrough"])?;
-    if let Some(value) = local {
-        return Ok(value);
+fn pane_allow_passthrough(pane_id: &str) -> Result<TmuxOptionValue> {
+    if let Some(value) =
+        tmux_option_value(&["show-options", "-p", "-t", pane_id, "allow-passthrough"])?
+    {
+        return Ok(TmuxOptionValue { value, local: true });
     }
-    tmux_option_value(&["show-options", "-g", "allow-passthrough"])?
-        .ok_or_else(|| anyhow::anyhow!("tmux global allow-passthrough option had no value"))
+    let value = tmux_option_value(&["show-options", "-g", "allow-passthrough"])?
+        .ok_or_else(|| anyhow::anyhow!("tmux global allow-passthrough option had no value"))?;
+    Ok(TmuxOptionValue {
+        value,
+        local: false,
+    })
 }
 
 fn tmux_option_value(args: &[&str]) -> Result<Option<String>> {
@@ -950,6 +960,29 @@ fn set_pane_allow_passthrough(pane_id: &str, value: &str) -> Result<()> {
     if !output.status.success() {
         anyhow::bail!(
             "tmux set-option allow-passthrough failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn restore_pane_allow_passthrough(previous: &TmuxPanePassthroughOverride) -> Result<()> {
+    if previous.previous.local {
+        return set_pane_allow_passthrough(&previous.pane_id, &previous.previous.value);
+    }
+    unset_pane_allow_passthrough(&previous.pane_id)
+}
+
+fn unset_pane_allow_passthrough(pane_id: &str) -> Result<()> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args(["set-option", "-u", "-p", "-t", pane_id, "allow-passthrough"])
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux unset-option allow-passthrough failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }

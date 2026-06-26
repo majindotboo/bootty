@@ -644,7 +644,7 @@ impl AppState {
     }
 
     fn restore_theme_picker_preview(&mut self, effects: &mut Vec<AppEffect>) {
-        let Some(config) = self.theme_picker_restore_config.take() else {
+        let Some(config) = self.theme_picker_restore_config.clone() else {
             return;
         };
         self.config_state.accept(config);
@@ -1179,6 +1179,11 @@ impl AppState {
             ThemePickerEvent::Close => {
                 self.input_focus = InputFocus::Terminal;
                 self.restore_theme_picker_preview(effects);
+                self.theme_picker_restore_config = None;
+            }
+            ThemePickerEvent::RestorePreview => {
+                self.restore_theme_picker_preview(effects);
+                self.theme_picker_dialog = Some(dialog);
             }
             ThemePickerEvent::Preview(theme) => {
                 self.preview_active_theme(&theme, effects);

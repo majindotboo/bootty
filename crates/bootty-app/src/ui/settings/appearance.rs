@@ -7,6 +7,7 @@ use libghostty_vt::style::RgbColor;
 use super::SettingsWindow;
 use crate::{
     color::Color,
+    config::load_config_from_path,
     config::{AppearanceBranchConfig, AppearanceMode, AppearanceVariant, ColorConfig},
 };
 
@@ -284,6 +285,28 @@ fn branch_mut(
     }
 }
 
+fn appearance_config_path<'a>(variant: AppearanceVariant, path: &'a [&'a str]) -> Vec<&'a str> {
+    let mut full = vec!["appearance", branch_key(variant)];
+    full.extend_from_slice(path);
+    full
+}
+
+fn reload_settings_config(win: &mut SettingsWindow) {
+    match load_config_from_path(&win.config_path) {
+        Ok(config) => win.config = config,
+        Err(error) => win.last_write_error = Some(error.to_string()),
+    }
+}
+
+fn remove_branch_config_value(win: &mut SettingsWindow, variant: AppearanceVariant, path: &[&str]) {
+    let full_path = appearance_config_path(variant, path);
+    win.remove(&full_path);
+    if variant == AppearanceVariant::Dark {
+        win.remove(path);
+    }
+    reload_settings_config(win);
+}
+
 fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVariant) {
     let config_path = win.config_path.clone();
     let themes = win
@@ -326,12 +349,12 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVar
                 current_index,
             ) {
                 if index == 0 {
-                    branch_mut(&mut win.config, variant).theme = None;
-                    win.remove(&["appearance", branch_key(variant), "theme"]);
+                    remove_branch_config_value(win, variant, &["theme"]);
                 } else {
                     let chosen = themes[index - 1].clone();
                     branch_mut(&mut win.config, variant).theme = Some(chosen.clone());
                     win.set_str(&["appearance", branch_key(variant), "theme"], &chosen);
+                    reload_settings_config(win);
                 }
             }
         },
@@ -362,11 +385,11 @@ fn terminal_color_row(
             win.set_color(&["appearance", branch_key(variant), path[0], path[1]], rgb);
         }
         let override_path = ["appearance", branch_key(variant), path[0], path[1]];
-        if win.contains_config_value(&override_path)
-            && super::settings_button(ui, win.palette, "Reset").clicked()
-        {
-            *field(&mut branch_mut(&mut win.config, variant).colors) = None;
-            win.remove(&override_path);
+        let legacy_path = [path[0], path[1]];
+        let has_override = win.contains_config_value(&override_path)
+            || (variant == AppearanceVariant::Dark && win.contains_config_value(&legacy_path));
+        if has_override && super::settings_button(ui, win.palette, "Reset").clicked() {
+            remove_branch_config_value(win, variant, path);
         }
     });
 }
@@ -417,7 +440,9 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: Appeara
 
     let branch_colors = &branch(&win.config, variant).colors;
     let palette_override_path = ["appearance", branch_key(variant), "colors", "palette"];
-    let has_palette_overrides = win.contains_config_value(&palette_override_path);
+    let legacy_palette_path = ["colors", "palette"];
+    let has_palette_overrides = win.contains_config_value(&palette_override_path)
+        || (variant == AppearanceVariant::Dark && win.contains_config_value(&legacy_palette_path));
     let mut colors = if has_palette_overrides {
         branch_colors.palette.clone()
     } else {
@@ -522,7 +547,7 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: Appeara
     if changed {
         branch_mut(&mut win.config, variant).colors.palette = colors.clone();
         if colors.is_empty() {
-            win.remove(&["appearance", branch_key(variant), "colors", "palette"]);
+            remove_branch_config_value(win, variant, &["colors", "palette"]);
         } else {
             let hex: Vec<String> = colors
                 .iter()

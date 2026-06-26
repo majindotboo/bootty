@@ -21,6 +21,7 @@ pub struct ThemePickerDialog {
 pub enum ThemePickerEvent {
     None,
     Close,
+    RestorePreview,
     Preview(String),
     Select(String),
 }
@@ -191,12 +192,15 @@ impl ThemePickerDialog {
         if result.escaped || result.clicked_outside {
             return ThemePickerEvent::Close;
         }
-        if let Some(preview) = preview
-            && self.current.as_deref() != Some(preview.as_str())
-            && self.last_preview.as_deref() != Some(preview.as_str())
-        {
-            self.last_preview = Some(preview.clone());
-            return ThemePickerEvent::Preview(preview);
+        if let Some(preview) = preview {
+            if self.current.as_deref() == Some(preview.as_str()) {
+                if self.last_preview.take().is_some() {
+                    return ThemePickerEvent::RestorePreview;
+                }
+            } else if self.last_preview.as_deref() != Some(preview.as_str()) {
+                self.last_preview = Some(preview.clone());
+                return ThemePickerEvent::Preview(preview);
+            }
         }
         ThemePickerEvent::None
     }

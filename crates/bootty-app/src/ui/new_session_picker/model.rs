@@ -40,7 +40,7 @@ pub(super) fn project_entries_for_filter(
             .iter()
             .any(|existing| same_project_path(&existing.path, &entry.path))
     {
-        filtered.push(entry);
+        filtered.insert(0, entry);
     }
     filtered
 }
@@ -158,6 +158,20 @@ mod tests {
         let entries = project_entries_for_filter(&[known], path.to_str().expect("utf-8 temp path"));
 
         assert_eq!(entries.len(), 1);
+        _ = std::fs::remove_dir(path);
+    }
+
+    #[test]
+    fn project_filter_prioritizes_direct_directory_paths_over_substring_matches() {
+        let path = temp_dir("priority");
+        let known = project(&format!("{}/child", path.display()), true);
+
+        let entries = project_entries_for_filter(&[known], path.to_str().expect("utf-8 temp path"));
+
+        assert_eq!(
+            PathBuf::from(&entries[0].path),
+            path.canonicalize().unwrap()
+        );
         _ = std::fs::remove_dir(path);
     }
 }

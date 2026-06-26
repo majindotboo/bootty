@@ -699,10 +699,9 @@ fn binding_editor_row(
 
                 ui.label(egui::RichText::new("→").color(palette.muted));
 
-                let (base, params) = match row.action.split_once(':') {
-                    Some((base, params)) => (base.to_owned(), params.to_owned()),
-                    None => (row.action.clone(), String::new()),
-                };
+                // Title + description picker, drawn from the shared action catalog.
+                let options = action_options(ctx.scope);
+                let (base, params) = split_action_for_editor(&row.action, &options);
 
                 // Spread the action + value across the leftover width, reserving a right cluster for
                 // the status, flags, and remove controls so the row uses its full width.
@@ -711,8 +710,6 @@ fn binding_editor_row(
                 let action_width = (fields * 0.58 - 8.0).clamp(150.0, 320.0);
                 let value_width = (fields - action_width - 8.0).clamp(90.0, 240.0);
 
-                // Title + description picker, drawn from the shared action catalog.
-                let options = action_options(ctx.scope);
                 let mut chosen_action: &'static str = options
                     .iter()
                     .find(|(name, _, _)| *name == base)
@@ -1199,10 +1196,26 @@ fn split_entry(entry: &str) -> (String, String) {
     (entry.to_owned(), String::new())
 }
 
+fn split_action_for_editor(
+    action: &str,
+    options: &[(&'static str, &'static str, &'static str)],
+) -> (String, String) {
+    if options.iter().any(|(name, _, _)| *name == action) {
+        return (action.to_owned(), String::new());
+    }
+    match action.split_once(':') {
+        Some((base, params)) => (base.to_owned(), params.to_owned()),
+        None => (action.to_owned(), String::new()),
+    }
+}
+
 /// A human-readable label for an action string, preferring the shared action catalog's title (the
 /// same titles the command palette shows) and falling back to sentence-casing the name for actions
 /// the catalog doesn't know (sidebar actions, `text`/`csi`/…). Keeps any trailing `:param` suffix.
 fn action_title(action: &str) -> String {
+    if let Some(command) = crate::action_catalog::Command::from_action(action) {
+        return command.title().to_owned();
+    }
     let (base, param) = match action.split_once(':') {
         Some((base, param)) => (base, Some(param)),
         None => (action, None),
@@ -1345,8 +1358,24 @@ mod tests {
             action_title("decrease_font_size:1"),
             "Decrease Font Size: 1"
         );
+        assert_eq!(
+            action_title("change_appearance:dark"),
+            "Use Dark Appearance"
+        );
     }
 
+    #[test]
+    fn editor_action_split_keeps_catalog_actions_with_colons_whole() {
+        let options = action_options(KeybindScope::Global);
+        assert_eq!(
+            split_action_for_editor("change_appearance:dark", &options),
+            ("change_appearance:dark".to_owned(), String::new())
+        );
+        assert_eq!(
+            split_action_for_editor("csi:\u{1b}[1;5D", &options),
+            ("csi".to_owned(), "\u{1b}[1;5D".to_owned())
+        );
+    }
     #[test]
     fn humanize_action_sentence_cases_names_off_the_catalog() {
         // Fallback for actions the catalog doesn't carry (sidebar actions, text/csi/…).

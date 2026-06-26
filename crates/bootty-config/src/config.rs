@@ -1969,16 +1969,20 @@ fn resolve_appearance(
     legacy_colors: ColorConfig,
     config_dir: &Path,
 ) -> ConfigResult<AppearanceConfig> {
+    let has_legacy_appearance = legacy_theme.is_some() || legacy_colors != ColorConfig::default();
+    let legacy_branch = AppearanceBranchConfig {
+        theme: legacy_theme,
+        colors: legacy_colors,
+    };
+    let default_appearance = AppearanceConfig::default();
     let mut appearance = AppearanceConfig {
         mode: AppearanceMode::System,
-        light: AppearanceBranchConfig {
-            theme: Some(DEFAULT_LIGHT_THEME.to_owned()),
-            colors: resolve_theme_colors(DEFAULT_LIGHT_THEME, config_dir)?,
+        light: if has_legacy_appearance {
+            legacy_branch.clone()
+        } else {
+            default_appearance.light
         },
-        dark: AppearanceBranchConfig {
-            theme: legacy_theme,
-            colors: legacy_colors,
-        },
+        dark: legacy_branch,
     };
     apply_value(&mut appearance.mode, partial.mode);
     apply_appearance_branch(&mut appearance.light, partial.light, config_dir)?;

@@ -1269,16 +1269,34 @@ fn placement_rows_overlap_content(
     let origin = surface.content_origin();
     let min_y = placement.destination.min_y - origin.y;
     let max_y = placement.destination.max_y - origin.y;
-    if max_y <= 0.0 || min_y >= rows.len() as f32 * surface.cell.height {
+    let min_x = placement.destination.min_x - origin.x;
+    let max_x = placement.destination.max_x - origin.x;
+    if max_y <= 0.0
+        || min_y >= rows.len() as f32 * surface.cell.height
+        || max_x <= 0.0
+        || surface.cell.width <= 0.0
+        || surface.cell.height <= 0.0
+    {
         return false;
     }
 
     let start = (min_y.max(0.0) / surface.cell.height).floor() as usize;
     let end = (max_y.max(0.0) / surface.cell.height).ceil() as usize;
     let end = end.saturating_sub(1).min(rows.len().saturating_sub(1));
+    let start_col = (min_x.max(0.0) / surface.cell.width).floor() as u16;
+    let end_col = (max_x.max(0.0) / surface.cell.width).ceil().max(1.0) as u16;
+    let end_col = end_col.saturating_sub(1);
     (start..=end).any(|index| {
-        rows.get(index)
-            .is_some_and(|row| row.text.iter().any(|ch| !ch.is_whitespace()))
+        rows.get(index).is_some_and(|row| {
+            row.cells.iter().any(|cell| {
+                cell.x >= start_col
+                    && cell.x <= end_col
+                    && row
+                        .text
+                        .get(cell.text_start..cell.text_start + cell.text_len)
+                        .is_some_and(|text| text.iter().any(|ch| !ch.is_whitespace()))
+            })
+        })
     })
 }
 

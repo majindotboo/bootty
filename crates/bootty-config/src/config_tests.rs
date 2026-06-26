@@ -321,7 +321,7 @@ fn appearance_branches_resolve_separate_themes_and_overrides() {
 }
 
 #[test]
-fn legacy_theme_and_colors_seed_dark_appearance_branch() {
+fn legacy_theme_and_colors_seed_appearance_branches() {
     let config = load_config_source(indoc! {r##"
         theme = "Catppuccin Mocha"
 
@@ -329,14 +329,13 @@ fn legacy_theme_and_colors_seed_dark_appearance_branch() {
         background = "#101112"
     "##});
 
-    assert_eq!(
-        config.appearance.dark.theme.as_deref(),
-        Some("Catppuccin Mocha")
-    );
-    assert_eq!(
-        config.appearance.dark.colors.background,
-        Some(Color::from_hex("#101112").unwrap())
-    );
+    for branch in [&config.appearance.light, &config.appearance.dark] {
+        assert_eq!(branch.theme.as_deref(), Some("Catppuccin Mocha"));
+        assert_eq!(
+            branch.colors.background,
+            Some(Color::from_hex("#101112").unwrap())
+        );
+    }
     assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
     assert_eq!(config.colors, config.appearance.dark.colors);
 }
