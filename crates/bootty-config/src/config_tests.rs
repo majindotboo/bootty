@@ -175,6 +175,15 @@ fn missing_config_file_loads_with_selected_path() {
     let config = sandbox.load().unwrap();
 
     assert_eq!(config.config_path, sandbox.path);
+    assert_eq!(
+        config.appearance.light.theme.as_deref(),
+        Some("Catppuccin Latte")
+    );
+    assert_eq!(
+        config.appearance.dark.theme.as_deref(),
+        Some("Catppuccin Mocha")
+    );
+    assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
 }
 
 #[test]

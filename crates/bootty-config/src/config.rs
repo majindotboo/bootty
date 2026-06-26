@@ -809,7 +809,12 @@ impl Default for AppearanceConfig {
                     .expect("default light theme must be built in")
                     .colors,
             },
-            dark: AppearanceBranchConfig::default(),
+            dark: AppearanceBranchConfig {
+                theme: Some(DEFAULT_DARK_THEME.to_owned()),
+                colors: load_builtin_theme(DEFAULT_DARK_THEME)
+                    .expect("default dark theme must be built in")
+                    .colors,
+            },
         }
     }
 }
@@ -1389,11 +1394,14 @@ impl ConfigDocument {
 
 impl Default for BoottyConfig {
     fn default() -> Self {
+        let appearance = AppearanceConfig::default();
+        let theme = appearance.dark.theme.clone();
+        let colors = appearance.dark.colors.clone();
         Self {
             version: 1,
-            appearance: AppearanceConfig::default(),
-            theme: None,
-            colors: ColorConfig::default(),
+            appearance,
+            theme,
+            colors,
             cursor: CursorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
@@ -1988,7 +1996,11 @@ fn resolve_appearance(
         } else {
             default_appearance.light
         },
-        dark: legacy_branch,
+        dark: if has_legacy_appearance {
+            legacy_branch
+        } else {
+            default_appearance.dark
+        },
     };
     apply_value(&mut appearance.mode, partial.mode);
     apply_appearance_branch(&mut appearance.light, partial.light, config_dir)?;
@@ -2090,7 +2102,8 @@ struct BuiltinTheme {
     source: &'static str,
 }
 
-const DEFAULT_LIGHT_THEME: &str = "Catppuccin Latte";
+pub const DEFAULT_LIGHT_THEME: &str = "Catppuccin Latte";
+pub const DEFAULT_DARK_THEME: &str = "Catppuccin Mocha";
 
 const BUILTIN_THEMES: &[BuiltinTheme] = &[
     BuiltinTheme {

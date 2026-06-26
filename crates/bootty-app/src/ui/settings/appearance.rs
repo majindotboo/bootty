@@ -332,25 +332,17 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVar
         "Theme",
         "Built-in or config-directory theme.",
         |ui| {
+            let fallback = match variant {
+                AppearanceVariant::Light => crate::config::DEFAULT_LIGHT_THEME,
+                AppearanceVariant::Dark => crate::config::DEFAULT_DARK_THEME,
+            };
             let current = branch(&win.config, variant)
                 .theme
                 .clone()
-                .unwrap_or_default();
-            let label = if current.is_empty() {
-                "(default)".to_owned()
-            } else {
-                current.clone()
-            };
-            let mut options: Vec<&str> = vec!["(default)"];
-            options.extend(themes.iter().map(String::as_str));
-            let current_index = if current.is_empty() {
-                Some(0)
-            } else {
-                themes
-                    .iter()
-                    .position(|theme| *theme == current)
-                    .map(|i| i + 1)
-            };
+                .unwrap_or_else(|| fallback.to_owned());
+            let label = current.clone();
+            let options: Vec<&str> = themes.iter().map(String::as_str).collect();
+            let current_index = themes.iter().position(|theme| *theme == current);
             let combo_id = format!("settings_theme_{}", branch_key(variant));
             if let Some(index) = super::searchable_combo(
                 ui,
@@ -361,14 +353,10 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVar
                 &options,
                 current_index,
             ) {
-                if index == 0 {
-                    remove_branch_config_value(win, variant, &["theme"]);
-                } else {
-                    let chosen = themes[index - 1].clone();
-                    branch_mut(&mut win.config, variant).theme = Some(chosen.clone());
-                    win.set_str(&["appearance", branch_key(variant), "theme"], &chosen);
-                    reload_settings_config(win);
-                }
+                let chosen = themes[index].clone();
+                branch_mut(&mut win.config, variant).theme = Some(chosen.clone());
+                win.set_str(&["appearance", branch_key(variant), "theme"], &chosen);
+                reload_settings_config(win);
             }
         },
     );

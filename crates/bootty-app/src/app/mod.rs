@@ -568,6 +568,7 @@ impl BoottyApp {
         ui: &mut egui::Ui,
         area: Rect,
         palette: bootty_ui::ThemePalette,
+        background: egui::Color32,
     ) {
         let chrome = &self.state.config().chrome;
         let gap = chrome.pane_divider_width;
@@ -578,7 +579,6 @@ impl BoottyApp {
             .unwrap_or(palette.accent);
         let corner_radius_px = chrome.pane_corner_radius;
         let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
-        let background = palette.mantle;
         let rects = self.state.pane_rects(area, gap);
 
         // Handle click-to-focus before snapshotting focus so this frame already renders the clicked
@@ -1144,7 +1144,12 @@ impl BoottyApp {
                 // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
                 if self.state.native_multi_pane() {
                     // show_split_panes swaps in the focused widget itself (after click-to-focus).
-                    self.show_split_panes(ui, terminal_rect, palette);
+                    self.show_split_panes(
+                        ui,
+                        terminal_rect,
+                        palette,
+                        notch_chrome_color.unwrap_or(palette.mantle),
+                    );
                     self.show_pane_dividers(ui, terminal_rect, palette, notch_chrome_color);
                 } else {
                     if let Some(focused) = self.state.focused_pane() {
@@ -1158,7 +1163,7 @@ impl BoottyApp {
                         ui,
                         terminal_rect,
                         chrome_config.pane_corner_radius,
-                        palette.mantle,
+                        notch_chrome_color.unwrap_or(palette.mantle),
                     );
                 }
             } else {
@@ -1169,7 +1174,7 @@ impl BoottyApp {
                     ui,
                     terminal_rect,
                     chrome_config.pane_corner_radius,
-                    palette.mantle,
+                    notch_chrome_color.unwrap_or(palette.mantle),
                 );
             }
             if !self.state.terminal_focused() {
