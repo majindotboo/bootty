@@ -554,7 +554,7 @@ impl Default for FontConfig {
         Self {
             family: text.families,
             ui_family: Vec::new(),
-            ui_use_terminal_family: true,
+            ui_use_terminal_family: false,
             features: text.font_features,
             size: text.font_size,
             cell_width: text.cell_width,
@@ -748,6 +748,8 @@ impl InputConfig {
 fn common_keybinds() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         common_keybinds_macos()
+    } else if cfg!(windows) {
+        common_keybinds_windows()
     } else {
         common_keybinds_other()
     }
@@ -809,6 +811,49 @@ fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl++=increase_font_size:1",
         "ctrl+0=reset_font_size",
         "performable:ctrl+shift+v=paste_from_clipboard",
+        "shift+Enter=text:\\n",
+        "ctrl+shift+alt+n=new_window",
+        "ctrl+shift+alt+w=close_window",
+        "ctrl+shift+w=close_surface",
+        "ctrl+shift+q=quit",
+        "ctrl+shift+alt+f=toggle_fullscreen",
+        "ctrl+shift+p=command_palette",
+        "ctrl+shift+alt+o=session_picker",
+        "ctrl+shift+o=toggle_sidebar_focus",
+        "ctrl+shift+e=toggle_sidebar_visibility",
+        "ctrl+shift+n=new_mux_session",
+        "ctrl+shift+alt+r=rename_session",
+        "ctrl+shift+t=new_tab",
+        "ctrl+Tab=last_session",
+        "ctrl+shift+Tab=last_session",
+        "ctrl+shift+]=next_session",
+        "ctrl+shift+[=previous_session",
+        "ctrl+shift+,=open_settings",
+        "ctrl+shift+alt+,=move_session:-1",
+        "ctrl+shift+alt+.=move_session:1",
+        "ctrl+shift+1=select_session:1",
+        "ctrl+shift+2=select_session:2",
+        "ctrl+shift+3=select_session:3",
+        "ctrl+shift+4=select_session:4",
+        "ctrl+shift+5=select_session:5",
+        "ctrl+shift+6=select_session:6",
+        "ctrl+shift+7=select_session:7",
+        "ctrl+shift+8=select_session:8",
+        "ctrl+shift+9=select_session:9",
+        "ctrl+shift+alt+x=ditch_session",
+    ]
+}
+
+fn common_keybinds_windows() -> &'static [&'static str] {
+    &[
+        "ctrl+shift+r=reload_config",
+        "ctrl+-=decrease_font_size:1",
+        "ctrl+==increase_font_size:1",
+        "ctrl++=increase_font_size:1",
+        "ctrl+0=reset_font_size",
+        "performable:ctrl+v=paste_from_clipboard",
+        "performable:ctrl+shift+v=paste_from_clipboard",
+        "performable:shift+Insert=paste_from_clipboard",
         "shift+Enter=text:\\n",
         "ctrl+shift+alt+n=new_window",
         "ctrl+shift+alt+w=close_window",

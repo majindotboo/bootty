@@ -35,7 +35,7 @@ Native Bootty app bundles are built from `bootty-app --bin bootty`.
 ```sh
 mise run package          # macOS .app zip or Linux tarball
 mise run package:windows  # Windows zip
-mise run install          # package and install Bootty.app into /Applications (macOS)
+mise run install          # package and install Bootty for the current OS
 ```
 
 The CI workflow runs full Rust validation on pull requests and pushes, then

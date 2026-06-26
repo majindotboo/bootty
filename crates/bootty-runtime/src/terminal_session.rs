@@ -1855,7 +1855,7 @@ mod tests {
         );
         assert_eq!(
             select_shell_path(None, None, None, None),
-            shell_fixture_path("bin/sh")
+            DEFAULT_SHELL.to_owned()
         );
     }
 
@@ -2108,6 +2108,11 @@ mod tests {
         }
 
         fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
             None
         }
     }

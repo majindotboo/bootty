@@ -3,6 +3,7 @@
 -- Bootty exposes only owned session identity/state; all enrichment is rendered here as primitives.
 local ui = bootty.ui
 local quote = ui.shell_quote
+local stderr_null = ui.stderr_null
 
 local MUTED_COLOR = "#6c7086"
 local SUCCESS_COLOR = "#a6e3a1"
@@ -41,7 +42,8 @@ local function tmux_active_pane(session)
 	local out = bootty.run(
 		"tmux list-panes -t "
 			.. quote(session.id)
-			.. " -F '#{pane_active}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}' 2>/dev/null"
+			.. " -F '#{pane_active}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}' "
+			.. stderr_null
 	)
 	for line in string.gmatch(out, "[^\n]+") do
 		local active, pane_id, command, pane_pid = string.match(line, "^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.+)$")
@@ -54,7 +56,7 @@ end
 
 local function captured_pane(pane_id)
 	return if pane_id and pane_id ~= ""
-		then bootty.run("tmux capture-pane -t " .. quote(pane_id) .. " -p -S -30 2>/dev/null")
+		then bootty.run("tmux capture-pane -t " .. quote(pane_id) .. " -p -S -30 " .. stderr_null)
 		else ""
 end
 
@@ -62,7 +64,7 @@ local function git_branch(cwd)
 	if not cwd or cwd == "" then
 		return nil
 	end
-	local branch = bootty.run("git -C " .. quote(cwd) .. " rev-parse --abbrev-ref HEAD 2>/dev/null")
+	local branch = bootty.run("git -C " .. quote(cwd) .. " rev-parse --abbrev-ref HEAD " .. stderr_null)
 	local function unusable(value)
 		return value == "" or ui.starts_with(value, "bootty.run:") or string.find(value, "\n", 1, true) ~= nil
 	end
@@ -74,7 +76,7 @@ local function git_branch(cwd)
 	-- branch with no sign the session has detached. nil stays reserved for the
 	-- error/empty case, where preserving the previous branch is correct.
 	if branch == "HEAD" then
-		local short = bootty.run("git -C " .. quote(cwd) .. " rev-parse --short HEAD 2>/dev/null")
+		local short = bootty.run("git -C " .. quote(cwd) .. " rev-parse --short HEAD " .. stderr_null)
 		return if unusable(short) then "detached" else "detached " .. short
 	end
 	return branch
@@ -87,7 +89,7 @@ local function git_diff(cwd)
 	end
 	local added = 0
 	local removed = 0
-	for line in string.gmatch(bootty.run("git -C " .. quote(cwd) .. " diff HEAD --numstat 2>/dev/null"), "[^\n]+") do
+	for line in string.gmatch(bootty.run("git -C " .. quote(cwd) .. " diff HEAD --numstat " .. stderr_null), "[^\n]+") do
 		local add, remove = string.match(line, "^(%d+)\t(%d+)\t")
 		added += tonumber(add) or 0
 		removed += tonumber(remove) or 0
@@ -151,7 +153,7 @@ end
 
 local function process_snapshot()
 	local children = {}
-	for line in string.gmatch(bootty.run("ps -axo pid=,ppid=,comm=,args= 2>/dev/null"), "[^\n]+") do
+	for line in string.gmatch(bootty.run("ps -axo pid=,ppid=,comm=,args= " .. stderr_null), "[^\n]+") do
 		local pid, ppid, command, args = string.match(line, "^%s*(%d+)%s+(%d+)%s+(%S+)%s*(.*)$")
 		if pid and ppid and command then
 			if not children[ppid] then

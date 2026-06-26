@@ -8,6 +8,7 @@ $TargetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "targe
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 $BundleName = "$AppName-windows-$Arch"
 $BundleRoot = Join-Path $DistDir $BundleName
+$ReleaseDir = Join-Path $TargetRoot "release"
 
 if (Test-Path $DistDir) {
     Remove-Item -Recurse -Force $DistDir
@@ -15,18 +16,29 @@ if (Test-Path $DistDir) {
 New-Item -ItemType Directory -Force -Path $BundleRoot | Out-Null
 
 cargo build --release -p $PackageName --bin bootty
+if ($LASTEXITCODE -ne 0) {
+    throw "cargo build failed with exit code $LASTEXITCODE"
+}
 
-Copy-Item (Join-Path $TargetRoot "release\$BinaryName") (Join-Path $BundleRoot $BinaryName)
-Copy-Item "crates\bootty-app\assets\bootty-mascot.png" (Join-Path $BundleRoot "bootty-mascot.png")
-Copy-Item "crates\bootty-app\assets\bootty-mascot.svg" (Join-Path $BundleRoot "bootty-mascot.svg")
+$BinaryPath = Join-Path $ReleaseDir $BinaryName
+if (-not (Test-Path -LiteralPath $BinaryPath)) {
+    throw "Expected built binary at $BinaryPath"
+}
+Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $BundleRoot $BinaryName)
 
-$Readme = @"
-Bootty
-======
-
-Run bootty.exe to start the native Bootty terminal app.
-"@
-Set-Content -Path (Join-Path $BundleRoot "README.txt") -Value $Readme -NoNewline
+$RuntimeDlls = @("ghostty-vt.dll")
+foreach ($DllName in $RuntimeDlls) {
+    $Candidates = @(Get-ChildItem -LiteralPath $ReleaseDir -Recurse -File -Filter $DllName -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending)
+    if ($Candidates.Count -gt 0) {
+        Copy-Item -LiteralPath $Candidates[0].FullName -Destination (Join-Path $BundleRoot $DllName)
+    } else {
+        $BinaryText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($BinaryPath))
+        if ($BinaryText.IndexOf($DllName, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "Expected runtime DLL $DllName for $BinaryPath"
+        }
+    }
+}
 
 $ArchivePath = Join-Path $DistDir "$BundleName.zip"
 Compress-Archive -Path $BundleRoot -DestinationPath $ArchivePath -Force

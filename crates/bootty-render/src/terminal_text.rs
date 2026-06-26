@@ -24,17 +24,7 @@ pub struct TerminalTextConfig {
 impl Default for TerminalTextConfig {
     fn default() -> Self {
         Self {
-            families: vec![
-                "Maple Mono".to_owned(),
-                "Font Awesome 7 Brands".to_owned(),
-                "Maple Mono NF".to_owned(),
-                "Symbols Nerd Font Mono".to_owned(),
-                "Symbols Nerd Font".to_owned(),
-                "Font Awesome 6 Free".to_owned(),
-                "Font Awesome 6 Pro".to_owned(),
-                "FontAwesome".to_owned(),
-                "monospace".to_owned(),
-            ],
+            families: vec!["monospace".to_owned()],
             font_features: default_font_features(),
             codepoint_overrides: CodepointFontMap::default(),
             font_size: DEFAULT_FONT_SIZE,
@@ -926,28 +916,10 @@ mod tests {
     fn default_terminal_text_config_matches_comparison_ghostty_font_stack() {
         let config = TerminalTextConfig::default();
 
-        assert_eq!(config.families[0], "Maple Mono");
-        assert_eq!(config.families[1], "Font Awesome 7 Brands");
-        assert_eq!(config.families[2], "Maple Mono NF");
+        assert_eq!(config.families, vec!["monospace"]);
         assert_eq!(config.font_size, DEFAULT_FONT_SIZE);
         assert!(config.fit_cell_height);
         assert_eq!(config.baseline_adjustment, 3.0);
-        assert!(
-            config
-                .families
-                .iter()
-                .any(|family| family == "Symbols Nerd Font Mono")
-        );
-        assert!(
-            config
-                .families
-                .iter()
-                .any(|family| family == "Font Awesome 6 Free")
-        );
-        assert_eq!(
-            config.families.last().map(String::as_str),
-            Some("monospace")
-        );
         assert_eq!(config.font_features, vec![FontFeature::new(*b"liga", 1)]);
     }
 

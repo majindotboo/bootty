@@ -332,12 +332,30 @@ fn direct_copy_shortcut_pressed(input: KeyInput) -> bool {
 /// Multi-character key names like `Tab`/`F5` and non-letters are left untouched.
 fn normalize_recorded_chord(chord: String) -> String {
     match chord.rsplit_once('+') {
-        Some((mods, key)) if is_single_ascii_letter(key) => {
-            format!("{mods}+{}", key.to_ascii_lowercase())
-        }
-        None if is_single_ascii_letter(&chord) => chord.to_ascii_lowercase(),
-        _ => chord,
+        Some((mods, key)) => match normalize_recorded_key(key) {
+            Some(key) => format!("{mods}+{key}"),
+            None => chord,
+        },
+        None => normalize_recorded_key(&chord).unwrap_or(chord),
     }
+}
+
+fn normalize_recorded_key(key: &str) -> Option<String> {
+    if is_single_ascii_letter(key) {
+        return Some(key.to_ascii_lowercase());
+    }
+    if let Some(letter) = key.strip_prefix("Key")
+        && is_single_ascii_letter(letter)
+    {
+        return Some(letter.to_ascii_lowercase());
+    }
+    if let Some(digit) = key.strip_prefix("Digit")
+        && digit.len() == 1
+        && digit.as_bytes()[0].is_ascii_digit()
+    {
+        return Some(digit.to_owned());
+    }
+    None
 }
 
 fn is_single_ascii_letter(value: &str) -> bool {
@@ -390,7 +408,6 @@ fn terminal_cursor_icon_for_mouse_shape(shape: &str) -> Option<egui::CursorIcon>
     }
     None
 }
-
 fn terminal_report_variable_response(name: &str, session_name: Option<&str>) -> Option<Vec<u8>> {
     match name {
         "session.name" => session_name.map(encode_iterm2_report_variable),
@@ -2340,6 +2357,11 @@ mod tests {
             "cmd+alt+x"
         );
         assert_eq!(normalize_recorded_chord("cmd+V".to_owned()), "cmd+v");
+        assert_eq!(normalize_recorded_chord("ctrl+KeyV".to_owned()), "ctrl+v");
+        assert_eq!(
+            normalize_recorded_chord("ctrl+shift+Digit1".to_owned()),
+            "ctrl+shift+1"
+        );
         assert_eq!(normalize_recorded_chord("ctrl+Tab".to_owned()), "ctrl+Tab");
         assert_eq!(normalize_recorded_chord("cmd+F5".to_owned()), "cmd+F5");
         assert_eq!(normalize_recorded_chord("cmd+=".to_owned()), "cmd+=");
@@ -2752,13 +2774,23 @@ mod tests {
         let mut config = BoottyConfig::default();
         assert_eq!(mux_refresh_repaint_after(&config.multiplexer), None);
 
-        config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+        config.multiplexer.backend = MultiplexerBackendConfig::Zellij;
 
         assert_eq!(
             mux_refresh_repaint_after(&config.multiplexer),
             Some(MUX_SESSION_REFRESH_INTERVAL)
         );
         assert!(MUX_SESSION_REFRESH_INTERVAL <= Duration::from_millis(250));
+
+        config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+        assert_eq!(
+            mux_refresh_repaint_after(&config.multiplexer),
+            if cfg!(windows) {
+                None
+            } else {
+                Some(MUX_SESSION_REFRESH_INTERVAL)
+            }
+        );
     }
 
     #[test]

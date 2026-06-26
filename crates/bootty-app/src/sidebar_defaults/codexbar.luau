@@ -3,6 +3,7 @@
 -- Backed by the CodexBar CLI. Provider fetches are independent; a missing provider
 -- should not suppress rows from another configured provider.
 local ui = bootty.ui
+local stderr_null = ui.stderr_null
 
 -- Provider colors are intentionally hue-preserving: warning/critical states should read as
 -- quota severity without making one provider look like another.
@@ -29,7 +30,6 @@ local GREEN_COLOR = "#a6e3a1"
 local TRACK_COLOR = "#313244"
 local TEXT_COLOR = "#cdd6f4"
 local MUTED_COLOR = "#6c7086"
-local empty_renders = 0
 
 local function parse_window(data, key, fallback_window_secs)
 	local window = data[key]
@@ -149,8 +149,7 @@ end
 
 
 local function usage_command(provider)
-	local command = "codexbar usage --provider " .. provider.id .. " --format json --json-only 2>&1"
-	return "out=$(" .. command .. "); status=$?; if [ -n \"$out\" ]; then printf '%s' \"$out\"; else printf 'codexbar exited %s with empty output' \"$status\"; fi"
+	return "codexbar usage --provider " .. provider.id .. " --format json --json-only " .. stderr_null
 end
 
 local function provider_items(provider)
@@ -193,11 +192,12 @@ local function usage_items()
 		end
 	end
 	if #items > 0 then
-		empty_renders = 0
 		return items
 	end
-	empty_renders += 1
-	return { status_item(if status then status else "loading") }
+	if status then
+		return { status_item(status) }
+	end
+	return {}
 end
 
 return {

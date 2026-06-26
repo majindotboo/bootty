@@ -54,7 +54,7 @@ window-decoration = "auto"
 macos-titlebar-style = "transparent"
 
 [font]
-family = ["Maple Mono", "Font Awesome 7 Brands", "Maple Mono NF", "monospace"]
+family = ["monospace"]
 size = 15.666
 # Optional fixed cell metric overrides; omit to derive from font size.
 # cell-width = 10

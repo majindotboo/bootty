@@ -590,12 +590,7 @@ impl SettingsSurface {
             "Switches immediately for new mux actions and refreshes live config.",
             |ui| {
                 let mut backend = self.config.multiplexer.backend;
-                let options = [
-                    (MultiplexerBackendConfig::Native, "native"),
-                    (MultiplexerBackendConfig::Rmux, "rmux"),
-                    (MultiplexerBackendConfig::Tmux, "tmux"),
-                    (MultiplexerBackendConfig::Zellij, "zellij"),
-                ];
+                let options = available_backend_options();
                 let labels: Vec<&str> = options.iter().map(|(_, label)| *label).collect();
                 let current = options
                     .iter()
@@ -857,6 +852,25 @@ fn page_matches(meta: PageMeta, query: &str) -> bool {
 
 fn color_hex(color: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+#[cfg(windows)]
+fn available_backend_options() -> &'static [(MultiplexerBackendConfig, &'static str)] {
+    &[
+        (MultiplexerBackendConfig::Native, "native"),
+        (MultiplexerBackendConfig::Rmux, "rmux"),
+        (MultiplexerBackendConfig::Zellij, "zellij"),
+    ]
+}
+
+#[cfg(not(windows))]
+fn available_backend_options() -> &'static [(MultiplexerBackendConfig, &'static str)] {
+    &[
+        (MultiplexerBackendConfig::Native, "native"),
+        (MultiplexerBackendConfig::Rmux, "rmux"),
+        (MultiplexerBackendConfig::Tmux, "tmux"),
+        (MultiplexerBackendConfig::Zellij, "zellij"),
+    ]
 }
 
 fn backend_token(backend: MultiplexerBackendConfig) -> &'static str {
