@@ -49,6 +49,10 @@ pub struct BackendPaneTerminal {
     /// Session whose tmux `status` option bootty has toggled off so its own
     /// status bar is the only one shown; restored when bootty stops showing it.
     status_hidden_session: Option<String>,
+    /// Pane whose `allow-passthrough` option bootty has temporarily set to `all` so
+    /// Kitty graphics reach the attached Bootty client even when tmux does not
+    /// classify the pane as visible for `allow-passthrough on`.
+    passthrough_all_pane: Option<TmuxPanePassthroughOverride>,
     #[deref]
     #[deref_mut]
     terminal: ActiveTerminalRuntime,
@@ -183,6 +187,11 @@ impl TerminalRuntime for IdleRenderSource {
     }
 }
 
+struct TmuxPanePassthroughOverride {
+    pane_id: String,
+    previous: String,
+}
+
 impl TerminalRuntime for TerminalSession {
     fn drain_pty(&mut self) -> DrainStats {
         Self::drain_pty(self)
@@ -278,6 +287,7 @@ impl BackendPaneTerminal {
             native_terminals: HashMap::new(),
             native_window_targets: Vec::new(),
             status_hidden_session: None,
+            passthrough_all_pane: None,
             terminal: ActiveTerminalRuntime::idle(),
         }
     }
@@ -288,16 +298,19 @@ impl BackendPaneTerminal {
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
         let backend = selected_backend(config);
+        let target = anchor.cloned().map(MuxPaneTarget::from);
         if self.backend == backend
             && target_matches_anchor(backend, self.active_target.as_ref(), anchor)
         {
-            // Attach and target unchanged; still reconcile the status override so a
-            // runtime toggle of hide-tmux-status takes effect without a re-attach.
+            // The tmux attach client follows pane/window changes server-side, so avoid
+            // restarting it. Still update Bootty's tracked target so pane-local option
+            // overrides follow the pane currently being rendered.
+            self.active_target = target;
+            self.sync_tmux_passthrough_override();
             self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
 
-        let target = anchor.cloned().map(MuxPaneTarget::from);
         if self.backend == MuxBackendKind::Tmux
             && backend == MuxBackendKind::Tmux
             && target.is_some()
@@ -307,6 +320,7 @@ impl BackendPaneTerminal {
                 .is_ok()
         {
             self.active_target = target;
+            self.sync_tmux_passthrough_override();
             self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
@@ -316,14 +330,42 @@ impl BackendPaneTerminal {
             .inspect_err(|_| {
                 self.backend = backend;
                 self.active_target = None;
+                self.sync_tmux_passthrough_override();
                 self.clear_terminal();
             })?;
 
         self.backend = backend;
         self.active_target = target;
         self.terminal = terminal;
+        self.sync_tmux_passthrough_override();
         self.sync_status_bar(config.hide_tmux_status);
         Ok(())
+    }
+
+    fn sync_tmux_passthrough_override(&mut self) {
+        let want = passthrough_override_target(self.backend, self.active_target.as_ref());
+        if self
+            .passthrough_all_pane
+            .as_ref()
+            .map(|override_| override_.pane_id.as_str())
+            == want
+        {
+            return;
+        }
+
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+        }
+
+        if let Some(pane_id) = want
+            && let Ok(previous) = pane_allow_passthrough(pane_id)
+            && set_pane_allow_passthrough(pane_id, "all").is_ok()
+        {
+            self.passthrough_all_pane = Some(TmuxPanePassthroughOverride {
+                pane_id: pane_id.to_owned(),
+                previous,
+            });
+        }
     }
 
     /// Toggle tmux's per-session `status` option so only bootty's own status bar
@@ -595,6 +637,9 @@ impl BackendPaneTerminal {
     // sync_mux_anchor attaches the surviving pane instead of parking the closed one.
     pub fn discard_active_pane(&mut self) {
         self.terminal = ActiveTerminalRuntime::idle();
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+        }
         self.active_target = None;
     }
 
@@ -619,6 +664,9 @@ impl Drop for BackendPaneTerminal {
         // Bring the tmux status bar back when bootty stops showing the session
         // (window closed, app quit). Best-effort: a hard kill skips this, and a
         // later attach re-hides while a clean detach restores.
+        if let Some(previous) = self.passthrough_all_pane.take() {
+            let _ = set_pane_allow_passthrough(&previous.pane_id, &previous.previous);
+        }
         if let Some(session) = self.status_hidden_session.take() {
             let _ = set_session_status_hidden(&session, false);
         }
@@ -842,6 +890,72 @@ fn resolve_launch_program_with_path(program: &str, path: Option<&OsStr>) -> Resu
     anyhow::bail!("backend attach program {program:?} not found in PATH")
 }
 
+fn passthrough_override_target(
+    backend: MuxBackendKind,
+    target: Option<&MuxPaneTarget>,
+) -> Option<&str> {
+    if backend != MuxBackendKind::Tmux {
+        return None;
+    }
+    target.map(|target| match target {
+        MuxPaneTarget::Pane { pane_id, .. } => pane_id.as_str(),
+        MuxPaneTarget::Session { session_id, .. } => session_id.as_str(),
+    })
+}
+
+fn pane_allow_passthrough(pane_id: &str) -> Result<String> {
+    let local = tmux_option_value(&["show-options", "-p", "-t", pane_id, "allow-passthrough"])?;
+    if let Some(value) = local {
+        return Ok(value);
+    }
+    tmux_option_value(&["show-options", "-g", "allow-passthrough"])?
+        .ok_or_else(|| anyhow::anyhow!("tmux global allow-passthrough option had no value"))
+}
+
+fn tmux_option_value(args: &[&str]) -> Result<Option<String>> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux option command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_whitespace();
+    if fields.next().is_none() {
+        return Ok(None);
+    }
+    Ok(fields.next().map(str::to_owned))
+}
+
+fn set_pane_allow_passthrough(pane_id: &str, value: &str) -> Result<()> {
+    let program = resolve_launch_program("tmux")?;
+    let output = Command::new(program)
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            "allow-passthrough",
+            value,
+        ])
+        .env_remove("TMUX")
+        .env_remove("ZELLIJ")
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "tmux set-option allow-passthrough failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// The session whose tmux status bar should be hidden: only with the feature on,
 /// the tmux backend, and a session attached. Native/rmux/zellij are never
 /// touched, so this can only ever issue a `set-option` against a tmux server.
@@ -910,6 +1024,38 @@ mod tests {
         assert_eq!(
             status_bar_hidden_target(true, MuxBackendKind::Tmux, None),
             None
+        );
+    }
+
+    #[test]
+    fn passthrough_override_targets_only_tmux_targets() {
+        let target = MuxPaneTarget::Pane {
+            session_id: "$1".to_owned(),
+            pane_id: "%3".to_owned(),
+            cwd: None,
+        };
+
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Tmux, Some(&target)),
+            Some("%3")
+        );
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Native, Some(&target)),
+            None
+        );
+        assert_eq!(
+            passthrough_override_target(MuxBackendKind::Tmux, None),
+            None
+        );
+        assert_eq!(
+            passthrough_override_target(
+                MuxBackendKind::Tmux,
+                Some(&MuxPaneTarget::Session {
+                    session_id: "$1".to_owned(),
+                    cwd: None,
+                })
+            ),
+            Some("$1")
         );
     }
 

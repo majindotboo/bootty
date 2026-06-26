@@ -421,7 +421,9 @@ impl TerminalRenderCache {
         {
             self.frame
                 .as_ref()
-                .filter(|cached| !is_transition_placeholder_frame(cached))
+                .filter(|cached| {
+                    !is_transition_placeholder_frame(cached) && cached.images.placements.is_empty()
+                })
                 .map(Arc::clone)
                 .unwrap_or_else(|| Arc::clone(incoming))
         } else {
@@ -1171,6 +1173,75 @@ mod tests {
         assert!(Arc::ptr_eq(&frame, &next_empty_initialized));
         let frame = cache.frame_for_paint(&next_ready, true);
         assert!(Arc::ptr_eq(&frame, &next_ready));
+    }
+
+    #[test]
+    fn render_cache_does_not_hold_image_frames_for_transition_placeholders() {
+        let surface = TerminalSurface::for_size(
+            Vec2::new(80.0, 40.0),
+            CellMetrics::new(10.0, 20.0),
+            TerminalPadding::default(),
+        );
+        let previous = Arc::new(RenderFrame {
+            cols: 8,
+            rows: 2,
+            images: KittyImageFrame {
+                placements: vec![KittyImagePlacement {
+                    image_id: 44,
+                    placement_id: 1,
+                    layer: KittyImageLayer::BelowText,
+                    image_width: 1,
+                    image_height: 1,
+                    image_format: libghostty_vt::kitty::graphics::ImageFormat::Rgba,
+                    source: libghostty_vt::kitty::graphics::SourceRect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    destination: SurfaceRect::from_min_size(0.0, 0.0, 10.0, 20.0),
+                    data: Arc::new(vec![255, 0, 0, 255]),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let next_empty_initialized = Arc::new(RenderFrame {
+            cols: 8,
+            rows: 2,
+            cursor: Some(cursor_at(0, 1, false)),
+            ..Default::default()
+        });
+        let rect = SurfaceRect::from_min_size(0.0, 0.0, 10.0, 20.0);
+        let mut cache = TerminalRenderCache::default();
+
+        cache.store(
+            surface,
+            &previous,
+            TerminalRenderFrame {
+                surface: rect,
+                commands: vec![TerminalRenderCommand::Image(KittyImagePlacement {
+                    image_id: 44,
+                    placement_id: 1,
+                    layer: KittyImageLayer::BelowText,
+                    source: libghostty_vt::kitty::graphics::SourceRect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    destination: rect,
+                    data: Arc::new(vec![255, 0, 0, 255]),
+                    image_width: 1,
+                    image_height: 1,
+                    image_format: libghostty_vt::kitty::graphics::ImageFormat::Rgba,
+                })],
+            },
+            0,
+        );
+
+        let frame = cache.frame_for_paint(&next_empty_initialized, true);
+        assert!(Arc::ptr_eq(&frame, &next_empty_initialized));
     }
 
     #[test]
