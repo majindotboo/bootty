@@ -589,7 +589,6 @@ impl IncompletePlacement {
             col: self.col.unwrap_or(0),
             row: self.row.unwrap_or(0),
             width: self.width,
-            height: 1,
         }
     }
 }
@@ -603,7 +602,6 @@ struct Placement {
     col: u32,
     row: u32,
     width: u32,
-    height: u32,
 }
 
 impl Placement {
@@ -642,7 +640,7 @@ impl Placement {
             x: image_width * (f64::from(self.col) / f64::from(grid.columns)),
             y: image_height * (f64::from(self.row) / f64::from(grid.rows)),
             width: image_width * (f64::from(self.width) / f64::from(grid.columns)),
-            height: image_height * (f64::from(self.height) / f64::from(grid.rows)),
+            height: image_height / f64::from(grid.rows),
         };
         if source.width <= 0.0 || source.height <= 0.0 {
             return None;
@@ -655,7 +653,7 @@ impl Placement {
                 origin.x + f32::from(self.x) * surface.cell.width,
                 origin.y + f32::from(self.y) * surface.cell.height,
                 self.width as f32 * surface.cell.width,
-                self.height as f32 * surface.cell.height,
+                surface.cell.height,
             ),
         })
     }

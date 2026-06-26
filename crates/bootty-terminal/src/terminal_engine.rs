@@ -232,7 +232,6 @@ struct CachedRenderRow {
     text: Vec<char>,
     virtual_cells: Vec<KittyVirtualCell>,
     selection: Option<FrameSelection>,
-    has_virtual_placeholder: bool,
 }
 
 impl CachedRenderRow {
@@ -241,7 +240,6 @@ impl CachedRenderRow {
         self.text.clear();
         self.virtual_cells.clear();
         self.selection = None;
-        self.has_virtual_placeholder = false;
     }
 }
 
@@ -257,7 +255,6 @@ fn extract_render_row(
     out.clear();
     let raw_row = row.raw_row()?;
     let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
-    out.has_virtual_placeholder = raw_row.has_kitty_virtual_placeholder()?;
     out.selection = row.selection()?.map(|selection| FrameSelection {
         row: row_index,
         start_col: selection.start_x,
