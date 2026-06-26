@@ -102,6 +102,7 @@ wgpu = { version = "29", default-features = false, features = [
 ] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 embed-resource = "3.0.9"
+windows-sys = "0.61"
 
 
 [profile.dev]

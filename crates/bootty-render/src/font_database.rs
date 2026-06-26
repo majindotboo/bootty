@@ -8,10 +8,30 @@ pub fn system_font_database() -> &'static fontdb::Database {
     SYSTEM_FONT_DATABASE.get_or_init(|| {
         let mut database = fontdb::Database::new();
         database.load_system_fonts();
+        configure_windows_fonts(&mut database);
         load_macos_fonts(&mut database);
         database
     })
 }
+
+#[cfg(windows)]
+fn configure_windows_fonts(database: &mut fontdb::Database) {
+    for family in ["Cascadia Mono", "Consolas"] {
+        if database
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..fontdb::Query::default()
+            })
+            .is_some()
+        {
+            database.set_monospace_family(family);
+            break;
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn configure_windows_fonts(_database: &mut fontdb::Database) {}
 
 #[cfg(target_os = "macos")]
 fn load_macos_fonts(database: &mut fontdb::Database) {

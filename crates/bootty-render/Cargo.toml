@@ -26,6 +26,7 @@ wgpu = { workspace = true, features = ["gles", "vulkan"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
 
 [dev-dependencies]
 epaint_default_fonts.workspace = true
