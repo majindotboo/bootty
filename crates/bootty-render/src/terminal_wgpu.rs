@@ -415,7 +415,7 @@ pub struct TerminalWgpuRenderer {
     image_resources: Vec<Option<TerminalImageFrameResources>>,
     prepared_frame_cache: Option<PreparedTerminalFrameCache>,
     prepared_frame_cache_cooldown: u8,
-    text_zoomed: bool,
+    text_linear_filter: bool,
 }
 
 impl TerminalWgpuRenderer {
@@ -464,7 +464,7 @@ impl TerminalWgpuRenderer {
             image_resources: Vec::new(),
             prepared_frame_cache: None,
             prepared_frame_cache_cooldown: 0,
-            text_zoomed: false,
+            text_linear_filter: false,
         }
     }
 
@@ -476,11 +476,10 @@ impl TerminalWgpuRenderer {
         pixels_per_point: f32,
         view: ViewTransform,
     ) -> u32 {
+        let raster_ppp = text_raster_pixels_per_point(pixels_per_point, view);
         // Set before the cache early-return so `paint` always picks the right sampler.
-        self.text_zoomed = view.is_zoomed();
+        self.text_linear_filter = text_uses_linear_filter(pixels_per_point, view, raster_ppp);
         let render_surface = view.applied_to(frame.surface);
-        // Glyphs rasterize at a quantized supersample of the base scale so zoomed text stays sharp.
-        let raster_ppp = pixels_per_point * view.raster_supersample();
         let pixels_per_point_bits = raster_ppp.to_bits();
         let view_bits = [
             view.zoom.to_bits(),
@@ -672,7 +671,7 @@ impl TerminalWgpuRenderer {
                         render_pass.set_pipeline(&self.text_pipeline);
                         active_pipeline = Some(ActiveTerminalPipeline::Text);
                     }
-                    let bind_group = if self.text_zoomed {
+                    let bind_group = if self.text_linear_filter {
                         &texture.bind_group_linear
                     } else {
                         &texture.bind_group
@@ -821,6 +820,36 @@ impl TerminalWgpuRenderer {
         );
         texture.modified_count = modified_count;
     }
+}
+
+fn text_raster_pixels_per_point(pixels_per_point: f32, view: ViewTransform) -> f32 {
+    // Zoomed text already supersamples by integer zoom steps. Windows gets an extra base
+    // supersample because the generic outline rasterizer has no DirectWrite/ClearType hinting.
+    pixels_per_point * view.raster_supersample() * platform_base_text_supersample()
+}
+
+fn text_uses_linear_filter(
+    pixels_per_point: f32,
+    view: ViewTransform,
+    raster_pixels_per_point: f32,
+) -> bool {
+    view.is_zoomed()
+        || raster_pixels_per_point > pixels_per_point + f32::EPSILON
+        || has_fractional_scale(pixels_per_point)
+}
+
+fn has_fractional_scale(value: f32) -> bool {
+    (value - value.round()).abs() > 0.001
+}
+
+#[cfg(windows)]
+const fn platform_base_text_supersample() -> f32 {
+    2.0
+}
+
+#[cfg(not(windows))]
+const fn platform_base_text_supersample() -> f32 {
+    1.0
 }
 
 #[derive(Default)]

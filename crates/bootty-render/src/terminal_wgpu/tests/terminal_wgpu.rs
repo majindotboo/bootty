@@ -110,6 +110,43 @@ fn terminal_text_cell_metrics_auto_scales_with_font_size() {
     assert!(large.height > small.height);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_text_rasterization_supersamples_and_linear_filters_at_base_zoom() {
+    let raster_ppp = text_raster_pixels_per_point(1.0, ViewTransform::IDENTITY);
+
+    assert_eq!(raster_ppp, 2.0);
+    assert!(text_uses_linear_filter(
+        1.0,
+        ViewTransform::IDENTITY,
+        raster_ppp
+    ));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn non_windows_text_rasterization_keeps_base_scale_at_base_zoom() {
+    let raster_ppp = text_raster_pixels_per_point(1.0, ViewTransform::IDENTITY);
+
+    assert_eq!(raster_ppp, 1.0);
+    assert!(!text_uses_linear_filter(
+        1.0,
+        ViewTransform::IDENTITY,
+        raster_ppp
+    ));
+}
+
+#[test]
+fn fractional_display_scales_use_linear_text_filtering() {
+    let raster_ppp = text_raster_pixels_per_point(1.25, ViewTransform::IDENTITY);
+
+    assert!(text_uses_linear_filter(
+        1.25,
+        ViewTransform::IDENTITY,
+        raster_ppp
+    ));
+}
+
 #[test]
 fn background_command_vertices_include_cursor_commands_in_frame_order() {
     let surface = SurfaceRect::from_min_size(0.0, 0.0, 10.0, 10.0);
