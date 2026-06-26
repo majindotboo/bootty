@@ -10,7 +10,7 @@ use crate::{
 
 mod model;
 
-use model::{NewMuxSessionStep, filtered_project_entries, filtered_worktree_entries};
+use model::{NewMuxSessionStep, filtered_worktree_entries, project_entries_for_filter};
 
 pub use crate::mux::controller::NewMuxSessionRequest;
 
@@ -69,7 +69,7 @@ impl NewMuxSessionDialog {
         theme: Theme,
         open_cwds: &[String],
     ) -> NewSessionPickerEvent {
-        let entries = filtered_project_entries(&self.projects, &self.filter);
+        let entries = project_entries_for_filter(&self.projects, &self.filter);
         self.selected = list::clamp_selection(self.selected, entries.len());
         let rows = project_rows(&entries);
 
