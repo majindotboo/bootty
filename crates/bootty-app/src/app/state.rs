@@ -424,6 +424,7 @@ fn new_mux_session_request_with_name(
         .session
         .working_directory
         .clone()
+        .or_else(crate::config::default_working_directory)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| {
             config
@@ -2802,6 +2803,18 @@ mod tests {
 
         assert_eq!(request.session_id, "review-session");
         assert_eq!(request.cwd, "tmp/bootty-project");
+    }
+
+    #[test]
+    fn new_mux_session_request_defaults_to_home_working_directory() {
+        let config = BoottyConfig::default();
+        let expected_home = crate::config::default_working_directory()
+            .expect("home directory should be discoverable");
+
+        let request = new_mux_session_request_with_name(&config, "home-session");
+
+        assert_eq!(request.session_id, "home-session");
+        assert_eq!(request.cwd, expected_home.to_string_lossy().as_ref());
     }
 
     #[test]

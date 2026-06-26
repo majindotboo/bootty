@@ -146,6 +146,29 @@ fn config_path_prefers_xdg_then_home(
 }
 
 #[test]
+fn empty_session_working_directory_resolves_to_home() {
+    let expected_home = default_working_directory().expect("home directory should be discoverable");
+
+    assert_eq!(
+        SessionConfig::default().launch_config().working_directory,
+        Some(expected_home)
+    );
+}
+
+#[test]
+fn configured_session_working_directory_overrides_home_default() {
+    let config = SessionConfig {
+        working_directory: Some(PathBuf::from("tmp/bootty-project")),
+        ..SessionConfig::default()
+    };
+
+    assert_eq!(
+        config.launch_config().working_directory,
+        Some(PathBuf::from("tmp/bootty-project"))
+    );
+}
+
+#[test]
 fn missing_config_file_loads_with_selected_path() {
     let sandbox = ConfigSandbox::new();
 

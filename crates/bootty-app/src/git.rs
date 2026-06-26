@@ -5,6 +5,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Git state of a session's working directory, used to decide which ditch
 /// cleanup actions are safe to offer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -117,12 +120,7 @@ pub fn main_worktree(cwd: &str) -> Option<String> {
 }
 
 fn read(cwd: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = git_command(cwd, args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -130,10 +128,7 @@ fn read(cwd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn run(cwd: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
+    let output = git_command(cwd, args)
         .output()
         .map_err(|error| error.to_string())?;
     if output.status.success() {
@@ -142,6 +137,21 @@ fn run(cwd: &str, args: &[&str]) -> Result<(), String> {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
     }
 }
+
+fn git_command(cwd: &str, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(cwd).args(args);
+    hide_command_window(&mut command);
+    command
+}
+
+#[cfg(windows)]
+fn hide_command_window(command: &mut Command) {
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_command_window(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {

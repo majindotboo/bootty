@@ -30,7 +30,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         ui,
         palette,
         "Working directory",
-        "Empty inherits from the launching process. Applies to new sessions.",
+        "Empty starts new sessions in your home directory.",
         |ui| {
             let mut cwd = win
                 .config

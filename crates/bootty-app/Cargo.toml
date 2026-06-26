@@ -1,6 +1,7 @@
 [package]
 name = "bootty-app"
 edition.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "bootty"
@@ -48,6 +49,9 @@ winit = { workspace = true, features = ["wayland", "x11"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wgpu = { workspace = true, features = ["dx12"] }
+
+[build-dependencies]
+embed-resource.workspace = true
 
 [dev-dependencies]
 bootty-winit = { path = "../bootty-winit", features = ["bare-host"] }

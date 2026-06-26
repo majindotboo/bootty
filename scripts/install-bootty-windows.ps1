@@ -33,7 +33,8 @@ if (Test-Path -LiteralPath $StartMenuDir) {
     $Shell = New-Object -ComObject WScript.Shell
     $Shortcut = $Shell.CreateShortcut($ShortcutPath)
     $Shortcut.TargetPath = Join-Path $InstallDir $BinaryName
-    $Shortcut.WorkingDirectory = $InstallDir
+    $Shortcut.WorkingDirectory = if ($env:USERPROFILE) { $env:USERPROFILE } else { $InstallDir }
+    $Shortcut.IconLocation = Join-Path $InstallDir $BinaryName
     $Shortcut.Save()
 }
 

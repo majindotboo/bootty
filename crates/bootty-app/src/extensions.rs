@@ -1248,9 +1248,15 @@ fn platform_shell_run_output(
     use std::os::windows::process::CommandExt;
 
     let output = std::process::Command::new("cmd")
+        .creation_flags(windows_no_window_flag())
         .raw_arg(format!("/S /C {cmd}"))
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(windows)]
+const fn windows_no_window_flag() -> u32 {
+    0x0800_0000
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]

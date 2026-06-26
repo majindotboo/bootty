@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    env,
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -650,7 +652,10 @@ impl SessionConfig {
         SessionLaunchConfig {
             shell: self.shell.clone(),
             args: Vec::new(),
-            working_directory: self.working_directory.clone(),
+            working_directory: self
+                .working_directory
+                .clone()
+                .or_else(default_working_directory),
             env: self.env.clone(),
             env_remove: Vec::new(),
             term: self.term.clone(),
@@ -672,6 +677,33 @@ impl BoottyConfig {
             benchmark_trace: None,
         }
     }
+}
+
+pub fn default_working_directory() -> Option<PathBuf> {
+    default_working_directory_from(|name| env::var_os(name))
+}
+
+fn default_working_directory_from(
+    mut var: impl FnMut(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) = non_empty_env_path(var("USERPROFILE")) {
+            return Some(user_profile);
+        }
+        let home_drive = non_empty_env_path(var("HOMEDRIVE"))?;
+        let home_path = non_empty_env_path(var("HOMEPATH"))?;
+        Some(home_drive.join(home_path))
+    }
+
+    #[cfg(not(windows))]
+    {
+        non_empty_env_path(var("HOME"))
+    }
+}
+
+fn non_empty_env_path(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 impl ColorConfig {
