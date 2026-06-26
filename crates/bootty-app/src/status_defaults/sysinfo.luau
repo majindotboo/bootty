@@ -20,14 +20,17 @@ return {
 
 		local items = {}
 		local function cell(item)
-			item.bg = if #items % 2 == 0 then bootty.theme.mantle else bootty.theme.surface
+			if item.bg == nil then
+				item.bg = if #items % 2 == 0 then bootty.theme.surface else bootty.theme.hover
+			end
 			items[#items + 1] = item
 		end
 
 		local awake = bootty.awake()
 		cell({
 			icon = if awake then "coffee-cup-filled" else "coffee-cup",
-			fg = if awake then bootty.theme.success else bootty.theme.subtext,
+			fg = if awake then bootty.theme.base else bootty.theme.subtext,
+			bg = if awake then bootty.theme.success else nil,
 			action = "toggle-caffeinate",
 		})
 

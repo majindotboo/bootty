@@ -227,6 +227,8 @@ pub enum BindingAction {
     ToggleSidebarFocus,
     ToggleSidebarVisibility,
     OpenSettings,
+    ChangeAppearance(AppearanceChoice),
+    SwitchTheme,
     Csi(String),
     Esc(String),
     Text(String),
@@ -344,6 +346,15 @@ string_enum! {
         Down => "down",
         Up => "up",
         Right => "right",
+    }
+}
+
+string_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AppearanceChoice {
+        System => "system",
+        Light => "light",
+        Dark => "dark",
     }
 }
 
@@ -490,6 +501,8 @@ impl BindingAction {
             Self::ToggleSidebarFocus => "toggle_sidebar_focus".to_owned(),
             Self::ToggleSidebarVisibility => "toggle_sidebar_visibility".to_owned(),
             Self::OpenSettings => "open_settings".to_owned(),
+            Self::ChangeAppearance(value) => format!("change_appearance:{}", value.as_str()),
+            Self::SwitchTheme => "switch_theme".to_owned(),
             Self::Csi(value) => format!("csi:{value}"),
             Self::Esc(value) => format!("esc:{value}"),
             Self::Text(value) => format!("text:{}", format_text_bytes(value)),
@@ -708,6 +721,12 @@ pub fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
         "toggle_sidebar_focus" => parse_unit(value, BindingAction::ToggleSidebarFocus),
         "toggle_sidebar_visibility" => parse_unit(value, BindingAction::ToggleSidebarVisibility),
         "open_settings" => parse_unit(value, BindingAction::OpenSettings),
+        "change_appearance" => parse_required(value, |value| {
+            Ok(BindingAction::ChangeAppearance(AppearanceChoice::parse(
+                value,
+            )?))
+        }),
+        "switch_theme" => parse_unit(value, BindingAction::SwitchTheme),
         "csi" => parse_required(value, |value| Ok(BindingAction::Csi(value.to_owned()))),
         "esc" => parse_required(value, |value| Ok(BindingAction::Esc(value.to_owned()))),
         "text" => parse_required(value, |value| Ok(BindingAction::Text(value.to_owned()))),

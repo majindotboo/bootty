@@ -2,7 +2,7 @@
 //! area. Rows carry a leading icon, a primary label, and an optional trailing
 //! label; the framework owns navigation, selection highlight, and scrolling.
 
-use bootty_ui::ThemePalette;
+use bootty_ui::{ThemePalette, readable_color};
 use eframe::egui::{self, Align, Color32, FontId, Pos2, Rect, Sense};
 
 use crate::ui::icons;
@@ -18,15 +18,25 @@ pub struct ListRow {
     pub icon_tint: Option<Color32>,
     /// Primary label.
     pub primary: String,
+    /// Character indices in the primary label that matched the active fuzzy query.
+    pub primary_matches: Vec<usize>,
     /// Override the primary label color.
     pub primary_tint: Option<Color32>,
     /// Optional dim description rendered under the primary label (needs a taller
     /// [`ListView::row_height`]).
     pub secondary: Option<String>,
+    /// Character indices in the secondary label that matched the active fuzzy query.
+    pub secondary_matches: Vec<usize>,
     /// Optional right-aligned secondary label.
     pub trailing: Option<String>,
+    /// Character indices in the trailing label that matched the active fuzzy query.
+    pub trailing_matches: Vec<usize>,
+    /// Optional keybinding trigger rendered with the shared keycap glyph layout.
+    pub trailing_keybind: Option<String>,
     /// Marks the active/current entry: accent bar + primary tint.
     pub current: bool,
+    /// Non-selectable section heading row.
+    pub section: bool,
 }
 
 /// What a [`ListView`] produced for one frame.
@@ -36,6 +46,8 @@ pub struct ListOutcome {
     pub selected: usize,
     /// Row activated this frame by Enter or a primary click, if any.
     pub activated: Option<usize>,
+    /// Selectable row currently under the pointer, if any.
+    pub hovered: Option<usize>,
 }
 
 /// A scrollable, selectable list. Construct per frame from the rows the caller
@@ -45,6 +57,7 @@ pub struct ListView<'a> {
     rows: &'a [ListRow],
     selected: usize,
     max_height: f32,
+    scroll_selected: bool,
     row_height: f32,
     empty_text: &'a str,
 }
@@ -56,6 +69,7 @@ impl<'a> ListView<'a> {
             rows,
             selected,
             max_height: f32::INFINITY,
+            scroll_selected: false,
             row_height: ROW_HEIGHT,
             empty_text: "no matches",
         }
@@ -81,6 +95,13 @@ impl<'a> ListView<'a> {
         self
     }
 
+    /// Scroll the selected row into view this frame even without keyboard navigation.
+    #[must_use]
+    pub fn scroll_selected(mut self, scroll: bool) -> Self {
+        self.scroll_selected = scroll;
+        self
+    }
+
     pub fn show(self, ui: &mut egui::Ui, palette: ThemePalette) -> ListOutcome {
         let (next, previous, enter) = ui.input(|input| {
             (
@@ -91,7 +112,6 @@ impl<'a> ListView<'a> {
                 input.key_pressed(egui::Key::Enter),
             )
         });
-        let selected = selection_after_nav(self.selected, self.rows.len(), next, previous);
 
         if self.rows.is_empty() {
             let (rect, _) = ui.allocate_exact_size(
@@ -108,11 +128,14 @@ impl<'a> ListView<'a> {
             return ListOutcome {
                 selected: 0,
                 activated: None,
+                hovered: None,
             };
         }
 
         let navigated = next || previous;
-        let mut activated = enter.then_some(selected);
+        let mut selected = selectable_selection_after_nav(self.selected, self.rows, next, previous);
+        let mut hovered = None;
+        let mut activated = (enter && !self.rows[selected].section).then_some(selected);
 
         // Reserve a definite height (content, capped at max_height) instead of
         // letting the ScrollArea negotiate with the auto-sizing floating panel —
@@ -126,17 +149,25 @@ impl<'a> ListView<'a> {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let width = ui.available_width();
                     for (index, row) in self.rows.iter().enumerate() {
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(width, self.row_height),
-                            Sense::click(),
-                        );
-                        paint_row(ui.painter(), rect, palette, row, index == selected);
-                        if response.clicked() {
+                        let sense = if row.section {
+                            Sense::hover()
+                        } else {
+                            Sense::click()
+                        };
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(width, self.row_height), sense);
+                        let row_selected = !row.section && index == selected;
+                        paint_row(ui.painter(), rect, palette, row, row_selected);
+                        if !row.section && response.hovered() {
+                            selected = index;
+                            hovered = Some(index);
+                        }
+                        if !row.section && response.clicked() {
                             activated = Some(index);
                         }
                         // Keep the cursor visible only when navigation moved it, so a
                         // resting selection doesn't fight a user's manual scroll.
-                        if index == selected && navigated {
+                        if index == selected && (navigated || self.scroll_selected) {
                             response.scroll_to_me(Some(Align::Center));
                         }
                     }
@@ -146,6 +177,7 @@ impl<'a> ListView<'a> {
         ListOutcome {
             selected,
             activated,
+            hovered,
         }
     }
 }
@@ -157,6 +189,17 @@ fn paint_row(
     row: &ListRow,
     selected: bool,
 ) {
+    if row.section {
+        painter.rect_filled(rect, 0.0, palette.surface);
+        painter.text(
+            Pos2::new(rect.left() + 14.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            row.primary.to_ascii_uppercase(),
+            FontId::monospace(11.0),
+            palette.muted,
+        );
+        return;
+    }
     let background = if selected {
         Some(palette.hover)
     } else if row.current {
@@ -175,11 +218,15 @@ fn paint_row(
         );
     }
 
-    let text_color = if row.current {
-        palette.primary
-    } else {
-        palette.text
-    };
+    let row_background = background.unwrap_or(palette.pane);
+    let text_color = readable_color(
+        row_background,
+        if row.current {
+            palette.primary
+        } else {
+            palette.text
+        },
+    );
     let mut x = rect.left() + 14.0;
     if let Some(slug) = &row.icon {
         let tint = row.icon_tint.unwrap_or(if selected || row.current {
@@ -202,31 +249,127 @@ fn paint_row(
         Some(_) => rect.top() + rect.height() * 0.34,
         None => rect.center().y,
     };
-    painter.text(
-        Pos2::new(x, primary_y),
-        egui::Align2::LEFT_CENTER,
-        &row.primary,
-        FontId::monospace(13.0),
-        row.primary_tint.unwrap_or(text_color),
+    paint_highlighted_text(
+        painter,
+        HighlightedText {
+            pos: Pos2::new(x, primary_y),
+            align: egui::Align2::LEFT_CENTER,
+            text: &row.primary,
+            matches: &row.primary_matches,
+            font: FontId::monospace(13.0),
+            color: row.primary_tint.unwrap_or(text_color),
+            match_color: readable_color(row_background, palette.warning),
+        },
     );
     if let Some(secondary) = &row.secondary {
-        painter.text(
-            Pos2::new(x, rect.top() + rect.height() * 0.70),
-            egui::Align2::LEFT_CENTER,
-            secondary,
-            FontId::monospace(11.0),
-            palette.muted,
+        paint_highlighted_text(
+            painter,
+            HighlightedText {
+                pos: Pos2::new(x, rect.top() + rect.height() * 0.70),
+                align: egui::Align2::LEFT_CENTER,
+                text: secondary,
+                matches: &row.secondary_matches,
+                font: FontId::monospace(11.0),
+                color: readable_color(row_background, palette.muted),
+                match_color: readable_color(row_background, palette.warning),
+            },
         );
     }
-    if let Some(trailing) = &row.trailing {
-        painter.text(
-            Pos2::new(rect.right() - 14.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            trailing,
-            FontId::monospace(12.0),
-            palette.muted,
+    if let Some(trigger) = &row.trailing_keybind {
+        let color = readable_color(row_background, palette.muted);
+        let galley = crate::ui::keycaps::trigger_galley_from_painter(
+            painter, palette, trigger, color, 220.0,
+        );
+        let pos = Pos2::new(
+            rect.right() - 14.0 - galley.size().x,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        painter.galley(pos, galley, color);
+    } else if let Some(trailing) = &row.trailing {
+        paint_highlighted_text(
+            painter,
+            HighlightedText {
+                pos: Pos2::new(rect.right() - 14.0, rect.center().y),
+                align: egui::Align2::RIGHT_CENTER,
+                text: trailing,
+                matches: &row.trailing_matches,
+                font: FontId::monospace(12.0),
+                color: readable_color(row_background, palette.muted),
+                match_color: readable_color(row_background, palette.warning),
+            },
         );
     }
+}
+
+struct HighlightedText<'a> {
+    pos: Pos2,
+    align: egui::Align2,
+    text: &'a str,
+    matches: &'a [usize],
+    font: FontId,
+    color: Color32,
+    match_color: Color32,
+}
+
+fn paint_highlighted_text(painter: &egui::Painter, text: HighlightedText<'_>) {
+    if text.matches.is_empty() {
+        painter.text(text.pos, text.align, text.text, text.font, text.color);
+        return;
+    }
+    let matched = text
+        .matches
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut job = egui::text::LayoutJob::default();
+    for (index, ch) in text.text.chars().enumerate() {
+        let color = if matched.contains(&index) {
+            text.match_color
+        } else {
+            text.color
+        };
+        job.append(
+            &ch.to_string(),
+            0.0,
+            egui::text::TextFormat {
+                font_id: text.font.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    let galley = painter.layout_job(job);
+    let offset = egui::vec2(
+        match text.align.x() {
+            egui::Align::LEFT => 0.0,
+            egui::Align::Center => -galley.size().x * 0.5,
+            egui::Align::RIGHT => -galley.size().x,
+        },
+        match text.align.y() {
+            egui::Align::TOP => 0.0,
+            egui::Align::Center => -galley.size().y * 0.5,
+            egui::Align::BOTTOM => -galley.size().y,
+        },
+    );
+    painter.galley(text.pos + offset, galley, text.color);
+}
+
+fn selectable_selection_after_nav(
+    selected: usize,
+    rows: &[ListRow],
+    next: bool,
+    previous: bool,
+) -> usize {
+    let selectable = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| (!row.section).then_some(index))
+        .collect::<Vec<_>>();
+    let Some(position) = selectable.iter().position(|&index| index == selected) else {
+        return selectable.first().copied().unwrap_or(0);
+    };
+    let position = selection_after_nav(position, selectable.len(), next, previous);
+    selectable[position]
 }
 
 /// Move the selection one row for a down/up press, clamped to the list (no wrap).

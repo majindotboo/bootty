@@ -67,25 +67,31 @@ impl ThemePalette {
     #[must_use]
     pub fn from_config(config: UiColorConfig) -> Self {
         let mut palette = Self::default();
+        let custom_background = config.background.is_some();
+        let custom_foreground = config.foreground.is_some();
         if let Some(background) = config.background {
             palette.base = background;
-            palette.pane = mix(background, palette.text, 0.04);
-            palette.mantle = mix(background, Color32::BLACK, 0.28);
-            palette.surface = mix(background, palette.text, 0.07);
-            palette.hover = mix(background, palette.text, 0.12);
-            palette.border = mix(background, palette.text, 0.17);
         }
         if let Some(foreground) = config.foreground {
             palette.text = foreground;
-            palette.subtext = mix(foreground, palette.base, 0.18);
-            palette.muted = mix(foreground, palette.base, 0.48);
         }
-        if let Some(selection) = config.selection_background {
-            palette.hover = selection;
+        if custom_background || custom_foreground {
+            let surface_source = palette.text;
+            palette.pane = mix(palette.base, surface_source, 0.07);
+            palette.surface = mix(palette.base, surface_source, 0.13);
+            palette.hover = mix(palette.base, surface_source, 0.20);
+            palette.border = mix(palette.base, surface_source, 0.28);
+            palette.mantle = if is_dark_palette(palette) {
+                mix(palette.base, Color32::BLACK, 0.28)
+            } else {
+                mix(palette.base, surface_source, 0.18)
+            };
+            palette.subtext = mix(palette.text, palette.base, 0.12);
+            palette.muted = mix(palette.text, palette.base, 0.34);
         }
-        if let Some(selection_foreground) = config.selection_foreground {
-            palette.subtext = selection_foreground;
-        }
+        // Terminal selection colors can be much more saturated than UI hover/label surfaces.
+        // Keep chrome hover/subtext derived from the background and foreground so widgets remain
+        // readable across imported terminal themes.
         if let Some(primary) = config.palette.get(5).copied().flatten() {
             palette.primary = primary;
         }
@@ -159,25 +165,72 @@ impl<'a> ThemedUi<'a> {
     }
 }
 
+fn is_dark_palette(palette: ThemePalette) -> bool {
+    let luma = u32::from(palette.base.r()) * 299
+        + u32::from(palette.base.g()) * 587
+        + u32::from(palette.base.b()) * 114;
+    luma < 128_000
+}
+
+fn linear_channel(value: u8) -> f32 {
+    let value = f32::from(value) / 255.0;
+    if value <= 0.03928 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(color: Color32) -> f32 {
+    0.2126 * linear_channel(color.r())
+        + 0.7152 * linear_channel(color.g())
+        + 0.0722 * linear_channel(color.b())
+}
+
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let a = relative_luminance(a);
+    let b = relative_luminance(b);
+    let (lighter, darker) = if a >= b { (a, b) } else { (b, a) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+#[must_use]
+pub fn readable_color(background: Color32, preferred: Color32) -> Color32 {
+    const MIN_TEXT_CONTRAST: f32 = 7.0;
+    if contrast_ratio(background, preferred) >= MIN_TEXT_CONTRAST {
+        return preferred;
+    }
+    let black = Color32::BLACK;
+    let white = Color32::WHITE;
+    if contrast_ratio(background, black) >= contrast_ratio(background, white) {
+        black
+    } else {
+        white
+    }
+}
+
 pub fn configure_style(style: &mut egui::Style, theme: Theme) {
     let palette = theme.palette;
     // Start from a dark base so widgets (buttons, combos, checkboxes) don't inherit the OS
     // light-mode visuals, then layer the palette on top.
     style.visuals = egui::Visuals::dark();
+    style.visuals.dark_mode = is_dark_palette(palette);
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
     // A taller interact size keeps buttons, combo boxes, and text fields the same height so rows of
     // mixed widgets line up.
     style.spacing.interact_size.y = 26.0;
-    style.visuals.override_text_color = Some(palette.text);
+    style.visuals.override_text_color = None;
     style.visuals.window_fill = palette.pane;
     style.visuals.window_stroke = Stroke::new(1.0, palette.border);
     style.visuals.panel_fill = palette.base;
     style.visuals.extreme_bg_color = palette.mantle;
     style.visuals.faint_bg_color = palette.surface;
-    style.visuals.hyperlink_color = palette.accent;
-    style.visuals.selection.bg_fill = palette.primary;
-    style.visuals.selection.stroke = Stroke::new(1.0, palette.base);
+    style.visuals.hyperlink_color = readable_color(palette.base, palette.accent);
+    style.visuals.selection.bg_fill = palette.accent;
+    style.visuals.selection.stroke = Stroke::new(1.0, readable_color(palette.accent, palette.text));
+    style.visuals.text_cursor.stroke =
+        Stroke::new(2.0, readable_color(palette.surface, palette.text));
 
     for widget in [
         &mut style.visuals.widgets.noninteractive,
@@ -189,20 +242,20 @@ pub fn configure_style(style: &mut egui::Style, theme: Theme) {
         widget.bg_fill = palette.surface;
         widget.weak_bg_fill = palette.surface;
         widget.bg_stroke = Stroke::new(1.0, palette.border);
-        widget.fg_stroke = Stroke::new(1.0, palette.text);
+        widget.fg_stroke = Stroke::new(1.0, readable_color(palette.surface, palette.text));
         widget.corner_radius = CornerRadius::same(palette.radius);
     }
     let hovered = &mut style.visuals.widgets.hovered;
     hovered.bg_fill = palette.hover;
     hovered.weak_bg_fill = palette.hover;
-    hovered.bg_stroke = Stroke::new(1.0, palette.primary);
-    hovered.fg_stroke = Stroke::new(1.0, palette.text);
+    hovered.bg_stroke = Stroke::new(1.0, palette.accent);
+    hovered.fg_stroke = Stroke::new(1.0, readable_color(palette.hover, palette.text));
     hovered.corner_radius = CornerRadius::same(palette.radius);
     let active = &mut style.visuals.widgets.active;
-    active.bg_fill = palette.primary;
-    active.weak_bg_fill = palette.primary;
-    active.bg_stroke = Stroke::new(1.0, palette.primary);
-    active.fg_stroke = Stroke::new(1.0, palette.base);
+    active.bg_fill = palette.accent;
+    active.weak_bg_fill = palette.accent;
+    active.bg_stroke = Stroke::new(1.0, palette.accent);
+    active.fg_stroke = Stroke::new(1.0, readable_color(palette.accent, palette.text));
     active.corner_radius = CornerRadius::same(palette.radius);
 }
 
@@ -334,7 +387,14 @@ mod tests {
 
         assert_eq!(palette.base, Color32::from_rgb(1, 2, 3));
         assert_eq!(palette.text, Color32::from_rgb(240, 241, 242));
-        assert_eq!(palette.hover, Color32::from_rgb(20, 21, 22));
+        assert_eq!(
+            palette.hover,
+            mix(
+                Color32::from_rgb(1, 2, 3),
+                Color32::from_rgb(240, 241, 242),
+                0.20
+            )
+        );
         assert_eq!(palette.primary, Color32::from_rgb(80, 0, 100));
         assert_eq!(palette.accent, Color32::from_rgb(0, 0, 100));
         assert_eq!(palette.warning, Color32::from_rgb(100, 80, 0));

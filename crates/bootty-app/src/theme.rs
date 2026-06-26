@@ -3,15 +3,22 @@ use eframe::egui::Color32;
 
 use crate::{
     color::Color,
-    config::{BoottyConfig, ColorConfig},
+    config::{AppearanceVariant, BoottyConfig, ColorConfig},
 };
 
-pub fn theme_from_config(config: &BoottyConfig) -> Theme {
-    Theme::new(theme_palette_from_config(config))
+pub fn theme_from_config(config: &BoottyConfig, variant: AppearanceVariant) -> Theme {
+    Theme::new(theme_palette_from_config(config, variant))
 }
 
-pub fn theme_palette_from_config(config: &BoottyConfig) -> ThemePalette {
-    ThemePalette::from_config(ui_color_config_from_colors(&config.colors))
+pub fn theme_palette_from_config(
+    config: &BoottyConfig,
+    variant: AppearanceVariant,
+) -> ThemePalette {
+    theme_palette_from_colors(config.colors_for_appearance(variant))
+}
+
+pub fn theme_palette_from_colors(colors: &ColorConfig) -> ThemePalette {
+    ThemePalette::from_config(ui_color_config_from_colors(colors))
 }
 
 fn ui_color_config_from_colors(colors: &ColorConfig) -> UiColorConfig {
@@ -34,8 +41,8 @@ pub(crate) fn config_color32(color: Color) -> Color32 {
 
 /// Named theme colors as `#rrggbb` strings, exposed to Lua extensions as `bootty.theme.*` so
 /// extensions style themselves with palette tokens instead of hardcoded hex.
-pub fn theme_tokens(config: &BoottyConfig) -> Vec<(String, String)> {
-    let palette = theme_palette_from_config(config);
+pub fn theme_tokens(config: &BoottyConfig, variant: AppearanceVariant) -> Vec<(String, String)> {
+    let palette = theme_palette_from_config(config, variant);
     let hex = |color: Color32| format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
     [
         ("base", palette.base),
@@ -88,7 +95,7 @@ mod tests {
             },
         ];
 
-        let palette = theme_palette_from_config(&config);
+        let palette = theme_palette_from_colors(&config.colors);
 
         assert_eq!(palette.base, Color32::from_rgb(1, 2, 3));
         assert_eq!(palette.text, Color32::from_rgb(240, 241, 242));

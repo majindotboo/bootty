@@ -1,16 +1,26 @@
 use std::path::Path;
 
+use bootty_ui::readable_color;
 use eframe::egui;
 use libghostty_vt::style::RgbColor;
 
 use super::SettingsWindow;
-use crate::color::Color;
+use crate::{
+    color::Color,
+    config::{AppearanceBranchConfig, AppearanceMode, AppearanceVariant, ColorConfig},
+};
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
+    super::section(ui, palette, "APPEARANCE");
+    mode_row(win, ui);
+    branch_tabs(win, ui);
+
+    let variant = win.appearance_variant;
+
     super::section(ui, palette, "THEME");
-    theme_row(win, ui);
+    theme_row(win, ui, variant);
 
     super::section(ui, palette, "TERMINAL COLORS");
     terminal_color_row(
@@ -122,6 +132,15 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     super::sidebar_color_row(
         win,
         ui,
+        "Fullscreen background",
+        "Sidebar background while the window is fullscreen or in the notch band.",
+        &["sidebar", "fullscreen-background"],
+        palette.base,
+        |sidebar| &mut sidebar.fullscreen_background,
+    );
+    super::sidebar_color_row(
+        win,
+        ui,
         "Foreground",
         "Sidebar text and icons.",
         &["sidebar", "foreground"],
@@ -172,14 +191,100 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         "Focus border",
         "Border around the focused split pane; unset uses the theme accent.",
         &["chrome", "pane-focus-border-color"],
-        palette.primary,
+        palette.accent,
         |chrome| &mut chrome.pane_focus_border_color,
     );
 
-    palette_section(win, ui);
+    palette_section(win, ui, variant);
 }
 
-fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+fn mode_row(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+    let selected = match win.config.appearance.mode {
+        AppearanceMode::System => 0,
+        AppearanceMode::Light => 1,
+        AppearanceMode::Dark => 2,
+    };
+    super::settings_row(
+        ui,
+        win.palette,
+        "Mode",
+        "Follow the system appearance or force a light/dark branch.",
+        |ui| {
+            if let Some(index) = super::settings_segmented_ltr(
+                ui,
+                win.palette,
+                &["System", "Light", "Dark"],
+                selected,
+            ) {
+                let mode = match index {
+                    0 => AppearanceMode::System,
+                    1 => AppearanceMode::Light,
+                    _ => AppearanceMode::Dark,
+                };
+                win.config.appearance.mode = mode;
+                let token = match mode {
+                    AppearanceMode::System => "system",
+                    AppearanceMode::Light => "light",
+                    AppearanceMode::Dark => "dark",
+                };
+                win.set_str(&["appearance", "mode"], token);
+            }
+        },
+    );
+}
+
+fn branch_tabs(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+    let selected = match win.appearance_variant {
+        AppearanceVariant::Light => 0,
+        AppearanceVariant::Dark => 1,
+    };
+    super::settings_row(
+        ui,
+        win.palette,
+        "Edit branch",
+        "Theme and color choices are stored separately for light and dark.",
+        |ui| {
+            if let Some(index) =
+                super::settings_segmented_ltr(ui, win.palette, &["Light", "Dark"], selected)
+            {
+                win.appearance_variant = if index == 0 {
+                    AppearanceVariant::Light
+                } else {
+                    AppearanceVariant::Dark
+                };
+            }
+        },
+    );
+}
+
+fn branch_key(variant: AppearanceVariant) -> &'static str {
+    match variant {
+        AppearanceVariant::Light => "light",
+        AppearanceVariant::Dark => "dark",
+    }
+}
+
+fn branch(
+    config: &crate::config::BoottyConfig,
+    variant: AppearanceVariant,
+) -> &AppearanceBranchConfig {
+    match variant {
+        AppearanceVariant::Light => &config.appearance.light,
+        AppearanceVariant::Dark => &config.appearance.dark,
+    }
+}
+
+fn branch_mut(
+    config: &mut crate::config::BoottyConfig,
+    variant: AppearanceVariant,
+) -> &mut AppearanceBranchConfig {
+    match variant {
+        AppearanceVariant::Light => &mut config.appearance.light,
+        AppearanceVariant::Dark => &mut config.appearance.dark,
+    }
+}
+
+fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVariant) {
     let config_path = win.config_path.clone();
     let themes = win
         .theme_names
@@ -191,7 +296,10 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         "Theme",
         "Built-in or config-directory theme.",
         |ui| {
-            let current = win.config.theme.clone().unwrap_or_default();
+            let current = branch(&win.config, variant)
+                .theme
+                .clone()
+                .unwrap_or_default();
             let label = if current.is_empty() {
                 "(default)".to_owned()
             } else {
@@ -207,22 +315,23 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                     .position(|theme| *theme == current)
                     .map(|i| i + 1)
             };
+            let combo_id = format!("settings_theme_{}", branch_key(variant));
             if let Some(index) = super::searchable_combo(
                 ui,
                 win.palette,
-                "settings_theme",
+                &combo_id,
                 &label,
                 300.0,
                 &options,
                 current_index,
             ) {
                 if index == 0 {
-                    win.config.theme = None;
-                    win.remove(&["theme"]);
+                    branch_mut(&mut win.config, variant).theme = None;
+                    win.remove(&["appearance", branch_key(variant), "theme"]);
                 } else {
                     let chosen = themes[index - 1].clone();
-                    win.config.theme = Some(chosen.clone());
-                    win.set_str(&["theme"], &chosen);
+                    branch_mut(&mut win.config, variant).theme = Some(chosen.clone());
+                    win.set_str(&["appearance", branch_key(variant), "theme"], &chosen);
                 }
             }
         },
@@ -236,29 +345,33 @@ fn terminal_color_row(
     help: &str,
     path: &[&str],
     seed: egui::Color32,
-    field: fn(&mut crate::config::ColorConfig) -> &mut Option<Color>,
+    field: fn(&mut ColorConfig) -> &mut Option<Color>,
 ) {
+    let variant = win.appearance_variant;
     super::settings_row(ui, win.palette, label, help, |ui| {
-        let current = *field(&mut win.config.colors);
+        let current = *field(&mut branch_mut(&mut win.config, variant).colors);
         let mut rgb = current.map_or([seed.r(), seed.g(), seed.b()], |color| {
             [color.r, color.g, color.b]
         });
         if super::settings_color_picker(ui, win.palette, &mut rgb).changed() {
-            *field(&mut win.config.colors) = Some(Color {
+            *field(&mut branch_mut(&mut win.config, variant).colors) = Some(Color {
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
             });
-            win.set_color(path, rgb);
+            win.set_color(&["appearance", branch_key(variant), path[0], path[1]], rgb);
         }
-        if current.is_some() && super::settings_button(ui, win.palette, "Reset").clicked() {
-            *field(&mut win.config.colors) = None;
-            win.remove(path);
+        let override_path = ["appearance", branch_key(variant), path[0], path[1]];
+        if win.contains_config_value(&override_path)
+            && super::settings_button(ui, win.palette, "Reset").clicked()
+        {
+            *field(&mut branch_mut(&mut win.config, variant).colors) = None;
+            win.remove(&override_path);
         }
     });
 }
 
-fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
+fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVariant) {
     let palette = win.palette;
     super::section(ui, palette, "ANSI PALETTE");
     super::settings_toggle_row(
@@ -266,10 +379,18 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         palette,
         "Generate 256-color cube",
         "Generate the extended color cube from the ANSI base palette.",
-        win.config.colors.palette_generate,
+        branch(&win.config, variant).colors.palette_generate,
         |enabled| {
-            win.config.colors.palette_generate = enabled;
-            win.set_bool(&["colors", "palette-generate"], enabled);
+            branch_mut(&mut win.config, variant).colors.palette_generate = enabled;
+            win.set_bool(
+                &[
+                    "appearance",
+                    branch_key(variant),
+                    "colors",
+                    "palette-generate",
+                ],
+                enabled,
+            );
         },
     );
     super::settings_toggle_row(
@@ -277,21 +398,39 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         palette,
         "Harmonious blend",
         "Blend generated colors toward the active theme.",
-        win.config.colors.palette_harmonious,
+        branch(&win.config, variant).colors.palette_harmonious,
         |enabled| {
-            win.config.colors.palette_harmonious = enabled;
-            win.set_bool(&["colors", "palette-harmonious"], enabled);
+            branch_mut(&mut win.config, variant)
+                .colors
+                .palette_harmonious = enabled;
+            win.set_bool(
+                &[
+                    "appearance",
+                    branch_key(variant),
+                    "colors",
+                    "palette-harmonious",
+                ],
+                enabled,
+            );
         },
     );
 
-    let mut colors = win.config.colors.palette.clone();
+    let branch_colors = &branch(&win.config, variant).colors;
+    let palette_override_path = ["appearance", branch_key(variant), "colors", "palette"];
+    let has_palette_overrides = win.contains_config_value(&palette_override_path);
+    let mut colors = if has_palette_overrides {
+        branch_colors.palette.clone()
+    } else {
+        Vec::new()
+    };
     let mut changed = false;
-    // Seed sources for the "active" palette buttons: existing overrides win, theme defaults fill the
-    // rest, and the cube anchors come from the current bg/fg + harmonious toggle.
+    // Seed sources for the "active" palette buttons: explicit overrides win and theme defaults fill
+    // the rest. The editable grid itself only shows values explicitly stored in config.
     let base_overrides = colors.clone();
-    let harmonious = win.config.colors.palette_harmonious;
-    let bg_override = win.config.colors.background;
-    let fg_override = win.config.colors.foreground;
+    let theme_palette = branch_colors.palette.clone();
+    let harmonious = branch_colors.palette_harmonious;
+    let bg_override = branch_colors.background;
+    let fg_override = branch_colors.foreground;
     egui::Frame::NONE
         .fill(palette.pane)
         .stroke(egui::Stroke::new(1.0, palette.border))
@@ -300,24 +439,30 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new("ANSI colors")
-                    .color(palette.text)
+                    .color(readable_color(palette.pane, palette.text))
                     .strong(),
             );
             ui.label(
                 egui::RichText::new(
                     "Override indexed terminal colors. Empty inherits the active theme.",
                 )
-                .color(palette.muted)
+                .color(readable_color(palette.pane, palette.muted))
                 .size(11.0),
             );
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 if super::settings_button(ui, palette, "Use standard 16").clicked() {
-                    colors = active_base16(&base_overrides);
+                    colors = active_base16(&base_overrides, &theme_palette);
                     changed = true;
                 }
                 if super::settings_button(ui, palette, "Use xterm 256").clicked() {
-                    colors = active_xterm256(&base_overrides, bg_override, fg_override, harmonious);
+                    colors = active_xterm256(
+                        &base_overrides,
+                        &theme_palette,
+                        bg_override,
+                        fg_override,
+                        harmonious,
+                    );
                     changed = true;
                 }
                 if super::settings_button(ui, palette, "Add empty slot").clicked() {
@@ -339,7 +484,10 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             });
             ui.add_space(10.0);
             if colors.is_empty() {
-                ui.label(egui::RichText::new("No ANSI overrides set.").color(palette.muted));
+                ui.label(
+                    egui::RichText::new("No ANSI overrides set.")
+                        .color(readable_color(palette.pane, palette.muted)),
+                );
             } else {
                 egui::Grid::new("settings_ansi_palette_grid")
                     .num_columns(8)
@@ -349,7 +497,7 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                             ui.vertical(|ui| {
                                 ui.label(
                                     egui::RichText::new(format!("{index:02}"))
-                                        .color(palette.muted)
+                                        .color(readable_color(palette.pane, palette.muted))
                                         .size(11.0),
                                 );
                                 let mut rgb = [color.r, color.g, color.b];
@@ -372,28 +520,33 @@ fn palette_section(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     ui.add_space(8.0);
 
     if changed {
-        win.config.colors.palette = colors.clone();
+        branch_mut(&mut win.config, variant).colors.palette = colors.clone();
         if colors.is_empty() {
-            win.remove(&["colors", "palette"]);
+            win.remove(&["appearance", branch_key(variant), "colors", "palette"]);
         } else {
             let hex: Vec<String> = colors
                 .iter()
                 .map(|color| format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b))
                 .collect();
-            win.set_strings(&["colors", "palette"], &hex);
+            win.set_strings(
+                &["appearance", branch_key(variant), "colors", "palette"],
+                &hex,
+            );
         }
     }
 }
 
 /// The active base 16 ANSI colors: existing overrides take priority, theme defaults fill the rest.
-fn active_base16(overrides: &[Color]) -> Vec<Color> {
+fn active_base16(overrides: &[Color], theme_palette: &[Color]) -> Vec<Color> {
     let defaults = bootty_terminal::terminal_palette::default_base16();
     (0..16)
         .map(|index| {
-            overrides
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| rgb_to_color(defaults[index]))
+            overrides.get(index).copied().unwrap_or_else(|| {
+                theme_palette
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| rgb_to_color(defaults[index]))
+            })
         })
         .collect()
 }
@@ -402,11 +555,12 @@ fn active_base16(overrides: &[Color]) -> Vec<Color> {
 /// does (Lab-space cube + grayscale ramp), honoring the harmonious-blend toggle.
 fn active_xterm256(
     overrides: &[Color],
+    theme_palette: &[Color],
     bg: Option<Color>,
     fg: Option<Color>,
     harmonious: bool,
 ) -> Vec<Color> {
-    let base16 = active_base16(overrides);
+    let base16 = active_base16(overrides, theme_palette);
     let base: [RgbColor; 256] = std::array::from_fn(|index| {
         base16
             .get(index)

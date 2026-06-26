@@ -289,6 +289,59 @@ fn config_resolves_theme_and_color_overrides(
 }
 
 #[test]
+fn appearance_branches_resolve_separate_themes_and_overrides() {
+    let config = load_config_source(indoc! {r##"
+        [appearance]
+        mode = "light"
+
+        [appearance.light]
+        theme = "Atom One Light"
+
+        [appearance.light.colors]
+        background = "#fefefe"
+
+        [appearance.dark]
+        theme = "Dracula"
+    "##});
+
+    assert_eq!(config.appearance.mode, AppearanceMode::Light);
+    assert_eq!(
+        config.appearance.light.theme.as_deref(),
+        Some("Atom One Light")
+    );
+    assert_eq!(
+        config.appearance.light.colors.background,
+        Some(Color::from_hex("#fefefe").unwrap())
+    );
+    assert_eq!(config.appearance.dark.theme.as_deref(), Some("Dracula"));
+    assert_eq!(
+        config.appearance.dark.colors.background,
+        Some(Color::from_hex("#282a36").unwrap())
+    );
+}
+
+#[test]
+fn legacy_theme_and_colors_seed_dark_appearance_branch() {
+    let config = load_config_source(indoc! {r##"
+        theme = "Catppuccin Mocha"
+
+        [colors]
+        background = "#101112"
+    "##});
+
+    assert_eq!(
+        config.appearance.dark.theme.as_deref(),
+        Some("Catppuccin Mocha")
+    );
+    assert_eq!(
+        config.appearance.dark.colors.background,
+        Some(Color::from_hex("#101112").unwrap())
+    );
+    assert_eq!(config.theme.as_deref(), Some("Catppuccin Mocha"));
+    assert_eq!(config.colors, config.appearance.dark.colors);
+}
+
+#[test]
 fn config_resolves_sidebar_section() {
     let config = load_config_source(indoc! {r##"
         [sidebar]

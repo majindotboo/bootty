@@ -223,23 +223,73 @@ pub fn parse_keybind(raw: &str) -> Option<(String, String)> {
     (!chord.is_empty() && !action.is_empty()).then(|| (chord.to_owned(), action.to_owned()))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FuzzyMatch {
+    pub score: i32,
+    pub indices: Vec<usize>,
+}
+
+/// Case-insensitive subsequence match with a score and character indices for highlighting.
+#[must_use]
+pub fn fuzzy_match_info(candidate: &str, pattern: &str) -> Option<FuzzyMatch> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Some(FuzzyMatch {
+            score: 0,
+            indices: Vec::new(),
+        });
+    }
+
+    let candidate_chars = candidate.chars().collect::<Vec<_>>();
+    let candidate_lower = candidate.to_ascii_lowercase();
+    let pattern_lower = pattern.to_ascii_lowercase();
+    let pattern_chars = pattern_lower.chars().collect::<Vec<_>>();
+    let mut indices = Vec::with_capacity(pattern_chars.len());
+    let mut search_from = 0;
+    for needle in pattern_chars {
+        let found = candidate_chars
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .find_map(|(index, ch)| {
+                ch.to_lowercase()
+                    .any(|candidate_ch| candidate_ch == needle)
+                    .then_some(index)
+            })?;
+        indices.push(found);
+        search_from = found + 1;
+    }
+
+    let first = indices[0] as i32;
+    let last = *indices.last().unwrap_or(&indices[0]) as i32;
+    let gaps = indices
+        .windows(2)
+        .map(|pair| pair[1] - pair[0] - 1)
+        .sum::<usize>() as i32;
+    let mut score = 10_000 - first * 25 - gaps * 12 - (last - first) * 4;
+    if let Some(byte_index) = candidate_lower.find(&pattern_lower) {
+        let char_index = candidate_lower[..byte_index].chars().count() as i32;
+        score += 5_000 - char_index * 20;
+    }
+    if word_boundary_match(&candidate_lower, &pattern_lower) {
+        score += 1_500;
+    }
+    if candidate_lower == pattern_lower {
+        score += 10_000;
+    }
+    Some(FuzzyMatch { score, indices })
+}
+
 /// Case-insensitive subsequence match — the picker filter shared across overlays.
 #[must_use]
 pub fn fuzzy_match(candidate: &str, pattern: &str) -> bool {
-    let mut remaining = pattern.chars().flat_map(char::to_lowercase);
-    let mut current = remaining.next();
-    if current.is_none() {
-        return true;
-    }
-    for ch in candidate.chars().flat_map(char::to_lowercase) {
-        if Some(ch) == current {
-            current = remaining.next();
-            if current.is_none() {
-                return true;
-            }
-        }
-    }
-    false
+    fuzzy_match_info(candidate, pattern).is_some()
+}
+
+fn word_boundary_match(candidate: &str, pattern: &str) -> bool {
+    candidate
+        .match_indices(pattern)
+        .any(|(index, _)| index == 0 || !candidate.as_bytes()[index - 1].is_ascii_alphanumeric())
 }
 
 #[cfg(test)]

@@ -5,31 +5,30 @@
 local ui = bootty.ui
 local stderr_null = ui.stderr_null
 
--- Provider colors are intentionally hue-preserving: warning/critical states should read as
--- quota severity without making one provider look like another.
 local PROVIDERS = {
 	{
 		id = "codex",
 		label = "codex",
 		icon = "openai",
-		color = "#74c7ec",
-		warning = "#4ea8de",
-		critical = "#2f8cc8",
+		color = bootty.theme.accent,
+		warning = bootty.theme.warning,
+		critical = bootty.theme.destructive,
 	},
 	{
 		id = "claude",
 		label = "claude",
 		icon = "claude",
-		color = "#fab387",
-		warning = "#d9915f",
-		critical = "#c9654c",
+		color = bootty.theme.warning,
+		warning = bootty.theme.warning,
+		critical = bootty.theme.destructive,
 	},
 }
 
-local GREEN_COLOR = "#a6e3a1"
-local TRACK_COLOR = "#313244"
-local TEXT_COLOR = "#cdd6f4"
-local MUTED_COLOR = "#6c7086"
+local GREEN_COLOR = bootty.theme.success
+local TRACK_COLOR = bootty.theme.surface
+local TEXT_COLOR = bootty.theme.text
+local MUTED_COLOR = bootty.theme.muted
+local empty_renders = 0
 
 local function parse_window(data, key, fallback_window_secs)
 	local window = data[key]

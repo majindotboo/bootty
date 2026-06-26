@@ -12,7 +12,7 @@ mod window;
 
 use std::path::PathBuf;
 
-use bootty_ui::{Theme, ThemePalette};
+use bootty_ui::{Theme, ThemePalette, contrast_ratio, readable_color};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, UiBuilder, Vec2};
 
 use crate::{
@@ -245,6 +245,7 @@ pub struct SettingsSurface {
     search: String,
     font_families: Option<Vec<String>>,
     theme_names: Option<Vec<String>>,
+    appearance_variant: crate::config::AppearanceVariant,
     /// Which keybind list is being edited (global, or one of the per-backend lists).
     keybind_scope: keybinds::KeybindScope,
     /// Editable rows for the loaded scope: the user layer that sits on top of the built-in defaults.
@@ -283,6 +284,7 @@ impl SettingsSurface {
             search: String::new(),
             font_families: None,
             theme_names: None,
+            appearance_variant: crate::config::AppearanceVariant::Dark,
             keybind_scope: keybinds::KeybindScope::Global,
             keybind_rows: None,
             keybind_clear: false,
@@ -329,10 +331,20 @@ impl SettingsSurface {
         style.visuals.window_fill = self.palette.pane;
         style.visuals.window_stroke = egui::Stroke::new(1.0, self.palette.border);
         style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
-        style.visuals.widgets.inactive.bg_fill = self.palette.hover;
+        style.visuals.widgets.inactive.bg_fill = self.palette.surface;
         style.visuals.widgets.inactive.weak_bg_fill = self.palette.surface;
-        style.visuals.widgets.hovered.bg_fill = self.palette.surface;
-        style.visuals.widgets.active.bg_fill = self.palette.primary;
+        style.visuals.widgets.inactive.fg_stroke =
+            egui::Stroke::new(1.0, readable_color(self.palette.surface, self.palette.text));
+        style.visuals.widgets.hovered.bg_fill = self.palette.hover;
+        style.visuals.widgets.hovered.weak_bg_fill = self.palette.hover;
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.palette.accent);
+        style.visuals.widgets.hovered.fg_stroke =
+            egui::Stroke::new(1.0, readable_color(self.palette.hover, self.palette.text));
+        style.visuals.widgets.active.bg_fill = self.palette.accent;
+        style.visuals.widgets.active.weak_bg_fill = self.palette.accent;
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.palette.accent);
+        style.visuals.widgets.active.fg_stroke =
+            egui::Stroke::new(1.0, readable_color(self.palette.accent, self.palette.text));
         ui.ctx().set_global_style(style);
 
         let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
@@ -405,7 +417,7 @@ impl SettingsSurface {
             .fill(self.palette.mantle)
             .inner_margin(egui::Margin {
                 left: 14,
-                right: 16,
+                right: 0,
                 top: 36,
                 bottom: 16,
             })
@@ -414,13 +426,14 @@ impl SettingsSurface {
                 // The UI font has no "←" glyph (it rendered as tofu), so draw the arrow from the
                 // icon font and fall back to text-only if the slug is ever missing.
                 let mut back = egui::text::LayoutJob::default();
+                let back_color = readable_color(self.palette.mantle, self.palette.subtext);
                 if let Some((glyph, family)) = crate::ui::icons::icon_glyph("arrow-left") {
                     back.append(
                         &glyph.to_string(),
                         0.0,
                         egui::text::TextFormat {
                             font_id: egui::FontId::new(14.0, egui::FontFamily::Name(family.into())),
-                            color: self.palette.subtext,
+                            color: back_color,
                             valign: egui::Align::Center,
                             ..Default::default()
                         },
@@ -431,7 +444,7 @@ impl SettingsSurface {
                     0.0,
                     egui::text::TextFormat {
                         font_id: egui::FontId::proportional(13.0),
-                        color: self.palette.subtext,
+                        color: back_color,
                         valign: egui::Align::Center,
                         ..Default::default()
                     },
@@ -448,27 +461,41 @@ impl SettingsSurface {
                 }
 
                 ui.add_space(10.0);
-                settings_text_edit(ui, self.palette, &mut self.search, "Search settings...");
+                ui.scope(|ui| {
+                    ui.set_width((ui.available_width() - 14.0).max(80.0));
+                    settings_text_edit(ui, self.palette, &mut self.search, "Search settings...");
+                });
                 ui.add_space(16.0);
 
                 let query = self.search.trim().to_ascii_lowercase();
-                for group in ["Core", "Terminal", "Advanced"] {
-                    let visible_pages: Vec<PageMeta> = PAGE_META
-                        .iter()
-                        .copied()
-                        .filter(|meta| meta.group == group)
-                        .filter(|meta| query.is_empty() || page_matches(*meta, &query))
-                        .collect();
-                    if visible_pages.is_empty() {
-                        continue;
-                    }
-                    ui.label(RichText::new(group).color(self.palette.muted).size(11.0));
-                    ui.add_space(4.0);
-                    for meta in visible_pages {
-                        self.sidebar_page_button(ui, meta);
-                    }
-                    ui.add_space(12.0);
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("settings_sidebar_pages")
+                    .max_height(ui.available_height())
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width((ui.available_width() - 14.0).max(0.0));
+                        for group in ["Core", "Terminal", "Advanced"] {
+                            let visible_pages: Vec<PageMeta> = PAGE_META
+                                .iter()
+                                .copied()
+                                .filter(|meta| meta.group == group)
+                                .filter(|meta| query.is_empty() || page_matches(*meta, &query))
+                                .collect();
+                            if visible_pages.is_empty() {
+                                continue;
+                            }
+                            ui.label(
+                                RichText::new(group)
+                                    .color(readable_color(self.palette.mantle, self.palette.muted))
+                                    .size(11.0),
+                            );
+                            ui.add_space(4.0);
+                            for meta in visible_pages {
+                                self.sidebar_page_button(ui, meta);
+                            }
+                            ui.add_space(12.0);
+                        }
+                    });
                 close
             })
             .inner
@@ -504,13 +531,16 @@ impl SettingsSurface {
                 Pos2::new(rect.min.x, rect.min.y),
                 Pos2::new(rect.min.x + 4.0, rect.max.y),
             );
-            ui.painter().rect_filled(accent, 0.0, self.palette.primary);
+            ui.painter().rect_filled(accent, 0.0, self.palette.accent);
         }
-        let tint = if selected {
-            self.palette.text
-        } else {
-            self.palette.subtext
-        };
+        let tint = readable_color(
+            fill,
+            if selected {
+                self.palette.text
+            } else {
+                self.palette.subtext
+            },
+        );
         let icon_center = Pos2::new(rect.min.x + 17.0, rect.center().y);
         crate::ui::icons::paint_icon_slug(ui.painter(), meta.icon, icon_center, 15.0, tint);
         ui.painter().text(
@@ -527,58 +557,61 @@ impl SettingsSurface {
     }
 
     fn settings_content(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::NONE
-            .fill(self.palette.base)
-            .inner_margin(egui::Margin {
-                left: 36,
-                right: 36,
-                top: 30,
-                bottom: 24,
-            })
-            .show(ui, |ui| {
-                let meta = page_meta(self.page);
-                settings_page_header(ui, self.palette, meta.title);
-                if let Some(error) = self.last_write_error.clone() {
-                    settings_notice(
-                        ui,
-                        self.palette.destructive,
-                        &format!("Write failed: {error}"),
-                    );
-                }
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let max_width = match self.page {
-                            SettingsPage::Keys | SettingsPage::Status => 1040.0,
-                            SettingsPage::Appearance | SettingsPage::Sidebar => 860.0,
-                            _ => 780.0,
-                        };
-                        let content_width = ui.available_width().min(max_width);
-                        let left_pad = ((ui.available_width() - content_width) * 0.5).max(0.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(left_pad);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(content_width, ui.available_height()),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| match self.page {
-                                    SettingsPage::General => self.general_ui(ui),
-                                    SettingsPage::Text => font::ui(self, ui),
-                                    SettingsPage::Appearance => appearance::ui(self, ui),
-                                    SettingsPage::Window => window::ui(self, ui),
-                                    SettingsPage::Sidebar => self.sidebar_ui(ui),
-                                    SettingsPage::Shell => session::ui(self, ui),
-                                    SettingsPage::Status => {
-                                        status_preview(ui, self.palette, &self.config);
-                                        status_bar::ui(self, ui);
-                                    }
-                                    SettingsPage::Keys => keybinds::ui(self, ui),
-                                    SettingsPage::Config => self.config_ui(ui),
-                                    SettingsPage::Diagnostics => self.diagnostics_ui(ui),
-                                },
-                            );
+        egui::Frame::NONE.fill(self.palette.base).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("settings_content")
+                .max_height(ui.available_height())
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 36,
+                            right: 36,
+                            top: 30,
+                            bottom: 24,
+                        })
+                        .show(ui, |ui| {
+                            let meta = page_meta(self.page);
+                            settings_page_header(ui, self.palette, meta.title);
+                            if let Some(error) = self.last_write_error.clone() {
+                                settings_notice(
+                                    ui,
+                                    self.palette.destructive,
+                                    &format!("Write failed: {error}"),
+                                );
+                            }
+                            let max_width = match self.page {
+                                SettingsPage::Keys | SettingsPage::Status => 1040.0,
+                                SettingsPage::Appearance | SettingsPage::Sidebar => 860.0,
+                                _ => 780.0,
+                            };
+                            let content_width = ui.available_width().min(max_width);
+                            let left_pad = ((ui.available_width() - content_width) * 0.5).max(0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(left_pad);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(content_width, ui.available_height()),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| match self.page {
+                                        SettingsPage::General => self.general_ui(ui),
+                                        SettingsPage::Text => font::ui(self, ui),
+                                        SettingsPage::Appearance => appearance::ui(self, ui),
+                                        SettingsPage::Window => window::ui(self, ui),
+                                        SettingsPage::Sidebar => self.sidebar_ui(ui),
+                                        SettingsPage::Shell => session::ui(self, ui),
+                                        SettingsPage::Status => {
+                                            status_preview(ui, self.palette, &self.config);
+                                            status_bar::ui(self, ui);
+                                        }
+                                        SettingsPage::Keys => keybinds::ui(self, ui),
+                                        SettingsPage::Config => self.config_ui(ui),
+                                        SettingsPage::Diagnostics => self.diagnostics_ui(ui),
+                                    },
+                                );
+                            });
                         });
-                    });
-            });
+                });
+        });
     }
 
     fn general_ui(&mut self, ui: &mut egui::Ui) {
@@ -796,6 +829,25 @@ impl SettingsSurface {
         self.write(move |document| document.set_item(path, bootty_config::toml_edit::value(array)));
     }
 
+    fn contains_config_value(&self, path: &[&str]) -> bool {
+        let Ok(Some(document)) = crate::config::load_config_document(&self.config_path) else {
+            return false;
+        };
+        let Some((leaf, parents)) = path.split_last() else {
+            return false;
+        };
+        let mut table = document.document().as_table();
+        for key in parents {
+            let Some(next) = table
+                .get(key)
+                .and_then(bootty_config::toml_edit::Item::as_table)
+            else {
+                return false;
+            };
+            table = next;
+        }
+        table.contains_key(leaf)
+    }
     fn remove(&mut self, path: &[&str]) {
         self.write(|document| document.remove_item(path));
     }
@@ -921,20 +973,31 @@ fn searchable_combo(
                         if !needle.is_empty() && !option.to_ascii_lowercase().contains(&needle) {
                             continue;
                         }
-                        // The current item is drawn with egui's selection fill (≈ primary), so its
-                        // text must contrast against that fill rather than blend into it.
-                        let color = if current == Some(index) {
-                            palette.base
+                        let is_current = current == Some(index);
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 24.0),
+                            egui::Sense::click(),
+                        );
+                        let fill = if is_current {
+                            palette.accent
+                        } else if response.hovered() {
+                            palette.hover
                         } else {
-                            palette.text
+                            palette.pane
                         };
-                        if ui
-                            .selectable_label(
-                                current == Some(index),
-                                RichText::new(*option).color(color),
-                            )
-                            .clicked()
-                        {
+                        ui.painter().rect_filled(
+                            rect,
+                            egui::CornerRadius::same(palette.radius),
+                            fill,
+                        );
+                        ui.painter().text(
+                            rect.left_center() + Vec2::new(8.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            *option,
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            readable_color(fill, palette.text),
+                        );
+                        if response.clicked() {
                             chosen = Some(index);
                             ui.memory_mut(|memory| memory.data.remove_temp::<String>(filter_id));
                             ui.close();
@@ -1025,7 +1088,7 @@ pub(super) fn described_combo<T: Copy + PartialEq>(
                             egui::Align2::LEFT_TOP,
                             *label,
                             egui::TextStyle::Button.resolve(ui.style()),
-                            palette.text,
+                            readable_color(fill, palette.text),
                         );
                         if !description.is_empty() {
                             ui.painter().text(
@@ -1033,7 +1096,7 @@ pub(super) fn described_combo<T: Copy + PartialEq>(
                                 egui::Align2::LEFT_TOP,
                                 *description,
                                 egui::TextStyle::Small.resolve(ui.style()),
-                                palette.muted,
+                                readable_color(fill, palette.muted),
                             );
                         }
                         if response.clicked() {
@@ -1058,9 +1121,10 @@ pub(super) fn described_combo<T: Copy + PartialEq>(
 /// frame appear to grow under the pointer; this keeps the footprint fixed.
 fn settings_button(ui: &mut egui::Ui, palette: ThemePalette, label: &str) -> egui::Response {
     let font = egui::FontId::proportional(13.0);
+    let text_color = readable_color(palette.surface, palette.text);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font, palette.text);
+        .layout_no_wrap(label.to_owned(), font, text_color);
     let padding = Vec2::new(14.0, 8.0);
     let size = Vec2::new(galley.size().x + padding.x * 2.0, 30.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -1081,7 +1145,7 @@ fn settings_button(ui: &mut egui::Ui, palette: ThemePalette, label: &str) -> egu
     ui.painter().galley(
         Pos2::new(text_pos.x, text_pos.y - galley.size().y * 0.5),
         galley,
-        palette.text,
+        readable_color(fill, text_color),
     );
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1184,7 +1248,7 @@ fn reorderable_list(
     };
     ui.painter().line_segment(
         [Pos2::new(left, line_y), Pos2::new(right, line_y)],
-        egui::Stroke::new(2.0, palette.primary),
+        egui::Stroke::new(2.0, palette.accent),
     );
 
     if ui.input(|input| input.pointer.any_released()) {
@@ -1229,18 +1293,29 @@ fn settings_icon_button(
         egui::Stroke::new(1.0, palette.border),
         egui::StrokeKind::Inside,
     );
-    crate::ui::icons::paint_icon_slug(ui.painter(), slug, rect.center(), 15.0, palette.text);
+    crate::ui::icons::paint_icon_slug(
+        ui.painter(),
+        slug,
+        rect.center(),
+        15.0,
+        readable_color(fill, palette.text),
+    );
     response.on_hover_text(tooltip)
 }
 
 fn settings_page_header(ui: &mut egui::Ui, palette: ThemePalette, title: &str) {
     ui.label(
         RichText::new("Bootty Settings")
-            .color(palette.muted)
+            .color(readable_color(palette.base, palette.muted))
             .size(12.0),
     );
     ui.add_space(6.0);
-    ui.label(RichText::new(title).color(palette.text).strong().size(24.0));
+    ui.label(
+        RichText::new(title)
+            .color(readable_color(palette.base, palette.text))
+            .strong()
+            .size(24.0),
+    );
     ui.add_space(18.0);
 }
 
@@ -1256,7 +1331,7 @@ fn section(ui: &mut egui::Ui, palette: ThemePalette, title: &str) {
     ui.add_space(12.0);
     ui.label(
         RichText::new(title)
-            .color(palette.subtext)
+            .color(readable_color(palette.base, palette.subtext))
             .strong()
             .size(12.0),
     );
@@ -1289,9 +1364,21 @@ fn settings_row(
             Vec2::new(label_width, 0.0),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.add(egui::Label::new(RichText::new(label).color(palette.text).strong()).wrap());
                 ui.add(
-                    egui::Label::new(RichText::new(help).color(palette.muted).size(11.0)).wrap(),
+                    egui::Label::new(
+                        RichText::new(label)
+                            .color(readable_color(palette.base, palette.text))
+                            .strong(),
+                    )
+                    .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(help)
+                            .color(readable_color(palette.base, palette.muted))
+                            .size(11.0),
+                    )
+                    .wrap(),
                 );
             },
         );
@@ -1340,7 +1427,7 @@ fn settings_toggle(ui: &mut egui::Ui, palette: ThemePalette, value: &mut bool) -
         *value = !*value;
     }
     let fill = if *value {
-        palette.primary
+        palette.accent
     } else if response.hovered() {
         palette.hover
     } else {
@@ -1354,7 +1441,7 @@ fn settings_toggle(ui: &mut egui::Ui, palette: ThemePalette, value: &mut bool) -
         egui::Stroke::new(
             1.0,
             if *value {
-                palette.primary
+                palette.accent
             } else {
                 palette.border
             },
@@ -1369,17 +1456,24 @@ fn settings_toggle(ui: &mut egui::Ui, palette: ThemePalette, value: &mut bool) -
     ui.painter().circle_filled(
         Pos2::new(knob_x, rect.center().y),
         9.0,
-        if *value {
-            palette.base
-        } else {
-            palette.subtext
-        },
+        readable_color(
+            fill,
+            if *value {
+                palette.base
+            } else {
+                palette.subtext
+            },
+        ),
     );
     changed
 }
 
 fn settings_notice(ui: &mut egui::Ui, color: Color32, text: &str) {
-    ui.label(RichText::new(text).color(color).size(12.0));
+    ui.label(
+        RichText::new(text)
+            .color(readable_color(ui.visuals().panel_fill, color))
+            .size(12.0),
+    );
 }
 
 fn settings_text_edit(
@@ -1399,8 +1493,9 @@ fn settings_text_edit_width(
     hint: &str,
     width: f32,
 ) -> egui::Response {
+    let fill = palette.surface;
     egui::Frame::NONE
-        .fill(palette.mantle)
+        .fill(fill)
         .stroke(egui::Stroke::new(1.0, palette.border))
         .corner_radius(egui::CornerRadius::same(palette.radius))
         .inner_margin(egui::Margin::symmetric(10, 7))
@@ -1409,8 +1504,9 @@ fn settings_text_edit_width(
                 [width, 22.0],
                 egui::TextEdit::singleline(value)
                     .hint_text(hint)
+                    .text_color(readable_color(fill, palette.text))
                     .vertical_align(egui::Align::Center)
-                    .background_color(palette.mantle)
+                    .background_color(fill)
                     .frame(egui::Frame::NONE),
             )
         })
@@ -1473,15 +1569,27 @@ fn settings_segmented_unit(
                 egui::Stroke::new(1.0, palette.border),
             );
         }
+        let pointer_hovered = response.hover_pos().is_some_and(|pos| item.contains(pos));
+        if pointer_hovered && index != selected {
+            ui.painter()
+                .rect_filled(item.shrink(3.0), egui::CornerRadius::same(5), palette.hover);
+        }
         if index == selected {
             let selected_rect = item.shrink(3.0);
             ui.painter()
-                .rect_filled(selected_rect, egui::CornerRadius::same(5), palette.primary);
+                .rect_filled(selected_rect, egui::CornerRadius::same(5), palette.accent);
         }
-        let color = if index == selected {
-            palette.base
+        let fill = if index == selected {
+            palette.accent
+        } else if pointer_hovered {
+            palette.hover
         } else {
-            palette.subtext
+            palette.surface
+        };
+        let color = if index == selected {
+            readable_color(fill, palette.text)
+        } else {
+            readable_color(fill, palette.subtext)
         };
         // Shrink the label to match a clamped item so long labels (e.g. "Drawn by system") stay
         // inside their cell instead of bleeding into the neighbour.
@@ -1512,18 +1620,53 @@ fn settings_color_picker(
 ) -> egui::Response {
     let mut style = (*ui.ctx().global_style()).clone();
     style.spacing.interact_size = Vec2::splat(30.0);
+    for widget in [
+        &mut style.visuals.widgets.inactive,
+        &mut style.visuals.widgets.hovered,
+        &mut style.visuals.widgets.active,
+        &mut style.visuals.widgets.open,
+    ] {
+        widget.bg_fill = palette.border;
+        widget.weak_bg_fill = palette.border;
+        widget.expansion = 0.0;
+    }
     ui.scope(|ui| {
         ui.set_style(style);
         let response = egui::color_picker::color_edit_button_srgb(ui, rgb);
+        let swatch = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let border = swatch_border_color(palette, swatch);
+        let hover = response.hovered();
+        let stroke = if hover {
+            egui::Stroke::new(2.0, readable_color(swatch, palette.accent))
+        } else {
+            egui::Stroke::new(1.5, border)
+        };
         ui.painter().rect_stroke(
             response.rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(2.0, palette.border),
+            stroke,
             egui::StrokeKind::Inside,
         );
+        if hover {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         response
     })
     .inner
+}
+
+fn swatch_border_color(palette: ThemePalette, swatch: Color32) -> Color32 {
+    if contrast_ratio(swatch, palette.border) >= 3.0 {
+        return palette.border;
+    }
+    [palette.text, palette.muted, Color32::BLACK, Color32::WHITE]
+        .into_iter()
+        .max_by(|a, b| {
+            contrast_ratio(swatch, *a)
+                .partial_cmp(&contrast_ratio(swatch, *b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(Color32::BLACK)
 }
 
 fn settings_slider(
@@ -1557,11 +1700,15 @@ fn settings_slider(
         Pos2::new(rail.left() + rail.width() * normalized, rail.bottom()),
     );
     ui.painter()
-        .rect_filled(active, egui::CornerRadius::same(4), palette.primary);
+        .rect_filled(active, egui::CornerRadius::same(4), palette.accent);
     let thumb = Pos2::new(rail.left() + rail.width() * normalized, rail.center().y);
-    ui.painter().circle_filled(thumb, 10.0, palette.subtext);
+    ui.painter().circle_filled(
+        thumb,
+        10.0,
+        readable_color(palette.surface, palette.subtext),
+    );
     ui.painter()
-        .circle_stroke(thumb, 10.0, egui::Stroke::new(2.0, palette.primary));
+        .circle_stroke(thumb, 10.0, egui::Stroke::new(2.0, palette.accent));
     response.changed() || response.dragged() || response.clicked()
 }
 
@@ -1618,7 +1765,7 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
                 };
                 for segment in modules {
                     let bg = segment.bg.map_or(palette.hover, color_to_egui);
-                    let fg = segment.fg.map_or(palette.text, color_to_egui);
+                    let fg = readable_color(bg, segment.fg.map_or(palette.text, color_to_egui));
                     let chip = Rect::from_min_size(
                         Pos2::new(x, bar.center().y - 12.0),
                         Vec2::new(84.0, 24.0),

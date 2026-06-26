@@ -5,7 +5,7 @@
 return {
 	interval = 0.2,
 	render = function()
-		local accent = bootty.session_color() or bootty.theme.primary
+		local accent = bootty.theme.accent
 		local windows = bootty.windows()
 		local items = {}
 		local radius = 6
@@ -34,14 +34,15 @@ return {
 			return if windows[index - 1].active then bootty.theme.surface else bootty.theme.base
 		end
 
+
 		local function left_chevron(fill)
 			return {
 				type = "polygon",
 				fill = fill,
 				points = {
-					{ x = 0, y = 0 },
+					{ x = 0, dx = -1, y = 0 },
 					{ x = 0, dx = wedge, y = 0.5 },
-					{ x = 0, y = 1 },
+					{ x = 0, dx = -1, y = 1 },
 				},
 			}
 		end

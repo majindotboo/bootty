@@ -947,7 +947,13 @@ fn record_cell(
                 palette.muted,
             );
         } else {
-            let galley = trigger_galley(ui, palette, trigger, palette.text, rect.width() - 20.0);
+            let galley = crate::ui::keycaps::trigger_galley(
+                ui,
+                palette,
+                trigger,
+                palette.text,
+                rect.width() - 20.0,
+            );
             let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5);
             ui.painter().galley(pos, galley, palette.text);
         }
@@ -999,134 +1005,10 @@ fn keycap_chip(ui: &mut egui::Ui, palette: bootty_ui::ThemePalette, trigger: &st
         .corner_radius(egui::CornerRadius::same(palette.radius))
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
-            let galley = trigger_galley(ui, palette, trigger, palette.text, 320.0);
+            let galley =
+                crate::ui::keycaps::trigger_galley(ui, palette, trigger, palette.text, 320.0);
             ui.add(egui::Label::new(galley).selectable(false));
         });
-}
-
-/// Lay a trigger out as keycaps. On macOS the modifier symbols come from the icon font (the UI font
-/// has no ⌘/⌥/⌃ glyphs, which is why bare text rendered blanks); elsewhere modifiers fall back to
-/// text joined with `+`.
-fn trigger_galley(
-    ui: &egui::Ui,
-    palette: bootty_ui::ThemePalette,
-    trigger: &str,
-    color: egui::Color32,
-    max_width: f32,
-) -> std::sync::Arc<egui::Galley> {
-    use egui::text::{LayoutJob, TextFormat};
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = max_width;
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    let mut first_combo = true;
-    for combo in trigger.split('>') {
-        let combo = combo.trim();
-        if combo.is_empty() {
-            continue;
-        }
-        if !first_combo {
-            job.append(
-                " ▸ ",
-                2.0,
-                TextFormat {
-                    font_id: egui::FontId::proportional(12.0),
-                    color: palette.muted,
-                    ..Default::default()
-                },
-            );
-        }
-        first_combo = false;
-        append_combo(&mut job, palette, combo, color);
-    }
-    ui.painter().layout_job(job)
-}
-
-fn append_combo(
-    job: &mut egui::text::LayoutJob,
-    palette: bootty_ui::ThemePalette,
-    combo: &str,
-    color: egui::Color32,
-) {
-    use egui::text::TextFormat;
-    let tokens: Vec<&str> = combo
-        .split('+')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect();
-    for (index, &token) in tokens.iter().enumerate() {
-        let leading = if index == 0 { 0.0 } else { 3.0 };
-        if cfg!(target_os = "macos") {
-            if let Some((glyph, family)) =
-                modifier_icon(token).and_then(crate::ui::icons::icon_glyph)
-            {
-                job.append(
-                    &glyph.to_string(),
-                    leading,
-                    TextFormat {
-                        font_id: egui::FontId::new(15.0, egui::FontFamily::Name(family.into())),
-                        color,
-                        ..Default::default()
-                    },
-                );
-                continue;
-            }
-            job.append(
-                &key_label(token),
-                leading,
-                TextFormat {
-                    font_id: egui::FontId::monospace(13.0),
-                    color,
-                    ..Default::default()
-                },
-            );
-        } else {
-            if index > 0 {
-                job.append(
-                    "+",
-                    2.0,
-                    TextFormat {
-                        font_id: egui::FontId::proportional(12.0),
-                        color: palette.muted,
-                        ..Default::default()
-                    },
-                );
-            }
-            job.append(
-                &key_label(token),
-                if index == 0 { 0.0 } else { 2.0 },
-                TextFormat {
-                    font_id: egui::FontId::monospace(13.0),
-                    color,
-                    ..Default::default()
-                },
-            );
-        }
-    }
-}
-
-/// Icon-font slug for a modifier token, so ⌘/⌥/⇧/⌃ render from the icon font instead of relying on
-/// the UI font (which lacks them).
-fn modifier_icon(token: &str) -> Option<&'static str> {
-    match token {
-        "cmd" | "super" => Some("command"),
-        "alt" | "option" => Some("option"),
-        "shift" => Some("arrow-big-up"),
-        "ctrl" | "control" => Some("chevron-up"),
-        _ => None,
-    }
-}
-
-fn key_label(token: &str) -> String {
-    match token {
-        "cmd" | "super" => "Cmd".to_owned(),
-        "ctrl" | "control" => "Ctrl".to_owned(),
-        "alt" | "option" => "Alt".to_owned(),
-        "shift" => "Shift".to_owned(),
-        "space" => "Space".to_owned(),
-        other if other.chars().count() == 1 => other.to_uppercase(),
-        other => other.to_owned(),
-    }
 }
 
 struct BindingEditorContext<'a> {

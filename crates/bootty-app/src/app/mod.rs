@@ -13,14 +13,14 @@ use eframe::{
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 
 use crate::{
-    config::BoottyConfig,
+    config::{AppearanceVariant, BoottyConfig},
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
     layout::SplitDirection,
     menu::AppMenu,
     mux::config::selected_backend,
     renderer::TerminalWidget,
     terminal_text::TerminalTextConfig,
-    theme::theme_palette_from_config,
+    theme::{theme_palette_from_config, theme_tokens},
     ui::{
         chrome::{self, SidebarModel, StatusBarModel},
         settings::{SettingsAction, SettingsSurface},
@@ -49,12 +49,8 @@ fn color_hex(color: egui::Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
 }
 
-fn status_bar_left_padding(sidebar_visible: bool, sidebar_on_right: bool) -> f32 {
-    if sidebar_visible && !sidebar_on_right {
-        0.0
-    } else {
-        chrome::STATUS_EDGE_PAD
-    }
+fn status_bar_left_padding(_sidebar_visible: bool, _sidebar_on_right: bool) -> f32 {
+    chrome::STATUS_EDGE_PAD
 }
 
 /// Pane corner radius (px), clamped so it never exceeds the pane's shorter half-extent.
@@ -177,6 +173,7 @@ pub struct BoottyApp {
     _menu: Option<AppMenu>,
     status_extensions: crate::extensions::ExtensionHost,
     sidebar_extensions: crate::extensions::ExtensionHost,
+    extension_theme: Vec<(String, String)>,
     lua_window: Option<(LuaWindowOwner, crate::ui::lua_window::LuaWindowDialog)>,
     keep_awake: Option<keepawake::KeepAwake>,
     terminal_cursor_icon: egui::CursorIcon,
@@ -224,7 +221,8 @@ impl BoottyApp {
 
         // User extensions live beside the config file. Built-ins are Luau modules;
         // user `.lua` / `.luau` files override same-named defaults per extension surface.
-        let theme_tokens = crate::theme::theme_tokens(&config);
+        let startup_variant = config.appearance.mode.variant(AppearanceVariant::Dark);
+        let extension_theme = theme_tokens(&config, startup_variant);
         let config_dir = config
             .config_path
             .parent()
@@ -232,12 +230,12 @@ impl BoottyApp {
         let status_extensions = crate::extensions::ExtensionHost::spawn_status(
             config_dir.join("status"),
             cc.egui_ctx.clone(),
-            theme_tokens.clone(),
+            extension_theme.clone(),
         );
         let sidebar_extensions = crate::extensions::ExtensionHost::spawn_sidebar(
             config_dir.join("sidebar"),
             cc.egui_ctx.clone(),
-            theme_tokens,
+            extension_theme.clone(),
         );
 
         Ok(Self {
@@ -253,10 +251,38 @@ impl BoottyApp {
             _menu: crate::menu::install(),
             status_extensions,
             sidebar_extensions,
+            extension_theme,
             lua_window: None,
             keep_awake: None,
             terminal_cursor_icon: egui::CursorIcon::Default,
         })
+    }
+
+    fn sync_extension_theme(&mut self, ctx: &egui::Context) {
+        let next = theme_tokens(self.state.config(), self.state.active_appearance_variant());
+        if self.extension_theme == next {
+            return;
+        }
+        self.dismiss_lua_window();
+        self.extension_theme = next.clone();
+        let config_dir = self
+            .state
+            .config()
+            .config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        self.status_extensions = crate::extensions::ExtensionHost::spawn_status(
+            config_dir.join("status"),
+            ctx.clone(),
+            next.clone(),
+        );
+        self.sidebar_extensions = crate::extensions::ExtensionHost::spawn_sidebar(
+            config_dir.join("sidebar"),
+            ctx.clone(),
+            next,
+        );
+        ctx.request_repaint();
     }
 
     fn open_settings(&mut self, ctx: &egui::Context) {
@@ -401,11 +427,7 @@ impl BoottyApp {
             self.state.mux().selected_session(),
         )
         .map(str::to_owned);
-        let session_color = crate::ui::sidebar::session_accent_color(
-            self.state.mux().sessions(),
-            self.state.mux().selected_session(),
-        )
-        .map(color_hex);
+        let session_color = Some(color_hex(self.state.ui_theme().palette.accent));
         crate::extensions::MuxView {
             windows,
             sessions: self.current_extension_sessions(),
@@ -416,17 +438,15 @@ impl BoottyApp {
     }
 
     fn current_extension_sessions(&self) -> Vec<crate::extensions::SessionView> {
+        let palette = self.state.ui_theme().palette;
+        let session_color = color_hex(palette.accent);
+        let dim_color = color_hex(palette.muted);
         let selected_session = self.state.mux().selected_session();
-        let sidebar_items =
-            crate::ui::sidebar::build_sidebar_items(self.state.mux().sessions(), selected_session);
         self.state
             .mux()
             .sessions()
             .iter()
             .map(|session| {
-                let row = sidebar_items
-                    .iter()
-                    .find(|item| item.session_id == Some(session.id.as_str()));
                 let selected = if selected_session.is_some() {
                     selected_session == Some(session.id.as_str())
                         || selected_session == Some(session.name.as_str())
@@ -439,8 +459,8 @@ impl BoottyApp {
                     active: session.active,
                     selected,
                     cwd: session.anchor.cwd.clone(),
-                    color: row.map(|item| color_hex(item.color)),
-                    dim_color: row.map(|item| color_hex(item.dim_color)),
+                    color: Some(session_color.clone()),
+                    dim_color: Some(dim_color.clone()),
                 }
             })
             .collect()
@@ -544,7 +564,7 @@ impl BoottyApp {
         let border_color = chrome
             .pane_focus_border_color
             .map(crate::theme::config_color32)
-            .unwrap_or(palette.primary);
+            .unwrap_or(palette.accent);
         let corner_radius_px = chrome.pane_corner_radius;
         let inactive_dim = chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
         let background = palette.mantle;
@@ -740,7 +760,8 @@ impl BoottyApp {
         // handles so the next frame's input pass suppresses selection only over live handles.
         self.state.reset_chrome_handles();
         let rect = ui.max_rect();
-        let palette = theme_palette_from_config(self.state.config());
+        let palette =
+            theme_palette_from_config(self.state.config(), self.state.active_appearance_variant());
         let chrome_config = &self.state.config().chrome;
         let sidebar = chrome_config.sidebar;
         let status_bar = chrome_config.status_bar;
@@ -1231,6 +1252,17 @@ impl BoottyApp {
         }
     }
 
+    fn show_theme_picker_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_theme_picker_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        let mut effects = Vec::new();
+        self.state
+            .apply_theme_picker_event(dialog, event, &mut effects);
+        self.apply_effects(ctx, effects);
+    }
+
     /// Drain Luau `bootty.window` requests from both workers, render the active
     /// window through the overlay framework, and route the user's choice back to
     /// the owning worker's `on_action` handler.
@@ -1384,6 +1416,13 @@ impl eframe::App for BoottyApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let system_variant = match ui.ctx().system_theme().unwrap_or(egui::Theme::Dark) {
+            egui::Theme::Light => AppearanceVariant::Light,
+            egui::Theme::Dark => AppearanceVariant::Dark,
+        };
+        let variant = self.state.config().appearance.mode.variant(system_variant);
+        self.state.set_appearance_variant(variant);
+        self.sync_extension_theme(ui.ctx());
         let palette = self.state.ui_theme().palette;
         egui::Frame::NONE.fill(palette.mantle).show(ui, |ui| {
             if self.settings_open {
@@ -1399,6 +1438,7 @@ impl eframe::App for BoottyApp {
             self.show_ditch_session_dialog(ui.ctx());
             self.show_keybind_help_dialog(ui.ctx());
             self.show_command_palette_dialog(ui.ctx());
+            self.show_theme_picker_dialog(ui.ctx());
             self.drive_lua_windows(ui.ctx());
         }
     }
@@ -1508,8 +1548,11 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_left_padding_is_flush_next_to_left_sidebar() {
-        assert_eq!(status_bar_left_padding(true, false), 0.0);
+    fn status_bar_left_padding_keeps_edge_spacing() {
+        assert_eq!(
+            status_bar_left_padding(true, false),
+            chrome::STATUS_EDGE_PAD
+        );
         assert_eq!(
             status_bar_left_padding(false, false),
             chrome::STATUS_EDGE_PAD

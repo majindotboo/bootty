@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bootty_ui::ThemePalette;
+use bootty_ui::{ThemePalette, readable_color};
 use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind, TextureHandle};
 
 use crate::{
@@ -102,7 +102,7 @@ pub enum StatusBarEvent {
 
 pub const STATUS_EDGE_PAD: f32 = 12.0;
 const STATUS_ITEM_GAP: f32 = 4.0;
-const STATUS_ITEM_PAD: f32 = 8.0;
+const STATUS_ITEM_PAD: f32 = 10.0;
 const STATUS_ICON_GAP: f32 = 6.0;
 /// Square edge of a status-bar icon glyph, matched to the 12pt text.
 const STATUS_ICON_SIZE: f32 = 14.0;
@@ -405,6 +405,40 @@ fn items_width(ui: &egui::Ui, items: &[&ResolvedItem], font: &egui::FontId) -> f
     total
 }
 
+fn hovered_reorder_anchor(
+    ui: &egui::Ui,
+    rect: Rect,
+    start_x: f32,
+    bound: f32,
+    items: &[&ResolvedItem],
+    font: &egui::FontId,
+) -> Option<(String, String)> {
+    let hover_pos = ui.input(|input| input.pointer.hover_pos())?;
+    let mut x = start_x;
+    for index in 0..items.len() {
+        let item = items[index];
+        let prev = (index > 0).then(|| items[index - 1]);
+        if prev.is_some() && item_gap_before(item) && !connected(prev, item) {
+            x += STATUS_ITEM_GAP;
+        }
+        let width = item_width(ui, item, font);
+        if x + width > bound {
+            break;
+        }
+        let item_rect = Rect::from_min_size(
+            Pos2::new(x, rect.min.y + 3.0),
+            egui::vec2(width, rect.height() - 6.0),
+        );
+        if item_rect.contains(hover_pos)
+            && let Some(anchor) = item.reorder_anchor.as_deref()
+        {
+            return Some((item.module.clone(), anchor.to_owned()));
+        }
+        x += width;
+    }
+    None
+}
+
 /// A battery meter (rounded body + terminal nub) filled to `ratio`, tinted `color`.
 fn paint_battery_gauge(
     painter: &egui::Painter,
@@ -456,6 +490,7 @@ fn paint_item_primitives(
     item_rect: Rect,
     primitives: &[ModulePrimitive],
     default_color: egui::Color32,
+    background: egui::Color32,
 ) {
     for primitive in primitives {
         match primitive {
@@ -523,7 +558,7 @@ fn paint_item_primitives(
                     primitive_align(align),
                     text,
                     egui::FontId::monospace(*size),
-                    color.unwrap_or(default_color),
+                    readable_color(background, color.unwrap_or(default_color)),
                 );
             }
             ModulePrimitive::Icon {
@@ -542,9 +577,57 @@ fn paint_item_primitives(
                     icon,
                     Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
                     *size,
-                    color.unwrap_or(default_color),
+                    readable_color(background, color.unwrap_or(default_color)),
                 );
             }
+        }
+    }
+}
+
+fn paint_item_hover_overlay(
+    painter: &egui::Painter,
+    item_rect: Rect,
+    primitives: &[ModulePrimitive],
+    color: egui::Color32,
+) {
+    for primitive in primitives {
+        match primitive {
+            ModulePrimitive::Rect {
+                fill: Some(_),
+                x,
+                y,
+                w,
+                h,
+                radius,
+                ..
+            } => {
+                let rect = Rect::from_min_size(
+                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
+                    egui::vec2(coord_w(item_rect, *w), coord_h(item_rect, *h)),
+                );
+                painter.rect_filled(rect, *radius, color);
+            }
+            ModulePrimitive::Polygon {
+                fill: Some(_),
+                points,
+                ..
+            } => {
+                let points = points
+                    .iter()
+                    .map(|(x, y)| Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)))
+                    .collect::<Vec<_>>();
+                if points.len() >= 3 {
+                    painter.add(egui::Shape::convex_polygon(
+                        points,
+                        color,
+                        Stroke::new(0.0, egui::Color32::TRANSPARENT),
+                    ));
+                }
+            }
+            ModulePrimitive::Rect { fill: None, .. }
+            | ModulePrimitive::Polygon { fill: None, .. }
+            | ModulePrimitive::Text { .. }
+            | ModulePrimitive::Icon { .. } => {}
         }
     }
 }
@@ -562,6 +645,29 @@ fn primitive_align(value: &str) -> egui::Align2 {
         "right_bottom" => egui::Align2::RIGHT_BOTTOM,
         _ => egui::Align2::LEFT_CENTER,
     }
+}
+
+fn primitive_background(primitives: &[ModulePrimitive]) -> Option<egui::Color32> {
+    primitives
+        .iter()
+        .rev()
+        .find_map(|primitive| match primitive {
+            ModulePrimitive::Rect { fill, .. } => *fill,
+            ModulePrimitive::Polygon { .. }
+            | ModulePrimitive::Text { .. }
+            | ModulePrimitive::Icon { .. } => None,
+        })
+        .or_else(|| {
+            primitives
+                .iter()
+                .rev()
+                .find_map(|primitive| match primitive {
+                    ModulePrimitive::Polygon { fill, .. } => *fill,
+                    ModulePrimitive::Rect { .. }
+                    | ModulePrimitive::Text { .. }
+                    | ModulePrimitive::Icon { .. } => None,
+                })
+        })
 }
 
 fn paint_status_item_background(
@@ -594,6 +700,7 @@ fn draw_items(
     let rect = input.rect;
     let palette = input.palette;
     let font = input.font.clone();
+    let hovered_anchor = hovered_reorder_anchor(ui, rect, start_x, bound, items, &font);
     let mut x = start_x;
     for index in 0..items.len() {
         let item = items[index];
@@ -651,9 +758,20 @@ fn draw_items(
                 anchor: anchor.to_owned(),
             });
         }
-        let hovered = response.as_ref().is_some_and(egui::Response::hovered);
+        let hovered = response.as_ref().is_some_and(egui::Response::hovered)
+            || item.reorder_anchor.as_deref().is_some_and(|anchor| {
+                hovered_anchor
+                    .as_ref()
+                    .is_some_and(|(module, hovered)| module == &item.module && hovered == anchor)
+            });
 
         let painter = ui.painter_at(rect);
+        let primitive_bg = primitive_background(&item.primitives);
+        let hover_background = hovered.then_some(palette.hover);
+        let text_background = hover_background
+            .or(item.bg)
+            .or(primitive_bg)
+            .unwrap_or(palette.base);
         if item.bg.is_some() || item.stroke.is_some() {
             let r = STATUS_PILL_RADIUS;
             let left_join = connected(prev, item);
@@ -665,11 +783,31 @@ fn draw_items(
                 se: if right_join { 0 } else { r },
             };
             paint_status_item_background(&painter, item_rect, item.bg, item.stroke, corners);
-        } else if hovered {
-            painter.rect_filled(item_rect, STATUS_PILL_RADIUS, palette.hover);
+            if let Some(hover_background) = hover_background {
+                paint_status_item_background(
+                    &painter,
+                    item_rect,
+                    Some(hover_background),
+                    None,
+                    corners,
+                );
+            }
+        } else if let Some(hover_background) = hover_background
+            && primitive_bg.is_none()
+        {
+            painter.rect_filled(item_rect, STATUS_PILL_RADIUS, hover_background);
         }
-        paint_item_primitives(&painter, item_rect, &item.primitives, palette.subtext);
-        let color = item.fg.unwrap_or(palette.subtext);
+        paint_item_primitives(
+            &painter,
+            item_rect,
+            &item.primitives,
+            palette.subtext,
+            text_background,
+        );
+        if hovered && primitive_bg.is_some() {
+            paint_item_hover_overlay(&painter, item_rect, &item.primitives, palette.hover);
+        }
+        let color = readable_color(text_background, item.fg.unwrap_or(palette.subtext));
         let mut text_x = x + STATUS_ITEM_PAD + item.pad_left;
         if let Some(ratio) = item.gauge {
             paint_battery_gauge(&painter, text_x, rect.center().y, ratio, color);
@@ -1317,11 +1455,11 @@ fn sidebar_item_row(
         paint_tree_guide(&painter, rect, item);
 
         match &item.kind {
-            SidebarItemKind::Group => paint_group_item(&painter, rect, item, palette),
+            SidebarItemKind::Group => paint_group_item(&painter, rect, item, palette, bg),
             SidebarItemKind::Session { active } => {
-                paint_session_item(&painter, rect, item, *active, palette)
+                paint_session_item(&painter, rect, item, *active, palette, bg)
             }
-            SidebarItemKind::Row => paint_generic_sidebar_item(&painter, rect, item, palette),
+            SidebarItemKind::Row => paint_generic_sidebar_item(&painter, rect, item, palette, bg),
         }
     }
     response
@@ -1357,6 +1495,7 @@ fn paint_group_item(
     rect: Rect,
     item: &SidebarItem<'_>,
     palette: ThemePalette,
+    background: egui::Color32,
 ) {
     let SidebarDisplay::Text(text) = item.display else {
         return;
@@ -1366,9 +1505,9 @@ fn paint_group_item(
         egui::Align2::LEFT_CENTER,
         truncate_label(text, 28),
         egui::FontId::monospace(12.0),
-        palette.border,
+        readable_color(background, palette.muted),
     );
-    paint_item_primitives(painter, rect, item.primitives, item.color);
+    paint_item_primitives(painter, rect, item.primitives, item.color, background);
 }
 
 fn paint_session_item(
@@ -1377,8 +1516,9 @@ fn paint_session_item(
     item: &SidebarItem<'_>,
     active: bool,
     palette: ThemePalette,
+    background: egui::Color32,
 ) {
-    let label_color = if active { item.color } else { item.dim_color };
+    let label_color = readable_color(background, if active { item.color } else { item.dim_color });
     let x = item_text_x(rect, item);
     let cy = rect.center().y;
     let (number, name) = match item.display {
@@ -1403,7 +1543,11 @@ fn paint_session_item(
             egui::Align2::CENTER_CENTER,
             (number % 100).to_string(),
             egui::FontId::monospace(10.0),
-            if active { palette.base } else { item.dim_color },
+            if active {
+                readable_color(item.color, palette.base)
+            } else {
+                readable_color(background, item.dim_color)
+            },
         );
         text_x = badge.max.x + 6.0;
     }
@@ -1414,7 +1558,7 @@ fn paint_session_item(
         egui::FontId::monospace(13.0),
         label_color,
     );
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color);
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background);
 }
 
 fn paint_generic_sidebar_item(
@@ -1422,8 +1566,9 @@ fn paint_generic_sidebar_item(
     rect: Rect,
     item: &SidebarItem<'_>,
     palette: ThemePalette,
+    background: egui::Color32,
 ) {
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color);
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background);
     if !item.primitives.is_empty() {
         return;
     }
@@ -1431,7 +1576,13 @@ fn paint_generic_sidebar_item(
     let cy = rect.center().y;
     let mut text_x = x;
     if let Some(icon) = item.icon
-        && paint_icon_slug(painter, icon, Pos2::new(x + 6.0, cy), 12.0, item.color)
+        && paint_icon_slug(
+            painter,
+            icon,
+            Pos2::new(x + 6.0, cy),
+            12.0,
+            readable_color(background, item.color),
+        )
     {
         text_x += 16.0;
     }
@@ -1445,7 +1596,7 @@ fn paint_generic_sidebar_item(
             egui::Align2::LEFT_CENTER,
             truncate_label(text, 28),
             egui::FontId::monospace(11.0),
-            palette.muted,
+            readable_color(background, palette.muted),
         );
     }
 }
@@ -1484,8 +1635,8 @@ fn paint_sidebar_footer(
             Pos2::new(rect.min.x + 14.0, row_y - 10.0),
             egui::vec2(rect.width() - 28.0, 26.0),
         );
-        let color = item.fg.unwrap_or(palette.subtext);
-        paint_item_primitives(&painter, item_rect, &item.primitives, color);
+        let color = readable_color(palette.base, item.fg.unwrap_or(palette.subtext));
+        paint_item_primitives(&painter, item_rect, &item.primitives, color, palette.base);
         if item.primitives.is_empty() {
             paint_footer_fallback(&painter, item_rect, item, color, palette);
         }
@@ -1497,7 +1648,7 @@ fn paint_sidebar_footer(
         egui::Align2::LEFT_CENTER,
         crate::platform::sidebar_shortcut_hint(),
         egui::FontId::monospace(11.0),
-        palette.muted,
+        readable_color(palette.base, palette.muted),
     );
 }
 
@@ -1515,7 +1666,7 @@ fn paint_footer_fallback(
             icon,
             Pos2::new(rect.min.x + 6.0, rect.min.y + 6.0),
             12.0,
-            color,
+            readable_color(palette.base, color),
         )
     {
         text_x += 16.0;
@@ -1526,7 +1677,7 @@ fn paint_footer_fallback(
             egui::Align2::LEFT_CENTER,
             truncate_label(&item.text, 28),
             egui::FontId::monospace(11.0),
-            palette.subtext,
+            readable_color(palette.base, palette.subtext),
         );
     }
 }
@@ -1576,6 +1727,30 @@ mod tests {
             sidebar_title_drag_rect(rect, true).min.x,
             MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
         );
+    }
+
+    #[test]
+    fn primitive_background_prefers_cell_rect_over_chevron_polygon() {
+        let rect_fill = egui::Color32::from_rgb(0xee, 0xee, 0xee);
+        let chevron_fill = egui::Color32::from_rgb(0x4c, 0x7d, 0xd9);
+        let primitives = [
+            ModulePrimitive::Rect {
+                fill: Some(rect_fill),
+                stroke: None,
+                x: ModuleCoord::default(),
+                y: ModuleCoord::default(),
+                w: ModuleCoord { frac: 1.0, px: 0.0 },
+                h: ModuleCoord { frac: 1.0, px: 0.0 },
+                radius: egui::CornerRadius::ZERO,
+            },
+            ModulePrimitive::Polygon {
+                fill: Some(chevron_fill),
+                stroke: None,
+                points: Vec::new(),
+            },
+        ];
+
+        assert_eq!(primitive_background(&primitives), Some(rect_fill));
     }
 
     #[test]

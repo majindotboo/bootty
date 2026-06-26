@@ -384,43 +384,6 @@ impl<'a> GroupMeta<'a> {
     }
 }
 
-/// The sidebar accent color for a session, so the status bar can match it. Walks
-/// the same grouping as the sidebar render (group position is computed by ordered
-/// iteration) and returns the primary (non-dim) color for the selected session.
-pub(crate) fn session_accent_color(
-    sessions: &[MuxSession],
-    selected: Option<&str>,
-) -> Option<Color32> {
-    let selected = selected?;
-    let target = sessions
-        .iter()
-        .position(|session| session.id == selected || session.name == selected)?;
-    let mut group_meta = GroupMeta::new(sessions);
-    let mut color = None;
-    for index in 0..=target {
-        let Some(group_info) = group_meta.session(index) else {
-            continue;
-        };
-        if index == target {
-            let group_total = if group_info.name.is_empty() {
-                0
-            } else {
-                group_info.count
-            };
-            color = Some(
-                computed_color(
-                    group_info.index,
-                    group_meta.dynamic_total,
-                    group_info.position,
-                    group_total,
-                )
-                .0,
-            );
-        }
-    }
-    color
-}
-
 fn computed_color(
     pos: usize,
     total: usize,
