@@ -1124,6 +1124,10 @@ impl BoottyApp {
                     if let Some(focused) = self.state.focused_pane() {
                         self.focus_pane_widget(&focused);
                     }
+                    // focus_pane_widget swapped the focused pane's widget into terminal_widget;
+                    // set the transition key on it so native tab-switches cross-fade like non-native.
+                    self.terminal_widget
+                        .set_transition_key(terminal_transition_key);
                     self.show_single_terminal(ui, terminal_rect);
                 }
             } else {

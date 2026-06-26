@@ -642,10 +642,29 @@ impl AppState {
         self.pane_layouts.get(&self.current_window_key())
     }
 
+    /// Drop split layouts whose `(session, window)` no longer exists, so the map doesn't grow
+    /// unbounded as the user creates and destroys native sessions and tabs. Keys are stored by
+    /// whatever `current_window_key` recorded (session id, occasionally name), so accept either.
+    fn prune_pane_layouts(&mut self) {
+        if self.pane_layouts.is_empty() {
+            return;
+        }
+        let mut live: Vec<(String, String)> = Vec::new();
+        for session in self.mux.sessions() {
+            for window in &session.windows {
+                live.push((session.id.clone(), window.id.clone()));
+                live.push((session.name.clone(), window.id.clone()));
+            }
+        }
+        live.push(self.current_window_key());
+        self.pane_layouts.retain(|key, _| live.contains(key));
+    }
+
     /// Reconcile the active native window's split layout against the backend's pane list, then make
     /// the layout's focused pane the input runtime and keep its siblings live. Non-native backends
     /// fall back to attaching the single selected anchor.
     fn sync_terminal_panes(&mut self) -> Result<()> {
+        self.prune_pane_layouts();
         let config = self.config_state.current().multiplexer.clone();
         if !self.is_native() {
             return self
@@ -2853,6 +2872,30 @@ mod tests {
             1
         );
         assert_eq!(state.input_focus, InputFocus::Terminal);
+    }
+
+    #[test]
+    fn prune_pane_layouts_drops_dead_sessions_but_keeps_the_active_window() {
+        let mut state = test_state();
+        let current = state.current_window_key();
+        let ghost = ("ghost-session".to_owned(), "@9".to_owned());
+        state
+            .pane_layouts
+            .insert(current.clone(), PaneLayout::single("p1".to_owned()));
+        state
+            .pane_layouts
+            .insert(ghost.clone(), PaneLayout::single("p2".to_owned()));
+
+        state.prune_pane_layouts();
+
+        assert!(
+            state.pane_layouts.contains_key(&current),
+            "active window's layout must survive pruning"
+        );
+        assert!(
+            !state.pane_layouts.contains_key(&ghost),
+            "layout for a session that no longer exists must be reclaimed"
+        );
     }
 
     #[test]
