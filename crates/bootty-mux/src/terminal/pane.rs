@@ -19,7 +19,7 @@ use bootty_runtime::{
 };
 use bootty_terminal::{
     terminal_engine::{
-        TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
+        TerminalColorConfig, TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
         TerminalSelectionFormat,
     },
     terminal_input_model::{KeyInput, MouseInput},
@@ -120,10 +120,7 @@ pub trait TerminalRuntime: TerminalRenderSource {
     fn set_feature_config(&mut self, _features: TerminalFeatureConfig) -> Result<()> {
         Ok(())
     }
-    fn set_colors(
-        &mut self,
-        colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()>;
+    fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()>;
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
     fn write_paste(&mut self, text: &str) -> Result<()>;
     fn encode_key(&mut self, input: KeyInput) -> Result<()>;
@@ -156,10 +153,7 @@ impl TerminalRuntime for IdleRenderSource {
         Ok(false)
     }
 
-    fn set_colors(
-        &mut self,
-        _colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()> {
+    fn set_colors(&mut self, _colors: TerminalColorConfig) -> Result<()> {
         Ok(())
     }
 
@@ -230,10 +224,7 @@ impl TerminalRuntime for TerminalSession {
         Self::set_feature_config(self, features)
     }
 
-    fn set_colors(
-        &mut self,
-        colors: bootty_terminal::terminal_engine::TerminalColorConfig,
-    ) -> Result<()> {
+    fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
         Self::set_colors(self, colors)
     }
 
@@ -399,6 +390,15 @@ impl BackendPaneTerminal {
 
     pub fn set_terminal_config(&mut self, terminal_config: TerminalSessionConfig) {
         self.terminal_config = terminal_config;
+    }
+
+    pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
+        self.terminal.set_colors(colors.clone())?;
+        for terminal in self.native_terminals.values_mut() {
+            terminal.set_colors(colors.clone())?;
+        }
+        self.terminal_config.colors = colors;
+        Ok(())
     }
 
     fn start_terminal(
@@ -1030,7 +1030,10 @@ fn set_session_status_hidden(session_id: &str, hidden: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
     use bootty_terminal::terminal_engine::TerminalColorConfig;
+    use bootty_terminal::terminal_frame::RenderFrame;
     use tempfile::TempDir;
 
     use bootty_config::config::{MultiplexerBackendConfig, MultiplexerConfig};
@@ -1109,6 +1112,114 @@ mod tests {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join(program), "").unwrap();
         temp
+    }
+
+    struct ColorRecordingRuntime {
+        colors: Arc<Mutex<Vec<(u8, u8, u8)>>>,
+    }
+
+    impl TerminalRenderSource for ColorRecordingRuntime {
+        fn resize(&mut self, _geometry: TerminalGeometry) -> Result<()> {
+            Ok(())
+        }
+
+        fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
+            Ok(Arc::new(RenderFrame::default()))
+        }
+    }
+
+    impl TerminalRuntime for ColorRecordingRuntime {
+        fn drain_pty(&mut self) -> DrainStats {
+            DrainStats::default()
+        }
+
+        fn pending_pty_len(&self) -> usize {
+            0
+        }
+
+        fn child_exited(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
+            self.colors.lock().unwrap().push((
+                colors.background.r,
+                colors.background.g,
+                colors.background.b,
+            ));
+            Ok(())
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_paste(&mut self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_key(&mut self, _input: KeyInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_focus(&mut self, _gained: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_mouse(&mut self, _input: MouseInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn handle_mouse_wheel(&mut self, _input: MouseInput, _scroll_delta: isize) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn color_config(background: (u8, u8, u8)) -> TerminalColorConfig {
+        let mut colors = TerminalColorConfig::default();
+        colors.background.r = background.0;
+        colors.background.g = background.1;
+        colors.background.b = background.2;
+        colors
+    }
+
+    #[test]
+    fn set_colors_updates_focused_and_parked_native_panes() {
+        let geometry = TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            geometry,
+            MuxBackendKind::Native,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        let active_colors = Arc::new(Mutex::new(Vec::new()));
+        terminal.terminal = ActiveTerminalRuntime(Box::new(ColorRecordingRuntime {
+            colors: Arc::clone(&active_colors),
+        }));
+        let parked_colors = Arc::new(Mutex::new(Vec::new()));
+        terminal.native_terminals.insert(
+            MuxPaneTarget::Pane {
+                session_id: "agents".to_owned(),
+                pane_id: "%4".to_owned(),
+                cwd: None,
+            },
+            ActiveTerminalRuntime(Box::new(ColorRecordingRuntime {
+                colors: Arc::clone(&parked_colors),
+            })),
+        );
+
+        terminal.set_colors(color_config((1, 2, 3))).unwrap();
+
+        assert_eq!(*active_colors.lock().unwrap(), vec![(1, 2, 3)]);
+        assert_eq!(*parked_colors.lock().unwrap(), vec![(1, 2, 3)]);
+        assert_eq!(terminal.terminal_config.colors.background.r, 1);
+        assert_eq!(terminal.terminal_config.colors.background.g, 2);
+        assert_eq!(terminal.terminal_config.colors.background.b, 3);
     }
 
     #[test]

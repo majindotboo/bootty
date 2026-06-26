@@ -67,47 +67,48 @@ fn pane_corner_radius(rect: Rect, px: f32) -> egui::CornerRadius {
 /// reads as rounded (the window background shows through the corners) even though the terminal
 /// content itself isn't clipped.
 fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg: egui::Color32) {
-    let r = pane_corner_radius_px(rect, radius);
+    let r = pane_corner_radius_px(rect, radius).round();
     if r <= 0.5 {
         return;
     }
     // (arc center, square-corner point, start angle) for each corner, angles in egui screen space
-    // (y down), sweeping a quarter turn.
+    // (y down), sweeping a quarter turn. A single mesh avoids anti-aliased cracks between the
+    // triangles; separate convex polygons showed one-pixel seams at the pane corners.
     let corners = [
         (
             Pos2::new(rect.min.x + r, rect.min.y + r),
             rect.min,
             std::f32::consts::PI,
-        ), // top-left
+        ),
         (
             Pos2::new(rect.max.x - r, rect.min.y + r),
             Pos2::new(rect.max.x, rect.min.y),
             std::f32::consts::FRAC_PI_2 * 3.0,
-        ), // top-right
-        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0), // bottom-right
+        ),
+        (Pos2::new(rect.max.x - r, rect.max.y - r), rect.max, 0.0),
         (
             Pos2::new(rect.min.x + r, rect.max.y - r),
             Pos2::new(rect.min.x, rect.max.y),
             std::f32::consts::FRAC_PI_2,
-        ), // bottom-left
+        ),
     ];
-    // The cutout (square corner minus the rounded arc) is concave, so fan it into triangles from
-    // the corner — each triangle is convex and the region is star-shaped from the corner — rather
-    // than filling one polygon (which egui would collapse to its diagonal hull).
-    let steps = 8;
+    let steps = 16;
+    let mut mesh = egui::epaint::Mesh::default();
     for (center, corner, start) in corners {
-        let arc = |step: usize| {
-            let angle = start + std::f32::consts::FRAC_PI_2 * (step as f32 / steps as f32);
-            Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
-        };
         for step in 0..steps {
-            painter.add(egui::Shape::convex_polygon(
-                vec![corner, arc(step), arc(step + 1)],
-                bg,
-                egui::Stroke::NONE,
-            ));
+            let idx = mesh.vertices.len() as u32;
+            mesh.colored_vertex(corner, bg);
+            for arc_step in [step, step + 1] {
+                let angle = start + std::f32::consts::FRAC_PI_2 * (arc_step as f32 / steps as f32);
+                mesh.colored_vertex(
+                    Pos2::new(center.x + r * angle.cos(), center.y + r * angle.sin()),
+                    bg,
+                );
+            }
+            mesh.add_triangle(idx, idx + 1, idx + 2);
         }
     }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Shrink a divider's visual rect along its long axis by the pane corner radius (per end), so it
@@ -1137,6 +1138,9 @@ impl BoottyApp {
                 .mux()
                 .selected_session_anchor()
                 .is_some_and(|anchor| anchor.pane_id.is_some());
+        let pane_backing_color = notch_chrome_color.unwrap_or(palette.mantle);
+        ui.painter()
+            .rect_filled(terminal_rect, 0.0, pane_backing_color);
         if has_terminal {
             self.state.record_pane_area(terminal_rect);
             if native_backend {
@@ -1144,12 +1148,7 @@ impl BoottyApp {
                 // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
                 if self.state.native_multi_pane() {
                     // show_split_panes swaps in the focused widget itself (after click-to-focus).
-                    self.show_split_panes(
-                        ui,
-                        terminal_rect,
-                        palette,
-                        notch_chrome_color.unwrap_or(palette.mantle),
-                    );
+                    self.show_split_panes(ui, terminal_rect, palette, pane_backing_color);
                     self.show_pane_dividers(ui, terminal_rect, palette, notch_chrome_color);
                 } else {
                     if let Some(focused) = self.state.focused_pane() {
@@ -1163,7 +1162,7 @@ impl BoottyApp {
                         ui,
                         terminal_rect,
                         chrome_config.pane_corner_radius,
-                        notch_chrome_color.unwrap_or(palette.mantle),
+                        pane_backing_color,
                     );
                 }
             } else {
@@ -1174,7 +1173,7 @@ impl BoottyApp {
                     ui,
                     terminal_rect,
                     chrome_config.pane_corner_radius,
-                    notch_chrome_color.unwrap_or(palette.mantle),
+                    pane_backing_color,
                 );
             }
             if !self.state.terminal_focused() {
