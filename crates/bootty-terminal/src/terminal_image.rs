@@ -111,7 +111,6 @@ pub fn collect_kitty_image_frame(
 ) -> Result<KittyImageFrame> {
     let graphics = terminal.kitty_graphics()?;
     let mut frame = KittyImageFrame::default();
-    let mut visible_images = HashSet::<u32>::new();
 
     for layer in KittyImageLayer::ordered() {
         let mut placements = placement_iterator.update(&graphics)?;
@@ -147,7 +146,6 @@ pub fn collect_kitty_image_frame(
             if !render_info.viewport_visible {
                 continue;
             }
-            visible_images.insert(image_id);
             let data = image_cache.data_for(image_id, fingerprint, image_bytes);
             frame.placements.push(KittyImagePlacement {
                 image_id,
@@ -167,13 +165,14 @@ pub fn collect_kitty_image_frame(
                     render_info,
                     placement.x_offset()?,
                     placement.y_offset()?,
+                    placement.columns()?,
+                    placement.rows()?,
                 ),
                 data,
             });
         }
     }
 
-    image_cache.retain_visible(&visible_images);
     Ok(frame)
 }
 
@@ -207,6 +206,37 @@ impl KittyImageDataCache {
         data
     }
 
+    pub(super) fn data_for_image(
+        &mut self,
+        image_id: u32,
+        number: u32,
+        width: u32,
+        height: u32,
+        format: ImageFormat,
+        bytes: &[u8],
+    ) -> Arc<Vec<u8>> {
+        self.data_for(
+            image_id,
+            KittyImageFingerprint {
+                number,
+                width,
+                height,
+                format,
+                payload_hash: kitty_image_payload_hash(bytes),
+            },
+            bytes,
+        )
+    }
+
+    pub(crate) fn retain_frame(&mut self, frame: &KittyImageFrame) {
+        let visible_images = frame
+            .placements
+            .iter()
+            .map(|placement| placement.image_id)
+            .collect::<HashSet<_>>();
+        self.retain_visible(&visible_images);
+    }
+
     fn retain_visible(&mut self, visible_images: &HashSet<u32>) {
         self.images
             .retain(|image_id, _| visible_images.contains(image_id));
@@ -218,13 +248,25 @@ pub fn placement_destination(
     info: PlacementRenderInfo,
     x_offset: u32,
     y_offset: u32,
+    columns: u32,
+    rows: u32,
 ) -> SurfaceRect {
     let origin = surface.content_origin();
+    let width = if columns > 0 {
+        columns as f32 * surface.cell.width
+    } else {
+        info.pixel_width as f32
+    };
+    let height = if rows > 0 {
+        rows as f32 * surface.cell.height
+    } else {
+        info.pixel_height as f32
+    };
     SurfaceRect::from_min_size(
         origin.x + info.viewport_col as f32 * surface.cell.width + x_offset as f32,
         origin.y + info.viewport_row as f32 * surface.cell.height + y_offset as f32,
-        info.pixel_width as f32,
-        info.pixel_height as f32,
+        width,
+        height,
     )
 }
 
@@ -233,6 +275,7 @@ pub fn append_virtual_image_placements(
     surface: TerminalSurface,
     frame: &mut KittyImageFrame,
     cells: &[KittyVirtualCell],
-) -> Result<()> {
-    virtual_placement::append_virtual_image_placements(terminal, surface, frame, cells)
+    image_cache: &mut KittyImageDataCache,
+) -> Result<Vec<u16>> {
+    virtual_placement::append_virtual_image_placements(terminal, surface, frame, cells, image_cache)
 }

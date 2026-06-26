@@ -95,6 +95,30 @@ pub(super) fn rgba_image_pixels(image: &KittyImagePlacement) -> Option<Cow<'_, [
     }
 }
 
+pub(super) fn rgba_image_texture_pixels(image: &KittyImagePlacement) -> Option<Cow<'_, [u8]>> {
+    let pixels = rgba_image_pixels(image)?;
+    if pixels.chunks_exact(4).all(|pixel| pixel[3] == 255) {
+        return Some(pixels);
+    }
+
+    let mut premultiplied = Vec::with_capacity(pixels.len());
+    for pixel in pixels.chunks_exact(4) {
+        premultiplied.extend_from_slice(&[
+            premultiply_unorm_channel(pixel[0], pixel[3]),
+            premultiply_unorm_channel(pixel[1], pixel[3]),
+            premultiply_unorm_channel(pixel[2], pixel[3]),
+            pixel[3],
+        ]);
+    }
+    Some(Cow::Owned(premultiplied))
+}
+
+fn premultiply_unorm_channel(value: u8, alpha: u8) -> u8 {
+    let value = u16::from(value);
+    let alpha = u16::from(alpha);
+    ((value * alpha + 127) / 255) as u8
+}
+
 fn decode_png_rgba(image: &KittyImagePlacement) -> Option<Cow<'_, [u8]>> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(image.data.as_slice()));
     decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);

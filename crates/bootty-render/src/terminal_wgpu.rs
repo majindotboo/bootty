@@ -24,7 +24,9 @@ mod vertices;
 use font_lookup::{GHOSTTY_FONT_FAMILY_PRIORITY, terminal_font_family_priority};
 use font_lookup::{ghostty_cell_metrics_from_font, terminal_font, terminal_font_for_char};
 use glyph_draw::push_text_glyph_draws;
-use image_upload::{image_fits_device_limits, rgba_image_pixels};
+#[cfg(test)]
+use image_upload::rgba_image_pixels;
+use image_upload::{image_fits_device_limits, rgba_image_texture_pixels};
 use pipelines::{
     background_pipeline, image_bind_group_layout, image_pipeline, text_bind_group_layout,
     text_pipeline, text_texture_format,
@@ -1066,7 +1068,7 @@ fn prepare_image_resource(
         previous.update_vertices(queue, vertices);
         return Some(previous);
     }
-    let pixels = rgba_image_pixels(image)?;
+    let pixels = rgba_image_texture_pixels(image)?;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("bootty_terminal_kitty_image"),
         size: wgpu::Extent3d {
@@ -1077,7 +1079,7 @@ fn prepare_image_resource(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

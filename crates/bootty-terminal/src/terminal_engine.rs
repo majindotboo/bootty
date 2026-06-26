@@ -12,8 +12,8 @@ use crate::{
         CellMetrics, GridPoint, SurfacePoint, TerminalGeometry, TerminalPadding, TerminalSurface,
     },
     terminal_image::{
-        KittyImageDataCache, KittyImageFrame, KittyVirtualCell, append_virtual_image_placements,
-        collect_kitty_image_frame,
+        KittyImageDataCache, KittyImageFrame, KittyImagePlacement, KittyVirtualCell,
+        append_virtual_image_placements, collect_kitty_image_frame,
     },
     terminal_png_decoder::BoottyPngDecoder,
 };
@@ -1264,6 +1264,27 @@ fn hyperlink_uri_at(
     }
 }
 
+fn placement_rows_overlap_content(
+    placement: &KittyImagePlacement,
+    surface: TerminalSurface,
+    rows: &[CachedRenderRow],
+) -> bool {
+    let origin = surface.content_origin();
+    let min_y = placement.destination.min_y - origin.y;
+    let max_y = placement.destination.max_y - origin.y;
+    if max_y <= 0.0 || min_y >= rows.len() as f32 * surface.cell.height {
+        return false;
+    }
+
+    let start = (min_y.max(0.0) / surface.cell.height).floor() as usize;
+    let end = (max_y.max(0.0) / surface.cell.height).ceil() as usize;
+    let end = end.saturating_sub(1).min(rows.len().saturating_sub(1));
+    (start..=end).any(|index| {
+        rows.get(index)
+            .is_some_and(|row| row.text.iter().any(|ch| !ch.is_whitespace()))
+    })
+}
+
 impl TerminalEngine {
     pub fn new(geometry: TerminalGeometry) -> Result<Self> {
         Self::new_with_colors(geometry, TerminalColorConfig::default())
@@ -2345,12 +2366,8 @@ impl TerminalEngine {
             ..FrameStats::default()
         };
 
-        let mut virtual_placeholder_rows = Vec::new();
         let mut virtual_cells = Vec::new();
-        for (row_index, row) in self.row_cache.iter().enumerate() {
-            if row.has_virtual_placeholder {
-                virtual_placeholder_rows.push(row_index as u16);
-            }
+        for row in &self.row_cache {
             if let Some(selection) = row.selection {
                 self.frame.selections.push(selection);
             }
@@ -2385,8 +2402,17 @@ impl TerminalEngine {
                 &mut self.image_data_cache,
             )
             .unwrap_or_default();
-            append_virtual_image_placements(&self.terminal, surface, &mut images, &virtual_cells)?;
-            images.virtual_placeholder_rows = virtual_placeholder_rows;
+            images.placements.retain(|placement| {
+                !placement_rows_overlap_content(placement, surface, &self.row_cache)
+            });
+            images.virtual_placeholder_rows = append_virtual_image_placements(
+                &self.terminal,
+                surface,
+                &mut images,
+                &virtual_cells,
+                &mut self.image_data_cache,
+            )?;
+            self.image_data_cache.retain_frame(&images);
             self.frame.images = images;
         }
 

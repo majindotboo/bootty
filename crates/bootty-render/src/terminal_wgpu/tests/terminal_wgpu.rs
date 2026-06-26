@@ -430,6 +430,27 @@ fn image_pixels_are_expanded_to_rgba() {
 }
 
 #[test]
+fn image_texture_pixels_are_premultiplied_for_unorm_filtering() {
+    let image = image_placement(
+        SurfaceRect::from_min_size(0.0, 0.0, 1.0, 1.0),
+        libghostty_vt::kitty::graphics::SourceRect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        },
+        2,
+        1,
+        vec![255, 128, 0, 128, 10, 20, 30, 255],
+    );
+
+    let pixels = rgba_image_texture_pixels(&image).expect("premultiplied pixels");
+
+    assert_eq!(&pixels[0..4], &[128, 64, 0, 128]);
+    assert_eq!(&pixels[4..8], &[10, 20, 30, 255]);
+}
+
+#[test]
 fn png_image_pixels_are_decoded_to_rgba() {
     let png = png_rgba_pixel([9, 8, 7, 6]);
     let image = KittyImagePlacement {
