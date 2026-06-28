@@ -58,10 +58,21 @@ fn direct_project_entry(filter: &str) -> Option<ProjectPickerEntry> {
 }
 
 fn looks_like_directory_path(filter: &str) -> bool {
-    filter.starts_with('/')
+    Path::new(filter).has_root()
         || filter.starts_with("~/")
         || filter.starts_with("./")
         || filter.starts_with("../")
+        || looks_like_windows_relative_path(filter)
+}
+
+#[cfg(windows)]
+fn looks_like_windows_relative_path(filter: &str) -> bool {
+    filter.starts_with(r"~\") || filter.starts_with(r".\") || filter.starts_with(r"..\")
+}
+
+#[cfg(not(windows))]
+fn looks_like_windows_relative_path(_filter: &str) -> bool {
+    false
 }
 
 fn normalize_path_for_session(path: &Path) -> String {
@@ -148,6 +159,15 @@ mod tests {
             path.canonicalize().unwrap()
         );
         _ = std::fs::remove_dir(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_filter_treats_windows_path_syntax_as_direct_paths() {
+        assert!(looks_like_directory_path(r"C:\Users\bootty"));
+        assert!(looks_like_directory_path(r".\bootty"));
+        assert!(looks_like_directory_path(r"..\bootty"));
+        assert!(looks_like_directory_path(r"~\src"));
     }
 
     #[test]

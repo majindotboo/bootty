@@ -155,6 +155,29 @@ fn empty_session_working_directory_resolves_to_home() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_default_working_directory_uses_userprofile_without_home() {
+    let home = default_working_directory_from(|name| match name {
+        "USERPROFILE" => Some("C:\\Users\\bootty".into()),
+        _ => None,
+    });
+
+    assert_eq!(home, Some(PathBuf::from("C:\\Users\\bootty")));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_default_working_directory_uses_home_drive_and_path_without_userprofile() {
+    let home = default_working_directory_from(|name| match name {
+        "HOMEDRIVE" => Some("C:".into()),
+        "HOMEPATH" => Some("\\Users\\bootty".into()),
+        _ => None,
+    });
+
+    assert_eq!(home, Some(PathBuf::from("C:\\Users\\bootty")));
+}
+
 #[test]
 fn configured_session_working_directory_overrides_home_default() {
     let config = SessionConfig {
