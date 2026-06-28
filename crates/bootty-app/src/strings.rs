@@ -20,7 +20,7 @@ pub fn session_name_for_path(path: &str) -> String {
 }
 
 pub fn expand_home_path(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
+    if let Some(rest) = home_relative_path(path)
         && let Some(home) = home_dir()
     {
         return home.join(rest);
@@ -28,8 +28,22 @@ pub fn expand_home_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn home_relative_path(path: &str) -> Option<&str> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Some(rest);
+    }
+    #[cfg(windows)]
+    {
+        path.strip_prefix(r"~\")
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::config::default_working_directory()
 }
 
 pub fn is_hidden_path(path: &Path) -> bool {
@@ -112,5 +126,15 @@ mod tests {
         push_truncated_label(&mut out, "abc", 0);
 
         assert_eq!(out, "prefix");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_home_path_accepts_windows_separator() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+
+        assert_eq!(expand_home_path(r"~\src"), home.join("src"));
     }
 }
