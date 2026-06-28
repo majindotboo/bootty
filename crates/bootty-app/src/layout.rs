@@ -7,6 +7,7 @@
 //! first/left/top child). "Split the current pane" replaces the focused leaf with a split whose
 //! children are the old pane and the new one.
 
+use crate::mux::snapshot::{MuxPaneLayout, MuxPaneSplitDirection};
 use eframe::egui::{Pos2, Rect, Vec2};
 
 pub type PaneId = String;
@@ -90,6 +91,32 @@ impl PaneLayout {
         }
     }
 
+    pub fn from_mux_layout(layout: &MuxPaneLayout) -> Option<Self> {
+        let root = Self::node_from_mux_layout(layout)?;
+        let focused = Self::first_leaf(&root).to_owned();
+        Some(Self { root, focused })
+    }
+
+    fn node_from_mux_layout(layout: &MuxPaneLayout) -> Option<Node> {
+        match layout {
+            MuxPaneLayout::Pane(pane) => Some(Node::Leaf(pane.clone())),
+            MuxPaneLayout::Split {
+                direction,
+                ratio_millis,
+                first,
+                second,
+            } => Some(Node::Split {
+                direction: match direction {
+                    MuxPaneSplitDirection::Right => SplitDirection::Right,
+                    MuxPaneSplitDirection::Down => SplitDirection::Down,
+                },
+                ratio: (f32::from(*ratio_millis) / 1000.0).clamp(0.05, 0.95),
+                first: Box::new(Self::node_from_mux_layout(first)?),
+                second: Box::new(Self::node_from_mux_layout(second)?),
+            }),
+        }
+    }
+
     pub fn focused(&self) -> &str {
         &self.focused
     }
@@ -146,8 +173,16 @@ impl PaneLayout {
 
     /// Bring the tree in line with the backend's pane set: drop leaves whose pane has gone away
     /// (closed or exited elsewhere) and adopt any pane that appeared outside the UI split path by
-    /// splitting the focused leaf to the right. No-ops when already in sync.
+    /// splitting the focused leaf in the supplied direction. No-ops when already in sync.
     pub fn reconcile(&mut self, pane_ids: &[PaneId]) {
+        self.reconcile_with_new_pane_direction(pane_ids, SplitDirection::Right);
+    }
+
+    pub fn reconcile_with_new_pane_direction(
+        &mut self,
+        pane_ids: &[PaneId],
+        new_pane_direction: SplitDirection,
+    ) {
         for existing in self.panes() {
             if !pane_ids.contains(&existing) {
                 self.remove(&existing);
@@ -155,7 +190,7 @@ impl PaneLayout {
         }
         for id in pane_ids {
             if !self.contains(id) {
-                self.split_focused(id.clone(), SplitDirection::Right);
+                self.split_focused(id.clone(), new_pane_direction);
             }
         }
     }
@@ -173,6 +208,15 @@ impl PaneLayout {
         let mut out = Vec::new();
         Self::collect_dividers(&self.root, area, gap, &mut Vec::new(), &mut out);
         out
+    }
+    /// The rmux window size needed for this split tree when each leaf has the supplied terminal
+    /// cell size. Rmux panes share a single window layout, so every internal split consumes one
+    /// server-side separator cell even though Bootty paints its own divider chrome.
+    pub fn terminal_window_size<F>(&self, mut leaf_size: F) -> Option<(u16, u16)>
+    where
+        F: FnMut(&str) -> Option<(u16, u16)>,
+    {
+        Self::node_terminal_window_size(&self.root, &mut leaf_size)
     }
 
     /// Set the ratio of the split node addressed by `path` (sequence of 0=first / 1=second steps),
@@ -352,6 +396,34 @@ impl PaneLayout {
             path.push(1);
             Self::collect_dividers(second, second_area, gap, path, out);
             path.pop();
+        }
+    }
+    fn node_terminal_window_size<F>(node: &Node, leaf_size: &mut F) -> Option<(u16, u16)>
+    where
+        F: FnMut(&str) -> Option<(u16, u16)>,
+    {
+        match node {
+            Node::Leaf(id) => leaf_size(id),
+            Node::Split {
+                direction,
+                first,
+                second,
+                ..
+            } => {
+                let (first_cols, first_rows) = Self::node_terminal_window_size(first, leaf_size)?;
+                let (second_cols, second_rows) =
+                    Self::node_terminal_window_size(second, leaf_size)?;
+                Some(match direction {
+                    SplitDirection::Right => (
+                        first_cols.saturating_add(second_cols).saturating_add(1),
+                        first_rows.max(second_rows),
+                    ),
+                    SplitDirection::Down => (
+                        first_cols.max(second_cols),
+                        first_rows.saturating_add(second_rows).saturating_add(1),
+                    ),
+                })
+            }
         }
     }
 }
@@ -592,6 +664,85 @@ mod tests {
         let before = layout.clone();
         layout.reconcile(&["a".to_owned(), "c".to_owned(), "d".to_owned()]);
         assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn reconcile_after_closing_bottom_right_preserves_left_split() {
+        let mut layout = PaneLayout::single("left".to_owned());
+        layout.split_focused("top-right".to_owned(), SplitDirection::Right);
+        layout.split_focused("bottom-right".to_owned(), SplitDirection::Down);
+
+        layout.reconcile(&["left".to_owned(), "top-right".to_owned()]);
+
+        let rects = layout.rects(area(), 0.0);
+        assert_eq!(
+            layout.panes(),
+            vec!["left".to_owned(), "top-right".to_owned()]
+        );
+        approx(rect_for(&rects, "left").height(), 80.0);
+        approx(rect_for(&rects, "left").width(), 50.0);
+        approx(rect_for(&rects, "top-right").height(), 80.0);
+        approx(rect_for(&rects, "top-right").width(), 50.0);
+    }
+
+    #[test]
+    fn reconcile_adopts_async_new_pane_with_requested_direction() {
+        let mut layout = PaneLayout::single("a".to_owned());
+
+        layout.reconcile_with_new_pane_direction(
+            &["a".to_owned(), "b".to_owned()],
+            SplitDirection::Down,
+        );
+
+        let dividers = layout.dividers(area(), 4.0);
+        assert_eq!(dividers.len(), 1);
+        assert_eq!(dividers[0].direction, SplitDirection::Down);
+        assert_eq!(layout.focused(), "b");
+    }
+
+    #[test]
+    fn from_mux_layout_restores_split_orientation_and_ratio() {
+        let layout = PaneLayout::from_mux_layout(&MuxPaneLayout::Split {
+            direction: MuxPaneSplitDirection::Down,
+            ratio_millis: 250,
+            first: Box::new(MuxPaneLayout::Pane("a".to_owned())),
+            second: Box::new(MuxPaneLayout::Pane("b".to_owned())),
+        })
+        .expect("mux layout should convert");
+
+        let dividers = layout.dividers(area(), 0.0);
+        assert_eq!(dividers.len(), 1);
+        assert_eq!(dividers[0].direction, SplitDirection::Down);
+        let rects = layout.rects(area(), 0.0);
+        approx(rect_for(&rects, "a").height(), 20.0);
+        approx(rect_for(&rects, "b").height(), 60.0);
+    }
+
+    #[test]
+    fn terminal_window_size_includes_internal_split_borders() {
+        let mut right = PaneLayout::single("a".to_owned());
+        right.split_focused("b".to_owned(), SplitDirection::Right);
+
+        assert_eq!(
+            right.terminal_window_size(|pane| match pane {
+                "a" | "b" => Some((58, 40)),
+                _ => None,
+            }),
+            Some((117, 40))
+        );
+
+        let mut nested = PaneLayout::single("a".to_owned());
+        nested.split_focused("b".to_owned(), SplitDirection::Right);
+        nested.split_focused("c".to_owned(), SplitDirection::Down);
+
+        assert_eq!(
+            nested.terminal_window_size(|pane| match pane {
+                "a" => Some((58, 39)),
+                "b" | "c" => Some((58, 19)),
+                _ => None,
+            }),
+            Some((117, 39))
+        );
     }
 
     #[test]

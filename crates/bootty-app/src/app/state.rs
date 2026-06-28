@@ -5,6 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(debug_assertions)]
+use std::{fs::File, io::Write};
+
 use anyhow::Result;
 use eframe::egui::{self, Pos2, Rect};
 
@@ -32,7 +35,7 @@ use crate::{
     modifier_remap::ModifierRemapSet,
     mux::{
         RepaintHandle,
-        command::MuxCommand,
+        command::{MuxCommand, MuxSplitDirection},
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
         snapshot::MuxPaneAnchor,
@@ -54,7 +57,7 @@ use crate::{
         ditch::{DitchAction, DitchSessionDialog, DitchSessionEvent},
         keybind_help::{KeybindHelpDialog, KeybindHelpEvent},
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
-        rename::{RenameSessionDialog, RenameSessionEvent},
+        rename::{RenameSessionDialog, RenameSessionEvent, RenameTabDialog, RenameTabEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
         theme_picker::{ThemePickerDialog, ThemePickerEvent},
     },
@@ -130,6 +133,9 @@ pub struct AppState {
     /// Per native window (session id, window id) split layout. Drives multi-pane rendering, focus,
     /// and divider geometry. Non-native backends own their own layout and never populate this.
     pane_layouts: HashMap<(String, String), PaneLayout>,
+    /// Split direction to apply when a nonblocking native-layout backend reports the pane created
+    /// by the last split command. True native creates the pane synchronously and does not use this.
+    pending_pane_split_directions: HashMap<(String, String), SplitDirection>,
     /// The full terminal area the panes were last laid out within, for geometric neighbor lookup.
     last_pane_area: Option<Rect>,
     terminal_view_transform: ViewTransform,
@@ -172,6 +178,7 @@ pub struct AppState {
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
     rename_session_dialog: Option<RenameSessionDialog>,
+    rename_tab_dialog: Option<RenameTabDialog>,
     ditch_session_dialog: Option<DitchSessionDialog>,
     keybind_help_dialog: Option<KeybindHelpDialog>,
     command_palette_dialog: Option<CommandPaletteDialog>,
@@ -180,6 +187,8 @@ pub struct AppState {
     /// A command-palette choice waiting to be dispatched on the next input pass,
     /// where the viewport snapshot and effect sink are in scope.
     pending_command: Option<KeybindAction>,
+    #[cfg(debug_assertions)]
+    diagnostic_action_driver: Option<DiagnosticActionDriver>,
     macos_non_native_fullscreen_active: bool,
     macos_non_native_fullscreen_pending_apply: bool,
 }
@@ -217,6 +226,33 @@ fn layout_direction(direction: crate::mux::command::MuxDirection) -> Direction {
         MuxDirection::Up => Direction::Up,
         MuxDirection::Down => Direction::Down,
     }
+}
+
+fn mux_split_direction(direction: SplitDirection) -> MuxSplitDirection {
+    match direction {
+        SplitDirection::Right => MuxSplitDirection::Right,
+        SplitDirection::Down => MuxSplitDirection::Down,
+    }
+}
+
+fn pane_sets_match(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().all(|pane| b.contains(pane))
+}
+
+fn focus_after_native_layout_reconcile(
+    restored_from_server: bool,
+    new_panes: &[String],
+    selected_pane: Option<&str>,
+) -> Option<String> {
+    if restored_from_server {
+        return selected_pane.map(str::to_owned);
+    }
+    if let Some(selected_pane) = selected_pane
+        && new_panes.iter().any(|pane| pane == selected_pane)
+    {
+        return Some(selected_pane.to_owned());
+    }
+    new_panes.first().cloned()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -447,6 +483,215 @@ fn new_mux_session_request_with_name(
     }
 }
 
+fn terminal_cwd_for_mux_command(
+    live_terminal_cwd: Option<String>,
+    anchor_cwd: Option<String>,
+) -> Option<String> {
+    live_terminal_cwd
+        .and_then(|cwd| normalize_terminal_cwd(&cwd))
+        .or(anchor_cwd)
+}
+
+fn normalize_terminal_cwd(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    if let Some(path) = cwd.strip_prefix("file://") {
+        let path_start = path.find('/')?;
+        let path = &path[path_start..];
+        return percent_decode(path);
+    }
+    Some(cwd.to_owned())
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hi = hex_value(*bytes.get(index + 1)?)?;
+            let lo = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push((hi << 4) | lo);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug)]
+enum DiagnosticAction {
+    NewTab,
+    NextTab,
+    PreviousTab,
+    SplitRight,
+    SplitDown,
+    SelectPaneLeft,
+    SelectPaneRight,
+    SelectPaneUp,
+    SelectPaneDown,
+    NextPane,
+}
+
+#[cfg(debug_assertions)]
+impl DiagnosticAction {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "new_tab" => Some(Self::NewTab),
+            "next_tab" => Some(Self::NextTab),
+            "previous_tab" => Some(Self::PreviousTab),
+            "split_right" => Some(Self::SplitRight),
+            "split_down" => Some(Self::SplitDown),
+            "select_pane_left" => Some(Self::SelectPaneLeft),
+            "select_pane_right" => Some(Self::SelectPaneRight),
+            "select_pane_up" => Some(Self::SelectPaneUp),
+            "select_pane_down" => Some(Self::SelectPaneDown),
+            "next_pane" => Some(Self::NextPane),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NewTab => "new_tab",
+            Self::NextTab => "next_tab",
+            Self::PreviousTab => "previous_tab",
+            Self::SplitRight => "split_right",
+            Self::SplitDown => "split_down",
+            Self::SelectPaneLeft => "select_pane_left",
+            Self::SelectPaneRight => "select_pane_right",
+            Self::SelectPaneUp => "select_pane_up",
+            Self::SelectPaneDown => "select_pane_down",
+            Self::NextPane => "next_pane",
+        }
+    }
+
+    fn mux_action(self) -> MuxKeyAction {
+        match self {
+            Self::NewTab => MuxKeyAction::NewTab,
+            Self::NextTab => MuxKeyAction::NextTab,
+            Self::PreviousTab => MuxKeyAction::PreviousTab,
+            Self::SplitRight => MuxKeyAction::SplitPane(SplitDirection::Right),
+            Self::SplitDown => MuxKeyAction::SplitPane(SplitDirection::Down),
+            Self::SelectPaneLeft => {
+                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Left)
+            }
+            Self::SelectPaneRight => {
+                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Right)
+            }
+            Self::SelectPaneUp => MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Up),
+            Self::SelectPaneDown => {
+                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Down)
+            }
+            Self::NextPane => MuxKeyAction::NextPane,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug)]
+struct DiagnosticStep {
+    at: Duration,
+    action: DiagnosticAction,
+}
+
+#[cfg(debug_assertions)]
+struct DiagnosticRecord<'a> {
+    phase: &'a str,
+    action: DiagnosticAction,
+    action_elapsed_us: u128,
+    selected_session: Option<&'a str>,
+    selected_window: Option<&'a str>,
+    pane_count: usize,
+    last_error: Option<&'a str>,
+}
+
+#[cfg(debug_assertions)]
+struct DiagnosticActionDriver {
+    started_at: Instant,
+    steps: Vec<DiagnosticStep>,
+    next_step: usize,
+    trace: Option<File>,
+}
+
+#[cfg(debug_assertions)]
+impl DiagnosticActionDriver {
+    fn from_env() -> Option<Self> {
+        let script = std::env::var("BOOTTY_DIAGNOSTIC_ACTIONS").ok()?;
+        let mut steps = Vec::new();
+        for raw in script.split(',') {
+            let (at, action) = raw.split_once(':')?;
+            let at = at.trim().parse::<u64>().ok()?;
+            let action = DiagnosticAction::parse(action)?;
+            steps.push(DiagnosticStep {
+                at: Duration::from_millis(at),
+                action,
+            });
+        }
+        if steps.is_empty() {
+            return None;
+        }
+        steps.sort_by_key(|step| step.at);
+        let mut trace =
+            std::env::var_os("BOOTTY_DIAGNOSTIC_TRACE").and_then(|path| File::create(path).ok());
+        if let Some(trace) = &mut trace {
+            let _ = writeln!(
+                trace,
+                "elapsed_ms,phase,action,action_elapsed_us,selected_session,selected_window,pane_count,last_error"
+            );
+        }
+        Some(Self {
+            started_at: Instant::now(),
+            steps,
+            next_step: 0,
+            trace,
+        })
+    }
+
+    fn due_actions(&mut self, now: Instant) -> Vec<DiagnosticAction> {
+        let elapsed = now.duration_since(self.started_at);
+        let mut actions = Vec::new();
+        while let Some(step) = self.steps.get(self.next_step)
+            && elapsed >= step.at
+        {
+            actions.push(step.action);
+            self.next_step += 1;
+        }
+        actions
+    }
+
+    fn record(&mut self, record: DiagnosticRecord<'_>) {
+        let Some(trace) = &mut self.trace else {
+            return;
+        };
+        let _ = writeln!(
+            trace,
+            "{},{},{},{},{},{},{},{}",
+            self.started_at.elapsed().as_millis(),
+            record.phase,
+            record.action.label(),
+            record.action_elapsed_us,
+            record.selected_session.unwrap_or(""),
+            record.selected_window.unwrap_or(""),
+            record.pane_count,
+            record.last_error.unwrap_or("")
+        );
+    }
+}
+
 impl AppState {
     pub fn new(
         config: BoottyConfig,
@@ -477,6 +722,8 @@ impl AppState {
             apply_macos_non_native_fullscreen_presentation(&config.window);
         let macos_non_native_fullscreen_pending_apply =
             macos_non_native_fullscreen_active && !macos_non_native_fullscreen_applied;
+        #[cfg(debug_assertions)]
+        let diagnostic_action_driver = DiagnosticActionDriver::from_env();
 
         Ok(Self {
             terminal: ActiveTerminal::new(
@@ -493,6 +740,7 @@ impl AppState {
             last_status_metrics_sample: Instant::now() - STATUS_METRICS_SAMPLE_INTERVAL,
             terminal_surface: None,
             pane_layouts: HashMap::new(),
+            pending_pane_split_directions: HashMap::new(),
             last_pane_area: None,
             chrome_handle_rects: Vec::new(),
             terminal_view_transform: ViewTransform::IDENTITY,
@@ -527,12 +775,15 @@ impl AppState {
             sidebar_hovered_session: None,
             session_picker_dialog: None,
             rename_session_dialog: None,
+            rename_tab_dialog: None,
             command_palette_dialog: None,
             theme_picker_dialog: None,
             theme_picker_restore_config: None,
             pending_command: None,
             ditch_session_dialog: None,
             keybind_help_dialog: None,
+            #[cfg(debug_assertions)]
+            diagnostic_action_driver,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
         })
@@ -772,6 +1023,14 @@ impl AppState {
         )
     }
 
+    fn uses_native_terminal_layout(&self) -> bool {
+        matches!(
+            self.config().multiplexer.backend,
+            crate::config::MultiplexerBackendConfig::Native
+                | crate::config::MultiplexerBackendConfig::Rmux
+        )
+    }
+
     fn current_window_key(&self) -> (String, String) {
         let session = self.mux.selected_session().unwrap_or("local").to_owned();
         let window = self
@@ -788,9 +1047,28 @@ impl AppState {
             .unwrap_or_default();
         (session, window)
     }
+    pub fn pane_widget_key(&self, pane_id: &str) -> String {
+        let (session, window) = self.current_window_key();
+        let backend = selected_backend(&self.config().multiplexer);
+        format!("{backend:?}:{session}:{window}:{pane_id}")
+    }
+
+    fn take_pending_pane_split_direction(
+        &mut self,
+        key: &(String, String),
+    ) -> Option<SplitDirection> {
+        self.pending_pane_split_directions.remove(key).or_else(|| {
+            if key.1.is_empty() {
+                None
+            } else {
+                self.pending_pane_split_directions
+                    .remove(&(key.0.clone(), String::new()))
+            }
+        })
+    }
 
     fn current_pane_layout(&self) -> Option<&PaneLayout> {
-        if !self.is_native() {
+        if !self.uses_native_terminal_layout() {
             return None;
         }
         self.pane_layouts.get(&self.current_window_key())
@@ -820,7 +1098,7 @@ impl AppState {
     fn sync_terminal_panes(&mut self) -> Result<()> {
         self.prune_pane_layouts();
         let config = self.config_state.current().multiplexer.clone();
-        if !self.is_native() {
+        if !self.uses_native_terminal_layout() {
             return self
                 .terminal
                 .sync_mux_anchor(&config, self.mux.selected_session_anchor());
@@ -837,23 +1115,93 @@ impl AppState {
                 .sync_mux_anchor(&config, self.mux.selected_session_anchor());
         }
         let key = self.current_window_key();
+        let window_id = (!key.1.is_empty()).then(|| key.1.clone());
+        let selected_pane = self
+            .mux
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.clone());
+        let server_layout = self
+            .mux
+            .selected_window_layout()
+            .and_then(PaneLayout::from_mux_layout)
+            .filter(|layout| pane_sets_match(&layout.panes(), &pane_ids));
+        let layout_missing = !self.pane_layouts.contains_key(&key);
+        let stale_layout = self
+            .pane_layouts
+            .get(&key)
+            .is_some_and(|layout| layout.panes().iter().all(|pane| !pane_ids.contains(pane)));
+        let mut restored_from_server = false;
+        if (layout_missing || stale_layout)
+            && let Some(layout) = server_layout.clone()
+        {
+            self.pane_layouts.insert(key.clone(), layout);
+            restored_from_server = true;
+        }
+
+        let previous_panes = self
+            .pane_layouts
+            .get(&key)
+            .map(PaneLayout::panes)
+            .unwrap_or_default();
+        let new_panes = pane_ids
+            .iter()
+            .filter(|pane| !previous_panes.contains(pane))
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_new_pane = !new_panes.is_empty();
+        {
+            let layout = self
+                .pane_layouts
+                .entry(key.clone())
+                .or_insert_with(|| PaneLayout::single(pane_ids[0].clone()));
+            // A window id can be reused after its window is closed (native names tabs `tab-N`). If none
+            // of the cached layout's panes still exist, it belongs to the old window -- start fresh.
+            if layout.panes().iter().all(|pane| !pane_ids.contains(pane)) {
+                *layout = PaneLayout::single(pane_ids[0].clone());
+            }
+        }
+        let removed_panes = previous_panes
+            .iter()
+            .filter(|pane| !pane_ids.contains(pane))
+            .cloned()
+            .collect::<Vec<_>>();
+        let pane_set_changed = has_new_pane || !removed_panes.is_empty();
+        if pane_set_changed && let Some(layout) = server_layout {
+            self.pane_layouts.insert(key.clone(), layout);
+            restored_from_server = true;
+        } else if pane_set_changed {
+            let new_pane_direction = self
+                .take_pending_pane_split_direction(&key)
+                .unwrap_or(SplitDirection::Right);
+            let layout = self
+                .pane_layouts
+                .get_mut(&key)
+                .expect("native layout should be initialized");
+            layout.reconcile_with_new_pane_direction(&pane_ids, new_pane_direction);
+        }
         let layout = self
             .pane_layouts
-            .entry(key)
-            .or_insert_with(|| PaneLayout::single(pane_ids[0].clone()));
-        // A window id can be reused after its window is closed (native names tabs `tab-N`). If none
-        // of the cached layout's panes still exist, it belongs to the old window — start fresh.
-        if layout.panes().iter().all(|pane| !pane_ids.contains(pane)) {
-            *layout = PaneLayout::single(pane_ids[0].clone());
+            .get_mut(&key)
+            .expect("native layout should be initialized");
+        if let Some(focus) = focus_after_native_layout_reconcile(
+            restored_from_server,
+            &new_panes,
+            selected_pane.as_deref(),
+        ) {
+            layout.set_focus(&focus);
         }
-        layout.reconcile(&pane_ids);
         let focused_id = layout.focused().to_owned();
         let focused_anchor = panes
             .iter()
             .find(|pane| pane.pane_id.as_deref() == Some(focused_id.as_str()))
             .cloned();
-        self.terminal
-            .sync_native_window(&panes, focused_anchor.as_ref(), config.hide_tmux_status)
+        self.terminal.sync_native_window(
+            &panes,
+            focused_anchor.as_ref(),
+            window_id.as_deref(),
+            selected_backend(&config),
+            config.hide_tmux_status,
+        )
     }
 
     /// True when the active native window holds more than one pane and should render as a split.
@@ -903,33 +1251,76 @@ impl AppState {
         self.terminal.render_source_for_pane(pane_id)
     }
 
+    pub fn pane_terminal_window_size<F>(&self, leaf_size: F) -> Option<(u16, u16)>
+    where
+        F: FnMut(&str) -> Option<(u16, u16)>,
+    {
+        self.current_pane_layout()?.terminal_window_size(leaf_size)
+    }
+
+    pub fn resize_native_layout_window(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.terminal.resize_native_layout_window(cols, rows)
+    }
+
+    fn sync_native_layout_terminal_now(&mut self) {
+        if !self.uses_native_terminal_layout() {
+            return;
+        }
+        if let Err(error) = self.sync_terminal_panes() {
+            self.last_error = Some(error.to_string());
+        }
+    }
+
     fn split_focused_pane(&mut self, direction: SplitDirection) {
         let session = self.mux.selected_session().unwrap_or("local").to_owned();
         let mux_config = self.config().multiplexer.clone();
-        if !self.is_native() {
+        if !self.uses_native_terminal_layout() {
             self.mux.execute_command(
                 &self.repaint,
                 &mux_config,
                 MuxCommand::SplitPane {
                     session_id: session,
                     pane_id: None,
+                    direction: mux_split_direction(direction),
                 },
             );
             return;
         }
+        let backend = selected_backend(&mux_config);
         let key = self.current_window_key();
         let focused = self
             .pane_layouts
             .get(&key)
-            .map(|layout| layout.focused().to_owned());
+            .map(|layout| layout.focused().to_owned())
+            .or_else(|| {
+                self.mux
+                    .selected_session_anchor()
+                    .and_then(|anchor| anchor.pane_id.clone())
+            });
         self.mux.execute_command(
             &self.repaint,
             &mux_config,
             MuxCommand::SplitPane {
                 session_id: session,
                 pane_id: focused.clone(),
+                direction: mux_split_direction(direction),
             },
         );
+        self.apply_split_layout_after_command(key, focused, direction, backend);
+    }
+
+    fn apply_split_layout_after_command(
+        &mut self,
+        key: (String, String),
+        focused: Option<String>,
+        direction: SplitDirection,
+        backend: MuxBackendKind,
+    ) {
+        if backend == MuxBackendKind::Rmux {
+            self.pending_pane_split_directions.insert(key, direction);
+            return;
+        }
+
         // The native split synchronously sets the new pane active, so the refreshed anchor names it.
         let new_pane = self
             .mux
@@ -938,7 +1329,7 @@ impl AppState {
         if let Some(new_pane) = new_pane {
             let layout = self
                 .pane_layouts
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| PaneLayout::single(new_pane.clone()));
             if let Some(focused) = &focused {
                 layout.set_focus(focused);
@@ -946,6 +1337,7 @@ impl AppState {
             if !layout.contains(&new_pane) {
                 layout.split_focused(new_pane, direction);
             }
+            self.pending_pane_split_directions.remove(&key);
             let _ = self.sync_terminal_panes();
         }
     }
@@ -971,6 +1363,7 @@ impl AppState {
 
     pub fn activate_session_from_ui(&mut self, session_id: &str) {
         self.mux.activate_session(session_id);
+        self.sync_native_layout_terminal_now();
         self.sidebar_hovered_session = Some(session_id.to_owned());
         (self.repaint)();
     }
@@ -979,6 +1372,27 @@ impl AppState {
         let mux_config = self.config().multiplexer.clone();
         self.mux
             .activate_window(session_id, window_id, &self.repaint, &mux_config);
+        self.sync_native_layout_terminal_now();
+    }
+    fn rename_selected_native_window(&mut self, name: String) {
+        if !self.uses_native_terminal_layout() {
+            return;
+        }
+        let Some(session_id) = self.mux.selected_session().map(str::to_owned) else {
+            return;
+        };
+        let Some(window_id) = self.mux.selected_window().map(str::to_owned).or_else(|| {
+            self.mux
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id || session.name == session_id)
+                .and_then(|session| session.active_window_id.clone())
+        }) else {
+            return;
+        };
+        let mux_config = self.config().multiplexer.clone();
+        self.mux
+            .rename_window(&session_id, &window_id, name, &self.repaint, &mux_config);
     }
 
     fn sync_session_order(&mut self) {
@@ -1085,6 +1499,31 @@ impl AppState {
                     &mux_config,
                     MuxCommand::RenameSession { session_id, name },
                 );
+                self.input_focus = InputFocus::Terminal;
+            }
+        }
+    }
+
+    pub fn take_rename_tab_dialog(&mut self) -> Option<RenameTabDialog> {
+        self.rename_tab_dialog.take()
+    }
+
+    pub fn apply_rename_tab_event(&mut self, dialog: RenameTabDialog, event: RenameTabEvent) {
+        match event {
+            RenameTabEvent::None => {
+                self.rename_tab_dialog = Some(dialog);
+            }
+            RenameTabEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+            }
+            RenameTabEvent::Rename {
+                session_id,
+                window_id,
+                name,
+            } => {
+                let mux_config = self.config().multiplexer.clone();
+                self.mux
+                    .rename_window(&session_id, &window_id, name, &self.repaint, &mux_config);
                 self.input_focus = InputFocus::Terminal;
             }
         }
@@ -1307,6 +1746,7 @@ impl AppState {
                 Err(error) => self.last_error = Some(error.to_string()),
             },
             TerminalSideEffect::WindowTitle(title) => {
+                self.rename_selected_native_window(title.clone());
                 effects.push(AppEffect::SetWindowTitle(title));
             }
             TerminalSideEffect::WindowIcon(_) => {}
@@ -1417,6 +1857,53 @@ impl AppState {
             .collect()
     }
 
+    #[cfg(debug_assertions)]
+    fn drive_diagnostic_actions(&mut self, now: Instant, effects: &mut Vec<AppEffect>) -> usize {
+        let actions = self
+            .diagnostic_action_driver
+            .as_mut()
+            .map(|driver| driver.due_actions(now))
+            .unwrap_or_default();
+        let action_count = actions.len();
+        for action in actions {
+            self.record_diagnostic_action("start", action, 0);
+            let start = Instant::now();
+            self.apply_mux_key_action(action.mux_action());
+            self.record_diagnostic_action("done", action, start.elapsed().as_micros());
+            effects.push(AppEffect::RequestRepaint);
+        }
+        action_count
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn drive_diagnostic_actions(&mut self, _now: Instant, _effects: &mut Vec<AppEffect>) -> usize {
+        0
+    }
+
+    #[cfg(debug_assertions)]
+    fn record_diagnostic_action(
+        &mut self,
+        phase: &str,
+        action: DiagnosticAction,
+        action_elapsed_us: u128,
+    ) {
+        let selected_session = self.mux.selected_session().map(str::to_owned);
+        let selected_window = self.mux.selected_window().map(str::to_owned);
+        let pane_count = self.mux.selected_window_panes().len();
+        let last_error = self.last_error.clone();
+        if let Some(driver) = &mut self.diagnostic_action_driver {
+            driver.record(DiagnosticRecord {
+                phase,
+                action,
+                action_elapsed_us,
+                selected_session: selected_session.as_deref(),
+                selected_window: selected_window.as_deref(),
+                pane_count,
+                last_error: last_error.as_deref(),
+            });
+        }
+    }
+
     pub fn update_frame(&mut self, inputs: FrameInputs) -> Vec<AppEffect> {
         let FrameInputs {
             now,
@@ -1459,14 +1946,14 @@ impl AppState {
             }
         }
 
+        if let Some(result) = self.mux.poll_command() {
+            self.last_error = result.err();
+        }
         if let Some(error) = self
             .mux
             .refresh_sessions(&self.repaint, &self.config_state.current().multiplexer)
         {
             self.last_error = Some(error);
-        }
-        if let Some(result) = self.mux.poll_command() {
-            self.last_error = result.err();
         }
         if let Some(after) = mux_refresh_repaint_after(&self.config_state.current().multiplexer) {
             effects.push(AppEffect::RepaintAfter(after));
@@ -1487,7 +1974,8 @@ impl AppState {
                 viewport,
                 &mut effects,
             )
-            + self.handle_dropped_file_paths(dropped_file_paths);
+            + self.handle_dropped_file_paths(dropped_file_paths)
+            + self.drive_diagnostic_actions(now, &mut effects);
         self.last_frame_dt_ms = stable_dt_ms;
 
         let pending_pty_bytes = self.terminal.pending_pty_len();
@@ -1535,6 +2023,7 @@ impl AppState {
         self.new_mux_session_dialog = None;
         self.session_picker_dialog = None;
         self.rename_session_dialog = None;
+        self.rename_tab_dialog = None;
         self.ditch_session_dialog = None;
         self.keybind_help_dialog = None;
         self.command_palette_dialog = None;
@@ -1572,6 +2061,32 @@ impl AppState {
         self.close_overlay_dialogs();
         self.rename_session_dialog = Some(RenameSessionDialog::open(selected, name));
         self.input_focus = InputFocus::Picker;
+    }
+
+    fn open_rename_tab_dialog(&mut self) {
+        let Some((session_id, window_id, name)) = self.selected_window_for_rename() else {
+            return;
+        };
+        self.close_overlay_dialogs();
+        self.rename_tab_dialog = Some(RenameTabDialog::open(session_id, window_id, name));
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn selected_window_for_rename(&self) -> Option<(String, String, String)> {
+        let selected = self.mux.selected_session()?;
+        let session = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == selected || session.name == selected)?;
+        let window_id = self
+            .mux
+            .selected_window()
+            .or(session.active_window_id.as_deref());
+        let window = window_id
+            .and_then(|id| session.windows.iter().find(|window| window.id == id))
+            .or_else(|| session.windows.first())?;
+        Some((session.id.clone(), window.id.clone(), window.name.clone()))
     }
 
     fn open_ditch_session_dialog(&mut self) {
@@ -1635,6 +2150,7 @@ impl AppState {
             && self.new_mux_session_dialog.is_none()
             && self.session_picker_dialog.is_none()
             && self.rename_session_dialog.is_none()
+            && self.rename_tab_dialog.is_none()
             && self.ditch_session_dialog.is_none()
             && self.keybind_help_dialog.is_none()
             && self.command_palette_dialog.is_none()
@@ -2082,6 +2598,10 @@ impl AppState {
                 self.open_rename_session_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
+            KeybindAction::App(AppAction::RenameTab) => {
+                self.open_rename_tab_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
             KeybindAction::App(AppAction::DitchSession) => {
                 self.open_ditch_session_dialog();
                 effects.push(AppEffect::RequestRepaint);
@@ -2216,7 +2736,7 @@ impl AppState {
     // active terminal is dropped here so its PTY is reaped; sync_mux_anchor then attaches whatever
     // pane the mux selected next (or idle when the session has no tabs left).
     fn close_active_pane(&mut self) {
-        if self.is_native() {
+        if self.uses_native_terminal_layout() {
             if let Some(focused) = self.focused_pane() {
                 self.close_pane(&focused);
             }
@@ -2270,7 +2790,7 @@ impl AppState {
         }
         // On the native engine, killing a pane means removing the focused split leaf and collapsing
         // the layout, same as closing it. Other backends keep tmux/zellij kill-pane semantics.
-        if self.is_native() && matches!(action, MuxKeyAction::KillPane) {
+        if self.uses_native_terminal_layout() && matches!(action, MuxKeyAction::KillPane) {
             self.close_active_pane();
             return;
         }
@@ -2281,16 +2801,18 @@ impl AppState {
         // On the native engine, directional pane selection moves focus geometrically across the
         // egui split layout. Other backends keep their own (cycling) pane selection.
         if let MuxKeyAction::SelectPane(direction) = action
-            && self.is_native()
+            && self.uses_native_terminal_layout()
         {
             self.focus_pane_neighbor(layout_direction(direction));
             return;
         }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
-        let selected_cwd = self
-            .mux
-            .selected_session_anchor()
-            .and_then(|anchor| anchor.cwd.clone());
+        let selected_cwd = terminal_cwd_for_mux_command(
+            self.terminal.current_working_directory().ok().flatten(),
+            self.mux
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.cwd.clone()),
+        );
         let command = match action {
             MuxKeyAction::NewTab => MuxCommand::NewWindow {
                 session_id: selected_session,
@@ -2344,6 +2866,7 @@ impl AppState {
         let mux_config = self.config().multiplexer.clone();
         self.mux
             .execute_command(&self.repaint, &mux_config, command);
+        self.sync_native_layout_terminal_now();
     }
 
     fn ensure_sidebar_hovered_session(&mut self) {
@@ -2414,6 +2937,7 @@ impl AppState {
         // reach the command builder's `unreachable!` for these Bootty-owned actions and panic.
         if let Some(target) = target {
             self.mux.activate_session(&target);
+            self.sync_native_layout_terminal_now();
         }
         true
     }
@@ -2560,7 +3084,12 @@ fn run_ditch_cleanup(cwd: Option<&str>, action: &DitchAction) -> Result<(), Stri
 mod tests {
     use super::*;
     use crate::config::{MultiplexerBackendConfig, WindowFullscreen};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use anyhow::Context;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn recorded_chord_lowercases_letters_but_keeps_named_keys() {
@@ -3032,6 +3561,21 @@ mod tests {
     }
 
     #[test]
+    fn mux_command_cwd_prefers_live_osc7_directory_over_snapshot_anchor() {
+        assert_eq!(
+            terminal_cwd_for_mux_command(
+                Some("file://host/Users/me/project%20space".to_owned()),
+                Some("/old".to_owned()),
+            ),
+            Some("/Users/me/project space".to_owned())
+        );
+        assert_eq!(
+            terminal_cwd_for_mux_command(None, Some("/fallback".to_owned())),
+            Some("/fallback".to_owned())
+        );
+    }
+
+    #[test]
     fn new_window_action_opens_new_session_picker() {
         let mut state = test_state();
         let mut effects = Vec::new();
@@ -3060,6 +3604,16 @@ mod tests {
         };
         mutate(&mut config);
         AppState::new(config, repaint, None, None).expect("state")
+    }
+
+    fn sync_initial_native_terminal(state: &mut AppState) {
+        let mux_config = state.config_state.current().multiplexer.clone();
+        if let Some(error) = state.mux.refresh_sessions(&state.repaint, &mux_config) {
+            panic!("initial native mux refresh failed: {error}");
+        }
+        state
+            .sync_terminal_panes()
+            .expect("initial native terminal sync");
     }
 
     fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
@@ -3104,6 +3658,35 @@ mod tests {
             bindings.action_for_key(egui::Key::Escape, egui::Modifiers::NONE),
             None
         );
+    }
+
+    #[test]
+    fn pane_widget_key_namespaces_same_pane_id_by_session_and_window() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_a = format!("widget-a-{}", unique_test_id());
+        let session_b = format!("widget-b-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_a.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let key_a = state.pane_widget_key("pane-1");
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_b,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let key_b = state.pane_widget_key("pane-1");
+
+        assert_ne!(key_a, key_b);
+        assert!(key_a.contains(&session_a));
     }
 
     #[test]
@@ -3154,6 +3737,227 @@ mod tests {
         assert!(
             !state.pane_layouts.contains_key(&ghost),
             "layout for a session that no longer exists must be reclaimed"
+        );
+    }
+
+    #[test]
+    fn native_layout_reconcile_keeps_local_focus_when_server_anchor_is_stale() {
+        assert_eq!(
+            focus_after_native_layout_reconcile(false, &[], Some("%1")),
+            None,
+            "refreshes must not let a stale rmux active-pane anchor overwrite Bootty focus"
+        );
+    }
+
+    #[test]
+    fn native_layout_reconcile_focuses_new_or_restored_server_pane() {
+        assert_eq!(
+            focus_after_native_layout_reconcile(true, &[], Some("%2")),
+            Some("%2".to_owned())
+        );
+        assert_eq!(
+            focus_after_native_layout_reconcile(false, &["%2".to_owned()], Some("%2")),
+            Some("%2".to_owned())
+        );
+        assert_eq!(
+            focus_after_native_layout_reconcile(false, &["%2".to_owned()], Some("%1")),
+            Some("%2".to_owned())
+        );
+    }
+
+    #[test]
+    fn native_new_tab_command_syncs_terminal_before_next_frame() {
+        let mut state = test_state_with_config(|config| {
+            config.session.shell = Some("/usr/bin/true".to_owned());
+        });
+        sync_initial_native_terminal(&mut state);
+        let previous = state
+            .terminal
+            .focused_pane_id()
+            .map(str::to_owned)
+            .expect("initial focused pane");
+
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+
+        let selected = state
+            .mux
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.as_deref())
+            .map(str::to_owned)
+            .expect("new tab selected pane");
+        assert_eq!(state.terminal.focused_pane_id(), Some(selected.as_str()));
+        assert_ne!(selected, previous);
+    }
+
+    #[test]
+    fn native_session_activation_syncs_terminal_before_next_frame() {
+        let mut state = test_state_with_config(|config| {
+            config.session.shell = Some("/usr/bin/true".to_owned());
+        });
+        sync_initial_native_terminal(&mut state);
+        let mux_config = state.config().multiplexer.clone();
+        let session_a = format!("native-a-{}", unique_test_id());
+        let session_b = format!("native-b-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_a.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.sync_native_layout_terminal_now();
+        let first_pane = state
+            .terminal
+            .focused_pane_id()
+            .map(str::to_owned)
+            .expect("first focused pane");
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_b,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.sync_native_layout_terminal_now();
+        let second_pane = state
+            .terminal
+            .focused_pane_id()
+            .map(str::to_owned)
+            .expect("second focused pane");
+        assert_ne!(second_pane, first_pane);
+
+        state.activate_session_from_ui(&session_a);
+
+        assert_eq!(state.terminal.focused_pane_id(), Some(first_pane.as_str()));
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_app_state_session_and_tab_activation_stay_interactive() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::mux::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        let session_a = format!("bootty-app-perf-a-{}", std::process::id());
+        let session_b = format!("bootty-app-perf-b-{}", std::process::id());
+        client.ensure_session(&session_a, &cwd)?;
+        client.ensure_session(&session_b, &cwd)?;
+        client.new_window(&session_a, Some(&cwd))?;
+        client.new_window(&session_a, Some(&cwd))?;
+        client.new_window(&session_b, Some(&cwd))?;
+
+        let mut state = test_state_with_config(|config| {
+            config.multiplexer.backend = MultiplexerBackendConfig::Rmux;
+        });
+        let refresh_start = Instant::now();
+        let deadline = refresh_start + Duration::from_secs(5);
+        loop {
+            let mux_config = state.config_state.current().multiplexer.clone();
+            if let Some(error) = state.mux.refresh_sessions(&state.repaint, &mux_config) {
+                anyhow::bail!(error);
+            }
+            if state
+                .mux
+                .sessions()
+                .iter()
+                .any(|session| session.id == session_a)
+                && state
+                    .mux
+                    .sessions()
+                    .iter()
+                    .any(|session| session.id == session_b)
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for rmux app-state snapshot");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let refresh_elapsed = refresh_start.elapsed();
+
+        let session_start = Instant::now();
+        state.activate_session_from_ui(&session_b);
+        state.sync_terminal_panes()?;
+        let session_elapsed = session_start.elapsed();
+
+        let window_id = state
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_a)
+            .and_then(|session| session.windows.get(1))
+            .map(|window| window.id.clone())
+            .context("app perf target tab should exist")?;
+        let tab_start = Instant::now();
+        state.activate_window_from_ui(&session_a, &window_id);
+        state.sync_terminal_panes()?;
+        let tab_elapsed = tab_start.elapsed();
+
+        eprintln!(
+            "rmux app-state perf probe: refresh={refresh_elapsed:?} session={session_elapsed:?} tab={tab_elapsed:?}"
+        );
+
+        client.kill_session(&session_a)?;
+        client.kill_session(&session_b)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        assert!(
+            session_elapsed < Duration::from_millis(100),
+            "app-state rmux session activation should not block: {session_elapsed:?}"
+        );
+        assert!(
+            tab_elapsed < Duration::from_millis(100),
+            "app-state rmux tab activation should not block: {tab_elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_pane_split_direction_survives_window_id_materialization() {
+        let mut state = test_state();
+        state.pending_pane_split_directions.insert(
+            ("rmux-session".to_owned(), String::new()),
+            SplitDirection::Down,
+        );
+
+        let direction =
+            state.take_pending_pane_split_direction(&("rmux-session".to_owned(), "@1".to_owned()));
+
+        assert_eq!(direction, Some(SplitDirection::Down));
+        assert!(state.pending_pane_split_directions.is_empty());
+    }
+
+    #[test]
+    fn rmux_split_layout_defers_when_selected_anchor_is_still_old_pane() {
+        let mut state = test_state();
+        let key = ("rmux-session".to_owned(), "@1".to_owned());
+        state
+            .pane_layouts
+            .insert(key.clone(), PaneLayout::single("%1".to_owned()));
+
+        state.apply_split_layout_after_command(
+            key.clone(),
+            Some("%1".to_owned()),
+            SplitDirection::Down,
+            MuxBackendKind::Rmux,
+        );
+
+        assert_eq!(
+            state.take_pending_pane_split_direction(&key),
+            Some(SplitDirection::Down)
+        );
+        assert_eq!(
+            state.pane_layouts.get(&key).map(PaneLayout::panes),
+            Some(vec!["%1".to_owned()])
         );
     }
 
@@ -3272,6 +4076,87 @@ mod tests {
         assert!(
             after > before,
             "before={before} after={after} selected={selected:?}"
+        );
+    }
+
+    #[test]
+    fn rename_tab_action_opens_dialog_and_renames_selected_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("rename-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let window_id = state.mux.selected_session_windows()[0].id.clone();
+        let mut effects = Vec::new();
+
+        state.apply_keybind_action(
+            KeybindAction::App(AppAction::RenameTab),
+            ViewportSnapshot::default(),
+            &mut effects,
+        );
+        let dialog = state
+            .take_rename_tab_dialog()
+            .expect("rename tab action should open the dialog");
+
+        state.apply_rename_tab_event(
+            dialog,
+            RenameTabEvent::Rename {
+                session_id,
+                window_id: window_id.clone(),
+                name: "build".to_owned(),
+            },
+        );
+
+        let window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id == window_id)
+            .expect("renamed tab should remain present");
+        assert_eq!(window.name, "build");
+        assert_eq!(effects, vec![AppEffect::RequestRepaint]);
+    }
+
+    #[test]
+    fn native_window_title_side_effect_renames_selected_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("title-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let window_id = state.mux.selected_session_windows()[0].id.clone();
+        let mut effects = Vec::new();
+
+        state.apply_terminal_side_effect(
+            TerminalSideEffect::WindowTitle("editor".to_owned()),
+            &mut effects,
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        let window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id == window_id)
+            .expect("selected window should remain present");
+        assert_eq!(window.name, "editor");
+        assert_eq!(
+            effects,
+            vec![AppEffect::SetWindowTitle("editor".to_owned())]
         );
     }
 

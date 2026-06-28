@@ -15,6 +15,22 @@ pub struct MuxSession {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MuxPaneSplitDirection {
+    Right,
+    Down,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MuxPaneLayout {
+    Pane(String),
+    Split {
+        direction: MuxPaneSplitDirection,
+        ratio_millis: u16,
+        first: Box<MuxPaneLayout>,
+        second: Box<MuxPaneLayout>,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MuxWindow {
     pub id: String,
     pub index: u32,
@@ -24,6 +40,8 @@ pub struct MuxWindow {
     /// Every pane in the window, in order. The native engine renders these as an egui split layout;
     /// other backends own their own layout and expose only the single attach anchor here.
     pub panes: Vec<MuxPaneAnchor>,
+    /// Native-layout shape for backends that expose a durable split tree.
+    pub layout: Option<MuxPaneLayout>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

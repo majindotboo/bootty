@@ -110,6 +110,7 @@ const STATUS_GAUGE_WIDTH: f32 = 22.0;
 const STATUS_GAUGE_HEIGHT: f32 = 11.0;
 /// Corner radius (logical px) for status-bar pills and the strip's outer ends.
 const STATUS_PILL_RADIUS: u8 = 6;
+const STATUS_DIAGONAL_JOIN_WIDTH: f32 = 8.0;
 
 /// Native replacement for the tmux status line. Flattens each alignment group's module items and
 /// lays them out: left from the left edge, right anchored to the right edge, center centered. Items
@@ -358,15 +359,18 @@ fn item_icon(item: &ResolvedItem) -> Option<&str> {
 
 fn item_width(ui: &egui::Ui, item: &ResolvedItem, font: &egui::FontId) -> f32 {
     let mut inner = text_width(ui, &item.text, font);
-    let lead = if item.gauge.is_some() {
-        Some(STATUS_GAUGE_WIDTH)
-    } else if item_icon(item).is_some() {
-        Some(STATUS_ICON_SIZE)
-    } else {
-        None
-    };
-    if let Some(lead_width) = lead {
-        inner += lead_width;
+    let mut lead = 0.0;
+    if item.gauge.is_some() {
+        lead += STATUS_GAUGE_WIDTH;
+    }
+    if item_icon(item).is_some() {
+        if lead > 0.0 {
+            lead += STATUS_ICON_GAP;
+        }
+        lead += STATUS_ICON_SIZE;
+    }
+    if lead > 0.0 {
+        inner += lead;
         if !item.text.is_empty() {
             inner += STATUS_ICON_GAP;
         }
@@ -689,6 +693,22 @@ fn paint_status_item_background(
     }
 }
 
+fn paint_status_diagonal_join(painter: &egui::Painter, item_rect: Rect, color: egui::Color32) {
+    let width = STATUS_DIAGONAL_JOIN_WIDTH.min(item_rect.width() / 2.0);
+    if width <= 0.5 {
+        return;
+    }
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(item_rect.min.x - width, item_rect.min.y),
+            item_rect.left_top(),
+            item_rect.left_bottom(),
+        ],
+        color,
+        Stroke::new(0.0, egui::Color32::TRANSPARENT),
+    ));
+}
+
 fn draw_items(
     ui: &mut egui::Ui,
     start_x: f32,
@@ -782,6 +802,12 @@ fn draw_items(
                 se: if right_join { 0 } else { r },
             };
             paint_status_item_background(&painter, item_rect, item.bg, item.stroke, corners);
+            if let Some(bg) = item.bg
+                && left_join
+                && prev.and_then(|prev| prev.bg) != Some(bg)
+            {
+                paint_status_diagonal_join(&painter, item_rect, bg);
+            }
             if let Some(hover_background) = hover_background {
                 paint_status_item_background(
                     &painter,
@@ -790,6 +816,9 @@ fn draw_items(
                     None,
                     corners,
                 );
+                if left_join {
+                    paint_status_diagonal_join(&painter, item_rect, hover_background);
+                }
             }
         } else if let Some(hover_background) = hover_background
             && primitive_bg.is_none()
@@ -811,16 +840,17 @@ fn draw_items(
         if let Some(ratio) = item.gauge {
             paint_battery_gauge(&painter, text_x, rect.center().y, ratio, color);
             text_x += STATUS_GAUGE_WIDTH;
-            if !item.text.is_empty() {
+        }
+        if let Some(slug) = item_icon(item) {
+            if item.gauge.is_some() {
                 text_x += STATUS_ICON_GAP;
             }
-        } else if let Some(slug) = item_icon(item) {
             let center = Pos2::new(text_x + STATUS_ICON_SIZE / 2.0, rect.center().y);
             paint_icon_slug(&painter, slug, center, STATUS_ICON_SIZE, color);
             text_x += STATUS_ICON_SIZE;
-            if !item.text.is_empty() {
-                text_x += STATUS_ICON_GAP;
-            }
+        }
+        if (item.gauge.is_some() || item_icon(item).is_some()) && !item.text.is_empty() {
+            text_x += STATUS_ICON_GAP;
         }
         if !item.text.is_empty() {
             painter.text(
@@ -1819,6 +1849,36 @@ mod tests {
     }
 
     #[test]
+    fn status_item_width_reserves_gauge_and_icon() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let font = egui::FontId::monospace(12.0);
+                let gauge = ResolvedItem {
+                    text: "99%".to_owned(),
+                    gauge: Some(0.99),
+                    ..ResolvedItem::default()
+                };
+                let gauge_and_icon = ResolvedItem {
+                    icon: Some("battery-charging".to_owned()),
+                    ..gauge.clone()
+                };
+
+                assert_eq!(
+                    item_width(ui, &gauge_and_icon, &font) - item_width(ui, &gauge, &font),
+                    STATUS_ICON_GAP + STATUS_ICON_SIZE
+                );
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
     fn status_bar_primary_press_starts_window_drag() {
         let context = egui::Context::default();
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
@@ -1841,7 +1901,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+                egui::CentralPanel::default().show(ui, |ui| show(ui));
             },
         );
 
@@ -1857,7 +1917,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+                egui::CentralPanel::default().show(ui, |ui| show(ui));
             },
         );
 
@@ -1903,7 +1963,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+                egui::CentralPanel::default().show(ui, |ui| show(ui));
             },
         );
 
@@ -1919,7 +1979,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| show(ui));
+                egui::CentralPanel::default().show(ui, |ui| show(ui));
             },
         );
 
@@ -1967,7 +2027,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         let event = show_status_bar(
                             ui,
                             ThemePalette::default(),
@@ -2118,7 +2178,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         let item_id = crate::ui::sidebar::SidebarItemId::Session("s2");
                         let id = ui.make_persistent_id(("mux-sidebar-item", &item_id));
                         ui.memory_mut(|memory| memory.request_focus(id));
@@ -2141,7 +2201,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         event = show_test_sidebar(ui, &sessions);
                     });
                 },
@@ -2228,7 +2288,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let _ = show(ui);
                 });
             },
@@ -2247,7 +2307,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     event = show(ui);
                 });
             },
@@ -2274,7 +2334,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         let event = show_test_sidebar(ui, &sessions);
                         if event.is_some() {
                             *captured = event;

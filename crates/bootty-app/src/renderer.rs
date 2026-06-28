@@ -110,6 +110,7 @@ impl TerminalWidget {
         if self.transition_key == key {
             return;
         }
+        self.render_cache.clear();
         self.transition_key = key;
         self.transition_pending = true;
     }
@@ -133,7 +134,7 @@ impl TerminalWidget {
         &mut self,
         ui: &mut egui::Ui,
         rect: Rect,
-        id_salt: impl std::hash::Hash,
+        id_salt: impl std::hash::Hash + std::fmt::Debug,
         terminal: &mut dyn TerminalRenderSource,
     ) -> Result<TerminalSurface> {
         let widget_id = ui.make_persistent_id(("terminal-widget", id_salt));
@@ -175,6 +176,9 @@ impl TerminalWidget {
         (self.cell.width, self.cell.height)
     }
 
+    pub fn geometry_for_rect(&self, rect: Rect) -> crate::geometry::TerminalGeometry {
+        TerminalSurface::for_rect(rect, self.cell_metrics_for_rect(rect)).geometry()
+    }
     fn cell_metrics_for_rect(&self, rect: Rect) -> CellMetrics {
         let mut cell = self.base_cell;
         if self.text_config.fit_cell_height {
@@ -429,9 +433,7 @@ impl TerminalRenderCache {
         incoming: &Arc<RenderFrame>,
         hold_transition_placeholder: bool,
     ) -> Arc<RenderFrame> {
-        if is_uninitialized_frame(incoming)
-            || (hold_transition_placeholder && is_transition_placeholder_frame(incoming))
-        {
+        if hold_transition_placeholder && is_transition_placeholder_frame(incoming) {
             self.frame
                 .as_ref()
                 .filter(|cached| {

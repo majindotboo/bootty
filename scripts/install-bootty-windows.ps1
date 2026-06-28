@@ -12,7 +12,7 @@ $InstallDir = if ($env:BOOTTY_INSTALL_DIR) {
     Join-Path $env:LOCALAPPDATA "Programs\Bootty"
 }
 
-& pwsh ./scripts/package-bootty-windows.ps1
+& pwsh ./scripts/package-bootty-windows.ps1 @args
 if ($LASTEXITCODE -ne 0) {
     throw "Windows package failed with exit code $LASTEXITCODE"
 }

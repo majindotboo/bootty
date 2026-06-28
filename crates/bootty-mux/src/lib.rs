@@ -9,6 +9,7 @@ pub mod controller;
 pub mod native;
 pub mod process;
 pub mod rmux;
+pub(crate) mod rmux_bridge;
 pub mod snapshot;
 pub mod terminal;
 pub mod tmux;

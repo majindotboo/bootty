@@ -33,9 +33,12 @@ same renderer path as the main app.
 Native Bootty app bundles are built from `bootty-app --bin bootty`.
 
 ```sh
-mise run package          # macOS .app zip or Linux tarball
-mise run package:windows  # Windows zip
-mise run install          # package and install Bootty for the current OS
+mise run package          # local dynamic package using dynamic-release
+mise run package --static # static release package for distribution/CI
+mise run package:windows  # local dynamic Windows zip using dynamic-release
+mise run install          # local dynamic package and install for the current OS
+mise run build --fast     # dynamic build with --profile fast-release
+mise run install --fast   # dynamic install using --profile fast-release
 ```
 
 The CI workflow runs full Rust validation on pull requests and pushes, then

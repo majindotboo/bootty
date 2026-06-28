@@ -76,6 +76,7 @@ fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
                         active: window == 0,
                         anchor: anchor.clone(),
                         panes: Vec::new(),
+                        layout: None,
                     })
                     .collect(),
             }
@@ -571,7 +572,7 @@ fn bench_sidebar_ui(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
                             black_box(chrome::show_sidebar(
                                 ui,
                                 bootty_ui::ThemePalette::default(),
@@ -628,7 +629,7 @@ fn bench_sidebar_ui_usage_footer(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
                             black_box(chrome::show_sidebar(
                                 ui,
                                 bootty_ui::ThemePalette::default(),

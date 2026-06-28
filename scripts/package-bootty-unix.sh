@@ -13,6 +13,34 @@ VERSION="${BOOTTY_VERSION:-$(awk '
   /^\[/ { in_workspace_package = 0 }
   in_workspace_package && $1 == "version" { gsub(/\"/, "", $3); print $3; exit }
 ' Cargo.toml)}"
+
+PROFILE="release"
+CARGO_PROFILE_ARGS=(--release)
+FAST=0
+LINKAGE="dynamic"
+while (($#)); do
+  case "$1" in
+    --fast)
+      FAST=1
+      ;;
+    --static)
+      LINKAGE="static"
+      ;;
+    *)
+      echo "unknown package argument: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+if [[ "$FAST" -eq 1 ]]; then
+  PROFILE="fast-release"
+  CARGO_PROFILE_ARGS=(--profile fast-release)
+elif [[ "$LINKAGE" == "dynamic" ]]; then
+  PROFILE="dynamic-release"
+  CARGO_PROFILE_ARGS=(--profile dynamic-release)
+fi
+
 VERSION="${VERSION:-0.0.0}"
 
 ensure_project_zig() {
@@ -37,11 +65,87 @@ ensure_project_zig() {
   fi
 }
 
+append_rustflags() {
+  if [[ -n "${RUSTFLAGS:-}" ]]; then
+    export RUSTFLAGS="$RUSTFLAGS $*"
+  else
+    export RUSTFLAGS="$*"
+  fi
+}
+
+enable_dynamic_linkage() {
+  case "$(uname -s)" in
+    Darwin)
+      append_rustflags -C prefer-dynamic -C link-arg=-Wl,-rpath,@executable_path/../Frameworks
+      ;;
+    Linux)
+      append_rustflags -C prefer-dynamic -C 'link-arg=-Wl,-rpath,$ORIGIN/../lib'
+      ;;
+    *)
+      echo "dynamic packaging is unsupported on $(uname -s); pass --static" >&2
+      exit 1
+      ;;
+  esac
+}
+
+copy_dynamic_libraries() {
+  local binary_path="$1"
+  local dest_dir="$2"
+  local copied=0
+  local dependency_name source_dir library
+  local -a dependency_names=()
+
+  case "$(uname -s)" in
+    Darwin)
+      while IFS= read -r dependency_name; do
+        dependency_names+=("$dependency_name")
+      done < <(otool -L "$binary_path" | awk '/@rpath\/.*\.dylib/ { n=$1; sub("@rpath/", "", n); print n }')
+      ;;
+    Linux)
+      while IFS= read -r dependency_name; do
+        dependency_names+=("$dependency_name")
+      done < <(ldd "$binary_path" | awk '/=>/ { n=$1; if (n ~ /^lib.*\.so/) print n }')
+      ;;
+  esac
+
+  if [[ "${#dependency_names[@]}" -eq 0 ]]; then
+    echo "expected dynamic Rust libraries referenced by $binary_path" >&2
+    exit 1
+  fi
+
+  mkdir -p "$dest_dir"
+  for dependency_name in "${dependency_names[@]}"; do
+    library=""
+    for source_dir in "$TARGET_ROOT/$PROFILE/deps" "$(rustc --print target-libdir)"; do
+      if [[ -f "$source_dir/$dependency_name" ]]; then
+        library="$source_dir/$dependency_name"
+        break
+      fi
+    done
+
+    if [[ -z "$library" ]]; then
+      echo "could not find dynamic dependency $dependency_name for $binary_path" >&2
+      exit 1
+    fi
+
+    cp -f "$library" "$dest_dir/"
+    copied=1
+  done
+
+  if [[ "$copied" -eq 0 ]]; then
+    echo "expected dynamic Rust libraries under $TARGET_ROOT/$PROFILE/deps or rustc target-libdir" >&2
+    exit 1
+  fi
+}
+
 ensure_project_zig
+if [[ "$LINKAGE" == "dynamic" ]]; then
+  enable_dynamic_linkage
+fi
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-cargo build --release -p "$PACKAGE_NAME" --bin "$BINARY_NAME"
+cargo build "${CARGO_PROFILE_ARGS[@]}" -p "$PACKAGE_NAME" --bin "$BINARY_NAME"
 
 case "$(uname -s)" in
   Darwin)
@@ -52,7 +156,10 @@ case "$(uname -s)" in
     RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
     mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-    cp "$TARGET_ROOT/release/$BINARY_NAME" "$MACOS_DIR/$BINARY_NAME"
+    cp "$TARGET_ROOT/$PROFILE/$BINARY_NAME" "$MACOS_DIR/$BINARY_NAME"
+    if [[ "$LINKAGE" == "dynamic" ]]; then
+      copy_dynamic_libraries "$MACOS_DIR/$BINARY_NAME" "$CONTENTS_DIR/Frameworks"
+    fi
     ACTOOL="$(xcrun --find actool 2>/dev/null || true)"
     if [[ -z "$ACTOOL" ]]; then
       echo "Xcode actool is required to package the macOS app icon" >&2
@@ -131,7 +238,10 @@ PLIST
       "$ROOT_DIR/share/icons/hicolor/256x256/apps" \
       "$ROOT_DIR/share/icons/hicolor/scalable/apps"
 
-    cp "$TARGET_ROOT/release/$BINARY_NAME" "$ROOT_DIR/bin/$BINARY_NAME"
+    cp "$TARGET_ROOT/$PROFILE/$BINARY_NAME" "$ROOT_DIR/bin/$BINARY_NAME"
+    if [[ "$LINKAGE" == "dynamic" ]]; then
+      copy_dynamic_libraries "$ROOT_DIR/bin/$BINARY_NAME" "$ROOT_DIR/lib"
+    fi
     cp "crates/bootty-app/assets/bootty-mascot.png" "$ROOT_DIR/share/icons/hicolor/256x256/apps/bootty.png"
     cp "crates/bootty-app/assets/bootty-mascot.svg" "$ROOT_DIR/share/icons/hicolor/scalable/apps/bootty.svg"
     chmod +x "$ROOT_DIR/bin/$BINARY_NAME"

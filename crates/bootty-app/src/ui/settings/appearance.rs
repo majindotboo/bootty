@@ -134,9 +134,9 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         win,
         ui,
         "Status bar background",
-        "Status strip background; unset uses the active theme background.",
+        "Status strip background; unset uses the sidebar background default.",
         &["chrome", "status-background"],
-        palette.base,
+        palette.mantle,
         |chrome| &mut chrome.status_background,
     );
     super::sidebar_color_row(

@@ -280,6 +280,7 @@ pub enum BindingAction {
     MoveSession(i32),
     DitchSession,
     RenameSession,
+    RenameTab,
     ShowKeybinds,
     WriteScreenFile(WriteScreen),
     WriteSelectionFile(WriteScreen),
@@ -553,6 +554,7 @@ impl BindingAction {
             Self::MoveSession(value) => format!("move_session:{value}"),
             Self::DitchSession => "ditch_session".to_owned(),
             Self::RenameSession => "rename_session".to_owned(),
+            Self::RenameTab => "rename_tab".to_owned(),
             Self::ShowKeybinds => "show_keybinds".to_owned(),
             Self::AdjustSelection(value) => format!("adjust_selection:{}", value.as_str()),
             Self::JumpToPrompt(value) => format!("jump_to_prompt:{value}"),
@@ -811,6 +813,7 @@ pub fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
         }),
         "ditch_session" => parse_unit(value, BindingAction::DitchSession),
         "rename_session" => parse_unit(value, BindingAction::RenameSession),
+        "rename_tab" => parse_unit(value, BindingAction::RenameTab),
         "show_keybinds" => parse_unit(value, BindingAction::ShowKeybinds),
         "jump_to_prompt" => parse_required(value, |value| {
             Ok(BindingAction::JumpToPrompt(parse_i16(value)?))

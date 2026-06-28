@@ -1,11 +1,12 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     ffi::OsStr,
     hash::{Hash, Hasher},
     path::Path,
     process::Command,
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread,
 };
 
 use anyhow::Result;
@@ -30,10 +31,21 @@ use crate::{
     snapshot::MuxPaneAnchor,
 };
 
-use super::{rmux_native::RmuxNativeTerminal, tmux_control::TmuxControlTerminal};
+use super::rmux_native::RmuxNativeTerminal;
 
 pub(super) const TMUX_CLIENT_FEATURES: &str =
     "256,RGB,clipboard,focus,hyperlinks,overline,strikethrough,sync,title";
+
+struct RmuxWindowResizeRequest {
+    window_id: String,
+    cols: u16,
+    rows: u16,
+}
+
+struct RmuxWindowResizeWorker {
+    tx: mpsc::Sender<RmuxWindowResizeRequest>,
+    result_rx: mpsc::Receiver<std::result::Result<(), String>>,
+}
 
 #[derive(Deref, DerefMut)]
 pub struct BackendPaneTerminal {
@@ -46,6 +58,10 @@ pub struct BackendPaneTerminal {
     /// The active native window's panes (focused + the parked siblings rendered alongside it). Empty
     /// for non-native backends, which render a single attach surface.
     native_window_targets: Vec<MuxPaneTarget>,
+    native_window_spawn_geometry: Option<TerminalGeometry>,
+    native_window_id: Option<String>,
+    last_rmux_window_size: Option<(String, u16, u16)>,
+    rmux_window_resize_worker: Option<RmuxWindowResizeWorker>,
     /// Session whose tmux `status` option bootty has toggled off so its own
     /// status bar is the only one shown; restored when bootty stops showing it.
     status_hidden_session: Option<String>,
@@ -111,7 +127,13 @@ pub trait TerminalRuntime: TerminalRenderSource {
     fn discard_pending_output(&mut self) -> Result<()> {
         Ok(())
     }
+    fn force_resize(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn format_selection(&mut self, _format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn current_working_directory(&mut self) -> Result<Option<String>> {
         Ok(None)
     }
     fn set_cursor_config(&mut self, _cursor: TerminalCursorConfig) -> Result<()> {
@@ -216,6 +238,10 @@ impl TerminalRuntime for TerminalSession {
         Self::format_selection(self, format)
     }
 
+    fn current_working_directory(&mut self) -> Result<Option<String>> {
+        Ok(Self::current_working_directory(self))
+    }
+
     fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
         Self::set_cursor_config(self, cursor)
     }
@@ -253,6 +279,290 @@ impl TerminalRuntime for TerminalSession {
     }
 }
 
+enum QueuedStartupCommand {
+    RawInput(Vec<u8>),
+    Paste(String),
+    Key(KeyInput),
+    Focus(bool),
+    Mouse(MouseInput),
+    MouseWheel {
+        input: MouseInput,
+        scroll_delta: isize,
+    },
+    ScrollViewport(isize),
+    SelectionBegin(TerminalSelectionEvent),
+    SelectionUpdate(TerminalSelectionEvent),
+    SelectionEnd(Option<TerminalSelectionEvent>),
+}
+
+struct StartingNativeTerminal {
+    rx: mpsc::Receiver<std::result::Result<TerminalSession, String>>,
+    terminal: Option<TerminalSession>,
+    geometry: TerminalGeometry,
+    pending_colors: Option<TerminalColorConfig>,
+    pending_cursor: Option<TerminalCursorConfig>,
+    pending_features: Option<TerminalFeatureConfig>,
+    pending_commands: VecDeque<QueuedStartupCommand>,
+    startup_error: Option<String>,
+}
+
+impl StartingNativeTerminal {
+    fn spawn(
+        geometry: TerminalGeometry,
+        config: TerminalSessionConfig,
+        repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let thread_repaint = Arc::clone(&repaint_wakeup);
+        thread::spawn(move || {
+            let result =
+                TerminalSession::new_with_config(geometry, config, Arc::clone(&thread_repaint))
+                    .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+            thread_repaint();
+        });
+
+        Self {
+            rx,
+            terminal: None,
+            geometry,
+            pending_colors: None,
+            pending_cursor: None,
+            pending_features: None,
+            pending_commands: VecDeque::new(),
+            startup_error: None,
+        }
+    }
+
+    fn ready_terminal(&mut self) -> Result<Option<&mut TerminalSession>> {
+        self.poll_startup()?;
+        Ok(self.terminal.as_mut())
+    }
+
+    fn poll_startup(&mut self) -> Result<()> {
+        if self.terminal.is_some() {
+            return Ok(());
+        }
+        if let Some(error) = &self.startup_error {
+            anyhow::bail!(error.clone());
+        }
+
+        let mut terminal = match self.rx.try_recv() {
+            Ok(Ok(terminal)) => terminal,
+            Ok(Err(error)) => {
+                self.startup_error = Some(error.clone());
+                anyhow::bail!(error);
+            }
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let error = "native terminal startup worker stopped".to_owned();
+                self.startup_error = Some(error.clone());
+                anyhow::bail!(error);
+            }
+        };
+
+        terminal.resize(self.geometry)?;
+        if let Some(colors) = self.pending_colors.clone() {
+            terminal.set_colors(colors)?;
+        }
+        if let Some(cursor) = self.pending_cursor {
+            terminal.set_cursor_config(cursor)?;
+        }
+        if let Some(features) = self.pending_features {
+            terminal.set_feature_config(features)?;
+        }
+        while let Some(command) = self.pending_commands.pop_front() {
+            apply_queued_startup_command(&mut terminal, command)?;
+        }
+        self.terminal = Some(terminal);
+        Ok(())
+    }
+
+    fn queue_or_apply(&mut self, command: QueuedStartupCommand) -> Result<()> {
+        if let Some(terminal) = self.ready_terminal()? {
+            apply_queued_startup_command(terminal, command)
+        } else {
+            self.pending_commands.push_back(command);
+            Ok(())
+        }
+    }
+}
+
+fn startup_placeholder_frame(geometry: TerminalGeometry) -> Arc<RenderFrame> {
+    let mut frame = RenderFrame {
+        cols: geometry.cols,
+        rows: geometry.rows,
+        row_dirty: vec![true; geometry.rows as usize],
+        ..RenderFrame::default()
+    };
+    frame.stats.dirty_rows = geometry.rows as usize;
+    Arc::new(frame)
+}
+
+fn apply_queued_startup_command(
+    terminal: &mut TerminalSession,
+    command: QueuedStartupCommand,
+) -> Result<()> {
+    match command {
+        QueuedStartupCommand::RawInput(bytes) => terminal.write_input(&bytes),
+        QueuedStartupCommand::Paste(text) => terminal.write_paste(&text),
+        QueuedStartupCommand::Key(input) => terminal.encode_key(input),
+        QueuedStartupCommand::Focus(gained) => terminal.encode_focus(gained),
+        QueuedStartupCommand::Mouse(input) => terminal.encode_mouse(input),
+        QueuedStartupCommand::MouseWheel {
+            input,
+            scroll_delta,
+        } => terminal.handle_mouse_wheel(input, scroll_delta),
+        QueuedStartupCommand::ScrollViewport(delta) => terminal.scroll_viewport_delta(delta),
+        QueuedStartupCommand::SelectionBegin(event) => terminal.begin_selection(event),
+        QueuedStartupCommand::SelectionUpdate(event) => terminal.update_selection(event),
+        QueuedStartupCommand::SelectionEnd(event) => terminal.end_selection(event),
+    }
+}
+
+impl TerminalRenderSource for StartingNativeTerminal {
+    fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
+        self.geometry = geometry;
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.resize(geometry)?;
+        }
+        Ok(())
+    }
+
+    fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.extract_frame()
+        } else {
+            Ok(startup_placeholder_frame(self.geometry))
+        }
+    }
+
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.is_mouse_tracking()
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::ScrollViewport(delta))
+    }
+
+    fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::SelectionBegin(event))
+    }
+
+    fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::SelectionUpdate(event))
+    }
+
+    fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::SelectionEnd(event))
+    }
+}
+
+impl TerminalRuntime for StartingNativeTerminal {
+    fn drain_pty(&mut self) -> DrainStats {
+        match self.ready_terminal() {
+            Ok(Some(terminal)) => terminal.drain_pty(),
+            Ok(None) | Err(_) => DrainStats::default(),
+        }
+    }
+
+    fn pending_pty_len(&self) -> usize {
+        self.terminal
+            .as_ref()
+            .map(TerminalSession::pending_pty_len)
+            .unwrap_or_default()
+    }
+
+    fn child_exited(&mut self) -> Result<bool> {
+        Ok(self
+            .ready_terminal()?
+            .map(TerminalSession::child_exited)
+            .transpose()?
+            .unwrap_or(false))
+    }
+
+    fn tty_name(&self) -> Option<&str> {
+        self.terminal.as_ref().and_then(TerminalSession::tty_name)
+    }
+
+    fn discard_pending_output(&mut self) -> Result<()> {
+        self.pending_commands.clear();
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.discard_pending_output()?;
+        }
+        Ok(())
+    }
+
+    fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.format_selection(format)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn current_working_directory(&mut self) -> Result<Option<String>> {
+        Ok(self
+            .ready_terminal()?
+            .and_then(|terminal| TerminalSession::current_working_directory(&*terminal)))
+    }
+
+    fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        self.pending_cursor = Some(cursor);
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.set_cursor_config(cursor)?;
+        }
+        Ok(())
+    }
+
+    fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        self.pending_features = Some(features);
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.set_feature_config(features)?;
+        }
+        Ok(())
+    }
+
+    fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
+        self.pending_colors = Some(colors.clone());
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.set_colors(colors)?;
+        }
+        Ok(())
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::RawInput(bytes.to_vec()))
+    }
+
+    fn write_paste(&mut self, text: &str) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::Paste(text.to_owned()))
+    }
+
+    fn encode_key(&mut self, input: KeyInput) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::Key(input))
+    }
+
+    fn encode_focus(&mut self, gained: bool) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::Focus(gained))
+    }
+
+    fn encode_mouse(&mut self, input: MouseInput) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::Mouse(input))
+    }
+
+    fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::MouseWheel {
+            input,
+            scroll_delta,
+        })
+    }
+}
+
 impl BackendPaneTerminal {
     pub fn new(
         geometry: TerminalGeometry,
@@ -282,6 +592,10 @@ impl BackendPaneTerminal {
             repaint_wakeup,
             native_terminals: HashMap::new(),
             native_window_targets: Vec::new(),
+            native_window_spawn_geometry: None,
+            native_window_id: None,
+            last_rmux_window_size: None,
+            rmux_window_resize_worker: None,
             status_hidden_session: None,
             passthrough_all_pane: None,
             terminal: ActiveTerminalRuntime::idle(),
@@ -320,7 +634,7 @@ impl BackendPaneTerminal {
             self.sync_status_bar(config.hide_tmux_status);
             return Ok(());
         }
-        self.park_native_terminal();
+        self.park_native_layout_terminal();
         let terminal = self
             .start_terminal(backend, target.as_ref())
             .inspect_err(|_| {
@@ -401,6 +715,10 @@ impl BackendPaneTerminal {
         Ok(())
     }
 
+    pub fn current_working_directory(&mut self) -> Result<Option<String>> {
+        self.terminal.current_working_directory()
+    }
+
     fn start_terminal(
         &mut self,
         backend: MuxBackendKind,
@@ -410,47 +728,44 @@ impl BackendPaneTerminal {
             return Ok(ActiveTerminalRuntime::idle());
         };
 
-        if backend == MuxBackendKind::Native {
-            // A native session whose tabs have all been closed resolves to a session-level target
-            // with no pane; it has no shell to attach, so it renders as idle.
-            if !matches!(target, MuxPaneTarget::Pane { .. }) {
-                return Ok(ActiveTerminalRuntime::idle());
-            }
-            if let Some(mut terminal) = self.native_terminals.remove(target) {
-                terminal.resize(self.geometry)?;
-                return Ok(terminal);
-            }
-            self.spawn_native_runtime(target)
-        } else if matches!(backend, MuxBackendKind::Tmux | MuxBackendKind::Zellij) {
-            let config = backend_attach_session_config(
-                self.terminal_config.clone(),
-                backend,
-                target.session_id(),
-                bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
-            )?;
-            Ok(ActiveTerminalRuntime(Box::new(
-                TerminalSession::new_with_config(
-                    self.geometry,
-                    config,
+        match backend {
+            MuxBackendKind::Native | MuxBackendKind::Rmux => {
+                // A native session whose tabs have all been closed resolves to a session-level target
+                // with no pane; it has no shell to attach, so it renders as idle. Rmux session targets
+                // can resolve to the active backend pane.
+                if backend == MuxBackendKind::Native
+                    && !matches!(target, MuxPaneTarget::Pane { .. })
+                {
+                    return Ok(ActiveTerminalRuntime::idle());
+                }
+                if let Some(terminal) = self.native_terminals.remove(target) {
+                    return Ok(terminal);
+                }
+                if backend == MuxBackendKind::Native {
+                    return self.spawn_native_runtime(target);
+                }
+                Ok(ActiveTerminalRuntime(Box::new(RmuxNativeTerminal::new(
+                    target.clone(),
+                    self.native_window_spawn_geometry.unwrap_or(self.geometry),
+                    self.terminal_config.clone(),
                     Arc::clone(&self.repaint_wakeup),
-                )?,
-            )))
-        } else if backend == MuxBackendKind::Rmux {
-            Ok(ActiveTerminalRuntime(Box::new(RmuxNativeTerminal::new(
-                target.clone(),
-                self.geometry,
-                self.terminal_config.colors.clone(),
-            )?)))
-        } else {
-            Ok(ActiveTerminalRuntime(Box::new(TmuxControlTerminal::new(
-                backend,
-                target.clone(),
-                self.geometry,
-                self.terminal_config.colors.clone(),
-                self.terminal_config.macos_option_as_alt,
-                self.terminal_config.side_effect_tx.clone(),
-                Arc::clone(&self.repaint_wakeup),
-            )?)))
+                )?)))
+            }
+            MuxBackendKind::Tmux | MuxBackendKind::Zellij => {
+                let config = backend_attach_session_config(
+                    self.terminal_config.clone(),
+                    backend,
+                    target.session_id(),
+                    bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
+                )?;
+                Ok(ActiveTerminalRuntime(Box::new(
+                    TerminalSession::new_with_config(
+                        self.geometry,
+                        config,
+                        Arc::clone(&self.repaint_wakeup),
+                    )?,
+                )))
+            }
         }
     }
 
@@ -458,25 +773,31 @@ impl BackendPaneTerminal {
         let mut config = self.terminal_config.clone();
         config.launch.working_directory = target.cwd().map(Path::new).map(Path::to_path_buf);
         Ok(ActiveTerminalRuntime(Box::new(
-            TerminalSession::new_with_config(
-                self.geometry,
+            StartingNativeTerminal::spawn(
+                self.native_window_spawn_geometry.unwrap_or(self.geometry),
                 config,
                 Arc::clone(&self.repaint_wakeup),
-            )?,
+            ),
         )))
     }
 
-    /// Reconcile the live native runtimes against the active window's panes: make `focused` the
-    /// deref (input) runtime and keep every other pane alive in the parked map so it renders and
+    /// Reconcile the live native-layout runtimes against the active window's panes: make `focused`
+    /// the deref/input runtime and keep every other pane alive in the parked map so it renders and
     /// drains alongside. Panes are only torn down on explicit close, so switching focus or tabs
     /// never kills a shell.
     pub fn sync_native_window(
         &mut self,
         window_panes: &[MuxPaneAnchor],
         focused: Option<&MuxPaneAnchor>,
+        window_id: Option<&str>,
+        layout_backend: MuxBackendKind,
         hide_tmux_status: bool,
     ) -> Result<()> {
-        self.backend = MuxBackendKind::Native;
+        debug_assert!(matches!(
+            layout_backend,
+            MuxBackendKind::Native | MuxBackendKind::Rmux
+        ));
+        self.backend = layout_backend;
         let targets: Vec<MuxPaneTarget> = window_panes
             .iter()
             .cloned()
@@ -490,9 +811,9 @@ impl BackendPaneTerminal {
             .or_else(|| targets.first().cloned());
 
         if self.active_target.as_ref() != focused_target.as_ref() {
-            self.park_native_terminal();
+            self.park_native_layout_terminal();
             let terminal = self
-                .start_terminal(MuxBackendKind::Native, focused_target.as_ref())
+                .start_terminal(layout_backend, focused_target.as_ref())
                 .inspect_err(|_| {
                     self.active_target = None;
                     self.clear_terminal();
@@ -506,12 +827,111 @@ impl BackendPaneTerminal {
                 continue;
             }
             if !self.native_terminals.contains_key(target) {
-                let runtime = self.spawn_native_runtime(target)?;
+                let runtime = self.start_terminal(layout_backend, Some(target))?;
                 self.native_terminals.insert(target.clone(), runtime);
             }
         }
+        let window_id = window_id.map(str::to_owned);
+        if self.native_window_id != window_id {
+            self.native_window_id = window_id;
+            self.last_rmux_window_size = None;
+        }
         self.native_window_targets = targets;
         self.sync_status_bar(hide_tmux_status);
+        Ok(())
+    }
+
+    pub fn resize_native_layout_window(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.native_window_spawn_geometry = Some(TerminalGeometry {
+            cols,
+            rows,
+            cell_width: self.geometry.cell_width,
+            cell_height: self.geometry.cell_height,
+        });
+        self.drain_rmux_window_resize_results()?;
+        if self.backend != MuxBackendKind::Rmux {
+            return Ok(());
+        }
+        let Some(window_id) = self.native_window_id.clone() else {
+            return Ok(());
+        };
+        let requested = (window_id.clone(), cols, rows);
+        if self.last_rmux_window_size.as_ref() == Some(&requested) {
+            return Ok(());
+        }
+        self.ensure_rmux_window_resize_worker();
+        let Some(worker) = &self.rmux_window_resize_worker else {
+            anyhow::bail!("rmux window resize worker did not start");
+        };
+        worker
+            .tx
+            .send(RmuxWindowResizeRequest {
+                window_id,
+                cols,
+                rows,
+            })
+            .map_err(|_| anyhow::anyhow!("rmux window resize worker stopped"))?;
+        self.last_rmux_window_size = Some(requested);
+        Ok(())
+    }
+
+    fn ensure_rmux_window_resize_worker(&mut self) {
+        if self.rmux_window_resize_worker.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<RmuxWindowResizeRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<std::result::Result<(), String>>();
+        let repaint = Arc::clone(&self.repaint_wakeup);
+        thread::spawn(move || {
+            while let Ok(mut request) = rx.recv() {
+                while let Ok(next) = rx.try_recv() {
+                    request = next;
+                }
+                let result = crate::rmux::resize_bootty_rmux_window(
+                    &request.window_id,
+                    request.cols,
+                    request.rows,
+                )
+                .map_err(|error| error.to_string());
+                let _ = result_tx.send(result);
+                repaint();
+            }
+        });
+        self.rmux_window_resize_worker = Some(RmuxWindowResizeWorker { tx, result_rx });
+    }
+
+    fn drain_rmux_window_resize_results(&mut self) -> Result<()> {
+        let mut completed = false;
+        let mut error = None;
+        if let Some(worker) = &self.rmux_window_resize_worker {
+            while let Ok(result) = worker.result_rx.try_recv() {
+                match result {
+                    Ok(()) => completed = true,
+                    Err(result_error) => error = Some(result_error),
+                }
+            }
+        }
+        if let Some(error) = error {
+            self.last_rmux_window_size = None;
+            anyhow::bail!(error);
+        }
+        if completed {
+            self.force_native_layout_pane_resizes()?;
+        }
+        Ok(())
+    }
+
+    fn force_native_layout_pane_resizes(&mut self) -> Result<()> {
+        self.terminal.force_resize()?;
+        let targets = self.native_window_targets.clone();
+        for target in targets {
+            if self.active_target.as_ref() == Some(&target) {
+                continue;
+            }
+            if let Some(runtime) = self.native_terminals.get_mut(&target) {
+                runtime.force_resize()?;
+            }
+        }
         Ok(())
     }
 
@@ -652,8 +1072,8 @@ impl BackendPaneTerminal {
         self.terminal = ActiveTerminalRuntime::idle();
     }
 
-    fn park_native_terminal(&mut self) {
-        if self.backend != MuxBackendKind::Native {
+    fn park_native_layout_terminal(&mut self) {
+        if !matches!(self.backend, MuxBackendKind::Native | MuxBackendKind::Rmux) {
             return;
         }
         let Some(target) = self.active_target.clone() else {
@@ -753,13 +1173,6 @@ impl MuxPaneTarget {
         match self {
             Self::Session { cwd, .. } | Self::Pane { cwd, .. } => cwd.as_deref(),
         }
-    }
-
-    pub(super) fn tmux_pane_number(&self) -> Option<usize> {
-        let Self::Pane { pane_id, .. } = self else {
-            return None;
-        };
-        pane_id.strip_prefix('%')?.parse().ok()
     }
 }
 
@@ -1030,13 +1443,12 @@ fn set_session_status_hidden(session_id: &str, hidden: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use std::sync::Mutex;
 
     use bootty_terminal::terminal_engine::TerminalColorConfig;
     use bootty_terminal::terminal_frame::RenderFrame;
     use tempfile::TempDir;
-
-    use bootty_config::config::{MultiplexerBackendConfig, MultiplexerConfig};
 
     #[test]
     fn status_bar_hidden_only_targets_tmux_when_enabled() {
@@ -1063,6 +1475,210 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_layout_sync_preserves_rmux_backend() {
+        let geometry = TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            geometry,
+            MuxBackendKind::Native,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+
+        terminal
+            .sync_native_window(&[], None, Some("@1"), MuxBackendKind::Rmux, false)
+            .unwrap();
+
+        assert_eq!(terminal.backend, MuxBackendKind::Rmux);
+    }
+
+    #[test]
+    fn starting_native_terminal_buffers_input_until_spawn_completes() -> Result<()> {
+        let mut config = terminal_config();
+        config.launch.shell = Some("/bin/cat".to_owned());
+        let mut terminal = StartingNativeTerminal::spawn(
+            TerminalGeometry {
+                cols: 80,
+                rows: 24,
+                cell_width: 10,
+                cell_height: 20,
+            },
+            config,
+            Arc::new(|| {}),
+        );
+
+        terminal.write_input(b"bootty-queued-input\n")?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            terminal.drain_pty();
+            let frame = terminal.extract_frame()?;
+            let text = frame.text.iter().collect::<String>();
+            if text.contains("bootty-queued-input") {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("queued native input was not replayed; frame text: {text:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_window_resize_worker_is_non_blocking_and_reaches_server() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-worker-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let window_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .map(|window| window.id.clone())
+            .context("worker resize window should exist")?;
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            TerminalGeometry {
+                cols: 80,
+                rows: 24,
+                cell_width: 10,
+                cell_height: 20,
+            },
+            MuxBackendKind::Rmux,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        terminal.native_window_id = Some(window_id.clone());
+
+        let start = std::time::Instant::now();
+        terminal.resize_native_layout_window(117, 40)?;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(50),
+            "enqueueing rmux resize should not block the render path: {:?}",
+            start.elapsed()
+        );
+
+        let expected = format!("{session} {window_id} 117x40");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let output = std::process::Command::new("rmux")
+                .args([
+                    "list-windows",
+                    "-a",
+                    "-F",
+                    "#{session_name} #{window_id} #{window_width}x#{window_height}",
+                ])
+                .output()?;
+            let last_output = String::from_utf8_lossy(&output.stdout).into_owned();
+            if last_output.lines().any(|line| line == expected) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("expected {expected:?} in rmux windows:\n{last_output}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        terminal.resize_native_layout_window(117, 40)?;
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_native_window_attach_and_switch_stay_interactive() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-attach-perf-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        client.new_window(&session, Some(&cwd))?;
+        client.new_window(&session, Some(&cwd))?;
+        let snapshot = client.snapshot()?;
+        let session_snapshot = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("attach perf session should exist")?;
+        let first_window = session_snapshot
+            .windows
+            .first()
+            .context("attach perf first window should exist")?;
+        let second_window = session_snapshot
+            .windows
+            .get(1)
+            .context("attach perf second window should exist")?;
+        let first_focused = first_window.anchor.clone();
+        let second_focused = second_window.anchor.clone();
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            TerminalGeometry {
+                cols: 100,
+                rows: 30,
+                cell_width: 10,
+                cell_height: 20,
+            },
+            MuxBackendKind::Rmux,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+
+        let attach_start = std::time::Instant::now();
+        terminal.sync_native_window(
+            &first_window.panes,
+            Some(&first_focused),
+            Some(&first_window.id),
+            MuxBackendKind::Rmux,
+            false,
+        )?;
+        let attach_elapsed = attach_start.elapsed();
+
+        let switch_start = std::time::Instant::now();
+        terminal.sync_native_window(
+            &second_window.panes,
+            Some(&second_focused),
+            Some(&second_window.id),
+            MuxBackendKind::Rmux,
+            false,
+        )?;
+        let switch_elapsed = switch_start.elapsed();
+
+        eprintln!("rmux attach perf probe: attach={attach_elapsed:?} switch={switch_elapsed:?}");
+        assert!(
+            attach_elapsed < std::time::Duration::from_millis(100),
+            "rmux initial native-window attach should not block UI: {attach_elapsed:?}"
+        );
+        assert!(
+            switch_elapsed < std::time::Duration::from_millis(100),
+            "rmux native-window switch should not block UI: {switch_elapsed:?}"
+        );
+
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
     #[test]
     fn passthrough_override_targets_only_tmux_targets() {
         let target = MuxPaneTarget::Pane {
@@ -1175,12 +1791,192 @@ mod tests {
         }
     }
 
+    struct ResizeRecordingRuntime {
+        resize_calls: Arc<Mutex<Vec<TerminalGeometry>>>,
+    }
+
+    impl TerminalRenderSource for ResizeRecordingRuntime {
+        fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
+            self.resize_calls.lock().unwrap().push(geometry);
+            Ok(())
+        }
+
+        fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
+            Ok(Arc::new(RenderFrame::default()))
+        }
+    }
+
+    impl TerminalRuntime for ResizeRecordingRuntime {
+        fn drain_pty(&mut self) -> DrainStats {
+            DrainStats::default()
+        }
+
+        fn pending_pty_len(&self) -> usize {
+            0
+        }
+
+        fn child_exited(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn force_resize(&mut self) -> Result<()> {
+            self.resize_calls.lock().unwrap().push(TerminalGeometry {
+                cols: 1,
+                rows: 1,
+                cell_width: 1,
+                cell_height: 1,
+            });
+            Ok(())
+        }
+
+        fn set_colors(&mut self, _colors: TerminalColorConfig) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_paste(&mut self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_key(&mut self, _input: KeyInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_focus(&mut self, _gained: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn encode_mouse(&mut self, _input: MouseInput) -> Result<()> {
+            Ok(())
+        }
+
+        fn handle_mouse_wheel(&mut self, _input: MouseInput, _scroll_delta: isize) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn color_config(background: (u8, u8, u8)) -> TerminalColorConfig {
         let mut colors = TerminalColorConfig::default();
         colors.background.r = background.0;
         colors.background.g = background.1;
         colors.background.b = background.2;
         colors
+    }
+
+    #[test]
+    fn rmux_native_layout_focus_switch_parks_active_runtime() {
+        let geometry = TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let target = MuxPaneTarget::Pane {
+            session_id: "agents".to_owned(),
+            pane_id: "%4".to_owned(),
+            cwd: None,
+        };
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            geometry,
+            MuxBackendKind::Rmux,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        terminal.active_target = Some(target.clone());
+        terminal.terminal = ActiveTerminalRuntime(Box::new(ColorRecordingRuntime {
+            colors: Arc::new(Mutex::new(Vec::new())),
+        }));
+
+        terminal.park_native_layout_terminal();
+
+        assert!(terminal.native_terminals.contains_key(&target));
+    }
+
+    #[test]
+    fn restoring_parked_native_runtime_keeps_its_pane_geometry_until_render_resize() {
+        let previous_focused_geometry = TerminalGeometry {
+            cols: 120,
+            rows: 40,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let target = MuxPaneTarget::Pane {
+            session_id: "agents".to_owned(),
+            pane_id: "%7".to_owned(),
+            cwd: None,
+        };
+        let resize_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            previous_focused_geometry,
+            MuxBackendKind::Rmux,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        terminal.native_terminals.insert(
+            target.clone(),
+            ActiveTerminalRuntime(Box::new(ResizeRecordingRuntime {
+                resize_calls: Arc::clone(&resize_calls),
+            })),
+        );
+
+        let _restored = terminal
+            .start_terminal(MuxBackendKind::Rmux, Some(&target))
+            .unwrap();
+
+        assert!(resize_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn completed_rmux_window_resize_forces_active_and_parked_pane_resizes() {
+        let geometry = TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        };
+        let active_target = MuxPaneTarget::Pane {
+            session_id: "agents".to_owned(),
+            pane_id: "%7".to_owned(),
+            cwd: None,
+        };
+        let parked_target = MuxPaneTarget::Pane {
+            session_id: "agents".to_owned(),
+            pane_id: "%8".to_owned(),
+            cwd: None,
+        };
+        let active_calls = Arc::new(Mutex::new(Vec::new()));
+        let parked_calls = Arc::new(Mutex::new(Vec::new()));
+        let (tx, _rx) = mpsc::channel::<RmuxWindowResizeRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<std::result::Result<(), String>>();
+        result_tx.send(Ok(())).unwrap();
+        let mut terminal = BackendPaneTerminal::new_with_backend(
+            geometry,
+            MuxBackendKind::Rmux,
+            terminal_config(),
+            Arc::new(|| {}),
+        );
+        terminal.native_window_id = Some("@1".to_owned());
+        terminal.last_rmux_window_size = Some(("@1".to_owned(), 117, 40));
+        terminal.rmux_window_resize_worker = Some(RmuxWindowResizeWorker { tx, result_rx });
+        terminal.active_target = Some(active_target.clone());
+        terminal.native_window_targets = vec![active_target, parked_target.clone()];
+        terminal.terminal = ActiveTerminalRuntime(Box::new(ResizeRecordingRuntime {
+            resize_calls: Arc::clone(&active_calls),
+        }));
+        terminal.native_terminals.insert(
+            parked_target,
+            ActiveTerminalRuntime(Box::new(ResizeRecordingRuntime {
+                resize_calls: Arc::clone(&parked_calls),
+            })),
+        );
+
+        terminal.resize_native_layout_window(117, 40).unwrap();
+
+        assert_eq!(active_calls.lock().unwrap().len(), 1);
+        assert_eq!(parked_calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -1237,39 +2033,6 @@ mod tests {
         };
 
         assert_eq!(MuxPaneTarget::from(before), MuxPaneTarget::from(after));
-    }
-
-    #[test]
-    fn sync_mux_anchor_does_not_commit_target_after_restart_failure() {
-        let geometry = TerminalGeometry {
-            cols: 80,
-            rows: 24,
-            cell_width: 10,
-            cell_height: 20,
-        };
-        let mut terminal = BackendPaneTerminal::new_with_backend(
-            geometry,
-            MuxBackendKind::Tmux,
-            terminal_config(),
-            Arc::new(|| {}),
-        );
-
-        let anchor = MuxPaneAnchor {
-            session_id: String::new(),
-            pane_id: Some("%11".to_owned()),
-            cwd: None,
-            process: None,
-        };
-        let result = terminal.sync_mux_anchor(
-            &MultiplexerConfig {
-                backend: MultiplexerBackendConfig::Rmux,
-                ..Default::default()
-            },
-            Some(&anchor),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(terminal.active_target, None);
     }
 
     #[test]

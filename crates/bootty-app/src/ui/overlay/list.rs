@@ -63,7 +63,11 @@ pub struct ListView<'a> {
 }
 
 impl<'a> ListView<'a> {
-    pub fn new(id_salt: impl std::hash::Hash, rows: &'a [ListRow], selected: usize) -> Self {
+    pub fn new(
+        id_salt: impl std::hash::Hash + std::fmt::Debug,
+        rows: &'a [ListRow],
+        selected: usize,
+    ) -> Self {
         Self {
             id_salt: egui::Id::new(id_salt),
             rows,

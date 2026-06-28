@@ -181,6 +181,8 @@ mod tests {
             "coffee-cup",
             "coffee-cup-filled",
             "plug-zap",
+            "battery-charging",
+            "battery-full",
             "cpu",
             "memory-stick",
             "calendar",
@@ -211,9 +213,11 @@ mod tests {
             "option",
             "arrow-big-up",
             "chevron-up",
+            "chevron-right",
             "grip-vertical",
             "sliders-horizontal",
             "arrow-left",
+            "arrow-right",
         ] {
             let glyph = icon_glyph(slug);
             assert!(glyph.is_some(), "missing keybind icon '{slug}' in iconflow");

@@ -1905,7 +1905,7 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
             let status_background = config
                 .chrome
                 .status_background
-                .map_or(palette.surface, color_to_egui);
+                .map_or(palette.mantle, color_to_egui);
             ui.painter().rect_filled(
                 bar,
                 egui::CornerRadius::same(palette.radius),

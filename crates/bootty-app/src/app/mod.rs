@@ -13,7 +13,7 @@ use eframe::{
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
 
 use crate::{
-    config::{AppearanceVariant, BoottyConfig},
+    config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig},
     direct_input::{DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input},
     layout::SplitDirection,
     menu::AppMenu,
@@ -45,12 +45,32 @@ fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visibl
     !(sidebar_visible && segment.module == "session")
 }
 
+fn backend_uses_native_layout_renderer(backend: MultiplexerBackendConfig) -> bool {
+    matches!(
+        backend,
+        MultiplexerBackendConfig::Native | MultiplexerBackendConfig::Rmux
+    )
+}
 fn color_hex(color: egui::Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
 }
 
 fn status_bar_left_padding(_sidebar_visible: bool, _sidebar_on_right: bool) -> f32 {
     chrome::STATUS_EDGE_PAD
+}
+
+fn status_bar_background_color(
+    chrome_config: &crate::config::ChromeConfig,
+    palette: bootty_ui::ThemePalette,
+    notch_chrome_color: Option<egui::Color32>,
+) -> egui::Color32 {
+    notch_chrome_color
+        .or_else(|| {
+            chrome_config
+                .status_background
+                .map(crate::theme::config_color32)
+        })
+        .unwrap_or(palette.mantle)
 }
 
 /// Pane corner radius (px), clamped so it never exceeds the pane's shorter half-extent.
@@ -431,10 +451,22 @@ impl BoottyApp {
             self.state.mux().selected_session(),
         )
         .map(str::to_owned);
-        let session_color = Some(color_hex(self.state.ui_theme().palette.accent));
+        let sessions = self.current_extension_sessions();
+        let selected_session = self.state.mux().selected_session();
+        let session_color = sessions
+            .iter()
+            .find(|candidate| {
+                if let Some(selected) = selected_session {
+                    candidate.id == selected || candidate.name == selected
+                } else {
+                    candidate.active
+                }
+            })
+            .and_then(|session| session.color.clone())
+            .or_else(|| Some(color_hex(self.state.ui_theme().palette.accent)));
         crate::extensions::MuxView {
             windows,
-            sessions: self.current_extension_sessions(),
+            sessions,
             session,
             session_color,
             keep_awake: self.keep_awake.is_some(),
@@ -443,12 +475,20 @@ impl BoottyApp {
 
     fn current_extension_sessions(&self) -> Vec<crate::extensions::SessionView> {
         let palette = self.state.ui_theme().palette;
-        let session_color = color_hex(palette.accent);
-        let dim_color = color_hex(palette.muted);
+        let fallback_color = color_hex(palette.accent);
+        let fallback_dim_color = color_hex(palette.muted);
         let selected_session = self.state.mux().selected_session();
-        self.state
-            .mux()
-            .sessions()
+        let sessions = self.state.mux().sessions();
+        let session_colors = crate::ui::sidebar::sidebar_session_colors(sessions)
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.session_id.to_owned(),
+                    (color_hex(entry.color), color_hex(entry.dim_color)),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        sessions
             .iter()
             .map(|session| {
                 let selected = if selected_session.is_some() {
@@ -457,14 +497,18 @@ impl BoottyApp {
                 } else {
                     session.active
                 };
+                let (color, dim_color) = session_colors
+                    .get(&session.id)
+                    .cloned()
+                    .unwrap_or_else(|| (fallback_color.clone(), fallback_dim_color.clone()));
                 crate::extensions::SessionView {
                     id: session.id.clone(),
                     name: session.name.clone(),
                     active: session.active,
                     selected,
                     cwd: session.anchor.cwd.clone(),
-                    color: Some(session_color.clone()),
-                    dim_color: Some(dim_color.clone()),
+                    color: Some(color),
+                    dim_color: Some(dim_color),
                 }
             })
             .collect()
@@ -594,12 +638,47 @@ impl BoottyApp {
             self.state.focus_pane(pane_id);
         }
         let focused = self.state.focused_pane();
-        if let Some(focused) = &focused {
-            self.focus_pane_widget(focused);
+        let focused_widget_key = focused
+            .as_deref()
+            .map(|pane_id| self.state.pane_widget_key(pane_id));
+        if let Some(focused_widget_key) = &focused_widget_key {
+            self.focus_pane_widget(focused_widget_key);
         }
 
-        let current_ids: std::collections::HashSet<String> =
-            rects.iter().map(|(id, _)| id.clone()).collect();
+        let pane_geometries: Vec<(String, String, crate::geometry::TerminalGeometry)> = rects
+            .iter()
+            .map(|(pane_id, rect)| {
+                let widget_key = self.state.pane_widget_key(pane_id);
+                let is_focused = focused.as_deref() == Some(pane_id.as_str());
+                let geometry = if is_focused {
+                    self.terminal_widget.geometry_for_rect(*rect)
+                } else {
+                    let widget = self
+                        .pane_widgets
+                        .entry(widget_key.clone())
+                        .or_insert_with(|| {
+                            TerminalWidget::new(self.terminal_target_format)
+                                .with_text_config(self.terminal_text_config.clone())
+                        });
+                    widget.set_terminal_cursor_icon(self.terminal_cursor_icon);
+                    widget.geometry_for_rect(*rect)
+                };
+                (pane_id.clone(), widget_key, geometry)
+            })
+            .collect();
+        if let Some((cols, rows)) = self.state.pane_terminal_window_size(|pane| {
+            pane_geometries
+                .iter()
+                .find(|(pane_id, _, _)| pane_id.as_str() == pane)
+                .map(|(_, _, geometry)| (geometry.cols, geometry.rows))
+        }) && let Err(error) = self.state.resize_native_layout_window(cols, rows)
+        {
+            self.state.record_render_error(error);
+        }
+        let current_ids: std::collections::HashSet<String> = pane_geometries
+            .iter()
+            .map(|(_, key, _)| key.clone())
+            .collect();
         let Self {
             state,
             terminal_widget,
@@ -610,23 +689,24 @@ impl BoottyApp {
             ..
         } = self;
         for (pane_id, rect) in &rects {
+            let widget_key = state.pane_widget_key(pane_id);
             let is_focused = focused.as_deref() == Some(pane_id.as_str());
             let result = if is_focused {
                 Some(terminal_widget.show_at_rect(
                     ui,
                     *rect,
-                    ("native-pane", pane_id),
+                    ("native-pane", &widget_key),
                     state.terminal_mut(),
                 ))
             } else {
-                let widget = pane_widgets.entry(pane_id.clone()).or_insert_with(|| {
+                let widget = pane_widgets.entry(widget_key.clone()).or_insert_with(|| {
                     TerminalWidget::new(*terminal_target_format)
                         .with_text_config(terminal_text_config.clone())
                 });
                 widget.set_terminal_cursor_icon(*terminal_cursor_icon);
-                state
-                    .render_source_for_pane(pane_id)
-                    .map(|source| widget.show_at_rect(ui, *rect, ("native-pane", pane_id), source))
+                state.render_source_for_pane(pane_id).map(|source| {
+                    widget.show_at_rect(ui, *rect, ("native-pane", &widget_key), source)
+                })
             };
             match result {
                 Some(Ok(surface)) => {
@@ -844,13 +924,15 @@ impl BoottyApp {
                 .reorder_session_before(&reorder.source, reorder.before.as_deref());
         }
         self.publish_extension_mux_view(sidebar, status_bar);
-        let (sidebar_session_items, sidebar_footer_items) = if sidebar {
-            (
-                self.sidebar_extensions.items("sessions"),
-                self.sidebar_extensions.items("codexbar"),
-            )
+        let sidebar_session_items = if sidebar {
+            self.sidebar_extensions.items("sessions")
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
+        };
+        let sidebar_footer_items = if sidebar {
+            self.sidebar_extensions.items("codexbar")
+        } else {
+            Vec::new()
         };
         let sidebar_items = crate::ui::sidebar::build_sidebar_items_from_module_items(
             &sidebar_session_items,
@@ -1068,13 +1150,8 @@ impl BoottyApp {
             // Tick once a second so the clock advances and module output refreshes when idle.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs(1));
-            let status_background = notch_chrome_color
-                .or_else(|| {
-                    chrome_config
-                        .status_background
-                        .map(crate::theme::config_color32)
-                })
-                .unwrap_or(palette.base);
+            let status_background =
+                status_bar_background_color(&chrome_config, palette, notch_chrome_color);
             let segments = self.resolve_status_segments(sidebar);
             let mut status_event = None;
             ui.scope_builder(
@@ -1124,14 +1201,12 @@ impl BoottyApp {
             let pane_id = anchor.pane_id.as_deref().unwrap_or_default();
             format!("{terminal_backend:?}:{}:{pane_id}", anchor.session_id)
         });
-        // A native session whose tabs have all been closed has no pane to attach. Paint an empty
-        // state instead of the terminal widget, which would otherwise hold the closed terminal's
-        // last frame.
-        let native_backend = matches!(
-            self.state.config().multiplexer.backend,
-            crate::config::MultiplexerBackendConfig::Native
-        );
-        let has_terminal = !native_backend
+        // Native-layout backends whose tabs have all been closed have no pane to attach. Paint an
+        // empty state instead of the terminal widget, which would otherwise hold the closed
+        // terminal's last frame.
+        let native_layout_backend =
+            backend_uses_native_layout_renderer(self.state.config().multiplexer.backend);
+        let has_terminal = !native_layout_backend
             || self
                 .state
                 .mux()
@@ -1142,21 +1217,29 @@ impl BoottyApp {
             .rect_filled(terminal_rect, 0.0, pane_backing_color);
         if has_terminal {
             self.state.record_pane_area(terminal_rect);
-            if native_backend {
-                // Native panes render through per-pane widgets keyed by pane id; keep the focused
-                // pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
+            if native_layout_backend {
+                // Native-layout panes render through per-pane widgets keyed by pane id; keep the
+                // focused pane's widget in `terminal_widget` so zoom/metrics keep targeting it.
                 if self.state.native_multi_pane() {
                     // show_split_panes swaps in the focused widget itself (after click-to-focus).
                     self.show_split_panes(ui, terminal_rect, palette, pane_backing_color);
                     self.show_pane_dividers(ui, terminal_rect, palette, notch_chrome_color);
                 } else {
                     if let Some(focused) = self.state.focused_pane() {
-                        self.focus_pane_widget(&focused);
+                        let widget_key = self.state.pane_widget_key(&focused);
+                        self.focus_pane_widget(&widget_key);
                     }
                     // focus_pane_widget swapped the focused pane's widget into terminal_widget;
                     // set the transition key on it so native tab-switches cross-fade like non-native.
                     self.terminal_widget
                         .set_transition_key(terminal_transition_key);
+                    let geometry = self.terminal_widget.geometry_for_rect(terminal_rect);
+                    if let Err(error) = self
+                        .state
+                        .resize_native_layout_window(geometry.cols, geometry.rows)
+                    {
+                        self.state.record_render_error(error);
+                    }
                     self.show_single_terminal(
                         ui,
                         terminal_rect,
@@ -1235,6 +1318,14 @@ impl BoottyApp {
         };
         let event = dialog.show(ctx, self.state.ui_theme());
         self.state.apply_rename_session_event(dialog, event);
+    }
+
+    fn show_rename_tab_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_rename_tab_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        self.state.apply_rename_tab_event(dialog, event);
     }
 
     fn show_ditch_session_dialog(&mut self, ctx: &egui::Context) {
@@ -1453,6 +1544,7 @@ impl eframe::App for BoottyApp {
             self.show_new_mux_session_dialog(ui.ctx());
             self.show_session_picker_dialog(ui.ctx());
             self.show_rename_session_dialog(ui.ctx());
+            self.show_rename_tab_dialog(ui.ctx());
             self.show_ditch_session_dialog(ui.ctx());
             self.show_keybind_help_dialog(ui.ctx());
             self.show_command_palette_dialog(ui.ctx());
@@ -1547,6 +1639,22 @@ mod tests {
     }
 
     #[test]
+    fn rmux_uses_native_layout_renderer() {
+        assert!(backend_uses_native_layout_renderer(
+            MultiplexerBackendConfig::Native
+        ));
+        assert!(backend_uses_native_layout_renderer(
+            MultiplexerBackendConfig::Rmux
+        ));
+        assert!(!backend_uses_native_layout_renderer(
+            MultiplexerBackendConfig::Tmux
+        ));
+        assert!(!backend_uses_native_layout_renderer(
+            MultiplexerBackendConfig::Zellij
+        ));
+    }
+
+    #[test]
     fn session_status_segment_tracks_sidebar_visibility() {
         let segment = crate::config::StatusSegment {
             module: "session".to_owned(),
@@ -1563,6 +1671,37 @@ mod tests {
             ..Default::default()
         };
         assert!(status_segment_visible(&segment, true));
+    }
+
+    #[test]
+    fn status_bar_background_defaults_to_sidebar_background_default() {
+        let palette = bootty_ui::ThemePalette::default();
+        let chrome = crate::config::ChromeConfig::default();
+
+        assert_eq!(
+            status_bar_background_color(&chrome, palette, None),
+            palette.mantle
+        );
+    }
+
+    #[test]
+    fn status_bar_background_respects_overrides_before_default() {
+        let palette = bootty_ui::ThemePalette::default();
+        let chrome = crate::config::ChromeConfig {
+            status_background: Some(crate::color::Color::from_hex("#123456").unwrap()),
+            ..Default::default()
+        };
+        let explicit = crate::theme::config_color32(chrome.status_background.unwrap());
+        let notch = egui::Color32::from_rgb(0xaa, 0xbb, 0xcc);
+
+        assert_eq!(
+            status_bar_background_color(&chrome, palette, None),
+            explicit
+        );
+        assert_eq!(
+            status_bar_background_color(&chrome, palette, Some(notch)),
+            notch
+        );
     }
 
     #[test]

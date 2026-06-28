@@ -912,6 +912,26 @@ fn config_accepts_native_multiplexer_backend() {
     assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Native);
 }
 
+#[test]
+fn rmux_backend_defaults_include_native_layout_bindings() {
+    let config = BoottyConfig::default();
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Rmux);
+
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+space>v=split_right")
+    );
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+space>-=split_down")
+    );
+    assert!(keybinds.iter().any(|entry| entry == "ctrl+space>c=new_tab"));
+}
+
 // The platform default tables are cfg-selected, so these tests address both tables directly to
 // validate the Linux/Windows table from any build host.
 fn binding_triggers(entries: &[&str]) -> Vec<BindingTrigger> {

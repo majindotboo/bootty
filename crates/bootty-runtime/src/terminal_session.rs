@@ -98,6 +98,7 @@ pub struct TerminalSession {
     latest_frame: Arc<PublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_pty_len: Arc<AtomicUsize>,
+    current_working_directory: Arc<Mutex<Option<String>>>,
     geometry: TerminalGeometry,
     pty_master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
@@ -169,7 +170,6 @@ impl PublishedFrame {
 
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
 type MouseTrackingResponse = std::result::Result<bool, String>;
-
 enum TerminalCommand {
     Cursor(TerminalCursorConfig),
     Features(TerminalFeatureConfig),
@@ -220,6 +220,7 @@ impl TerminalSession {
         let latest_frame = Arc::new(PublishedFrame::new());
         let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
         let pending_pty_len = Arc::new(AtomicUsize::new(0));
+        let current_working_directory = Arc::new(Mutex::new(None));
         let benchmark_trace = match config.benchmark_trace.clone() {
             Some(trace) => Some(trace),
             None => BenchmarkTrace::from_env().context("open benchmark trace")?,
@@ -237,6 +238,7 @@ impl TerminalSession {
             latest_frame: latest_frame.clone(),
             latest_drain: latest_drain.clone(),
             pending_pty_len: pending_pty_len.clone(),
+            current_working_directory: current_working_directory.clone(),
             repaint_wakeup,
             side_effect_tx: config.side_effect_tx,
             benchmark_trace,
@@ -247,6 +249,7 @@ impl TerminalSession {
             latest_frame,
             latest_drain,
             pending_pty_len,
+            current_working_directory,
             geometry,
             pty_master,
             child: Some(child),
@@ -380,6 +383,13 @@ impl TerminalSession {
             .map_err(anyhow::Error::msg)
     }
 
+    pub fn current_working_directory(&self) -> Option<String> {
+        self.current_working_directory
+            .lock()
+            .ok()
+            .and_then(|cwd| cwd.clone())
+    }
+
     pub fn discard_pending_output(&mut self) -> Result<()> {
         let (done_tx, done_rx) = mpsc::sync_channel(0);
         self.send_command(TerminalCommand::DiscardPendingOutput(done_tx))?;
@@ -412,6 +422,7 @@ struct TerminalWorkerConfig {
     latest_frame: Arc<PublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_pty_len: Arc<AtomicUsize>,
+    current_working_directory: Arc<Mutex<Option<String>>>,
     repaint_wakeup: RepaintWakeup,
     side_effect_tx: Option<Sender<TerminalSideEffect>>,
     benchmark_trace: Option<BenchmarkTrace>,
@@ -450,6 +461,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             latest_frame: config.latest_frame,
             latest_drain: config.latest_drain,
             pending_pty_len: config.pending_pty_len,
+            current_working_directory: config.current_working_directory,
             repaint_wakeup: config.repaint_wakeup,
             side_effect_tx: config.side_effect_tx,
             benchmark_trace: config.benchmark_trace,
@@ -487,6 +499,7 @@ struct TerminalWorker {
     latest_frame: Arc<PublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_pty_len: Arc<AtomicUsize>,
+    current_working_directory: Arc<Mutex<Option<String>>>,
     repaint_wakeup: RepaintWakeup,
     side_effect_tx: Option<Sender<TerminalSideEffect>>,
     output_buf: Vec<u8>,
@@ -828,6 +841,7 @@ impl TerminalWorker {
             drain_pty_backlog(&mut self.pending_pty, |bytes| engine.write_vt(bytes))
         };
         if stats.bytes > 0 {
+            self.publish_current_working_directory();
             self.trace_event(
                 "parse_done",
                 &[
@@ -848,6 +862,16 @@ impl TerminalWorker {
                 .store(self.pending_pty.len(), Ordering::Relaxed);
         }
         stats
+    }
+
+    fn publish_current_working_directory(&mut self) {
+        let cwd = self.engine.current_working_directory();
+        let next = (!cwd.is_empty()).then(|| cwd.to_owned());
+        if let Ok(mut current) = self.current_working_directory.lock()
+            && *current != next
+        {
+            *current = next;
+        }
     }
 
     fn forward_side_effects(&mut self) {

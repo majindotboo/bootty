@@ -85,6 +85,9 @@ impl<R: CommandRunner> MuxBackend for ZellijBackend<R> {
             MuxCommand::DitchSession { session_id } => {
                 self.run_owned(vec!["kill-session".into(), session_id])?;
             }
+            MuxCommand::RenameWindow { .. } => {
+                anyhow::bail!("zellij backend does not support window rename");
+            }
             MuxCommand::NewWindow { .. }
             | MuxCommand::ActivateNextWindow { .. }
             | MuxCommand::ActivatePreviousWindow { .. }

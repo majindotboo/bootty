@@ -258,13 +258,17 @@ impl egui_wgpu::CallbackTrait for TerminalRenderCallback {
         let cache = callback_resources
             .get_mut::<TerminalWgpuRendererCache>()
             .expect("terminal wgpu renderer cache");
-        cache
-            .renderers
+        let TerminalWgpuRendererCache {
+            renderers,
+            text_builder,
+        } = cache;
+        renderers
             .entry(self.key)
             .or_insert_with(|| TerminalWgpuRenderer::new(device, self.target_format))
-            .prepare_terminal_frame(
+            .prepare_terminal_frame_with_text_builder(
                 device,
                 queue,
+                text_builder,
                 &self.frame,
                 screen_descriptor.pixels_per_point,
                 self.view,
@@ -287,9 +291,18 @@ impl egui_wgpu::CallbackTrait for TerminalRenderCallback {
     }
 }
 
-#[derive(Default)]
 struct TerminalWgpuRendererCache {
     renderers: HashMap<TerminalCallbackKey, TerminalWgpuRenderer>,
+    text_builder: TextAtlasBuilder,
+}
+
+impl Default for TerminalWgpuRendererCache {
+    fn default() -> Self {
+        Self {
+            renderers: HashMap::new(),
+            text_builder: TextAtlasBuilder::new_rgba(1024, 1024),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -405,8 +418,8 @@ pub struct TerminalWgpuRenderer {
     text_sampler: wgpu::Sampler,
     text_sampler_linear: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
-    text_builder: TextAtlasBuilder,
     text_texture: Option<TerminalTextAtlasTexture>,
+    local_text_builder: Option<TextAtlasBuilder>,
     layers: Vec<TerminalPreparedLayer>,
     background_resources: Vec<TerminalBackgroundFrameResources>,
     text_resources: Option<TerminalTextFrameResources>,
@@ -454,8 +467,8 @@ impl TerminalWgpuRenderer {
             }),
             text_bind_group_layout,
             image_bind_group_layout,
-            text_builder: TextAtlasBuilder::new_rgba(1024, 1024),
             text_texture: None,
+            local_text_builder: None,
             layers: Vec::new(),
             background_resources: Vec::new(),
             text_resources: None,
@@ -478,6 +491,31 @@ impl TerminalWgpuRenderer {
         pixels_per_point: f32,
         view: ViewTransform,
     ) -> u32 {
+        let mut text_builder = self
+            .local_text_builder
+            .take()
+            .unwrap_or_else(|| TextAtlasBuilder::new_rgba(1024, 1024));
+        let vertex_count = self.prepare_terminal_frame_with_text_builder(
+            device,
+            queue,
+            &mut text_builder,
+            frame,
+            pixels_per_point,
+            view,
+        );
+        self.local_text_builder = Some(text_builder);
+        vertex_count
+    }
+
+    fn prepare_terminal_frame_with_text_builder(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        text_builder: &mut TextAtlasBuilder,
+        frame: &TerminalRenderFrame,
+        pixels_per_point: f32,
+        view: ViewTransform,
+    ) -> u32 {
         let raster_ppp = text_raster_pixels_per_point(pixels_per_point, view);
         // Set before the cache early-return so `paint` always picks the right sampler.
         self.text_linear_filter = text_uses_linear_filter(pixels_per_point, view, raster_ppp);
@@ -488,7 +526,7 @@ impl TerminalWgpuRenderer {
             view.pan_x.to_bits(),
             view.pan_y.to_bits(),
         ];
-        let mut atlas_resized_count = self.text_builder.atlas_resized_count();
+        let mut atlas_resized_count = text_builder.atlas_resized_count();
         let mut update_frame_cache = true;
         if self.prepared_frame_cache_cooldown > 0 {
             self.prepared_frame_cache_cooldown -= 1;
@@ -527,7 +565,7 @@ impl TerminalWgpuRenderer {
             let mut text_batch_count = 0;
             let mut image_vertex_count = 0;
 
-            self.text_builder.begin_text_frame();
+            text_builder.begin_text_frame();
             for command in &frame.commands {
                 match command {
                     TerminalRenderCommand::Text(text) => {
@@ -536,13 +574,13 @@ impl TerminalWgpuRenderer {
                             &mut text_batches,
                             &mut text_batch_dirty,
                             &mut text_batch_count,
-                            &mut self.text_builder,
+                            text_builder,
                             text,
                             raster_ppp,
                         );
                     }
                     TerminalRenderCommand::Sprite(sprite) => {
-                        let quad = self.text_builder.prepare_sprite_command(sprite, raster_ppp);
+                        let quad = text_builder.prepare_sprite_command(sprite, raster_ppp);
                         push_text_quad(
                             &mut self.layers,
                             &mut text_batches,
@@ -601,7 +639,7 @@ impl TerminalWgpuRenderer {
                     TerminalRenderCommand::KittyVirtualPlacement(_) => {}
                 }
             }
-            self.text_builder.finish_text_frame();
+            text_builder.finish_text_frame();
 
             let background_vertex_count = self.prepare_background_resources(
                 device,
@@ -611,6 +649,7 @@ impl TerminalWgpuRenderer {
             let text_vertex_count = self.prepare_text_resources(
                 device,
                 queue,
+                text_builder,
                 render_surface,
                 text_batches[..text_batch_count].iter().map(Vec::as_slice),
                 &text_batch_dirty[..text_batch_count],
@@ -620,9 +659,9 @@ impl TerminalWgpuRenderer {
             self.text_batch_dirty_scratch = text_batch_dirty;
 
             let vertex_count = image_vertex_count + background_vertex_count + text_vertex_count;
-            let grew_during_build = self.text_builder.atlas_resized_count() != atlas_resized_count;
+            let grew_during_build = text_builder.atlas_resized_count() != atlas_resized_count;
             if grew_during_build && build_attempt < 2 {
-                atlas_resized_count = self.text_builder.atlas_resized_count();
+                atlas_resized_count = text_builder.atlas_resized_count();
                 continue;
             }
             if update_frame_cache && !grew_during_build {
@@ -727,6 +766,7 @@ impl TerminalWgpuRenderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        text_builder: &TextAtlasBuilder,
         surface: SurfaceRect,
         batches: impl Iterator<Item = &'a [TexturedGlyphQuad]>,
         dirty_batches: &[bool],
@@ -737,7 +777,7 @@ impl TerminalWgpuRenderer {
             return 0;
         }
 
-        self.prepare_text_texture(device, queue);
+        self.prepare_text_texture(device, queue, text_builder);
         if self.text_texture.is_none() {
             self.text_resources = None;
             return 0;
@@ -769,11 +809,16 @@ impl TerminalWgpuRenderer {
         vertex_count
     }
 
-    fn prepare_text_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let (width, height) = self.text_builder.atlas_size();
-        let format = self.text_builder.atlas_format();
-        let modified_count = self.text_builder.atlas_modified_count();
-        let resized_count = self.text_builder.atlas_resized_count();
+    fn prepare_text_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        text_builder: &TextAtlasBuilder,
+    ) {
+        let (width, height) = text_builder.atlas_size();
+        let format = text_builder.atlas_format();
+        let modified_count = text_builder.atlas_modified_count();
+        let resized_count = text_builder.atlas_resized_count();
         let needs_texture = self.text_texture.as_ref().is_none_or(|texture| {
             texture.width != width
                 || texture.height != height
@@ -808,7 +853,7 @@ impl TerminalWgpuRenderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            self.text_builder.atlas_pixels(),
+            text_builder.atlas_pixels(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * format.depth()),

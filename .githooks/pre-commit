@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
 
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -W clippy::all
+mise exec -- cargo fmt --check
+mise exec -- cargo hakari generate --diff
+mise exec -- cargo hakari manage-deps --dry-run
+mise exec -- cargo clippy --workspace --all-targets -- -W clippy::all

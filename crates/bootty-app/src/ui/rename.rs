@@ -17,6 +17,25 @@ pub enum RenameSessionEvent {
     Rename { session_id: String, name: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameTabDialog {
+    session_id: String,
+    window_id: String,
+    name: String,
+    focus: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenameTabEvent {
+    None,
+    Close,
+    Rename {
+        session_id: String,
+        window_id: String,
+        name: String,
+    },
+}
+
 impl RenameSessionDialog {
     pub fn open(session_id: String, current_name: String) -> Self {
         Self {
@@ -55,6 +74,49 @@ impl RenameSessionDialog {
             return RenameSessionEvent::Close;
         }
         RenameSessionEvent::None
+    }
+}
+
+impl RenameTabDialog {
+    pub fn open(session_id: String, window_id: String, current_name: String) -> Self {
+        Self {
+            session_id,
+            window_id,
+            name: current_name,
+            focus: true,
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, theme: Theme) -> RenameTabEvent {
+        let normalized = normalized_name(&self.name);
+        let validation = normalized.is_none().then_some("name cannot be empty");
+
+        let result = FloatingWindow::new("rename-tab-dialog", "Rename Tab")
+            .icon("square-pen")
+            .hint("Enter rename   Esc close")
+            .width(overlay::panel_width(ctx, 520.0, 360.0))
+            .show(ctx, theme, |ui, _palette| {
+                TextPrompt::new("rename-tab-field")
+                    .caption("tab name")
+                    .hint("new tab name...")
+                    .validation(validation)
+                    .submit_disabled(normalized.is_none())
+                    .show(ui, theme, &mut self.name, &mut self.focus)
+            });
+
+        if result.inner.submitted
+            && let Some(name) = normalized
+        {
+            return RenameTabEvent::Rename {
+                session_id: self.session_id.clone(),
+                window_id: self.window_id.clone(),
+                name,
+            };
+        }
+        if result.escaped || result.clicked_outside {
+            return RenameTabEvent::Close;
+        }
+        RenameTabEvent::None
     }
 }
 

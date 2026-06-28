@@ -8,6 +8,7 @@ bootty-render = { path = "../bootty-render" }
 bootty-runtime = { path = "../bootty-runtime" }
 bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
+bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [lints]
 workspace = true

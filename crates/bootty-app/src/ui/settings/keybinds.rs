@@ -5,7 +5,7 @@ use crate::config::load_or_create_config_document;
 
 /// Which keybind list is being edited: the global list, one of the per-backend lists, or the
 /// sidebar navigation list (which has its own action vocabulary).
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(super) enum KeybindScope {
     Global,
     Native,
@@ -685,7 +685,7 @@ fn binding_editor_row(
                         if cap.steps.is_empty() {
                             "Press keys… Esc to cancel".to_owned()
                         } else {
-                            cap.steps.join(" ▸ ")
+                            cap.steps.join(" > ")
                         }
                     })
                     .unwrap_or_default();
@@ -697,7 +697,12 @@ fn binding_editor_row(
                     *ctx.toggle_capture = Some(ctx.index);
                 }
 
-                ui.label(egui::RichText::new("→").color(palette.muted));
+                if let Some(icon) = crate::ui::icons::icon_text("arrow-right", 14.0, palette.muted)
+                {
+                    ui.label(icon);
+                } else {
+                    ui.label(egui::RichText::new("->").color(palette.muted));
+                }
 
                 // Title + description picker, drawn from the shared action catalog.
                 let options = action_options(ctx.scope);
