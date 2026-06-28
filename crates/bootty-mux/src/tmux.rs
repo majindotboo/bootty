@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use super::{
     backend::MuxBackend,
-    command::{MuxCommand, MuxDirection},
+    command::{MuxCommand, MuxDirection, MuxSplitDirection},
     config::MuxBackendKind,
     process::{CommandRunner, SystemCommandRunner, require_success},
     snapshot::{MuxPaneAnchor, MuxSession, MuxSnapshot, MuxWindow},
@@ -135,6 +135,13 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                 }
                 self.run_owned(args)?;
             }
+            MuxCommand::RenameWindow {
+                session_id: _,
+                window_id,
+                name,
+            } => {
+                self.run_owned(vec!["rename-window".into(), "-t".into(), window_id, name])?;
+            }
             MuxCommand::ActivateNextWindow { session_id } => {
                 self.run_owned(vec!["next-window".into(), "-t".into(), session_id])?;
             }
@@ -163,8 +170,21 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     self.run(&["select-window", "-t", target])?;
                 }
             }
-            MuxCommand::SplitPane { session_id, .. } => {
-                self.run_owned(vec!["split-window".into(), "-t".into(), session_id])?;
+            MuxCommand::SplitPane {
+                session_id,
+                direction,
+                ..
+            } => {
+                let flag = match direction {
+                    MuxSplitDirection::Right => "-h",
+                    MuxSplitDirection::Down => "-v",
+                };
+                self.run_owned(vec![
+                    "split-window".into(),
+                    flag.into(),
+                    "-t".into(),
+                    session_id,
+                ])?;
             }
             MuxCommand::SelectPane {
                 session_id,
@@ -347,6 +367,7 @@ fn add_tmux_windows(sessions: &mut [MuxSession], panes_output: &str) -> Result<(
             // tmux owns its own pane layout; bootty renders the single attach surface, so expose
             // just the attach anchor here.
             panes: vec![anchor.clone()],
+            layout: None,
             anchor,
         });
     }

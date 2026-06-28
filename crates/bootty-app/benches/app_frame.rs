@@ -167,6 +167,7 @@ fn sidebar_sessions(count: usize) -> Vec<MuxSession> {
                         active: window == 0,
                         anchor: anchor.clone(),
                         panes: Vec::new(),
+                        layout: None,
                     })
                     .collect(),
             }
@@ -350,7 +351,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         terminal_widget_frame(ui, &mut terminal, &mut widget);
                     });
                 },
@@ -368,7 +369,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                     ..Default::default()
                 },
                 |ui| {
-                    egui::CentralPanel::default().show_inside(ui, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
                         sidebar_ui_frame(ui, black_box(&sessions), selected);
                         status_ui_frame(ui, selected);
                     });
@@ -395,7 +396,7 @@ fn bench_egui_app_frames(c: &mut Criterion) {
                         ..Default::default()
                     },
                     |ui| {
-                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                        egui::CentralPanel::default().show(ui, |ui| {
                             sidebar_ui_frame(ui, black_box(&sessions), selected);
                             status_ui_frame(ui, selected);
                             terminal_widget_frame(ui, &mut terminal, &mut widget);

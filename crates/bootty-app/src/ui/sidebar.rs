@@ -73,6 +73,41 @@ pub fn build_visible_sidebar_items<'a>(
     build_sidebar_items_inner(sessions, selected_session, Some(max_rows))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidebarSessionColor<'a> {
+    pub session_id: &'a str,
+    pub color: Color32,
+    pub dim_color: Color32,
+}
+
+pub fn sidebar_session_colors(sessions: &[MuxSession]) -> Vec<SidebarSessionColor<'_>> {
+    let mut group_meta = GroupMeta::new(sessions);
+    let dynamic_total = group_meta.dynamic_total;
+    sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, session)| {
+            let group_info = group_meta.session(index)?;
+            let group_total = if group_info.name.is_empty() {
+                0
+            } else {
+                group_info.count
+            };
+            let (color, dim_color) = computed_color(
+                group_info.index,
+                dynamic_total,
+                group_info.position,
+                group_total,
+            );
+            Some(SidebarSessionColor {
+                session_id: session.id.as_str(),
+                color,
+                dim_color,
+            })
+        })
+        .collect()
+}
+
 pub fn build_sidebar_items_from_module_items<'a>(
     items: &'a [ModuleItem],
     selected_session: Option<&str>,
@@ -564,6 +599,20 @@ mod tests {
             .map(|item| item.session_id)
             .collect::<Vec<_>>();
         assert_eq!(current, vec![Some("$2")]);
+    }
+
+    #[test]
+    fn ungrouped_native_sessions_get_distinct_accent_colors() {
+        let sessions = vec![
+            session("local", "local", "zsh"),
+            session("project", "project", "fish"),
+        ];
+
+        let colors = sidebar_session_colors(&sessions);
+
+        assert_eq!(colors.len(), 2);
+        assert_ne!(colors[0].color, colors[1].color);
+        assert_ne!(colors[0].dim_color, colors[1].dim_color);
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub enum Command {
         detailed_message = "Toggle back to the most recently used tab"
     )]
     LastTab,
+    #[strum(message = "Rename Tab", detailed_message = "Rename the current tab")]
+    RenameTab,
     #[strum(
         message = "Split Right",
         detailed_message = "Split the current pane horizontally"
@@ -284,6 +286,7 @@ impl Command {
             Self::NextTab => "next_tab",
             Self::PreviousTab => "previous_tab",
             Self::LastTab => "last_tab",
+            Self::RenameTab => "rename_tab",
             Self::SplitRight => "split_right",
             Self::SplitDown => "split_down",
             Self::NextPane => "next_pane",
@@ -341,6 +344,7 @@ impl Command {
             Self::NextTab => "chevron-right",
             Self::PreviousTab => "chevron-left",
             Self::LastTab => "arrow-right-to-line",
+            Self::RenameTab => "pencil",
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
             Self::NextPane => "layout-grid",

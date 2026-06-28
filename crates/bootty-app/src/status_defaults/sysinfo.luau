@@ -53,8 +53,13 @@ return {
 		if m.battery ~= nil then
 			local remaining = battery_time()
 			local low = (not m.on_ac) and m.battery <= 20
+			local battery_icon = nil
+			if m.on_ac then
+				battery_icon = if m.battery >= 99.5 then "battery-full" else "battery-charging"
+			end
 			cell({
 				gauge = m.battery / 100,
+				icon = battery_icon,
 				text = if remaining then string.format("%.0f%% %s", m.battery, remaining) else string.format("%.0f%%", m.battery),
 				fg = if low then bootty.theme.warning elseif m.on_ac then bootty.theme.success else bootty.theme.text,
 			})

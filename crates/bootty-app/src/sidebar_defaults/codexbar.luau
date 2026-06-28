@@ -1,9 +1,8 @@
 --!strict
 -- Built-in sidebar `codexbar` module. Override with ~/.config/bootty/sidebar/codexbar.luau.
--- Backed by the CodexBar CLI. Provider fetches are independent; a missing provider
--- should not suppress rows from another configured provider.
+-- Backed by a persistent CodexBar localhost server managed by Bootty. Provider fetches
+-- are independent; a missing provider should not suppress rows from another provider.
 local ui = bootty.ui
-local stderr_null = ui.stderr_null
 
 local PROVIDERS = {
 	{
@@ -147,12 +146,8 @@ local function error_message(data)
 end
 
 
-local function usage_command(provider)
-	return "codexbar usage --provider " .. provider.id .. " --format json --json-only " .. stderr_null
-end
-
 local function provider_items(provider)
-	local raw = bootty.run(usage_command(provider))
+	local raw = bootty.codexbar_usage(provider.id)
 	if raw == "" then
 		return {}, nil
 	end
@@ -200,8 +195,8 @@ local function usage_items()
 end
 
 return {
-	-- The extension host re-runs this module on this cadence; no Bootty usage cache exists.
-	-- Each provider is one CodexBar fetch, so keep PROVIDERS short to bound per-tick work.
+	-- CodexBar's server owns provider refresh/caching; this cadence only refreshes Bootty rows.
+	-- Each provider is one localhost request, so keep PROVIDERS short to bound render work.
 	interval = 60,
 	render = usage_items,
 }

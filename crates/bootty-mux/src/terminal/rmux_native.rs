@@ -1,975 +1,1733 @@
 use std::{
-    io::{Read, Write},
-    sync::{Arc, mpsc},
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
+use bootty_runtime::{
+    DrainStats, TerminalSessionConfig,
+    render_source::TerminalRenderSource,
+    terminal_session::{should_publish_frame_after_work, sync_output_suppresses_publish},
+};
 use bootty_surface::geometry::TerminalGeometry;
 use bootty_terminal::{
-    terminal_engine::TerminalColorConfig,
-    terminal_frame::{CellStyle, CursorSnapshot, FrameColors, FrameStats, RenderCell, RenderFrame},
-    terminal_input_model::{KeyInput, MouseAction, MouseButton, MouseInput},
+    terminal_engine::{
+        NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCursorConfig,
+        TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat,
+        TerminalSideEffect,
+    },
+    terminal_frame::RenderFrame,
+    terminal_input_model::{KeyInput, MouseInput},
 };
-use rmux_ipc::{LocalEndpoint, connect_blocking};
-use rmux_proto::{
-    AttachFrameDecoder, AttachMessage, AttachSessionExt2Request, ClientTerminalContext,
-    FrameDecoder, Request, Response, TerminalGeometry as RmuxTerminalGeometry, TerminalPixels,
-    TerminalSize, encode_attach_message, encode_frame,
-};
-use rmux_sdk::{
-    Pane, PaneAttributes, PaneColor, PaneId, PaneRef, PaneSnapshot, Rmux, RmuxEndpoint,
-    SessionName, TerminalSizeSpec,
-};
-use tokio::runtime::{Builder, Runtime};
+use rmux_sdk::{PaneOutputChunk, TerminalSizeSpec};
 
-use bootty_runtime::{DrainStats, render_source::TerminalRenderSource};
+use crate::rmux_bridge::{RmuxPaneEvent, RmuxPaneIo, RmuxPaneTarget, open_rmux_pane_io};
 
 use super::pane::{MuxPaneTarget, TerminalRuntime};
 
+const RMUX_MAX_DRAIN_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+const RMUX_MAX_DRAIN_CHUNKS_PER_TICK: usize = 32;
+const RMUX_MAX_DRAIN_SLICE_BYTES: usize = 8 * 1024;
+const RMUX_MAX_DRAIN_TIME_US: u128 = 20_000;
+const RMUX_INPUT_FAST_PATH_DRAIN_BYTES: usize = 64 * 1024;
+const RMUX_INPUT_FAST_PATH_DRAIN_CHUNKS: usize = 8;
+const RMUX_INPUT_FAST_PATH_DRAIN_TIME_US: u128 = 2_000;
+const RMUX_RESTORE_DRAIN_BYTES_PER_TICK: usize = 64 * 1024;
+const RMUX_RESTORE_DRAIN_CHUNKS_PER_TICK: usize = 4;
+const RMUX_RESTORE_DRAIN_TIME_US: u128 = 2_000;
+const RMUX_MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+const RMUX_MAX_COLLECT_CHUNKS_PER_TICK: usize = 256;
+const RMUX_WORKER_IDLE_SLEEP: Duration = Duration::from_millis(4);
+const RMUX_INITIAL_FRAME_AGE: Duration = Duration::from_millis(16);
+const RMUX_RESTORE_MAX_SCROLLBACK_LINES: usize = 10_000;
+
 pub(super) struct RmuxNativeTerminal {
-    runtime: Runtime,
-    pane: Pane,
-    attach: RmuxAttachedClient,
+    command_tx: mpsc::Sender<RmuxTerminalCommand>,
+    latest_frame: Arc<RmuxPublishedFrame>,
+    latest_drain: Arc<Mutex<DrainStats>>,
+    pending_output_len: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+    error_rx: mpsc::Receiver<String>,
     geometry: TerminalGeometry,
-    colors: TerminalColorConfig,
-    latest_frame: Arc<RenderFrame>,
+    needs_initial_resize: bool,
+}
+
+struct RmuxPublishedFrame {
+    latest: Mutex<Arc<RenderFrame>>,
+}
+
+impl RmuxPublishedFrame {
+    fn new() -> Self {
+        Self {
+            latest: Mutex::new(Arc::new(RenderFrame::default())),
+        }
+    }
+
+    fn load(&self) -> Result<Arc<RenderFrame>> {
+        self.latest
+            .lock()
+            .map(|latest| Arc::clone(&latest))
+            .map_err(|_| anyhow::anyhow!("rmux frame cache lock poisoned"))
+    }
+
+    fn publish(&self, frame: RenderFrame) -> Result<()> {
+        let mut latest = self
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("rmux frame cache lock poisoned"))?;
+        *latest = Arc::new(frame);
+        Ok(())
+    }
+}
+
+enum RmuxTerminalCommand {
+    Resize(TerminalGeometry),
+    ForceResize,
+    Colors(TerminalColorConfig),
+    Cursor(TerminalCursorConfig),
+    Features(TerminalFeatureConfig),
+    Key(KeyInput),
+    Focus(bool),
+    Mouse(MouseInput),
+    MouseWheel {
+        input: MouseInput,
+        scroll_delta: isize,
+    },
+    Paste(String),
+    InputText(String),
+    MouseViewportScroll {
+        delta: isize,
+    },
+    SelectionBegin(TerminalSelectionEvent),
+    SelectionUpdate(TerminalSelectionEvent),
+    SelectionEnd(Option<TerminalSelectionEvent>),
+    FormatSelection {
+        format: TerminalSelectionFormat,
+        done: mpsc::Sender<std::result::Result<Option<Vec<u8>>, String>>,
+    },
+    IsMouseTracking {
+        done: mpsc::Sender<std::result::Result<bool, String>>,
+    },
+    DiscardPendingOutput {
+        done: mpsc::Sender<std::result::Result<(), String>>,
+    },
+    Stop,
+}
+
+struct RmuxWorkerConfig {
+    pane_io: RmuxPaneIo,
+    geometry: TerminalGeometry,
+    terminal_config: TerminalSessionConfig,
+    command_rx: mpsc::Receiver<RmuxTerminalCommand>,
+    latest_frame: Arc<RmuxPublishedFrame>,
+    latest_drain: Arc<Mutex<DrainStats>>,
+    pending_output_len: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+    error_tx: mpsc::Sender<String>,
+    repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+struct RmuxWorker {
+    pane_io: RmuxPaneIo,
+    geometry: TerminalGeometry,
+    engine: TerminalEngine,
+    engine_input_rx: mpsc::Receiver<Vec<u8>>,
+    command_rx: mpsc::Receiver<RmuxTerminalCommand>,
+    latest_frame: Arc<RmuxPublishedFrame>,
+    latest_drain: Arc<Mutex<DrainStats>>,
+    pending_output: RmuxOutputBacklog,
+    pending_restore_output: RmuxOutputBacklog,
+    pending_output_len: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+    error_tx: mpsc::Sender<String>,
+    repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
+    side_effect_tx: Option<mpsc::Sender<TerminalSideEffect>>,
+    output_buf: Vec<u8>,
+    last_frame_publish: Instant,
+    has_unpublished_frame: bool,
+    force_next_frame_publish: bool,
+    sync_output_since: Option<Instant>,
+    last_terminal_change: Option<Instant>,
+    scroll_bottom_after_output: bool,
+    command_disconnected: bool,
+    output_closed: bool,
+}
+
+struct RmuxOutputBacklog {
+    chunks: VecDeque<RmuxPendingOutput>,
+    len: usize,
+}
+
+struct RmuxPendingOutput {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl RmuxOutputBacklog {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            chunks: VecDeque::with_capacity(capacity),
+            len: 0,
+        }
+    }
+
+    fn push_back(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.len += bytes.len();
+        self.chunks
+            .push_back(RmuxPendingOutput { bytes, offset: 0 });
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.len = 0;
+    }
+
+    fn front_len(&self) -> Option<usize> {
+        self.chunks
+            .front()
+            .map(|front| front.bytes.len().saturating_sub(front.offset))
+    }
+
+    fn consume_front(&mut self, len: usize, mut consume: impl FnMut(&[u8])) {
+        if len == 0 {
+            return;
+        }
+        let mut consumed = 0;
+        let mut remove_front = false;
+        if let Some(front) = self.chunks.front_mut() {
+            let available = front.bytes.len().saturating_sub(front.offset);
+            let amount = len.min(available);
+            let start = front.offset;
+            let end = start + amount;
+            consume(&front.bytes[start..end]);
+            front.offset = end;
+            consumed = amount;
+            remove_front = front.offset >= front.bytes.len();
+        }
+        if remove_front {
+            self.chunks.pop_front();
+        }
+        self.len = self.len.saturating_sub(consumed);
+    }
+}
+
+#[derive(Default)]
+struct RmuxCommandStats {
+    did_work: bool,
+    terminal_changed: bool,
 }
 
 impl RmuxNativeTerminal {
     pub(super) fn new(
         target: MuxPaneTarget,
         geometry: TerminalGeometry,
-        colors: TerminalColorConfig,
+        config: TerminalSessionConfig,
+        repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<Self> {
-        let runtime = Builder::new_current_thread().enable_all().build()?;
-        let session_name = SessionName::new(target.session_id())
-            .context("invalid rmux session name for native render")?;
-        let pane_id = target
-            .input_selector()
-            .strip_prefix('%')
-            .and_then(|value| value.parse::<u32>().ok())
-            .map(PaneId::from);
-        let pane = runtime.block_on(async {
-            let endpoint = rmux_ipc::default_endpoint()
-                .map_err(rmux_sdk::RmuxError::from)?
-                .into_path();
-            let rmux = Rmux::connect_or_start_at(RmuxEndpoint::UnixSocket(endpoint)).await?;
-            if let Some(pane_id) = pane_id {
-                return rmux.pane_by_id(session_name, pane_id).await;
-            }
-            Ok(rmux.session(session_name).await?.pane(0, 0))
-        })?;
-        let attach = RmuxAttachedClient::connect(pane.endpoint(), pane.target(), geometry)?;
-        let mut terminal = Self {
-            runtime,
-            pane,
-            attach,
+        let pane_target = RmuxPaneTarget::new(
+            target.session_id().to_owned(),
+            match &target {
+                MuxPaneTarget::Pane { pane_id, .. } => Some(pane_id.clone()),
+                MuxPaneTarget::Session { .. } => None,
+            },
+        );
+        let restore_lines = rmux_restore_lines(config.max_scrollback, geometry.rows);
+        let pane_io = open_rmux_pane_io(pane_target, restore_lines)?;
+        let (command_tx, command_rx) = mpsc::channel();
+        let (error_tx, error_rx) = mpsc::channel();
+        let latest_frame = Arc::new(RmuxPublishedFrame::new());
+        let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
+        let pending_output_len = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        spawn_rmux_terminal_worker(RmuxWorkerConfig {
+            pane_io,
             geometry,
-            colors,
-            latest_frame: Arc::new(RenderFrame::default()),
-        };
-        terminal.resize(geometry)?;
-        Ok(terminal)
+            terminal_config: config,
+            command_rx,
+            latest_frame: Arc::clone(&latest_frame),
+            latest_drain: Arc::clone(&latest_drain),
+            pending_output_len: Arc::clone(&pending_output_len),
+            closed: Arc::clone(&closed),
+            error_tx,
+            repaint_wakeup,
+        })?;
+        Ok(Self {
+            command_tx,
+            latest_frame,
+            latest_drain,
+            pending_output_len,
+            closed,
+            error_rx,
+            geometry,
+            needs_initial_resize: true,
+        })
     }
 
-    fn refresh_frame(&mut self) -> Result<()> {
-        let snapshot = self.runtime.block_on(self.pane.snapshot())?;
-        self.latest_frame = Arc::new(render_frame_from_snapshot(&snapshot, &self.colors));
+    fn send_command(&mut self, command: RmuxTerminalCommand) -> Result<()> {
+        self.check_worker_error()?;
+        self.command_tx
+            .send(command)
+            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))
+    }
+
+    fn request<T>(
+        &mut self,
+        build: impl FnOnce(mpsc::Sender<std::result::Result<T, String>>) -> RmuxTerminalCommand,
+    ) -> Result<T> {
+        self.check_worker_error()?;
+        let (done, response_rx) = mpsc::channel();
+        self.command_tx
+            .send(build(done))
+            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))?;
+        response_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))?
+            .map_err(|error| anyhow::anyhow!(error))
+    }
+
+    fn queue_resize(&mut self) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::Resize(self.geometry))
+    }
+
+    fn queue_input_text(&mut self, text: &str) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.send_command(RmuxTerminalCommand::InputText(text.to_owned()))
+    }
+
+    fn check_worker_error(&mut self) -> Result<()> {
+        let mut error = None;
+        while let Ok(next) = self.error_rx.try_recv() {
+            error = Some(next);
+        }
+        if let Some(error) = error {
+            anyhow::bail!(error);
+        }
         Ok(())
+    }
+
+    fn take_drain_stats(&self) -> DrainStats {
+        let Ok(mut stats) = self.latest_drain.lock() else {
+            return DrainStats::default();
+        };
+        let drained = *stats;
+        *stats = DrainStats::default();
+        drained
+    }
+
+    fn write_literal_input(&mut self, bytes: &[u8]) -> Result<()> {
+        let text = literal_input_text(bytes)?;
+        self.queue_input_text(text)
     }
 }
 
 impl TerminalRenderSource for RmuxNativeTerminal {
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
-        if self.geometry != geometry {
+        if self.needs_initial_resize || self.geometry != geometry {
             self.geometry = geometry;
-            self.attach.resize(geometry)?;
-            self.runtime.block_on(
-                self.pane
-                    .resize(TerminalSizeSpec::new(geometry.cols, geometry.rows)),
-            )?;
+            self.needs_initial_resize = false;
+            self.queue_resize()?;
         }
-        self.refresh_frame()
+        self.check_worker_error()
     }
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
-        self.refresh_frame()?;
-        Ok(Arc::clone(&self.latest_frame))
+        self.check_worker_error()?;
+        self.latest_frame.load()
+    }
+
+    fn is_mouse_tracking(&mut self) -> Result<bool> {
+        self.request(|done| RmuxTerminalCommand::IsMouseTracking { done })
+    }
+
+    fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::MouseViewportScroll { delta })
+    }
+
+    fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::SelectionBegin(event))
+    }
+
+    fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::SelectionUpdate(event))
+    }
+
+    fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::SelectionEnd(event))
     }
 }
 
 impl TerminalRuntime for RmuxNativeTerminal {
     fn drain_pty(&mut self) -> DrainStats {
-        DrainStats::default()
+        let _ = self.check_worker_error();
+        self.take_drain_stats()
     }
 
     fn pending_pty_len(&self) -> usize {
-        0
+        self.pending_output_len.load(Ordering::Relaxed)
     }
 
     fn child_exited(&mut self) -> Result<bool> {
-        Ok(false)
+        self.check_worker_error()?;
+        Ok(self.closed.load(Ordering::Relaxed))
+    }
+
+    fn discard_pending_output(&mut self) -> Result<()> {
+        self.request(|done| RmuxTerminalCommand::DiscardPendingOutput { done })
+    }
+
+    fn force_resize(&mut self) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::ForceResize)
+    }
+
+    fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+        self.request(|done| RmuxTerminalCommand::FormatSelection { format, done })
+    }
+
+    fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::Cursor(cursor))
+    }
+
+    fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::Features(features))
     }
 
     fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
-        self.colors = colors;
-        self.refresh_frame()
+        self.send_command(RmuxTerminalCommand::Colors(colors))
     }
 
     fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
-        self.attach.write_input(bytes)
+        self.write_literal_input(bytes)
     }
 
     fn write_paste(&mut self, text: &str) -> Result<()> {
-        self.runtime.block_on(self.pane.send_text(text))?;
-        Ok(())
+        self.send_command(RmuxTerminalCommand::Paste(text.to_owned()))
     }
 
     fn encode_key(&mut self, input: KeyInput) -> Result<()> {
-        if let Some(token) = rmux_key_token(input) {
-            self.runtime.block_on(self.pane.send_key(token))?;
-        }
-        Ok(())
+        self.send_command(RmuxTerminalCommand::Key(input))
     }
 
-    fn encode_focus(&mut self, _gained: bool) -> Result<()> {
-        Ok(())
+    fn encode_focus(&mut self, gained: bool) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::Focus(gained))
     }
 
     fn encode_mouse(&mut self, input: MouseInput) -> Result<()> {
-        self.runtime
-            .block_on(self.pane.send_text(rmux_mouse_input(input)))?;
-        Ok(())
+        self.send_command(RmuxTerminalCommand::Mouse(input))
     }
 
-    fn handle_mouse_wheel(&mut self, input: MouseInput, _scroll_delta: isize) -> Result<()> {
-        self.encode_mouse(input)
+    fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::MouseWheel {
+            input,
+            scroll_delta,
+        })
     }
 }
 
-pub(super) fn render_frame_from_snapshot(
-    snapshot: &PaneSnapshot,
-    colors: &TerminalColorConfig,
-) -> RenderFrame {
-    let start = Instant::now();
-    let mut frame = RenderFrame {
-        cols: snapshot.cols,
-        rows: snapshot.rows,
-        colors: FrameColors {
-            background: colors.background,
-            foreground: colors.foreground,
-            cursor: colors.cursor,
-            cursor_text: colors.cursor_text,
-            selection_background: colors.selection_background,
-            selection_foreground: colors.selection_foreground,
-        },
-        row_dirty: vec![true; usize::from(snapshot.rows)],
-        ..RenderFrame::default()
-    };
+impl Drop for RmuxNativeTerminal {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(RmuxTerminalCommand::Stop);
+    }
+}
 
-    for (index, cell) in snapshot.cells.iter().enumerate() {
-        if cell.glyph.padding
-            || cell.glyph.text.is_empty()
-            || is_kitty_virtual_placeholder(&cell.glyph.text)
+fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
+    let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let (engine_input_tx, engine_input_rx) = mpsc::channel();
+        let mut engine = match TerminalEngine::new_with_terminal_options(
+            config.geometry,
+            config.terminal_config.colors,
+            config.terminal_config.cursor,
+            config.terminal_config.features,
+            config.terminal_config.max_scrollback,
+            config.terminal_config.macos_option_as_alt,
+        ) {
+            Ok(engine) => engine,
+            Err(error) => {
+                let _ = startup_tx.send(Err(error.to_string()));
+                return;
+            }
+        };
+        if let Err(error) = engine.on_pty_write(move |_terminal, bytes| {
+            let _ = engine_input_tx.send(bytes.to_vec());
+        }) {
+            let _ = startup_tx.send(Err(error.to_string()));
+            return;
+        }
+        let worker = RmuxWorker {
+            pane_io: config.pane_io,
+            geometry: config.geometry,
+            engine,
+            engine_input_rx,
+            command_rx: config.command_rx,
+            latest_frame: config.latest_frame,
+            latest_drain: config.latest_drain,
+            pending_output: RmuxOutputBacklog::with_capacity(RMUX_MAX_COLLECT_CHUNKS_PER_TICK),
+            pending_restore_output: RmuxOutputBacklog::with_capacity(1),
+            pending_output_len: config.pending_output_len,
+            closed: config.closed,
+            error_tx: config.error_tx,
+            repaint_wakeup: config.repaint_wakeup,
+            side_effect_tx: config.terminal_config.side_effect_tx,
+            output_buf: Vec::with_capacity(1024),
+            last_frame_publish: Instant::now() - RMUX_INITIAL_FRAME_AGE,
+            has_unpublished_frame: false,
+            force_next_frame_publish: false,
+            sync_output_since: None,
+            last_terminal_change: None,
+            scroll_bottom_after_output: false,
+            command_disconnected: false,
+            output_closed: false,
+        };
+        let _ = startup_tx.send(Ok(()));
+        worker.run();
+    });
+
+    startup_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("rmux terminal worker failed to start"))?
+        .map_err(|error| anyhow::anyhow!(error))
+}
+
+impl RmuxWorker {
+    fn run(mut self) {
+        loop {
+            let command_stats = self.process_commands();
+            let mut did_work = command_stats.did_work;
+            let mut terminal_changed = command_stats.terminal_changed;
+            did_work |= self.collect_pane_output();
+            let stats = self.drain_pending_output();
+            terminal_changed |= stats.bytes > 0;
+            did_work |= stats.bytes > 0;
+            terminal_changed |= self.drain_engine_input();
+            self.drain_input_results();
+            self.forward_side_effects();
+
+            if terminal_changed {
+                self.mark_unpublished_frame();
+            }
+
+            if did_work {
+                self.publish_drain(stats);
+                if self.should_publish_frame() {
+                    self.publish_frame();
+                    self.last_frame_publish = Instant::now();
+                }
+            } else {
+                if self.should_publish_frame() {
+                    self.publish_frame();
+                    self.last_frame_publish = Instant::now();
+                    continue;
+                }
+                if self.should_stop() {
+                    break;
+                }
+                thread::sleep(RMUX_WORKER_IDLE_SLEEP);
+            }
+        }
+    }
+
+    fn process_commands(&mut self) -> RmuxCommandStats {
+        let mut stats = RmuxCommandStats::default();
+        loop {
+            let command = match self.command_rx.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.command_disconnected = true;
+                    break;
+                }
+            };
+            stats.did_work = true;
+            match command {
+                RmuxTerminalCommand::Resize(geometry) => {
+                    self.mark_input_fast_path();
+                    self.geometry = geometry;
+                    self.queue_resize(geometry);
+                    if self.engine.resize(geometry).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::ForceResize => {
+                    self.mark_input_fast_path();
+                    self.queue_resize(self.geometry);
+                    stats.terminal_changed = true;
+                }
+                RmuxTerminalCommand::Colors(colors) => {
+                    if self.engine.set_colors(colors).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::Cursor(cursor) => {
+                    if self.engine.set_cursor_config(cursor).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::Features(features) => {
+                    if self.engine.set_feature_config(features).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::Key(input) => {
+                    self.mark_input_fast_path();
+                    self.engine.scroll_viewport_bottom();
+                    stats.terminal_changed = true;
+                    if self
+                        .engine
+                        .encode_key_to_vec(input, &mut self.output_buf)
+                        .is_ok()
+                    {
+                        self.write_output_buf();
+                    }
+                }
+                RmuxTerminalCommand::Focus(gained) => {
+                    self.mark_input_fast_path();
+                    if self
+                        .engine
+                        .encode_focus_to_vec(gained, &mut self.output_buf)
+                        .is_ok()
+                    {
+                        self.write_output_buf();
+                    }
+                }
+                RmuxTerminalCommand::Mouse(input) => {
+                    self.mark_input_fast_path();
+                    if self
+                        .engine
+                        .encode_mouse_to_vec(input, &mut self.output_buf)
+                        .is_ok()
+                    {
+                        self.write_output_buf();
+                    }
+                }
+                RmuxTerminalCommand::MouseWheel {
+                    input,
+                    scroll_delta,
+                } => match self.engine.is_mouse_tracking() {
+                    Ok(true) => {
+                        self.mark_input_fast_path();
+                        if self
+                            .engine
+                            .encode_mouse_to_vec(input, &mut self.output_buf)
+                            .is_ok()
+                        {
+                            self.write_output_buf();
+                        }
+                    }
+                    Ok(false) if scroll_delta != 0 => {
+                        self.mark_input_fast_path();
+                        self.engine.scroll_viewport_delta(scroll_delta);
+                        stats.terminal_changed = true;
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.send_error(error),
+                },
+                RmuxTerminalCommand::Paste(text) => {
+                    self.mark_input_fast_path();
+                    self.engine.scroll_viewport_bottom();
+                    stats.terminal_changed = true;
+                    if self
+                        .engine
+                        .encode_paste_to_vec(&text, &mut self.output_buf)
+                        .is_ok()
+                    {
+                        self.write_output_buf();
+                    }
+                }
+                RmuxTerminalCommand::InputText(text) => {
+                    self.mark_input_fast_path();
+                    self.engine.scroll_viewport_bottom();
+                    stats.terminal_changed = true;
+                    self.queue_input_text(&text);
+                }
+                RmuxTerminalCommand::MouseViewportScroll { delta } => {
+                    self.mark_input_fast_path();
+                    self.engine.scroll_viewport_delta(delta);
+                    stats.terminal_changed = true;
+                }
+                RmuxTerminalCommand::SelectionBegin(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.begin_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::SelectionUpdate(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.update_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::SelectionEnd(event) => {
+                    self.mark_input_fast_path();
+                    if self.engine.end_selection(event).is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
+                RmuxTerminalCommand::FormatSelection { format, done } => {
+                    let response = self
+                        .engine
+                        .format_selection(format)
+                        .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                RmuxTerminalCommand::IsMouseTracking { done } => {
+                    let response = self
+                        .engine
+                        .is_mouse_tracking()
+                        .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                RmuxTerminalCommand::DiscardPendingOutput { done } => {
+                    self.pending_output.clear();
+                    self.pending_restore_output.clear();
+                    self.pending_output_len.store(0, Ordering::Relaxed);
+                    self.has_unpublished_frame = false;
+                    let _ = done.send(Ok(()));
+                }
+                RmuxTerminalCommand::Stop => {
+                    self.command_disconnected = true;
+                    break;
+                }
+            }
+        }
+        stats
+    }
+
+    fn collect_pane_output(&mut self) -> bool {
+        let mut did_work = false;
+        let mut collected_bytes = 0;
+        let mut collected_chunks = 0;
+        while collected_chunks < RMUX_MAX_COLLECT_CHUNKS_PER_TICK
+            && collected_bytes < RMUX_MAX_COLLECT_BYTES_PER_TICK
         {
-            continue;
+            let event = match self.pane_io.output_rx.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.output_closed = true;
+                    self.closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            };
+            did_work = true;
+            match event {
+                RmuxPaneEvent::Capture(bytes) => {
+                    collected_chunks += 1;
+                    let bytes = normalize_capture_newlines(&bytes);
+                    collected_bytes += bytes.len();
+                    self.push_pending_restore_output(bytes);
+                    self.scroll_bottom_after_output = true;
+                }
+                RmuxPaneEvent::Chunks(chunks) => {
+                    for chunk in chunks {
+                        collected_chunks += 1;
+                        if let Some(bytes) = pane_output_chunk_bytes(chunk) {
+                            collected_bytes += bytes.len();
+                            self.discard_pending_restore_output();
+                            self.push_pending_output(bytes);
+                        }
+                    }
+                }
+                RmuxPaneEvent::Error(error) => {
+                    self.send_error(anyhow::anyhow!(error));
+                    self.output_closed = true;
+                    self.closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
         }
-        let y = index / usize::from(snapshot.cols.max(1));
-        let x = index % usize::from(snapshot.cols.max(1));
-        let text_start = frame.text.len();
-        frame.text.extend(cell.glyph.text.chars());
-        let text_len = frame.text.len() - text_start;
-        if text_len == 0 {
-            continue;
-        }
-        frame.cells.push(RenderCell {
-            x: x as u16,
-            y: y as u16,
-            text_start,
-            text_len,
-            fg: pane_color(cell.foreground, colors, true),
-            bg: pane_color(cell.background, colors, false),
-            style: cell_style(cell.attributes),
-            hyperlink: None,
-        });
+        did_work
     }
 
-    if snapshot.cursor.visible {
-        frame.cursor = Some(CursorSnapshot {
-            x: snapshot.cursor.col,
-            y: snapshot.cursor.row,
-            at_wide_tail: false,
-            style: libghostty_vt::render::CursorVisualStyle::Block,
-            blinking: false,
-            color: colors.cursor,
-        });
+    fn push_pending_output(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.pending_output.push_back(bytes);
+        self.update_pending_output_len();
     }
-    frame.stats = FrameStats {
-        extraction_us: start.elapsed().as_micros() as u64,
-        cells: frame.cells.len(),
-        chars: frame.text.len(),
-        dirty_rows: usize::from(snapshot.rows),
-        ..FrameStats::default()
-    };
-    frame
-}
 
-fn is_kitty_virtual_placeholder(text: &str) -> bool {
-    text.starts_with('\u{10eeee}')
-}
+    fn push_pending_restore_output(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.pending_restore_output.push_back(bytes);
+        self.update_pending_output_len();
+    }
 
-fn pane_color(
-    color: PaneColor,
-    colors: &TerminalColorConfig,
-    foreground: bool,
-) -> Option<libghostty_vt::style::RgbColor> {
-    match color {
-        PaneColor::Default | PaneColor::Terminal => Some(if foreground {
-            colors.foreground
+    fn discard_pending_restore_output(&mut self) {
+        if self.pending_restore_output.is_empty() {
+            return;
+        }
+        self.pending_restore_output.clear();
+        self.update_pending_output_len();
+    }
+
+    fn total_pending_output_len(&self) -> usize {
+        self.pending_output
+            .len()
+            .saturating_add(self.pending_restore_output.len())
+    }
+
+    fn update_pending_output_len(&self) {
+        self.pending_output_len
+            .store(self.total_pending_output_len(), Ordering::Relaxed);
+    }
+
+    fn drain_pending_output(&mut self) -> DrainStats {
+        let (max_bytes, max_chunks, max_time_us) = if self.force_next_frame_publish {
+            (
+                RMUX_INPUT_FAST_PATH_DRAIN_BYTES,
+                RMUX_INPUT_FAST_PATH_DRAIN_CHUNKS,
+                RMUX_INPUT_FAST_PATH_DRAIN_TIME_US,
+            )
         } else {
-            colors.background
-        }),
-        PaneColor::None | PaneColor::Encoded { .. } => None,
-        PaneColor::Ansi { index } => colors.palette.get(usize::from(index)).copied(),
-        PaneColor::BrightAnsi { index } => colors.palette.get(usize::from(index + 8)).copied(),
-        PaneColor::Indexed { index } => colors.palette.get(usize::from(index)).copied(),
-        PaneColor::Rgb { red, green, blue } => Some(libghostty_vt::style::RgbColor {
-            r: red,
-            g: green,
-            b: blue,
-        }),
+            (
+                RMUX_MAX_DRAIN_BYTES_PER_TICK,
+                RMUX_MAX_DRAIN_CHUNKS_PER_TICK,
+                RMUX_MAX_DRAIN_TIME_US,
+            )
+        };
+        let mut stats = {
+            let engine = &mut self.engine;
+            drain_rmux_output_backlog_with_limits(
+                &mut self.pending_output,
+                max_bytes,
+                max_chunks,
+                max_time_us,
+                |bytes| engine.write_vt(bytes),
+            )
+        };
+        if stats.bytes == 0
+            && !self.force_next_frame_publish
+            && self.pending_output.is_empty()
+            && !self.pending_restore_output.is_empty()
+        {
+            let engine = &mut self.engine;
+            let restore_stats = drain_rmux_output_backlog_with_limits(
+                &mut self.pending_restore_output,
+                RMUX_RESTORE_DRAIN_BYTES_PER_TICK,
+                RMUX_RESTORE_DRAIN_CHUNKS_PER_TICK,
+                RMUX_RESTORE_DRAIN_TIME_US,
+                |bytes| engine.write_vt(bytes),
+            );
+            stats.chunks = stats.chunks.saturating_add(restore_stats.chunks);
+            stats.bytes = stats.bytes.saturating_add(restore_stats.bytes);
+            stats.elapsed_us = stats.elapsed_us.saturating_add(restore_stats.elapsed_us);
+        }
+        if stats.bytes > 0 && self.scroll_bottom_after_output {
+            self.engine.scroll_viewport_bottom();
+        }
+        if self.pending_output.is_empty() && self.pending_restore_output.is_empty() {
+            self.scroll_bottom_after_output = false;
+        }
+        if stats.bytes > 0 {
+            self.update_pending_output_len();
+        }
+        stats
+    }
+
+    fn drain_engine_input(&mut self) -> bool {
+        let mut did_work = false;
+        while let Ok(bytes) = self.engine_input_rx.try_recv() {
+            did_work = true;
+            self.write_literal_input(&bytes);
+        }
+        did_work
+    }
+
+    fn drain_input_results(&mut self) {
+        while let Ok(result) = self.pane_io.result_rx.try_recv() {
+            if let Err(error) = result {
+                self.send_error(anyhow::anyhow!(error));
+            }
+        }
+    }
+
+    fn forward_side_effects(&mut self) {
+        let Some(tx) = self.side_effect_tx.as_ref() else {
+            return;
+        };
+        let mut disconnected = false;
+        for effect in self.engine.drain_side_effects() {
+            if tx.send(effect).is_err() {
+                disconnected = true;
+                break;
+            }
+        }
+        if disconnected {
+            self.side_effect_tx = None;
+        }
+    }
+
+    fn publish_drain(&self, stats: DrainStats) {
+        if let Ok(mut latest) = self.latest_drain.lock() {
+            latest.chunks = latest.chunks.saturating_add(stats.chunks);
+            latest.bytes = latest.bytes.saturating_add(stats.bytes);
+            latest.elapsed_us = latest.elapsed_us.saturating_add(stats.elapsed_us);
+        }
+    }
+
+    fn should_publish_frame(&mut self) -> bool {
+        let sync_output_suppressed = self.sync_output_suppressed();
+        should_publish_frame_after_work(
+            self.has_unpublished_frame,
+            self.force_next_frame_publish,
+            sync_output_suppressed,
+            self.total_pending_output_len(),
+            self.last_terminal_change
+                .map(|instant| instant.elapsed())
+                .unwrap_or(Duration::ZERO),
+            self.last_frame_publish.elapsed(),
+        )
+    }
+
+    fn sync_output_suppressed(&mut self) -> bool {
+        if !self.engine.is_synchronized_output().unwrap_or(false) {
+            self.sync_output_since = None;
+            return false;
+        }
+        let since = *self.sync_output_since.get_or_insert_with(Instant::now);
+        sync_output_suppresses_publish(true, since.elapsed())
+    }
+
+    fn publish_frame(&mut self) {
+        let Ok(frame) = self.engine.extract_frame() else {
+            return;
+        };
+        if self.latest_frame.publish(frame.clone()).is_ok() {
+            self.force_next_frame_publish = false;
+            self.has_unpublished_frame = false;
+            (self.repaint_wakeup)();
+        }
+    }
+
+    fn mark_unpublished_frame(&mut self) {
+        self.has_unpublished_frame = true;
+        self.last_terminal_change = Some(Instant::now());
+    }
+
+    fn mark_input_fast_path(&mut self) {
+        self.discard_pending_restore_output();
+        self.force_next_frame_publish = true;
+    }
+
+    fn should_stop(&self) -> bool {
+        self.command_disconnected || (self.output_closed && self.total_pending_output_len() == 0)
+    }
+
+    fn queue_resize(&mut self, geometry: TerminalGeometry) {
+        if self
+            .pane_io
+            .resize_tx
+            .send(TerminalSizeSpec::new(geometry.cols, geometry.rows))
+            .is_err()
+        {
+            self.send_error(anyhow::anyhow!("rmux resize queue stopped"));
+        }
+    }
+
+    fn queue_input_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.pane_io.input_tx.send(text.to_owned()).is_err() {
+            self.send_error(anyhow::anyhow!("rmux input queue stopped"));
+        }
+    }
+
+    fn write_literal_input(&mut self, bytes: &[u8]) {
+        match literal_input_text(bytes) {
+            Ok(text) => self.queue_input_text(text),
+            Err(error) => self.send_error(error),
+        }
+    }
+
+    fn write_output_buf(&mut self) {
+        if self.output_buf.is_empty() {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.output_buf);
+        self.write_literal_input(&bytes);
+    }
+
+    fn send_error(&self, error: anyhow::Error) {
+        let _ = self.error_tx.send(error.to_string());
+    }
+}
+
+fn literal_input_text(bytes: &[u8]) -> Result<&str> {
+    std::str::from_utf8(bytes).context("rmux pane literal input must be valid UTF-8")
+}
+
+fn normalize_capture_newlines(bytes: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut previous = None;
+    for byte in bytes {
+        if *byte == b'\n' && previous != Some(b'\r') {
+            normalized.push(b'\r');
+        }
+        normalized.push(*byte);
+        previous = Some(*byte);
+    }
+    normalized
+}
+
+#[cfg(test)]
+fn write_pane_output_chunk(engine: &mut TerminalEngine, chunk: PaneOutputChunk) -> usize {
+    let Some(bytes) = pane_output_chunk_bytes(chunk) else {
+        return 0;
+    };
+    let len = bytes.len();
+    engine.write_vt(&bytes);
+    len
+}
+
+fn pane_output_chunk_bytes(chunk: PaneOutputChunk) -> Option<Vec<u8>> {
+    match chunk {
+        PaneOutputChunk::Bytes { bytes, .. } => Some(bytes),
+        PaneOutputChunk::Lag(lag) if !lag.recent.bytes.is_empty() => Some(lag.recent.bytes),
+        PaneOutputChunk::Lag(_) => None,
         _ => None,
     }
 }
 
-fn cell_style(attrs: PaneAttributes) -> CellStyle {
-    CellStyle {
-        bold: attrs.contains(PaneAttributes::BOLD),
-        italic: attrs.contains(PaneAttributes::ITALIC),
-        faint: attrs.contains(PaneAttributes::DIM),
-        blink: attrs.contains(PaneAttributes::BLINK),
-        inverse: attrs.contains(PaneAttributes::REVERSE),
-        invisible: attrs.contains(PaneAttributes::HIDDEN),
-        strikethrough: attrs.contains(PaneAttributes::STRIKETHROUGH),
-        overline: attrs.contains(PaneAttributes::OVERLINE),
-        underline: libghostty_vt::style::Underline::None,
+fn rmux_restore_lines(max_scrollback_bytes: usize, viewport_rows: u16) -> usize {
+    let viewport_rows = usize::from(viewport_rows);
+    if max_scrollback_bytes == 0 {
+        return viewport_rows;
     }
+    let scrollback_rows = max_scrollback_bytes.div_ceil(NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE);
+    viewport_rows.saturating_add(scrollback_rows.min(RMUX_RESTORE_MAX_SCROLLBACK_LINES))
 }
 
-fn rmux_key_token(input: KeyInput) -> Option<String> {
-    if input.mods.command {
-        return None;
-    }
+fn drain_rmux_output_backlog_with_limits(
+    backlog: &mut RmuxOutputBacklog,
+    max_bytes: usize,
+    max_chunks: usize,
+    max_time_us: u128,
+    mut write: impl FnMut(&[u8]),
+) -> DrainStats {
+    let start = Instant::now();
+    let mut stats = DrainStats::default();
 
-    if let Some(utf8) = input.utf8
-        && !has_terminal_modifier(input.mods)
+    while !backlog.is_empty()
+        && stats.bytes < max_bytes
+        && stats.chunks < max_chunks
+        && start.elapsed().as_micros() < max_time_us
     {
-        return Some(utf8.to_owned());
-    }
-
-    let key = rmux_key_base(input)?;
-    let mut modifiers = Vec::new();
-    if input.mods.ctrl {
-        modifiers.push("C");
-    }
-    if input.mods.alt {
-        modifiers.push("M");
-    }
-    if should_encode_shift_modifier(input) {
-        modifiers.push("S");
-    }
-
-    if modifiers.is_empty() {
-        Some(key)
-    } else {
-        Some(format!("{}-{key}", modifiers.join("-")))
-    }
-}
-
-fn has_terminal_modifier(mods: bootty_terminal::terminal_input_model::KeyMods) -> bool {
-    mods.ctrl || mods.alt
-}
-
-fn should_encode_shift_modifier(input: KeyInput) -> bool {
-    input.mods.shift && input.utf8.is_none()
-}
-
-fn rmux_key_base(input: KeyInput) -> Option<String> {
-    if input.mods.ctrl && input.unshifted.is_some() {
-        return input.unshifted.map(|unshifted| unshifted.to_string());
-    }
-    if let Some(utf8) = input.utf8 {
-        return Some(utf8.to_owned());
-    }
-    rmux_named_key(input.key).map(str::to_owned)
-}
-
-fn rmux_named_key(key: bootty_terminal::terminal_input_model::TerminalKey) -> Option<&'static str> {
-    use bootty_terminal::terminal_input_model::TerminalKey;
-
-    Some(match key {
-        TerminalKey::Enter => "Enter",
-        TerminalKey::Tab => "Tab",
-        TerminalKey::Backspace => "BSpace",
-        TerminalKey::Escape => "Escape",
-        TerminalKey::ArrowLeft => "Left",
-        TerminalKey::ArrowRight => "Right",
-        TerminalKey::ArrowUp => "Up",
-        TerminalKey::ArrowDown => "Down",
-        TerminalKey::Home => "Home",
-        TerminalKey::End => "End",
-        TerminalKey::PageUp => "PageUp",
-        TerminalKey::PageDown => "PageDown",
-        TerminalKey::Delete => "Delete",
-        TerminalKey::Insert => "Insert",
-        TerminalKey::Space => "Space",
-        TerminalKey::F1 => "F1",
-        TerminalKey::F2 => "F2",
-        TerminalKey::F3 => "F3",
-        TerminalKey::F4 => "F4",
-        TerminalKey::F5 => "F5",
-        TerminalKey::F6 => "F6",
-        TerminalKey::F7 => "F7",
-        TerminalKey::F8 => "F8",
-        TerminalKey::F9 => "F9",
-        TerminalKey::F10 => "F10",
-        TerminalKey::F11 => "F11",
-        TerminalKey::F12 => "F12",
-        TerminalKey::A => "a",
-        TerminalKey::B => "b",
-        TerminalKey::C => "c",
-        TerminalKey::D => "d",
-        TerminalKey::E => "e",
-        TerminalKey::F => "f",
-        TerminalKey::G => "g",
-        TerminalKey::H => "h",
-        TerminalKey::I => "i",
-        TerminalKey::J => "j",
-        TerminalKey::K => "k",
-        TerminalKey::L => "l",
-        TerminalKey::M => "m",
-        TerminalKey::N => "n",
-        TerminalKey::O => "o",
-        TerminalKey::P => "p",
-        TerminalKey::Q => "q",
-        TerminalKey::R => "r",
-        TerminalKey::S => "s",
-        TerminalKey::T => "t",
-        TerminalKey::U => "u",
-        TerminalKey::V => "v",
-        TerminalKey::W => "w",
-        TerminalKey::X => "x",
-        TerminalKey::Y => "y",
-        TerminalKey::Z => "z",
-        _ => return None,
-    })
-}
-
-fn rmux_mouse_input(input: MouseInput) -> String {
-    let (col, row) = rmux_mouse_position(input);
-    let mut button = match input.action {
-        MouseAction::Motion => input
-            .button
-            .map_or(35, |button| 32 + rmux_mouse_button(button)),
-        MouseAction::Press | MouseAction::Release => input.button.map_or(3, rmux_mouse_button),
-    };
-    if input.mods.shift {
-        button += 4;
-    }
-    if input.mods.alt {
-        button += 8;
-    }
-    if input.mods.ctrl {
-        button += 16;
-    }
-    let suffix = if input.action == MouseAction::Release {
-        'm'
-    } else {
-        'M'
-    };
-    format!("\x1b[<{button};{col};{row}{suffix}")
-}
-
-fn rmux_mouse_button(button: MouseButton) -> u16 {
-    match button {
-        MouseButton::Left => 0,
-        MouseButton::Middle => 1,
-        MouseButton::Right => 2,
-        MouseButton::Four => 64,
-        MouseButton::Five => 65,
-        MouseButton::Six => 66,
-        MouseButton::Seven => 67,
-        MouseButton::Eight => 68,
-        MouseButton::Nine => 69,
-        MouseButton::Ten => 70,
-        MouseButton::Eleven => 71,
-    }
-}
-
-fn rmux_mouse_position(input: MouseInput) -> (u16, u16) {
-    let cell_width = input.size.cell_width.max(1) as f32;
-    let cell_height = input.size.cell_height.max(1) as f32;
-    let x = (input.x - input.size.padding_left as f32).max(0.0);
-    let y = (input.y - input.size.padding_top as f32).max(0.0);
-    let col = (x / cell_width).floor() as u32 + 1;
-    let row = (y / cell_height).floor() as u32 + 1;
-    (
-        col.min(u32::from(u16::MAX)) as u16,
-        row.min(u32::from(u16::MAX)) as u16,
-    )
-}
-
-struct RmuxAttachedClient {
-    command_tx: mpsc::Sender<AttachIoCommand>,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-enum AttachIoCommand {
-    Message(AttachMessage),
-    Resize(TerminalGeometry),
-    Shutdown,
-}
-
-impl RmuxAttachedClient {
-    fn connect(
-        endpoint: &RmuxEndpoint,
-        target: &PaneRef,
-        geometry: TerminalGeometry,
-    ) -> Result<Self> {
-        let (stream, initial_bytes) = open_attach_stream(endpoint, target, geometry)?;
-        let (command_tx, command_rx) = mpsc::channel();
-        let worker = thread::spawn(move || run_attach_stream(stream, initial_bytes, command_rx));
-        let attach = Self {
-            command_tx,
-            worker: Some(worker),
+        let Some(available) = backlog.front_len() else {
+            backlog.clear();
+            break;
         };
-        attach.resize(geometry)?;
-        Ok(attach)
-    }
-
-    fn write_input(&self, bytes: &[u8]) -> Result<()> {
-        self.send_message(AttachMessage::Data(bytes.to_vec()))
-    }
-
-    fn resize(&self, geometry: TerminalGeometry) -> Result<()> {
-        self.command_tx
-            .send(AttachIoCommand::Resize(geometry))
-            .context("queue rmux attach resize")
-    }
-
-    fn send_message(&self, message: AttachMessage) -> Result<()> {
-        self.command_tx
-            .send(AttachIoCommand::Message(message))
-            .context("queue rmux attach message")
-    }
-}
-
-impl Drop for RmuxAttachedClient {
-    fn drop(&mut self) {
-        let _ = self.command_tx.send(AttachIoCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn open_attach_stream(
-    endpoint: &RmuxEndpoint,
-    target: &PaneRef,
-    geometry: TerminalGeometry,
-) -> Result<(rmux_ipc::BlockingLocalStream, Vec<u8>)> {
-    let endpoint = local_endpoint(endpoint)?;
-    let mut stream = connect_blocking(&endpoint, Duration::from_secs(2))
-        .context("connect rmux IPC endpoint for attach input")?;
-    let request = attach_session_request(target, geometry);
-    let frame = encode_frame(&request).context("encode rmux attach input request")?;
-    stream
-        .write_all(&frame)
-        .context("write rmux attach input request")?;
-    stream.flush().context("flush rmux attach input request")?;
-
-    let mut decoder = FrameDecoder::new();
-    let mut buffer = [0_u8; 4096];
-    loop {
-        if let Some(response) = decoder
-            .next_frame::<Response>()
-            .context("decode rmux attach input response")?
-        {
-            return match response {
-                Response::AttachSession(_) => Ok((stream, decoder.remaining_bytes().to_vec())),
-                Response::Error(error) => Err(anyhow::anyhow!(error.error.to_string()))
-                    .context("rmux rejected attach input upgrade"),
-                other => Err(anyhow::anyhow!(
-                    "rmux attach input request received unexpected {} response",
-                    other.command_name()
-                )),
-            };
+        let remaining_bytes = max_bytes.saturating_sub(stats.bytes);
+        let consumed = available
+            .min(remaining_bytes)
+            .min(RMUX_MAX_DRAIN_SLICE_BYTES);
+        if consumed == 0 {
+            break;
         }
 
-        let read = stream
-            .read(&mut buffer)
-            .context("read rmux attach input response")?;
-        anyhow::ensure!(read > 0, "rmux closed before acknowledging attach input");
-        decoder.push_bytes(&buffer[..read]);
+        stats.chunks += 1;
+        backlog.consume_front(consumed, |bytes| write(bytes));
+        stats.bytes += consumed;
     }
-}
 
-fn attach_session_request(target: &PaneRef, geometry: TerminalGeometry) -> Request {
-    Request::AttachSessionExt2(AttachSessionExt2Request {
-        target: Some(target.session_name.clone()),
-        target_spec: Some(attach_target_spec(target)),
-        detach_other_clients: false,
-        kill_other_clients: false,
-        read_only: false,
-        skip_environment_update: false,
-        flags: None,
-        working_directory: None,
-        client_terminal: ClientTerminalContext {
-            terminal_features: Vec::new(),
-            utf8: true,
-        },
-        client_size: Some(TerminalSize::new(geometry.cols, geometry.rows)),
-    })
-}
-
-fn attach_target_spec(target: &PaneRef) -> String {
-    format!(
-        "{}:{}.{}",
-        target.session_name, target.window_index, target.pane_index
-    )
-}
-
-fn rmux_terminal_geometry(geometry: TerminalGeometry) -> RmuxTerminalGeometry {
-    let pixels = TerminalPixels::new(geometry.pixel_width(), geometry.pixel_height());
-    RmuxTerminalGeometry::new(geometry.cols, geometry.rows).with_pixels(pixels)
-}
-
-fn run_attach_stream(
-    mut stream: rmux_ipc::BlockingLocalStream,
-    initial_bytes: Vec<u8>,
-    command_rx: mpsc::Receiver<AttachIoCommand>,
-) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-    let mut decoder = AttachFrameDecoder::new();
-    decoder.push_bytes(&initial_bytes);
-    let mut buffer = [0_u8; 4096];
-
-    loop {
-        while let Ok(command) = command_rx.try_recv() {
-            match command {
-                AttachIoCommand::Message(message) => {
-                    let _ = write_attach_message(&mut stream, &message);
-                }
-                AttachIoCommand::Resize(geometry) => {
-                    let _ = write_attach_message(
-                        &mut stream,
-                        &AttachMessage::ResizeGeometry(rmux_terminal_geometry(geometry)),
-                    );
-                }
-                AttachIoCommand::Shutdown => return,
-            }
-        }
-
-        drain_attach_messages(&mut decoder);
-
-        match stream.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(read) => decoder.push_bytes(&buffer[..read]),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => return,
-        }
-    }
-}
-
-fn drain_attach_messages(decoder: &mut AttachFrameDecoder) {
-    for _ in 0..32 {
-        match decoder.next_message() {
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => return,
-        }
-    }
-}
-
-fn write_attach_message(
-    stream: &mut rmux_ipc::BlockingLocalStream,
-    message: &AttachMessage,
-) -> Result<()> {
-    let frame = encode_attach_message(message).context("encode rmux attach message")?;
-    stream
-        .write_all(&frame)
-        .context("write rmux attach message")?;
-    stream.flush().context("flush rmux attach message")?;
-    Ok(())
-}
-
-fn local_endpoint(endpoint: &RmuxEndpoint) -> Result<LocalEndpoint> {
-    match endpoint {
-        RmuxEndpoint::UnixSocket(path) => Ok(LocalEndpoint::from_path(path.clone())),
-        RmuxEndpoint::WindowsPipe(name) => Ok(LocalEndpoint::from_path(name.clone().into())),
-        RmuxEndpoint::Default => {
-            anyhow::bail!("rmux endpoint should be resolved before attach input")
-        }
-        _ => anyhow::bail!("unsupported rmux endpoint variant for attach input"),
-    }
+    stats.elapsed_us = start.elapsed().as_micros() as u64;
+    stats
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bootty_terminal::terminal_input_model::{
-        KeyMods, MouseAction, MouseButton, MouseEncoderSize, TerminalKey,
-    };
-    use rmux_sdk::{PaneCell, PaneCursor, PaneGlyph, SessionName};
 
-    fn snapshot(cells: Vec<PaneCell>) -> PaneSnapshot {
-        PaneSnapshot::new(3, 2, cells, PaneCursor::new(1, 2, true, 0)).unwrap()
-    }
-
-    fn cell(text: &str, attrs: PaneAttributes) -> PaneCell {
-        PaneCell {
-            glyph: PaneGlyph::new(text.to_owned(), 1),
-            attributes: attrs,
-            foreground: PaneColor::Rgb {
-                red: 1,
-                green: 2,
-                blue: 3,
-            },
-            background: PaneColor::Default,
-            underline: PaneColor::Default,
-        }
-    }
-
-    fn key_input(
-        key: TerminalKey,
-        mods: KeyMods,
-        utf8: Option<&'static str>,
-        unshifted: Option<char>,
-    ) -> KeyInput {
-        KeyInput {
-            key,
-            mods,
-            repeat: false,
-            utf8,
-            unshifted,
-        }
-    }
-
-    #[test]
-    fn rmux_key_token_preserves_readline_ctrl_chords() {
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::U,
-                KeyMods {
-                    ctrl: true,
-                    ..Default::default()
-                },
-                Some("u"),
-                Some('u'),
-            )),
-            Some("C-u".to_owned())
-        );
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::C,
-                KeyMods {
-                    ctrl: true,
-                    ..Default::default()
-                },
-                Some("c"),
-                Some('c'),
-            )),
-            Some("C-c".to_owned())
-        );
-    }
-
-    #[test]
-    fn rmux_key_token_uses_a_general_modifier_policy() {
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::ArrowLeft,
-                KeyMods {
-                    ctrl: true,
-                    shift: true,
-                    ..Default::default()
-                },
-                None,
-                None,
-            )),
-            Some("C-S-Left".to_owned())
-        );
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::ArrowRight,
-                KeyMods {
-                    alt: true,
-                    shift: true,
-                    ..Default::default()
-                },
-                None,
-                None,
-            )),
-            Some("M-S-Right".to_owned())
-        );
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::Q,
-                KeyMods {
-                    command: true,
-                    ..Default::default()
-                },
-                Some("q"),
-                Some('q'),
-            )),
-            None
-        );
-    }
-
-    #[test]
-    fn rmux_key_token_keeps_plain_text_plain() {
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::U,
-                KeyMods::default(),
-                Some("u"),
-                Some('u')
-            )),
-            Some("u".to_owned())
-        );
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::U,
-                KeyMods {
-                    shift: true,
-                    ..Default::default()
-                },
-                Some("U"),
-                Some('u'),
-            )),
-            Some("U".to_owned())
-        );
-    }
-
-    #[test]
-    fn rmux_key_token_preserves_alt_shift_letter_chords() {
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::Q,
-                KeyMods {
-                    shift: true,
-                    alt: true,
-                    ..Default::default()
-                },
-                Some("Q"),
-                Some('q'),
-            )),
-            Some("M-Q".to_owned())
-        );
-        assert_eq!(
-            rmux_key_token(key_input(
-                TerminalKey::Q,
-                KeyMods {
-                    alt: true,
-                    ..Default::default()
-                },
-                Some("q"),
-                Some('q'),
-            )),
-            Some("M-q".to_owned())
-        );
-    }
-
-    #[test]
-    fn rmux_mouse_input_uses_sgr_reports_for_attach_input() {
-        let size = MouseEncoderSize {
-            screen_width: 800,
-            screen_height: 480,
-            cell_width: 10,
-            cell_height: 20,
-            padding_top: 0,
-            padding_bottom: 0,
-            padding_right: 0,
-            padding_left: 0,
-        };
-        let mods = KeyMods {
-            shift: true,
-            alt: true,
-            ctrl: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            rmux_mouse_input(MouseInput {
-                action: MouseAction::Press,
-                button: Some(MouseButton::Left),
-                mods,
-                x: 0.0,
-                y: 0.0,
-                size,
-            }),
-            "\x1b[<28;1;1M"
-        );
-        assert_eq!(
-            rmux_mouse_input(MouseInput {
-                action: MouseAction::Release,
-                button: Some(MouseButton::Left),
-                mods: KeyMods::default(),
-                x: 0.0,
-                y: 0.0,
-                size,
-            }),
-            "\x1b[<0;1;1m"
-        );
-        assert_eq!(
-            rmux_mouse_input(MouseInput {
-                action: MouseAction::Motion,
-                button: Some(MouseButton::Left),
-                mods: KeyMods::default(),
-                x: 10.0,
-                y: 20.0,
-                size,
-            }),
-            "\x1b[<32;2;2M"
-        );
-        assert_eq!(
-            rmux_mouse_input(MouseInput {
-                action: MouseAction::Press,
-                button: Some(MouseButton::Four),
-                mods: KeyMods::default(),
-                x: 0.0,
-                y: 0.0,
-                size,
-            }),
-            "\x1b[<64;1;1M"
-        );
-    }
-
-    #[test]
-    fn attach_session_request_targets_exact_pane_and_client_size() {
-        let request = attach_session_request(
-            &PaneRef::new(SessionName::new("alpha").unwrap(), 0, 0),
-            TerminalGeometry {
-                cols: 80,
-                rows: 24,
-                cell_width: 10,
-                cell_height: 20,
-            },
-        );
-
-        let Request::AttachSessionExt2(request) = request else {
-            panic!("expected attach-session-ext2 request");
-        };
-        assert_eq!(request.target, Some(SessionName::new("alpha").unwrap()));
-        assert_eq!(request.target_spec.as_deref(), Some("alpha:0.0"));
-        assert_eq!(request.client_size, Some(TerminalSize::new(80, 24)));
-        assert!(request.client_terminal.utf8);
-    }
-
-    #[test]
-    fn rmux_terminal_geometry_preserves_cells_and_pixels() {
-        let geometry = rmux_terminal_geometry(TerminalGeometry {
+    fn test_geometry() -> TerminalGeometry {
+        TerminalGeometry {
             cols: 80,
             rows: 24,
-            cell_width: 9,
-            cell_height: 18,
-        });
+            cell_width: 10,
+            cell_height: 20,
+        }
+    }
 
-        assert_eq!(geometry.size, TerminalSize::new(80, 24));
-        assert_eq!(geometry.pixels, Some(TerminalPixels::new(720, 432)));
+    fn test_config() -> TerminalSessionConfig {
+        TerminalSessionConfig {
+            launch: Default::default(),
+            colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
+            max_scrollback: 0,
+            macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            benchmark_trace: None,
+        }
     }
 
     #[test]
-    fn native_render_harness_projects_rmux_snapshot_into_bootty_frame() {
-        let frame = render_frame_from_snapshot(
-            &snapshot(vec![
-                cell("a", PaneAttributes::BOLD),
-                cell("界", PaneAttributes::ITALIC),
-                cell("", PaneAttributes::EMPTY),
-                cell("b", PaneAttributes::UNDERLINE),
-                cell(" ", PaneAttributes::EMPTY),
-                cell("c", PaneAttributes::REVERSE),
-            ]),
-            &TerminalColorConfig::default(),
-        );
+    fn rmux_worker_backlog_drain_respects_byte_budget() {
+        let mut backlog = RmuxOutputBacklog::with_capacity(1);
+        backlog.push_back(b"abcdefghij".to_vec());
+        let mut written = Vec::new();
 
-        let rendered = frame
-            .cells
-            .iter()
-            .map(|cell| frame.cell_text(cell).iter().collect::<String>())
-            .collect::<Vec<_>>();
+        let stats =
+            drain_rmux_output_backlog_with_limits(&mut backlog, 4, 16, 1_000_000, |bytes| {
+                written.extend_from_slice(bytes)
+            });
 
-        assert_eq!(frame.cols, 3);
-        assert_eq!(frame.rows, 2);
-        assert_eq!(rendered, vec!["a", "界", "b", " ", "c"]);
-        assert!(frame.cells[0].style.bold);
-        assert!(frame.cells[1].style.italic);
-        assert!(frame.cells[4].style.inverse);
+        assert_eq!(stats.bytes, 4);
+        assert_eq!(stats.chunks, 1);
+        assert_eq!(written, b"abcd");
+        assert_eq!(backlog.len(), 6);
+    }
+
+    #[test]
+    fn rmux_restore_lines_converts_scrollback_bytes_to_bounded_rows() {
+        assert_eq!(rmux_restore_lines(0, 24), 24);
         assert_eq!(
-            frame.cursor.map(|cursor| (cursor.x, cursor.y)),
-            Some((2, 1))
+            rmux_restore_lines(NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE * 2, 24),
+            26
+        );
+        assert_eq!(
+            rmux_restore_lines(usize::MAX, 24),
+            RMUX_RESTORE_MAX_SCROLLBACK_LINES + 24
         );
     }
 
+    fn rmux_capture_text(pane_id: &str) -> Result<String> {
+        let output = std::process::Command::new("rmux")
+            .args(["capture-pane", "-t", pane_id, "-p"])
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn wait_rmux_capture_contains(pane_id: &str, needle: &str) -> Result<()> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let text = rmux_capture_text(pane_id)?;
+            if text.contains(needle) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("expected {needle:?} in rmux pane capture:\n{text}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
-    fn native_render_harness_skips_wide_padding_cells() {
-        let mut padding = cell("", PaneAttributes::EMPTY);
-        padding.glyph = PaneGlyph {
-            text: String::new(),
-            width: 0,
-            padding: true,
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_input_write_is_non_blocking_and_reaches_pane() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-input-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("input smoke pane should exist")?;
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
         };
-        let frame = render_frame_from_snapshot(
-            &snapshot(vec![
-                cell("界", PaneAttributes::EMPTY),
-                padding,
-                cell("x", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-            ]),
-            &TerminalColorConfig::default(),
+        let mut terminal =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+
+        let start = Instant::now();
+        terminal.write_input(b"printf 'BOOTTY_FAST_INPUT\\n'\r")?;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(50),
+            "queueing rmux input should not block the input path: {:?}",
+            start.elapsed()
         );
 
-        let positions = frame
-            .cells
-            .iter()
-            .map(|cell| {
-                (
-                    cell.x,
-                    cell.y,
-                    frame.cell_text(cell).iter().collect::<String>(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            terminal.drain_pty();
+            terminal.check_worker_error()?;
+            let output = std::process::Command::new("rmux")
+                .args(["capture-pane", "-t", &pane_id, "-p"])
+                .output()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            if text.contains("BOOTTY_FAST_INPUT") {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("expected input output in rmux pane capture:\n{text}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
 
-        assert_eq!(
-            positions,
-            vec![(0, 0, "界".to_owned()), (2, 0, "x".to_owned())]
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_ctrl_c_key_interrupts_foreground_process() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+        use bootty_terminal::terminal_input_model::{KeyMods, TerminalKey};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-ctrl-c-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("ctrl-c smoke pane should exist")?;
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
+        };
+        let mut terminal =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+
+        terminal.write_input(b"sleep 30\r")?;
+        wait_rmux_capture_contains(&pane_id, "sleep 30")?;
+        terminal.encode_key(KeyInput {
+            key: TerminalKey::C,
+            mods: KeyMods {
+                ctrl: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("c"),
+            unshifted: Some('c'),
+        })?;
+        terminal.write_input(b"printf 'BOOTTY_AFTER_CTRL_C\\n'\r")?;
+        wait_rmux_capture_contains(&pane_id, "BOOTTY_AFTER_CTRL_C")?;
+
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_input_latency_stays_interactive() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-latency-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("latency smoke pane should exist")?;
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
+        };
+        let mut terminal =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+
+        let marker = format!("BOOTTY_LATENCY_{}", std::process::id());
+        let input = format!("printf '{marker}\\n'\r");
+        let start = Instant::now();
+        terminal.write_input(input.as_bytes())?;
+        let enqueue_elapsed = start.elapsed();
+        let mut capture_elapsed = None;
+        let mut frame_elapsed = None;
+        let deadline = start + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline && (capture_elapsed.is_none() || frame_elapsed.is_none()) {
+            terminal.drain_pty();
+            terminal.check_worker_error()?;
+            if capture_elapsed.is_none() && rmux_capture_text(&pane_id)?.contains(&marker) {
+                capture_elapsed = Some(start.elapsed());
+            }
+            if frame_elapsed.is_none() {
+                let frame = terminal.extract_frame()?;
+                let text = frame.text.iter().collect::<String>();
+                if text.contains(&marker) {
+                    frame_elapsed = Some(start.elapsed());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        eprintln!(
+            "rmux latency probe: enqueue={enqueue_elapsed:?} capture={capture_elapsed:?} frame={frame_elapsed:?}"
+        );
+        assert!(
+            enqueue_elapsed < std::time::Duration::from_millis(50),
+            "input enqueue should stay fast: {enqueue_elapsed:?}"
+        );
+        assert!(
+            capture_elapsed.is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(250)),
+            "rmux capture should see input quickly, got {capture_elapsed:?}"
+        );
+        assert!(
+            frame_elapsed.is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(250)),
+            "Bootty frame should see rmux output quickly, got {frame_elapsed:?}"
+        );
+
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_input_after_scrollback_restore_stays_interactive() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-restore-latency-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("restore latency smoke pane should exist")?;
+        let prefill = "for i in $(seq 1 4000); do printf 'BOOTTY_PREFILL_%04d\\n' $i; done; printf 'BOOTTY_PREFILL_DONE\\n'";
+        let status = std::process::Command::new("rmux")
+            .args(["send-keys", "-t", &pane_id, prefill, "Enter"])
+            .status()?;
+        anyhow::ensure!(status.success(), "rmux send-keys prefill failed: {status}");
+        wait_rmux_capture_contains(&pane_id, "BOOTTY_PREFILL_DONE")?;
+
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
+        };
+        let mut terminal =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+        let marker = format!("BOOTTY_RESTORE_FAST_INPUT_{}", std::process::id());
+        let input = format!("printf '{marker}\\n'\r");
+        let start = Instant::now();
+        terminal.write_input(input.as_bytes())?;
+        let enqueue_elapsed = start.elapsed();
+        let mut capture_elapsed = None;
+        let mut frame_elapsed = None;
+        let deadline = start + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline && (capture_elapsed.is_none() || frame_elapsed.is_none()) {
+            terminal.drain_pty();
+            terminal.check_worker_error()?;
+            if capture_elapsed.is_none() && rmux_capture_text(&pane_id)?.contains(&marker) {
+                capture_elapsed = Some(start.elapsed());
+            }
+            if frame_elapsed.is_none() {
+                let frame = terminal.extract_frame()?;
+                let text = frame.text.iter().collect::<String>();
+                if text.contains(&marker) {
+                    frame_elapsed = Some(start.elapsed());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        eprintln!(
+            "rmux restore latency probe: enqueue={enqueue_elapsed:?} capture={capture_elapsed:?} frame={frame_elapsed:?}"
+        );
+        assert!(
+            enqueue_elapsed < std::time::Duration::from_millis(50),
+            "input enqueue should stay fast with existing scrollback: {enqueue_elapsed:?}"
+        );
+        assert!(
+            capture_elapsed.is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(250)),
+            "rmux should receive input quickly while restore is pending, got {capture_elapsed:?}"
+        );
+        assert!(
+            frame_elapsed.is_some_and(|elapsed| elapsed < std::time::Duration::from_millis(250)),
+            "Bootty frame should see input quickly while restore is pending, got {frame_elapsed:?}"
+        );
+
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_drop_and_reopen_preserves_process_and_restores_history() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-persist-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("persist smoke pane should exist")?;
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
+        };
+
+        {
+            let mut terminal = RmuxNativeTerminal::new(
+                target.clone(),
+                test_geometry(),
+                test_config(),
+                Arc::new(|| {}),
+            )?;
+            terminal.write_input(
+                b"BOOTTY_RMUX_PERSIST=kept; export BOOTTY_RMUX_PERSIST; printf 'BOOTTY_PERSIST_HISTORY\\n'\r",
+            )?;
+            wait_rmux_capture_contains(&pane_id, "BOOTTY_PERSIST_HISTORY")?;
+        }
+
+        let mut reopened =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+        reopened.resize(test_geometry())?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            reopened.drain_pty();
+            reopened.check_worker_error()?;
+            let frame = reopened.extract_frame()?;
+            let text = frame.text.iter().collect::<String>();
+            if text.contains("BOOTTY_PERSIST_HISTORY") {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("expected restored rmux history in reopened frame, got {text:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        reopened.write_input(b"printf 'BOOTTY_PERSIST_%s\\n' \"$BOOTTY_RMUX_PERSIST\"\r")?;
+        wait_rmux_capture_contains(&pane_id, "BOOTTY_PERSIST_kept")?;
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_drop_and_reopen_restores_cursor_position() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
+
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-cursor-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        client.ensure_session(&session, &cwd)?;
+        let snapshot = client.snapshot()?;
+        let pane_id = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.panes.first())
+            .and_then(|pane| pane.pane_id.clone())
+            .context("cursor smoke pane should exist")?;
+        let target = MuxPaneTarget::Pane {
+            session_id: session.clone(),
+            pane_id: pane_id.clone(),
+            cwd: None,
+        };
+
+        {
+            let mut terminal = RmuxNativeTerminal::new(
+                target.clone(),
+                test_geometry(),
+                test_config(),
+                Arc::new(|| {}),
+            )?;
+            terminal.write_input(
+                b"printf '\x1b[2J\x1b[5;10HBOOTTY_CURSOR_MARK\x1b[8;15H'; sleep 30\r",
+            )?;
+            wait_rmux_capture_contains(&pane_id, "BOOTTY_CURSOR_MARK")?;
+            let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                terminal.drain_pty();
+                terminal.check_worker_error()?;
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        let expected_cursor = rmux_live_pane_cursor(&session, &pane_id)?;
+
+        let mut reopened =
+            RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
+        reopened.resize(test_geometry())?;
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            reopened.drain_pty();
+            reopened.check_worker_error()?;
+            let frame = reopened.extract_frame()?;
+            let text = frame.text.iter().collect::<String>();
+            if text.contains("BOOTTY_CURSOR_MARK") {
+                let cursor = frame
+                    .cursor
+                    .context("restored frame should include cursor")?;
+                assert_eq!((cursor.y, cursor.x), expected_cursor);
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("expected restored rmux cursor frame, got {text:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        client.kill_session(&session)?;
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
+    fn rmux_live_pane_cursor(session: &str, pane_id: &str) -> Result<(u16, u16)> {
+        let pane_id = pane_id
+            .strip_prefix('%')
+            .context("rmux pane id should use tmux-style prefix")?
+            .parse::<u32>()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let rmux = crate::rmux_bridge::connect_bootty_rmux().await?;
+            let pane = rmux
+                .pane_by_id(
+                    rmux_sdk::SessionName::new(session)?,
+                    rmux_sdk::PaneId::from(pane_id),
+                )
+                .await?;
+            let cursor = pane.snapshot().await?.cursor;
+            Ok((cursor.row, cursor.col))
+        })
+    }
+
+    #[test]
+    fn literal_input_text_accepts_terminal_control_sequences() -> Result<()> {
+        let text = literal_input_text(b"\x1b[200~hello\r\x1b[201~")?;
+
+        assert_eq!(text, "\x1b[200~hello\r\x1b[201~");
+        Ok(())
+    }
+
+    #[test]
+    fn literal_input_text_rejects_non_utf8_bytes() {
+        let error = literal_input_text(&[0xff]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("rmux pane literal input must be valid UTF-8")
         );
     }
 
     #[test]
-    fn native_render_harness_skips_kitty_virtual_placeholder_cells() {
-        let frame = render_frame_from_snapshot(
-            &snapshot(vec![
-                cell("a", PaneAttributes::EMPTY),
-                cell("\u{10eeee}\u{0305}\u{0305}", PaneAttributes::EMPTY),
-                cell("b", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-                cell("", PaneAttributes::EMPTY),
-            ]),
-            &TerminalColorConfig::default(),
+    fn normalize_capture_newlines_restores_terminal_line_starts() {
+        assert_eq!(normalize_capture_newlines(b"a\nb\r\nc"), b"a\r\nb\r\nc");
+    }
+
+    #[test]
+    fn retained_rmux_output_feeds_bootty_scrollback() -> Result<()> {
+        let mut engine =
+            TerminalEngine::new_with_scrollback(test_geometry(), Default::default(), 4096)?;
+        for index in 0..30 {
+            write_pane_output_chunk(
+                &mut engine,
+                PaneOutputChunk::Bytes {
+                    sequence: index,
+                    bytes: format!("line {index:02}\r\n").into_bytes(),
+                },
+            );
+        }
+
+        engine.scroll_viewport_delta(-10);
+        let frame = engine.extract_frame()?;
+        let text = frame.text.iter().collect::<String>();
+
+        assert!(
+            text.contains("line 00") || text.contains("line 01"),
+            "scrollback frame should include retained rmux history, got {text:?}"
+        );
+        Ok(())
+    }
+
+    fn tmux_wrap(payload: &[u8]) -> Vec<u8> {
+        let mut wrapped = b"\x1bPtmux;".to_vec();
+        for byte in payload {
+            if *byte == 0x1b {
+                wrapped.push(0x1b);
+            }
+            wrapped.push(*byte);
+        }
+        wrapped.extend_from_slice(b"\x1b\\");
+        wrapped
+    }
+
+    #[test]
+    fn rmux_bytes_chunk_preserves_timg_kitty_image_payload() -> Result<()> {
+        let mut engine = TerminalEngine::new_with_terminal_options(
+            test_geometry(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            4096,
+            Default::default(),
+        )?;
+        let bytes = b"\x1b[?25l\x1b_Ga=T,i=32024961,q=2,f=100,m=0;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\\x1b[?25h".to_vec();
+
+        let written = write_pane_output_chunk(
+            &mut engine,
+            PaneOutputChunk::Bytes {
+                sequence: 1,
+                bytes: bytes.clone(),
+            },
+        );
+        let frame = engine.extract_frame()?;
+
+        assert_eq!(written, bytes.len());
+        assert_eq!(frame.images.placements.len(), 1);
+        assert_eq!(frame.images.placements[0].image_width, 1);
+        assert_eq!(frame.images.placements[0].image_height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rmux_lag_recent_preserves_tmux_passthrough_kitty_payload() -> Result<()> {
+        let mut engine = TerminalEngine::new_with_terminal_options(
+            test_geometry(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            4096,
+            Default::default(),
+        )?;
+        let bytes = tmux_wrap(b"\x1b_Ga=T,f=24,t=d,i=86,s=1,v=1,m=0,q=1;////\x1b\\");
+
+        let written = write_pane_output_chunk(
+            &mut engine,
+            PaneOutputChunk::Lag(rmux_sdk::PaneLagNotice {
+                expected_sequence: 1,
+                resume_sequence: 2,
+                missed_events: 1,
+                newest_sequence: 2,
+                recent: rmux_sdk::PaneRecentOutput {
+                    bytes: bytes.clone(),
+                    oldest_sequence: Some(2),
+                    newest_sequence: Some(2),
+                },
+            }),
+        );
+        let frame = engine.extract_frame()?;
+
+        assert_eq!(written, bytes.len());
+        assert_eq!(frame.images.placements.len(), 1);
+        assert_eq!(frame.images.placements[0].image_id, 86);
+        assert_eq!(frame.images.placements[0].image_width, 1);
+        assert_eq!(frame.images.placements[0].image_height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lag_recent_output_is_written_to_the_local_engine() -> Result<()> {
+        let mut engine =
+            TerminalEngine::new_with_scrollback(test_geometry(), Default::default(), 4096)?;
+        let bytes = b"recent after lag\r\n".to_vec();
+        let written = write_pane_output_chunk(
+            &mut engine,
+            PaneOutputChunk::Lag(rmux_sdk::PaneLagNotice {
+                expected_sequence: 1,
+                resume_sequence: 2,
+                missed_events: 1,
+                newest_sequence: 2,
+                recent: rmux_sdk::PaneRecentOutput {
+                    bytes: bytes.clone(),
+                    oldest_sequence: Some(2),
+                    newest_sequence: Some(2),
+                },
+            }),
         );
 
-        assert_eq!(frame.text.iter().collect::<String>(), "ab");
-        assert_eq!(frame.cells.len(), 2);
-        assert_eq!(frame.cells[0].x, 0);
-        assert_eq!(frame.cells[1].x, 2);
+        let frame = engine.extract_frame()?;
+        assert_eq!(written, bytes.len());
+        assert!(
+            frame
+                .text
+                .iter()
+                .collect::<String>()
+                .contains("recent after lag")
+        );
+        Ok(())
     }
 }

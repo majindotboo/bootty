@@ -13,7 +13,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -29,6 +32,8 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(100);
 /// How often extension dirs are re-scanned for edited/added/removed module files (hot reload).
 const RELOAD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const CODEXBAR_SERVER_PORT: u16 = 17_613;
+const CODEXBAR_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const ERROR_COLOR: Color32 = Color32::from_rgb(0xf3, 0x8b, 0xa8);
 const EXTENSION_UI_PRELUDE: &str = include_str!("extension_ui.luau");
 
@@ -340,12 +345,20 @@ struct RunCache {
     waker: Option<Arc<Waker>>,
     run_jobs: Arc<PlatformRunJobs>,
     shutdown: Arc<AtomicBool>,
+    codexbar: CodexBarClient,
 }
 
 #[derive(Default)]
 struct RunEntry {
     output: String,
     refreshing: bool,
+}
+
+#[derive(Default)]
+struct CodexBarEntry {
+    output: String,
+    refreshing: bool,
+    last_refresh: Option<Instant>,
 }
 
 impl RunCache {
@@ -387,6 +400,20 @@ impl RunCache {
         }
     }
 
+    fn codexbar_usage(self: &Arc<Self>, provider: &str) -> std::io::Result<String> {
+        validate_codexbar_provider(provider)?;
+        #[cfg(test)]
+        if let Some(output) = self.codexbar.mock_usage(provider) {
+            return Ok(output.trim().to_owned());
+        }
+
+        let output = self.codexbar.cached(provider).unwrap_or_default();
+        if self.mode() != RunMode::Cached {
+            self.refresh_codexbar_usage(provider.to_owned());
+        }
+        Ok(output)
+    }
+
     fn cached(&self, cmd: &str) -> Option<String> {
         self.entries
             .lock()
@@ -421,6 +448,294 @@ impl RunCache {
             }
         });
     }
+
+    fn refresh_codexbar_usage(self: &Arc<Self>, provider: String) {
+        if !self
+            .codexbar
+            .mark_refreshing(&provider, CODEXBAR_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        let cache = Arc::clone(self);
+        std::thread::spawn(move || {
+            let output = cache
+                .codexbar
+                .fetch_usage(&provider)
+                .map(|output| output.trim().to_owned())
+                .ok();
+            let changed = cache.codexbar.finish_refresh(&provider, output);
+            if changed && let Some(waker) = &cache.waker {
+                waker.force();
+            }
+        });
+    }
+}
+
+#[derive(Default)]
+struct CodexBarClient {
+    server: Mutex<CodexBarServerState>,
+    entries: Mutex<HashMap<String, CodexBarEntry>>,
+    #[cfg(test)]
+    mock_usage: Mutex<HashMap<String, String>>,
+}
+
+#[derive(Default)]
+struct CodexBarServerState {
+    port: Option<u16>,
+    child: Option<Child>,
+}
+
+impl Drop for CodexBarClient {
+    fn drop(&mut self) {
+        if let Ok(mut server) = self.server.lock()
+            && let Some(mut child) = server.child.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl CodexBarClient {
+    #[cfg(test)]
+    fn mock_usage(&self, provider: &str) -> Option<String> {
+        self.mock_usage
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(provider).cloned())
+    }
+
+    fn cached(&self, provider: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(provider).map(|entry| entry.output.clone()))
+    }
+
+    fn mark_refreshing(&self, provider: &str, refresh_interval: Duration) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let entry = entries.entry(provider.to_owned()).or_default();
+        if entry.refreshing {
+            return false;
+        }
+        let now = Instant::now();
+        if entry
+            .last_refresh
+            .is_some_and(|last| now.duration_since(last) < refresh_interval)
+        {
+            return false;
+        }
+        entry.refreshing = true;
+        entry.last_refresh = Some(now);
+        true
+    }
+
+    fn finish_refresh(&self, provider: &str, output: Option<String>) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let entry = entries.entry(provider.to_owned()).or_default();
+        entry.refreshing = false;
+        let Some(output) = output else {
+            return false;
+        };
+        if entry.output == output {
+            return false;
+        }
+        entry.output = output;
+        true
+    }
+
+    fn fetch_usage(&self, provider: &str) -> std::io::Result<String> {
+        let port = self.ensure_server()?;
+        http_get_local(
+            port,
+            &format!("/usage?provider={provider}"),
+            Duration::from_secs(35),
+        )
+    }
+
+    #[cfg(test)]
+    fn set_mock_usage(&self, provider: &str, output: &str) {
+        self.mock_usage
+            .lock()
+            .expect("codexbar mock usage")
+            .insert(provider.to_owned(), output.to_owned());
+    }
+
+    fn ensure_server(&self) -> std::io::Result<u16> {
+        let mut server = self
+            .server
+            .lock()
+            .map_err(|_| std::io::Error::other("codexbar server lock poisoned"))?;
+        if let (Some(port), Some(child)) = (server.port, server.child.as_mut())
+            && child.try_wait()?.is_none()
+        {
+            return Ok(port);
+        }
+        if let Some(port) = server.port
+            && server.child.is_none()
+            && http_get_local(port, "/health", Duration::from_millis(100)).is_ok()
+        {
+            return Ok(port);
+        }
+
+        server.child.take();
+        server.port = None;
+        if http_get_local(CODEXBAR_SERVER_PORT, "/health", Duration::from_millis(100)).is_ok() {
+            server.port = Some(CODEXBAR_SERVER_PORT);
+            return Ok(CODEXBAR_SERVER_PORT);
+        }
+
+        let port = CODEXBAR_SERVER_PORT;
+        let port_arg = port.to_string();
+        let child = Command::new(resolve_codexbar_program()?)
+            .args([
+                "serve",
+                "--port",
+                port_arg.as_str(),
+                "--refresh-interval",
+                "60",
+                "--request-timeout",
+                "30",
+                "--log-level",
+                "error",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        server.port = Some(port);
+        server.child = Some(child);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(child) = server.child.as_mut()
+                && let Some(status) = child.try_wait()?
+            {
+                server.child = None;
+                server.port = None;
+                return Err(std::io::Error::other(format!(
+                    "codexbar serve exited during startup with {status}"
+                )));
+            }
+            if http_get_local(port, "/health", Duration::from_millis(100)).is_ok() {
+                return Ok(port);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "codexbar serve did not become healthy",
+        ))
+    }
+}
+
+fn validate_codexbar_provider(provider: &str) -> std::io::Result<()> {
+    let valid = !provider.is_empty()
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if valid {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid codexbar provider",
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_codexbar_program() -> std::io::Result<String> {
+    bootty_mux::process::resolve_program("codexbar").map_err(std::io::Error::other)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_codexbar_program() -> std::io::Result<String> {
+    Ok("codexbar".to_owned())
+}
+
+fn http_get_local(port: u16, path: &str, timeout: Duration) -> std::io::Result<String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    http_response_body(&response)
+}
+
+fn http_response_body(response: &[u8]) -> std::io::Result<String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP headers")
+        })?;
+    let header = std::str::from_utf8(&response[..header_end])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut lines = header.lines();
+    let status = lines.next().unwrap_or_default();
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(std::io::Error::other(format!(
+            "codexbar request failed: {status}"
+        )));
+    }
+    let body = &response[header_end + 4..];
+    let is_chunked = lines.any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    });
+    let body = if is_chunked {
+        decode_chunked_body(body)?
+    } else {
+        body.to_vec()
+    };
+    String::from_utf8(body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn decode_chunked_body(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+    loop {
+        let Some(line_end) = find_crlf(&body[offset..]) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid chunked body",
+            ));
+        };
+        let size_line = std::str::from_utf8(&body[offset..offset + line_end])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let size_hex = size_line.split(';').next().unwrap_or_default().trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        offset += line_end + 2;
+        if size == 0 {
+            return Ok(decoded);
+        }
+        if body.len() < offset + size + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "truncated chunked body",
+            ));
+        }
+        decoded.extend_from_slice(&body[offset..offset + size]);
+        offset += size + 2;
+    }
+}
+
+fn find_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|window| window == b"\r\n")
 }
 
 /// Wakes the worker out of its tick wait so reorders and structural mux changes apply promptly
@@ -1286,10 +1601,21 @@ fn setup_lua(
     // `bootty.metrics()` for system stats, which is native and cross-platform.
     // Render phases return cached output immediately and refresh in the background,
     // so a slow provider/command cannot block unrelated modules.
+    let run_shell_cache = Arc::clone(&run_cache);
     bootty.set(
         "run",
         lua.create_function(move |_, cmd: String| {
-            run_cache.run(&cmd).map_err(mlua::Error::external)
+            run_shell_cache.run(&cmd).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    let codexbar_cache = Arc::clone(&run_cache);
+    bootty.set(
+        "codexbar_usage",
+        lua.create_function(move |_, provider: String| {
+            codexbar_cache
+                .codexbar_usage(&provider)
+                .map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -2190,12 +2516,11 @@ mod tests {
 
     #[test]
     fn codexbar_builtin_renders_a_row_per_configured_provider() {
-        // Exercise the render against pre-seeded provider output (Cached mode) rather
-        // than a real shell-out, so the test is deterministic and touches no PATH/launchd
-        // state shared with other tests. The builtin must emit a 5h and a 7d row per
-        // entry in its PROVIDERS table, in order: guards the multi-provider default
-        // (codex + claude) against a provider being dropped, mislabeled, or misordered —
-        // which the removed single-provider test could not.
+        // Exercise the render against pre-seeded CodexBar server responses so the test is
+        // deterministic and touches no PATH/launchd state shared with other tests. The builtin
+        // must emit a 5h and a 7d row per entry in its PROVIDERS table, in order: guards the
+        // multi-provider default (codex + claude) against a provider being dropped, mislabeled,
+        // or misordered.
         let run_cache = Arc::new(RunCache::default());
         let lua = setup_lua(
             &[],
@@ -2212,31 +2537,10 @@ mod tests {
             .find(|module| module.name == "codexbar")
             .expect("codexbar builtin loaded");
 
-        // Mirror the shell snippet codexbar.luau builds in usage_command(provider); the
-        // cache is keyed by the exact command string, so this must stay in sync with it.
-        let usage_command = |provider: &str| {
-            let stderr_null = if cfg!(windows) {
-                "2>nul"
-            } else {
-                "2>/dev/null"
-            };
-            format!("codexbar usage --provider {provider} --format json --json-only {stderr_null}")
-        };
         const PROBE_JSON: &str = r#"[{"usage":{"primary":{"usedPercent":25,"windowMinutes":300},"secondary":{"usedPercent":50,"windowMinutes":10080}}}]"#;
-        {
-            let mut entries = run_cache.entries.lock().expect("run cache entries");
-            for provider in ["codex", "claude"] {
-                entries.insert(
-                    usage_command(provider),
-                    RunEntry {
-                        output: PROBE_JSON.to_owned(),
-                        refreshing: false,
-                    },
-                );
-            }
+        for provider in ["codex", "claude"] {
+            run_cache.codexbar.set_mock_usage(provider, PROBE_JSON);
         }
-
-        run_cache.set_mode(RunMode::Cached);
         let texts = run_module(&codexbar.body)
             .into_iter()
             .map(|item| item.text)
@@ -2246,6 +2550,86 @@ mod tests {
             texts,
             vec!["codex 5h", "codex 7d", "claude 5h", "claude 7d"]
         );
+    }
+
+    #[test]
+    fn codexbar_usage_returns_cached_value_without_waiting_for_refresh() {
+        let run_cache = Arc::new(RunCache::default());
+        run_cache
+            .codexbar
+            .entries
+            .lock()
+            .expect("codexbar entries")
+            .insert(
+                "claude".to_owned(),
+                CodexBarEntry {
+                    output: "cached".to_owned(),
+                    refreshing: true,
+                    last_refresh: None,
+                },
+            );
+
+        assert_eq!(run_cache.codexbar_usage("claude").unwrap(), "cached");
+    }
+
+    #[test]
+    fn codexbar_usage_does_not_refresh_during_cached_render() {
+        let run_cache = Arc::new(RunCache::default());
+        run_cache
+            .codexbar
+            .entries
+            .lock()
+            .expect("codexbar entries")
+            .insert(
+                "claude".to_owned(),
+                CodexBarEntry {
+                    output: "cached".to_owned(),
+                    refreshing: false,
+                    last_refresh: None,
+                },
+            );
+        run_cache.set_mode(RunMode::Cached);
+
+        assert_eq!(run_cache.codexbar_usage("claude").unwrap(), "cached");
+        assert!(
+            !run_cache
+                .codexbar
+                .entries
+                .lock()
+                .expect("codexbar entries")
+                .get("claude")
+                .expect("claude entry")
+                .refreshing
+        );
+    }
+
+    #[test]
+    fn codexbar_refresh_is_throttled_per_provider() {
+        let client = CodexBarClient::default();
+
+        assert!(client.mark_refreshing("claude", CODEXBAR_REFRESH_INTERVAL));
+        assert!(!client.mark_refreshing("claude", CODEXBAR_REFRESH_INTERVAL));
+        assert!(client.mark_refreshing("codex", CODEXBAR_REFRESH_INTERVAL));
+    }
+
+    #[test]
+    fn http_response_body_reads_content_length_response() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"ok\":true}\n";
+
+        assert_eq!(http_response_body(response).unwrap(), "{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn http_response_body_decodes_chunked_response() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwiki\r\n5\r\npedia\r\n0\r\n\r\n";
+
+        assert_eq!(http_response_body(response).unwrap(), "wikipedia");
+    }
+
+    #[test]
+    fn codexbar_provider_rejects_url_injection() {
+        assert!(validate_codexbar_provider("claude").is_ok());
+        assert!(validate_codexbar_provider("claude&provider=all").is_err());
     }
 
     #[test]
@@ -2999,6 +3383,62 @@ mod tests {
         let module = loaded_module_from_value("test".to_owned(), value).unwrap();
         let items = run_module(&module.body);
         assert_eq!(items[0].text, "78:7080");
+    }
+
+    fn built_in_sysinfo_items(metrics: Metrics) -> Vec<ModuleItem> {
+        let theme = [
+            ("base".to_owned(), "#1e1e2e".to_owned()),
+            ("surface".to_owned(), "#313244".to_owned()),
+            ("hover".to_owned(), "#45475a".to_owned()),
+            ("success".to_owned(), "#a6e3a1".to_owned()),
+            ("warning".to_owned(), "#f9e2af".to_owned()),
+            ("subtext".to_owned(), "#a6adc8".to_owned()),
+            ("text".to_owned(), "#cdd6f4".to_owned()),
+        ];
+        let metrics = Arc::new(RwLock::new(metrics));
+        let lua = setup_lua(
+            &theme,
+            Arc::default(),
+            metrics,
+            Arc::default(),
+            Arc::default(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
+        let sysinfo = modules
+            .iter()
+            .find(|module| module.name == "sysinfo")
+            .expect("built-in sysinfo module loaded");
+        run_module(&sysinfo.body)
+    }
+
+    #[test]
+    fn built_in_sysinfo_marks_charging_and_full_battery() {
+        let charging = built_in_sysinfo_items(Metrics {
+            cpu: 10.0,
+            mem_used_pct: 25.0,
+            battery_percent: Some(61.0),
+            on_ac: true,
+            battery_time_to_full_secs: Some(3_600.0),
+            ..Metrics::default()
+        });
+        assert_eq!(
+            charging.last().and_then(|item| item.icon.as_deref()),
+            Some("battery-charging")
+        );
+
+        let full = built_in_sysinfo_items(Metrics {
+            cpu: 10.0,
+            mem_used_pct: 25.0,
+            battery_percent: Some(100.0),
+            on_ac: true,
+            ..Metrics::default()
+        });
+        assert_eq!(
+            full.last().and_then(|item| item.icon.as_deref()),
+            Some("battery-full")
+        );
     }
 
     #[test]

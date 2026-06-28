@@ -1,25 +1,42 @@
-use std::sync::{Mutex, OnceLock};
-
 use anyhow::{Context, Result};
-use rmux_sdk::{
-    EnsureSession, EnsureSessionPolicy, InfoSnapshot, PaneInfo, PaneProcessState, ProcessSpec,
-    Rmux, RmuxEndpoint, SessionName, TerminalSizeSpec,
-};
-use tokio::runtime::{Builder, Runtime};
+use rmux_sdk::{Rmux, SessionName};
+
+use crate::rmux_bridge::{resize_rmux_window, rmux_execute, rmux_snapshot};
 
 use super::{
     backend::MuxBackend,
-    command::MuxCommand,
+    command::{MuxCommand, MuxSplitDirection},
     config::MuxBackendKind,
-    snapshot::{MuxPaneAnchor, MuxSession, MuxSnapshot, MuxWindow},
+    snapshot::{
+        MuxPaneAnchor, MuxPaneLayout, MuxPaneSplitDirection, MuxSession, MuxSnapshot, MuxWindow,
+    },
+    tmux_protocol::{TmuxLayout, TmuxLayoutContent},
 };
 
-const DEFAULT_RMUX_SESSION_NAME: &str = "local";
+pub(crate) const DEFAULT_RMUX_SESSION_NAME: &str = "local";
+const RMUX_FIELD_SEPARATOR: char = '\u{1f}';
+pub(crate) const RMUX_WINDOW_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_active}\u{1f}#{window_name}\u{1f}#{window_layout}";
+pub(crate) const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
 
 pub trait RmuxSessionClient {
     fn snapshot(&self) -> Result<MuxSnapshot>;
     fn ensure_session(&self, session_name: &str, cwd: &str) -> Result<()>;
     fn kill_session(&self, session_name: &str) -> Result<()>;
+    fn activate_window(&self, session_name: &str, window_id: &str) -> Result<()>;
+    fn rename_window(&self, session_name: &str, window_id: &str, name: &str) -> Result<()>;
+    fn new_window(&self, session_name: &str, cwd: Option<&str>) -> Result<()>;
+    fn activate_next_window(&self, session_name: &str) -> Result<()>;
+    fn activate_previous_window(&self, session_name: &str) -> Result<()>;
+    fn activate_last_window(&self, session_name: &str) -> Result<()>;
+    fn activate_window_index(&self, session_name: &str, index: u32) -> Result<()>;
+    fn move_window(&self, session_name: &str, delta: i32) -> Result<()>;
+    fn split_pane(
+        &self,
+        session_name: &str,
+        pane_id: Option<&str>,
+        direction: MuxSplitDirection,
+    ) -> Result<()>;
+    fn close_pane(&self, session_name: &str, pane_id: Option<&str>) -> Result<()>;
 }
 
 pub struct RmuxBackend<C = SdkRmuxClient> {
@@ -67,9 +84,11 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
 
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         match command {
-            MuxCommand::ActivateWindow { .. } => {
-                // Bootty owns rmux selection and pane rendering natively; there is no
-                // attached rmux client to switch.
+            MuxCommand::ActivateWindow {
+                session_id,
+                window_id,
+            } => {
+                self.client.activate_window(&session_id, &window_id)?;
             }
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
@@ -81,17 +100,51 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
             MuxCommand::DitchSession { session_id } => {
                 self.client.kill_session(&session_id)?;
             }
-            MuxCommand::NewWindow { .. }
-            | MuxCommand::ActivateNextWindow { .. }
-            | MuxCommand::ActivatePreviousWindow { .. }
-            | MuxCommand::ActivateLastWindow { .. }
-            | MuxCommand::ActivateWindowIndex { .. }
-            | MuxCommand::MoveWindow { .. }
-            | MuxCommand::SplitPane { .. }
-            | MuxCommand::SelectPane { .. }
+            MuxCommand::RenameWindow {
+                session_id,
+                window_id,
+                name,
+            } => {
+                self.client.rename_window(&session_id, &window_id, &name)?;
+            }
+            MuxCommand::NewWindow { session_id, cwd } => {
+                self.client.new_window(&session_id, cwd.as_deref())?;
+            }
+            MuxCommand::ActivateNextWindow { session_id } => {
+                self.client.activate_next_window(&session_id)?;
+            }
+            MuxCommand::ActivatePreviousWindow { session_id } => {
+                self.client.activate_previous_window(&session_id)?;
+            }
+            MuxCommand::ActivateLastWindow { session_id } => {
+                self.client.activate_last_window(&session_id)?;
+            }
+            MuxCommand::ActivateWindowIndex { session_id, index } => {
+                self.client.activate_window_index(&session_id, index)?;
+            }
+            MuxCommand::MoveWindow { session_id, delta } => {
+                self.client.move_window(&session_id, delta)?;
+            }
+            MuxCommand::SplitPane {
+                session_id,
+                pane_id,
+                direction,
+            } => {
+                self.client
+                    .split_pane(&session_id, pane_id.as_deref(), direction)?;
+            }
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            }
+            | MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => {
+                self.client.close_pane(&session_id, pane_id.as_deref())?;
+            }
+            MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
-            | MuxCommand::KillPane { .. }
-            | MuxCommand::ClosePane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {
                 anyhow::bail!("rmux backend does not support mux command {command:?}");
             }
@@ -116,147 +169,373 @@ impl Default for SdkRmuxClient {
 
 impl RmuxSessionClient for SdkRmuxClient {
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        shared_rmux_runtime()
-            .lock()
-            .expect("rmux runtime lock")
-            .block_on(async {
-                let rmux = connect_bootty_rmux().await?;
-                let names = rmux.list_sessions().await?;
-                let mut sessions = Vec::with_capacity(names.len());
-                for name in names {
-                    let handle = rmux.session(name.clone()).await?;
-                    let info = handle.pane(0, 0).info().await?;
-                    sessions.push(session_from_info(&name, &info));
-                }
-                Ok(MuxSnapshot {
-                    active_session_id: sessions
-                        .iter()
-                        .find(|session| session.active)
-                        .map(|session| session.id.clone()),
-                    sessions,
-                })
-            })
+        rmux_snapshot()
     }
 
     fn ensure_session(&self, session_name: &str, cwd: &str) -> Result<()> {
-        shared_rmux_runtime()
-            .lock()
-            .expect("rmux runtime lock")
-            .block_on(async {
-                let rmux = connect_bootty_rmux().await?;
-                let name = SessionName::new(session_name).context("invalid rmux session name")?;
-                rmux.ensure_session(
-                    EnsureSession::named(name)
-                        .policy(EnsureSessionPolicy::CreateOrReuse)
-                        .detached(true)
-                        .working_directory(cwd)
-                        .size(TerminalSizeSpec::new(80, 24))
-                        .process(ProcessSpec::default()),
-                )
-                .await?;
-                Ok(())
-            })
+        rmux_execute(MuxCommand::CreateProjectSession {
+            session_id: session_name.to_owned(),
+            cwd: cwd.to_owned(),
+        })
     }
 
     fn kill_session(&self, session_name: &str) -> Result<()> {
-        shared_rmux_runtime()
-            .lock()
-            .expect("rmux runtime lock")
-            .block_on(async {
-                let rmux = connect_bootty_rmux().await?;
-                let name = SessionName::new(session_name).context("invalid rmux session name")?;
-                let session = rmux.session(name).await?;
-                session.kill().await?;
-                Ok(())
-            })
+        rmux_execute(MuxCommand::DitchSession {
+            session_id: session_name.to_owned(),
+        })
+    }
+
+    fn activate_window(&self, session_name: &str, window_id: &str) -> Result<()> {
+        rmux_execute(MuxCommand::ActivateWindow {
+            session_id: session_name.to_owned(),
+            window_id: window_id.to_owned(),
+        })
+    }
+
+    fn rename_window(&self, session_name: &str, window_id: &str, name: &str) -> Result<()> {
+        rmux_execute(MuxCommand::RenameWindow {
+            session_id: session_name.to_owned(),
+            window_id: window_id.to_owned(),
+            name: name.to_owned(),
+        })
+    }
+
+    fn new_window(&self, session_name: &str, cwd: Option<&str>) -> Result<()> {
+        rmux_execute(MuxCommand::NewWindow {
+            session_id: session_name.to_owned(),
+            cwd: cwd.map(str::to_owned),
+        })
+    }
+
+    fn activate_next_window(&self, session_name: &str) -> Result<()> {
+        rmux_execute(MuxCommand::ActivateNextWindow {
+            session_id: session_name.to_owned(),
+        })
+    }
+
+    fn activate_previous_window(&self, session_name: &str) -> Result<()> {
+        rmux_execute(MuxCommand::ActivatePreviousWindow {
+            session_id: session_name.to_owned(),
+        })
+    }
+
+    fn activate_last_window(&self, session_name: &str) -> Result<()> {
+        rmux_execute(MuxCommand::ActivateLastWindow {
+            session_id: session_name.to_owned(),
+        })
+    }
+
+    fn activate_window_index(&self, session_name: &str, index: u32) -> Result<()> {
+        rmux_execute(MuxCommand::ActivateWindowIndex {
+            session_id: session_name.to_owned(),
+            index,
+        })
+    }
+
+    fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+        rmux_execute(MuxCommand::MoveWindow {
+            session_id: session_name.to_owned(),
+            delta,
+        })
+    }
+
+    fn split_pane(
+        &self,
+        session_name: &str,
+        pane_id: Option<&str>,
+        direction: MuxSplitDirection,
+    ) -> Result<()> {
+        rmux_execute(MuxCommand::SplitPane {
+            session_id: session_name.to_owned(),
+            pane_id: pane_id.map(str::to_owned),
+            direction,
+        })
+    }
+
+    fn close_pane(&self, session_name: &str, pane_id: Option<&str>) -> Result<()> {
+        rmux_execute(MuxCommand::ClosePane {
+            session_id: session_name.to_owned(),
+            pane_id: pane_id.map(str::to_owned),
+        })
     }
 }
 
-fn shared_rmux_runtime() -> &'static Mutex<Runtime> {
-    static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        Mutex::new(
-            Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("rmux sdk runtime should initialize"),
-        )
+pub(crate) fn resize_bootty_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
+    resize_rmux_window(window_id, cols, rows)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RmuxWindowRow {
+    pub(crate) session_name: String,
+    pub(crate) id: String,
+    pub(crate) index: u32,
+    pub(crate) active: bool,
+    pub(crate) name: String,
+    pub(crate) layout: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RmuxPaneRow {
+    pub(crate) session_name: String,
+    pub(crate) window_id: String,
+    pub(crate) pane_id: String,
+    pub(crate) index: u32,
+    pub(crate) active: bool,
+    pub(crate) cwd: Option<String>,
+    pub(crate) process: Option<String>,
+}
+
+pub(crate) async fn list_window_rows(
+    rmux: &Rmux,
+    name: &SessionName,
+) -> Result<Vec<RmuxWindowRow>> {
+    let session_name = name.to_string();
+    let output = rmux_cmd_stdout(
+        rmux,
+        [
+            "list-windows",
+            "-t",
+            session_name.as_str(),
+            "-F",
+            RMUX_WINDOW_FORMAT,
+        ],
+    )
+    .await?;
+    output.lines().map(parse_window_row).collect()
+}
+
+pub(crate) async fn list_pane_rows(rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxPaneRow>> {
+    let session_name = name.to_string();
+    let output = rmux_cmd_stdout(rmux, ["list-panes", "-a", "-F", RMUX_PANE_FORMAT]).await?;
+    output
+        .lines()
+        .map(parse_pane_row)
+        .filter(|row| match row {
+            Ok(row) => row.session_name == session_name,
+            Err(_) => true,
+        })
+        .collect()
+}
+
+pub(crate) async fn rmux_cmd_checked(rmux: &Rmux, args: Vec<String>) -> Result<()> {
+    let run = rmux.cmd(args).await?;
+    anyhow::ensure!(
+        run.exit == Some(0),
+        "rmux command exited {:?}: {}",
+        run.exit,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    Ok(())
+}
+async fn rmux_cmd_stdout<'a>(
+    rmux: &Rmux,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<String> {
+    let run = rmux.cmd(args).await?;
+    anyhow::ensure!(
+        run.exit == Some(0),
+        "rmux command exited {:?}: {}",
+        run.exit,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    Ok(String::from_utf8_lossy(&run.stdout).into_owned())
+}
+
+fn parse_window_row(line: &str) -> Result<RmuxWindowRow> {
+    let mut fields = line.splitn(6, RMUX_FIELD_SEPARATOR);
+    let session_name = next_rmux_field(&mut fields, "window session")?.to_owned();
+    let id = next_rmux_field(&mut fields, "window id")?.to_owned();
+    let index = next_rmux_field(&mut fields, "window index")?
+        .parse::<u32>()
+        .with_context(|| format!("invalid rmux window index in {line:?}"))?;
+    let active = parse_rmux_bool(next_rmux_field(&mut fields, "window active")?);
+    let name = next_rmux_field(&mut fields, "window name")?.to_owned();
+    let layout = non_empty_rmux_field(next_rmux_field(&mut fields, "window layout")?);
+    Ok(RmuxWindowRow {
+        session_name,
+        id,
+        index,
+        active,
+        name,
+        layout,
     })
 }
 
-async fn connect_bootty_rmux() -> Result<Rmux> {
-    let endpoint = rmux_ipc::default_endpoint()
-        .context("resolve default rmux endpoint")?
-        .into_path();
-    Rmux::connect_or_start_at(RmuxEndpoint::UnixSocket(endpoint))
-        .await
-        .map_err(Into::into)
+fn parse_pane_row(line: &str) -> Result<RmuxPaneRow> {
+    let mut fields = line.splitn(7, RMUX_FIELD_SEPARATOR);
+    let session_name = next_rmux_field(&mut fields, "pane session")?.to_owned();
+    let window_id = next_rmux_field(&mut fields, "pane window id")?.to_owned();
+    let pane_id = next_rmux_field(&mut fields, "pane id")?.to_owned();
+    let index = next_rmux_field(&mut fields, "pane index")?
+        .parse::<u32>()
+        .with_context(|| format!("invalid rmux pane index in {line:?}"))?;
+    let active = parse_rmux_bool(next_rmux_field(&mut fields, "pane active")?);
+    let cwd = non_empty_rmux_field(next_rmux_field(&mut fields, "pane cwd")?);
+    let process = non_empty_rmux_field(next_rmux_field(&mut fields, "pane process")?);
+    Ok(RmuxPaneRow {
+        session_name,
+        window_id,
+        pane_id,
+        index,
+        active,
+        cwd,
+        process,
+    })
 }
 
-fn session_from_info(name: &SessionName, info: &InfoSnapshot) -> MuxSession {
-    let session_info = info.sessions.first();
-    let name = name.to_string();
-    let active = session_info.is_some_and(|session| session.attached_clients > 0);
-    let panes = &info.panes;
-    let windows = info
-        .windows
+fn next_rmux_field<'a>(fields: &mut impl Iterator<Item = &'a str>, name: &str) -> Result<&'a str> {
+    fields
+        .next()
+        .with_context(|| format!("rmux row omitted {name}"))
+}
+
+fn parse_rmux_bool(value: &str) -> bool {
+    value == "1"
+}
+
+fn non_empty_rmux_field(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn rmux_window_layout(raw: &str) -> Option<MuxPaneLayout> {
+    TmuxLayout::parse_with_checksum(raw)
+        .or_else(|_| TmuxLayout::parse(raw))
+        .ok()
+        .and_then(|layout| mux_layout_from_tmux_layout(&layout))
+}
+
+fn mux_layout_from_tmux_layout(layout: &TmuxLayout) -> Option<MuxPaneLayout> {
+    match &layout.content {
+        TmuxLayoutContent::Pane(pane_id) => Some(MuxPaneLayout::Pane(format!("%{pane_id}"))),
+        TmuxLayoutContent::Horizontal(children) => {
+            mux_layout_from_tmux_children(MuxPaneSplitDirection::Right, children, |layout| {
+                layout.width
+            })
+        }
+        TmuxLayoutContent::Vertical(children) => {
+            mux_layout_from_tmux_children(MuxPaneSplitDirection::Down, children, |layout| {
+                layout.height
+            })
+        }
+    }
+}
+
+fn mux_layout_from_tmux_children(
+    direction: MuxPaneSplitDirection,
+    children: &[TmuxLayout],
+    extent: fn(&TmuxLayout) -> usize,
+) -> Option<MuxPaneLayout> {
+    let (first, rest) = children.split_first()?;
+    if rest.is_empty() {
+        return mux_layout_from_tmux_layout(first);
+    }
+    let first_layout = mux_layout_from_tmux_layout(first)?;
+    let second_layout = mux_layout_from_tmux_children(direction.clone(), rest, extent)?;
+    let first_extent = extent(first);
+    let total_extent = children.iter().map(extent).sum::<usize>().max(1);
+    let ratio_millis = ((first_extent.saturating_mul(1000) + total_extent / 2) / total_extent)
+        .clamp(1, 999) as u16;
+
+    Some(MuxPaneLayout::Split {
+        direction,
+        ratio_millis,
+        first: Box::new(first_layout),
+        second: Box::new(second_layout),
+    })
+}
+
+pub(crate) fn session_from_rows(
+    name: &str,
+    window_rows: &[RmuxWindowRow],
+    pane_rows: &[RmuxPaneRow],
+) -> MuxSession {
+    let index_offset = if window_rows
         .iter()
+        .filter(|window| window.session_name == name)
+        .map(|window| window.index)
+        .min()
+        == Some(0)
+    {
+        1
+    } else {
+        0
+    };
+    let mut windows = window_rows
+        .iter()
+        .filter(|window| window.session_name == name)
         .map(|window| {
-            let pane = panes
+            let mut window_pane_rows = pane_rows
                 .iter()
-                .find(|pane| pane.window_id == window.id && pane.index == 0)
-                .or_else(|| panes.iter().find(|pane| pane.window_id == window.id));
-            let anchor = anchor_for_pane(&name, pane);
+                .filter(|pane| pane.session_name == name && pane.window_id == window.id)
+                .collect::<Vec<_>>();
+            window_pane_rows.sort_by_key(|pane| pane.index);
+            let window_panes = window_pane_rows
+                .iter()
+                .map(|pane| anchor_for_pane_row(name, pane))
+                .collect::<Vec<_>>();
+            let anchor = window_pane_rows
+                .iter()
+                .find(|pane| pane.active)
+                .map(|pane| anchor_for_pane_row(name, pane))
+                .or_else(|| window_panes.first().cloned())
+                .unwrap_or_else(|| MuxPaneAnchor {
+                    session_id: name.to_owned(),
+                    pane_id: None,
+                    cwd: None,
+                    process: None,
+                });
             MuxWindow {
-                id: window.id.to_string(),
-                index: window.index,
-                name: window.name.clone().unwrap_or_default(),
-                active: window.index == 0,
-                panes: vec![anchor.clone()],
+                id: window.id.clone(),
+                index: window.index.saturating_add(index_offset),
+                name: window.name.clone(),
+                active: window.active,
+                panes: window_panes,
+                layout: window.layout.as_deref().and_then(rmux_window_layout),
                 anchor,
             }
         })
         .collect::<Vec<_>>();
-    let anchor = panes
+    let active_window_id = windows
         .iter()
-        .find(|pane| pane.index == 0)
-        .or_else(|| panes.first())
-        .map_or_else(
-            || MuxPaneAnchor {
-                session_id: name.clone(),
-                pane_id: None,
-                cwd: session_info.and_then(|session| session.working_directory.clone()),
-                process: None,
-            },
-            |pane| anchor_for_pane(&name, Some(pane)),
-        );
+        .find(|window| window.active)
+        .or_else(|| windows.last())
+        .map(|window| window.id.clone());
+    if !windows.iter().any(|window| window.active)
+        && let Some(active_window_id) = active_window_id.as_deref()
+        && let Some(window) = windows
+            .iter_mut()
+            .find(|window| window.id == active_window_id)
+    {
+        window.active = true;
+    }
+    let anchor = active_window_id
+        .as_deref()
+        .and_then(|id| windows.iter().find(|window| window.id == id))
+        .map(|window| window.anchor.clone())
+        .or_else(|| windows.first().map(|window| window.anchor.clone()))
+        .unwrap_or_else(|| MuxPaneAnchor {
+            session_id: name.to_owned(),
+            pane_id: None,
+            cwd: None,
+            process: None,
+        });
 
     MuxSession {
-        id: name,
-        name: session_info
-            .map(|session| session.name.to_string())
-            .unwrap_or_else(|| anchor.session_id.clone()),
-        active,
+        id: name.to_owned(),
+        name: name.to_owned(),
+        active: false,
         anchor,
-        active_window_id: windows.first().map(|window| window.id.clone()),
+        active_window_id,
         windows,
     }
 }
 
-fn anchor_for_pane(session_name: &str, pane: Option<&PaneInfo>) -> MuxPaneAnchor {
+fn anchor_for_pane_row(session_name: &str, pane: &RmuxPaneRow) -> MuxPaneAnchor {
     MuxPaneAnchor {
         session_id: session_name.to_owned(),
-        pane_id: pane.map(|pane| pane.id.to_string()),
-        cwd: pane.and_then(|pane| pane.working_directory.clone()),
-        process: pane.and_then(|pane| match &pane.process {
-            PaneProcessState::Running { .. } => pane
-                .command
-                .as_ref()
-                .and_then(|command| command.first())
-                .cloned(),
-            PaneProcessState::Exited | PaneProcessState::Unknown => None,
-            _ => None,
-        }),
+        pane_id: Some(pane.pane_id.clone()),
+        cwd: pane.cwd.clone(),
+        process: pane.process.clone(),
     }
 }
 
@@ -292,6 +571,100 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(vec!["kill_session".to_owned(), session_name.to_owned()]);
+            Ok(())
+        }
+
+        fn activate_window(&self, session_name: &str, window_id: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_window".to_owned(),
+                session_name.to_owned(),
+                window_id.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn rename_window(&self, session_name: &str, window_id: &str, name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "rename_window".to_owned(),
+                session_name.to_owned(),
+                window_id.to_owned(),
+                name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn new_window(&self, session_name: &str, cwd: Option<&str>) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "new_window".to_owned(),
+                session_name.to_owned(),
+                cwd.unwrap_or_default().to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_next_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_next_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_previous_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_previous_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_last_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_last_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_window_index(&self, session_name: &str, index: u32) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_window_index".to_owned(),
+                session_name.to_owned(),
+                index.to_string(),
+            ]);
+            Ok(())
+        }
+
+        fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "move_window".to_owned(),
+                session_name.to_owned(),
+                delta.to_string(),
+            ]);
+            Ok(())
+        }
+
+        fn split_pane(
+            &self,
+            session_name: &str,
+            pane_id: Option<&str>,
+            direction: MuxSplitDirection,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "split_pane".to_owned(),
+                session_name.to_owned(),
+                pane_id.unwrap_or_default().to_owned(),
+                format!("{direction:?}"),
+            ]);
+            Ok(())
+        }
+
+        fn close_pane(&self, session_name: &str, pane_id: Option<&str>) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "close_pane".to_owned(),
+                session_name.to_owned(),
+                pane_id.unwrap_or_default().to_owned(),
+            ]);
             Ok(())
         }
     }
@@ -333,6 +706,7 @@ mod tests {
                             process: None,
                         },
                         panes: Vec::new(),
+                        layout: None,
                     }],
                 }],
             })
@@ -352,6 +726,100 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(vec!["kill_session".to_owned(), session_name.to_owned()]);
+            Ok(())
+        }
+
+        fn activate_window(&self, session_name: &str, window_id: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_window".to_owned(),
+                session_name.to_owned(),
+                window_id.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn rename_window(&self, session_name: &str, window_id: &str, name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "rename_window".to_owned(),
+                session_name.to_owned(),
+                window_id.to_owned(),
+                name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn new_window(&self, session_name: &str, cwd: Option<&str>) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "new_window".to_owned(),
+                session_name.to_owned(),
+                cwd.unwrap_or_default().to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_next_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_next_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_previous_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_previous_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_last_window(&self, session_name: &str) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_last_window".to_owned(),
+                session_name.to_owned(),
+            ]);
+            Ok(())
+        }
+
+        fn activate_window_index(&self, session_name: &str, index: u32) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "activate_window_index".to_owned(),
+                session_name.to_owned(),
+                index.to_string(),
+            ]);
+            Ok(())
+        }
+
+        fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "move_window".to_owned(),
+                session_name.to_owned(),
+                delta.to_string(),
+            ]);
+            Ok(())
+        }
+
+        fn split_pane(
+            &self,
+            session_name: &str,
+            pane_id: Option<&str>,
+            direction: MuxSplitDirection,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "split_pane".to_owned(),
+                session_name.to_owned(),
+                pane_id.unwrap_or_default().to_owned(),
+                format!("{direction:?}"),
+            ]);
+            Ok(())
+        }
+
+        fn close_pane(&self, session_name: &str, pane_id: Option<&str>) -> Result<()> {
+            self.calls.borrow_mut().push(vec![
+                "close_pane".to_owned(),
+                session_name.to_owned(),
+                pane_id.unwrap_or_default().to_owned(),
+            ]);
             Ok(())
         }
     }
@@ -384,6 +852,11 @@ mod tests {
             calls.borrow().as_slice(),
             &[
                 vec![
+                    "activate_window".to_owned(),
+                    "project".to_owned(),
+                    "@2".to_owned()
+                ],
+                vec![
                     "ensure_session".to_owned(),
                     "next".to_owned(),
                     "/next".to_owned()
@@ -391,6 +864,592 @@ mod tests {
                 vec!["kill_session".to_owned(), "next".to_owned()],
             ]
         );
+    }
+
+    #[test]
+    fn rmux_adapter_maps_native_tab_and_pane_commands_to_sdk_client() {
+        let client = RecordingClient::default();
+        let calls = client.calls.clone();
+        let mut backend = RmuxBackend::with_client(client);
+
+        backend
+            .execute(MuxCommand::NewWindow {
+                session_id: "project".to_owned(),
+                cwd: Some("/repo".to_owned()),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::SplitPane {
+                session_id: "project".to_owned(),
+                pane_id: Some("%3".to_owned()),
+                direction: MuxSplitDirection::Down,
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "project".to_owned(),
+                pane_id: Some("%4".to_owned()),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::RenameWindow {
+                session_id: "project".to_owned(),
+                window_id: "@2".to_owned(),
+                name: "build".to_owned(),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::ActivateNextWindow {
+                session_id: "project".to_owned(),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::ActivatePreviousWindow {
+                session_id: "project".to_owned(),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::ActivateLastWindow {
+                session_id: "project".to_owned(),
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::ActivateWindowIndex {
+                session_id: "project".to_owned(),
+                index: 2,
+            })
+            .unwrap();
+        backend
+            .execute(MuxCommand::MoveWindow {
+                session_id: "project".to_owned(),
+                delta: -1,
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[
+                vec![
+                    "new_window".to_owned(),
+                    "project".to_owned(),
+                    "/repo".to_owned()
+                ],
+                vec![
+                    "split_pane".to_owned(),
+                    "project".to_owned(),
+                    "%3".to_owned(),
+                    "Down".to_owned()
+                ],
+                vec![
+                    "close_pane".to_owned(),
+                    "project".to_owned(),
+                    "%4".to_owned()
+                ],
+                vec![
+                    "rename_window".to_owned(),
+                    "project".to_owned(),
+                    "@2".to_owned(),
+                    "build".to_owned()
+                ],
+                vec!["activate_next_window".to_owned(), "project".to_owned()],
+                vec!["activate_previous_window".to_owned(), "project".to_owned()],
+                vec!["activate_last_window".to_owned(), "project".to_owned()],
+                vec![
+                    "activate_window_index".to_owned(),
+                    "project".to_owned(),
+                    "2".to_owned()
+                ],
+                vec![
+                    "move_window".to_owned(),
+                    "project".to_owned(),
+                    "-1".to_owned()
+                ],
+            ]
+        );
+    }
+
+    fn wait_for_controller(
+        label: &str,
+        controller: &mut crate::controller::MuxController,
+        repaint: &crate::RepaintHandle,
+        config: &bootty_config::config::MultiplexerConfig,
+        mut done: impl FnMut(&crate::controller::MuxController) -> bool,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if let Some(result) = controller.poll_command() {
+                result.map_err(anyhow::Error::msg)?;
+            }
+            if let Some(error) = controller.refresh_sessions(repaint, config) {
+                anyhow::bail!(error);
+            }
+            if done(controller) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                let sessions = controller
+                    .sessions()
+                    .iter()
+                    .map(|session| format!("{}:{}", session.id, session.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "timed out waiting for rmux controller state: {label}; selected={:?}; sessions=[{sessions}]",
+                    controller.selected_session()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn kill_rmux_server() {
+        let _ = std::process::Command::new("rmux")
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    fn rmux_pane_sizes(session: &str) -> Result<Vec<(u16, u16)>> {
+        let output = std::process::Command::new("rmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name} #{pane_width} #{pane_height}",
+            ])
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "rmux list-panes exited with {}",
+            output.status
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.lines()
+            .filter_map(|line| line.strip_prefix(session))
+            .map(|fields| {
+                let mut fields = fields.split_whitespace();
+                let width = fields
+                    .next()
+                    .context("missing pane width")?
+                    .parse::<u16>()?;
+                let height = fields
+                    .next()
+                    .context("missing pane height")?
+                    .parse::<u16>()?;
+                Ok((width, height))
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_split_down_stacks_panes() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-split-down-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+
+        client.ensure_session(&session, &cwd)?;
+        client.split_pane(&session, None, MuxSplitDirection::Down)?;
+        let sizes = rmux_pane_sizes(&session)?;
+        let snapshot = client.snapshot()?;
+        let restored_layout = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|session| session.windows.first())
+            .and_then(|window| window.layout.as_ref())
+            .context("split-down rmux snapshot should expose window layout")?;
+        assert!(
+            matches!(
+                restored_layout,
+                MuxPaneLayout::Split {
+                    direction: MuxPaneSplitDirection::Down,
+                    ..
+                }
+            ),
+            "split down snapshot should preserve vertical layout, got {restored_layout:?}"
+        );
+
+        client.kill_session(&session)?;
+        kill_rmux_server();
+
+        assert_eq!(sizes.len(), 2, "expected two panes, got {sizes:?}");
+        assert!(
+            sizes.iter().all(|(width, _)| *width >= 78),
+            "split down should stack panes at full width, got {sizes:?}"
+        );
+        assert!(
+            sizes.iter().all(|(_, height)| *height < 24),
+            "split down should divide pane height, got {sizes:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_backend_smoke_covers_tabs_splits_switching_and_persistence() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-smoke-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+        let other_session = format!("bootty-smoke-other-{}", std::process::id());
+
+        client.ensure_session(&session, &cwd)?;
+        client.new_window(&session, Some(&cwd))?;
+        client.activate_window_index(&session, 1)?;
+        let snapshot = client.snapshot()?;
+        let smoke = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("smoke rmux session should exist after creation")?;
+        assert_eq!(smoke.windows.len(), 2);
+        assert_eq!(
+            smoke.active_window_id.as_deref(),
+            Some(smoke.windows[0].id.as_str())
+        );
+
+        client.split_pane(&session, None, MuxSplitDirection::Down)?;
+        let snapshot = client.snapshot()?;
+        let smoke = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("smoke rmux session should exist after active-pane split")?;
+        assert_eq!(smoke.windows[0].panes.len(), 2);
+
+        let pane_id = smoke.windows[0]
+            .anchor
+            .pane_id
+            .as_deref()
+            .context("smoke window should expose its active pane id")?;
+        client.split_pane(&session, Some(pane_id), MuxSplitDirection::Right)?;
+        let snapshot = client.snapshot()?;
+        let smoke = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("smoke rmux session should exist after targeted split")?;
+        assert_eq!(smoke.windows[0].panes.len(), 3);
+
+        client.activate_next_window(&session)?;
+        let snapshot = client.snapshot()?;
+        let smoke = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("smoke rmux session should exist after tab switch")?;
+        assert_eq!(
+            smoke.active_window_id.as_deref(),
+            Some(smoke.windows[1].id.as_str())
+        );
+
+        let repaint: crate::RepaintHandle = std::sync::Arc::new(|| {});
+        let config = bootty_config::config::MultiplexerConfig {
+            backend: bootty_config::config::MultiplexerBackendConfig::Rmux,
+            ..Default::default()
+        };
+        let mut controller = crate::controller::MuxController::new();
+        controller.create_project_session(
+            crate::controller::NewMuxSessionRequest {
+                session_id: session.clone(),
+                cwd: cwd.clone(),
+            },
+            &repaint,
+            &config,
+        );
+        wait_for_controller(
+            "initial controller session",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(session.as_str())
+                    && controller.selected_session_anchor().is_some()
+            },
+        )?;
+        controller.create_project_session(
+            crate::controller::NewMuxSessionRequest {
+                session_id: other_session.clone(),
+                cwd: cwd.clone(),
+            },
+            &repaint,
+            &config,
+        );
+        wait_for_controller(
+            "other controller session",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(other_session.as_str())
+                    && controller.selected_session_anchor().is_some()
+            },
+        )?;
+        let pane_id = controller
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.clone())
+            .context("controller should expose the selected rmux pane id")?;
+
+        controller.execute_command(
+            &repaint,
+            &config,
+            MuxCommand::SplitPane {
+                session_id: other_session.clone(),
+                pane_id: Some(pane_id),
+                direction: MuxSplitDirection::Right,
+            },
+        );
+        wait_for_controller(
+            "controller split",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(other_session.as_str())
+                    && controller.selected_window_panes().len() == 2
+            },
+        )?;
+
+        controller.execute_command(
+            &repaint,
+            &config,
+            MuxCommand::NewWindow {
+                session_id: other_session.clone(),
+                cwd: Some(cwd.clone()),
+            },
+        );
+        wait_for_controller(
+            "controller new window",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(other_session.as_str())
+                    && controller.selected_session_windows().len() >= 2
+            },
+        )?;
+        let active_before_switch = controller.selected_window().map(str::to_owned);
+        controller.execute_command(
+            &repaint,
+            &config,
+            MuxCommand::ActivateNextWindow {
+                session_id: other_session.clone(),
+            },
+        );
+        wait_for_controller(
+            "controller next window",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(other_session.as_str())
+                    && controller.selected_window().map(str::to_owned) != active_before_switch
+            },
+        )?;
+        client.kill_session(&session)?;
+        client.kill_session(&other_session)?;
+
+        kill_rmux_server();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
+    fn rmux_live_window_resize_makes_bootty_split_pane_sizes_real() -> Result<()> {
+        std::env::var_os("RMUX_TMPDIR")
+            .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
+        let client = SdkRmuxClient::new();
+        let session = format!("bootty-resize-{}", std::process::id());
+        let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+
+        client.ensure_session(&session, &cwd)?;
+        client.split_pane(&session, None, MuxSplitDirection::Right)?;
+        let snapshot = client.snapshot()?;
+        let smoke = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .context("resize rmux session should exist after split")?;
+        let window = smoke
+            .windows
+            .first()
+            .context("resize window should exist")?;
+        let window_id = window.id.clone();
+        let pane_ids = window
+            .panes
+            .iter()
+            .filter_map(|pane| pane.pane_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(pane_ids.len(), 2);
+
+        resize_bootty_rmux_window(&window_id, 117, 40)?;
+        for pane_id in &pane_ids {
+            let status = std::process::Command::new("rmux")
+                .args(["resize-pane", "-t", pane_id, "-x", "58", "-y", "40"])
+                .status()?;
+            anyhow::ensure!(status.success(), "rmux resize-pane exited with {status}");
+        }
+        let output = std::process::Command::new("rmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name} #{pane_id} #{pane_width}x#{pane_height}",
+            ])
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "rmux list-panes exited with {}",
+            output.status
+        );
+        let sizes = String::from_utf8_lossy(&output.stdout).into_owned();
+
+        client.kill_session(&session)?;
+        kill_rmux_server();
+
+        for pane_id in pane_ids {
+            let expected = format!("{session} {pane_id} 58x40");
+            assert!(
+                sizes.lines().any(|line| line == expected),
+                "expected {expected:?} in rmux sizes:\n{sizes}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rmux_window_layout_restores_vertical_split_tree() {
+        let layout = rmux_window_layout("80x24,0,0[80x12,0,0,1,80x11,0,13,2]")
+            .expect("tmux-compatible layout should parse");
+
+        assert_eq!(
+            layout,
+            MuxPaneLayout::Split {
+                direction: MuxPaneSplitDirection::Down,
+                ratio_millis: 522,
+                first: Box::new(MuxPaneLayout::Pane("%1".to_owned())),
+                second: Box::new(MuxPaneLayout::Pane("%2".to_owned())),
+            }
+        );
+    }
+
+    #[test]
+    fn rmux_snapshot_preserves_window_layout_metadata() {
+        let windows = vec![RmuxWindowRow {
+            session_name: "alpha".to_owned(),
+            id: "@10".to_owned(),
+            index: 0,
+            active: true,
+            name: "one".to_owned(),
+            layout: Some("80x24,0,0[80x12,0,0,1,80x11,0,13,2]".to_owned()),
+        }];
+        let panes = vec![
+            RmuxPaneRow {
+                session_name: "alpha".to_owned(),
+                window_id: "@10".to_owned(),
+                pane_id: "%1".to_owned(),
+                index: 0,
+                active: true,
+                cwd: None,
+                process: None,
+            },
+            RmuxPaneRow {
+                session_name: "alpha".to_owned(),
+                window_id: "@10".to_owned(),
+                pane_id: "%2".to_owned(),
+                index: 1,
+                active: false,
+                cwd: None,
+                process: None,
+            },
+        ];
+
+        let session = session_from_rows("alpha", &windows, &panes);
+
+        assert!(matches!(
+            session.windows[0].layout,
+            Some(MuxPaneLayout::Split {
+                direction: MuxPaneSplitDirection::Down,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn rmux_snapshot_presents_full_session_windows_and_panes() {
+        let windows = vec![
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@10".to_owned(),
+                index: 0,
+                active: false,
+                name: "one".to_owned(),
+                layout: None,
+            },
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@11".to_owned(),
+                index: 1,
+                active: true,
+                name: "two".to_owned(),
+                layout: None,
+            },
+        ];
+        let panes = vec![
+            RmuxPaneRow {
+                session_name: "alpha".to_owned(),
+                window_id: "@10".to_owned(),
+                pane_id: "%1".to_owned(),
+                index: 1,
+                active: false,
+                cwd: Some("/repo".to_owned()),
+                process: Some("fish".to_owned()),
+            },
+            RmuxPaneRow {
+                session_name: "alpha".to_owned(),
+                window_id: "@10".to_owned(),
+                pane_id: "%2".to_owned(),
+                index: 0,
+                active: true,
+                cwd: Some("/repo".to_owned()),
+                process: Some("vim".to_owned()),
+            },
+            RmuxPaneRow {
+                session_name: "alpha".to_owned(),
+                window_id: "@11".to_owned(),
+                pane_id: "%3".to_owned(),
+                index: 0,
+                active: true,
+                cwd: Some("/build".to_owned()),
+                process: Some("cargo".to_owned()),
+            },
+        ];
+
+        let snapshot = session_from_rows("alpha", &windows, &panes);
+
+        assert_eq!(snapshot.active_window_id.as_deref(), Some("@11"));
+        assert_eq!(snapshot.anchor.pane_id.as_deref(), Some("%3"));
+        assert_eq!(
+            snapshot
+                .windows
+                .iter()
+                .map(|window| (window.id.as_str(), window.index, window.active))
+                .collect::<Vec<_>>(),
+            vec![("@10", 1, false), ("@11", 2, true)]
+        );
+        assert_eq!(
+            snapshot.windows[0]
+                .panes
+                .iter()
+                .filter_map(|pane| pane.pane_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["%2", "%1"]
+        );
+        assert_eq!(snapshot.windows[0].anchor.pane_id.as_deref(), Some("%2"));
     }
 
     #[test]

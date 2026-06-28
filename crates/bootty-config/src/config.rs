@@ -1163,6 +1163,12 @@ fn owned_keybinds(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|entry| (*entry).to_owned()).collect()
 }
 
+fn native_layout_keybinds() -> Vec<String> {
+    let mut keybinds = owned_keybinds(native_keybinds());
+    keybinds.extend(owned_keybinds(native_scroll_keybinds()));
+    keybinds
+}
+
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
@@ -1176,12 +1182,8 @@ impl Default for InputConfig {
             },
             sidebar_keybind: owned_keybinds(sidebar_keybinds()),
             backend_keybinds: BackendKeybindConfig {
-                native: {
-                    let mut native = owned_keybinds(native_keybinds());
-                    native.extend(owned_keybinds(native_scroll_keybinds()));
-                    native
-                },
-                rmux: Vec::new(),
+                native: native_layout_keybinds(),
+                rmux: native_layout_keybinds(),
                 tmux: owned_keybinds(tmux_keybinds()),
                 zellij: Vec::new(),
             },

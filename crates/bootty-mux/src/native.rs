@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -65,7 +65,7 @@ impl NativeMuxState {
         let window = NativeWindow {
             id: "tab-1".to_owned(),
             index: 1,
-            name: "shell".to_owned(),
+            name: default_window_name(),
             active_pane_id: pane_id.clone(),
             panes: vec![NativePane { id: pane_id, cwd }],
         };
@@ -87,6 +87,21 @@ impl NativeMuxState {
         {
             session.active_window_id = window_id.to_owned();
             self.active_session_id = session_id.to_owned();
+        }
+    }
+    fn rename_window(&mut self, session_id: &str, window_id: &str, name: String) {
+        if let Some(window) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .and_then(|session| {
+                session
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.id == window_id)
+            })
+        {
+            window.name = name;
         }
     }
 
@@ -133,7 +148,7 @@ impl NativeMuxState {
             let window = NativeWindow {
                 id: format!("tab-{index}"),
                 index,
-                name: "shell".to_owned(),
+                name: default_window_name(),
                 active_pane_id: pane_id.clone(),
                 panes: vec![NativePane { id: pane_id, cwd }],
             };
@@ -324,6 +339,7 @@ impl NativeMuxState {
                     active: active && window.id == session.active_window_id,
                     anchor,
                     panes,
+                    layout: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -377,6 +393,20 @@ fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
         cwd: Some(pane.cwd.to_string_lossy().into_owned()),
         process: Some("shell".to_owned()),
     }
+}
+
+fn default_window_name() -> String {
+    std::env::var("BOOTTY_SHELL")
+        .ok()
+        .or_else(|| std::env::var("SHELL").ok())
+        .and_then(|shell| {
+            Path::new(&shell)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "shell".to_owned())
 }
 
 pub struct NativeBackend {
@@ -438,6 +468,13 @@ impl MuxBackend for NativeBackend {
             MuxCommand::NewWindow { session_id, cwd } => {
                 state.new_window(&session_id, cwd.map(PathBuf::from));
             }
+            MuxCommand::RenameWindow {
+                session_id,
+                window_id,
+                name,
+            } => {
+                state.rename_window(&session_id, &window_id, name);
+            }
             MuxCommand::ActivateNextWindow { session_id } => {
                 state.activate_relative_window(&session_id, 1);
             }
@@ -456,6 +493,7 @@ impl MuxBackend for NativeBackend {
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
+                ..
             } => state.split_pane(&session_id, pane_id.as_deref()),
             MuxCommand::SelectPane {
                 session_id,
@@ -504,6 +542,7 @@ impl MuxBackend for NativeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::MuxSplitDirection;
 
     #[test]
     fn native_backend_starts_with_local_bootty_owned_session() {
@@ -545,6 +584,22 @@ mod tests {
     }
 
     #[test]
+    fn rename_window_command_updates_tab_title() {
+        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+
+        backend
+            .execute(MuxCommand::RenameWindow {
+                session_id: "local".to_owned(),
+                window_id: "tab-1".to_owned(),
+                name: "editor".to_owned(),
+            })
+            .unwrap();
+
+        let snapshot = backend.snapshot().unwrap();
+        assert_eq!(snapshot.sessions[0].windows[0].name, "editor");
+    }
+
+    #[test]
     fn close_pane_command_removes_last_tab_and_leaves_session_without_a_pane() {
         let mut backend = NativeBackend::with_state(NativeMuxState::new());
 
@@ -576,6 +631,7 @@ mod tests {
             .execute(MuxCommand::SplitPane {
                 session_id: "local".to_owned(),
                 pane_id: None,
+                direction: MuxSplitDirection::Right,
             })
             .unwrap();
         assert_eq!(

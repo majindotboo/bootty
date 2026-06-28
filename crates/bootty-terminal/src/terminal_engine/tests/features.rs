@@ -210,6 +210,14 @@ fn terminal_engine_collects_window_title_side_effect() -> Result<()> {
         engine.drain_side_effects(),
         vec![TerminalSideEffect::WindowTitle("bootty title".to_owned())]
     );
+
+    engine.write_vt(b"\x1b]0;bootty zero title\x07");
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::WindowTitle(
+            "bootty zero title".to_owned()
+        )]
+    );
     Ok(())
 }
 

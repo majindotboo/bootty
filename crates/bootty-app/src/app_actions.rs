@@ -30,6 +30,7 @@ pub enum AppAction {
     ChangeAppearance(crate::config::AppearanceMode),
     SwitchTheme,
     RenameSession,
+    RenameTab,
     DitchSession,
     ShowKeybinds,
 }
@@ -369,6 +370,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         )),
         BindingAction::SwitchTheme => Ok(KeybindAction::App(AppAction::SwitchTheme)),
         BindingAction::RenameSession => Ok(KeybindAction::App(AppAction::RenameSession)),
+        BindingAction::RenameTab => Ok(KeybindAction::App(AppAction::RenameTab)),
         BindingAction::NewTab => Ok(KeybindAction::Mux(MuxKeyAction::NewTab)),
         BindingAction::NextTab => Ok(KeybindAction::Mux(MuxKeyAction::NextTab)),
         BindingAction::PreviousTab => Ok(KeybindAction::Mux(MuxKeyAction::PreviousTab)),
@@ -978,6 +980,14 @@ mod tests {
                 }
             ),
             Some(KeybindAction::App(AppAction::ToggleFullscreen))
+        );
+    }
+
+    #[test]
+    fn command_palette_action_resolves_rename_tab() {
+        assert_eq!(
+            keybind_action_for_name("rename_tab"),
+            Some(KeybindAction::App(AppAction::RenameTab))
         );
     }
 

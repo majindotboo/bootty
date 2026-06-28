@@ -6,6 +6,12 @@ pub enum MuxDirection {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuxSplitDirection {
+    Right,
+    Down,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MuxCommand {
     ActivateWindow {
@@ -15,6 +21,11 @@ pub enum MuxCommand {
     NewWindow {
         session_id: String,
         cwd: Option<String>,
+    },
+    RenameWindow {
+        session_id: String,
+        window_id: String,
+        name: String,
     },
     ActivateNextWindow {
         session_id: String,
@@ -37,6 +48,7 @@ pub enum MuxCommand {
         session_id: String,
         /// The pane to split (its cwd seeds the new pane). `None` splits the window's active pane.
         pane_id: Option<String>,
+        direction: MuxSplitDirection,
     },
     SelectPane {
         session_id: String,

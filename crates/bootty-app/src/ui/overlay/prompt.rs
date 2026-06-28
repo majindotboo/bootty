@@ -24,7 +24,7 @@ pub struct PromptOutcome {
 }
 
 impl<'a> TextPrompt<'a> {
-    pub fn new(id_source: impl std::hash::Hash) -> Self {
+    pub fn new(id_source: impl std::hash::Hash + std::fmt::Debug) -> Self {
         Self {
             id: egui::Id::new(id_source),
             caption: None,

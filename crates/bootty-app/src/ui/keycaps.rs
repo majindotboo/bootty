@@ -30,7 +30,7 @@ fn trigger_layout_job(
     color: egui::Color32,
     max_width: f32,
 ) -> egui::text::LayoutJob {
-    use egui::text::{LayoutJob, TextFormat};
+    use egui::text::LayoutJob;
     let mut job = LayoutJob::default();
     job.wrap.max_width = max_width;
     job.wrap.max_rows = 1;
@@ -42,20 +42,46 @@ fn trigger_layout_job(
             continue;
         }
         if !first_combo {
-            job.append(
-                " ▸ ",
-                2.0,
-                TextFormat {
-                    font_id: egui::FontId::proportional(12.0),
-                    color: palette.muted,
-                    ..Default::default()
-                },
-            );
+            append_combo_separator(&mut job, palette);
         }
         first_combo = false;
         append_combo(&mut job, palette, combo, color);
     }
     job
+}
+
+fn append_combo_separator(job: &mut egui::text::LayoutJob, palette: bootty_ui::ThemePalette) {
+    use egui::text::TextFormat;
+    if let Some((glyph, family)) = crate::ui::icons::icon_glyph("chevron-right") {
+        job.append(
+            &glyph.to_string(),
+            5.0,
+            TextFormat {
+                font_id: egui::FontId::new(12.0, egui::FontFamily::Name(family.into())),
+                color: palette.muted,
+                ..Default::default()
+            },
+        );
+        job.append(
+            " ",
+            5.0,
+            TextFormat {
+                font_id: egui::FontId::proportional(12.0),
+                color: palette.muted,
+                ..Default::default()
+            },
+        );
+    } else {
+        job.append(
+            " > ",
+            2.0,
+            TextFormat {
+                font_id: egui::FontId::proportional(12.0),
+                color: palette.muted,
+                ..Default::default()
+            },
+        );
+    }
 }
 
 fn append_combo(

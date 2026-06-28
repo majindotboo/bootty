@@ -41,7 +41,10 @@ pub struct FloatingWindow {
 }
 
 impl FloatingWindow {
-    pub fn new(id_source: impl std::hash::Hash, title: impl Into<String>) -> Self {
+    pub fn new(
+        id_source: impl std::hash::Hash + std::fmt::Debug,
+        title: impl Into<String>,
+    ) -> Self {
         Self {
             id: egui::Id::new(id_source),
             title: title.into(),
