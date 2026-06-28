@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
-    fs::File,
-    io::Write,
     path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+#[cfg(debug_assertions)]
+use std::{fs::File, io::Write};
 
 use anyhow::Result;
 use eframe::egui::{self, Pos2, Rect};
@@ -186,6 +187,7 @@ pub struct AppState {
     /// A command-palette choice waiting to be dispatched on the next input pass,
     /// where the viewport snapshot and effect sink are in scope.
     pending_command: Option<KeybindAction>,
+    #[cfg(debug_assertions)]
     diagnostic_action_driver: Option<DiagnosticActionDriver>,
     macos_non_native_fullscreen_active: bool,
     macos_non_native_fullscreen_pending_apply: bool,
@@ -529,6 +531,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+#[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug)]
 enum DiagnosticAction {
     NewTab,
@@ -543,6 +546,7 @@ enum DiagnosticAction {
     NextPane,
 }
 
+#[cfg(debug_assertions)]
 impl DiagnosticAction {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -597,12 +601,14 @@ impl DiagnosticAction {
     }
 }
 
+#[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug)]
 struct DiagnosticStep {
     at: Duration,
     action: DiagnosticAction,
 }
 
+#[cfg(debug_assertions)]
 struct DiagnosticRecord<'a> {
     phase: &'a str,
     action: DiagnosticAction,
@@ -613,6 +619,7 @@ struct DiagnosticRecord<'a> {
     last_error: Option<&'a str>,
 }
 
+#[cfg(debug_assertions)]
 struct DiagnosticActionDriver {
     started_at: Instant,
     steps: Vec<DiagnosticStep>,
@@ -620,6 +627,7 @@ struct DiagnosticActionDriver {
     trace: Option<File>,
 }
 
+#[cfg(debug_assertions)]
 impl DiagnosticActionDriver {
     fn from_env() -> Option<Self> {
         let script = std::env::var("BOOTTY_DIAGNOSTIC_ACTIONS").ok()?;
@@ -714,6 +722,7 @@ impl AppState {
             apply_macos_non_native_fullscreen_presentation(&config.window);
         let macos_non_native_fullscreen_pending_apply =
             macos_non_native_fullscreen_active && !macos_non_native_fullscreen_applied;
+        #[cfg(debug_assertions)]
         let diagnostic_action_driver = DiagnosticActionDriver::from_env();
 
         Ok(Self {
@@ -773,6 +782,7 @@ impl AppState {
             pending_command: None,
             ditch_session_dialog: None,
             keybind_help_dialog: None,
+            #[cfg(debug_assertions)]
             diagnostic_action_driver,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
@@ -1847,6 +1857,7 @@ impl AppState {
             .collect()
     }
 
+    #[cfg(debug_assertions)]
     fn drive_diagnostic_actions(&mut self, now: Instant, effects: &mut Vec<AppEffect>) -> usize {
         let actions = self
             .diagnostic_action_driver
@@ -1864,6 +1875,12 @@ impl AppState {
         action_count
     }
 
+    #[cfg(not(debug_assertions))]
+    fn drive_diagnostic_actions(&mut self, _now: Instant, _effects: &mut Vec<AppEffect>) -> usize {
+        0
+    }
+
+    #[cfg(debug_assertions)]
     fn record_diagnostic_action(
         &mut self,
         phase: &str,

@@ -306,15 +306,19 @@ pub(crate) async fn list_window_rows(
 
 pub(crate) async fn list_pane_rows(rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxPaneRow>> {
     let session_name = name.to_string();
-    let output = rmux_cmd_stdout(rmux, ["list-panes", "-a", "-F", RMUX_PANE_FORMAT]).await?;
-    output
-        .lines()
-        .map(parse_pane_row)
-        .filter(|row| match row {
-            Ok(row) => row.session_name == session_name,
-            Err(_) => true,
-        })
-        .collect()
+    let output = rmux_cmd_stdout(
+        rmux,
+        [
+            "list-panes",
+            "-s",
+            "-t",
+            session_name.as_str(),
+            "-F",
+            RMUX_PANE_FORMAT,
+        ],
+    )
+    .await?;
+    output.lines().map(parse_pane_row).collect()
 }
 
 pub(crate) async fn rmux_cmd_checked(rmux: &Rmux, args: Vec<String>) -> Result<()> {

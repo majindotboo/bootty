@@ -376,9 +376,11 @@ impl RmuxBridgeState {
             MuxCommand::ActivateNextWindow { session_id } => {
                 self.activate_relative_window(&session_id, 1).await
             }
-            MuxCommand::ActivatePreviousWindow { session_id }
-            | MuxCommand::ActivateLastWindow { session_id } => {
+            MuxCommand::ActivatePreviousWindow { session_id } => {
                 self.activate_relative_window(&session_id, -1).await
+            }
+            MuxCommand::ActivateLastWindow { session_id } => {
+                self.activate_last_window(&session_id).await
             }
             MuxCommand::ActivateWindowIndex { session_id, index } => {
                 self.activate_window_index(&session_id, index).await
@@ -483,6 +485,19 @@ impl RmuxBridgeState {
             .select()
             .await?;
         Ok(())
+    }
+
+    async fn activate_last_window(&mut self, session_name: &str) -> Result<()> {
+        let rmux = self.rmux().await?;
+        rmux_cmd_checked(
+            rmux,
+            vec![
+                "last-window".to_owned(),
+                "-t".to_owned(),
+                session_name.to_owned(),
+            ],
+        )
+        .await
     }
 
     async fn activate_window_index(&mut self, session_name: &str, index: u32) -> Result<()> {
