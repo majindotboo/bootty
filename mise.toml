@@ -1,10 +1,12 @@
 [tools]
 rust = "stable"
-zig = "0.15.2"
+# macOS must use Homebrew/system Zig for libghostty; mise manages Zig elsewhere.
+zig = { version = "0.15.2", os = ["linux", "windows"] }
 
 [tasks.build]
-description = "Build the bootty app in release mode"
-run = "cargo build --release -p bootty-app --bin bootty"
+description = "Build the bootty app with dynamic local linkage; pass --static for distribution or --fast for fast-release"
+run = "./scripts/build-bootty-unix.sh"
+run_windows = "pwsh ./scripts/build-bootty-windows.ps1"
 
 [tasks."site:build"]
 description = "Build the Cloudflare Pages site from Rust/WASM source"
@@ -39,6 +41,14 @@ run = "cargo test --workspace"
 [tasks.fmt]
 description = "Check formatting"
 run = "cargo fmt --all -- --check"
+
+[tasks."hakari:generate"]
+description = "Regenerate the cargo-hakari workspace hack"
+run = "cargo hakari generate && cargo hakari manage-deps --yes"
+
+[tasks."hakari:check"]
+description = "Check the cargo-hakari workspace hack is up to date"
+run = "cargo hakari generate --diff && cargo hakari manage-deps --dry-run"
 
 [tasks.clippy]
 description = "Run clippy on the workspace"
@@ -81,14 +91,14 @@ description = "Run the full benchmark reproduction suite for scheduled CI"
 run = "scripts/run-benchmark-suite.sh --quick --output artifacts/benchmark-reproduction/overnight"
 
 [tasks.package]
-description = "Package the app bundle (macOS .app zip or Linux tarball)"
+description = "Package the app bundle with dynamic local linkage; pass --static for distribution or --fast for fast-release"
 run = "./scripts/package-bootty-unix.sh"
 
 [tasks."package:windows"]
-description = "Package the Windows zip"
+description = "Package the Windows zip with dynamic local linkage; pass --static for distribution or --fast for fast-release"
 run = "pwsh ./scripts/package-bootty-windows.ps1"
 
 [tasks.install]
-description = "Package and install Bootty for the current OS"
+description = "Package and install Bootty with dynamic local linkage; pass --static for distribution or --fast for fast-release"
 run = "./scripts/install-bootty-unix.sh"
 run_windows = "pwsh ./scripts/install-bootty-windows.ps1"

@@ -5,7 +5,7 @@ APP_NAME="Bootty"
 BINARY_NAME="bootty"
 DIST_DIR="${BOOTTY_DIST_DIR:-dist}"
 
-./scripts/package-bootty-unix.sh
+./scripts/package-bootty-unix.sh "$@"
 
 case "$(uname -s)" in
   Darwin)
@@ -33,6 +33,10 @@ case "$(uname -s)" in
     fi
 
     install -Dm755 "$ROOT_DIR/bin/$BINARY_NAME" "$PREFIX/bin/$BINARY_NAME"
+    if [[ -d "$ROOT_DIR/lib" ]]; then
+      mkdir -p "$PREFIX/lib"
+      cp -f "$ROOT_DIR/lib/"*.so "$PREFIX/lib/"
+    fi
     install -Dm644 "$ROOT_DIR/share/applications/dev.bootty.desktop" \
       "$PREFIX/share/applications/dev.bootty.desktop"
     install -Dm644 "$ROOT_DIR/share/icons/hicolor/256x256/apps/bootty.png" \

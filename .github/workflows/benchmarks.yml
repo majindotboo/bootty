@@ -52,11 +52,6 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@v4
 
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:

@@ -34,6 +34,7 @@ wgpu.workspace = true
 winit.workspace = true
 keepawake.workspace = true
 mlua = { version = "0.11.6", features = ["luau"] }
+bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda.workspace = true
