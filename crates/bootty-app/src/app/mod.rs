@@ -32,6 +32,7 @@ use crate::{
 /// drop-down line reported by macOS safe-area APIs.
 const FALLBACK_NOTCH_LAYOUT_OFFSET: f32 = 24.0;
 const MACOS_NOTCH_MENU_BAR_OVERSHOOT: f32 = 7.0;
+const FULLSCREEN_NOTCH_TAB_ROW_CLEARANCE: f32 = 4.0;
 /// Minimum sidebar width enforced while dragging the resize handle (matches the settings floor).
 const MIN_SIDEBAR_WIDTH: f32 = 120.0;
 /// Grab width of the invisible splitter painted at the sidebar's inner edge.
@@ -161,6 +162,33 @@ fn fullscreen_notch_layout_offset(configured_offset: Option<f32>, measured_band:
         (measured_band - MACOS_NOTCH_MENU_BAR_OVERSHOOT).max(0.0)
     } else {
         FALLBACK_NOTCH_LAYOUT_OFFSET
+    }
+}
+
+fn fullscreen_status_top_offset(
+    fullscreen_top_offset: f32,
+    status_row_height: f32,
+    extra_tab_rows_clear_notch: bool,
+    auto_top_offset: bool,
+) -> f32 {
+    if extra_tab_rows_clear_notch && auto_top_offset {
+        (fullscreen_top_offset + FULLSCREEN_NOTCH_TAB_ROW_CLEARANCE - status_row_height).max(0.0)
+    } else {
+        fullscreen_top_offset
+    }
+}
+
+fn fullscreen_status_content_offset(
+    tabs_in_notch: bool,
+    status_top_offset: f32,
+    terminal_cell_height: f32,
+    extra_tab_rows_clear_notch: bool,
+    auto_top_offset: bool,
+) -> f32 {
+    if !tabs_in_notch || (extra_tab_rows_clear_notch && auto_top_offset) {
+        status_top_offset
+    } else {
+        (status_top_offset - terminal_cell_height).max(0.0)
     }
 }
 
@@ -907,11 +935,6 @@ impl BoottyApp {
         } else {
             0.0
         };
-        let status_height = if status_bar {
-            status_height_config
-        } else {
-            0.0
-        };
         // Apply session-order changes any extension module requested via `bootty.reorder_session`
         // before publishing the snapshot, so the reordered sessions render on the next tick.
         for reorder in self
@@ -980,12 +1003,56 @@ impl BoottyApp {
         } else {
             0.0
         };
+        let status_left_padding = status_bar_left_padding(sidebar, sidebar_on_right);
+        let segments = if status_bar {
+            self.resolve_status_segments(sidebar)
+        } else {
+            Vec::new()
+        };
+        let base_status_height = if status_bar {
+            status_height_config
+        } else {
+            0.0
+        };
+        let notch_span = if tabs_in_notch {
+            crate::platform::macos_active_screen_notch_span()
+                .map(|(left, right)| (rect.min.x + left, rect.min.x + right))
+        } else {
+            None
+        };
+        let candidate_status_rect = Rect::from_min_max(
+            Pos2::new(
+                (right_rect.min.x + status_left_inset).min(right_rect.max.x),
+                right_rect.min.y,
+            ),
+            Pos2::new(right_rect.max.x, right_rect.min.y + base_status_height),
+        );
+        let tab_row_count = if status_bar {
+            chrome::status_bar_window_tab_row_count(
+                ui,
+                candidate_status_rect,
+                &segments,
+                status_left_padding,
+                notch_span,
+            )
+        } else {
+            1
+        };
+        let extra_tab_rows_clear_notch = tabs_in_notch && tab_row_count > 1;
+        let auto_fullscreen_top_offset = self.state.config().window.fullscreen_top_offset.is_none();
+        let status_top_offset = fullscreen_status_top_offset(
+            fullscreen_top_offset,
+            status_height_config,
+            extra_tab_rows_clear_notch,
+            auto_fullscreen_top_offset,
+        );
+        let status_height = base_status_height * tab_row_count as f32;
         // Paint the notch band with the sidebar's fullscreen background so the strip above the
         // content matches the sidebar (the sidebar fills its own band). Content draws on top.
-        if notch_context && fullscreen_top_offset > 0.0 {
+        if notch_context && status_top_offset > 0.0 {
             let band = Rect::from_min_max(
                 Pos2::new(right_rect.min.x, rect.min.y),
-                Pos2::new(right_rect.max.x, rect.min.y + fullscreen_top_offset),
+                Pos2::new(right_rect.max.x, rect.min.y + status_top_offset),
             );
             ui.painter().rect_filled(band, 0.0, notch_band_color);
         }
@@ -994,11 +1061,13 @@ impl BoottyApp {
         // notch. The terminal default background is overridden to the band color below so a tmux
         // `bg=default` status line matches the chrome.
         let terminal_cell_height = self.terminal_widget.cell_dimensions().1;
-        let content_offset = if !tabs_in_notch {
-            fullscreen_top_offset
-        } else {
-            (fullscreen_top_offset - terminal_cell_height).max(0.0)
-        };
+        let content_offset = fullscreen_status_content_offset(
+            tabs_in_notch,
+            status_top_offset,
+            terminal_cell_height,
+            extra_tab_rows_clear_notch,
+            auto_fullscreen_top_offset,
+        );
         let content_top = (right_rect.min.y + content_offset).min(right_rect.max.y);
         let status_rect = Rect::from_min_max(
             Pos2::new(
@@ -1030,7 +1099,8 @@ impl BoottyApp {
                             .config()
                             .window
                             .reserves_macos_titlebar_button_area();
-                    // Shared with the content stack so the sidebar header clears the notch too.
+                    // Sidebar remains tied to the measured/auto notch offset; extra status tab rows
+                    // only change the content/status stack.
                     let top_inset = fullscreen_top_offset;
                     // Resolve `[sidebar]` color overrides on top of the theme. In dark notched
                     // fullscreen the shared notch chrome color overrides all panel backgrounds.
@@ -1152,7 +1222,6 @@ impl BoottyApp {
                 .request_repaint_after(std::time::Duration::from_secs(1));
             let status_background =
                 status_bar_background_color(&chrome_config, palette, notch_chrome_color);
-            let segments = self.resolve_status_segments(sidebar);
             let mut status_event = None;
             ui.scope_builder(
                 UiBuilder::new()
@@ -1165,7 +1234,10 @@ impl BoottyApp {
                         StatusBarModel {
                             segments: &segments,
                             background: status_background,
-                            left_padding: status_bar_left_padding(sidebar, sidebar_on_right),
+                            left_padding: status_left_padding,
+                            row_height: status_height_config,
+                            notch_x: notch_span.map(|(left, right)| left..right),
+                            tab_rows: tab_row_count,
                         },
                     );
                 },
@@ -1268,16 +1340,21 @@ impl BoottyApp {
             }
         } else {
             self.terminal_widget.reset();
-            ui.painter_at(terminal_rect).text(
-                terminal_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                format!(
-                    "No open tabs — press {} to open one",
-                    crate::platform::new_tab_shortcut_hint()
-                ),
-                egui::FontId::proportional(13.0),
-                palette.muted,
+            let painter = ui.painter_at(terminal_rect);
+            let color = palette.muted;
+            let galley = crate::ui::keycaps::inline_shortcut_galley_from_painter(
+                &painter,
+                palette,
+                crate::ui::keycaps::InlineShortcut {
+                    prefix: "No open tabs - press ",
+                    trigger: crate::platform::new_tab_shortcut_trigger(),
+                    suffix: " to open one",
+                },
+                color,
+                terminal_rect.width(),
+                13.0,
             );
+            painter.galley(terminal_rect.center() - galley.size() * 0.5, galley, color);
         }
     }
 
@@ -1715,6 +1792,24 @@ mod tests {
             chrome::STATUS_EDGE_PAD
         );
         assert_eq!(status_bar_left_padding(true, true), chrome::STATUS_EDGE_PAD);
+    }
+
+    #[test]
+    fn auto_top_offset_is_reduced_so_second_tab_row_clears_notch() {
+        assert_eq!(fullscreen_status_top_offset(37.0, 30.0, true, true), 11.0);
+        assert_eq!(
+            fullscreen_status_content_offset(true, 11.0, 18.0, true, true),
+            11.0
+        );
+    }
+
+    #[test]
+    fn explicit_top_offset_survives_extra_tab_rows() {
+        assert_eq!(fullscreen_status_top_offset(24.0, 30.0, true, false), 24.0);
+        assert_eq!(
+            fullscreen_status_content_offset(true, 24.0, 18.0, true, false),
+            6.0
+        );
     }
 
     #[test]

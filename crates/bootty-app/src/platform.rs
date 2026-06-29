@@ -189,6 +189,53 @@ fn platform_active_screen_notch_height() -> f32 {
     0.0
 }
 
+/// Horizontal span of the active screen's camera housing in window points from the left screen
+/// edge. Returns `None` off macOS or when the notched display geometry can't be inferred.
+pub fn macos_active_screen_notch_span() -> Option<(f32, f32)> {
+    platform_active_screen_notch_span()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_active_screen_notch_span() -> Option<(f32, f32)> {
+    let mtm = MainThreadMarker::new()?;
+    let app = NSApplication::sharedApplication(mtm);
+    let screen = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().firstObject())
+        .and_then(|window| window.screen())?;
+    let frame = screen.frame();
+    let width = frame.size.width as f32;
+    if width <= 0.0 {
+        return None;
+    }
+
+    if screen.respondsToSelector(sel!(auxiliaryTopLeftArea))
+        && screen.respondsToSelector(sel!(auxiliaryTopRightArea))
+    {
+        let left = screen.auxiliaryTopLeftArea();
+        let right = screen.auxiliaryTopRightArea();
+        let notch_left = (left.origin.x + left.size.width - frame.origin.x) as f32;
+        let notch_right = (right.origin.x - frame.origin.x) as f32;
+        if left.size.height > 0.0 && right.size.height > 0.0 && notch_right > notch_left {
+            return Some((notch_left.max(0.0), notch_right.min(width)));
+        }
+    }
+
+    if platform_active_screen_is_notched() {
+        let fallback_width = 220.0_f32.min(width * 0.35);
+        let center = width * 0.5;
+        Some((center - fallback_width * 0.5, center + fallback_width * 0.5))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_active_screen_notch_span() -> Option<(f32, f32)> {
+    None
+}
+
 /// Remove the 1px titlebar separator macOS draws under the transparent titlebar. In fullscreen it
 /// reads as a stray border across the top of the window; wezterm suppresses the same line.
 pub fn macos_disable_titlebar_separator() {
@@ -288,26 +335,32 @@ pub fn disable_automatic_window_tabbing() {
 #[cfg(not(target_os = "macos"))]
 pub fn disable_automatic_window_tabbing() {}
 
-// Sidebar footer hint, using each platform's modifier shorthand and default session shortcuts.
-// `^` is the terminal-idiomatic shorthand for Ctrl.
 #[cfg(target_os = "macos")]
-pub fn sidebar_shortcut_hint() -> &'static str {
-    "⌘1-9 session   ⌘⇧n/p nav   ⌘n new"
+pub fn sidebar_shortcut_hints() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("cmd+1-9", "session"),
+        ("cmd+shift+n/p", "nav"),
+        ("cmd+n", "new"),
+    ]
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn sidebar_shortcut_hint() -> &'static str {
-    "^⇧1-9 session   ^⇧]/[ nav   ^⇧n new"
+pub fn sidebar_shortcut_hints() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("ctrl+shift+1-9", "session"),
+        ("ctrl+shift+]/[", "nav"),
+        ("ctrl+shift+n", "new"),
+    ]
 }
 
 #[cfg(target_os = "macos")]
-pub fn new_tab_shortcut_hint() -> &'static str {
-    "⌘T"
+pub fn new_tab_shortcut_trigger() -> &'static str {
+    "cmd+t"
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn new_tab_shortcut_hint() -> &'static str {
-    "Ctrl+Shift+T"
+pub fn new_tab_shortcut_trigger() -> &'static str {
+    "ctrl+shift+t"
 }
 
 #[cfg(target_os = "macos")]

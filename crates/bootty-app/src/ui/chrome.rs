@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use bootty_ui::{ThemePalette, readable_color};
 use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind, TextureHandle};
@@ -15,6 +15,8 @@ use crate::{
     },
 };
 
+const STATUS_WINDOWS_MODULE: &str = "windows";
+
 #[derive(Clone, Debug)]
 pub struct StatusBarModel<'a> {
     /// Ordered, resolved segments. Every segment is a Luau module's items; the app fills these in.
@@ -23,6 +25,14 @@ pub struct StatusBarModel<'a> {
     pub background: egui::Color32,
     /// Left edge inset before left-aligned segments; zero lets tab strips sit flush to adjacent chrome.
     pub left_padding: f32,
+    /// Height of the drawable status row. When the allocated bar is taller, items are bottom-aligned
+    /// so extra notch-clearance space appears above them instead of stretching the row.
+    pub row_height: f32,
+    /// Active fullscreen notch x-range in the same coordinate space as the status bar.
+    pub notch_x: Option<Range<f32>>,
+    /// Number of tab rows to reserve for the windows segment. Other status modules stay on the
+    /// bottom row.
+    pub tab_rows: usize,
 }
 
 /// A status segment resolved for this frame: a module's items plus where the segment is aligned.
@@ -112,6 +122,96 @@ const STATUS_GAUGE_HEIGHT: f32 = 11.0;
 const STATUS_PILL_RADIUS: u8 = 6;
 const STATUS_DIAGONAL_JOIN_WIDTH: f32 = 8.0;
 
+pub fn status_bar_windows_intersect_x_range(
+    ui: &egui::Ui,
+    bar_rect: Rect,
+    segments: &[ResolvedSegment],
+    left_padding: f32,
+    x_range: (f32, f32),
+) -> bool {
+    let font = egui::FontId::monospace(12.0);
+    let right = segments
+        .iter()
+        .filter(|segment| segment.align == SegmentAlign::Right && !segment.items.is_empty())
+        .collect::<Vec<_>>();
+    let right_start = bar_rect.max.x - STATUS_EDGE_PAD - segments_width(ui, &right, &font);
+    let bound = right_start - STATUS_ITEM_GAP;
+    let mut x = bar_rect.min.x + left_padding;
+    let mut drawn = 0;
+
+    for segment in segments
+        .iter()
+        .filter(|segment| segment.align == SegmentAlign::Left && !segment.items.is_empty())
+    {
+        let width = segment_width(ui, segment, &font);
+        if width <= 0.0 {
+            continue;
+        }
+        if drawn > 0 {
+            x += STATUS_ITEM_GAP;
+        }
+        let window_segment = segment_contains_module(segment, STATUS_WINDOWS_MODULE);
+        let visible_end = (x + width).min(bound);
+        if window_segment && ranges_intersect((x, visible_end), x_range) {
+            return true;
+        }
+        if x + width > bound {
+            break;
+        }
+        drawn += 1;
+        x += width;
+    }
+
+    false
+}
+
+fn ranges_intersect(a: (f32, f32), b: (f32, f32)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
+pub fn status_bar_window_tab_row_count(
+    ui: &egui::Ui,
+    bar_rect: Rect,
+    segments: &[ResolvedSegment],
+    left_padding: f32,
+    notch_x: Option<(f32, f32)>,
+) -> usize {
+    let font = egui::FontId::monospace(12.0);
+    let right = segments
+        .iter()
+        .filter(|segment| segment.align == SegmentAlign::Right && !segment.items.is_empty())
+        .collect::<Vec<_>>();
+    let left = segments
+        .iter()
+        .filter(|segment| segment.align == SegmentAlign::Left && !segment.items.is_empty())
+        .collect::<Vec<_>>();
+    let bottom_bound =
+        bar_rect.max.x - STATUS_EDGE_PAD - segments_width(ui, &right, &font) - STATUS_ITEM_GAP;
+    let top_bound = notch_x
+        .map(|(left, _)| left - STATUS_ITEM_GAP)
+        .unwrap_or(bar_rect.max.x - STATUS_EDGE_PAD);
+    let notch_collision = notch_x.is_some_and(|range| {
+        status_bar_windows_intersect_x_range(ui, bar_rect, segments, left_padding, range)
+    });
+
+    let mut row_count = if notch_collision { 2 } else { 1 };
+    loop {
+        let bounds = status_tab_row_bounds(bar_rect, row_count, top_bound, bottom_bound);
+        let rows = split_left_segments_for_tab_rows(
+            ui,
+            &left,
+            &font,
+            bar_rect.min.x + left_padding,
+            &bounds,
+            false,
+        );
+        if rows.len() <= row_count || row_count >= status_window_group_count(&left) {
+            return row_count.max(1);
+        }
+        row_count += 1;
+    }
+}
+
 /// Native replacement for the tmux status line. Flattens each alignment group's module items and
 /// lays them out: left from the left edge, right anchored to the right edge, center centered. Items
 /// with a `bg` render as pills; items with an `action` are clickable. Returns a clicked action.
@@ -139,7 +239,6 @@ pub fn show_status_bar(
     let center = segments_for(SegmentAlign::Center);
     let left = segments_for(SegmentAlign::Left);
 
-    let right_start = rect.max.x - STATUS_EDGE_PAD - segments_width(ui, &right, &font);
     let drag_id = egui::Id::new("status-bar-drag");
     let mut dragging = ui
         .ctx()
@@ -170,29 +269,20 @@ pub fn show_status_bar(
         blocks: Vec::new(),
     };
 
-    draw_segments(
-        ui,
-        right_start,
-        rect.max.x - STATUS_EDGE_PAD,
-        &right,
-        &mut input,
-    );
-    let left_end = draw_segments(
-        ui,
-        rect.min.x + model.left_padding,
-        right_start - STATUS_ITEM_GAP,
-        &left,
-        &mut input,
-    );
-    if !center.is_empty() {
-        let center_width = segments_width(ui, &center, &font);
-        let center_start = rect.center().x - center_width / 2.0;
-        let center_bound = right_start - STATUS_ITEM_GAP;
-        if center_start >= left_end + STATUS_ITEM_GAP && center_start + center_width <= center_bound
-        {
-            draw_segments(ui, center_start, center_bound, &center, &mut input);
-        }
+    if model.tab_rows > 1 {
+        draw_status_bar_tab_rows(ui, rect, &model, &left, &center, &right, &mut input);
+    } else {
+        draw_status_bar_row(
+            ui,
+            bottom_status_row(rect, model.row_height),
+            model.left_padding,
+            &left,
+            &center,
+            &right,
+            &mut input,
+        );
     }
+
     if !input.drag_blocked {
         start_window_drag_on_primary_press(&response);
     }
@@ -209,7 +299,7 @@ pub fn show_status_bar(
     let mut event = input.clicked.take().map(StatusBarEvent::Action);
     if let Some(drag) = dragging.as_ref() {
         let drop = pointer_pos
-            .and_then(|pos| status_drop_target(&input.blocks, &drag.module, &drag.anchor, pos.x));
+            .and_then(|pos| status_drop_target(&input.blocks, &drag.module, &drag.anchor, pos));
         if let Some((_, indicator_x)) = drop.as_ref() {
             ui.painter_at(rect).line_segment(
                 [
@@ -248,6 +338,8 @@ struct StatusBlock {
     anchor: String,
     start_x: f32,
     end_x: f32,
+    start_y: f32,
+    end_y: f32,
 }
 
 /// Layout context plus per-frame interaction accumulators, threaded through the status-bar draw
@@ -271,7 +363,7 @@ fn status_drop_target(
     blocks: &[StatusBlock],
     module: &str,
     anchor: &str,
-    pointer_x: f32,
+    pointer: Pos2,
 ) -> Option<(Option<String>, f32)> {
     let module_blocks: Vec<&StatusBlock> = blocks
         .iter()
@@ -280,11 +372,44 @@ fn status_drop_target(
     let source_index = module_blocks
         .iter()
         .position(|block| block.anchor == anchor)?;
-    let mut target_index = module_blocks.len();
-    for (index, block) in module_blocks.iter().enumerate() {
-        if pointer_x < (block.start_x + block.end_x) * 0.5 {
-            target_index = index;
+    let row_blocks = module_blocks
+        .iter()
+        .copied()
+        .filter(|block| pointer.y >= block.start_y && pointer.y <= block.end_y)
+        .collect::<Vec<_>>();
+    let target_blocks = if row_blocks.is_empty() {
+        module_blocks.as_slice()
+    } else {
+        row_blocks.as_slice()
+    };
+    let mut target_anchor = None;
+    for block in target_blocks {
+        if pointer.x < (block.start_x + block.end_x) * 0.5 {
+            target_anchor = Some(block.anchor.as_str());
             break;
+        }
+    }
+    let mut target_index = module_blocks.len();
+    if let Some(anchor) = target_anchor {
+        for (index, block) in module_blocks.iter().enumerate() {
+            if block.anchor == anchor {
+                target_index = index;
+                break;
+            }
+        }
+    } else if let Some(last) = target_blocks.last()
+        && let Some(index) = module_blocks
+            .iter()
+            .position(|block| block.anchor == last.anchor)
+    {
+        target_index = index + 1;
+    }
+    if target_blocks.is_empty() {
+        for (index, block) in module_blocks.iter().enumerate() {
+            if pointer.x < (block.start_x + block.end_x) * 0.5 {
+                target_index = index;
+                break;
+            }
         }
     }
     if target_index == source_index || target_index == source_index + 1 {
@@ -295,7 +420,7 @@ fn status_drop_target(
         .map(|block| block.anchor.clone());
     let indicator_x = match module_blocks.get(target_index) {
         Some(block) => block.start_x,
-        None => module_blocks.last().map_or(pointer_x, |block| block.end_x),
+        None => module_blocks.last().map_or(pointer.x, |block| block.end_x),
     };
     Some((before, indicator_x))
 }
@@ -316,6 +441,343 @@ fn segments_width(ui: &egui::Ui, segments: &[&ResolvedSegment], font: &egui::Fon
     total
 }
 
+fn clamped_status_row_height(rect: Rect, row_height: f32) -> f32 {
+    row_height.max(0.0).min(rect.height())
+}
+
+fn bottom_status_row(rect: Rect, row_height: f32) -> Rect {
+    let row_height = clamped_status_row_height(rect, row_height);
+    Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - row_height), rect.max)
+}
+
+fn draw_status_bar_row(
+    ui: &mut egui::Ui,
+    row_rect: Rect,
+    left_padding: f32,
+    left: &[&ResolvedSegment],
+    center: &[&ResolvedSegment],
+    right: &[&ResolvedSegment],
+    input: &mut StatusInput,
+) -> f32 {
+    input.rect = row_rect;
+    let font = input.font.clone();
+    let right_start = row_rect.max.x - STATUS_EDGE_PAD - segments_width(ui, right, &font);
+    draw_segments(
+        ui,
+        right_start,
+        row_rect.max.x - STATUS_EDGE_PAD,
+        right,
+        input,
+    );
+    let left_end = draw_segments(
+        ui,
+        row_rect.min.x + left_padding,
+        right_start - STATUS_ITEM_GAP,
+        left,
+        input,
+    );
+    if !center.is_empty() {
+        let center_width = segments_width(ui, center, &font);
+        let center_start = row_rect.center().x - center_width / 2.0;
+        let center_bound = right_start - STATUS_ITEM_GAP;
+        if center_start >= left_end + STATUS_ITEM_GAP && center_start + center_width <= center_bound
+        {
+            draw_segments(ui, center_start, center_bound, center, input);
+        }
+    }
+    left_end
+}
+
+fn draw_status_bar_tab_rows(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    model: &StatusBarModel<'_>,
+    left: &[&ResolvedSegment],
+    center: &[&ResolvedSegment],
+    right: &[&ResolvedSegment],
+    input: &mut StatusInput,
+) {
+    let row_count = model.tab_rows.max(1);
+    let bottom_rect = bottom_status_row(rect, model.row_height);
+    let font = input.font.clone();
+    let bottom_bound =
+        bottom_rect.max.x - STATUS_EDGE_PAD - segments_width(ui, right, &font) - STATUS_ITEM_GAP;
+    let top_bound = model
+        .notch_x
+        .as_ref()
+        .map_or(rect.max.x - STATUS_EDGE_PAD, |range| {
+            range.start - STATUS_ITEM_GAP
+        });
+    let bounds = status_tab_row_bounds(rect, row_count, top_bound, bottom_bound);
+    let row_segments = split_left_segments_for_tab_rows(
+        ui,
+        left,
+        &font,
+        rect.min.x + model.left_padding,
+        &bounds,
+        true,
+    );
+
+    for (row_index, segments) in row_segments.iter().take(row_count - 1).enumerate() {
+        if segments.is_empty() {
+            continue;
+        }
+        let row_rect = status_row_from_top(rect, model.row_height, row_index);
+        input.rect = row_rect;
+        let row_refs = segments.iter().collect::<Vec<_>>();
+        draw_segments(
+            ui,
+            row_rect.min.x + model.left_padding,
+            bounds[row_index],
+            &row_refs,
+            input,
+        );
+    }
+
+    let bottom_left = row_segments
+        .get(row_count - 1)
+        .map(|segments| segments.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    draw_status_bar_row(
+        ui,
+        bottom_rect,
+        model.left_padding,
+        &bottom_left,
+        center,
+        right,
+        input,
+    );
+}
+
+fn status_tab_row_bounds(
+    rect: Rect,
+    row_count: usize,
+    first_top_bound: f32,
+    bottom_bound: f32,
+) -> Vec<f32> {
+    (0..row_count)
+        .map(|index| {
+            if index + 1 == row_count {
+                bottom_bound
+            } else if index == 0 {
+                first_top_bound
+            } else {
+                rect.max.x - STATUS_EDGE_PAD
+            }
+        })
+        .collect()
+}
+
+fn status_row_from_top(rect: Rect, row_height: f32, row_index: usize) -> Rect {
+    let row_height = clamped_status_row_height(rect, row_height);
+    let y = rect.min.y + row_height * row_index as f32;
+    Rect::from_min_max(
+        Pos2::new(rect.min.x, y),
+        Pos2::new(rect.max.x, y + row_height),
+    )
+}
+
+fn split_left_segments_for_tab_rows(
+    ui: &egui::Ui,
+    left: &[&ResolvedSegment],
+    font: &egui::FontId,
+    left_start: f32,
+    bounds: &[f32],
+    force_last_row: bool,
+) -> Vec<Vec<ResolvedSegment>> {
+    let Some(window_index) = left
+        .iter()
+        .position(|segment| segment_contains_module(segment, STATUS_WINDOWS_MODULE))
+    else {
+        return vec![left.iter().map(|segment| (*segment).clone()).collect()];
+    };
+    if bounds.is_empty() {
+        return Vec::new();
+    }
+
+    let window_segment = left[window_index];
+    let items = window_segment.items.iter().collect::<Vec<_>>();
+    let mut rows = vec![Vec::new(); bounds.len()];
+    let mut item_start = 0;
+    let bottom_index = bounds.len() - 1;
+    let bottom_start = status_bottom_window_start(ui, left, font, left_start, window_index);
+
+    for row_index in 0..bounds.len() {
+        if item_start >= items.len() {
+            break;
+        }
+        let row_start = if row_index == bottom_index {
+            bottom_start
+        } else {
+            left_start
+        };
+        let split = status_items_split_index_before_x(
+            ui,
+            &items[item_start..],
+            font,
+            row_start,
+            bounds[row_index],
+        );
+        let item_end = if split == 0 {
+            if force_last_row && row_index == bottom_index {
+                status_item_group_end(&items, item_start)
+            } else {
+                continue;
+            }
+        } else {
+            item_start + split
+        };
+        let mut row_items = window_segment.items[item_start..item_end].to_vec();
+        round_window_row_end(&mut row_items);
+        rows[row_index].push(ResolvedSegment {
+            align: window_segment.align,
+            items: row_items,
+        });
+        item_start = item_end;
+    }
+    if item_start < items.len() {
+        let mut row_items = window_segment.items[item_start..].to_vec();
+        round_window_row_end(&mut row_items);
+        rows.push(vec![ResolvedSegment {
+            align: window_segment.align,
+            items: row_items,
+        }]);
+    }
+
+    let bottom_windows = rows[bottom_index].clone();
+    let mut bottom = Vec::new();
+    for (index, segment) in left.iter().enumerate() {
+        if index == window_index {
+            bottom.extend(bottom_windows.clone());
+        } else {
+            bottom.push((*segment).clone());
+        }
+    }
+    rows[bottom_index] = bottom;
+    rows
+}
+
+fn round_window_row_end(items: &mut [ResolvedItem]) {
+    let Some(item) = items
+        .last_mut()
+        .filter(|item| item.module == STATUS_WINDOWS_MODULE && item.reorder_anchor.is_some())
+    else {
+        return;
+    };
+
+    for primitive in &mut item.primitives {
+        if let ModulePrimitive::Rect { radius, .. } = primitive {
+            radius.ne = STATUS_PILL_RADIUS;
+            radius.se = STATUS_PILL_RADIUS;
+        }
+    }
+}
+
+fn status_bottom_window_start(
+    ui: &egui::Ui,
+    left: &[&ResolvedSegment],
+    font: &egui::FontId,
+    left_start: f32,
+    window_index: usize,
+) -> f32 {
+    let mut x = left_start;
+    let mut drawn = 0;
+    for segment in left.iter().take(window_index) {
+        let width = segment_width(ui, segment, font);
+        if width <= 0.0 {
+            continue;
+        }
+        if drawn > 0 {
+            x += STATUS_ITEM_GAP;
+        }
+        x += width;
+        drawn += 1;
+    }
+    if drawn > 0 {
+        x += STATUS_ITEM_GAP;
+    }
+    x
+}
+
+fn status_window_group_count(left: &[&ResolvedSegment]) -> usize {
+    let Some(segment) = left
+        .iter()
+        .find(|segment| segment_contains_module(segment, STATUS_WINDOWS_MODULE))
+    else {
+        return 1;
+    };
+    let items = segment.items.iter().collect::<Vec<_>>();
+    let mut count = 0;
+    let mut index = 0;
+    while index < items.len() {
+        count += 1;
+        index = status_item_group_end(&items, index);
+    }
+    count.max(1)
+}
+
+fn segment_contains_module(segment: &ResolvedSegment, module: &str) -> bool {
+    segment.items.iter().any(|item| item.module == module)
+}
+
+fn status_items_split_index_before_x(
+    ui: &egui::Ui,
+    items: &[&ResolvedItem],
+    font: &egui::FontId,
+    start_x: f32,
+    bound: f32,
+) -> usize {
+    let mut x = start_x;
+    let mut index = 0;
+    while index < items.len() {
+        let end = status_item_group_end(items, index);
+        let width = status_item_group_width(ui, items, font, index, end);
+        let gap = if index > 0
+            && item_gap_before(items[index])
+            && !connected(Some(items[index - 1]), items[index])
+        {
+            STATUS_ITEM_GAP
+        } else {
+            0.0
+        };
+        if x + gap + width > bound {
+            return index;
+        }
+        x += gap + width;
+        index = end;
+    }
+    items.len()
+}
+
+fn status_item_group_end(items: &[&ResolvedItem], start: usize) -> usize {
+    let anchor = items[start].reorder_anchor.as_deref();
+    let mut end = start + 1;
+    while end < items.len() && anchor.is_some() && items[end].reorder_anchor.as_deref() == anchor {
+        end += 1;
+    }
+    end
+}
+
+fn status_item_group_width(
+    ui: &egui::Ui,
+    items: &[&ResolvedItem],
+    font: &egui::FontId,
+    start: usize,
+    end: usize,
+) -> f32 {
+    let mut width = 0.0;
+    for index in start..end {
+        if index > start
+            && item_gap_before(items[index])
+            && !connected(Some(items[index - 1]), items[index])
+        {
+            width += STATUS_ITEM_GAP;
+        }
+        width += item_width(ui, items[index], font);
+    }
+    width
+}
+
 fn draw_segments(
     ui: &mut egui::Ui,
     start_x: f32,
@@ -334,10 +796,13 @@ fn draw_segments(
         if drawn > 0 {
             x += STATUS_ITEM_GAP;
         }
+        let items = segment.items.iter().collect::<Vec<_>>();
         if x + width > bound {
+            if segment_contains_module(segment, STATUS_WINDOWS_MODULE) && x < bound {
+                draw_items(ui, x, bound, &items, input);
+            }
             break;
         }
-        let items = segment.items.iter().collect::<Vec<_>>();
         draw_items(ui, x, x + width, &items, input);
         drawn += 1;
         x += width;
@@ -760,12 +1225,16 @@ fn draw_items(
             match input.blocks.last_mut() {
                 Some(block) if block.module == item.module && block.anchor == anchor => {
                     block.end_x = x + width;
+                    block.start_y = block.start_y.min(item_rect.min.y);
+                    block.end_y = block.end_y.max(item_rect.max.y);
                 }
                 _ => input.blocks.push(StatusBlock {
                     module: item.module.clone(),
                     anchor: anchor.to_owned(),
                     start_x: x,
                     end_x: x + width,
+                    start_y: item_rect.min.y,
+                    end_y: item_rect.max.y,
                 }),
             }
         }
@@ -1670,12 +2139,19 @@ fn paint_sidebar_footer(
         row_y += SIDEBAR_FOOTER_ITEM_HEIGHT;
     }
 
-    painter.text(
-        Pos2::new(rect.min.x + 14.0, rect.max.y - 18.0),
-        egui::Align2::LEFT_CENTER,
-        crate::platform::sidebar_shortcut_hint(),
-        egui::FontId::monospace(11.0),
-        readable_color(palette.base, palette.muted),
+    let shortcut_color = readable_color(palette.base, palette.muted);
+    let galley = crate::ui::keycaps::shortcut_hint_galley_from_painter(
+        &painter,
+        palette,
+        crate::platform::sidebar_shortcut_hints(),
+        shortcut_color,
+        rect.width() - 28.0,
+        11.0,
+    );
+    painter.galley(
+        Pos2::new(rect.min.x + 14.0, rect.max.y - 18.0 - galley.size().y * 0.5),
+        galley,
+        shortcut_color,
     );
 }
 
@@ -1849,6 +2325,54 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_detects_window_tabs_crossing_notch_span() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let segments = [ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: vec![ResolvedItem {
+                text: "1 alpha-with-long-name".to_owned(),
+                module: STATUS_WINDOWS_MODULE.to_owned(),
+                ..ResolvedItem::default()
+            }],
+        }];
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let bar = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 30.0));
+                assert!(status_bar_windows_intersect_x_range(
+                    ui,
+                    bar,
+                    &segments,
+                    STATUS_EDGE_PAD,
+                    (20.0, 40.0),
+                ));
+                assert!(!status_bar_windows_intersect_x_range(
+                    ui,
+                    bar,
+                    &segments,
+                    STATUS_EDGE_PAD,
+                    (500.0, 540.0),
+                ));
+                assert_eq!(
+                    status_bar_window_tab_row_count(
+                        ui,
+                        bar,
+                        &segments,
+                        STATUS_EDGE_PAD,
+                        Some((20.0, 40.0)),
+                    ),
+                    2
+                );
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
     fn status_item_width_reserves_gauge_and_icon() {
         let context = egui::Context::default();
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
@@ -1890,6 +2414,9 @@ mod tests {
                     segments: &[],
                     background: ThemePalette::default().base,
                     left_padding: STATUS_EDGE_PAD,
+                    row_height: screen_rect.height(),
+                    notch_x: None,
+                    tab_rows: 1,
                 },
             );
         };
@@ -1952,6 +2479,9 @@ mod tests {
                     segments: &segments,
                     background: ThemePalette::default().base,
                     left_padding: STATUS_EDGE_PAD,
+                    row_height: screen_rect.height(),
+                    notch_x: None,
+                    tab_rows: 1,
                 },
             );
         };
@@ -2006,6 +2536,152 @@ mod tests {
     }
 
     #[test]
+    fn status_notch_split_keeps_window_tab_cells_together() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let mut items = Vec::new();
+        items.extend(window_tab("@1", "1", "alpha"));
+        items.extend(window_tab("@2", "2", "beta"));
+        items.extend(window_tab("@3", "3", "gamma"));
+        let segment = ResolvedSegment {
+            align: SegmentAlign::Left,
+            items,
+        };
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let font = egui::FontId::monospace(12.0);
+                let first_tab = segment.items[..2].iter().collect::<Vec<_>>();
+                let first_tab_end = STATUS_EDGE_PAD + items_width(ui, &first_tab, &font);
+                let segment_refs = [&segment];
+                let rows = split_left_segments_for_tab_rows(
+                    ui,
+                    &segment_refs,
+                    &font,
+                    STATUS_EDGE_PAD,
+                    &[first_tab_end + 0.5, 600.0],
+                    true,
+                );
+
+                let top = &rows[0][0];
+
+                assert_eq!(top.items.len(), 2);
+                assert!(
+                    top.items
+                        .iter()
+                        .all(|item| item.reorder_anchor.as_deref() == Some("@1"))
+                );
+
+                assert_eq!(rows[1].len(), 1);
+                assert_eq!(rows[1][0].items[0].reorder_anchor.as_deref(), Some("@2"));
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
+    fn status_tab_row_end_gets_right_corners() {
+        let rect = ModulePrimitive::Rect {
+            fill: Some(egui::Color32::WHITE),
+            stroke: None,
+            x: ModuleCoord::default(),
+            y: ModuleCoord::default(),
+            w: ModuleCoord { frac: 1.0, px: 0.0 },
+            h: ModuleCoord { frac: 1.0, px: 0.0 },
+            radius: egui::CornerRadius::ZERO,
+        };
+        let mut items = window_tab("@1", "1", "alpha");
+        items[1].primitives.push(rect);
+
+        round_window_row_end(&mut items);
+
+        let ModulePrimitive::Rect { radius, .. } = &items[1].primitives[0] else {
+            panic!("expected rect primitive");
+        };
+        assert_eq!(radius.ne, STATUS_PILL_RADIUS);
+        assert_eq!(radius.se, STATUS_PILL_RADIUS);
+    }
+
+    #[test]
+    fn status_tab_rows_wrap_when_window_tabs_exhaust_width() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let mut items = Vec::new();
+        items.extend(window_tab("@1", "1", "alpha"));
+        items.extend(window_tab("@2", "2", "beta"));
+        items.extend(window_tab("@3", "3", "gamma"));
+        let segments = [ResolvedSegment {
+            align: SegmentAlign::Left,
+            items,
+        }];
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let font = egui::FontId::monospace(12.0);
+                let first_tab = segments[0].items[..2].iter().collect::<Vec<_>>();
+                let width = items_width(ui, &first_tab, &font)
+                    + STATUS_EDGE_PAD * 2.0
+                    + STATUS_ITEM_GAP
+                    + 1.0;
+                let bar = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 30.0));
+
+                assert_eq!(
+                    status_bar_window_tab_row_count(ui, bar, &segments, STATUS_EDGE_PAD, None),
+                    3
+                );
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
+    fn status_tab_rows_reserve_bottom_space_for_right_segments() {
+        let context = egui::Context::default();
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let mut items = Vec::new();
+        items.extend(window_tab("@1", "1", "alpha"));
+        items.extend(window_tab("@2", "2", "beta"));
+        items.extend(window_tab("@3", "3", "gamma"));
+        let windows = ResolvedSegment {
+            align: SegmentAlign::Left,
+            items,
+        };
+        let sysinfo = ResolvedSegment {
+            align: SegmentAlign::Right,
+            items: vec![ResolvedItem {
+                text: "sysinfo-wide".to_owned(),
+                module: "sysinfo".to_owned(),
+                ..ResolvedItem::default()
+            }],
+        };
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let font = egui::FontId::monospace(12.0);
+                let first_two_tabs = windows.items[..4].iter().collect::<Vec<_>>();
+                let width = items_width(ui, &first_two_tabs, &font) + STATUS_EDGE_PAD * 2.0 + 1.0;
+                let bar = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, 30.0));
+                let segments = [windows.clone(), sysinfo.clone()];
+
+                assert_eq!(
+                    status_bar_window_tab_row_count(ui, bar, &segments, STATUS_EDGE_PAD, None),
+                    3
+                );
+            },
+        );
+        assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
     fn status_bar_drag_gesture_emits_window_reorder() {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
@@ -2035,6 +2711,9 @@ mod tests {
                                 segments: &segments,
                                 background: ThemePalette::default().base,
                                 left_padding: STATUS_EDGE_PAD,
+                                row_height: 30.0,
+                                notch_x: None,
+                                tab_rows: 1,
                             },
                         );
                         if event.is_some() {
@@ -2092,31 +2771,87 @@ mod tests {
                 anchor: "@1".to_owned(),
                 start_x: 0.0,
                 end_x: 40.0,
+                start_y: 0.0,
+                end_y: 20.0,
             },
             StatusBlock {
                 module: "windows".to_owned(),
                 anchor: "@2".to_owned(),
                 start_x: 40.0,
                 end_x: 80.0,
+                start_y: 0.0,
+                end_y: 20.0,
             },
             StatusBlock {
                 module: "windows".to_owned(),
                 anchor: "@3".to_owned(),
                 start_x: 80.0,
                 end_x: 120.0,
+                start_y: 0.0,
+                end_y: 20.0,
             },
         ];
         // Dragging @1 over the right half of @2 inserts before @3.
         assert_eq!(
-            status_drop_target(&blocks, "windows", "@1", 70.0),
+            status_drop_target(&blocks, "windows", "@1", Pos2::new(70.0, 10.0)),
             Some((Some("@3".to_owned()), 80.0))
         );
         // Dropping @1 onto its own slot (left of @2's midpoint) is a no-op.
-        assert_eq!(status_drop_target(&blocks, "windows", "@1", 50.0), None);
+        assert_eq!(
+            status_drop_target(&blocks, "windows", "@1", Pos2::new(50.0, 10.0)),
+            None
+        );
         // Past the last block drops at the end.
         assert_eq!(
-            status_drop_target(&blocks, "windows", "@1", 200.0),
+            status_drop_target(&blocks, "windows", "@1", Pos2::new(200.0, 10.0)),
             Some((None, 120.0))
+        );
+    }
+
+    #[test]
+    fn status_drop_target_uses_pointer_row_for_wrapped_tabs() {
+        let blocks = vec![
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@1".to_owned(),
+                start_x: 0.0,
+                end_x: 40.0,
+                start_y: 0.0,
+                end_y: 20.0,
+            },
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@2".to_owned(),
+                start_x: 40.0,
+                end_x: 80.0,
+                start_y: 0.0,
+                end_y: 20.0,
+            },
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@3".to_owned(),
+                start_x: 0.0,
+                end_x: 40.0,
+                start_y: 20.0,
+                end_y: 40.0,
+            },
+            StatusBlock {
+                module: "windows".to_owned(),
+                anchor: "@4".to_owned(),
+                start_x: 40.0,
+                end_x: 80.0,
+                start_y: 20.0,
+                end_y: 40.0,
+            },
+        ];
+
+        assert_eq!(
+            status_drop_target(&blocks, "windows", "@1", Pos2::new(10.0, 30.0)),
+            Some((Some("@3".to_owned()), 0.0))
+        );
+        assert_eq!(
+            status_drop_target(&blocks, "windows", "@1", Pos2::new(70.0, 30.0)),
+            Some((None, 80.0))
         );
     }
 
@@ -2166,6 +2901,7 @@ mod tests {
     fn sidebar_rows_ignore_keyboard_activation_keys() {
         for key in [egui::Key::Enter, egui::Key::Space] {
             let context = egui::Context::default();
+            crate::ui::icons::install_icon_fonts(&context);
             let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
             let sessions = vec![
                 test_session("s1", "alpha", true),
