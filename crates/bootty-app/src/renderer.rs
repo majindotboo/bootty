@@ -145,6 +145,8 @@ impl TerminalWidget {
 
         self.cell = self.cell_metrics_for_rect(rect);
         let surface = TerminalSurface::for_rect(rect, self.cell);
+        terminal.set_display_scale(ui.ctx().pixels_per_point())?;
+        terminal.set_render_cell_metrics(self.cell)?;
         terminal.resize(surface.geometry())?;
 
         let extract_start = Instant::now();

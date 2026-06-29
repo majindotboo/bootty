@@ -30,6 +30,7 @@ epaint = { version = "0.35", default-features = false, features = ["bytemuck", "
 font-types = { version = "0.11", default-features = false, features = ["bytemuck", "serde", "std"] }
 hashbrown-9067fe90e8c1f593 = { package = "hashbrown", version = "0.17" }
 hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16" }
+libc = { version = "0.2", features = ["extra_traits"] }
 lock_api = { version = "0.4", features = ["arc_lock"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2" }
@@ -79,7 +80,6 @@ dispatch2 = { version = "0.3", default-features = false, features = ["alloc", "b
 errno = { version = "0.3" }
 image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
 indexmap = { version = "2" }
-libc = { version = "0.2", features = ["extra_traits"] }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 naga = { version = "29", features = ["msl-out", "wgsl-in"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
@@ -104,7 +104,6 @@ crossbeam-utils = { version = "0.8" }
 fastrand = { version = "2" }
 getrandom = { version = "0.3", default-features = false, features = ["std"] }
 indexmap = { version = "2" }
-libc = { version = "0.2", features = ["extra_traits"] }
 naga = { version = "29", features = ["glsl-out", "spv-out", "wgsl-in"] }
 phf_shared = { version = "0.13", default-features = false, features = ["std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "shm", "system", "termios", "time"] }
@@ -145,7 +144,6 @@ dispatch2 = { version = "0.3", default-features = false, features = ["alloc", "b
 errno = { version = "0.3" }
 image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
 indexmap = { version = "2" }
-libc = { version = "0.2", features = ["extra_traits"] }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 naga = { version = "29", features = ["msl-out", "wgsl-in"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
@@ -184,7 +182,6 @@ syn = { version = "2", default-features = false, features = ["fold"] }
 [target.x86_64-pc-windows-msvc.dependencies]
 arboard = { version = "3" }
 indexmap = { version = "2" }
-libc = { version = "0.2", features = ["extra_traits"] }
 naga = { version = "29", features = ["hlsl-out", "wgsl-in"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 wgpu = { version = "29", default-features = false, features = ["dx12", "parking_lot", "std", "wgsl"] }
@@ -208,7 +205,6 @@ crossbeam-utils = { version = "0.8" }
 fastrand = { version = "2" }
 getrandom = { version = "0.3", default-features = false, features = ["std"] }
 indexmap = { version = "2" }
-libc = { version = "0.2", features = ["extra_traits"] }
 naga = { version = "29", features = ["glsl-out", "spv-out", "wgsl-in"] }
 phf_shared = { version = "0.13", default-features = false, features = ["std"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "shm", "system", "termios", "time"] }

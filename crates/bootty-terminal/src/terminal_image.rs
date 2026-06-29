@@ -106,6 +106,7 @@ impl KittyImageLayer {
 pub fn collect_kitty_image_frame(
     terminal: &Terminal<'_, '_>,
     surface: TerminalSurface,
+    display_scale: f32,
     placement_iterator: &mut PlacementIterator<'_>,
     image_cache: &mut KittyImageDataCache,
 ) -> Result<KittyImageFrame> {
@@ -163,6 +164,7 @@ pub fn collect_kitty_image_frame(
                 destination: placement_destination(
                     surface,
                     render_info,
+                    display_scale,
                     placement.x_offset()?,
                     placement.y_offset()?,
                     placement.columns()?,
@@ -246,25 +248,31 @@ impl KittyImageDataCache {
 pub fn placement_destination(
     surface: TerminalSurface,
     info: PlacementRenderInfo,
+    display_scale: f32,
     x_offset: u32,
     y_offset: u32,
     columns: u32,
     rows: u32,
 ) -> SurfaceRect {
     let origin = surface.content_origin();
+    let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+        display_scale
+    } else {
+        1.0
+    };
     let width = if columns > 0 {
         columns as f32 * surface.cell.width
     } else {
-        info.pixel_width as f32
+        info.pixel_width as f32 / display_scale
     };
     let height = if rows > 0 {
         rows as f32 * surface.cell.height
     } else {
-        info.pixel_height as f32
+        info.pixel_height as f32 / display_scale
     };
     SurfaceRect::from_min_size(
-        origin.x + info.viewport_col as f32 * surface.cell.width + x_offset as f32,
-        origin.y + info.viewport_row as f32 * surface.cell.height + y_offset as f32,
+        origin.x + info.viewport_col as f32 * surface.cell.width + x_offset as f32 / display_scale,
+        origin.y + info.viewport_row as f32 * surface.cell.height + y_offset as f32 / display_scale,
         width,
         height,
     )
@@ -273,9 +281,17 @@ pub fn placement_destination(
 pub fn append_virtual_image_placements(
     terminal: &Terminal<'_, '_>,
     surface: TerminalSurface,
+    display_scale: f32,
     frame: &mut KittyImageFrame,
     cells: &[KittyVirtualCell],
     image_cache: &mut KittyImageDataCache,
 ) -> Result<Vec<u16>> {
-    virtual_placement::append_virtual_image_placements(terminal, surface, frame, cells, image_cache)
+    virtual_placement::append_virtual_image_placements(
+        terminal,
+        surface,
+        display_scale,
+        frame,
+        cells,
+        image_cache,
+    )
 }

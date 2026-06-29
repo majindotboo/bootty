@@ -875,8 +875,108 @@ impl InputConfig {
             MultiplexerBackendConfig::Zellij => &self.backend_keybinds.zellij,
         };
         keybinds.extend(backend_keybinds.iter().cloned());
-        keybinds
+        resolve_macos_option_alt_keybinds(keybinds, self.macos_option_as_alt)
     }
+}
+
+fn resolve_macos_option_alt_keybinds(
+    keybinds: Vec<String>,
+    macos_option_as_alt: MacosOptionAsAltConfig,
+) -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return keybinds;
+    }
+    keybinds
+        .into_iter()
+        .flat_map(|entry| expand_macos_option_alt_keybind(entry, macos_option_as_alt))
+        .collect()
+}
+
+fn expand_macos_option_alt_keybind(
+    entry: String,
+    macos_option_as_alt: MacosOptionAsAltConfig,
+) -> Vec<String> {
+    let Some((trigger, action)) = split_keybind_entry(&entry) else {
+        return vec![entry];
+    };
+    if !trigger_has_replaceable_unsided_alt(trigger) {
+        return vec![entry];
+    }
+    let sides = match macos_option_as_alt {
+        MacosOptionAsAltConfig::None => return Vec::new(),
+        MacosOptionAsAltConfig::Left => &["left_alt"][..],
+        MacosOptionAsAltConfig::Right => &["right_alt"][..],
+        MacosOptionAsAltConfig::Both => &["left_alt", "right_alt"][..],
+    };
+    sides
+        .iter()
+        .map(|side| format!("{}={action}", replace_unsided_alt(trigger, side)))
+        .collect()
+}
+
+fn split_keybind_entry(entry: &str) -> Option<(&str, &str)> {
+    let bytes = entry.as_bytes();
+    let mut offset = 0;
+    while let Some(rel) = entry[offset..].find('=') {
+        let index = offset + rel;
+        if index + 1 < entry.len() && matches!(bytes[index + 1], b'+' | b'=') {
+            offset = index + 1;
+            continue;
+        }
+        return Some((&entry[..index], &entry[index + 1..]));
+    }
+    None
+}
+
+fn trigger_has_replaceable_unsided_alt(trigger: &str) -> bool {
+    trigger
+        .split('>')
+        .any(|step| !step_has_command_modifier(step) && step.split('+').any(is_unsided_alt_token))
+}
+
+fn replace_unsided_alt(trigger: &str, side: &str) -> String {
+    trigger
+        .split('>')
+        .map(|step| {
+            if step_has_command_modifier(step) {
+                return step.to_owned();
+            }
+            step.split('+')
+                .map(|part| {
+                    if is_unsided_alt_token(part) {
+                        side
+                    } else {
+                        part
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(">")
+}
+
+fn step_has_command_modifier(step: &str) -> bool {
+    step.split('+').any(is_command_modifier_token)
+}
+
+fn is_unsided_alt_token(token: &str) -> bool {
+    matches!(token, "alt" | "opt" | "option")
+}
+
+fn is_command_modifier_token(token: &str) -> bool {
+    matches!(
+        token,
+        "cmd"
+            | "command"
+            | "super"
+            | "left_cmd"
+            | "left_command"
+            | "left_super"
+            | "right_cmd"
+            | "right_command"
+            | "right_super"
+    )
 }
 
 fn common_keybinds() -> &'static [&'static str] {

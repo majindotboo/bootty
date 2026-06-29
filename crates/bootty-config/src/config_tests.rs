@@ -518,6 +518,19 @@ fn config_maps_font_fit_cell_height_to_terminal_text_config() {
 }
 
 #[test]
+fn config_maps_font_fit_cell_width_to_terminal_text_config() {
+    assert!(!load_config_source("").font.fit_cell_width);
+
+    let config = load_config_source(indoc! {r#"
+        [font]
+        fit-cell-width = true
+    "#});
+
+    assert!(config.font.fit_cell_width);
+    assert!(config.font.terminal_text_config().fit_cell_width);
+}
+
+#[test]
 fn config_uses_auto_font_cell_metrics_until_width_or_height_is_configured() {
     let default = load_config_source("");
     assert_eq!(default.font.cell_width, None);
@@ -887,6 +900,80 @@ fn keybind_entries_without_clear_layer_on_defaults() {
             .iter()
             .any(|k| k == "shift+Enter=text:\\n"),
         "defaults the user did not list are retained"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_expands_unsided_alt_keybinds_to_configured_sides() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "right"
+        keybind = ["clear", "alt+n=next_tab", "left_alt+p=previous_tab"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(keybinds.iter().any(|entry| entry == "right_alt+n=next_tab"));
+    assert!(!keybinds.iter().any(|entry| entry == "left_alt+n=next_tab"));
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "left_alt+p=previous_tab")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_preserves_command_alt_app_keybinds() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "none"
+        keybind = ["clear", "cmd+alt+n=new_window", "cmd+alt+r=rename_session"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(keybinds.iter().any(|entry| entry == "cmd+alt+n=new_window"));
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+alt+r=rename_session")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_expands_non_command_steps_in_chains() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "right"
+        keybind = ["clear", "cmd+k>alt+n=next_tab", "cmd+alt+p=previous_tab"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+k>right_alt+n=next_tab")
+    );
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+alt+p=previous_tab")
     );
 }
 

@@ -5,6 +5,8 @@ use std::{
 };
 
 use super::super::*;
+#[cfg(unix)]
+use super::{SharedMemoryFixture, is_shared_memory_unavailable};
 use crate::terminal_png_decoder::png_frame_to_rgba8;
 
 use libghostty_vt::kitty::graphics::{Layer, PlacementIterator};
@@ -310,7 +312,7 @@ fn terminal_engine_advertises_and_accepts_kitty_file_images() -> Result<()> {
     assert!(engine.terminal.kitty_image_storage_limit()? > 0);
     assert!(engine.terminal.is_kitty_image_from_file_allowed()?);
     assert!(engine.terminal.is_kitty_image_from_temp_file_allowed()?);
-    assert!(!engine.terminal.is_kitty_image_from_shared_mem_allowed()?);
+    assert!(engine.terminal.is_kitty_image_from_shared_mem_allowed()?);
     Ok(())
 }
 
@@ -345,6 +347,29 @@ fn terminal_engine_reports_cell_size_for_timg_queries() -> Result<()> {
     engine.write_vt(b"\x1b[16t");
 
     assert_eq!(lock_pty_output(&output).as_slice(), b"\x1b[6;16;8t");
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_physical_cell_size_for_timg_queries() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+    engine.set_display_scale(2.0);
+
+    engine.write_vt(b"\x1b[16t");
+
+    assert_eq!(lock_pty_output(&output).as_slice(), b"\x1b[6;32;16t");
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_reports_physical_render_cell_size_for_timg_queries() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+    engine.set_display_scale(2.0);
+    engine.set_render_cell_metrics(CellMetrics::new(8.4, 17.8));
+
+    engine.write_vt(b"\x1b[16t");
+
+    assert_eq!(lock_pty_output(&output).as_slice(), b"\x1b[6;36;17t");
     Ok(())
 }
 
@@ -417,6 +442,30 @@ fn terminal_engine_direct_kitty_image_uses_full_intrinsic_height() -> Result<()>
     assert_eq!(placement.source.y, 0);
     assert_eq!(placement.source.height, 66);
     assert_eq!(placement.destination.height(), 66.0);
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_direct_kitty_image_scales_intrinsic_pixels_to_logical_points() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    engine.set_display_scale(2.0);
+    engine.write_vt(raw_rgb_command_dimensions_with_options(91, 1, 30, 40, "q=1").as_bytes());
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 91)
+        .context("direct image placement")?;
+
+    assert_eq!(placement.destination.width(), 15.0);
+    assert_eq!(placement.destination.height(), 20.0);
     Ok(())
 }
 
@@ -649,6 +698,33 @@ fn terminal_engine_ports_kitty_image_file_and_tempfile_media() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn terminal_engine_ports_kitty_image_shared_memory_media() -> Result<()> {
+    let fixture = match SharedMemoryFixture::write(GHOSTTY_RGB_20X15) {
+        Ok(fixture) => fixture,
+        Err(err) if is_shared_memory_unavailable(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let (mut engine, output) = captured_pty_engine()?;
+    engine.write_vt(
+        format!(
+            "\x1b_Ga=t,f=24,t=s,i=70,s=20,v=15;{}\x1b\\",
+            fixture.payload()?,
+        )
+        .as_bytes(),
+    );
+
+    let image = engine
+        .terminal
+        .kitty_graphics()?
+        .image(70)
+        .expect("shared-memory RGB image");
+    assert_eq!(image.data()?.len(), 20 * 15 * 3);
+    assert_kitty_response(&output, 70, "OK");
+    Ok(())
+}
+
 #[test]
 fn terminal_engine_ports_kitty_image_png_file_and_media_limits() -> Result<()> {
     let png_path = write_temp_fixture(
@@ -675,7 +751,7 @@ fn terminal_engine_ports_kitty_image_png_file_and_media_limits() -> Result<()> {
 
     let (mut shared_memory, shared_memory_output) = captured_pty_engine()?;
     shared_memory.write_vt(b"\x1b_Ga=t,f=24,t=s,i=71,s=1,v=1;c2htLW5hbWU=\x1b\\");
-    assert_kitty_response(&shared_memory_output, 71, "EINVAL: unsupported medium");
+    assert_kitty_response(&shared_memory_output, 71, "EINVAL: invalid data");
     Ok(())
 }
 
@@ -2301,6 +2377,178 @@ fn virtual_image_reuses_cached_pixels_across_dirty_frames() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn terminal_engine_virtual_image_infers_grid_from_logical_image_size() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 10,
+        rows: 4,
+        cell_width: 10,
+        cell_height: 20,
+    })?;
+    engine.set_display_scale(2.0);
+
+    engine.write_vt(raw_rgb_transmit_command(105, 20, 40).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=105,q=1\x1b\\");
+    engine.write_vt("\x1b[38;5;105m\u{10EEEE}\x1b[39m".as_bytes());
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 105)
+        .expect("virtual image placement");
+
+    assert_eq!(placement.source.x, 0);
+    assert_eq!(placement.source.y, 0);
+    assert_eq!(placement.source.width, 20);
+    assert_eq!(placement.source.height, 40);
+    assert_eq!(placement.destination.width(), 10.0);
+    assert_eq!(placement.destination.height(), 20.0);
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_virtual_image_uses_render_cell_metrics_for_destination() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 120,
+        rows: 4,
+        cell_width: 5,
+        cell_height: 20,
+    })?;
+    engine.set_render_cell_metrics(CellMetrics::new(4.5, 20.0));
+
+    engine.write_vt(raw_rgb_transmit_command(106, 18, 20).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=106,c=4,r=1,q=1\x1b\\");
+    engine.write_vt(
+        format!(
+            "\x1b[101G\x1b[38;5;106m{}\x1b[39m",
+            unicode_placeholder_row(4)
+        )
+        .as_bytes(),
+    );
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 106)
+        .expect("virtual image placement");
+
+    assert_eq!(placement.destination.min_x, 450.0);
+    assert_eq!(placement.destination.width(), 18.0);
+    assert_eq!(placement.destination.height(), 20.0);
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_virtual_cover_image_uses_full_grid_width_for_centered_rows() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 8,
+        cell_height: 22,
+    })?;
+    engine.set_render_cell_metrics(CellMetrics::new(8.125, 22.3125));
+
+    engine.write_vt(raw_rgb_transmit_command(107, 512, 512).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=107,c=22,r=8,q=1\x1b\\");
+    engine.write_vt(b"\x1b[38;5;107m");
+    for row in 0..8 {
+        let line = (1..21)
+            .map(|col| unicode_placeholder_cell(row, col))
+            .collect::<String>();
+        engine.write_vt(line.as_bytes());
+        engine.write_vt(b"\r\n");
+    }
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 107)
+        .expect("centered virtual cover placement");
+
+    assert_eq!(placement.source.x, 0);
+    assert_eq!(placement.source.width, 512);
+    assert_eq!(placement.destination.min_x, -8.125);
+    assert_eq!(placement.destination.width(), 178.75);
+    assert_eq!(placement.destination.height(), 178.75);
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_virtual_square_image_keeps_full_grid_square() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 8,
+        cell_height: 22,
+    })?;
+    engine.set_render_cell_metrics(CellMetrics::new(22.3125, 22.28125));
+
+    engine.write_vt(raw_rgb_transmit_command(108, 512, 512).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=108,c=16,r=16,q=1\x1b\\");
+    engine.write_vt(b"\x1b[38;5;108m");
+    for row in 0..16 {
+        let line = unicode_placeholder_grid_row(row, 16);
+        engine.write_vt(line.as_bytes());
+        engine.write_vt(b"\r\n");
+    }
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 108)
+        .expect("full-grid square virtual placement");
+
+    assert_eq!(placement.source.width, 512);
+    assert_eq!(placement.source.height, 512);
+    assert_eq!(placement.destination.width(), 357.0);
+    assert_eq!(placement.destination.height(), 357.0);
+
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_virtual_square_icon_keeps_two_column_row_square() -> Result<()> {
+    let mut engine = TerminalEngine::new(TerminalGeometry {
+        cols: 80,
+        rows: 24,
+        cell_width: 8,
+        cell_height: 20,
+    })?;
+
+    engine.write_vt(raw_rgb_transmit_command(109, 24, 24).as_bytes());
+    engine.write_vt(b"\x1b_Ga=p,U=1,i=109,c=2,r=1,q=1\x1b\\");
+    engine.write_vt(b"\x1b[38;5;109m");
+    engine.write_vt(unicode_placeholder_grid_row(0, 2).as_bytes());
+
+    let frame = engine.extract_frame()?;
+    let placement = frame
+        .images
+        .placements
+        .iter()
+        .find(|placement| placement.image_id == 109)
+        .expect("square icon virtual placement");
+
+    assert_eq!(placement.source.width, 24);
+    assert_eq!(placement.source.height, 24);
+    assert_eq!(placement.destination.width(), 16.0);
+    assert_eq!(placement.destination.min_y, 2.0);
+    assert_eq!(placement.destination.height(), 16.0);
+
+    Ok(())
+}
+
 #[test]
 fn terminal_engine_ports_kitty_unicode_placeholder_runs() -> Result<()> {
     let mut engine = TerminalEngine::new(TerminalGeometry {

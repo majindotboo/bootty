@@ -443,6 +443,31 @@ fn mouse_encoder_inherits_cell_motion_dedup_except_sgr_pixels() -> Result<()> {
 }
 
 #[test]
+fn mouse_encoder_scales_pixel_mouse_to_physical_surface_pixels() -> Result<()> {
+    let mut engine = test_terminal_engine()?;
+    let mut out = Vec::new();
+    engine.set_display_scale(2.0);
+
+    engine.write_vt(b"\x1b[?1003h\x1b[?1006h");
+    assert_mouse_encode(
+        &mut engine,
+        &mut out,
+        test_mouse_input(MouseAction::Press, Some(MouseButton::Left), 10.0, 20.0),
+        b"\x1b[<0;2;2M",
+    )?;
+
+    engine.write_vt(b"\x1b[?1016h");
+    assert_mouse_encode(
+        &mut engine,
+        &mut out,
+        test_mouse_input(MouseAction::Release, Some(MouseButton::Left), 10.0, 20.0),
+        b"\x1b[<0;20;40m",
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() -> Result<()> {
     let size = unit_mouse_size();
     let mut out = Vec::new();

@@ -236,6 +236,9 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
                     segments: &segments,
                     background: bootty_ui::ThemePalette::default().base,
                     left_padding: chrome::STATUS_EDGE_PAD,
+                    row_height: 30.0,
+                    notch_x: None,
+                    tab_rows: 1,
                 },
             );
         },

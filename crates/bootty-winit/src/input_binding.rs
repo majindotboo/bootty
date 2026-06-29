@@ -41,12 +41,22 @@ impl Default for BindingFlags {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingModSide {
+    Left,
+    Right,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BindingMods {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
     pub command: bool,
+    pub shift_side: Option<BindingModSide>,
+    pub ctrl_side: Option<BindingModSide>,
+    pub alt_side: Option<BindingModSide>,
+    pub command_side: Option<BindingModSide>,
 }
 
 impl BindingMods {
@@ -60,17 +70,51 @@ impl BindingMods {
             | (u8::from(self.alt) << 2)
             | (u8::from(self.command) << 3)
     }
-}
 
-impl From<KeyMods> for BindingMods {
-    fn from(value: KeyMods) -> Self {
+    fn from_key_mods_with_sides(value: KeyMods) -> Self {
         Self {
             shift: value.shift,
             ctrl: value.ctrl,
             alt: value.alt,
             command: value.command,
+            shift_side: side_for_key_mod(value.shift, value.right_shift),
+            ctrl_side: side_for_key_mod(value.ctrl, value.right_ctrl),
+            alt_side: side_for_key_mod(value.alt, value.right_alt),
+            command_side: side_for_key_mod(value.command, value.right_command),
         }
     }
+
+    pub fn without_side_constraints(mut self) -> Self {
+        self.shift_side = None;
+        self.ctrl_side = None;
+        self.alt_side = None;
+        self.command_side = None;
+        self
+    }
+
+    fn input_candidates(value: KeyMods) -> Vec<Self> {
+        let sided = Self::from_key_mods_with_sides(value);
+        let unsided = sided.without_side_constraints();
+        if sided == unsided {
+            vec![unsided]
+        } else {
+            vec![sided, unsided]
+        }
+    }
+}
+
+impl From<KeyMods> for BindingMods {
+    fn from(value: KeyMods) -> Self {
+        Self::from_key_mods_with_sides(value).without_side_constraints()
+    }
+}
+
+fn side_for_key_mod(pressed: bool, right: bool) -> Option<BindingModSide> {
+    pressed.then_some(if right {
+        BindingModSide::Right
+    } else {
+        BindingModSide::Left
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,8 +131,22 @@ impl BindingTrigger {
         }
     }
 
+    pub fn from_key_input_with_modifier_sides(input: KeyInput) -> Self {
+        Self {
+            mods: BindingMods::from_key_mods_with_sides(input.mods),
+            key: BindingKey::Physical(input.key),
+        }
+    }
+
+    pub fn input_mod_candidates(input: KeyInput) -> Vec<BindingMods> {
+        BindingMods::input_candidates(input.mods)
+    }
+
     pub fn matches_key_input(&self, input: KeyInput) -> bool {
-        self == &Self::from_key_input(input) || self.key == BindingKey::CatchAll
+        Self::input_mod_candidates(input).iter().any(|mods| {
+            self.mods == *mods
+                && (self.key == BindingKey::Physical(input.key) || self.key == BindingKey::CatchAll)
+        })
     }
 
     fn sort_key(&self) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, i32) {
@@ -102,22 +160,36 @@ impl BindingTrigger {
     pub fn format_entry(&self) -> String {
         let mut output = String::new();
         if self.mods.command {
-            push_binding_part(&mut output, "cmd");
+            push_binding_part(&mut output, mod_token("cmd", self.mods.command_side));
         }
         if self.mods.ctrl {
-            push_binding_part(&mut output, "ctrl");
+            push_binding_part(&mut output, mod_token("ctrl", self.mods.ctrl_side));
         }
         if self.mods.alt {
-            push_binding_part(&mut output, "alt");
+            push_binding_part(&mut output, mod_token("alt", self.mods.alt_side));
         }
         if self.mods.shift {
-            push_binding_part(&mut output, "shift");
+            push_binding_part(&mut output, mod_token("shift", self.mods.shift_side));
         }
         if !output.is_empty() {
             output.push('+');
         }
         self.key.push_format_entry(&mut output);
         output
+    }
+}
+
+fn mod_token(base: &'static str, side: Option<BindingModSide>) -> &'static str {
+    match (base, side) {
+        ("cmd", Some(BindingModSide::Left)) => "left_cmd",
+        ("cmd", Some(BindingModSide::Right)) => "right_cmd",
+        ("ctrl", Some(BindingModSide::Left)) => "left_ctrl",
+        ("ctrl", Some(BindingModSide::Right)) => "right_ctrl",
+        ("alt", Some(BindingModSide::Left)) => "left_alt",
+        ("alt", Some(BindingModSide::Right)) => "right_alt",
+        ("shift", Some(BindingModSide::Left)) => "left_shift",
+        ("shift", Some(BindingModSide::Right)) => "right_shift",
+        _ => base,
     }
 }
 
@@ -141,6 +213,34 @@ impl FromStr for BindingTrigger {
                 "ctrl" | "control" => set_mod(&mut mods.ctrl)?,
                 "alt" | "opt" | "option" => set_mod(&mut mods.alt)?,
                 "cmd" | "command" | "super" => set_mod(&mut mods.command)?,
+                "left_shift" => {
+                    set_sided_mod(&mut mods.shift, &mut mods.shift_side, BindingModSide::Left)?
+                }
+                "right_shift" => {
+                    set_sided_mod(&mut mods.shift, &mut mods.shift_side, BindingModSide::Right)?
+                }
+                "left_ctrl" | "left_control" => {
+                    set_sided_mod(&mut mods.ctrl, &mut mods.ctrl_side, BindingModSide::Left)?
+                }
+                "right_ctrl" | "right_control" => {
+                    set_sided_mod(&mut mods.ctrl, &mut mods.ctrl_side, BindingModSide::Right)?
+                }
+                "left_alt" | "left_opt" | "left_option" => {
+                    set_sided_mod(&mut mods.alt, &mut mods.alt_side, BindingModSide::Left)?
+                }
+                "right_alt" | "right_opt" | "right_option" => {
+                    set_sided_mod(&mut mods.alt, &mut mods.alt_side, BindingModSide::Right)?
+                }
+                "left_cmd" | "left_command" | "left_super" => set_sided_mod(
+                    &mut mods.command,
+                    &mut mods.command_side,
+                    BindingModSide::Left,
+                )?,
+                "right_cmd" | "right_command" | "right_super" => set_sided_mod(
+                    &mut mods.command,
+                    &mut mods.command_side,
+                    BindingModSide::Right,
+                )?,
                 "catch_all" => set_key(&mut key, BindingKey::CatchAll)?,
                 _ => set_key(&mut key, BindingKey::parse(part)?)?,
             }
@@ -955,6 +1055,16 @@ fn set_mod(field: &mut bool) -> Result<(), BindingParseError> {
     Ok(())
 }
 
+fn set_sided_mod(
+    field: &mut bool,
+    side_field: &mut Option<BindingModSide>,
+    side: BindingModSide,
+) -> Result<(), BindingParseError> {
+    set_mod(field)?;
+    *side_field = Some(side);
+    Ok(())
+}
+
 fn set_key(slot: &mut Option<BindingKey>, key: BindingKey) -> Result<(), BindingParseError> {
     if slot.is_some() {
         return Err(BindingParseError::InvalidFormat);
@@ -1040,6 +1150,29 @@ mod tests {
         for input in ["foo=ignore", "shift+shift+a=ignore", "a+b=ignore"] {
             assert_eq!(parse_binding(input), Err(BindingParseError::InvalidFormat));
         }
+    }
+
+    #[test]
+    fn input_binding_parser_preserves_modifier_sides() {
+        let trigger = parse_binding("left_ctrl+right_alt+a=ignore")
+            .unwrap()
+            .trigger;
+
+        assert_eq!(
+            trigger.mods,
+            BindingMods {
+                ctrl: true,
+                alt: true,
+                ctrl_side: Some(BindingModSide::Left),
+                alt_side: Some(BindingModSide::Right),
+                ..Default::default()
+            }
+        );
+        assert_eq!(trigger.format_entry(), "left_ctrl+right_alt+a");
+        assert_eq!(
+            parse_binding("alt+right_alt+a=ignore"),
+            Err(BindingParseError::InvalidFormat)
+        );
     }
 
     #[test]

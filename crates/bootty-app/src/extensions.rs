@@ -388,6 +388,7 @@ impl RunCache {
     }
 
     fn run(self: &Arc<Self>, cmd: &str) -> std::io::Result<String> {
+        reject_reserved_shell_command(cmd)?;
         match self.mode() {
             RunMode::Live => shell_run_output(cmd, &self.run_jobs, &self.shutdown)
                 .map(|output| output.trim().to_owned()),
@@ -650,6 +651,70 @@ fn validate_codexbar_provider(provider: &str) -> std::io::Result<()> {
     }
 }
 
+fn reject_reserved_shell_command(cmd: &str) -> std::io::Result<()> {
+    if command_invokes_codexbar_usage(cmd) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bootty.run cannot invoke codexbar usage; use bootty.codexbar_usage(provider)",
+        ));
+    }
+    Ok(())
+}
+
+fn command_invokes_codexbar_usage(cmd: &str) -> bool {
+    let tokens = shellish_tokens(cmd);
+    let mut command_start = true;
+    let mut previous_command_is_codexbar = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 && contains_shell_command_separator(&cmd[tokens[index - 1].1..token.0]) {
+            command_start = true;
+            previous_command_is_codexbar = false;
+        }
+        let token = token.2;
+        if previous_command_is_codexbar && token == "usage" {
+            return true;
+        }
+        previous_command_is_codexbar = command_start
+            && token
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name == "codexbar");
+        if command_start && is_shell_assignment(token) {
+            continue;
+        }
+        command_start = false;
+    }
+    false
+}
+
+fn shellish_tokens(cmd: &str) -> Vec<(usize, usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, ch) in cmd.char_indices() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | '=') {
+            start.get_or_insert(index);
+        } else if let Some(token_start) = start.take() {
+            tokens.push((token_start, index, &cmd[token_start..index]));
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push((token_start, cmd.len(), &cmd[token_start..]));
+    }
+    tokens
+}
+
+fn contains_shell_command_separator(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| matches!(ch, ';' | '&' | '|' | '\n' | '\r' | '(' | '`'))
+}
+
+fn is_shell_assignment(token: &str) -> bool {
+    token
+        .split_once('=')
+        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/'))
+}
+
 #[cfg(target_os = "macos")]
 fn resolve_codexbar_program() -> std::io::Result<String> {
     bootty_mux::process::resolve_program("codexbar").map_err(std::io::Error::other)
@@ -833,6 +898,7 @@ impl ExtensionHost {
         let next_window_id = Arc::new(AtomicU64::new(1));
         let waker: Arc<Waker> = Arc::default();
         let run_jobs = Arc::new(PlatformRunJobs::default());
+        cleanup_stale_platform_shell_run_jobs();
         let shutdown = Arc::new(AtomicBool::new(false));
         let _handle = std::thread::Builder::new()
             .name(thread_name.to_owned())
@@ -1503,6 +1569,51 @@ fn cleanup_platform_shell_run_jobs(run_jobs: &PlatformRunJobs) {
 
 #[cfg(not(target_os = "macos"))]
 fn cleanup_platform_shell_run_jobs(_run_jobs: &PlatformRunJobs) {}
+
+#[cfg(target_os = "macos")]
+fn cleanup_stale_platform_shell_run_jobs() {
+    let Ok(launchctl) = resolve_shell_program("launchctl") else {
+        return;
+    };
+    let Ok(output) = std::process::Command::new(&launchctl).arg("list").output() else {
+        return;
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for line in listing.lines() {
+        let Some(label) = line
+            .split_whitespace()
+            .find(|field| field.starts_with("dev.bootty.run."))
+        else {
+            continue;
+        };
+        let Some(owner_pid) = stale_run_job_owner_pid(label) else {
+            continue;
+        };
+        if owner_pid == std::process::id() || process_exists(owner_pid) {
+            continue;
+        }
+        let _ = std::process::Command::new(&launchctl)
+            .args(["remove", label])
+            .status();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cleanup_stale_platform_shell_run_jobs() {}
+
+#[cfg(target_os = "macos")]
+fn stale_run_job_owner_pid(label: &str) -> Option<u32> {
+    let rest = label.strip_prefix("dev.bootty.run.")?;
+    rest.split('.').next()?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
 
 #[cfg(target_os = "macos")]
 fn macos_shell_run_environment_from<I, K, V>(
@@ -2630,6 +2741,37 @@ mod tests {
     fn codexbar_provider_rejects_url_injection() {
         assert!(validate_codexbar_provider("claude").is_ok());
         assert!(validate_codexbar_provider("claude&provider=all").is_err());
+    }
+
+    #[test]
+    fn codexbar_usage_shell_outs_are_reserved() {
+        assert!(command_invokes_codexbar_usage(
+            "codexbar usage --provider claude --format json"
+        ));
+        assert!(command_invokes_codexbar_usage(
+            "out=$(/opt/homebrew/bin/codexbar usage --provider claude)"
+        ));
+        assert!(!command_invokes_codexbar_usage("printf codexbar usage"));
+        assert!(!command_invokes_codexbar_usage("codexbar --version"));
+    }
+
+    #[test]
+    fn bootty_run_rejects_codexbar_usage_before_refresh() {
+        let run_cache = Arc::new(RunCache::default());
+        let cmd = "codexbar usage --provider claude --format json";
+
+        run_cache.set_mode(RunMode::Refresh);
+        let error = run_cache.run(cmd).expect_err("codexbar shell-out rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            run_cache
+                .entries
+                .lock()
+                .expect("run entries")
+                .get(cmd)
+                .is_none()
+        );
     }
 
     #[test]

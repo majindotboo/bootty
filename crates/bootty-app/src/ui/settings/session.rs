@@ -148,7 +148,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         env.remove(index);
         changed = true;
     }
-    if ui.button("+ Add variable").clicked() {
+    if super::settings_button(ui, palette, "+ Add variable").clicked() {
         env.push((String::new(), String::new()));
         changed = true;
     }

@@ -13,7 +13,6 @@ use super::{
     tmux_protocol::{TmuxLayout, TmuxLayoutContent},
 };
 
-pub(crate) const DEFAULT_RMUX_SESSION_NAME: &str = "local";
 const RMUX_FIELD_SEPARATOR: char = '\u{1f}';
 pub(crate) const RMUX_WINDOW_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_active}\u{1f}#{window_name}\u{1f}#{window_layout}";
 pub(crate) const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
@@ -67,18 +66,6 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
     }
 
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        let snapshot = self.client.snapshot()?;
-        if !snapshot.sessions.is_empty() {
-            return Ok(snapshot);
-        }
-
-        let cwd = std::env::current_dir()
-            .context("resolve cwd for default rmux session")?
-            .to_string_lossy()
-            .into_owned();
-        self.client
-            .ensure_session(DEFAULT_RMUX_SESSION_NAME, &cwd)
-            .context("bootstrap default rmux session")?;
         self.client.snapshot()
     }
 
@@ -674,46 +661,14 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct EmptyThenLocalClient {
+    struct EmptyClient {
         calls: Rc<RefCell<Vec<Vec<String>>>>,
-        ensured: Rc<RefCell<bool>>,
     }
 
-    impl RmuxSessionClient for EmptyThenLocalClient {
+    impl RmuxSessionClient for EmptyClient {
         fn snapshot(&self) -> Result<MuxSnapshot> {
             self.calls.borrow_mut().push(vec!["snapshot".to_owned()]);
-            if !*self.ensured.borrow() {
-                return Ok(MuxSnapshot::default());
-            }
-            Ok(MuxSnapshot {
-                active_session_id: None,
-                sessions: vec![MuxSession {
-                    id: "local".to_owned(),
-                    name: "local".to_owned(),
-                    active: false,
-                    anchor: MuxPaneAnchor {
-                        session_id: "local".to_owned(),
-                        pane_id: Some("%1".to_owned()),
-                        cwd: None,
-                        process: None,
-                    },
-                    active_window_id: Some("@1".to_owned()),
-                    windows: vec![MuxWindow {
-                        id: "@1".to_owned(),
-                        index: 1,
-                        name: "shell".to_owned(),
-                        active: true,
-                        anchor: MuxPaneAnchor {
-                            session_id: "local".to_owned(),
-                            pane_id: Some("%1".to_owned()),
-                            cwd: None,
-                            process: None,
-                        },
-                        panes: Vec::new(),
-                        layout: None,
-                    }],
-                }],
-            })
+            Ok(MuxSnapshot::default())
         }
 
         fn ensure_session(&self, session_name: &str, cwd: &str) -> Result<()> {
@@ -722,7 +677,6 @@ mod tests {
                 session_name.to_owned(),
                 cwd.to_owned(),
             ]);
-            *self.ensured.borrow_mut() = true;
             Ok(())
         }
 
@@ -1488,26 +1442,14 @@ mod tests {
     }
 
     #[test]
-    fn rmux_snapshot_bootstraps_local_session_when_server_is_empty() {
-        let cwd = std::env::current_dir()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let client = EmptyThenLocalClient::default();
+    fn rmux_snapshot_leaves_empty_server_empty() {
+        let client = EmptyClient::default();
         let calls = client.calls.clone();
         let backend = RmuxBackend::with_client(client);
 
         let snapshot = backend.snapshot().unwrap();
 
-        assert_eq!(snapshot.sessions.len(), 1);
-        assert_eq!(snapshot.sessions[0].id, "local");
-        assert_eq!(
-            calls.borrow().as_slice(),
-            &[
-                vec!["snapshot".to_owned()],
-                vec!["ensure_session".to_owned(), "local".to_owned(), cwd],
-                vec!["snapshot".to_owned()],
-            ]
-        );
+        assert!(snapshot.sessions.is_empty());
+        assert_eq!(calls.borrow().as_slice(), &[vec!["snapshot".to_owned()]]);
     }
 }

@@ -31,7 +31,7 @@ impl Default for TerminalTextConfig {
             cell_width: None,
             cell_height: None,
             fit_cell_height: true,
-            fit_cell_width: true,
+            fit_cell_width: false,
             baseline_adjustment: 3.0,
             underline_position: 2.0,
             underline_thickness: 1.0,
@@ -919,6 +919,7 @@ mod tests {
         assert_eq!(config.families, vec!["monospace"]);
         assert_eq!(config.font_size, DEFAULT_FONT_SIZE);
         assert!(config.fit_cell_height);
+        assert!(!config.fit_cell_width);
         assert_eq!(config.baseline_adjustment, 3.0);
         assert_eq!(config.font_features, vec![FontFeature::new(*b"liga", 1)]);
     }

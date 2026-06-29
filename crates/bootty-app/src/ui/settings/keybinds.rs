@@ -76,11 +76,13 @@ fn action_options(scope: KeybindScope) -> Vec<(&'static str, &'static str, &'sta
     }
 }
 
-/// One editable binding: a trigger (one combo, or a `>`-joined chord) and an action.
+/// One editable binding: a trigger (one combo, or a `>`-joined chord), an action, and editor-only
+/// state for whether newly recorded modifiers should keep left/right side information.
 #[derive(Default)]
 pub(super) struct BindingRow {
     pub trigger: String,
     pub action: String,
+    pub side_sensitive: bool,
 }
 
 /// In-progress chord capture: steps accumulate until `deadline` passes with no new key.
@@ -246,6 +248,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             rows.push(BindingRow {
                 trigger: String::new(),
                 action: target.clone(),
+                side_sensitive: false,
             });
         }
         let search_id = ui.make_persistent_id(("settings_keybind_search", scope));
@@ -536,11 +539,13 @@ fn conflict_banner(
                 } else {
                     palette.destructive
                 };
-                ui.label(
-                    egui::RichText::new(if ok { "✓" } else { "!" })
-                        .color(color)
-                        .strong(),
-                );
+                if let Some(icon) = crate::ui::icons::icon_text(
+                    if ok { "check" } else { "circle-alert" },
+                    16.0,
+                    color,
+                ) {
+                    ui.label(icon);
+                }
                 ui.label(
                     egui::RichText::new(if ok {
                         "No conflicts"
@@ -663,7 +668,7 @@ fn binding_editor_row(
     let flags_open_id = ui.make_persistent_id(("kb_flags_open", ctx.scope, ctx.index));
     let mut flags_open: bool =
         ui.memory(|memory| memory.data.get_temp(flags_open_id).unwrap_or(false));
-    let any_flag = flags.iter().any(|on| *on);
+    let any_flag = flags.iter().any(|on| *on) || row.side_sensitive;
 
     // No trailing space and alternating fills make the rows read as one continuous striped table.
     egui::Frame::NONE
@@ -685,7 +690,7 @@ fn binding_editor_row(
                         if cap.steps.is_empty() {
                             "Press keys… Esc to cancel".to_owned()
                         } else {
-                            cap.steps.join(" > ")
+                            cap.steps.join(">")
                         }
                     })
                     .unwrap_or_default();
@@ -700,8 +705,6 @@ fn binding_editor_row(
                 if let Some(icon) = crate::ui::icons::icon_text("arrow-right", 14.0, palette.muted)
                 {
                     ui.label(icon);
-                } else {
-                    ui.label(egui::RichText::new("->").color(palette.muted));
                 }
 
                 // Title + description picker, drawn from the shared action catalog.
@@ -815,6 +818,36 @@ fn binding_flags_editor(
                 });
                 ui.add_space(2.0);
             }
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let mut on = row.side_sensitive;
+                if super::settings_toggle(ui, palette, &mut on) {
+                    row.side_sensitive = on;
+                    let combo = if on {
+                        add_default_modifier_sides(combo)
+                    } else {
+                        strip_modifier_sides(combo)
+                    };
+                    row.trigger = join_trigger_flags(flags, &combo);
+                    *changed = true;
+                }
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Modifier side")
+                            .color(palette.text)
+                            .strong()
+                            .size(12.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Require the same physical left/right modifier side that was recorded.",
+                        )
+                        .color(palette.muted)
+                        .size(11.0),
+                    );
+                });
+            });
         });
 }
 
@@ -920,13 +953,25 @@ fn record_cell(
             egui::Stroke::new(1.0, palette.primary),
             egui::StrokeKind::Inside,
         );
-        ui.painter().text(
-            text_pos,
-            egui::Align2::LEFT_CENTER,
-            capture_text,
-            egui::FontId::proportional(12.0),
-            palette.text,
-        );
+        if capture_text.starts_with("Press keys") {
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_CENTER,
+                capture_text,
+                egui::FontId::proportional(12.0),
+                palette.text,
+            );
+        } else {
+            let galley = crate::ui::keycaps::trigger_galley_from_painter(
+                ui.painter(),
+                palette,
+                capture_text,
+                palette.text,
+                rect.width() - 20.0,
+            );
+            let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5);
+            ui.painter().galley(pos, galley, palette.text);
+        }
     } else {
         let fill = if response.hovered() {
             palette.hover
@@ -986,10 +1031,9 @@ fn binding_status(
                 .size(11.0),
         );
     } else if scope.entry_is_valid(trigger, action) {
-        match crate::ui::icons::icon_text("check", 16.0, palette.success) {
-            Some(text) => ui.label(text),
-            None => ui.label(egui::RichText::new("✓").color(palette.success)),
-        };
+        if let Some(icon) = crate::ui::icons::icon_text("check", 16.0, palette.success) {
+            ui.label(icon);
+        }
     } else {
         ui.label(
             egui::RichText::new("invalid")
@@ -1050,8 +1094,13 @@ fn handle_capture(
             *capture = None;
             return;
         }
-        if let Some(step) = trigger_step(key, modifiers)
-            && let Some(cap) = capture.as_mut()
+        if let Some(cap) = capture.as_mut()
+            && let Some(step) = captured_step(
+                rows.get(cap.row).is_some_and(|row| row.side_sensitive),
+                direct_chords,
+                key,
+                modifiers,
+            )
         {
             cap.steps.push(step);
             cap.deadline = Some(now + CHORD_TIMEOUT);
@@ -1059,12 +1108,17 @@ fn handle_capture(
         return;
     }
 
-    // Direct-input chords: cmd-modified combos (incl. ⌘C/⌘X/⌘V and their +alt/+shift variants) that
-    // egui turns into copy/cut/paste events with no recordable key event.
+    // Direct-input chords: cmd-modified combos (incl. Cmd+C/Cmd+X/Cmd+V and their +alt/+shift
+    // variants) that egui turns into copy/cut/paste events with no recordable key event.
     if let Some(step) = direct_chords.first()
         && let Some(cap) = capture.as_mut()
     {
-        cap.steps.push(step.clone());
+        let step = if rows.get(cap.row).is_some_and(|row| row.side_sensitive) {
+            step.clone()
+        } else {
+            strip_modifier_sides(step)
+        };
+        cap.steps.push(step);
         cap.deadline = Some(now + CHORD_TIMEOUT);
         return;
     }
@@ -1082,6 +1136,18 @@ fn handle_capture(
         *capture = None;
         *changed = true;
     }
+}
+
+fn captured_step(
+    side_sensitive: bool,
+    direct_chords: &[String],
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> Option<String> {
+    if side_sensitive && let Some(step) = direct_chords.first() {
+        return Some(step.clone());
+    }
+    trigger_step(key, modifiers)
 }
 
 /// Remove and return the first key-press event this frame. Also drops the text/clipboard events the
@@ -1109,6 +1175,76 @@ fn drain_first_key_press(ui: &egui::Ui) -> Option<(egui::Key, egui::Modifiers)> 
         });
         first
     })
+}
+
+fn combo_has_modifier_sides(combo: &str) -> bool {
+    combo
+        .split('>')
+        .flat_map(|step| step.split('+'))
+        .any(is_sided_modifier_token)
+}
+
+fn strip_modifier_sides(combo: &str) -> String {
+    rewrite_modifier_tokens(combo, strip_modifier_side_token)
+}
+
+fn add_default_modifier_sides(combo: &str) -> String {
+    rewrite_modifier_tokens(combo, add_default_modifier_side_token)
+}
+
+fn rewrite_modifier_tokens(combo: &str, rewrite: fn(&str) -> &str) -> String {
+    combo
+        .split('>')
+        .map(|step| step.split('+').map(rewrite).collect::<Vec<_>>().join("+"))
+        .collect::<Vec<_>>()
+        .join(">")
+}
+
+fn strip_modifier_side_token(token: &str) -> &str {
+    match token {
+        "left_shift" | "right_shift" => "shift",
+        "left_ctrl" | "left_control" | "right_ctrl" | "right_control" => "ctrl",
+        "left_alt" | "left_opt" | "left_option" | "right_alt" | "right_opt" | "right_option" => {
+            "alt"
+        }
+        "left_cmd" | "left_command" | "left_super" | "right_cmd" | "right_command"
+        | "right_super" => "cmd",
+        other => other,
+    }
+}
+
+fn add_default_modifier_side_token(token: &str) -> &str {
+    match token {
+        "shift" => "left_shift",
+        "ctrl" | "control" => "left_ctrl",
+        "alt" | "opt" | "option" => "left_alt",
+        "cmd" | "command" | "super" => "left_cmd",
+        other => other,
+    }
+}
+
+fn is_sided_modifier_token(token: &str) -> bool {
+    matches!(
+        token,
+        "left_shift"
+            | "right_shift"
+            | "left_ctrl"
+            | "left_control"
+            | "right_ctrl"
+            | "right_control"
+            | "left_alt"
+            | "left_opt"
+            | "left_option"
+            | "right_alt"
+            | "right_opt"
+            | "right_option"
+            | "left_cmd"
+            | "left_command"
+            | "left_super"
+            | "right_cmd"
+            | "right_command"
+            | "right_super"
+    )
 }
 
 fn trigger_step(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
@@ -1161,7 +1297,12 @@ fn read_scope_entries(win: &SettingsWindow, scope: KeybindScope) -> (bool, Vec<B
             continue;
         }
         let (trigger, action) = split_entry(entry);
-        rows.push(BindingRow { trigger, action });
+        let (_, combo) = parse_trigger_flags(&trigger);
+        rows.push(BindingRow {
+            trigger,
+            action,
+            side_sensitive: combo_has_modifier_sides(&combo),
+        });
     }
     (clear, rows)
 }
@@ -1407,5 +1548,35 @@ mod tests {
         let (flags, combo) = parse_trigger_flags("cmd+shift+r");
         assert_eq!(combo, "cmd+shift+r");
         assert!(flags.iter().all(|on| !on));
+    }
+
+    #[test]
+    fn side_sensitive_capture_prefers_direct_modifier_side_chord() {
+        let direct = vec!["right_alt+p".to_owned()];
+
+        assert_eq!(
+            captured_step(
+                true,
+                &direct,
+                egui::Key::P,
+                egui::Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+            Some("right_alt+p".to_owned())
+        );
+        assert_eq!(
+            captured_step(
+                false,
+                &direct,
+                egui::Key::P,
+                egui::Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+            Some("alt+p".to_owned())
+        );
     }
 }

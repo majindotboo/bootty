@@ -5,13 +5,14 @@ use eframe::egui;
 
 use crate::{
     config::InputConfig,
+    direct_input::ModifierSideState,
     input::terminal_key,
     input_binding::{
-        AppearanceChoice, BindingAction, BindingElement, BindingKey, BindingMods, BindingTrigger,
-        PaneDirection, parse_action, parse_binding_elements,
+        AppearanceChoice, BindingAction, BindingElement, BindingKey, BindingTrigger, PaneDirection,
+        parse_action, parse_binding_elements,
     },
     mux::command::MuxDirection,
-    terminal::{KeyInput, TerminalKey},
+    terminal::{KeyInput, KeyMods, TerminalKey},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,12 +164,17 @@ impl AppKeyBindings {
         })
     }
 
-    pub fn action_for_key(
+    pub fn action_for_key_with_modifier_sides(
         &mut self,
         key: egui::Key,
         modifiers: egui::Modifiers,
+        modifier_sides: ModifierSideState,
     ) -> Option<KeybindAction> {
-        self.action_for_candidates(binding_triggers_for_egui_key(key, modifiers))
+        self.action_for_candidates(binding_triggers_for_egui_key_with_modifier_sides(
+            key,
+            modifiers,
+            modifier_sides,
+        ))
     }
 
     pub fn action_for_input(&mut self, input: KeyInput) -> Option<KeybindAction> {
@@ -177,34 +183,35 @@ impl AppKeyBindings {
 
     fn action_for_candidates(&mut self, candidates: Vec<BindingTrigger>) -> Option<KeybindAction> {
         if let Some(leader) = self.active_leader.take() {
-            return self
-                .bindings
+            return candidates
                 .iter()
-                .find(|binding| {
-                    binding.leader.as_ref() == Some(&leader)
-                        && candidates
-                            .iter()
-                            .any(|candidate| candidate == &binding.trigger)
+                .find_map(|candidate| {
+                    self.bindings
+                        .iter()
+                        .find(|binding| {
+                            binding.leader.as_ref() == Some(&leader)
+                                && binding.trigger == *candidate
+                        })
+                        .map(|binding| binding.action.clone())
                 })
-                .map(|binding| binding.action.clone())
                 .or(Some(KeybindAction::App(AppAction::Ignore)));
         }
 
-        if let Some(leader) = self
-            .leaders
-            .iter()
-            .find(|leader| candidates.iter().any(|candidate| candidate == *leader))
-        {
-            self.active_leader = Some(leader.clone());
+        if let Some(leader) = candidates.iter().find_map(|candidate| {
+            self.leaders
+                .iter()
+                .find(|leader| *leader == candidate)
+                .cloned()
+        }) {
+            self.active_leader = Some(leader);
             return Some(KeybindAction::App(AppAction::Ignore));
         }
 
-        self.bindings.iter().find_map(|binding| {
-            (binding.leader.is_none()
-                && candidates
-                    .iter()
-                    .any(|candidate| candidate == &binding.trigger))
-            .then(|| binding.action.clone())
+        candidates.iter().find_map(|candidate| {
+            self.bindings
+                .iter()
+                .find(|binding| binding.leader.is_none() && binding.trigger == *candidate)
+                .map(|binding| binding.action.clone())
         })
     }
 }
@@ -266,9 +273,10 @@ fn sidebar_action(input: &str) -> Result<SidebarAction> {
     }
 }
 
-pub fn split_app_actions_for_bindings(
+pub fn split_app_actions_for_bindings_with_modifier_sides(
     app_key_bindings: &mut AppKeyBindings,
     events: Vec<egui::Event>,
+    modifier_sides: ModifierSideState,
 ) -> (Vec<egui::Event>, Vec<KeybindAction>) {
     let mut terminal_events = Vec::with_capacity(events.len());
     let mut actions = Vec::new();
@@ -295,7 +303,7 @@ pub fn split_app_actions_for_bindings(
                 modifiers,
                 ..
             } => app_key_bindings
-                .action_for_key(*key, *modifiers)
+                .action_for_key_with_modifier_sides(*key, *modifiers, modifier_sides)
                 .or_else(|| builtin_app_action_for_key(*key, *modifiers)),
             _ => None,
         };
@@ -513,41 +521,63 @@ fn binding_triggers_for_egui_key(
     key: egui::Key,
     modifiers: egui::Modifiers,
 ) -> Vec<BindingTrigger> {
-    let mods = BindingMods {
-        shift: modifiers.shift,
-        ctrl: modifiers.ctrl,
-        alt: modifiers.alt,
-        // egui aliases `command` to `ctrl` off macOS, which would spuriously set `command` for any
-        // Ctrl press and break Ctrl / Ctrl+Shift bindings. Only treat the real Cmd key as command.
-        command: cfg!(target_os = "macos") && (modifiers.command || modifiers.mac_cmd),
-    };
+    binding_triggers_for_egui_key_with_modifier_sides(key, modifiers, ModifierSideState::default())
+}
+
+fn binding_triggers_for_egui_key_with_modifier_sides(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+    modifier_sides: ModifierSideState,
+) -> Vec<BindingTrigger> {
     let Some(terminal_key) = terminal_key(key) else {
         return Vec::new();
     };
-    let mut triggers = vec![BindingTrigger {
-        mods,
-        key: BindingKey::Physical(terminal_key),
-    }];
-    if let Some(ch) = binding_char_for_egui_key(key) {
-        triggers.push(BindingTrigger {
-            mods,
-            key: BindingKey::Unicode(ch),
-        });
-    }
-    triggers
+    let input = KeyInput {
+        key: terminal_key,
+        mods: key_mods_for_egui_binding(modifiers, modifier_sides),
+        repeat: false,
+        utf8: None,
+        unshifted: binding_char_for_egui_key(key),
+    };
+    binding_triggers_for_key_input(input)
+}
+
+fn key_mods_for_egui_binding(
+    modifiers: egui::Modifiers,
+    modifier_sides: ModifierSideState,
+) -> KeyMods {
+    let mut input = KeyInput {
+        key: TerminalKey::A,
+        mods: KeyMods {
+            shift: modifiers.shift,
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            // egui aliases `command` to `ctrl` off macOS, which would spuriously set `command` for any
+            // Ctrl press and break Ctrl / Ctrl+Shift bindings. Only treat the real Cmd key as command.
+            command: cfg!(target_os = "macos") && (modifiers.command || modifiers.mac_cmd),
+            ..Default::default()
+        },
+        repeat: false,
+        utf8: None,
+        unshifted: None,
+    };
+    modifier_sides.apply_to_key_input(&mut input);
+    input.mods
 }
 
 fn binding_triggers_for_key_input(input: KeyInput) -> Vec<BindingTrigger> {
-    let mods = BindingMods::from(input.mods);
-    let mut triggers = vec![BindingTrigger {
-        mods,
-        key: BindingKey::Physical(input.key),
-    }];
-    if let Some(ch) = input.unshifted.or_else(|| input.utf8.and_then(single_char)) {
+    let mut triggers = Vec::new();
+    for mods in BindingTrigger::input_mod_candidates(input) {
         triggers.push(BindingTrigger {
             mods,
-            key: BindingKey::Unicode(ch),
+            key: BindingKey::Physical(input.key),
         });
+        if let Some(ch) = input.unshifted.or_else(|| input.utf8.and_then(single_char)) {
+            triggers.push(BindingTrigger {
+                mods,
+                key: BindingKey::Unicode(ch),
+            });
+        }
     }
     triggers
 }
@@ -614,6 +644,25 @@ fn binding_char_for_egui_key(key: egui::Key) -> Option<char> {
 mod tests {
     use super::*;
 
+    fn action_for_key(
+        bindings: &mut AppKeyBindings,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> Option<KeybindAction> {
+        bindings.action_for_key_with_modifier_sides(key, modifiers, ModifierSideState::default())
+    }
+
+    fn split_app_actions_for_bindings(
+        app_key_bindings: &mut AppKeyBindings,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::Event>, Vec<KeybindAction>) {
+        split_app_actions_for_bindings_with_modifier_sides(
+            app_key_bindings,
+            events,
+            ModifierSideState::default(),
+        )
+    }
+
     #[test]
     fn app_keybindings_route_default_app_shortcuts() {
         let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
@@ -657,16 +706,16 @@ mod tests {
             }
         };
 
-        let action = bindings.action_for_key(egui::Key::R, reload_modifiers);
+        let action = action_for_key(&mut bindings, egui::Key::R, reload_modifiers);
 
         assert_eq!(action, Some(KeybindAction::App(AppAction::ReloadConfig)));
 
         assert_eq!(
-            bindings.action_for_key(egui::Key::P, palette_modifiers),
+            action_for_key(&mut bindings, egui::Key::P, palette_modifiers),
             Some(KeybindAction::App(AppAction::CommandPalette))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::O, picker_modifiers),
+            action_for_key(&mut bindings, egui::Key::O, picker_modifiers),
             Some(KeybindAction::App(AppAction::SessionPicker))
         );
     }
@@ -817,6 +866,52 @@ mod tests {
     }
 
     #[test]
+    fn app_keybindings_match_side_specific_direct_input() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "alt+n=previous_tab".to_owned(),
+            "right_alt+n=next_tab".to_owned(),
+        ])
+        .unwrap();
+
+        let action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::N,
+            mods: crate::terminal::KeyMods {
+                alt: true,
+                right_alt: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("n"),
+            unshifted: Some('n'),
+        });
+
+        assert_eq!(action, Some(KeybindAction::Mux(MuxKeyAction::NextTab)));
+    }
+
+    #[test]
+    fn app_keybindings_match_side_specific_egui_input() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "left_alt+p=previous_tab".to_owned(),
+            "right_alt+p=next_tab".to_owned(),
+        ])
+        .unwrap();
+
+        let action = bindings.action_for_key_with_modifier_sides(
+            egui::Key::P,
+            egui::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            ModifierSideState {
+                left_alt: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(action, Some(KeybindAction::Mux(MuxKeyAction::PreviousTab)));
+    }
+
+    #[test]
     fn split_app_actions_keeps_plain_paste_event_without_paste_binding() {
         let mut bindings = AppKeyBindings::default();
         let (terminal_events, actions) = split_app_actions_for_bindings(
@@ -910,7 +1005,7 @@ mod tests {
         };
 
         assert_eq!(
-            bindings.action_for_key(egui::Key::B, cmd),
+            action_for_key(&mut bindings, egui::Key::B, cmd),
             Some(KeybindAction::Write(b"\x1b090;8~".to_vec()))
         );
         assert_eq!(
@@ -927,35 +1022,36 @@ mod tests {
             Some(KeybindAction::Write(b"\x1b090;8~".to_vec()))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::Enter, shift),
+            action_for_key(&mut bindings, egui::Key::Enter, shift),
             Some(KeybindAction::Write(b"\n".to_vec()))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::Num1, cmd),
+            action_for_key(&mut bindings, egui::Key::Num1, cmd),
             Some(KeybindAction::Write(vec![0x00, b'1']))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::O, cmd),
+            action_for_key(&mut bindings, egui::Key::O, cmd),
             Some(KeybindAction::App(AppAction::Ignore))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::Equals, cmd),
+            action_for_key(&mut bindings, egui::Key::Equals, cmd),
             Some(KeybindAction::Font(FontSizeAction::Increase(1.0)))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::Num0, cmd),
+            action_for_key(&mut bindings, egui::Key::Num0, cmd),
             Some(KeybindAction::Font(FontSizeAction::Reset))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::C, cmd),
+            action_for_key(&mut bindings, egui::Key::C, cmd),
             Some(KeybindAction::CopyToClipboard)
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::V, cmd),
+            action_for_key(&mut bindings, egui::Key::V, cmd),
             Some(KeybindAction::PasteFromClipboard)
         );
         assert_eq!(
-            bindings.action_for_key(
+            action_for_key(
+                &mut bindings,
                 egui::Key::N,
                 egui::Modifiers {
                     command: true,
@@ -966,11 +1062,12 @@ mod tests {
             Some(KeybindAction::App(AppAction::NewWindow))
         );
         assert_eq!(
-            bindings.action_for_key(egui::Key::Q, cmd),
+            action_for_key(&mut bindings, egui::Key::Q, cmd),
             Some(KeybindAction::App(AppAction::Close))
         );
         assert_eq!(
-            bindings.action_for_key(
+            action_for_key(
+                &mut bindings,
                 egui::Key::F,
                 egui::Modifiers {
                     command: true,

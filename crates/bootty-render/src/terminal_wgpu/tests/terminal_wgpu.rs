@@ -244,6 +244,14 @@ fn terminal_callback_key_distinguishes_terminal_viewports() {
 }
 
 #[test]
+fn terminal_image_textures_use_terminal_color_space() {
+    assert_eq!(
+        terminal_image_texture_format(),
+        wgpu::TextureFormat::Rgba8Unorm
+    );
+}
+
+#[test]
 fn virtual_placements_without_drawable_layers_do_not_schedule_wgpu_callback() {
     let frame = TerminalRenderFrame {
         surface: SurfaceRect::from_min_size(0.0, 0.0, 10.0, 10.0),
@@ -350,13 +358,35 @@ fn image_vertices_use_destination_and_source_rect_uvs() {
         vec![0; 10 * 20 * 4],
     );
 
-    let vertices = image_vertices(surface, &image).expect("valid image source rect");
+    let vertices = image_vertices(surface, 1.0, &image).expect("valid image source rect");
 
     assert_eq!(vertices.len(), 6);
     assert_float_pair(vertices[0].position, [-0.8, 0.6]);
     assert_float_pair(vertices[2].position, [-0.2, -0.2]);
     assert_float_pair(vertices[0].uv, [0.15, 0.125]);
     assert_float_pair(vertices[2].uv, [0.35, 0.275]);
+}
+
+#[test]
+fn image_vertices_snap_destination_edges_to_physical_pixels() {
+    let surface = SurfaceRect::from_min_size(0.0, 0.0, 100.0, 100.0);
+    let image = image_placement(
+        SurfaceRect::from_min_size(10.25, 20.25, 30.25, 39.5),
+        libghostty_vt::kitty::graphics::SourceRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 20,
+        },
+        10,
+        20,
+        vec![0; 10 * 20 * 4],
+    );
+
+    let vertices = image_vertices(surface, 2.0, &image).expect("valid image source rect");
+
+    assert_float_pair(vertices[0].position, [-0.79, 0.59]);
+    assert_float_pair(vertices[2].position, [-0.19, -0.2]);
 }
 
 #[test]
@@ -515,7 +545,7 @@ fn image_vertices_reject_out_of_bounds_source_rects() {
         vec![0; 16],
     );
 
-    assert!(image_vertices(SurfaceRect::from_min_size(0.0, 0.0, 1.0, 1.0), &image).is_none());
+    assert!(image_vertices(SurfaceRect::from_min_size(0.0, 0.0, 1.0, 1.0), 1.0, &image).is_none());
 }
 
 fn assert_float_pair(actual: [f32; 2], expected: [f32; 2]) {

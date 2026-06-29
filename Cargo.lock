@@ -781,6 +781,7 @@ dependencies = [
  "base64",
  "bootty-surface",
  "bootty-workspace-hack",
+ "libc",
  "libghostty-vt",
  "memchr",
  "png",

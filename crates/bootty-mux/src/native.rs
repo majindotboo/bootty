@@ -44,14 +44,11 @@ struct NativeMuxState {
 
 impl NativeMuxState {
     fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut state = Self {
+        Self {
             active_session_id: String::new(),
             sessions: Vec::new(),
             next_pane: 1,
-        };
-        state.ensure_session("local", cwd);
-        state
+        }
     }
 
     fn ensure_session(&mut self, session_id: &str, cwd: impl Into<PathBuf>) {
@@ -146,7 +143,7 @@ impl NativeMuxState {
             });
             let index = session.windows.len() as u32 + 1;
             let window = NativeWindow {
-                id: format!("tab-{index}"),
+                id: next_window_id(session),
                 index,
                 name: default_window_name(),
                 active_pane_id: pane_id.clone(),
@@ -395,6 +392,18 @@ fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
     }
 }
 
+fn next_window_id(session: &NativeSession) -> String {
+    let next = session
+        .windows
+        .iter()
+        .filter_map(|window| window.id.strip_prefix("tab-"))
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    format!("tab-{next}")
+}
+
 fn default_window_name() -> String {
     std::env::var("BOOTTY_SHELL")
         .ok()
@@ -544,19 +553,20 @@ mod tests {
     use super::*;
     use crate::command::MuxSplitDirection;
 
+    fn local_state() -> NativeMuxState {
+        let mut state = NativeMuxState::new();
+        state.ensure_session("local", ".");
+        state
+    }
+
     #[test]
-    fn native_backend_starts_with_local_bootty_owned_session() {
+    fn native_backend_starts_without_a_bootty_owned_session() {
         let backend = NativeBackend::with_state(NativeMuxState::new());
 
         let snapshot = backend.snapshot().unwrap();
 
-        assert_eq!(snapshot.active_session_id.as_deref(), Some("local"));
-        assert_eq!(snapshot.sessions[0].id, "local");
-        assert_eq!(snapshot.sessions[0].windows[0].id, "tab-1");
-        assert_eq!(
-            snapshot.sessions[0].windows[0].anchor.pane_id.as_deref(),
-            Some("pane-1")
-        );
+        assert_eq!(snapshot.active_session_id, None);
+        assert!(snapshot.sessions.is_empty());
     }
 
     #[test]
@@ -578,14 +588,14 @@ mod tests {
         let snapshot = backend.snapshot().unwrap();
 
         assert_eq!(snapshot.active_session_id.as_deref(), Some("project"));
-        assert_eq!(snapshot.sessions.len(), 2);
-        assert_eq!(snapshot.sessions[1].name, "renamed");
-        assert_eq!(snapshot.sessions[1].anchor.cwd.as_deref(), Some("/repo"));
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].name, "renamed");
+        assert_eq!(snapshot.sessions[0].anchor.cwd.as_deref(), Some("/repo"));
     }
 
     #[test]
     fn rename_window_command_updates_tab_title() {
-        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+        let mut backend = NativeBackend::with_state(local_state());
 
         backend
             .execute(MuxCommand::RenameWindow {
@@ -601,7 +611,7 @@ mod tests {
 
     #[test]
     fn close_pane_command_removes_last_tab_and_leaves_session_without_a_pane() {
-        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+        let mut backend = NativeBackend::with_state(local_state());
 
         backend
             .execute(MuxCommand::ClosePane {
@@ -626,7 +636,7 @@ mod tests {
 
     #[test]
     fn close_pane_command_targets_the_named_pane_not_just_the_active_one() {
-        let mut backend = NativeBackend::with_state(NativeMuxState::new());
+        let mut backend = NativeBackend::with_state(local_state());
         backend
             .execute(MuxCommand::SplitPane {
                 session_id: "local".to_owned(),
@@ -657,7 +667,7 @@ mod tests {
 
     #[test]
     fn close_pane_in_a_split_tab_keeps_the_tab() {
-        let mut state = NativeMuxState::new();
+        let mut state = local_state();
         state.split_pane("local", None);
 
         state.close_active_pane("local");
@@ -669,7 +679,7 @@ mod tests {
 
     #[test]
     fn new_window_revives_an_empty_session() {
-        let mut state = NativeMuxState::new();
+        let mut state = local_state();
         state.close_active_pane("local");
         assert!(state.sessions[0].windows.is_empty());
 
@@ -683,7 +693,7 @@ mod tests {
 
     #[test]
     fn close_pane_on_last_pane_removes_the_tab_and_selects_a_neighbor() {
-        let mut state = NativeMuxState::new();
+        let mut state = local_state();
         state.new_window("local", None);
         state.new_window("local", None);
 
@@ -701,5 +711,24 @@ mod tests {
             vec![1, 2],
             "remaining tabs are reindexed"
         );
+    }
+
+    #[test]
+    fn new_window_after_closing_middle_tab_keeps_window_ids_unique() {
+        let mut state = local_state();
+        state.new_window("local", None);
+        state.new_window("local", None);
+        state.new_window("local", None);
+        state.activate_window("local", "tab-2");
+
+        state.close_active_pane("local");
+        state.new_window("local", None);
+
+        let ids = state.sessions[0]
+            .windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["tab-1", "tab-3", "tab-4", "tab-5"]);
     }
 }

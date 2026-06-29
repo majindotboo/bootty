@@ -8,6 +8,11 @@ description = "Build the bootty app with dynamic local linkage; pass --static fo
 run = "./scripts/build-bootty-unix.sh"
 run_windows = "pwsh ./scripts/build-bootty-windows.ps1"
 
+[tasks.launch]
+description = "Build and launch the bootty app; args after -- are passed to Bootty"
+run = "./scripts/launch-bootty-unix.sh"
+run_windows = "pwsh ./scripts/launch-bootty-windows.ps1"
+
 [tasks."site:build"]
 description = "Build the Cloudflare Pages site from Rust/WASM source"
 run = """
