@@ -243,6 +243,56 @@ impl CachedRenderRow {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SizeReportState {
+    geometry: TerminalGeometry,
+    display_scale: f32,
+    render_cell: CellMetrics,
+}
+
+impl SizeReportState {
+    fn size(self) -> SizeReportSize {
+        let cell_width = scaled_metric_size(self.render_cell.width, self.display_scale);
+        let cell_height = scaled_metric_size(self.render_cell.height, self.display_scale);
+        SizeReportSize {
+            rows: self.geometry.rows,
+            columns: self.geometry.cols,
+            cell_width,
+            cell_height,
+        }
+    }
+}
+
+fn scaled_metric_size(cell_size: f32, display_scale: f32) -> u32 {
+    let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+        display_scale
+    } else {
+        1.0
+    };
+    (cell_size * display_scale).round().max(1.0) as u32
+}
+
+fn scaled_mouse_encoder_size(size: MouseEncoderSize, display_scale: f32) -> MouseEncoderSize {
+    MouseEncoderSize {
+        screen_width: scaled_mouse_extent(size.screen_width, display_scale).max(1),
+        screen_height: scaled_mouse_extent(size.screen_height, display_scale).max(1),
+        cell_width: scaled_mouse_extent(size.cell_width, display_scale).max(1),
+        cell_height: scaled_mouse_extent(size.cell_height, display_scale).max(1),
+        padding_top: scaled_mouse_extent(size.padding_top, display_scale),
+        padding_bottom: scaled_mouse_extent(size.padding_bottom, display_scale),
+        padding_right: scaled_mouse_extent(size.padding_right, display_scale),
+        padding_left: scaled_mouse_extent(size.padding_left, display_scale),
+    }
+}
+
+fn scaled_mouse_extent(value: u32, display_scale: f32) -> u32 {
+    ((value as f32) * display_scale).round() as u32
+}
+
+fn scaled_mouse_position(value: f32, display_scale: f32) -> f32 {
+    value * display_scale
+}
+
 fn extract_render_row(
     terminal: &Terminal<'static, 'static>,
     cell_iterator: &mut CellIterator<'static>,
@@ -397,7 +447,7 @@ pub struct TerminalEngine {
     mouse_encoder_options_dirty: bool,
     mouse_encoder_size: Option<MouseEncoderSize>,
     geometry: TerminalGeometry,
-    size_report_geometry: Arc<Mutex<TerminalGeometry>>,
+    size_report_state: Arc<Mutex<SizeReportState>>,
     current_working_directory_state: Arc<Mutex<String>>,
     osc_side_effect_pending: Vec<u8>,
     terminal_write_pending: Vec<u8>,
@@ -414,6 +464,9 @@ pub struct TerminalEngine {
     content_epoch: u64,
     extracted_content_epoch: u64,
     kitty_graphics_touched: bool,
+    display_scale: f32,
+    render_cell: CellMetrics,
+    render_cell_explicit: bool,
 }
 
 fn configure_default_colors(
@@ -1396,16 +1449,15 @@ impl TerminalEngine {
         configure_default_colors(&mut terminal, &base_color_palette, &colors)?;
         configure_default_cursor(&mut terminal, cursor)?;
         configure_terminal_features(&mut terminal, features)?;
-        let size_report_geometry = Arc::new(Mutex::new(geometry));
-        let report_geometry = size_report_geometry.clone();
+        let size_report_state = Arc::new(Mutex::new(SizeReportState {
+            geometry,
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
+        }));
+        let report_state = size_report_state.clone();
         terminal.on_size(move |_terminal| {
-            let geometry = *report_geometry.lock().ok()?;
-            Some(SizeReportSize {
-                rows: geometry.rows,
-                columns: geometry.cols,
-                cell_width: geometry.cell_width,
-                cell_height: geometry.cell_height,
-            })
+            let state = *report_state.lock().ok()?;
+            Some(state.size())
         })?;
         terminal.on_device_attributes(|_terminal| Some(default_device_attributes()))?;
         let color_scheme = Arc::new(Mutex::new(color_scheme_for_background(colors.background)));
@@ -1484,7 +1536,7 @@ impl TerminalEngine {
             mouse_encoder_options_dirty: true,
             mouse_encoder_size: None,
             geometry,
-            size_report_geometry,
+            size_report_state,
             osc_side_effect_pending: Vec::new(),
             terminal_write_pending: Vec::new(),
             cursor_home_pending_len: 0,
@@ -1501,6 +1553,9 @@ impl TerminalEngine {
             content_epoch: 0,
             extracted_content_epoch: u64::MAX,
             kitty_graphics_touched: false,
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
+            render_cell_explicit: false,
         };
         engine.set_kitty_image_storage_limit(64 * 1024 * 1024)?;
         Ok(engine)
@@ -1822,8 +1877,15 @@ impl TerminalEngine {
 
         let previous = self.geometry;
         self.geometry = geometry;
-        if let Ok(mut report_geometry) = self.size_report_geometry.lock() {
-            *report_geometry = geometry;
+        if let Ok(mut report_state) = self.size_report_state.lock() {
+            report_state.geometry = geometry;
+        }
+        if !self.render_cell_explicit {
+            self.render_cell =
+                CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32);
+            if let Ok(mut report_state) = self.size_report_state.lock() {
+                report_state.render_cell = self.render_cell;
+            }
         }
 
         if geometry.cols != previous.cols && geometry.rows < previous.rows {
@@ -1843,6 +1905,47 @@ impl TerminalEngine {
         self.mark_content_changed();
 
         Ok(())
+    }
+
+    pub fn set_display_scale(&mut self, display_scale: f32) {
+        let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
+        if (self.display_scale - display_scale).abs() > f32::EPSILON {
+            self.display_scale = display_scale;
+            if let Ok(mut report_state) = self.size_report_state.lock() {
+                report_state.display_scale = display_scale;
+            }
+            if self.kitty_graphics_touched {
+                self.mark_content_changed();
+            }
+        }
+    }
+
+    pub fn set_render_cell_metrics(&mut self, cell: CellMetrics) {
+        let width = if cell.width.is_finite() && cell.width > 0.0 {
+            cell.width
+        } else {
+            self.geometry.cell_width as f32
+        };
+        let height = if cell.height.is_finite() && cell.height > 0.0 {
+            cell.height
+        } else {
+            self.geometry.cell_height as f32
+        };
+        let cell = CellMetrics::new(width, height);
+        if self.render_cell != cell {
+            self.render_cell = cell;
+            if let Ok(mut report_state) = self.size_report_state.lock() {
+                report_state.render_cell = cell;
+            }
+            if self.kitty_graphics_touched {
+                self.mark_content_changed();
+            }
+        }
+        self.render_cell_explicit = true;
     }
 
     fn complete_streaming_terminal_write<'a>(&mut self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
@@ -2319,9 +2422,11 @@ impl TerminalEngine {
             self.mouse_encoder_options_dirty = false;
             self.mouse_encoder_size = None;
         }
-        if self.mouse_encoder_size != Some(input.size) {
-            self.mouse_encoder.set_size(input.size.into());
-            self.mouse_encoder_size = Some(input.size);
+        let display_scale = self.display_scale;
+        let encoder_size = scaled_mouse_encoder_size(input.size, display_scale);
+        if self.mouse_encoder_size != Some(encoder_size) {
+            self.mouse_encoder.set_size(encoder_size.into());
+            self.mouse_encoder_size = Some(encoder_size);
         }
         self.mouse_encoder
             .set_any_button_pressed(self.mouse_any_button_pressed);
@@ -2330,8 +2435,8 @@ impl TerminalEngine {
             .set_button(input.button.map(Into::into))
             .set_mods(input.mods.into())
             .set_position(mouse::Position {
-                x: input.x,
-                y: input.y,
+                x: scaled_mouse_position(input.x, display_scale),
+                y: scaled_mouse_position(input.y, display_scale),
             });
         if out.capacity() < 64 {
             out.reserve(64 - out.capacity());
@@ -2411,17 +2516,15 @@ impl TerminalEngine {
 
         if self.kitty_graphics_touched || !virtual_cells.is_empty() {
             let surface = TerminalSurface::for_logical_size(
-                f32::from(self.geometry.pixel_width()),
-                f32::from(self.geometry.pixel_height()),
-                CellMetrics::new(
-                    self.geometry.cell_width as f32,
-                    self.geometry.cell_height as f32,
-                ),
+                f32::from(self.geometry.cols) * self.render_cell.width,
+                f32::from(self.geometry.rows) * self.render_cell.height,
+                self.render_cell,
                 TerminalPadding::default(),
             );
             let mut images = collect_kitty_image_frame(
                 &self.terminal,
                 surface,
+                self.display_scale,
                 &mut self.image_placements,
                 &mut self.image_data_cache,
             )
@@ -2432,6 +2535,7 @@ impl TerminalEngine {
             images.virtual_placeholder_rows = append_virtual_image_placements(
                 &self.terminal,
                 surface,
+                self.display_scale,
                 &mut images,
                 &virtual_cells,
                 &mut self.image_data_cache,

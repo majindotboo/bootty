@@ -622,7 +622,10 @@ impl TerminalWgpuRenderer {
                         let resources = prepare_image_resource(
                             device,
                             queue,
-                            render_surface,
+                            ImageRenderTarget {
+                                surface: render_surface,
+                                pixels_per_point,
+                            },
                             image,
                             &self.image_bind_group_layout,
                             &self.image_sampler,
@@ -1061,6 +1064,12 @@ struct TerminalImageFrameResources {
     vertex_count: u32,
 }
 
+#[derive(Clone, Copy)]
+struct ImageRenderTarget {
+    surface: SurfaceRect,
+    pixels_per_point: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TerminalImageTextureKey {
     data_ptr: usize,
@@ -1096,7 +1105,7 @@ impl TerminalImageFrameResources {
 fn prepare_image_resource(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    surface: SurfaceRect,
+    target: ImageRenderTarget,
     image: &KittyImagePlacement,
     bind_group_layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
@@ -1105,7 +1114,7 @@ fn prepare_image_resource(
     if !image_fits_device_limits(device, image) {
         return None;
     }
-    let vertices = image_vertices(surface, image)?;
+    let vertices = image_vertices(target.surface, target.pixels_per_point, image)?;
     let texture_key = TerminalImageTextureKey::from_image(image);
     if let Some(mut previous) = previous
         && previous.texture_key == texture_key
@@ -1124,7 +1133,7 @@ fn prepare_image_resource(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: terminal_image_texture_format(),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -1175,6 +1184,10 @@ fn prepare_image_resource(
         vertices,
         vertex_count: vertices.len() as u32,
     })
+}
+
+fn terminal_image_texture_format() -> wgpu::TextureFormat {
+    wgpu::TextureFormat::Rgba8Unorm
 }
 
 fn background_batch_mut<'a>(

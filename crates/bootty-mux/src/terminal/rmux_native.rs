@@ -15,7 +15,7 @@ use bootty_runtime::{
     render_source::TerminalRenderSource,
     terminal_session::{should_publish_frame_after_work, sync_output_suppresses_publish},
 };
-use bootty_surface::geometry::TerminalGeometry;
+use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCursorConfig,
@@ -55,6 +55,8 @@ pub(super) struct RmuxNativeTerminal {
     closed: Arc<AtomicBool>,
     error_rx: mpsc::Receiver<String>,
     geometry: TerminalGeometry,
+    display_scale: f32,
+    render_cell: CellMetrics,
     needs_initial_resize: bool,
 }
 
@@ -87,6 +89,8 @@ impl RmuxPublishedFrame {
 }
 
 enum RmuxTerminalCommand {
+    DisplayScale(f32),
+    RenderCellMetrics(CellMetrics),
     Resize(TerminalGeometry),
     ForceResize,
     Colors(TerminalColorConfig),
@@ -276,6 +280,8 @@ impl RmuxNativeTerminal {
             closed,
             error_rx,
             geometry,
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
             needs_initial_resize: true,
         })
     }
@@ -340,6 +346,27 @@ impl RmuxNativeTerminal {
 }
 
 impl TerminalRenderSource for RmuxNativeTerminal {
+    fn set_display_scale(&mut self, display_scale: f32) -> Result<()> {
+        let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
+        if (self.display_scale - display_scale).abs() <= f32::EPSILON {
+            return Ok(());
+        }
+        self.display_scale = display_scale;
+        self.send_command(RmuxTerminalCommand::DisplayScale(display_scale))
+    }
+
+    fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()> {
+        if self.render_cell == cell {
+            return Ok(());
+        }
+        self.render_cell = cell;
+        self.send_command(RmuxTerminalCommand::RenderCellMetrics(cell))
+    }
+
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
         if self.needs_initial_resize || self.geometry != geometry {
             self.geometry = geometry;
@@ -558,6 +585,14 @@ impl RmuxWorker {
             };
             stats.did_work = true;
             match command {
+                RmuxTerminalCommand::DisplayScale(display_scale) => {
+                    self.engine.set_display_scale(display_scale);
+                    self.mark_unpublished_frame();
+                }
+                RmuxTerminalCommand::RenderCellMetrics(cell) => {
+                    self.engine.set_render_cell_metrics(cell);
+                    self.mark_unpublished_frame();
+                }
                 RmuxTerminalCommand::Resize(geometry) => {
                     self.mark_input_fast_path();
                     self.geometry = geometry;

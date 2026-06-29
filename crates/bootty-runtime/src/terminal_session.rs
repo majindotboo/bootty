@@ -19,7 +19,7 @@ use crate::benchmark_trace::{BenchmarkTrace, TraceValue};
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use bootty_surface::geometry::TerminalGeometry;
+use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM, TerminalColorConfig,
@@ -100,6 +100,8 @@ pub struct TerminalSession {
     pending_pty_len: Arc<AtomicUsize>,
     current_working_directory: Arc<Mutex<Option<String>>>,
     geometry: TerminalGeometry,
+    display_scale: f32,
+    render_cell: CellMetrics,
     pty_master: Box<dyn MasterPty + Send>,
     child: Option<Box<dyn Child + Send + Sync>>,
     tty_name: Option<String>,
@@ -171,6 +173,8 @@ impl PublishedFrame {
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
 type MouseTrackingResponse = std::result::Result<bool, String>;
 enum TerminalCommand {
+    DisplayScale(f32),
+    RenderCellMetrics(CellMetrics),
     Cursor(TerminalCursorConfig),
     Features(TerminalFeatureConfig),
     Resize(TerminalGeometry),
@@ -251,6 +255,8 @@ impl TerminalSession {
             pending_pty_len,
             current_working_directory,
             geometry,
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
             pty_master,
             child: Some(child),
             tty_name,
@@ -276,6 +282,27 @@ impl TerminalSession {
         })?;
 
         Ok(())
+    }
+
+    pub fn set_display_scale(&mut self, display_scale: f32) -> Result<()> {
+        let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
+        if (self.display_scale - display_scale).abs() <= f32::EPSILON {
+            return Ok(());
+        }
+        self.display_scale = display_scale;
+        self.send_command(TerminalCommand::DisplayScale(display_scale))
+    }
+
+    pub fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()> {
+        if self.render_cell == cell {
+            return Ok(());
+        }
+        self.render_cell = cell;
+        self.send_command(TerminalCommand::RenderCellMetrics(cell))
     }
 
     pub fn set_colors(&mut self, colors: TerminalColorConfig) -> Result<()> {
@@ -606,6 +633,14 @@ impl TerminalWorker {
             stats.did_work = true;
             stats.commands += 1;
             match command {
+                TerminalCommand::DisplayScale(display_scale) => {
+                    self.engine.set_display_scale(display_scale);
+                    stats.terminal_changed = true;
+                }
+                TerminalCommand::RenderCellMetrics(cell) => {
+                    self.engine.set_render_cell_metrics(cell);
+                    stats.terminal_changed = true;
+                }
                 TerminalCommand::Resize(geometry) => {
                     self.mark_input_fast_path();
                     if self.engine.resize(geometry).is_ok() {

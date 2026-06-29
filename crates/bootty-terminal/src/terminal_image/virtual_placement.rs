@@ -313,6 +313,7 @@ const DIACRITICS: &[char] = &[
 pub(super) fn append_virtual_image_placements(
     terminal: &Terminal<'_, '_>,
     surface: TerminalSurface,
+    display_scale: f32,
     frame: &mut KittyImageFrame,
     cells: &[KittyVirtualCell],
     image_cache: &mut KittyImageDataCache,
@@ -326,16 +327,18 @@ pub(super) fn append_virtual_image_placements(
     for cell in cells {
         let current = IncompletePlacement::from_cell(cell);
         let Some(current) = current else {
-            if let Some(done) = run.take() {
-                append_run(
+            if let Some(done) = run.take()
+                && let Some(row) = append_run(
                     surface,
                     frame,
                     &graphics,
                     &storage,
+                    display_scale,
                     image_cache,
                     done,
-                    &mut rendered_rows,
-                )?;
+                )?
+            {
+                rendered_rows.push(row);
             }
             continue;
         };
@@ -345,29 +348,33 @@ pub(super) fn append_virtual_image_placements(
                 continue;
             }
             let done = run.take().expect("run exists");
-            append_run(
+            if let Some(row) = append_run(
                 surface,
                 frame,
                 &graphics,
                 &storage,
+                display_scale,
                 image_cache,
                 done,
-                &mut rendered_rows,
-            )?;
+            )? {
+                rendered_rows.push(row);
+            }
         }
         run = Some(current.with_default_origin());
     }
 
-    if let Some(done) = run {
-        append_run(
+    if let Some(done) = run
+        && let Some(row) = append_run(
             surface,
             frame,
             &graphics,
             &storage,
+            display_scale,
             image_cache,
             done,
-            &mut rendered_rows,
-        )?;
+        )?
+    {
+        rendered_rows.push(row);
     }
 
     merge_adjacent_virtual_image_rows(&mut frame.placements, placement_start);
@@ -392,21 +399,27 @@ fn append_run(
     frame: &mut KittyImageFrame,
     graphics: &libghostty_vt::kitty::graphics::Graphics<'_>,
     storage: &HashMap<(u32, u32), KittyVirtualPlacement>,
+    display_scale: f32,
     image_cache: &mut KittyImageDataCache,
     run: IncompletePlacement,
-    rendered_rows: &mut Vec<u16>,
-) -> Result<()> {
+) -> Result<Option<u16>> {
     let placement = run.complete();
     let Some(storage_placement) = find_storage_placement(storage, &placement) else {
-        return Ok(());
+        return Ok(None);
     };
     let image_id = storage_placement.image_id;
     let Some(image) = graphics.image(image_id) else {
-        return Ok(());
+        return Ok(None);
     };
-    let grid = placement.grid(storage_placement, image.width()?, image.height()?, surface)?;
+    let grid = placement.grid(
+        storage_placement,
+        image.width()?,
+        image.height()?,
+        surface,
+        display_scale,
+    )?;
     let Some(rendered) = placement.render(grid, image.width()?, image.height()?, surface) else {
-        return Ok(());
+        return Ok(None);
     };
     let data = image_cache.data_for_image(
         image_id,
@@ -428,9 +441,7 @@ fn append_run(
         destination: rendered.destination,
         data,
     });
-    rendered_rows.push(placement.y);
-
-    Ok(())
+    Ok(Some(placement.y))
 }
 
 fn merge_adjacent_virtual_image_rows(placements: &mut Vec<KittyImagePlacement>, start: usize) {
@@ -611,14 +622,20 @@ impl Placement {
         image_width: u32,
         image_height: u32,
         surface: TerminalSurface,
+        display_scale: f32,
     ) -> Result<GridSize> {
         let mut rows = storage.rows;
         let mut columns = storage.columns;
+        let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
         if rows == 0 {
-            rows = image_height.div_ceil(surface.cell.height as u32);
+            rows = logical_pixel_cells(image_height, display_scale, surface.cell.height);
         }
         if columns == 0 {
-            columns = image_width.div_ceil(surface.cell.width as u32);
+            columns = logical_pixel_cells(image_width, display_scale, surface.cell.width);
         }
         Ok(GridSize { rows, columns })
     }
@@ -630,16 +647,31 @@ impl Placement {
         image_height: u32,
         surface: TerminalSurface,
     ) -> Option<RenderedPlacement> {
-        if grid.columns == 0 || grid.rows == 0 || image_width == 0 || image_height == 0 {
+        if grid.columns == 0
+            || grid.rows == 0
+            || image_width == 0
+            || image_height == 0
+            || self.width == 0
+        {
             return None;
         }
 
         let image_width = f64::from(image_width);
         let image_height = f64::from(image_height);
+        let uses_full_image_width = self.width == grid.columns
+            || (self.col > 0 && self.width.saturating_mul(2) >= grid.columns);
         let source = FloatRect {
-            x: image_width * (f64::from(self.col) / f64::from(grid.columns)),
+            x: if uses_full_image_width {
+                0.0
+            } else {
+                image_width * (f64::from(self.col) / f64::from(grid.columns))
+            },
             y: image_height * (f64::from(self.row) / f64::from(grid.rows)),
-            width: image_width * (f64::from(self.width) / f64::from(grid.columns)),
+            width: if uses_full_image_width {
+                image_width
+            } else {
+                image_width * (f64::from(self.width) / f64::from(grid.columns))
+            },
             height: image_height / f64::from(grid.rows),
         };
         if source.width <= 0.0 || source.height <= 0.0 {
@@ -647,16 +679,58 @@ impl Placement {
         }
 
         let origin = surface.content_origin();
+        let x = if uses_full_image_width {
+            i32::from(self.x) - self.col as i32
+        } else {
+            i32::from(self.x)
+        };
+        let width = if uses_full_image_width {
+            grid.columns as f32
+        } else {
+            self.width as f32
+        };
+        let full_grid_width = grid.columns as f32 * surface.cell.width;
+        let full_grid_height = grid.rows as f32 * surface.cell.height;
+        let source_aspect = image_width as f32 / image_height.max(1.0) as f32;
+        let grid_aspect = full_grid_width / full_grid_height.max(1.0);
+        let preserve_full_grid_aspect = uses_full_image_width
+            && grid.columns > 1
+            && grid.rows > 1
+            && ((source_aspect / grid_aspect) - 1.0).abs() <= 0.01;
+        let preserve_single_row_square_icon = uses_full_image_width
+            && grid.columns > 1
+            && grid.rows == 1
+            && (source_aspect - 1.0).abs() <= 0.01;
+        let preserve_source_aspect = preserve_full_grid_aspect || preserve_single_row_square_icon;
+        let row_height = if preserve_source_aspect {
+            (width * surface.cell.width) * (source.height as f32 / image_width as f32)
+        } else {
+            surface.cell.height
+        };
+        let y = if preserve_single_row_square_icon {
+            f32::from(self.y) * surface.cell.height + (surface.cell.height - row_height) * 0.5
+        } else if preserve_full_grid_aspect {
+            let top = f32::from(self.y) - self.row as f32;
+            top * surface.cell.height + self.row as f32 * row_height
+        } else {
+            f32::from(self.y) * surface.cell.height
+        };
         Some(RenderedPlacement {
             source: source_rect_from_float(source)?,
             destination: SurfaceRect::from_min_size(
-                origin.x + f32::from(self.x) * surface.cell.width,
-                origin.y + f32::from(self.y) * surface.cell.height,
-                self.width as f32 * surface.cell.width,
-                surface.cell.height,
+                origin.x + x as f32 * surface.cell.width,
+                origin.y + y,
+                width * surface.cell.width,
+                row_height,
             ),
         })
     }
+}
+
+fn logical_pixel_cells(pixels: u32, display_scale: f32, cell_size: f32) -> u32 {
+    ((pixels as f32 / display_scale) / cell_size)
+        .ceil()
+        .max(1.0) as u32
 }
 
 fn source_rect_from_float(source: FloatRect) -> Option<SourceRect> {

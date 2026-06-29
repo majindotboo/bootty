@@ -518,6 +518,19 @@ fn config_maps_font_fit_cell_height_to_terminal_text_config() {
 }
 
 #[test]
+fn config_maps_font_fit_cell_width_to_terminal_text_config() {
+    assert!(!load_config_source("").font.fit_cell_width);
+
+    let config = load_config_source(indoc! {r#"
+        [font]
+        fit-cell-width = true
+    "#});
+
+    assert!(config.font.fit_cell_width);
+    assert!(config.font.terminal_text_config().fit_cell_width);
+}
+
+#[test]
 fn config_uses_auto_font_cell_metrics_until_width_or_height_is_configured() {
     let default = load_config_source("");
     assert_eq!(default.font.cell_width, None);

@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::Result;
-use bootty_surface::geometry::TerminalGeometry;
+use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::terminal_frame::RenderFrame;
 use derive_more::{Deref, DerefMut};
 
@@ -88,6 +88,14 @@ impl ActiveTerminalRuntime {
 // Lets a non-focused pane's runtime be rendered directly by a per-pane `TerminalWidget` without
 // going through `BackendPaneTerminal` (which only ever exposes the focused pane).
 impl TerminalRenderSource for ActiveTerminalRuntime {
+    fn set_display_scale(&mut self, display_scale: f32) -> Result<()> {
+        self.0.set_display_scale(display_scale)
+    }
+
+    fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()> {
+        self.0.set_render_cell_metrics(cell)
+    }
+
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
         self.0.resize(geometry)
     }
@@ -299,6 +307,8 @@ struct StartingNativeTerminal {
     rx: mpsc::Receiver<std::result::Result<TerminalSession, String>>,
     terminal: Option<TerminalSession>,
     geometry: TerminalGeometry,
+    display_scale: f32,
+    render_cell: CellMetrics,
     pending_colors: Option<TerminalColorConfig>,
     pending_cursor: Option<TerminalCursorConfig>,
     pending_features: Option<TerminalFeatureConfig>,
@@ -326,6 +336,8 @@ impl StartingNativeTerminal {
             rx,
             terminal: None,
             geometry,
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
             pending_colors: None,
             pending_cursor: None,
             pending_features: None,
@@ -362,6 +374,8 @@ impl StartingNativeTerminal {
         };
 
         terminal.resize(self.geometry)?;
+        terminal.set_display_scale(self.display_scale)?;
+        terminal.set_render_cell_metrics(self.render_cell)?;
         if let Some(colors) = self.pending_colors.clone() {
             terminal.set_colors(colors)?;
         }
@@ -421,6 +435,27 @@ fn apply_queued_startup_command(
 }
 
 impl TerminalRenderSource for StartingNativeTerminal {
+    fn set_display_scale(&mut self, display_scale: f32) -> Result<()> {
+        self.display_scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
+        let display_scale = self.display_scale;
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.set_display_scale(display_scale)?;
+        }
+        Ok(())
+    }
+
+    fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()> {
+        self.render_cell = cell;
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.set_render_cell_metrics(cell)?;
+        }
+        Ok(())
+    }
+
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
         self.geometry = geometry;
         if let Some(terminal) = self.ready_terminal()? {
@@ -1099,6 +1134,14 @@ impl Drop for BackendPaneTerminal {
 }
 
 impl TerminalRenderSource for BackendPaneTerminal {
+    fn set_display_scale(&mut self, display_scale: f32) -> Result<()> {
+        self.terminal.set_display_scale(display_scale)
+    }
+
+    fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()> {
+        self.terminal.set_render_cell_metrics(cell)
+    }
+
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
         self.geometry = geometry;
         self.terminal.resize(geometry)

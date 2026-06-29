@@ -120,14 +120,16 @@ pub(super) fn text_vertices_into(
 
 pub(super) fn image_vertices(
     surface: SurfaceRect,
+    pixels_per_point: f32,
     image: &KittyImagePlacement,
 ) -> Option<[TextVertex; 6]> {
     let uv = super::image_upload::source_uv_rect(image)?;
+    let destination = snap_rect_to_pixel_grid(image.destination, surface, pixels_per_point);
     let transform = SurfaceNdcTransform::new(surface);
-    let min_x = transform.x(image.destination.min_x);
-    let max_x = transform.x(image.destination.max_x);
-    let min_y = transform.y(image.destination.min_y);
-    let max_y = transform.y(image.destination.max_y);
+    let min_x = transform.x(destination.min_x);
+    let max_x = transform.x(destination.max_x);
+    let min_y = transform.y(destination.min_y);
+    let max_y = transform.y(destination.max_y);
     let color = [1.0, 1.0, 1.0, 1.0];
     let top_left = TextVertex {
         position: [min_x, min_y],
@@ -157,6 +159,29 @@ pub(super) fn image_vertices(
         bottom_right,
         top_right,
     ])
+}
+
+fn snap_rect_to_pixel_grid(
+    rect: SurfaceRect,
+    surface: SurfaceRect,
+    pixels_per_point: f32,
+) -> SurfaceRect {
+    let scale = if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    };
+    let snap = |value: f32, origin: f32| origin + ((value - origin) * scale).round() / scale;
+    let min_x = snap(rect.min_x, surface.min_x);
+    let min_y = snap(rect.min_y, surface.min_y);
+    let max_x = snap(rect.max_x, surface.min_x).max(min_x + 1.0 / scale);
+    let max_y = snap(rect.max_y, surface.min_y).max(min_y + 1.0 / scale);
+    SurfaceRect {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
 }
 
 #[derive(Clone, Copy)]
