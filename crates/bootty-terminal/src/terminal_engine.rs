@@ -1452,7 +1452,7 @@ impl TerminalEngine {
         )?;
         terminal.set_kitty_image_from_file_allowed(true)?;
         terminal.set_kitty_image_from_temp_file_allowed(true)?;
-        terminal.set_kitty_image_from_shared_mem_allowed(false)?;
+        terminal.set_kitty_image_from_shared_mem_allowed(true)?;
         set_png_decoder(Some(Box::new(BoottyPngDecoder)))?;
 
         let selection_gesture = gesture::Gesture::new()?;

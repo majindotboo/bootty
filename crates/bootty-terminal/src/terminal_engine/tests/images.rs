@@ -5,6 +5,8 @@ use std::{
 };
 
 use super::super::*;
+#[cfg(unix)]
+use super::{SharedMemoryFixture, is_shared_memory_unavailable};
 use crate::terminal_png_decoder::png_frame_to_rgba8;
 
 use libghostty_vt::kitty::graphics::{Layer, PlacementIterator};
@@ -310,7 +312,7 @@ fn terminal_engine_advertises_and_accepts_kitty_file_images() -> Result<()> {
     assert!(engine.terminal.kitty_image_storage_limit()? > 0);
     assert!(engine.terminal.is_kitty_image_from_file_allowed()?);
     assert!(engine.terminal.is_kitty_image_from_temp_file_allowed()?);
-    assert!(!engine.terminal.is_kitty_image_from_shared_mem_allowed()?);
+    assert!(engine.terminal.is_kitty_image_from_shared_mem_allowed()?);
     Ok(())
 }
 
@@ -649,6 +651,33 @@ fn terminal_engine_ports_kitty_image_file_and_tempfile_media() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn terminal_engine_ports_kitty_image_shared_memory_media() -> Result<()> {
+    let fixture = match SharedMemoryFixture::write(GHOSTTY_RGB_20X15) {
+        Ok(fixture) => fixture,
+        Err(err) if is_shared_memory_unavailable(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let (mut engine, output) = captured_pty_engine()?;
+    engine.write_vt(
+        format!(
+            "\x1b_Ga=t,f=24,t=s,i=70,s=20,v=15;{}\x1b\\",
+            fixture.payload()?,
+        )
+        .as_bytes(),
+    );
+
+    let image = engine
+        .terminal
+        .kitty_graphics()?
+        .image(70)
+        .expect("shared-memory RGB image");
+    assert_eq!(image.data()?.len(), 20 * 15 * 3);
+    assert_kitty_response(&output, 70, "OK");
+    Ok(())
+}
+
 #[test]
 fn terminal_engine_ports_kitty_image_png_file_and_media_limits() -> Result<()> {
     let png_path = write_temp_fixture(
@@ -675,7 +704,7 @@ fn terminal_engine_ports_kitty_image_png_file_and_media_limits() -> Result<()> {
 
     let (mut shared_memory, shared_memory_output) = captured_pty_engine()?;
     shared_memory.write_vt(b"\x1b_Ga=t,f=24,t=s,i=71,s=1,v=1;c2htLW5hbWU=\x1b\\");
-    assert_kitty_response(&shared_memory_output, 71, "EINVAL: unsupported medium");
+    assert_kitty_response(&shared_memory_output, 71, "EINVAL: invalid data");
     Ok(())
 }
 

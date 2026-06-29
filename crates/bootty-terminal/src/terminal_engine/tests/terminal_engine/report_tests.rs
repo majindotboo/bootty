@@ -1,4 +1,6 @@
 use super::super::super::*;
+#[cfg(unix)]
+use super::super::{SharedMemoryFixture, is_shared_memory_unavailable};
 use super::support::*;
 
 #[test]
@@ -36,7 +38,7 @@ fn terminal_engine_answers_kitty_graphics_probes() -> Result<()> {
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\");
     assert_eq!(
         take_pty_output(&output),
-        b"\x1b_Gi=31;EINVAL: unsupported medium\x1b\\"
+        b"\x1b_Gi=31;EINVAL: invalid data\x1b\\"
     );
 
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
@@ -44,12 +46,44 @@ fn terminal_engine_answers_kitty_graphics_probes() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn terminal_engine_answers_valid_tuie_shared_memory_kitty_probe() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+    let fixture = match SharedMemoryFixture::write(&[0, 0, 0]) {
+        Ok(fixture) => fixture,
+        Err(err) if is_shared_memory_unavailable(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    let payload = fixture.payload()?;
+
+    engine.write_vt(format!("\x1b_Gi=32,s=1,v=1,a=q,t=s,f=24;{payload}\x1b\\").as_bytes());
+
+    assert_eq!(take_pty_output(&output), b"\x1b_Gi=32;OK\x1b\\");
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -> Result<()> {
     let (mut engine, output) = captured_pty_engine()?;
+    let (kitty_query, _fixture) = match SharedMemoryFixture::write(&[0, 0, 0]) {
+        Ok(fixture) => (
+            format!(
+                "\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;{}\x1b\\",
+                fixture.payload()?
+            ),
+            Some(fixture),
+        ),
+        Err(err) if is_shared_memory_unavailable(&err) => (
+            "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\".to_owned(),
+            None,
+        ),
+        Err(err) => return Err(err),
+    };
     let query = [
         b"\x1b[22;2t".as_slice(),
-        b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\".as_slice(),
+        kitty_query.as_bytes(),
         b"\x1b[23;2t\x1b[14t\x1b[16t".as_slice(),
         b"\x1b]11;?\x1b\\\x1b[c".as_slice(),
     ]
@@ -58,8 +92,8 @@ fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -
     engine.write_vt(&query);
     let output = take_pty_output(&output);
 
-    let kitty = find_subslice(&output, b"\x1b_Gi=31;EINVAL: unsupported medium\x1b\\")
-        .expect("kitty graphics probe response");
+    let kitty =
+        find_subslice(&output, b"\x1b_Gi=31;OK\x1b\\").expect("kitty graphics probe response");
     let window_px = find_subslice(&output, b"\x1b[4;480;800t").expect("window pixel size response");
     let cell_px = find_subslice(&output, b"\x1b[6;20;10t").expect("cell pixel size response");
     let background = find_subslice(&output, b"\x1b]11;rgb:1a1a/1b1b/2525\x1b\\")
