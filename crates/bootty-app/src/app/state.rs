@@ -736,7 +736,7 @@ impl AppState {
         #[cfg(debug_assertions)]
         let diagnostic_action_driver = DiagnosticActionDriver::from_env();
 
-        Ok(Self {
+        let mut state = Self {
             terminal: ActiveTerminal::new(
                 TerminalWidget::initial_geometry(),
                 &config.multiplexer,
@@ -799,11 +799,23 @@ impl AppState {
             diagnostic_action_driver,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
-        })
+        };
+        state.ensure_initial_native_session();
+        Ok(state)
     }
 
     pub fn config(&self) -> &BoottyConfig {
         self.config_state.current()
+    }
+
+    fn ensure_initial_native_session(&mut self) {
+        if !self.uses_native_terminal_layout() || !self.mux.sessions().is_empty() {
+            return;
+        }
+        let request = new_mux_session_request(self.config());
+        let mux_config = self.config().multiplexer.clone();
+        self.mux
+            .create_project_session(request, &self.repaint, &mux_config);
     }
 
     /// Apply a dragged sidebar width to the live config without touching disk, so the layout

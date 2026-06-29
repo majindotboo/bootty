@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn native_refresh_populates_sessions_without_worker() {
+    fn native_refresh_keeps_empty_startup_snapshot_without_worker() {
         let repaint: RepaintHandle = std::sync::Arc::new(|| {});
         let config = MultiplexerConfig {
             backend: bootty_config::config::MultiplexerBackendConfig::Native,
@@ -821,7 +821,7 @@ mod tests {
 
         assert_eq!(error, None);
         assert_eq!(controller.current_backend, Some(MuxBackendKind::Native));
-        assert!(!controller.sessions.is_empty());
+        assert!(controller.sessions.is_empty());
         assert!(controller.session_refresh_tx.is_none());
         assert!(controller.session_refresh_rx.is_none());
         assert!(!controller.session_refresh_pending);

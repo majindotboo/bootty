@@ -19,10 +19,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::{
     command::{MuxCommand, MuxSplitDirection},
-    rmux::{
-        DEFAULT_RMUX_SESSION_NAME, RmuxWindowRow, list_pane_rows, list_window_rows,
-        rmux_cmd_checked, session_from_rows,
-    },
+    rmux::{RmuxWindowRow, list_pane_rows, list_window_rows, rmux_cmd_checked, session_from_rows},
     snapshot::MuxSnapshot,
 };
 
@@ -311,16 +308,7 @@ impl RmuxBridgeState {
     }
 
     async fn snapshot_once(&mut self) -> Result<MuxSnapshot> {
-        let mut snapshot = self.snapshot_current_sessions().await?;
-        if snapshot.sessions.is_empty() {
-            let cwd = std::env::current_dir()
-                .context("resolve cwd for default rmux session")?
-                .to_string_lossy()
-                .into_owned();
-            self.ensure_session(DEFAULT_RMUX_SESSION_NAME, &cwd).await?;
-            snapshot = self.snapshot_current_sessions().await?;
-        }
-        Ok(snapshot)
+        self.snapshot_current_sessions().await
     }
 
     async fn snapshot_current_sessions(&mut self) -> Result<MuxSnapshot> {
