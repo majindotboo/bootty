@@ -88,25 +88,23 @@ impl RenameTabDialog {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, theme: Theme) -> RenameTabEvent {
-        let normalized = normalized_name(&self.name);
-        let validation = normalized.is_none().then_some("name cannot be empty");
+        let name = self.name.trim().to_owned();
 
         let result = FloatingWindow::new("rename-tab-dialog", "Rename Tab")
             .icon("square-pen")
             .hint("Enter rename   Esc close")
+            .footer("Clear the field to follow terminal title codes again")
             .width(overlay::panel_width(ctx, 520.0, 360.0))
             .show(ctx, theme, |ui, _palette| {
                 TextPrompt::new("rename-tab-field")
                     .caption("tab name")
                     .hint("new tab name...")
-                    .validation(validation)
-                    .submit_disabled(normalized.is_none())
+                    .validation(None)
+                    .submit_disabled(false)
                     .show(ui, theme, &mut self.name, &mut self.focus)
             });
 
-        if result.inner.submitted
-            && let Some(name) = normalized
-        {
+        if result.inner.submitted {
             return RenameTabEvent::Rename {
                 session_id: self.session_id.clone(),
                 window_id: self.window_id.clone(),

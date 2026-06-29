@@ -41,7 +41,7 @@ impl SessionPickerDialog {
 
         let result = FloatingWindow::new("session-picker-dialog", "Session Finder")
             .icon("terminal")
-            .hint("Enter select   Esc close")
+            .shortcut_hint([("enter", "select"), ("esc", "close")])
             .footer(format!("{} / {} sessions", matches.len(), sessions.len()))
             .width(overlay::panel_width(ctx, 780.0, 520.0))
             .show(ctx, theme, |ui, palette| {

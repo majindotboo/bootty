@@ -1151,9 +1151,7 @@ pub(super) fn described_combo<T: Copy + PartialEq>(
 fn settings_button(ui: &mut egui::Ui, palette: ThemePalette, label: &str) -> egui::Response {
     let font = egui::FontId::proportional(13.0);
     let text_color = readable_color(palette.surface, palette.text);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), font, text_color);
+    let galley = settings_button_galley(ui, label, font, text_color);
     let padding = Vec2::new(14.0, 8.0);
     let size = Vec2::new(galley.size().x + padding.x * 2.0, 30.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -1180,6 +1178,40 @@ fn settings_button(ui: &mut egui::Ui, palette: ThemePalette, label: &str) -> egu
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response
+}
+
+fn settings_button_galley(
+    ui: &egui::Ui,
+    label: &str,
+    font: egui::FontId,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let Some(label) = label.strip_prefix("+ ") else {
+        return ui.painter().layout_no_wrap(label.to_owned(), font, color);
+    };
+
+    let mut job = egui::text::LayoutJob::default();
+    if let Some((glyph, family)) = crate::ui::icons::icon_glyph("plus") {
+        job.append(
+            &glyph.to_string(),
+            0.0,
+            egui::text::TextFormat {
+                font_id: egui::FontId::new(14.0, egui::FontFamily::Name(family.into())),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job.append(
+        label,
+        4.0,
+        egui::text::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    ui.painter().layout_job(job)
 }
 
 /// A drag-and-drop payload identifying which list and row is being dragged. Namespaced by the

@@ -13,7 +13,7 @@ pub mod prompt;
 use bootty_ui::{Theme, ThemePalette};
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
-use crate::ui::icons;
+use crate::ui::{icons, keycaps};
 
 pub use list::{ListOutcome, ListRow, ListView};
 pub use menu::{ActionItem, ActionMenu, ActionMenuOutcome, ActionRisk, StatusLine};
@@ -29,13 +29,18 @@ pub struct OverlayResult<R> {
     pub clicked_outside: bool,
 }
 
+enum HeaderHint {
+    Text(String),
+    Shortcuts(Vec<(String, String)>),
+}
+
 /// A centered modal overlay with normalized chrome. Build it per frame, then
 /// [`FloatingWindow::show`] it with a body closure.
 pub struct FloatingWindow {
     id: egui::Id,
     title: String,
     icon: Option<String>,
-    hint: String,
+    hint: Option<HeaderHint>,
     footer: Option<String>,
     width: f32,
 }
@@ -49,7 +54,7 @@ impl FloatingWindow {
             id: egui::Id::new(id_source),
             title: title.into(),
             icon: None,
-            hint: String::new(),
+            hint: None,
             footer: None,
             width: 720.0,
         }
@@ -65,7 +70,22 @@ impl FloatingWindow {
     /// Right-aligned header key hint, e.g. `"Enter select   Esc close"`.
     #[must_use]
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = hint.into();
+        let hint = hint.into();
+        self.hint = (!hint.is_empty()).then_some(HeaderHint::Text(hint));
+        self
+    }
+
+    /// Right-aligned header shortcuts rendered with the shared keycap preview style.
+    #[must_use]
+    pub fn shortcut_hint(
+        mut self,
+        sections: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> Self {
+        let sections = sections
+            .into_iter()
+            .map(|(trigger, label)| (trigger.to_owned(), label.to_owned()))
+            .collect::<Vec<_>>();
+        self.hint = (!sections.is_empty()).then_some(HeaderHint::Shortcuts(sections));
         self
     }
 
@@ -160,15 +180,38 @@ impl FloatingWindow {
                     .size(15.0)
                     .color(palette.warning),
             );
-            if !self.hint.is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(&self.hint)
-                            .monospace()
-                            .size(12.0)
-                            .color(palette.muted),
-                    );
-                });
+            if let Some(hint) = &self.hint {
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| match hint {
+                        HeaderHint::Text(hint) => {
+                            ui.label(
+                                egui::RichText::new(hint)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(palette.muted),
+                            );
+                        }
+                        HeaderHint::Shortcuts(sections) => {
+                            let sections = sections
+                                .iter()
+                                .map(|(trigger, label)| (trigger.as_str(), label.as_str()))
+                                .collect::<Vec<_>>();
+                            let color = palette.muted;
+                            let galley = keycaps::shortcut_hint_galley_from_painter(
+                                ui.painter(),
+                                palette,
+                                &sections,
+                                color,
+                                ui.available_width(),
+                                12.0,
+                            );
+                            let (rect, _) =
+                                ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+                            ui.painter().galley(rect.min, galley, color);
+                        }
+                    },
+                );
             }
         });
     }

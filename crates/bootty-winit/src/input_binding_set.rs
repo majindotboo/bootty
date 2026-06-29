@@ -97,24 +97,16 @@ impl BindingSet {
     }
 
     pub fn get_event(&self, input: KeyInput) -> Option<&InputBinding> {
-        let mods = BindingMods::from(input.mods);
-        self.get(&BindingTrigger {
-            mods,
-            key: BindingKey::Physical(input.key),
-        })
-        .or_else(|| self.get_codepoint(input, mods))
-        .or_else(|| {
-            self.get(&BindingTrigger {
-                mods,
-                key: BindingKey::CatchAll,
+        let mod_candidates = BindingTrigger::input_mod_candidates(input);
+        self.get_with_mod_candidates(&mod_candidates, BindingKey::Physical(input.key))
+            .or_else(|| self.get_codepoint(input, &mod_candidates))
+            .or_else(|| self.get_with_mod_candidates(&mod_candidates, BindingKey::CatchAll))
+            .or_else(|| {
+                self.get(&BindingTrigger {
+                    mods: BindingMods::default(),
+                    key: BindingKey::CatchAll,
+                })
             })
-        })
-        .or_else(|| {
-            self.get(&BindingTrigger {
-                mods: BindingMods::default(),
-                key: BindingKey::CatchAll,
-            })
-        })
     }
 
     pub fn remove(&mut self, trigger: &BindingTrigger) {
@@ -125,30 +117,51 @@ impl BindingSet {
         }
     }
 
-    fn get_codepoint(&self, input: KeyInput, mods: BindingMods) -> Option<&InputBinding> {
+    fn get_with_mod_candidates(
+        &self,
+        mod_candidates: &[BindingMods],
+        key: BindingKey,
+    ) -> Option<&InputBinding> {
+        mod_candidates.iter().find_map(|mods| {
+            self.get(&BindingTrigger {
+                mods: *mods,
+                key: key.clone(),
+            })
+        })
+    }
+
+    fn get_codepoint(
+        &self,
+        input: KeyInput,
+        mod_candidates: &[BindingMods],
+    ) -> Option<&InputBinding> {
         let codepoint = input
             .unshifted
             .or_else(|| input.utf8.and_then(single_char))?;
-        self.entries.iter().find_map(|(_, entry)| match entry {
-            BindingEntry::Leaf(binding)
-                if binding.trigger.mods == mods
-                    && matches!(
-                        binding.trigger.key,
-                        BindingKey::Unicode(ch) if char_matches_case_folded(ch, codepoint)
-                    ) =>
-            {
-                Some(binding)
-            }
-            BindingEntry::Chained { binding, .. }
-                if binding.trigger.mods == mods
-                    && matches!(
-                        binding.trigger.key,
-                        BindingKey::Unicode(ch) if char_matches_case_folded(ch, codepoint)
-                    ) =>
-            {
-                Some(binding)
-            }
-            BindingEntry::Leaf(_) | BindingEntry::Chained { .. } | BindingEntry::Leader(_) => None,
+        mod_candidates.iter().find_map(|mods| {
+            self.entries.iter().find_map(|(_, entry)| match entry {
+                BindingEntry::Leaf(binding)
+                    if binding.trigger.mods == *mods
+                        && matches!(
+                            binding.trigger.key,
+                            BindingKey::Unicode(ch) if char_matches_case_folded(ch, codepoint)
+                        ) =>
+                {
+                    Some(binding)
+                }
+                BindingEntry::Chained { binding, .. }
+                    if binding.trigger.mods == *mods
+                        && matches!(
+                            binding.trigger.key,
+                            BindingKey::Unicode(ch) if char_matches_case_folded(ch, codepoint)
+                        ) =>
+                {
+                    Some(binding)
+                }
+                BindingEntry::Leaf(_) | BindingEntry::Chained { .. } | BindingEntry::Leader(_) => {
+                    None
+                }
+            })
         })
     }
 
@@ -424,6 +437,39 @@ mod tests {
             .unwrap()
             .action,
             BindingAction::Text("fallback".to_owned())
+        );
+    }
+
+    #[test]
+    fn input_binding_set_prefers_side_specific_modifier_bindings() {
+        let mut set = BindingSet::default();
+        set.parse_and_put("alt+KeyA=text:any").unwrap();
+        set.parse_and_put("right_alt+KeyA=text:right").unwrap();
+
+        assert_eq!(
+            set.get_event(key(
+                TerminalKey::A,
+                KeyMods {
+                    alt: true,
+                    right_alt: true,
+                    ..Default::default()
+                }
+            ))
+            .unwrap()
+            .action,
+            BindingAction::Text("right".to_owned())
+        );
+        assert_eq!(
+            set.get_event(key(
+                TerminalKey::A,
+                KeyMods {
+                    alt: true,
+                    ..Default::default()
+                }
+            ))
+            .unwrap()
+            .action,
+            BindingAction::Text("any".to_owned())
         );
     }
 

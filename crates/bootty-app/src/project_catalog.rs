@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -65,9 +65,12 @@ fn is_linked_worktree(dir: &Path) -> bool {
     dir.join(".git").is_file()
 }
 
+fn favorite_project_paths_file() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".config/tmux/.session-favorites"))
+}
+
 fn read_favorite_project_paths() -> Vec<PathBuf> {
-    home_dir()
-        .map(|home| home.join(".config/tmux/.session-favorites"))
+    favorite_project_paths_file()
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|content| {
             content
@@ -78,6 +81,58 @@ fn read_favorite_project_paths() -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub fn toggle_favorite_project_path(project_path: &str) -> io::Result<bool> {
+    let Some(path) = favorite_project_paths_file() else {
+        return Ok(false);
+    };
+    toggle_favorite_project_path_at(&path, project_path)
+}
+
+fn toggle_favorite_project_path_at(favorites_file: &Path, project_path: &str) -> io::Result<bool> {
+    let content = match fs::read_to_string(favorites_file) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let selected = PathBuf::from(project_path);
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(index) = lines
+        .iter()
+        .position(|line| same_project_path(&expand_home_path(line), &selected))
+    {
+        lines.remove(index);
+        write_favorite_project_paths(favorites_file, &lines)?;
+        return Ok(false);
+    }
+    lines.push(project_path.to_owned());
+    write_favorite_project_paths(favorites_file, &lines)?;
+    Ok(true)
+}
+
+fn write_favorite_project_paths(favorites_file: &Path, lines: &[String]) -> io::Result<()> {
+    if let Some(parent) = favorites_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    };
+    fs::write(favorites_file, content)
+}
+
+fn same_project_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +153,37 @@ mod tests {
 
         assert!(!is_linked_worktree(&primary));
         assert!(is_linked_worktree(&linked));
+    }
+
+    #[test]
+    fn toggle_favorite_project_path_adds_and_removes_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let favorites = dir.path().join("nested/.session-favorites");
+        let project = dir.path().join("project");
+        fs::create_dir(&project).expect("project dir");
+        let project = project.to_string_lossy().into_owned();
+
+        assert!(toggle_favorite_project_path_at(&favorites, &project).expect("favorite"));
+        assert_eq!(
+            fs::read_to_string(&favorites).expect("favorites file"),
+            format!("{project}\n")
+        );
+
+        assert!(!toggle_favorite_project_path_at(&favorites, &project).expect("unfavorite"));
+        assert_eq!(fs::read_to_string(&favorites).expect("favorites file"), "");
+    }
+
+    #[test]
+    fn toggle_favorite_project_path_matches_existing_canonical_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let favorites = dir.path().join(".session-favorites");
+        let project = dir.path().join("project");
+        fs::create_dir(&project).expect("project dir");
+        fs::write(&favorites, format!("{}\n", project.display())).expect("write favorites");
+
+        let selected = project.join(".").to_string_lossy().into_owned();
+
+        assert!(!toggle_favorite_project_path_at(&favorites, &selected).expect("unfavorite"));
+        assert_eq!(fs::read_to_string(&favorites).expect("favorites file"), "");
     }
 }

@@ -2,7 +2,9 @@ use bootty_ui::Theme;
 use eframe::egui;
 
 use crate::{
-    project_catalog::{ProjectPickerEntry, discover_project_picker_entries},
+    project_catalog::{
+        ProjectPickerEntry, discover_project_picker_entries, toggle_favorite_project_path,
+    },
     strings::{display_path, session_name_for_path},
     ui::overlay::{self, FloatingWindow, ListRow, ListView, list},
     worktree_catalog::{WorktreePickerEntry, discover_worktree_picker_entries},
@@ -30,6 +32,7 @@ pub struct NewMuxSessionDialog {
 pub enum NewSessionPickerEvent {
     None,
     Close,
+    Error(String),
     CreateWorktree { repo: String, branch: String },
     CreateSession(NewMuxSessionRequest),
 }
@@ -71,10 +74,13 @@ impl NewMuxSessionDialog {
     ) -> NewSessionPickerEvent {
         let entries = project_entries_for_filter(&self.projects, &self.filter);
         self.selected = list::clamp_selection(self.selected, entries.len());
+        let favorite = favorite_shortcut_pressed(ctx)
+            .then(|| entries.get(self.selected).cloned())
+            .flatten();
         let rows = project_rows(&entries);
 
         let result = self
-            .frame(ctx, "Directory", "folder", "Enter open   Esc close")
+            .frame(ctx, "Directory", "folder", project_step_hint())
             .show(ctx, theme, |ui, palette| {
                 self.body(
                     ui,
@@ -85,6 +91,10 @@ impl NewMuxSessionDialog {
                     "no matching directories",
                 )
             });
+
+        if let Some(entry) = favorite {
+            return self.toggle_project_favorite(entry);
+        }
 
         if let Some(index) = result.inner.activated
             && let Some(entry) = entries.get(index).cloned()
@@ -100,12 +110,7 @@ impl NewMuxSessionDialog {
         let rows = worktree_rows(&entries, theme);
 
         let result = self
-            .frame(
-                ctx,
-                "Worktree",
-                "git-branch",
-                "Enter create session   Esc close",
-            )
+            .frame(ctx, "Worktree", "git-branch", WORKTREE_STEP_HINT)
             .show(ctx, theme, |ui, palette| {
                 self.body(
                     ui,
@@ -137,12 +142,7 @@ impl NewMuxSessionDialog {
         let branch = self.branch.trim().to_owned();
 
         let result = self
-            .frame(
-                ctx,
-                "New Worktree",
-                "git-branch",
-                "Enter create   Esc cancel",
-            )
+            .frame(ctx, "New Worktree", "git-branch", BRANCH_STEP_HINT)
             .show(ctx, theme, |ui, _palette| {
                 overlay::TextPrompt::new("new-worktree-branch")
                     .caption(&caption)
@@ -164,11 +164,11 @@ impl NewMuxSessionDialog {
         ctx: &egui::Context,
         title: &'static str,
         icon: &'static str,
-        hint: &'static str,
+        hint: &'static [(&'static str, &'static str)],
     ) -> FloatingWindow {
         FloatingWindow::new("new-mux-session-dialog", title)
             .icon(icon)
-            .hint(hint)
+            .shortcut_hint(hint.iter().copied())
             .width(overlay::panel_width(ctx, 860.0, 560.0))
     }
 
@@ -209,6 +209,34 @@ impl NewMuxSessionDialog {
         }
     }
 
+    fn toggle_project_favorite(&mut self, project: ProjectPickerEntry) -> NewSessionPickerEvent {
+        match toggle_favorite_project_path(&project.path) {
+            Ok(favorite) => {
+                self.set_project_favorite(&project.path, favorite);
+                NewSessionPickerEvent::None
+            }
+            Err(error) => NewSessionPickerEvent::Error(format!(
+                "favorite {}: {error}",
+                display_path(&project.path)
+            )),
+        }
+    }
+
+    fn set_project_favorite(&mut self, path: &str, favorite: bool) {
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| same_dir(&project.path, path))
+        {
+            project.favorite = favorite;
+        } else if favorite {
+            self.projects.push(ProjectPickerEntry {
+                path: path.to_owned(),
+                favorite,
+            });
+        }
+    }
+
     /// Discover the project's worktrees and decide what to show next. A directory
     /// with a single worktree (or no git at all) skips straight to session
     /// creation; a repo with several worktrees opens the worktree step, defaulting
@@ -239,7 +267,7 @@ impl NewMuxSessionDialog {
         NewSessionPickerEvent::None
     }
 
-    /// Selecting the "+ New worktree" row advances to the branch-name prompt;
+    /// Selecting the "New worktree" row advances to the branch-name prompt;
     /// an existing worktree creates a session directly.
     fn activate_worktree(&mut self, entry: WorktreePickerEntry) -> NewSessionPickerEvent {
         if entry.is_new {
@@ -258,7 +286,7 @@ impl NewMuxSessionDialog {
     }
 }
 
-/// Index of the first worktree without an open session, or 0 ("+ New worktree")
+/// Index of the first worktree without an open session, or 0 ("New worktree")
 /// when every existing worktree is already in use.
 fn default_worktree_selection(entries: &[WorktreePickerEntry], open_cwds: &[String]) -> usize {
     entries
@@ -271,6 +299,56 @@ fn default_worktree_selection(entries: &[WorktreePickerEntry], open_cwds: &[Stri
                     .is_some_and(|path| !open_cwds.iter().any(|cwd| same_dir(cwd, path)))
         })
         .unwrap_or(0)
+}
+
+const PROJECT_STEP_HINT_MACOS: &[(&str, &str)] =
+    &[("enter", "open"), ("cmd+f", "favorite"), ("esc", "close")];
+const PROJECT_STEP_HINT_OTHER: &[(&str, &str)] = &[
+    ("enter", "open"),
+    ("ctrl+shift+f", "favorite"),
+    ("esc", "close"),
+];
+const WORKTREE_STEP_HINT: &[(&str, &str)] = &[("enter", "create session"), ("esc", "close")];
+const BRANCH_STEP_HINT: &[(&str, &str)] = &[("enter", "create"), ("esc", "cancel")];
+
+fn project_step_hint() -> &'static [(&'static str, &'static str)] {
+    if cfg!(target_os = "macos") {
+        PROJECT_STEP_HINT_MACOS
+    } else {
+        PROJECT_STEP_HINT_OTHER
+    }
+}
+
+fn favorite_shortcut_pressed(ctx: &egui::Context) -> bool {
+    ctx.input_mut(|input| {
+        let Some(index) = input.events.iter().position(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::F,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if favorite_shortcut_matches(*modifiers)
+            )
+        }) else {
+            return false;
+        };
+        input.events.remove(index);
+        true
+    })
+}
+
+fn favorite_shortcut_matches(modifiers: egui::Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        (modifiers.command || modifiers.mac_cmd)
+            && !modifiers.shift
+            && !modifiers.alt
+            && !modifiers.ctrl
+    } else {
+        modifiers.ctrl && modifiers.shift && !modifiers.alt
+    }
 }
 
 /// Compare two directory paths, tolerating symlinks and trailing slashes.
@@ -311,7 +389,7 @@ mod tests {
 
     fn new_row() -> WorktreePickerEntry {
         WorktreePickerEntry {
-            label: "+ New worktree".to_owned(),
+            label: "New worktree".to_owned(),
             path: None,
             is_new: true,
         }
@@ -339,5 +417,57 @@ mod tests {
         // A trailing slash on a session cwd still counts as occupying the worktree.
         let open = vec!["/repo/a".to_owned(), "/repo/b/".to_owned()];
         assert_eq!(default_worktree_selection(&entries, &open), 0);
+    }
+
+    #[test]
+    fn project_step_hint_shows_favorite_shortcut() {
+        if cfg!(target_os = "macos") {
+            assert!(project_step_hint().contains(&("cmd+f", "favorite")));
+        } else {
+            assert!(project_step_hint().contains(&("ctrl+shift+f", "favorite")));
+        }
+    }
+
+    #[test]
+    fn favorite_toggle_updates_project_rows_without_rediscovery() {
+        let mut dialog = NewMuxSessionDialog::open();
+        dialog.projects = vec![ProjectPickerEntry {
+            path: "/repo".to_owned(),
+            favorite: false,
+        }];
+
+        dialog.set_project_favorite("/repo", true);
+        assert!(dialog.projects[0].favorite);
+
+        dialog.set_project_favorite("/typed", true);
+        assert!(
+            dialog
+                .projects
+                .iter()
+                .any(|project| project.path == "/typed" && project.favorite)
+        );
+    }
+
+    #[test]
+    fn favorite_shortcut_requires_exact_app_modifier_chord() {
+        let mut modifiers = egui::Modifiers::default();
+        if cfg!(target_os = "macos") {
+            modifiers.command = true;
+            assert!(favorite_shortcut_matches(modifiers));
+            modifiers.alt = true;
+            assert!(!favorite_shortcut_matches(modifiers));
+            modifiers.alt = false;
+            modifiers.shift = true;
+            assert!(!favorite_shortcut_matches(modifiers));
+        } else {
+            modifiers.ctrl = true;
+            modifiers.shift = true;
+            assert!(favorite_shortcut_matches(modifiers));
+            modifiers.alt = true;
+            assert!(!favorite_shortcut_matches(modifiers));
+            modifiers.alt = false;
+            modifiers.command = true;
+            assert!(favorite_shortcut_matches(modifiers));
+        }
     }
 }

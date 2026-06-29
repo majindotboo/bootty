@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn keybind_chrome_icon_slugs_resolve() {
-        // Modifier keycaps draw these glyphs from the icon font because the UI font has no ⌘/⌥/⌃,
-        // and the reorder handle needs the grip glyph; a dropped slug would render blanks.
+        // Modifier keycaps draw these glyphs from the icon font because the UI font can miss
+        // command/option/control glyphs; settings controls use the same path for icon-only status.
         for slug in [
             "command",
             "option",
@@ -218,6 +218,9 @@ mod tests {
             "sliders-horizontal",
             "arrow-left",
             "arrow-right",
+            "check",
+            "circle-alert",
+            "plus",
         ] {
             let glyph = icon_glyph(slug);
             assert!(glyph.is_some(), "missing keybind icon '{slug}' in iconflow");

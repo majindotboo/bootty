@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
@@ -15,7 +15,7 @@ use crate::{
     app_actions::{
         AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction, SidebarAction,
         SidebarKeyBindings, TerminalScrollAction, builtin_app_action_for_direct_key,
-        keybind_action_for_name, split_app_actions_for_bindings,
+        keybind_action_for_name, split_app_actions_for_bindings_with_modifier_sides,
     },
     config::{
         AppearanceMode, AppearanceVariant, BoottyConfig, ConfigState, WindowConfig,
@@ -179,6 +179,8 @@ pub struct AppState {
     session_picker_dialog: Option<SessionPickerDialog>,
     rename_session_dialog: Option<RenameSessionDialog>,
     rename_tab_dialog: Option<RenameTabDialog>,
+    custom_tab_names: HashSet<(String, String)>,
+    terminal_tab_titles: HashMap<(String, String), String>,
     ditch_session_dialog: Option<DitchSessionDialog>,
     keybind_help_dialog: Option<KeybindHelpDialog>,
     command_palette_dialog: Option<CommandPaletteDialog>,
@@ -459,7 +461,6 @@ fn terminal_report_variable_response(name: &str, session_name: Option<&str>) -> 
     }
 }
 
-#[cfg(test)]
 fn new_mux_session_request_with_name(
     config: &BoottyConfig,
     name: impl Into<String>,
@@ -480,6 +481,16 @@ fn new_mux_session_request_with_name(
     crate::ui::new_session_picker::NewMuxSessionRequest {
         session_id: name.into(),
         cwd: cwd.to_string_lossy().into_owned(),
+    }
+}
+
+fn new_mux_session_request(
+    config: &BoottyConfig,
+) -> crate::ui::new_session_picker::NewMuxSessionRequest {
+    let request = new_mux_session_request_with_name(config, "");
+    crate::ui::new_session_picker::NewMuxSessionRequest {
+        session_id: crate::strings::session_name_for_path(&request.cwd),
+        cwd: request.cwd,
     }
 }
 
@@ -776,6 +787,8 @@ impl AppState {
             session_picker_dialog: None,
             rename_session_dialog: None,
             rename_tab_dialog: None,
+            custom_tab_names: HashSet::new(),
+            terminal_tab_titles: HashMap::new(),
             command_palette_dialog: None,
             theme_picker_dialog: None,
             theme_picker_restore_config: None,
@@ -1374,20 +1387,23 @@ impl AppState {
             .activate_window(session_id, window_id, &self.repaint, &mux_config);
         self.sync_native_layout_terminal_now();
     }
-    fn rename_selected_native_window(&mut self, name: String) {
+    fn selected_native_window_key(&self) -> Option<(String, String)> {
         if !self.uses_native_terminal_layout() {
-            return;
+            return None;
         }
-        let Some(session_id) = self.mux.selected_session().map(str::to_owned) else {
-            return;
-        };
-        let Some(window_id) = self.mux.selected_window().map(str::to_owned).or_else(|| {
+        let session_id = self.mux.selected_session().map(str::to_owned)?;
+        let window_id = self.mux.selected_window().map(str::to_owned).or_else(|| {
             self.mux
                 .sessions()
                 .iter()
                 .find(|session| session.id == session_id || session.name == session_id)
                 .and_then(|session| session.active_window_id.clone())
-        }) else {
+        })?;
+        Some((session_id, window_id))
+    }
+
+    fn rename_selected_native_window(&mut self, name: String) {
+        let Some((session_id, window_id)) = self.selected_native_window_key() else {
             return;
         };
         let mux_config = self.config().multiplexer.clone();
@@ -1403,6 +1419,25 @@ impl AppState {
                 .map(|session| session.name.as_str()),
         );
         self.mux.apply_session_order(&ordered_names);
+    }
+
+    fn prune_custom_tab_names(&mut self) {
+        let sessions = self.mux.sessions();
+        self.custom_tab_names.retain(|(session_id, window_id)| {
+            sessions
+                .iter()
+                .find(|session| session.id == *session_id || session.name == *session_id)
+                .is_some_and(|session| session.windows.iter().any(|window| window.id == *window_id))
+        });
+        self.terminal_tab_titles
+            .retain(|(session_id, window_id), _| {
+                sessions
+                    .iter()
+                    .find(|session| session.id == *session_id || session.name == *session_id)
+                    .is_some_and(|session| {
+                        session.windows.iter().any(|window| window.id == *window_id)
+                    })
+            });
     }
 
     fn move_selected_session(&mut self, delta: i32) -> bool {
@@ -1521,9 +1556,31 @@ impl AppState {
                 window_id,
                 name,
             } => {
-                let mux_config = self.config().multiplexer.clone();
-                self.mux
-                    .rename_window(&session_id, &window_id, name, &self.repaint, &mux_config);
+                if name.trim().is_empty() {
+                    let key = (session_id.clone(), window_id.clone());
+                    self.custom_tab_names.remove(&key);
+                    if let Some(title) = self.terminal_tab_titles.get(&key).cloned() {
+                        let mux_config = self.config().multiplexer.clone();
+                        self.mux.rename_window(
+                            &session_id,
+                            &window_id,
+                            title,
+                            &self.repaint,
+                            &mux_config,
+                        );
+                    }
+                } else {
+                    self.custom_tab_names
+                        .insert((session_id.clone(), window_id.clone()));
+                    let mux_config = self.config().multiplexer.clone();
+                    self.mux.rename_window(
+                        &session_id,
+                        &window_id,
+                        name,
+                        &self.repaint,
+                        &mux_config,
+                    );
+                }
                 self.input_focus = InputFocus::Terminal;
             }
         }
@@ -1660,6 +1717,10 @@ impl AppState {
             NewSessionPickerEvent::Close => {
                 self.input_focus = InputFocus::Terminal;
             }
+            NewSessionPickerEvent::Error(error) => {
+                self.last_error = Some(error);
+                self.new_mux_session_dialog = Some(dialog);
+            }
             NewSessionPickerEvent::CreateWorktree { repo, branch } => {
                 match crate::git::add_worktree(&repo, &branch) {
                     Ok(path) => {
@@ -1746,7 +1807,16 @@ impl AppState {
                 Err(error) => self.last_error = Some(error.to_string()),
             },
             TerminalSideEffect::WindowTitle(title) => {
-                self.rename_selected_native_window(title.clone());
+                let selected_window = self.selected_native_window_key();
+                if let Some(window) = selected_window.clone() {
+                    self.terminal_tab_titles.insert(window, title.clone());
+                }
+                if selected_window
+                    .as_ref()
+                    .is_none_or(|window| !self.custom_tab_names.contains(window))
+                {
+                    self.rename_selected_native_window(title.clone());
+                }
                 effects.push(AppEffect::SetWindowTitle(title));
             }
             TerminalSideEffect::WindowIcon(_) => {}
@@ -1850,7 +1920,10 @@ impl AppState {
         std::mem::take(&mut self.pending_direct_input)
             .into_iter()
             .map(|direct| {
-                let chord = crate::input_binding::BindingTrigger::from_key_input(direct.input())
+                let chord =
+                    crate::input_binding::BindingTrigger::from_key_input_with_modifier_sides(
+                        direct.input(),
+                    )
                     .format_entry();
                 normalize_recorded_chord(chord)
             })
@@ -1959,6 +2032,7 @@ impl AppState {
             effects.push(AppEffect::RepaintAfter(after));
         }
         self.sync_session_order();
+        self.prune_custom_tab_names();
         if let Err(error) = self.sync_terminal_panes() {
             self.last_error = Some(error.to_string());
         }
@@ -2283,7 +2357,11 @@ impl AppState {
         &mut self,
         events: Vec<egui::Event>,
     ) -> (Vec<egui::Event>, Vec<KeybindAction>) {
-        split_app_actions_for_bindings(&mut self.app_key_bindings, events)
+        split_app_actions_for_bindings_with_modifier_sides(
+            &mut self.app_key_bindings,
+            events,
+            self.modifier_sides,
+        )
     }
 
     /// While the command palette is open, find and remove the configure-keybinding
@@ -2804,6 +2882,14 @@ impl AppState {
             && self.uses_native_terminal_layout()
         {
             self.focus_pane_neighbor(layout_direction(direction));
+            return;
+        }
+        if matches!(action, MuxKeyAction::NewTab) && self.mux.selected_session().is_none() {
+            let request = new_mux_session_request(self.config());
+            let mux_config = self.config().multiplexer.clone();
+            self.mux
+                .create_project_session(request, &self.repaint, &mux_config);
+            self.sync_native_layout_terminal_now();
             return;
         }
         let selected_session = self.mux.selected_session().unwrap_or("local").to_owned();
@@ -3988,6 +4074,14 @@ mod tests {
         let mux_config = state.config().multiplexer.clone();
         state.mux.create_project_session(
             crate::mux::controller::NewMuxSessionRequest {
+                session_id: "local".to_owned(),
+                cwd: ".".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
                 session_id: "project".to_owned(),
                 cwd: "repo".to_owned(),
             },
@@ -4158,6 +4252,98 @@ mod tests {
             effects,
             vec![AppEffect::SetWindowTitle("editor".to_owned())]
         );
+    }
+
+    #[test]
+    fn manually_renamed_tab_ignores_terminal_title_renames() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("manual-title-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let window_id = state.mux.selected_session_windows()[0].id.clone();
+        state.apply_rename_tab_event(
+            RenameTabDialog::open(session_id.clone(), window_id.clone(), "tab-1".to_owned()),
+            RenameTabEvent::Rename {
+                session_id,
+                window_id: window_id.clone(),
+                name: "build".to_owned(),
+            },
+        );
+        let mut effects = Vec::new();
+
+        state.apply_terminal_side_effect(
+            TerminalSideEffect::WindowTitle("editor".to_owned()),
+            &mut effects,
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        let window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id == window_id)
+            .expect("selected window should remain present");
+        assert_eq!(window.name, "build");
+        assert_eq!(
+            effects,
+            vec![AppEffect::SetWindowTitle("editor".to_owned())]
+        );
+    }
+
+    #[test]
+    fn reset_tab_custom_name_allows_terminal_title_renames_again() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("reset-title-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let window_id = state.mux.selected_session_windows()[0].id.clone();
+        state.apply_rename_tab_event(
+            RenameTabDialog::open(session_id.clone(), window_id.clone(), "tab-1".to_owned()),
+            RenameTabEvent::Rename {
+                session_id: session_id.clone(),
+                window_id: window_id.clone(),
+                name: "build".to_owned(),
+            },
+        );
+        state.apply_terminal_side_effect(
+            TerminalSideEffect::WindowTitle("editor".to_owned()),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+        state.apply_rename_tab_event(
+            RenameTabDialog::open(session_id.clone(), window_id.clone(), "build".to_owned()),
+            RenameTabEvent::Rename {
+                session_id,
+                window_id: window_id.clone(),
+                name: String::new(),
+            },
+        );
+
+        let window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id == window_id)
+            .expect("selected window should remain present");
+        assert_eq!(window.name, "editor");
     }
 
     #[test]

@@ -890,6 +890,80 @@ fn keybind_entries_without_clear_layer_on_defaults() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_expands_unsided_alt_keybinds_to_configured_sides() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "right"
+        keybind = ["clear", "alt+n=next_tab", "left_alt+p=previous_tab"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(keybinds.iter().any(|entry| entry == "right_alt+n=next_tab"));
+    assert!(!keybinds.iter().any(|entry| entry == "left_alt+n=next_tab"));
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "left_alt+p=previous_tab")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_preserves_command_alt_app_keybinds() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "none"
+        keybind = ["clear", "cmd+alt+n=new_window", "cmd+alt+r=rename_session"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(keybinds.iter().any(|entry| entry == "cmd+alt+n=new_window"));
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+alt+r=rename_session")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_option_as_alt_expands_non_command_steps_in_chains() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        macos-option-as-alt = "right"
+        keybind = ["clear", "cmd+k>alt+n=next_tab", "cmd+alt+p=previous_tab"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+k>right_alt+n=next_tab")
+    );
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "cmd+alt+p=previous_tab")
+    );
+}
+
 #[test]
 fn sidebar_keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
