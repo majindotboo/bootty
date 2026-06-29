@@ -17,6 +17,72 @@ fn terminal_engine_answers_size_queries_from_current_geometry() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_orders_osc_color_query_responses_before_later_da1() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b]11;?\x1b\\\x1b[c");
+
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b]11;rgb:1a1a/1b1b/2525\x1b\\\x1b[?62;22;52c"
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_answers_kitty_graphics_probes() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+
+    engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\");
+    assert_eq!(
+        take_pty_output(&output),
+        b"\x1b_Gi=31;EINVAL: unsupported medium\x1b\\"
+    );
+
+    engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+    assert_eq!(take_pty_output(&output), b"\x1b_Gi=31;OK\x1b\\");
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -> Result<()> {
+    let (mut engine, output) = captured_pty_engine()?;
+    let query = [
+        b"\x1b[22;2t".as_slice(),
+        b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\".as_slice(),
+        b"\x1b[23;2t\x1b[14t\x1b[16t".as_slice(),
+        b"\x1b]11;?\x1b\\\x1b[c".as_slice(),
+    ]
+    .concat();
+
+    engine.write_vt(&query);
+    let output = take_pty_output(&output);
+
+    let kitty = find_subslice(&output, b"\x1b_Gi=31;EINVAL: unsupported medium\x1b\\")
+        .expect("kitty graphics probe response");
+    let window_px = find_subslice(&output, b"\x1b[4;480;800t").expect("window pixel size response");
+    let cell_px = find_subslice(&output, b"\x1b[6;20;10t").expect("cell pixel size response");
+    let background = find_subslice(&output, b"\x1b]11;rgb:1a1a/1b1b/2525\x1b\\")
+        .expect("background color query response");
+    let da1 = find_subslice(&output, b"\x1b[?62;22;52c").expect("DA1 sentinel response");
+
+    assert!(kitty < da1, "kitty probe response must arrive before DA1");
+    assert!(
+        window_px < da1,
+        "window pixel size response must arrive before DA1"
+    );
+    assert!(
+        cell_px < da1,
+        "cell pixel size response must arrive before DA1"
+    );
+    assert!(
+        background < da1,
+        "background color response must arrive before DA1"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_reports_resizes_when_window_ops_are_enabled() -> Result<()> {
     let (mut engine, output) = captured_pty_engine()?;
 

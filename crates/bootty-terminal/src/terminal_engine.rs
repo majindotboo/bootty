@@ -1635,17 +1635,22 @@ impl TerminalEngine {
         }
     }
 
-    fn apply_osc_color_responses_and_state(&mut self, data: &[u8]) {
+    fn write_vt_with_ordered_osc_color_responses(&mut self, data: &[u8]) {
         let mut search_start = 0;
         while let Some(relative_start) = find_subslice(&data[search_start..], b"\x1b]") {
             let start = search_start + relative_start;
             let payload_start = start + 2;
-            let Some((payload_len, terminator_len)) = find_osc_terminator(&data[payload_start..])
-            else {
-                return;
+            let (payload_len, terminator_len) = match find_osc_terminator(&data[payload_start..]) {
+                Some(found) => found,
+                None => {
+                    self.terminal.vt_write(&data[search_start..]);
+                    return;
+                }
             };
             let payload_end = payload_start + payload_len;
             let terminator_end = payload_end + terminator_len;
+
+            self.terminal.vt_write(&data[search_start..terminator_end]);
             self.apply_osc_color_state(&data[payload_start..payload_end]);
             if let Some(response) = self.osc_color_query_response(
                 &data[payload_start..payload_end],
@@ -1654,6 +1659,9 @@ impl TerminalEngine {
                 self.write_pty_response(&response);
             }
             search_start = terminator_end;
+        }
+        if search_start < data.len() {
+            self.terminal.vt_write(&data[search_start..]);
         }
     }
 
@@ -1948,11 +1956,12 @@ impl TerminalEngine {
             self.kitty_graphics_touched = true;
         }
         self.sgr_optimizer.reset();
-        self.terminal.vt_write(sanitized.bytes.as_ref());
-        self.sync_current_working_directory();
         if features.osc_color {
-            self.apply_osc_color_responses_and_state(sanitized.bytes.as_ref());
+            self.write_vt_with_ordered_osc_color_responses(sanitized.bytes.as_ref());
+        } else {
+            self.terminal.vt_write(sanitized.bytes.as_ref());
         }
+        self.sync_current_working_directory();
         if features.osc_side_effect {
             self.apply_osc_side_effects(sanitized.bytes.as_ref());
         }
