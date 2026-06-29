@@ -10,7 +10,7 @@ use base64::engine::general_purpose;
 #[cfg(unix)]
 use std::{
     ffi::CString,
-    os::fd::FromRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -40,6 +40,7 @@ impl SharedMemoryFixture {
         }
 
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let fd = file.as_raw_fd();
         if unsafe { libc::ftruncate(fd, bytes.len() as libc::off_t) } != 0 {
             return Err(std::io::Error::last_os_error()).context("size shared-memory fixture");
         }
