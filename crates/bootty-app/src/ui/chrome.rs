@@ -953,13 +953,46 @@ fn coord_h(rect: Rect, coord: ModuleCoord) -> f32 {
     rect.height() * coord.frac + coord.px
 }
 
+/// Fraction of a color kept when dimming an unfocused session row; the rest blends to the row
+/// background, so each element fades in its own hue rather than washing toward white.
+const UNFOCUSED_ROW_KEEP: f32 = 0.5;
+
+fn blend_toward(color: egui::Color32, background: egui::Color32, keep: f32) -> egui::Color32 {
+    if keep >= 1.0 {
+        return color;
+    }
+    let mix = |fg: u8, bg: u8| (bg as f32 + (fg as f32 - bg as f32) * keep).round() as u8;
+    egui::Color32::from_rgb(
+        mix(color.r(), background.r()),
+        mix(color.g(), background.g()),
+        mix(color.b(), background.b()),
+    )
+}
+
 fn paint_item_primitives(
     painter: &egui::Painter,
     item_rect: Rect,
     primitives: &[ModulePrimitive],
     default_color: egui::Color32,
     background: egui::Color32,
+    // Sidebar session rows pick intentionally dim, hue-tinted colors; honor them verbatim instead of
+    // running them through readable_color, whose AAA contrast gate flattens dim tints to white. The
+    // status bar and footer keep the gate so module colors stay legible on varied backgrounds.
+    respect_color: bool,
+    // Fraction of each color to keep before blending the rest toward the background. 1.0 paints the
+    // color as-is; unfocused session rows pass < 1.0 so every element dims in its own hue.
+    keep: f32,
 ) {
+    let dim = |color: egui::Color32| blend_toward(color, background, keep);
+    let resolve = |color: &Option<egui::Color32>| {
+        let value = color.unwrap_or(default_color);
+        let value = if respect_color {
+            value
+        } else {
+            readable_color(background, value)
+        };
+        dim(value)
+    };
     for primitive in primitives {
         match primitive {
             ModulePrimitive::Rect {
@@ -976,13 +1009,13 @@ fn paint_item_primitives(
                     egui::vec2(coord_w(item_rect, *w), coord_h(item_rect, *h)),
                 );
                 if let Some(fill) = fill {
-                    painter.rect_filled(rect, *radius, *fill);
+                    painter.rect_filled(rect, *radius, dim(*fill));
                 }
                 if let Some(stroke) = stroke {
                     painter.rect_stroke(
                         rect,
                         *radius,
-                        Stroke::new(1.0, *stroke),
+                        Stroke::new(1.0, dim(*stroke)),
                         StrokeKind::Inside,
                     );
                 }
@@ -1000,12 +1033,15 @@ fn paint_item_primitives(
                     if let Some(fill) = fill {
                         painter.add(egui::Shape::convex_polygon(
                             points.clone(),
-                            *fill,
+                            dim(*fill),
                             Stroke::new(0.0, egui::Color32::TRANSPARENT),
                         ));
                     }
                     if let Some(stroke) = stroke {
-                        painter.add(egui::Shape::closed_line(points, Stroke::new(1.0, *stroke)));
+                        painter.add(egui::Shape::closed_line(
+                            points,
+                            Stroke::new(1.0, dim(*stroke)),
+                        ));
                     }
                 }
             }
@@ -1026,7 +1062,7 @@ fn paint_item_primitives(
                     primitive_align(align),
                     text,
                     egui::FontId::monospace(*size),
-                    readable_color(background, color.unwrap_or(default_color)),
+                    resolve(color),
                 );
             }
             ModulePrimitive::Icon {
@@ -1045,7 +1081,7 @@ fn paint_item_primitives(
                     icon,
                     Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
                     *size,
-                    readable_color(background, color.unwrap_or(default_color)),
+                    resolve(color),
                 );
             }
         }
@@ -1300,6 +1336,8 @@ fn draw_items(
             &item.primitives,
             palette.subtext,
             text_background,
+            false,
+            1.0,
         );
         if hovered && primitive_bg.is_some() {
             paint_item_hover_overlay(&painter, item_rect, &item.primitives, palette.hover);
@@ -2003,7 +2041,7 @@ fn paint_group_item(
         egui::FontId::monospace(12.0),
         readable_color(background, palette.muted),
     );
-    paint_item_primitives(painter, rect, item.primitives, item.color, background);
+    paint_item_primitives(painter, rect, item.primitives, item.color, background, true, 1.0);
 }
 
 fn paint_session_item(
@@ -2014,7 +2052,9 @@ fn paint_session_item(
     palette: ThemePalette,
     background: egui::Color32,
 ) {
-    let label_color = readable_color(background, if active { item.color } else { item.dim_color });
+    // Render the session name in its own session color verbatim — vivid when active, dim when not —
+    // rather than through readable_color, whose AAA contrast gate flattens both tints to flat white.
+    let label_color = if active { item.color } else { item.dim_color };
     let x = item_text_x(rect, item);
     let cy = rect.center().y;
     let (number, name) = match item.display {
@@ -2042,7 +2082,7 @@ fn paint_session_item(
             if active {
                 readable_color(item.color, palette.base)
             } else {
-                readable_color(background, item.dim_color)
+                item.dim_color
             },
         );
         text_x = badge.max.x + 6.0;
@@ -2054,7 +2094,8 @@ fn paint_session_item(
         egui::FontId::monospace(13.0),
         label_color,
     );
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background);
+    let keep = if active { 1.0 } else { UNFOCUSED_ROW_KEEP };
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background, true, keep);
 }
 
 fn paint_generic_sidebar_item(
@@ -2064,7 +2105,8 @@ fn paint_generic_sidebar_item(
     palette: ThemePalette,
     background: egui::Color32,
 ) {
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background);
+    let keep = if item.current { 1.0 } else { UNFOCUSED_ROW_KEEP };
+    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background, true, keep);
     if !item.primitives.is_empty() {
         return;
     }
@@ -2132,7 +2174,7 @@ fn paint_sidebar_footer(
             egui::vec2(rect.width() - 28.0, 26.0),
         );
         let color = readable_color(palette.base, item.fg.unwrap_or(palette.subtext));
-        paint_item_primitives(&painter, item_rect, &item.primitives, color, palette.base);
+        paint_item_primitives(&painter, item_rect, &item.primitives, color, palette.base, false, 1.0);
         if item.primitives.is_empty() {
             paint_footer_fallback(&painter, item_rect, item, color, palette);
         }
