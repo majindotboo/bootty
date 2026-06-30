@@ -961,6 +961,9 @@ fn blend_toward(color: egui::Color32, background: egui::Color32, keep: f32) -> e
     if keep >= 1.0 {
         return color;
     }
+    if keep <= 0.0 {
+        return background;
+    }
     let mix = |fg: u8, bg: u8| (bg as f32 + (fg as f32 - bg as f32) * keep).round() as u8;
     egui::Color32::from_rgb(
         mix(color.r(), background.r()),
