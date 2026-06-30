@@ -8,6 +8,9 @@ use crate::ui::overlay::{self, ActionItem, ActionMenu, ActionRisk, FloatingWindo
 /// A cleanup action chosen in the ditch window, executed by the app layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DitchAction {
+    /// Close the session after detaching HEAD in the worktree, freeing its
+    /// branch while keeping the worktree, branch, and every commit.
+    DetachWorktree,
     /// Close the session, leaving the worktree and branch untouched.
     KillOnly,
     /// Close the session and remove its linked worktree (`force` discards dirty state).
@@ -46,7 +49,9 @@ impl DitchSessionDialog {
     pub fn open(session_id: String, cwd: Option<String>) -> Self {
         let status = cwd.as_deref().map(git::status).unwrap_or_default();
         let main = cwd.as_deref().and_then(git::main_worktree);
-        let actions = actions_for(&status, main.as_deref());
+        let trunk = cwd.as_deref().and_then(git::trunk_branch);
+        let multi_worktree = cwd.as_deref().map(git::worktree_count).unwrap_or(0) > 1;
+        let actions = actions_for(&status, main.as_deref(), trunk.as_deref(), multi_worktree);
         Self {
             session_id,
             cwd,
@@ -86,17 +91,34 @@ impl DitchSessionDialog {
     }
 }
 
-/// Offer only the cleanup actions that are safe and applicable: always a plain
-/// kill, plus worktree/branch removal when the cwd is a linked worktree.
-fn actions_for(status: &WorktreeStatus, main: Option<&str>) -> Vec<DitchAction> {
-    let mut actions = vec![DitchAction::KillOnly];
+/// Offer only the cleanup actions that are safe and applicable. In a repo with
+/// more than one worktree, detaching HEAD leads as the pre-selected default —
+/// it frees the current branch for use elsewhere while keeping the worktree,
+/// branch, and commits, so it suits the multi-worktree workflow whether the
+/// session sits in the main or a linked worktree. Worktree/branch removal is
+/// offered only inside a linked worktree (the main tree can't be removed).
+fn actions_for(
+    status: &WorktreeStatus,
+    main: Option<&str>,
+    trunk: Option<&str>,
+    multi_worktree: bool,
+) -> Vec<DitchAction> {
+    let mut actions = Vec::new();
+    // Detaching only does something when HEAD is actually on a branch.
+    if multi_worktree && status.branch.is_some() {
+        actions.push(DitchAction::DetachWorktree);
+    }
+    actions.push(DitchAction::KillOnly);
     if status.is_linked_worktree {
         actions.push(DitchAction::RemoveWorktree {
             force: status.dirty,
         });
         // Branch deletion needs the main worktree path; without it, offer only
-        // the worktree removal so we never queue an un-runnable cleanup.
-        if let (Some(branch), Some(repo)) = (&status.branch, main) {
+        // the worktree removal so we never queue an un-runnable cleanup. Never
+        // offer to delete the trunk — that branch outlives any single worktree.
+        if let (Some(branch), Some(repo)) = (&status.branch, main)
+            && trunk != Some(branch.as_str())
+        {
             actions.push(DitchAction::RemoveWorktreeAndBranch {
                 force: true,
                 branch: branch.clone(),
@@ -111,6 +133,15 @@ fn action_items(actions: &[DitchAction]) -> Vec<ActionItem> {
     actions
         .iter()
         .map(|action| match action {
+            DitchAction::DetachWorktree => ActionItem {
+                icon: Some("unlink".to_owned()),
+                label: "Detach worktree".to_owned(),
+                description: Some(
+                    "Detach HEAD to free the branch; keep the worktree, branch, and commits"
+                        .to_owned(),
+                ),
+                risk: ActionRisk::Safe,
+            },
             DitchAction::KillOnly => ActionItem {
                 icon: Some("x".to_owned()),
                 label: "Kill session".to_owned(),
@@ -229,29 +260,70 @@ mod tests {
         }
     }
 
+    fn main_worktree(branch: Option<&str>) -> WorktreeStatus {
+        WorktreeStatus {
+            in_repo: true,
+            is_linked_worktree: false,
+            branch: branch.map(str::to_owned),
+            ..WorktreeStatus::default()
+        }
+    }
+
     #[test]
-    fn only_kill_is_offered_outside_a_linked_worktree() {
+    fn single_worktree_repo_offers_only_kill() {
+        // No sibling worktrees: detaching HEAD just to kill the session is
+        // pointless, so the lone option stays a plain kill.
         assert_eq!(
-            actions_for(&WorktreeStatus::default(), None),
+            actions_for(&WorktreeStatus::default(), None, None, false),
             vec![DitchAction::KillOnly]
         );
-        let main = WorktreeStatus {
-            in_repo: true,
-            branch: Some("main".to_owned()),
-            ..WorktreeStatus::default()
-        };
         assert_eq!(
-            actions_for(&main, Some("/repo")),
+            actions_for(
+                &main_worktree(Some("feature")),
+                Some("/repo"),
+                Some("main"),
+                false
+            ),
             vec![DitchAction::KillOnly]
         );
     }
 
     #[test]
+    fn main_worktree_in_a_multi_worktree_repo_offers_detach_first() {
+        // The screenshot case: session sits in the *main* worktree on a feature
+        // branch, and the repo has other worktrees. Detach must be offered and
+        // pre-selected, but the main tree can't be removed.
+        let actions = actions_for(
+            &main_worktree(Some("feature")),
+            Some("/repo"),
+            Some("main"),
+            true,
+        );
+        assert_eq!(
+            actions,
+            vec![DitchAction::DetachWorktree, DitchAction::KillOnly]
+        );
+    }
+
+    #[test]
+    fn detached_head_does_not_offer_a_redundant_detach() {
+        // Already detached: re-detaching is a no-op, so it must not appear.
+        let actions = actions_for(&linked(false, None), Some("/repo"), Some("main"), true);
+        assert!(!actions.contains(&DitchAction::DetachWorktree));
+    }
+
+    #[test]
     fn clean_linked_worktree_offers_non_forced_removal_and_branch_delete() {
-        let actions = actions_for(&linked(false, Some("feature")), Some("/repo"));
+        let actions = actions_for(
+            &linked(false, Some("feature")),
+            Some("/repo"),
+            Some("main"),
+            true,
+        );
         assert_eq!(
             actions,
             vec![
+                DitchAction::DetachWorktree,
                 DitchAction::KillOnly,
                 DitchAction::RemoveWorktree { force: false },
                 DitchAction::RemoveWorktreeAndBranch {
@@ -264,10 +336,29 @@ mod tests {
     }
 
     #[test]
+    fn trunk_worktree_keeps_removal_but_never_offers_branch_delete() {
+        // A linked worktree sitting on the trunk: removing the worktree is fine,
+        // but deleting the trunk branch must never be offered.
+        let actions = actions_for(
+            &linked(false, Some("main")),
+            Some("/repo"),
+            Some("main"),
+            true,
+        );
+        assert!(actions.contains(&DitchAction::RemoveWorktree { force: false }));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, DitchAction::RemoveWorktreeAndBranch { .. })),
+            "deleting the trunk branch must never be offered"
+        );
+    }
+
+    #[test]
     fn branch_delete_is_withheld_without_a_resolved_main_worktree() {
         // A linked worktree whose main path could not be resolved must not offer
         // branch deletion — that cleanup would have no repo to run `git branch` in.
-        let actions = actions_for(&linked(false, Some("feature")), None);
+        let actions = actions_for(&linked(false, Some("feature")), None, Some("main"), true);
         assert!(
             !actions
                 .iter()
@@ -277,7 +368,12 @@ mod tests {
 
     #[test]
     fn dirty_linked_worktree_forces_removal() {
-        let actions = actions_for(&linked(true, Some("feature")), Some("/repo"));
+        let actions = actions_for(
+            &linked(true, Some("feature")),
+            Some("/repo"),
+            Some("main"),
+            true,
+        );
         assert!(actions.contains(&DitchAction::RemoveWorktree { force: true }));
     }
 }
