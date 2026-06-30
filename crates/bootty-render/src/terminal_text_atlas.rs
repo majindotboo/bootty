@@ -298,6 +298,11 @@ pub struct GlyphAtlas {
     next_y: u32,
     row_height: u32,
     resized: u64,
+    // Smallest footprint that the gap scan most recently failed to place. Since the atlas only
+    // gains space by growing (it never evicts), any later request at least this large is doomed
+    // too, so we skip the scan until the next grow clears this. Without it, a saturated atlas
+    // re-scans the whole surface for every new glyph and freezes the render thread.
+    no_fit_at_least: Option<(u32, u32)>,
 }
 
 // Upper bound on atlas growth, well under every backend's max texture dimension.
@@ -337,6 +342,7 @@ impl GlyphAtlas {
             row_height: 0,
             modified: 0,
             resized: 0,
+            no_fit_at_least: None,
         })
     }
 
@@ -435,15 +441,53 @@ impl GlyphAtlas {
         if width + 2 > self.width || height + 2 > self.height {
             return None;
         }
+        if let Some((fw, fh)) = self.no_fit_at_least
+            && width >= fw
+            && height >= fh
+        {
+            return None;
+        }
 
         if let Some(entry) = self.reserve_next_shelf_slot(width, height) {
             return Some(entry);
         }
 
-        let usable_right = self.width - 1;
-        let usable_bottom = self.height - 1;
-        for y in 1..=usable_bottom.saturating_sub(height) {
-            for x in 1..=usable_right.saturating_sub(width) {
+        match self.first_fit_in_gaps(width, height) {
+            Some(entry) => {
+                self.allocations.push(entry);
+                Some(entry)
+            }
+            None => {
+                self.no_fit_at_least = Some((width, height));
+                None
+            }
+        }
+    }
+
+    // Top-left first-fit over the surface, identical in result to scanning every pixel but
+    // visiting only positions flush against the surface edges or the edges of existing
+    // allocations. The optimal first-fit corner always lands on one of these, so the candidate
+    // grid is O(allocations) per axis instead of O(width * height).
+    fn first_fit_in_gaps(&self, width: u32, height: u32) -> Option<GlyphAtlasEntry> {
+        let max_x = (self.width - 1).saturating_sub(width);
+        let max_y = (self.height - 1).saturating_sub(height);
+
+        let mut candidate_xs: Vec<u32> = core::iter::once(1)
+            .chain(self.allocations.iter().map(|used| used.x + used.width))
+            .filter(|&x| (1..=max_x).contains(&x))
+            .collect();
+        candidate_xs.sort_unstable();
+        candidate_xs.dedup();
+
+        let mut candidate_ys: Vec<u32> = core::iter::once(1)
+            .chain(self.allocations.iter().map(|used| used.y + used.height))
+            .filter(|&y| (1..=max_y).contains(&y))
+            .collect();
+        candidate_ys.sort_unstable();
+        candidate_ys.dedup();
+
+        for &y in &candidate_ys {
+            for &x in &candidate_xs {
                 let entry = GlyphAtlasEntry {
                     x,
                     y,
@@ -455,7 +499,6 @@ impl GlyphAtlas {
                     .iter()
                     .all(|used| !rects_overlap(*used, entry))
                 {
-                    self.allocations.push(entry);
                     return Some(entry);
                 }
             }
@@ -570,6 +613,8 @@ impl GlyphAtlas {
         self.pixels = pixels;
         self.modified = self.modified.saturating_add(1);
         self.resized = self.resized.saturating_add(1);
+        // The larger surface may now hold rects that previously failed the gap scan.
+        self.no_fit_at_least = None;
         Ok(())
     }
 

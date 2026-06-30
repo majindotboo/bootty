@@ -301,6 +301,20 @@ fn glyph_atlas_ports_ghostty_error_paths_without_partial_mutation() {
 }
 
 #[test]
+fn glyph_atlas_saturation_memo_still_admits_smaller_glyphs() {
+    // Two wide rows leave only a thin right-edge gap. A large reserve fails and records the
+    // saturation footprint; the bug guarded here is the memo over-blocking — a smaller glyph
+    // that genuinely fits the leftover gap must still reserve rather than fall to the 1x1
+    // fallback (which silently drops the glyph).
+    let mut atlas = GlyphAtlas::new(20, 20);
+    assert!(atlas.reserve(16, 4).is_some());
+    assert!(atlas.reserve(16, 12).is_some());
+
+    assert!(atlas.reserve(16, 4).is_none());
+    assert!(atlas.reserve(2, 1).is_some());
+}
+
+#[test]
 fn text_atlas_builder_emits_one_textured_quad_per_shaped_cluster() {
     let command = TextCommand {
         rect: SurfaceRect::from_min_size(0.0, 0.0, 40.0, 20.0),

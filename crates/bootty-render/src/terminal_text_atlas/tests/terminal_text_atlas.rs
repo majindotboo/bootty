@@ -481,6 +481,34 @@ fn coretext_symbol_rasterizer_produces_arrow_mask() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn monospace_generic_resolves_to_a_monospaced_face() {
+    // The CoreText fallback must not pass the generic "monospace" to CTFontCreateWithName, which
+    // resolves it to Helvetica (proportional) and shadows the cascade. It should land on a real
+    // fixed-pitch face from the shared font database.
+    let resolved = coretext::coretext_family_name("monospace");
+    assert_ne!(
+        resolved.as_ref(),
+        "monospace",
+        "generic leaked through unresolved"
+    );
+
+    let database = crate::font_database::system_font_database();
+    let face = database
+        .faces()
+        .find(|face| {
+            face.families
+                .iter()
+                .any(|(name, _)| name == resolved.as_ref())
+        })
+        .expect("resolved monospace family is present in the font database");
+    assert!(
+        face.monospaced,
+        "monospace generic resolved to a non-monospaced face: {resolved}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn coretext_fallback_matches_ghostty_for_maple_arrow_symbol() {
     let names = coretext::fallback_names("Maple Mono", '\u{21e1}', 23.5)
         .expect("CoreText fallback resolves");
