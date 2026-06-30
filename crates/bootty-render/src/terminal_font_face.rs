@@ -350,7 +350,7 @@ fn is_symbol_codepoint(codepoint: u32) -> bool {
         codepoint,
         0x2190..=0x21FF
             | 0x2460..=0x24FF
-            | 0x2500..=0x259F
+            | 0x2500..=0x25FF
             | 0x2600..=0x27BF
             | 0x1F000..=0x1FAFF
             | 0xE000..=0xF8FF
@@ -525,6 +525,20 @@ mod tests {
         let nerd = terminal_glyph_constraint(0xF06CA);
         assert_eq!(nerd.size, GlyphConstraintSize::FitCover1);
         assert_eq!(nerd.height, GlyphConstraintHeight::Icon);
+    }
+
+    #[test]
+    fn geometric_shapes_fit_the_cell_instead_of_clipping() {
+        // Circle glyphs from the Geometric Shapes block (◐◓◑◒ spinners, ● ○ ◯) are font-rendered
+        // and routinely wider than one cell. Without a Fit constraint their ink overruns the tile
+        // and draw_outline_glyph hard-clips it. The whole block must fit-scale to the cell.
+        for cp in [0x25A0, 0x25CB, 0x25CF, 0x25D0, 0x25EF, 0x25FF] {
+            assert_eq!(
+                terminal_glyph_constraint(cp).size,
+                GlyphConstraintSize::Fit,
+                "U+{cp:04X} should fit to the cell",
+            );
+        }
     }
 
     fn ghostty_coretext_metrics() -> FontFaceMetrics {
