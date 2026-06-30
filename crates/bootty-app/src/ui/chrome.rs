@@ -2041,7 +2041,15 @@ fn paint_group_item(
         egui::FontId::monospace(12.0),
         readable_color(background, palette.muted),
     );
-    paint_item_primitives(painter, rect, item.primitives, item.color, background, true, 1.0);
+    paint_item_primitives(
+        painter,
+        rect,
+        item.primitives,
+        item.color,
+        background,
+        true,
+        1.0,
+    );
 }
 
 fn paint_session_item(
@@ -2095,7 +2103,15 @@ fn paint_session_item(
         label_color,
     );
     let keep = if active { 1.0 } else { UNFOCUSED_ROW_KEEP };
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background, true, keep);
+    paint_item_primitives(
+        painter,
+        rect,
+        item.primitives,
+        item.dim_color,
+        background,
+        true,
+        keep,
+    );
 }
 
 fn paint_generic_sidebar_item(
@@ -2105,8 +2121,20 @@ fn paint_generic_sidebar_item(
     palette: ThemePalette,
     background: egui::Color32,
 ) {
-    let keep = if item.current { 1.0 } else { UNFOCUSED_ROW_KEEP };
-    paint_item_primitives(painter, rect, item.primitives, item.dim_color, background, true, keep);
+    let keep = if item.current {
+        1.0
+    } else {
+        UNFOCUSED_ROW_KEEP
+    };
+    paint_item_primitives(
+        painter,
+        rect,
+        item.primitives,
+        item.dim_color,
+        background,
+        true,
+        keep,
+    );
     if !item.primitives.is_empty() {
         return;
     }
@@ -2174,7 +2202,15 @@ fn paint_sidebar_footer(
             egui::vec2(rect.width() - 28.0, 26.0),
         );
         let color = readable_color(palette.base, item.fg.unwrap_or(palette.subtext));
-        paint_item_primitives(&painter, item_rect, &item.primitives, color, palette.base, false, 1.0);
+        paint_item_primitives(
+            &painter,
+            item_rect,
+            &item.primitives,
+            color,
+            palette.base,
+            false,
+            1.0,
+        );
         if item.primitives.is_empty() {
             paint_footer_fallback(&painter, item_rect, item, color, palette);
         }
