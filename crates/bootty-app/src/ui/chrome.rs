@@ -1992,7 +1992,7 @@ fn sidebar_item_row(
         paint_tree_guide(&painter, rect, item);
 
         match &item.kind {
-            SidebarItemKind::Group => paint_group_item(&painter, rect, item, palette, bg),
+            SidebarItemKind::Group => paint_group_item(&painter, rect, item, bg),
             SidebarItemKind::Session { active } => {
                 paint_session_item(&painter, rect, item, *active, palette, bg)
             }
@@ -2031,18 +2031,24 @@ fn paint_group_item(
     painter: &egui::Painter,
     rect: Rect,
     item: &SidebarItem<'_>,
-    palette: ThemePalette,
     background: egui::Color32,
 ) {
     let SidebarDisplay::Text(text) = item.display else {
         return;
+    };
+    // Tint the group title in its own group color (dim while inactive) rather than running
+    // palette.muted through readable_color, whose AAA gate flattened it to flat white.
+    let title_color = if item.current {
+        item.color
+    } else {
+        item.dim_color
     };
     painter.text(
         Pos2::new(item_text_x(rect, item), rect.center().y),
         egui::Align2::LEFT_CENTER,
         truncate_label(text, 28),
         egui::FontId::monospace(12.0),
-        readable_color(background, palette.muted),
+        title_color,
     );
     paint_item_primitives(
         painter,
