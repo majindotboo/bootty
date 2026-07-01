@@ -1449,6 +1449,11 @@ impl TerminalEngine {
         configure_default_colors(&mut terminal, &base_color_palette, &colors)?;
         configure_default_cursor(&mut terminal, cursor)?;
         configure_terminal_features(&mut terminal, features)?;
+        // Measure grapheme clusters by their display width (DEC mode 2027), matching Ghostty's
+        // default. Without it the grid uses legacy per-codepoint wcwidth, so a VS16 emoji
+        // presentation sequence (⚠️ ❤️) lands in a single cell — too narrow to render the color
+        // glyph and inconsistent with how bootty measures the run.
+        terminal.set_mode(Mode::GRAPHEME_CLUSTER, true)?;
         let size_report_state = Arc::new(Mutex::new(SizeReportState {
             geometry,
             display_scale: 1.0,

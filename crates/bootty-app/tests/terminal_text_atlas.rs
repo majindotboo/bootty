@@ -27,10 +27,12 @@ fn text_shaper_groups_combining_emoji_and_variation_clusters() {
             .iter()
             .any(|cluster| cluster.text == "😀" && cluster.cells == 2)
     );
+    // A VS16 emoji presentation sequence (❤️) is one grapheme spanning two cells, matching
+    // libghostty's grid under grapheme-cluster mode. The selector must not split off.
     assert!(
         clusters
             .iter()
-            .any(|cluster| cluster.text == "\u{2764}\u{FE0F}" && cluster.cells == 1)
+            .any(|cluster| cluster.text == "\u{2764}\u{FE0F}" && cluster.cells == 2)
     );
 }
 

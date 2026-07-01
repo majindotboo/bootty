@@ -345,7 +345,7 @@ pub fn nerd_font_constraint(codepoint: u32) -> Option<GlyphConstraint> {
     })
 }
 
-fn is_symbol_codepoint(codepoint: u32) -> bool {
+pub(crate) fn is_symbol_codepoint(codepoint: u32) -> bool {
     matches!(
         codepoint,
         0x2190..=0x21FF

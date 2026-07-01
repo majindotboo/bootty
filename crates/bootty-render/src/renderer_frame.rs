@@ -4,7 +4,6 @@ use libghostty_vt::{
     render::Dirty,
     style::{RgbColor, Underline},
 };
-use unicode_width::UnicodeWidthChar;
 
 use crate::{
     geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface},
@@ -793,10 +792,7 @@ fn push_cell_decorations(
 }
 
 fn text_cell_width(text: &str) -> u16 {
-    text.chars()
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) as u16)
-        .sum::<u16>()
-        .max(1)
+    crate::terminal_text::terminal_grapheme_cells(&text.chars().collect::<Vec<_>>())
 }
 
 fn decoration_style_for_underline(underline: Underline) -> DecorationStyle {

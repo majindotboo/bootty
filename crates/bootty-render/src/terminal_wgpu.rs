@@ -1515,7 +1515,7 @@ fn text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextD
     let total_cells = command
         .text
         .chars()
-        .map(crate::terminal_text::terminal_char_width)
+        .map(crate::terminal_text::terminal_char_cell_delta)
         .sum::<u16>()
         .max(1);
 
@@ -1523,7 +1523,7 @@ fn text_draws(command: &TextCommand, pixels_per_point: f32) -> Vec<TerminalTextD
     crate::terminal_text::for_terminal_text_cells(&command.text, |cell, text| {
         let cells = text
             .chars()
-            .map(crate::terminal_text::terminal_char_width)
+            .map(crate::terminal_text::terminal_char_cell_delta)
             .sum::<u16>()
             .max(1);
         let cell_rect = SurfaceRect::from_min_size(

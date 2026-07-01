@@ -297,19 +297,17 @@ pub(super) fn rasterize_color_with_family(
         if family_ref.is_null() {
             return None;
         }
-        let font = CTFontCreateWithName(
-            family_ref,
-            f64::from(physical_font_size.max(1.0)),
-            std::ptr::null(),
-        );
-        CFRelease(family_ref);
+        let base_size = f64::from(physical_font_size.max(1.0));
+        let mut font = CTFontCreateWithName(family_ref, base_size, std::ptr::null());
         if font.is_null() {
+            CFRelease(family_ref);
             return None;
         }
         // Monochrome fonts draw with the context's default black fill; only fonts
         // with embedded color glyphs may bypass theme tinting.
         if CTFontGetSymbolicTraits(font) & K_CT_FONT_TRAIT_COLOR_GLYPHS == 0 {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         }
 
@@ -322,10 +320,12 @@ pub(super) fn rasterize_color_with_family(
         );
         let Some(glyph) = glyphs.into_iter().find(|glyph| *glyph != 0) else {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         };
         if !supports {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         }
 
@@ -337,6 +337,30 @@ pub(super) fn rasterize_color_with_family(
             },
         };
         CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &mut rect, 1);
+        if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+            CFRelease(font);
+            CFRelease(family_ref);
+            return None;
+        }
+
+        // Scale the glyph to fill the cell box, preserving aspect (contain fit). Apple Color
+        // Emoji's natural bounding box at the cell's font size is smaller than the cell, so without
+        // scaling up the glyph renders tiny and lost in its 2-cell slot; conversely some glyphs
+        // overflow and would clip. Fit to the limiting dimension with a 1px margin — scaling up or
+        // down — so the emoji fills its cells the way Ghostty draws it.
+        let avail_width = (f64::from(width) - 2.0).max(1.0);
+        let avail_height = (f64::from(height) - 2.0).max(1.0);
+        let fit = (avail_width / rect.size.width).min(avail_height / rect.size.height);
+        if fit.is_finite() && (fit - 1.0).abs() > 0.01 {
+            let fitted =
+                CTFontCreateWithName(family_ref, (base_size * fit).max(1.0), std::ptr::null());
+            if !fitted.is_null() {
+                CFRelease(font);
+                font = fitted;
+                CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &mut rect, 1);
+            }
+        }
+        CFRelease(family_ref);
         if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
             CFRelease(font);
             return None;

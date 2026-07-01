@@ -763,14 +763,14 @@ impl TerminalTextContract {
                     });
                 }
                 fragments.push(TerminalTextFragment::NativeSymbol { cell, ch, class });
-                cell = cell.saturating_add(terminal_char_width(ch));
+                cell = cell.saturating_add(terminal_char_cell_delta(ch));
                 text_start = cell;
             } else {
                 if text.is_empty() {
                     text_start = cell;
                 }
                 text.push(ch);
-                cell = cell.saturating_add(terminal_char_width(ch));
+                cell = cell.saturating_add(terminal_char_cell_delta(ch));
             }
         }
 
@@ -823,6 +823,41 @@ pub fn terminal_char_width(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(0) as u16
 }
 
+/// Per-character contribution to a running, grapheme-cluster-aware cell total. A VS16 (U+FE0F)
+/// makes its preceding character's cluster two cells instead of one; summing `terminal_char_width`
+/// per character alone undercounts it (the base contributes 1, the selector itself measures 0),
+/// desyncing the running total from `terminal_grapheme_cells` and squeezing everything after the
+/// emoji into space reserved for one cell instead of two. FE0F contributes the missing cell here.
+pub fn terminal_char_cell_delta(ch: char) -> u16 {
+    if ch == '\u{FE0F}' {
+        1
+    } else {
+        terminal_char_width(ch)
+    }
+}
+
+/// Cells occupied by one grapheme cluster, matching libghostty's grid under grapheme-cluster mode
+/// (DEC 2027, which bootty enables by default). A U+FE0F (VS16) emoji-presentation sequence
+/// (⚠️ ❤️ ☺️) is two cells even though its base symbol measures one — `UnicodeWidthStr::width`
+/// reports that whole-cluster width, while a per-char sum (base + zero-width selector) would not.
+/// Every cell/run width site must use this one measure or the planner and shaper disagree and the
+/// emoji flickers between one and two cells frame to frame.
+pub fn terminal_grapheme_cells(chars: &[char]) -> u16 {
+    if chars.contains(&'\u{FE0F}') {
+        return 2;
+    }
+    match chars {
+        [] => 1,
+        [ch] => terminal_char_width(*ch).max(1),
+        _ => chars
+            .iter()
+            .copied()
+            .map(terminal_char_width)
+            .sum::<u16>()
+            .max(1),
+    }
+}
+
 pub fn for_terminal_text_cells(text: &str, mut emit: impl FnMut(u16, &str)) {
     let mut current_start = None;
     let mut current_cell = 0_u16;
@@ -837,6 +872,10 @@ pub fn for_terminal_text_cells(text: &str, mut emit: impl FnMut(u16, &str)) {
                 current_cell = cursor;
                 current_has_advance = false;
             }
+            // A zero-width char (e.g. a combining mark) stays in the current group, but a VS16
+            // still consumes an extra cell (its cluster is two cells, not the base's one) — advance
+            // the cursor by that delta so the next group starts at the right column.
+            cursor = cursor.saturating_add(terminal_char_cell_delta(ch));
             continue;
         }
 
@@ -886,6 +925,28 @@ pub enum TerminalTextFragment {
 mod tests {
     use super::*;
     use crate::{geometry::SurfaceRect, paint_plan::PlanColor};
+
+    #[test]
+    fn grapheme_cells_matches_libghostty_grid_width() {
+        // Under grapheme-cluster mode (DEC 2027, enabled by default) libghostty lays a VS16
+        // emoji-presentation sequence in two cells — verified against its cursor advance. The
+        // measure here must match the grid or the run overlaps or underfills the next column.
+        let chars = |s: &str| s.chars().collect::<Vec<_>>();
+        assert_eq!(
+            terminal_grapheme_cells(&chars("\u{26A0}\u{FE0F}")),
+            2,
+            "warning ⚠️"
+        );
+        assert_eq!(
+            terminal_grapheme_cells(&chars("\u{2764}\u{FE0F}")),
+            2,
+            "heart ❤️"
+        );
+        // CJK is genuinely wide; ASCII narrow; a combining mark rides its base.
+        assert_eq!(terminal_grapheme_cells(&chars("\u{754C}")), 2, "CJK 界");
+        assert_eq!(terminal_grapheme_cells(&chars("a")), 1);
+        assert_eq!(terminal_grapheme_cells(&chars("e\u{301}")), 1, "é");
+    }
 
     fn attrs() -> TextAttrs {
         TextAttrs {

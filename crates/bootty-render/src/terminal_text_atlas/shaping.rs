@@ -42,19 +42,41 @@ pub(super) fn shape_run(
     buffer.set_cluster_level(BufferClusterLevel::Characters);
     buffer.set_direction(Direction::LeftToRight);
     let mut cell = 0_u16;
-    for (index, (_, ch)) in text.char_indices().enumerate() {
-        let char_width = crate::terminal_text::terminal_char_width(ch);
-        let glyph_cell = if is_attached_codepoint(ch) {
-            cell.saturating_sub(1)
-        } else {
-            cell
-        };
+    let mut grapheme = Vec::new();
+    let mut chars = text.chars().enumerate().peekable();
+    while let Some((index, ch)) = chars.next() {
         buffer.add(ch, u32::try_from(index).ok()?);
+        if is_attached_codepoint(ch) {
+            // A mark with no preceding base (the run starts mid-grapheme): attach to the
+            // previous cell rather than starting a new one.
+            source.push(SourceCodepoint {
+                cell: cell.saturating_sub(1),
+                starts_cell: false,
+            });
+            continue;
+        }
+        let base_cell = cell;
         source.push(SourceCodepoint {
-            cell: glyph_cell,
-            starts_cell: !is_attached_codepoint(ch),
+            cell: base_cell,
+            starts_cell: true,
         });
-        cell = cell.saturating_add(char_width);
+        grapheme.clear();
+        grapheme.push(ch);
+        while let Some(&(next_index, next)) = chars.peek() {
+            if !is_attached_codepoint(next) {
+                break;
+            }
+            buffer.add(next, u32::try_from(next_index).ok()?);
+            source.push(SourceCodepoint {
+                cell: base_cell,
+                starts_cell: false,
+            });
+            grapheme.push(next);
+            chars.next();
+        }
+        // Advance by the whole grapheme's grid width (base + attached marks), matching
+        // libghostty: a VS16 emoji presentation sequence (⚠️) is one cell, not two.
+        cell = cell.saturating_add(crate::terminal_text::terminal_grapheme_cells(&grapheme));
     }
     buffer.guess_segment_properties();
 
