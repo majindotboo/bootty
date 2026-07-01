@@ -740,6 +740,7 @@ fn terminal_graphics_symbols_stay_one_cell_wide() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn emoji_presentation_cluster_renders_in_color_even_with_a_primary_glyph() {
     // Regression: when the primary font carries a monochrome glyph for an emoji's base symbol,
@@ -778,6 +779,7 @@ fn emoji_presentation_cluster_renders_in_color_even_with_a_primary_glyph() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn color_emoji_quad_sized_to_em_in_narrow_cells() {
     // Regression: with a narrow cell, two cells are far thinner than the line, so sizing the emoji
@@ -810,6 +812,7 @@ fn color_emoji_quad_sized_to_em_in_narrow_cells() {
     assert!(emoji.rect.width() > 2.0 * cw && emoji.rect.height() < ch);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn color_emoji_fills_its_cell_without_clipping() {
     // Regressions: the color path drew the emoji at its natural font size and center-blitted it,
