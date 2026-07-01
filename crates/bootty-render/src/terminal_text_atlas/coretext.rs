@@ -143,6 +143,27 @@ unsafe extern "C" {
     fn CTFontGetSymbolicTraits(font: CTFontRef) -> u32;
 }
 
+// CoreText has no notion of the CSS-style generic "monospace": CTFontCreateWithName falls back to
+// Helvetica (proportional), which then shadows the per-glyph cascade for any symbol Helvetica
+// happens to carry. Resolve the generic through the shared font DB — the same source the primary
+// text path uses — so symbol/color fallbacks also land on a real monospaced face. Menlo is the
+// guaranteed-present macOS backstop.
+#[cfg(target_os = "macos")]
+pub(super) fn coretext_family_name(family: &str) -> std::borrow::Cow<'_, str> {
+    if family != "monospace" {
+        return std::borrow::Cow::Borrowed(family);
+    }
+    let database = crate::font_database::system_font_database();
+    database
+        .query(&fontdb::Query {
+            families: &[fontdb::Family::Monospace],
+            ..fontdb::Query::default()
+        })
+        .and_then(|id| database.faces().find(|face| face.id == id))
+        .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+        .map_or(std::borrow::Cow::Borrowed("Menlo"), std::borrow::Cow::Owned)
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn rasterize_symbol_cluster(
     face: &ResolvedFontFace,
@@ -259,7 +280,7 @@ pub(super) fn rasterize_color_with_family(
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    let family = CString::new(family).ok()?;
+    let family = CString::new(coretext_family_name(family).as_ref()).ok()?;
     let text = cluster
         .text
         .chars()
@@ -276,19 +297,17 @@ pub(super) fn rasterize_color_with_family(
         if family_ref.is_null() {
             return None;
         }
-        let font = CTFontCreateWithName(
-            family_ref,
-            f64::from(physical_font_size.max(1.0)),
-            std::ptr::null(),
-        );
-        CFRelease(family_ref);
+        let base_size = f64::from(physical_font_size.max(1.0));
+        let mut font = CTFontCreateWithName(family_ref, base_size, std::ptr::null());
         if font.is_null() {
+            CFRelease(family_ref);
             return None;
         }
         // Monochrome fonts draw with the context's default black fill; only fonts
         // with embedded color glyphs may bypass theme tinting.
         if CTFontGetSymbolicTraits(font) & K_CT_FONT_TRAIT_COLOR_GLYPHS == 0 {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         }
 
@@ -301,10 +320,12 @@ pub(super) fn rasterize_color_with_family(
         );
         let Some(glyph) = glyphs.into_iter().find(|glyph| *glyph != 0) else {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         };
         if !supports {
             CFRelease(font);
+            CFRelease(family_ref);
             return None;
         }
 
@@ -316,6 +337,30 @@ pub(super) fn rasterize_color_with_family(
             },
         };
         CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &mut rect, 1);
+        if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+            CFRelease(font);
+            CFRelease(family_ref);
+            return None;
+        }
+
+        // Scale the glyph to fill the cell box, preserving aspect (contain fit). Apple Color
+        // Emoji's natural bounding box at the cell's font size is smaller than the cell, so without
+        // scaling up the glyph renders tiny and lost in its 2-cell slot; conversely some glyphs
+        // overflow and would clip. Fit to the limiting dimension with a 1px margin — scaling up or
+        // down — so the emoji fills its cells the way Ghostty draws it.
+        let avail_width = (f64::from(width) - 2.0).max(1.0);
+        let avail_height = (f64::from(height) - 2.0).max(1.0);
+        let fit = (avail_width / rect.size.width).min(avail_height / rect.size.height);
+        if fit.is_finite() && (fit - 1.0).abs() > 0.01 {
+            let fitted =
+                CTFontCreateWithName(family_ref, (base_size * fit).max(1.0), std::ptr::null());
+            if !fitted.is_null() {
+                CFRelease(font);
+                font = fitted;
+                CTFontGetBoundingRectsForGlyphs(font, 0, &glyph, &mut rect, 1);
+            }
+        }
+        CFRelease(family_ref);
         if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
             CFRelease(font);
             return None;
@@ -398,7 +443,7 @@ pub(super) fn rasterize_symbol_with_family(
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    let family = CString::new(family).ok()?;
+    let family = CString::new(coretext_family_name(family).as_ref()).ok()?;
     let mut utf16 = [0_u16; 2];
     let encoded = ch.encode_utf16(&mut utf16);
     if encoded.len() != 1 {
@@ -603,7 +648,7 @@ pub(super) fn fallback_names(
             .map(str::to_owned)
     }
 
-    let base_family = CString::new(base_family).ok()?;
+    let base_family = CString::new(coretext_family_name(base_family).as_ref()).ok()?;
     let ch_string = CString::new(ch.to_string()).ok()?;
     unsafe {
         let base_family_ref = CFStringCreateWithCString(

@@ -56,6 +56,42 @@ pub fn status(cwd: &str) -> WorktreeStatus {
     status
 }
 
+/// Detach HEAD in `worktree_path`, freeing its branch while keeping the
+/// worktree directory and every commit. Fully non-destructive — the ditch
+/// "detach" action runs this before killing the session.
+pub fn detach_head(worktree_path: &str) -> Result<(), String> {
+    run(worktree_path, &["checkout", "--detach"])
+}
+
+/// Number of worktrees attached to the repo containing `cwd` — the main working
+/// tree plus every linked worktree. `0` when `cwd` is not in a git repo. Used to
+/// gate the detach action, which only earns its keep in a multi-worktree repo.
+pub fn worktree_count(cwd: &str) -> usize {
+    read(cwd, &["worktree", "list", "--porcelain"])
+        .map(|out| {
+            out.lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// The repo's trunk branch — the one ditch must never offer to delete. Resolved
+/// from the remote's default (`origin/HEAD`); for repos without a remote it
+/// falls back to the branch checked out in the main worktree. `None` when
+/// neither is known, in which case no branch is treated as the trunk.
+pub fn trunk_branch(cwd: &str) -> Option<String> {
+    read(
+        cwd,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|head| head.strip_prefix("refs/remotes/origin/").map(str::to_owned))
+    .or_else(|| {
+        let main = main_worktree(cwd)?;
+        read(&main, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    })
+}
+
 /// Remove the linked worktree rooted at `worktree_path`. Runs from the main
 /// working tree so git doesn't refuse to remove the tree you're standing in;
 /// `force` is required when the worktree is dirty.
@@ -252,6 +288,63 @@ mod tests {
         let branches =
             read(main.to_str().unwrap(), &["branch", "--list", "feature"]).expect("list");
         assert!(branches.is_empty(), "branch still present: {branches}");
+    }
+
+    #[test]
+    fn detach_head_frees_the_branch_keeping_the_worktree_and_commit() {
+        let (_root, _main, worktree) = repo_with_worktree();
+        let before = read(worktree.to_str().unwrap(), &["rev-parse", "HEAD"]).expect("rev-parse");
+
+        detach_head(worktree.to_str().unwrap()).expect("detach head");
+
+        let after = status(worktree.to_str().unwrap());
+        assert!(after.branch.is_none(), "HEAD should be detached");
+        assert!(worktree.exists(), "worktree dir must survive a detach");
+        assert_eq!(
+            read(worktree.to_str().unwrap(), &["rev-parse", "HEAD"]).as_deref(),
+            Some(before.as_str()),
+            "detach must not move HEAD off the current commit"
+        );
+    }
+
+    #[test]
+    fn worktree_count_includes_the_main_and_linked_trees() {
+        let (_root, main, worktree) = repo_with_worktree();
+        // main + one linked worktree, counted the same from either tree.
+        assert_eq!(worktree_count(main.to_str().unwrap()), 2);
+        assert_eq!(worktree_count(worktree.to_str().unwrap()), 2);
+    }
+
+    #[test]
+    fn trunk_branch_prefers_the_remote_default_over_any_hardcoded_name() {
+        let (_root, main, worktree) = repo_with_worktree();
+        // Point origin/HEAD at a non-"main" default; trunk detection must read it
+        // rather than assuming the conventional branch name.
+        let head = read(main.to_str().unwrap(), &["rev-parse", "HEAD"]).expect("rev-parse");
+        git_ok(&main, &["update-ref", "refs/remotes/origin/release", &head]);
+        git_ok(
+            &main,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/release",
+            ],
+        );
+
+        assert_eq!(
+            trunk_branch(worktree.to_str().unwrap()).as_deref(),
+            Some("release")
+        );
+    }
+
+    #[test]
+    fn trunk_branch_falls_back_to_the_main_worktree_branch_without_a_remote() {
+        let (_root, _main, worktree) = repo_with_worktree();
+        // No remote, so origin/HEAD is unknown; the main worktree sits on `main`.
+        assert_eq!(
+            trunk_branch(worktree.to_str().unwrap()).as_deref(),
+            Some("main")
+        );
     }
 
     #[test]

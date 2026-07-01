@@ -27,10 +27,12 @@ fn text_shaper_groups_combining_emoji_and_variation_clusters() {
             .iter()
             .any(|cluster| cluster.text == "😀" && cluster.cells == 2)
     );
+    // A VS16 emoji presentation sequence (❤️) is one grapheme spanning two cells, matching
+    // libghostty's grid under grapheme-cluster mode. The selector must not split off.
     assert!(
         clusters
             .iter()
-            .any(|cluster| cluster.text == "\u{2764}\u{FE0F}" && cluster.cells == 1)
+            .any(|cluster| cluster.text == "\u{2764}\u{FE0F}" && cluster.cells == 2)
     );
 }
 
@@ -298,6 +300,20 @@ fn glyph_atlas_ports_ghostty_error_paths_without_partial_mutation() {
     assert_eq!(atlas.resized_count(), old_resized);
     assert_eq!(atlas.size(), (4, 4));
     assert_atlas_pixels(&atlas, &[(1, 1, 1), (2, 1, 2), (1, 2, 3), (2, 2, 4)]);
+}
+
+#[test]
+fn glyph_atlas_saturation_memo_still_admits_smaller_glyphs() {
+    // Two wide rows leave only a thin right-edge gap. A large reserve fails and records the
+    // saturation footprint; the bug guarded here is the memo over-blocking — a smaller glyph
+    // that genuinely fits the leftover gap must still reserve rather than fall to the 1x1
+    // fallback (which silently drops the glyph).
+    let mut atlas = GlyphAtlas::new(20, 20);
+    assert!(atlas.reserve(16, 4).is_some());
+    assert!(atlas.reserve(16, 12).is_some());
+
+    assert!(atlas.reserve(16, 4).is_none());
+    assert!(atlas.reserve(2, 1).is_some());
 }
 
 #[test]

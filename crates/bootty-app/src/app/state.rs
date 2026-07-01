@@ -3159,6 +3159,7 @@ fn run_ditch_cleanup(cwd: Option<&str>, action: &DitchAction) -> Result<(), Stri
     };
     match action {
         DitchAction::KillOnly => Ok(()),
+        DitchAction::DetachWorktree => crate::git::detach_head(cwd),
         DitchAction::RemoveWorktree { force } => crate::git::remove_worktree(cwd, *force),
         DitchAction::RemoveWorktreeAndBranch {
             force,

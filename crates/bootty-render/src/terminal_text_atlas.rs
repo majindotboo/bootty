@@ -18,11 +18,14 @@ use crate::{
     font_database::system_font_database,
     geometry::SurfaceRect,
     paint_plan::PlanColor,
-    terminal_font_face::{FontFaceMetrics, GlyphSize, terminal_glyph_constraint},
+    terminal_font_face::{
+        FontFaceMetrics, GlyphSize, is_symbol_codepoint, terminal_glyph_constraint,
+    },
     terminal_render::{SpriteCommandBatch, TextCommand},
     terminal_sprite::SpriteCommand,
     terminal_text::{
         FontFeature, FontStyle, ResolvedFontFace, default_font_features, terminal_char_width,
+        terminal_grapheme_cells,
     },
 };
 
@@ -75,6 +78,7 @@ impl TerminalTextShaper {
         let mut total_cells = 0_u16;
         let mut chars = text.chars().peekable();
         let mut cluster_index = 0;
+        let mut grapheme = Vec::new();
         while let Some(ch) = chars.next() {
             let cluster = shaped_cluster_slot(clusters, cluster_index);
             cluster.text.clear();
@@ -82,24 +86,22 @@ impl TerminalTextShaper {
             cluster.text.push(ch);
             cluster.cell = cell;
             cluster.is_whitespace = ch.is_whitespace();
-            total_cells = total_cells.saturating_add(terminal_char_width(ch));
+            grapheme.clear();
+            grapheme.push(ch);
             while let Some(next) = chars.peek().copied() {
                 if is_combining_mark(next) || is_variation_selector(next) {
                     cluster.text.push(next);
                     cluster.is_whitespace &= next.is_whitespace();
-                    total_cells = total_cells.saturating_add(terminal_char_width(next));
+                    grapheme.push(next);
                     chars.next();
                 } else {
                     break;
                 }
             }
-            cluster.cells = cluster
-                .text
-                .chars()
-                .next()
-                .map(terminal_char_width)
-                .unwrap_or(1)
-                .max(1);
+            // Width comes from the whole grapheme, not the base char alone: a VS16 emoji
+            // presentation sequence (⚠️) is two cells even though its base measures as one.
+            cluster.cells = terminal_grapheme_cells(&grapheme);
+            total_cells = total_cells.saturating_add(cluster.cells);
             cell = cell.saturating_add(cluster.cells);
             cluster_index += 1;
         }
@@ -298,6 +300,11 @@ pub struct GlyphAtlas {
     next_y: u32,
     row_height: u32,
     resized: u64,
+    // Smallest footprint that the gap scan most recently failed to place. Since the atlas only
+    // gains space by growing (it never evicts), any later request at least this large is doomed
+    // too, so we skip the scan until the next grow clears this. Without it, a saturated atlas
+    // re-scans the whole surface for every new glyph and freezes the render thread.
+    no_fit_at_least: Option<(u32, u32)>,
 }
 
 // Upper bound on atlas growth, well under every backend's max texture dimension.
@@ -337,6 +344,7 @@ impl GlyphAtlas {
             row_height: 0,
             modified: 0,
             resized: 0,
+            no_fit_at_least: None,
         })
     }
 
@@ -435,15 +443,53 @@ impl GlyphAtlas {
         if width + 2 > self.width || height + 2 > self.height {
             return None;
         }
+        if let Some((fw, fh)) = self.no_fit_at_least
+            && width >= fw
+            && height >= fh
+        {
+            return None;
+        }
 
         if let Some(entry) = self.reserve_next_shelf_slot(width, height) {
             return Some(entry);
         }
 
-        let usable_right = self.width - 1;
-        let usable_bottom = self.height - 1;
-        for y in 1..=usable_bottom.saturating_sub(height) {
-            for x in 1..=usable_right.saturating_sub(width) {
+        match self.first_fit_in_gaps(width, height) {
+            Some(entry) => {
+                self.allocations.push(entry);
+                Some(entry)
+            }
+            None => {
+                self.no_fit_at_least = Some((width, height));
+                None
+            }
+        }
+    }
+
+    // Top-left first-fit over the surface, identical in result to scanning every pixel but
+    // visiting only positions flush against the surface edges or the edges of existing
+    // allocations. The optimal first-fit corner always lands on one of these, so the candidate
+    // grid is O(allocations) per axis instead of O(width * height).
+    fn first_fit_in_gaps(&self, width: u32, height: u32) -> Option<GlyphAtlasEntry> {
+        let max_x = (self.width - 1).saturating_sub(width);
+        let max_y = (self.height - 1).saturating_sub(height);
+
+        let mut candidate_xs: Vec<u32> = core::iter::once(1)
+            .chain(self.allocations.iter().map(|used| used.x + used.width))
+            .filter(|&x| (1..=max_x).contains(&x))
+            .collect();
+        candidate_xs.sort_unstable();
+        candidate_xs.dedup();
+
+        let mut candidate_ys: Vec<u32> = core::iter::once(1)
+            .chain(self.allocations.iter().map(|used| used.y + used.height))
+            .filter(|&y| (1..=max_y).contains(&y))
+            .collect();
+        candidate_ys.sort_unstable();
+        candidate_ys.dedup();
+
+        for &y in &candidate_ys {
+            for &x in &candidate_xs {
                 let entry = GlyphAtlasEntry {
                     x,
                     y,
@@ -455,7 +501,6 @@ impl GlyphAtlas {
                     .iter()
                     .all(|used| !rects_overlap(*used, entry))
                 {
-                    self.allocations.push(entry);
                     return Some(entry);
                 }
             }
@@ -570,6 +615,8 @@ impl GlyphAtlas {
         self.pixels = pixels;
         self.modified = self.modified.saturating_add(1);
         self.resized = self.resized.saturating_add(1);
+        // The larger surface may now hold rects that previously failed the gap scan.
+        self.no_fit_at_least = None;
         Ok(())
     }
 
@@ -951,12 +998,39 @@ impl TextAtlasBuilder {
                 cluster,
                 active_clusters.get(index + 1),
             );
-            let rect = SurfaceRect::from_min_size(
+            let mut rect = SurfaceRect::from_min_size(
                 command.rect.min_x + f32::from(cluster.cell) * cell_width,
                 command.rect.min_y,
                 f32::from(constraint_cells) * cell_width,
                 command.rect.height(),
             );
+            // Size a color emoji to the text em (font size), the way Ghostty draws it — matching the
+            // visual weight of surrounding glyphs — rather than the width of its grid cells (which is
+            // far thinner than the line in a narrow font, rendering the glyph tiny) or the full padded
+            // cell height (which overshoots the text). Center the square over the grid span both ways;
+            // the grid still reserves the cells for layout.
+            if is_color_emoji_cluster(cluster) {
+                let side = command.font_size.min(rect.height());
+                let center_x = rect.min_x + rect.width() * 0.5;
+                // Center on the text's cap band (top-of-ascent to baseline), not the padded cell
+                // center — text sits low in the cell, so cell-centering reads slightly high. Derive
+                // the baseline exactly as the text glyphs do, then take the midpoint of the ascent.
+                let center_y = self
+                    .fonts
+                    .font_for_face(&command.face)
+                    .map(|font| {
+                        let scaled = font.as_scaled(PxScale::from(command.font_size.max(1.0)));
+                        let baseline = (rect.height() - scaled.height()) * 0.5 + scaled.ascent();
+                        rect.min_y + baseline - scaled.ascent() * 0.5
+                    })
+                    .unwrap_or(rect.min_y + rect.height() * 0.5);
+                rect = SurfaceRect::from_min_size(
+                    center_x - side * 0.5,
+                    center_y - side * 0.5,
+                    side,
+                    side,
+                );
+            }
             let glyph_width = (rect.width() * pixels_per_point).ceil().max(1.0) as u32;
             let glyph_height = (rect.height() * pixels_per_point).ceil().max(1.0) as u32;
             let request = ClusterGlyphRequest {
@@ -1207,6 +1281,13 @@ fn cluster_constraint_cells(
     if cluster.cells > 1 {
         return cluster.cells;
     }
+    // A color emoji fills exactly its grid cells. The neighbor-based widening below is for lone
+    // monochrome symbols (arrows, shapes) that read better spanning two cells; applied to an emoji
+    // it spills the glyph into the next column — eating a following space and making the rendered
+    // width flip with whatever character happens to come after it.
+    if is_color_emoji_cluster(cluster) {
+        return cluster.cells;
+    }
     let Some(ch) = cluster.text.chars().next() else {
         return cluster.cells;
     };
@@ -1424,7 +1505,14 @@ impl FontLibrary {
                 color: false,
             };
         }
+        // An explicit emoji-presentation cluster (VS16, or a default-emoji codepoint) renders as a
+        // color emoji, even when the primary font carries a monochrome glyph for the base symbol —
+        // otherwise ⚠️/❤️ draw as a theme-tinted text glyph, and the rendering flips with whatever
+        // the shaper happened to produce. Skip the by-glyph path so it reaches the color path below.
+        let prefer_color_emoji =
+            format == GlyphAtlasFormat::Rgba && is_color_emoji_cluster(cluster);
         if !cluster.glyphs.is_empty()
+            && !prefer_color_emoji
             && let Some(font) = self.font_for_face(face)
             && let Some(alpha) = rasterize_glyph_cluster(RasterizeGlyphClusterRequest {
                 font: &font,
@@ -1755,6 +1843,53 @@ fn rasterize_glyph_cluster(request: RasterizeGlyphClusterRequest<'_>) -> Option<
     let cluster_start = glyphs.iter().map(|glyph| glyph.cluster).min().unwrap_or(0);
     let cell_width = width as f32 / f32::from(constraint_cells.max(1));
     let mut alpha = vec![0_u8; (width * height) as usize];
+
+    // A single substituted glyph (e.g. a font's GSUB stylistic-alternate circle) can be drawn
+    // wider than its cell. Fit it to the tile and center it so it doesn't hard-clip; this only
+    // diverts when the ink actually overflows, leaving normal glyphs and multi-glyph ligatures on
+    // the shaped-position path below.
+    if let [only] = glyphs
+        && let Some(outlined) = scaled
+            .outline_glyph(GlyphId(only.glyph_id).with_scale_and_position(scale, point(0.0, 0.0)))
+    {
+        let bounds = outlined.px_bounds();
+        let fit = (width as f32 / bounds.width())
+            .min(height as f32 / bounds.height())
+            .min(1.0);
+        if fit < 1.0 {
+            let fitted = PxScale {
+                x: scale.x * fit,
+                y: scale.y * fit,
+            };
+            let fitted_scaled = font.as_scaled(fitted);
+            let glyph_id = GlyphId(only.glyph_id);
+            if let Some(outlined) = fitted_scaled
+                .outline_glyph(glyph_id.with_scale_and_position(fitted, point(0.0, 0.0)))
+            {
+                let bounds = outlined.px_bounds();
+                let dx = ((width as f32 - bounds.width()) * 0.5) - bounds.min.x;
+                let dy = ((height as f32 - bounds.height()) * 0.5) - bounds.min.y;
+                draw_outline_glyph(
+                    &mut alpha,
+                    &fitted_scaled,
+                    glyph_id.with_scale_and_position(fitted, point(dx, dy)),
+                    width,
+                    height,
+                );
+                if synthesize_bold {
+                    draw_outline_glyph(
+                        &mut alpha,
+                        &fitted_scaled,
+                        glyph_id.with_scale_and_position(fitted, point(dx + bold_offset, dy)),
+                        width,
+                        height,
+                    );
+                }
+                return alpha.iter().any(|value| *value > 0).then_some(alpha);
+            }
+        }
+    }
+
     for glyph in glyphs {
         let glyph_id = GlyphId(glyph.glyph_id);
         let cell_offset = glyph.cluster.saturating_sub(cluster_start) as f32 * cell_width;
@@ -1822,41 +1957,70 @@ fn shaped_glyph_group(
     }
 }
 
+// Cell counting and cell→byte mapping group base + attached marks into one grapheme and advance
+// by its full width, matching `shape_run`. A VS16 emoji presentation sequence spans two cells, so
+// per-char counting (which sees the base as one and the selector as zero) would desync the cluster
+// slices from the shaped cell positions.
 fn text_cell_count(text: &str) -> u16 {
-    text.chars()
-        .filter(|ch| !is_combining_mark(*ch) && !is_variation_selector(*ch))
-        .map(terminal_char_width)
-        .sum::<u16>()
+    let mut total = 0_u16;
+    let mut chars = text.chars().peekable();
+    let mut grapheme = Vec::new();
+    while let Some(ch) = chars.next() {
+        if is_combining_mark(ch) || is_variation_selector(ch) {
+            continue;
+        }
+        grapheme.clear();
+        grapheme.push(ch);
+        while let Some(&next) = chars.peek() {
+            if is_combining_mark(next) || is_variation_selector(next) {
+                grapheme.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        total = total.saturating_add(terminal_grapheme_cells(&grapheme));
+    }
+    total
 }
 
 fn text_byte_range_for_cells(text: &str, start: u16, end: u16) -> (usize, usize) {
     let mut cell = 0_u16;
     let mut range_start = None;
     let mut range_end = None;
+    let mut chars = text.char_indices().peekable();
+    let mut grapheme = Vec::new();
 
-    for (byte_start, ch) in text.char_indices() {
-        let byte_end = byte_start + ch.len_utf8();
-        let attached = is_combining_mark(ch) || is_variation_selector(ch);
-        let char_start = if attached {
-            cell.saturating_sub(1)
-        } else {
-            cell
-        };
-        let char_cells = if attached {
-            1
-        } else {
-            terminal_char_width(ch).max(1)
-        };
-        let char_end = char_start.saturating_add(char_cells);
+    while let Some((byte_start, ch)) = chars.next() {
+        let mut byte_end = byte_start + ch.len_utf8();
+        if is_combining_mark(ch) || is_variation_selector(ch) {
+            // Standalone mark (run starts mid-grapheme): belongs to the previous cell.
+            let mark_cell = cell.saturating_sub(1);
+            if mark_cell < end && mark_cell.saturating_add(1) > start {
+                range_start.get_or_insert(byte_start);
+                range_end = Some(byte_end);
+            }
+            continue;
+        }
 
-        if char_start < end && char_end > start {
+        grapheme.clear();
+        grapheme.push(ch);
+        while let Some(&(next_byte, next)) = chars.peek() {
+            if is_combining_mark(next) || is_variation_selector(next) {
+                byte_end = next_byte + next.len_utf8();
+                grapheme.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        let grapheme_end = cell.saturating_add(terminal_grapheme_cells(&grapheme));
+        if cell < end && grapheme_end > start {
             range_start.get_or_insert(byte_start);
             range_end = Some(byte_end);
         }
-
-        if !attached {
-            cell = cell.saturating_add(terminal_char_width(ch));
-        }
+        cell = grapheme_end;
     }
 
     (range_start.unwrap_or(0), range_end.unwrap_or(text.len()))
@@ -1952,13 +2116,17 @@ fn positioned_cluster_glyph(
         );
     }
 
-    if !is_private_use(ch) {
-        return glyph;
-    }
-
+    // No symbol constraint: keep the glyph at its natural size and baseline, EXCEPT when its ink
+    // overflows the cell. Oversized symbols a font draws wider than one cell (circles, bullets,
+    // shapes outside the symbol-fit ranges) would otherwise be hard-clipped by draw_outline_glyph.
+    // Private-use icons always fit-and-center. The fit caps at 1.0, so well-behaved text glyphs
+    // (ink within the cell) are returned untouched.
     let fit = (tile_width / bounds.width())
         .min(tile_height / bounds.height())
         .min(1.0);
+    if fit >= 1.0 && !is_private_use(ch) {
+        return glyph;
+    }
     let scale = PxScale {
         x: scale.x * fit,
         y: scale.y * fit,
@@ -2020,16 +2188,12 @@ fn is_private_use(ch: char) -> bool {
     )
 }
 
+// Routing to the per-character (constraint-applying) path must track the constraint classifier
+// exactly: a glyph that fit-scales to the cell but takes the direct glyph-id path never gets the
+// scale applied and `draw_outline_glyph` clips it. Delegating keeps the two in lockstep — a drift
+// here is what let Geometric Shapes circles clip after they gained a Fit constraint.
 fn is_symbol_like(ch: char) -> bool {
-    is_private_use(ch)
-        || matches!(
-            ch as u32,
-            0x2190..=0x21FF
-                | 0x2460..=0x24FF
-                | 0x2500..=0x259F
-                | 0x2600..=0x27BF
-                | 0x1F000..=0x1FAFF
-        )
+    is_symbol_codepoint(ch as u32)
 }
 
 fn is_terminal_graphics_symbol(ch: char) -> bool {

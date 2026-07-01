@@ -180,7 +180,7 @@ impl TerminalRenderFrame {
                     text_active = false;
                 }
                 self.push_sprite_fragment(run, cell_width, cell, ch, glyph, text_contract);
-                cell = cell.saturating_add(crate::terminal_text::terminal_char_width(ch));
+                cell = cell.saturating_add(crate::terminal_text::terminal_char_cell_delta(ch));
                 continue;
             }
 
@@ -189,7 +189,7 @@ impl TerminalRenderFrame {
                 text_start_cell = cell;
                 text_active = true;
             }
-            cell = cell.saturating_add(crate::terminal_text::terminal_char_width(ch));
+            cell = cell.saturating_add(crate::terminal_text::terminal_char_cell_delta(ch));
         }
 
         if text_active {
@@ -244,7 +244,7 @@ impl TerminalRenderFrame {
                 fragment_start_cell = cell;
             }
             previous = Some(ch);
-            cell = cell.saturating_add(crate::terminal_text::terminal_char_width(ch));
+            cell = cell.saturating_add(crate::terminal_text::terminal_char_cell_delta(ch));
         }
 
         self.push_text_command(
@@ -509,10 +509,7 @@ fn cell_rect(run_rect: SurfaceRect, cell_width: f32, start_cell: u16, cells: u16
 }
 
 fn text_cell_width(text: &str) -> u16 {
-    text.chars()
-        .map(crate::terminal_text::terminal_char_width)
-        .sum::<u16>()
-        .max(1)
+    crate::terminal_text::terminal_grapheme_cells(&text.chars().collect::<Vec<_>>())
 }
 
 fn is_bad_ligature_pair(left: char, right: char) -> bool {
@@ -604,6 +601,46 @@ mod tests {
             }
             command => panic!("expected trailing text command, got {command:?}"),
         }
+    }
+
+    #[test]
+    fn text_command_rect_spans_the_full_run_across_a_vs16_emoji() {
+        // Regression: push_text_fragment tracked its running cell position with
+        // terminal_char_width per character, which measures a VS16 (U+FE0F) as 0 cells instead
+        // of the 1 extra cell its cluster needs (base 1 + FE0F's implied +1 = 2). That undercounted
+        // the run by one cell, so the text command's rect was squeezed to 3 cells' worth of width
+        // instead of 4 — visually compressing everything after the "(" and shifting the emoji and
+        // the closing paren left of where the grid actually placed them.
+        let plan = TerminalPaintPlan {
+            surface: SurfaceRect::from_min_size(0.0, 0.0, 100.0, 20.0),
+            default_background: color(0),
+            backgrounds: Vec::new(),
+            text_runs: vec![TextRun {
+                rect: SurfaceRect::from_min_size(0.0, 0.0, 40.0, 10.0),
+                cells: 4,
+                text: "(\u{26A0}\u{FE0F})".to_owned(),
+                attrs: attrs(),
+            }],
+            decorations: Vec::new(),
+            cursor: None,
+        };
+
+        let frame = TerminalRenderFrame::from_plan(&plan, &text_contract());
+        let command = frame
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                TerminalRenderCommand::Text(command) => Some(command),
+                _ => None,
+            })
+            .expect("run produced a text command");
+
+        assert_eq!(command.text, "(\u{26A0}\u{FE0F})");
+        assert_eq!(
+            command.rect,
+            SurfaceRect::from_min_size(0.0, 0.0, 40.0, 10.0),
+            "command rect must span all 4 cells (1 + 2 + 1), not undercount the VS16 emoji",
+        );
     }
 
     #[test]

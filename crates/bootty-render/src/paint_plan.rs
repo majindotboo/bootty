@@ -2,7 +2,6 @@ use libghostty_vt::{
     render::CursorVisualStyle,
     style::{RgbColor, Underline},
 };
-use unicode_width::UnicodeWidthChar;
 
 use crate::{
     geometry::{SurfaceRect, TerminalSurface},
@@ -602,16 +601,7 @@ fn paint_attrs(
 }
 
 fn cell_text_width(text: &[char]) -> u16 {
-    match text {
-        [] => 1,
-        [ch] if ch.is_ascii() => 1,
-        [ch] => UnicodeWidthChar::width(*ch).unwrap_or(0).max(1) as u16,
-        _ => text
-            .iter()
-            .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0) as u16)
-            .sum::<u16>()
-            .max(1),
-    }
+    crate::terminal_text::terminal_grapheme_cells(text)
 }
 
 #[cfg(test)]
@@ -1327,7 +1317,7 @@ mod tests {
                 let width: u16 = run
                     .text
                     .chars()
-                    .map(|ch| (UnicodeWidthChar::width(ch).unwrap_or(0) as u16).max(1))
+                    .map(|ch| crate::terminal_text::terminal_char_width(ch).max(1))
                     .sum();
                 prop_assert_eq!(run.cells, width, "{}", run.text);
             }

@@ -5,7 +5,9 @@
 return {
 	interval = 0.2,
 	render = function()
-		local accent = bootty.theme.accent
+		-- Tint the active window tab with the focused session's color so the status bar matches the
+		-- sidebar; falls back to the theme accent when no session color is available.
+		local accent = bootty.session_color() or bootty.theme.accent
 		local windows = bootty.windows()
 		local items = {}
 		local radius = 6

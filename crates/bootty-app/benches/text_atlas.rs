@@ -8,7 +8,7 @@ use bootty_app::{
         CodepointPresentation, FontFeature, FontResolver, FontStyle, TerminalCodepointResolver,
         TerminalTextConfig,
     },
-    terminal_text_atlas::{TerminalTextShaper, TextAtlasBuilder},
+    terminal_text_atlas::{GlyphAtlas, TerminalTextShaper, TextAtlasBuilder},
 };
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use libghostty_vt::style::Underline;
@@ -244,6 +244,49 @@ fn bench_text_atlas(c: &mut Criterion) {
     });
 }
 
+fn bench_glyph_atlas_reserve(c: &mut Criterion) {
+    // Guards the render-thread freeze: once the atlas saturated, the old fallback scanned every
+    // pixel — O(width * height * allocations) — for each glyph that no longer fit, so a full
+    // atlas spent seconds per frame here (see the zoom freeze sample). The atlas is filled to
+    // saturation in setup (excluded from the measurement); the measured loop then reserves in the
+    // saturated state, which the fix answers in O(1) via the saturation memo. A regression back to
+    // the per-pixel scan turns these microseconds into milliseconds — a stark dashboard spike.
+    c.bench_function("glyph_atlas_reserve_saturated", |b| {
+        b.iter_batched(
+            || {
+                let mut atlas = GlyphAtlas::new(256, 256);
+                while atlas.reserve(12, 12).is_some() {}
+                atlas
+            },
+            |mut atlas| {
+                let mut misses = 0_u32;
+                for _ in 0..256 {
+                    if atlas.reserve(black_box(12), black_box(12)).is_none() {
+                        misses += 1;
+                    }
+                }
+                black_box(misses)
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    // The gap-reclaiming first-fit: against an atlas already holding many allocations, a small
+    // glyph still fits a gap the shelf packer skipped. The fix visits only allocation-edge
+    // candidates; the old scan walked the whole surface to reach the same slot.
+    c.bench_function("glyph_atlas_reserve_gap_fill", |b| {
+        b.iter_batched(
+            || {
+                let mut atlas = GlyphAtlas::new(256, 256);
+                while atlas.reserve(12, 20).is_some() {}
+                atlas
+            },
+            |mut atlas| black_box(atlas.reserve(black_box(4), black_box(4))),
+            BatchSize::LargeInput,
+        )
+    });
+}
+
 criterion_group!(
 name = benches;
 config = Criterion::default().noise_threshold(0.15);
@@ -251,6 +294,7 @@ targets =
     bench_text_shaping,
     bench_ligature_modes,
     bench_font_resolution,
-    bench_text_atlas
+    bench_text_atlas,
+    bench_glyph_atlas_reserve
 );
 criterion_main!(benches);

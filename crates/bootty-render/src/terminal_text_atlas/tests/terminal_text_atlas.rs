@@ -481,6 +481,34 @@ fn coretext_symbol_rasterizer_produces_arrow_mask() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn monospace_generic_resolves_to_a_monospaced_face() {
+    // The CoreText fallback must not pass the generic "monospace" to CTFontCreateWithName, which
+    // resolves it to Helvetica (proportional) and shadows the cascade. It should land on a real
+    // fixed-pitch face from the shared font database.
+    let resolved = coretext::coretext_family_name("monospace");
+    assert_ne!(
+        resolved.as_ref(),
+        "monospace",
+        "generic leaked through unresolved"
+    );
+
+    let database = crate::font_database::system_font_database();
+    let face = database
+        .faces()
+        .find(|face| {
+            face.families
+                .iter()
+                .any(|(name, _)| name == resolved.as_ref())
+        })
+        .expect("resolved monospace family is present in the font database");
+    assert!(
+        face.monospaced,
+        "monospace generic resolved to a non-monospaced face: {resolved}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn coretext_fallback_matches_ghostty_for_maple_arrow_symbol() {
     let names = coretext::fallback_names("Maple Mono", '\u{21e1}', 23.5)
         .expect("CoreText fallback resolves");
@@ -712,6 +740,126 @@ fn terminal_graphics_symbols_stay_one_cell_wide() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn emoji_presentation_cluster_renders_in_color_even_with_a_primary_glyph() {
+    // Regression: when the primary font carries a monochrome glyph for an emoji's base symbol,
+    // the by-glyph path used to consume the cluster and draw a theme-tinted text glyph instead of
+    // the color emoji the VS16 selector requests. The color path must win on an Rgba atlas.
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    // Any valid primary-font glyph stands in for a font that happens to have a ⚠ glyph; the point
+    // is that the cluster carries glyphs yet must still take the color path because of the FE0F.
+    let glyph_id = library
+        .font_for_face(&face)
+        .expect("Maple Mono loads")
+        .glyph_id('A');
+
+    let mut cluster = shaped_cluster("\u{26A0}\u{FE0F}", 1);
+    cluster.glyphs.push(ShapedGlyph {
+        glyph_id: glyph_id.0,
+        cluster: 0,
+        x_offset: 0.0,
+        y_offset: 0.0,
+    });
+
+    let rasterized = library.rasterize_cluster(RasterizeClusterRequest {
+        face: &face,
+        cluster: &cluster,
+        font_size: 16.0,
+        pixels_per_point: 2.0,
+        constraint_cells: 1,
+        tile: (24, 40),
+        format: GlyphAtlasFormat::Rgba,
+    });
+
+    assert!(
+        rasterized.color,
+        "emoji-presentation cluster must take the color path, not the monochrome glyph path"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn color_emoji_quad_sized_to_em_in_narrow_cells() {
+    // Regression: with a narrow cell, two cells are far thinner than the line, so sizing the emoji
+    // to its grid-cell width rendered it tiny; sizing it to the full padded cell height overshot
+    // and overlapped neighbors. The quad must be a square at the text em (font size), centered over
+    // its grid span — matching the visual weight of surrounding glyphs the way Ghostty draws it.
+    let mut builder = TextAtlasBuilder::new_rgba(512, 512);
+    builder.fonts = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let (cw, ch) = (7.0_f32, 23.0_f32); // narrow real-world aspect (cell far taller than wide)
+    let mut command = text_command("\u{26A0}\u{FE0F}");
+    let em = command.font_size;
+    command.rect = SurfaceRect::from_min_size(0.0, 0.0, 2.0 * cw, ch);
+
+    let mut quads = Vec::new();
+    builder.prepare_text_command_into(&command, 1.0, &mut quads);
+
+    let emoji = quads.first().expect("emoji produced a quad");
+    assert!(
+        (emoji.rect.width() - emoji.rect.height()).abs() < 0.5,
+        "emoji quad should be square: {}x{}",
+        emoji.rect.width(),
+        emoji.rect.height()
+    );
+    assert!(
+        (emoji.rect.height() - em).abs() < 0.5,
+        "emoji quad side {} should be the text em {em}",
+        emoji.rect.height()
+    );
+    // Between the two failure modes: bigger than the thin 2-cell width, smaller than the padded cell.
+    assert!(emoji.rect.width() > 2.0 * cw && emoji.rect.height() < ch);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn color_emoji_fills_its_cell_without_clipping() {
+    // Regressions: the color path drew the emoji at its natural font size and center-blitted it,
+    // so Apple Color Emoji (smaller than the cell) rendered tiny, and oversized glyphs clipped at
+    // the tile edge. It must now scale to fill the cell box, centered, with no edge clipping.
+    let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
+    let face = regular_face("Maple Mono", &[]);
+    let (w, h) = (48u32, 40u32);
+    let cluster = shaped_cluster("\u{26A0}\u{FE0F}", 2);
+
+    let rasterized = library.rasterize_cluster(RasterizeClusterRequest {
+        face: &face,
+        cluster: &cluster,
+        font_size: 16.0,
+        pixels_per_point: 2.0,
+        constraint_cells: 2,
+        tile: (w, h),
+        format: GlyphAtlasFormat::Rgba,
+    });
+    assert!(rasterized.color, "renders via the color path");
+
+    let alpha_at = |x: u32, y: u32| rasterized.pixels[((y * w + x) * 4 + 3) as usize];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    for y in 0..h {
+        for x in 0..w {
+            if alpha_at(x, y) > 16 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    assert!(max_y >= min_y, "emoji produced ink");
+    // Not clipped: ink stays off every edge (the fit leaves a margin).
+    assert!(
+        min_x > 0 && min_y > 0 && max_x < w - 1 && max_y < h - 1,
+        "emoji ink touches a tile edge (clipped): x[{min_x}..{max_x}] y[{min_y}..{max_y}] in {w}x{h}"
+    );
+    // Not tiny: fills most of the cell height (the limiting dimension for a square glyph).
+    assert!(
+        max_y - min_y + 1 >= h / 2,
+        "emoji ink is too small: {} tall in {h}",
+        max_y - min_y + 1
+    );
+}
+
 #[test]
 fn glyph_id_cluster_rasterizes_the_same_ink_as_its_character() {
     let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
@@ -839,6 +987,27 @@ fn shaped_run_cache_reuses_shaping_for_moved_text_without_changing_output() {
 }
 
 #[test]
+fn color_emoji_constraint_is_independent_of_following_character() {
+    // The bug: a VS16 emoji (one grid cell) was widened to two cells when alone or before a
+    // space by the lone-symbol heuristic, so its rendered size flipped with whatever followed
+    // it and the glyph spilled into the next column, eating a following space.
+    let emoji = shaped_cluster("\u{26A0}\u{FE0F}", 1);
+    let space = shaped_cluster(" ", 1);
+    let period = shaped_cluster(".", 1);
+    assert_eq!(cluster_constraint_cells(None, &emoji, None), 1, "alone");
+    assert_eq!(
+        cluster_constraint_cells(None, &emoji, Some(&space)),
+        1,
+        "before a space"
+    );
+    assert_eq!(
+        cluster_constraint_cells(None, &emoji, Some(&period)),
+        1,
+        "before a period"
+    );
+}
+
+#[test]
 fn configured_variants_and_style_sets_shape_feature_heavy_samples() {
     let mut library = bootty_font_library(&["MapleMono-wght.ttf"]);
     let face = regular_face("Maple Mono", &[]);
@@ -879,4 +1048,23 @@ fn configured_variants_and_style_sets_shape_feature_heavy_samples() {
     }
 
     assert_eq!(shaped_samples, 5);
+}
+
+#[test]
+fn fit_constrained_symbols_route_to_the_constraint_path() {
+    // A glyph that fit-scales to the cell must also be routed to the per-character path; the
+    // direct glyph-id path skips the fit and draw_outline_glyph clips the overflow. Geometric
+    // Shapes circles (U+25A0..U+25FF) regressed exactly this way — they gained a Fit constraint
+    // while the routing gate still stopped at U+259F, so they clipped on the right edge.
+    for cp in [0x25A0u32, 0x25CB, 0x25CF, 0x25D0, 0x25EF, 0x25FF] {
+        let ch = char::from_u32(cp).unwrap();
+        assert!(
+            terminal_glyph_constraint(cp).does_anything(),
+            "U+{cp:04X} should carry a fit constraint",
+        );
+        assert!(
+            is_symbol_like(ch),
+            "U+{cp:04X} must take the constraint path, not the direct glyph-id path",
+        );
+    }
 }
