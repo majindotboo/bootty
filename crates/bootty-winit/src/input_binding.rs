@@ -371,6 +371,7 @@ pub enum BindingAction {
     SplitDown,
     SelectPane(PaneDirection),
     NextPane,
+    PreviousPane,
     KillPane,
     TogglePaneZoom,
     NextSession,
@@ -645,6 +646,7 @@ impl BindingAction {
             Self::SplitDown => "split_down".to_owned(),
             Self::SelectPane(value) => format!("select_pane:{}", value.as_str()),
             Self::NextPane => "next_pane".to_owned(),
+            Self::PreviousPane => "previous_pane".to_owned(),
             Self::KillPane => "kill_pane".to_owned(),
             Self::TogglePaneZoom => "toggle_pane_zoom".to_owned(),
             Self::NextSession => "next_session".to_owned(),
@@ -900,6 +902,7 @@ pub fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
             Ok(BindingAction::SelectPane(PaneDirection::parse(value)?))
         }),
         "next_pane" => parse_unit(value, BindingAction::NextPane),
+        "previous_pane" => parse_unit(value, BindingAction::PreviousPane),
         "kill_pane" => parse_unit(value, BindingAction::KillPane),
         "toggle_pane_zoom" => parse_unit(value, BindingAction::TogglePaneZoom),
         "next_session" => parse_unit(value, BindingAction::NextSession),

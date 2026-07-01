@@ -256,6 +256,8 @@ pub struct SettingsSurface {
     keybind_loaded_scope: Option<keybinds::KeybindScope>,
     /// In-progress chord capture, if any.
     keybind_capture: Option<keybinds::ChordCapture>,
+    /// Whether the preset-prefix recorder is capturing (single combo, commits on first step).
+    prefix_capture: bool,
     /// Editable modifier-remap rows (`from`, `to`); loaded lazily so incomplete rows persist.
     modifier_rows: Option<Vec<(String, String)>>,
     /// Binding-trigger chords captured this frame from the host's direct input path, fed in by the
@@ -290,6 +292,7 @@ impl SettingsSurface {
             keybind_clear: false,
             keybind_loaded_scope: None,
             keybind_capture: None,
+            prefix_capture: false,
             modifier_rows: None,
             recorder_chords: Vec::new(),
             last_write_error: None,
@@ -903,6 +906,15 @@ impl SettingsSurface {
         self.write(move |document| {
             document.set_item(&["chrome", "status-segment"], toml_edit::value(array))
         });
+    }
+}
+
+/// Re-resolve `win.config` from the config file so read paths (resolved shortcuts, effective
+/// prefix, theme previews) reflect what was just written.
+fn reload_settings_config(win: &mut SettingsWindow) {
+    match crate::config::load_config_from_path(&win.config_path) {
+        Ok(config) => win.config = config,
+        Err(error) => win.last_write_error = Some(error.to_string()),
     }
 }
 

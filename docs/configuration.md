@@ -79,6 +79,8 @@ backend = "rmux"
 # rmux-sdk. tmux and zellij attach through their backend UI.
 
 [input]
+preset = "ghostty" # ghostty (default), bootty, or tmux — which built-in default keybind set to use
+prefix = "ctrl+space" # leader for prefixed chords (bootty/tmux presets); defaults to ctrl+space / ctrl+b
 keybind = ["cmd+shift+,=reload_config"]
 sidebar-keybind = ["Enter=activate_session", "j=next_session", "k=previous_session"]
 hide-mouse-pointer-while-typing = true

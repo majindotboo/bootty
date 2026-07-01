@@ -58,6 +58,7 @@ pub enum MuxKeyAction {
     SplitPane(crate::layout::SplitDirection),
     SelectPane(MuxDirection),
     NextPane,
+    PreviousPane,
     KillPane,
     ClosePane,
     TogglePaneZoom,
@@ -395,6 +396,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             mux_direction(direction),
         ))),
         BindingAction::NextPane => Ok(KeybindAction::Mux(MuxKeyAction::NextPane)),
+        BindingAction::PreviousPane => Ok(KeybindAction::Mux(MuxKeyAction::PreviousPane)),
         BindingAction::KillPane => Ok(KeybindAction::Mux(MuxKeyAction::KillPane)),
         BindingAction::TogglePaneZoom => Ok(KeybindAction::Mux(MuxKeyAction::TogglePaneZoom)),
         BindingAction::NextSession => Ok(KeybindAction::Mux(MuxKeyAction::NextSession)),
@@ -635,6 +637,8 @@ fn binding_char_for_egui_key(key: egui::Key) -> Option<char> {
         egui::Key::Plus | egui::Key::Equals => '=',
         egui::Key::Backslash => '\\',
         egui::Key::Backtick => '`',
+        egui::Key::OpenBracket | egui::Key::OpenCurlyBracket => '[',
+        egui::Key::CloseBracket | egui::Key::CloseCurlyBracket => ']',
         egui::Key::Space => ' ',
         _ => return None,
     })
@@ -665,8 +669,10 @@ mod tests {
 
     #[test]
     fn app_keybindings_route_default_app_shortcuts() {
+        // Defaults are the Ghostty preset: reload on cmd/ctrl+shift+, and the command palette on
+        // cmd/ctrl+shift+p.
         let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
-        let reload_modifiers = if cfg!(target_os = "macos") {
+        let shifted_primary = if cfg!(target_os = "macos") {
             egui::Modifiers {
                 shift: true,
                 command: true,
@@ -679,44 +685,66 @@ mod tests {
                 ..Default::default()
             }
         };
-        let palette_modifiers = if cfg!(target_os = "macos") {
-            egui::Modifiers {
-                command: true,
-                ..Default::default()
-            }
-        } else {
-            egui::Modifiers {
-                ctrl: true,
-                shift: true,
-                ..Default::default()
-            }
-        };
-        let picker_modifiers = if cfg!(target_os = "macos") {
-            egui::Modifiers {
-                command: true,
-                shift: true,
-                ..Default::default()
-            }
-        } else {
-            egui::Modifiers {
-                ctrl: true,
-                shift: true,
-                alt: true,
-                ..Default::default()
-            }
-        };
-
-        let action = action_for_key(&mut bindings, egui::Key::R, reload_modifiers);
-
-        assert_eq!(action, Some(KeybindAction::App(AppAction::ReloadConfig)));
 
         assert_eq!(
-            action_for_key(&mut bindings, egui::Key::P, palette_modifiers),
-            Some(KeybindAction::App(AppAction::CommandPalette))
+            action_for_key(&mut bindings, egui::Key::Comma, shifted_primary),
+            Some(KeybindAction::App(AppAction::ReloadConfig))
         );
         assert_eq!(
-            action_for_key(&mut bindings, egui::Key::O, picker_modifiers),
+            action_for_key(&mut bindings, egui::Key::P, shifted_primary),
+            Some(KeybindAction::App(AppAction::CommandPalette))
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            action_for_key(
+                &mut bindings,
+                egui::Key::P,
+                egui::Modifiers {
+                    command: true,
+                    ..Default::default()
+                }
+            ),
             Some(KeybindAction::App(AppAction::SessionPicker))
+        );
+    }
+
+    // Bracket keys have no `unshifted` char in egui's Key enum by name; a regression here makes
+    // every default `[`/`]` binding (cmd+shift+[ previous_tab, cmd+] next_pane, …) dead keys.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bracket_shortcuts_route_through_egui_key_path() {
+        let config = crate::config::BoottyConfig::default();
+        let mut bindings = AppKeyBindings::from_keybinds(
+            &config
+                .input
+                .keybinds_for_backend(crate::config::MultiplexerBackendConfig::Native),
+        )
+        .unwrap();
+        let cmd_shift = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            action_for_key(&mut bindings, egui::Key::OpenBracket, cmd_shift),
+            Some(KeybindAction::Mux(MuxKeyAction::PreviousTab))
+        );
+        assert_eq!(
+            action_for_key(&mut bindings, egui::Key::CloseBracket, cmd_shift),
+            Some(KeybindAction::Mux(MuxKeyAction::NextTab))
+        );
+        let cmd = egui::Modifiers {
+            command: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            action_for_key(&mut bindings, egui::Key::OpenBracket, cmd),
+            Some(KeybindAction::Mux(MuxKeyAction::PreviousPane))
+        );
+        assert_eq!(
+            action_for_key(&mut bindings, egui::Key::CloseBracket, cmd),
+            Some(KeybindAction::Mux(MuxKeyAction::NextPane))
         );
     }
 

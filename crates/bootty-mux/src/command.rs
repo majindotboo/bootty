@@ -57,6 +57,9 @@ pub enum MuxCommand {
     SelectNextPane {
         session_id: String,
     },
+    SelectPreviousPane {
+        session_id: String,
+    },
     KillPane {
         session_id: String,
         /// The pane to remove. `None` targets the window's active pane.

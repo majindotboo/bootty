@@ -115,6 +115,7 @@ fn command_session_id(command: &MuxCommand) -> &str {
         | MuxCommand::SplitPane { session_id, .. }
         | MuxCommand::SelectPane { session_id, .. }
         | MuxCommand::SelectNextPane { session_id }
+        | MuxCommand::SelectPreviousPane { session_id }
         | MuxCommand::KillPane { session_id, .. }
         | MuxCommand::ClosePane { session_id, .. }
         | MuxCommand::TogglePaneZoom { session_id }

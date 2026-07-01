@@ -357,9 +357,52 @@ pub struct InputConfig {
     pub modifier_remap: Vec<String>,
     pub macos_option_as_alt: MacosOptionAsAltConfig,
     pub hide_mouse_pointer_while_typing: bool,
+    pub preset: KeybindPreset,
+    /// Leader trigger for the active preset's prefixed chords. `None` uses the preset's own
+    /// default; ignored by presets without a prefix concept (Ghostty).
+    pub prefix: Option<String>,
     pub keybind: Vec<String>,
     pub sidebar_keybind: Vec<String>,
     pub backend_keybinds: BackendKeybindConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeybindPreset {
+    // Ghostty is the default: direct combos with no leader concept, the friendliest starting
+    // point for new users.
+    #[default]
+    Ghostty,
+    Bootty,
+    Tmux,
+}
+
+impl KeybindPreset {
+    pub const ALL: [Self; 3] = [Self::Ghostty, Self::Bootty, Self::Tmux];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bootty => "bootty",
+            Self::Ghostty => "ghostty",
+            Self::Tmux => "tmux",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bootty => "Bootty",
+            Self::Ghostty => "Ghostty",
+            Self::Tmux => "Tmux",
+        }
+    }
+
+    pub fn default_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Bootty => Some("ctrl+space"),
+            Self::Ghostty => None,
+            Self::Tmux => Some("ctrl+b"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -399,6 +442,8 @@ struct InputPatch {
     modifier_remap: Option<Vec<String>>,
     macos_option_as_alt: Option<MacosOptionAsAltConfig>,
     hide_mouse_pointer_while_typing: Option<bool>,
+    preset: Option<KeybindPreset>,
+    prefix: Option<String>,
     keybind: Option<Vec<String>>,
     sidebar_keybind: Option<Vec<String>>,
     backend_keybind: Option<BackendKeybindPatch>,
@@ -480,7 +525,7 @@ pub struct ResolvedTheme {
     pub colors: ColorConfig,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct ColorPatch {
     background: Option<Color>,
@@ -877,6 +922,31 @@ impl InputConfig {
         keybinds.extend(backend_keybinds.iter().cloned());
         resolve_macos_option_alt_keybinds(keybinds, self.macos_option_as_alt)
     }
+
+    /// The leader trigger prefixed chords are recorded and built with; `None` when the active
+    /// preset has no prefix concept.
+    pub fn effective_prefix(&self) -> Option<String> {
+        let default = self.preset.default_prefix()?;
+        Some(
+            self.prefix
+                .as_deref()
+                .filter(|prefix| !prefix.is_empty())
+                .unwrap_or(default)
+                .to_owned(),
+        )
+    }
+
+    fn reset_default_keybinds(&mut self) {
+        let prefix = self.effective_prefix();
+        self.keybind = preset_global_keybinds(self.preset);
+        self.sidebar_keybind = owned_keybinds(sidebar_keybinds());
+        self.backend_keybinds = BackendKeybindConfig {
+            native: preset_layout_keybinds(self.preset, prefix.as_deref()),
+            rmux: preset_layout_keybinds(self.preset, prefix.as_deref()),
+            tmux: preset_tmux_backend_keybinds(self.preset, prefix.as_deref()),
+            zellij: Vec::new(),
+        };
+    }
 }
 
 fn resolve_macos_option_alt_keybinds(
@@ -1133,32 +1203,93 @@ fn sidebar_keybinds() -> &'static [&'static str] {
     ]
 }
 
-fn native_keybinds() -> &'static [&'static str] {
-    &[
-        "ctrl+space>c=new_tab",
-        "ctrl+space>v=split_right",
-        "ctrl+space>-=split_down",
-        "ctrl+space>h=select_pane:left",
-        "ctrl+space>j=select_pane:down",
-        "ctrl+space>k=select_pane:up",
-        "ctrl+space>l=select_pane:right",
-        "ctrl+space>s=new_mux_session",
-        "ctrl+space>x=ditch_session",
-        "ctrl+space>shift+x=ditch_session",
-        "ctrl+space>r=rename_session",
-        "ctrl+space>?=show_keybinds",
-        "ctrl+space>1=select_session:1",
-        "ctrl+space>2=select_session:2",
-        "ctrl+space>3=select_session:3",
-        "ctrl+space>4=select_session:4",
-        "ctrl+space>5=select_session:5",
-        "ctrl+space>6=select_session:6",
-        "ctrl+space>7=select_session:7",
-        "ctrl+space>8=select_session:8",
-        "ctrl+space>9=select_session:9",
-        "ctrl+space>shift+,=move_tab:-1",
-        "ctrl+space>shift+.=move_tab:1",
-    ]
+// Bootty's own prefixed chords; the leader is remappable (input.prefix), so the triggers are
+// built at load time rather than stored as static strings.
+const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
+    ("c", "new_tab"),
+    ("v", "split_right"),
+    ("-", "split_down"),
+    ("h", "select_pane:left"),
+    ("j", "select_pane:down"),
+    ("k", "select_pane:up"),
+    ("l", "select_pane:right"),
+    ("s", "new_mux_session"),
+    ("x", "ditch_session"),
+    ("shift+x", "ditch_session"),
+    ("r", "rename_session"),
+    ("?", "show_keybinds"),
+    ("1", "select_session:1"),
+    ("2", "select_session:2"),
+    ("3", "select_session:3"),
+    ("4", "select_session:4"),
+    ("5", "select_session:5"),
+    ("6", "select_session:6"),
+    ("7", "select_session:7"),
+    ("8", "select_session:8"),
+    ("9", "select_session:9"),
+    ("shift+,", "move_tab:-1"),
+    ("shift+.", "move_tab:1"),
+];
+
+// Real tmux 3.4 default key table (key-bindings.c) ported onto bootty's action vocabulary.
+// tmux window ≈ bootty tab; several rows are nearest-action ports rather than exact semantics:
+// `;` last-pane → next_pane, `(`/`)` switch-client → previous/next_session, `:` command-prompt
+// → command_palette, `/` describe-key → show_keybinds, `C` customize-mode → open_settings,
+// `]` paste-buffer → paste_from_clipboard, `w` choose-window → session_picker, `PPage`
+// copy-mode -u → scroll_page_up, `M-n`/`M-p` alerted-window nav → plain tab nav. tmux defaults
+// with no bootty equivalent at all are omitted: copy-mode entry ([), swap-pane ({ } C-o M-o),
+// layouts (Space, M-1..5, E), break-pane (!), detach/client chooser (d, D), display-panes (q),
+// clock (t), window info (i), marks (m, M), buffers (# - =), find-window (f), select-window 0
+// / by prompted index (0, '), move-window (. — tmux prompts for an absolute index while
+// bootty's move_tab is a relative delta), refresh/resize (r, S-/C-/M-arrows, DC), messages (~),
+// and suspend (C-z).
+const TMUX_PREFIX_KEYBINDS: &[(&str, &str)] = &[
+    ("%", "split_right"),
+    ("\"", "split_down"),
+    ("x", "kill_pane"),
+    ("z", "toggle_pane_zoom"),
+    (";", "next_pane"),
+    ("o", "next_pane"),
+    ("ArrowUp", "select_pane:up"),
+    ("ArrowDown", "select_pane:down"),
+    ("ArrowLeft", "select_pane:left"),
+    ("ArrowRight", "select_pane:right"),
+    ("c", "new_tab"),
+    ("&", "close_surface"),
+    ("n", "next_tab"),
+    ("p", "previous_tab"),
+    ("l", "last_tab"),
+    ("alt+n", "next_tab"),
+    ("alt+p", "previous_tab"),
+    (",", "rename_tab"),
+    ("1", "select_tab:1"),
+    ("2", "select_tab:2"),
+    ("3", "select_tab:3"),
+    ("4", "select_tab:4"),
+    ("5", "select_tab:5"),
+    ("6", "select_tab:6"),
+    ("7", "select_tab:7"),
+    ("8", "select_tab:8"),
+    ("9", "select_tab:9"),
+    ("$", "rename_session"),
+    ("s", "session_picker"),
+    ("w", "session_picker"),
+    (")", "next_session"),
+    ("(", "previous_session"),
+    ("shift+l", "last_session"),
+    (":", "command_palette"),
+    ("shift+c", "open_settings"),
+    ("]", "paste_from_clipboard"),
+    ("PageUp", "scroll_page_up"),
+    ("?", "show_keybinds"),
+    ("/", "show_keybinds"),
+];
+
+fn prefixed_keybinds(prefix: &str, entries: &[(&str, &str)]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|(key, action)| format!("{prefix}>{key}={action}"))
+        .collect()
 }
 
 // Tab and pane navigation, handled directly by bootty's mux layer on every backend (tmux included,
@@ -1222,6 +1353,155 @@ fn native_scroll_keybinds_other() -> &'static [&'static str] {
     ]
 }
 
+// Ghostty preset: Ghostty's upstream defaults with cmux's chrome layer on top (cmux vendors
+// Ghostty for terminal-level actions; where the two disagree the cmux layer wins). Direct combos
+// only — this preset has no prefix concept.
+fn ghostty_common_keybinds() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        ghostty_common_keybinds_macos()
+    } else {
+        ghostty_common_keybinds_other()
+    }
+}
+
+fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
+    &[
+        "cmd+shift+,=reload_config",
+        "cmd+,=open_settings",
+        "performable:cmd+c=copy_to_clipboard",
+        "performable:cmd+v=paste_from_clipboard",
+        "cmd+==increase_font_size:1",
+        "cmd++=increase_font_size:1",
+        "cmd+-=decrease_font_size:1",
+        "cmd+0=reset_font_size",
+        "cmd+shift+p=command_palette",
+        "cmd+p=session_picker",
+        "cmd+q=quit",
+        "ctrl+cmd+w=close_window",
+        "cmd+shift+w=ditch_session",
+        "cmd+w=close_surface",
+        "cmd+shift+n=new_window",
+        "ctrl+cmd+f=toggle_fullscreen",
+        "cmd+b=toggle_sidebar_visibility",
+        "cmd+shift+e=toggle_sidebar_focus",
+        "cmd+o=new_mux_session",
+        "cmd+Home=scroll_to_top",
+        "cmd+End=scroll_to_bottom",
+        "cmd+PageUp=scroll_page_up",
+        "cmd+PageDown=scroll_page_down",
+    ]
+}
+
+// Ghostty's Linux defaults; cmux is macOS-only, so its chrome actions (sessions, sidebar,
+// renames) stay unbound here and remain reachable through the command palette.
+fn ghostty_common_keybinds_other() -> &'static [&'static str] {
+    &[
+        "ctrl+shift+,=reload_config",
+        "ctrl+,=open_settings",
+        "performable:ctrl+shift+c=copy_to_clipboard",
+        "performable:ctrl+shift+v=paste_from_clipboard",
+        "performable:ctrl+Insert=copy_to_clipboard",
+        "performable:shift+Insert=paste_from_clipboard",
+        "ctrl+==increase_font_size:1",
+        "ctrl++=increase_font_size:1",
+        "ctrl+-=decrease_font_size:1",
+        "ctrl+0=reset_font_size",
+        "ctrl+shift+p=command_palette",
+        "ctrl+shift+q=quit",
+        "ctrl+shift+w=close_surface",
+        "ctrl+shift+n=new_window",
+        "ctrl+Enter=toggle_fullscreen",
+        "shift+Home=scroll_to_top",
+        "shift+End=scroll_to_bottom",
+        "shift+PageUp=scroll_page_up",
+        "shift+PageDown=scroll_page_down",
+    ]
+}
+
+fn ghostty_layout_keybinds() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        ghostty_layout_keybinds_macos()
+    } else {
+        ghostty_layout_keybinds_other()
+    }
+}
+
+// cmux's Cmd+1-9 = workspace (bootty session) wins over Ghostty's Cmd+1-8 = goto_tab; tab
+// selection follows cmux's select_surface on Ctrl+1-9. Cmd+[/] follow Ghostty's goto_split
+// previous/next.
+fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
+    &[
+        "cmd+n=new_mux_session",
+        "cmd+t=new_tab",
+        "cmd+alt+w=close_surface",
+        "cmd+d=split_right",
+        "cmd+shift+d=split_down",
+        "cmd+shift+Enter=toggle_pane_zoom",
+        "ctrl+Tab=next_tab",
+        "ctrl+shift+Tab=previous_tab",
+        "cmd+shift+]=next_tab",
+        "cmd+shift+[=previous_tab",
+        "cmd+]=next_pane",
+        "cmd+[=previous_pane",
+        "alt+cmd+ArrowLeft=select_pane:left",
+        "alt+cmd+ArrowRight=select_pane:right",
+        "alt+cmd+ArrowUp=select_pane:up",
+        "alt+cmd+ArrowDown=select_pane:down",
+        "ctrl+1=select_tab:1",
+        "ctrl+2=select_tab:2",
+        "ctrl+3=select_tab:3",
+        "ctrl+4=select_tab:4",
+        "ctrl+5=select_tab:5",
+        "ctrl+6=select_tab:6",
+        "ctrl+7=select_tab:7",
+        "ctrl+8=select_tab:8",
+        "ctrl+9=select_tab:9",
+        "cmd+1=select_session:1",
+        "cmd+2=select_session:2",
+        "cmd+3=select_session:3",
+        "cmd+4=select_session:4",
+        "cmd+5=select_session:5",
+        "cmd+6=select_session:6",
+        "cmd+7=select_session:7",
+        "cmd+8=select_session:8",
+        "cmd+9=select_session:9",
+        "ctrl+cmd+]=next_session",
+        "ctrl+cmd+[=previous_session",
+        "cmd+r=rename_tab",
+        "cmd+shift+r=rename_session",
+    ]
+}
+
+fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
+    &[
+        "ctrl+shift+t=new_tab",
+        "ctrl+shift+o=split_right",
+        "ctrl+shift+e=split_down",
+        "ctrl+shift+Enter=toggle_pane_zoom",
+        "ctrl+Tab=next_tab",
+        "ctrl+shift+Tab=previous_tab",
+        "ctrl+PageDown=next_tab",
+        "ctrl+PageUp=previous_tab",
+        "performable:ctrl+shift+ArrowLeft=previous_tab",
+        "performable:ctrl+shift+ArrowRight=next_tab",
+        "performable:ctrl+shift+PageUp=move_tab:-1",
+        "performable:ctrl+shift+PageDown=move_tab:1",
+        "alt+1=select_tab:1",
+        "alt+2=select_tab:2",
+        "alt+3=select_tab:3",
+        "alt+4=select_tab:4",
+        "alt+5=select_tab:5",
+        "alt+6=select_tab:6",
+        "alt+7=select_tab:7",
+        "alt+8=select_tab:8",
+        "alt+9=last_tab",
+        "ctrl+alt+ArrowLeft=select_pane:left",
+        "ctrl+alt+ArrowRight=select_pane:right",
+        "ctrl+alt+ArrowUp=select_pane:up",
+        "ctrl+alt+ArrowDown=select_pane:down",
+    ]
+}
+
 fn tmux_keybinds() -> &'static [&'static str] {
     &[
         "cmd+;=csi:61~",
@@ -1255,39 +1535,97 @@ fn tmux_keybinds() -> &'static [&'static str] {
         "alt+shift+c=esc:C",
         "ctrl+alt+]=text:\\x1b\\x1d",
         "alt+r=esc:R",
-        "ctrl+space=text:\\x00",
     ]
+}
+
+/// The raw control byte a `ctrl+space`/`ctrl+letter` prefix produces in a terminal; `None` for
+/// prefixes outside that family.
+fn prefix_control_byte(prefix: &str) -> Option<u8> {
+    let key = prefix.strip_prefix("ctrl+")?;
+    if key == "space" {
+        return Some(0);
+    }
+    let [letter] = key.as_bytes() else {
+        return None;
+    };
+    letter.is_ascii_lowercase().then(|| letter - b'a' + 1)
+}
+
+// The external tmux must receive its prefix as the raw control byte even when bootty's own
+// direct-input path wouldn't encode it (ctrl+space -> NUL). Prefixes outside the ctrl+key
+// family already reach the terminal unmodified, so no passthrough entry is needed for them.
+fn prefix_passthrough_keybind(prefix: &str) -> Option<String> {
+    let byte = prefix_control_byte(prefix)?;
+    Some(format!("{prefix}=text:\\x{byte:02x}"))
+}
+
+// tmux's `send-prefix` (prefix pressed twice): deliver the literal prefix byte to the terminal.
+fn send_prefix_keybind(prefix: &str) -> Option<String> {
+    let byte = prefix_control_byte(prefix)?;
+    Some(format!("{prefix}>{prefix}=text:\\x{byte:02x}"))
 }
 
 fn owned_keybinds(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|entry| (*entry).to_owned()).collect()
 }
 
-fn native_layout_keybinds() -> Vec<String> {
-    let mut keybinds = owned_keybinds(native_keybinds());
+fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
+    match preset {
+        // Tmux reuses Bootty's chrome — tmux itself has no opinion outside its prefix table.
+        KeybindPreset::Bootty | KeybindPreset::Tmux => {
+            let mut keybinds = owned_keybinds(common_keybinds());
+            keybinds.extend(owned_keybinds(navigation_keybinds()));
+            keybinds
+        }
+        KeybindPreset::Ghostty => owned_keybinds(ghostty_common_keybinds()),
+    }
+}
+
+fn preset_layout_keybinds(preset: KeybindPreset, prefix: Option<&str>) -> Vec<String> {
+    let table = match preset {
+        KeybindPreset::Ghostty => return owned_keybinds(ghostty_layout_keybinds()),
+        KeybindPreset::Bootty => BOOTTY_PREFIX_KEYBINDS,
+        KeybindPreset::Tmux => TMUX_PREFIX_KEYBINDS,
+    };
+    // effective_prefix is always Some for prefixed presets; the fallback keeps this total.
+    let prefix = prefix
+        .or(preset.default_prefix())
+        .expect("prefixed presets define a default prefix");
+    let mut keybinds = prefixed_keybinds(prefix, table);
+    if preset == KeybindPreset::Tmux {
+        keybinds.extend(send_prefix_keybind(prefix));
+    }
     keybinds.extend(owned_keybinds(native_scroll_keybinds()));
     keybinds
 }
 
+fn preset_tmux_backend_keybinds(preset: KeybindPreset, prefix: Option<&str>) -> Vec<String> {
+    match preset {
+        KeybindPreset::Bootty => {
+            let mut keybinds = owned_keybinds(tmux_keybinds());
+            keybinds.extend(prefix.and_then(prefix_passthrough_keybind));
+            keybinds
+        }
+        // No relay layer. For the Tmux preset the emptiness is load-bearing: an unbound prefix
+        // passes through as raw input, so the external tmux handles its own prefix natively.
+        KeybindPreset::Ghostty | KeybindPreset::Tmux => Vec::new(),
+    }
+}
+
 impl Default for InputConfig {
     fn default() -> Self {
-        Self {
+        let mut input = Self {
             modifier_remap: Vec::new(),
             macos_option_as_alt: MacosOptionAsAltConfig::default(),
             hide_mouse_pointer_while_typing: true,
-            keybind: {
-                let mut keybind = owned_keybinds(common_keybinds());
-                keybind.extend(owned_keybinds(navigation_keybinds()));
-                keybind
-            },
-            sidebar_keybind: owned_keybinds(sidebar_keybinds()),
-            backend_keybinds: BackendKeybindConfig {
-                native: native_layout_keybinds(),
-                rmux: native_layout_keybinds(),
-                tmux: owned_keybinds(tmux_keybinds()),
-                zellij: Vec::new(),
-            },
-        }
+            preset: KeybindPreset::default(),
+            prefix: None,
+            keybind: Vec::new(),
+            sidebar_keybind: Vec::new(),
+            backend_keybinds: BackendKeybindConfig::default(),
+        };
+        input.reset_default_keybinds();
+        input
     }
 }
 
@@ -1840,17 +2178,20 @@ impl ConfigResolver<'_> {
             ..BoottyConfig::default()
         };
         apply_value(&mut config.version, raw.version);
+        // Legacy top-level `theme`/`[colors]` seed both appearance branches, but only when the
+        // config actually sets them — `config.theme` defaults to the dark theme, and treating
+        // that default as legacy would overwrite the light branch's own default.
+        let has_legacy_appearance = raw.theme.is_some() || raw.colors != ColorPatch::default();
         if let Some(theme) = &raw.theme {
             config.theme = Some(theme.clone());
             config.colors = resolve_theme_colors(theme, self.config_dir)?;
         }
         apply_partial_colors(&mut config.colors, raw.colors);
-        config.appearance = resolve_appearance(
-            raw.appearance,
-            config.theme.clone(),
-            config.colors.clone(),
-            self.config_dir,
-        )?;
+        let legacy_branch = has_legacy_appearance.then(|| AppearanceBranchConfig {
+            theme: config.theme.clone(),
+            colors: config.colors.clone(),
+        });
+        config.appearance = resolve_appearance(raw.appearance, legacy_branch, self.config_dir)?;
         config.theme = config.appearance.dark.theme.clone();
         config.colors = config.appearance.dark.colors.clone();
         apply_partial_cursor(&mut config.cursor, raw.cursor);
@@ -1973,6 +2314,11 @@ fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
         &mut input.hide_mouse_pointer_while_typing,
         partial.hide_mouse_pointer_while_typing,
     );
+    apply_value(&mut input.preset, partial.preset);
+    apply_present(&mut input.prefix, partial.prefix);
+    // Preset and prefix select which built-in default arrays the user's keybind rows layer
+    // onto, so the defaults must be rebuilt before the merges below.
+    input.reset_default_keybinds();
     if let Some(value) = partial.keybind {
         input.keybind = merge_keybind_entries(&input.keybind, value);
     }
@@ -2081,28 +2427,14 @@ fn apply_partial_cursor(cursor: &mut CursorConfig, partial: CursorPatch) {
 
 fn resolve_appearance(
     partial: AppearancePatch,
-    legacy_theme: Option<String>,
-    legacy_colors: ColorConfig,
+    legacy_branch: Option<AppearanceBranchConfig>,
     config_dir: &Path,
 ) -> ConfigResult<AppearanceConfig> {
-    let has_legacy_appearance = legacy_theme.is_some() || legacy_colors != ColorConfig::default();
-    let legacy_branch = AppearanceBranchConfig {
-        theme: legacy_theme,
-        colors: legacy_colors,
-    };
     let default_appearance = AppearanceConfig::default();
     let mut appearance = AppearanceConfig {
         mode: AppearanceMode::System,
-        light: if has_legacy_appearance {
-            legacy_branch.clone()
-        } else {
-            default_appearance.light
-        },
-        dark: if has_legacy_appearance {
-            legacy_branch
-        } else {
-            default_appearance.dark
-        },
+        light: legacy_branch.clone().unwrap_or(default_appearance.light),
+        dark: legacy_branch.unwrap_or(default_appearance.dark),
     };
     apply_value(&mut appearance.mode, partial.mode);
     apply_appearance_branch(&mut appearance.light, partial.light, config_dir)?;
