@@ -3567,7 +3567,7 @@ mod tests {
         });
         assert_eq!(
             charging.last().and_then(|item| item.icon.as_deref()),
-            Some("battery-charging")
+            Some("plug")
         );
 
         let full = built_in_sysinfo_items(Metrics {

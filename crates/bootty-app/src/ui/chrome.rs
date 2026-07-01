@@ -1347,17 +1347,17 @@ fn draw_items(
         }
         let color = readable_color(text_background, item.fg.unwrap_or(palette.subtext));
         let mut text_x = x + STATUS_ITEM_PAD + item.pad_left;
-        if let Some(ratio) = item.gauge {
-            paint_battery_gauge(&painter, text_x, rect.center().y, ratio, color);
-            text_x += STATUS_GAUGE_WIDTH;
-        }
         if let Some(slug) = item_icon(item) {
-            if item.gauge.is_some() {
-                text_x += STATUS_ICON_GAP;
-            }
             let center = Pos2::new(text_x + STATUS_ICON_SIZE / 2.0, rect.center().y);
             paint_icon_slug(&painter, slug, center, STATUS_ICON_SIZE, color);
             text_x += STATUS_ICON_SIZE;
+        }
+        if let Some(ratio) = item.gauge {
+            if item_icon(item).is_some() {
+                text_x += STATUS_ICON_GAP;
+            }
+            paint_battery_gauge(&painter, text_x, rect.center().y, ratio, color);
+            text_x += STATUS_GAUGE_WIDTH;
         }
         if (item.gauge.is_some() || item_icon(item).is_some()) && !item.text.is_empty() {
             text_x += STATUS_ICON_GAP;

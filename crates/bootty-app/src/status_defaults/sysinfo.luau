@@ -55,7 +55,7 @@ return {
 			local low = (not m.on_ac) and m.battery <= 20
 			local battery_icon = nil
 			if m.on_ac then
-				battery_icon = if m.battery >= 99.5 then "battery-full" else "battery-charging"
+				battery_icon = if m.battery >= 99.5 then "battery-full" else "plug"
 			end
 			cell({
 				gauge = m.battery / 100,
