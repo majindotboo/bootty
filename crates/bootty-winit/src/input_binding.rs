@@ -94,11 +94,30 @@ impl BindingMods {
 
     fn input_candidates(value: KeyMods) -> Vec<Self> {
         let sided = Self::from_key_mods_with_sides(value);
-        let unsided = sided.without_side_constraints();
-        if sided == unsided {
-            vec![unsided]
-        } else {
-            vec![sided, unsided]
+        let mut candidates = vec![sided];
+        if sided.shift_side.is_some() {
+            Self::push_without_side(&mut candidates, |mods| mods.shift_side = None);
+        }
+        if sided.ctrl_side.is_some() {
+            Self::push_without_side(&mut candidates, |mods| mods.ctrl_side = None);
+        }
+        if sided.alt_side.is_some() {
+            Self::push_without_side(&mut candidates, |mods| mods.alt_side = None);
+        }
+        if sided.command_side.is_some() {
+            Self::push_without_side(&mut candidates, |mods| mods.command_side = None);
+        }
+        candidates
+    }
+
+    fn push_without_side(candidates: &mut Vec<Self>, clear_side: impl Fn(&mut Self)) {
+        let existing_count = candidates.len();
+        for index in 0..existing_count {
+            let mut candidate = candidates[index];
+            clear_side(&mut candidate);
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
         }
     }
 }

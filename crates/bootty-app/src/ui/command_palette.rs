@@ -201,6 +201,17 @@ mod tests {
     }
 
     #[test]
+    fn palette_includes_concrete_move_tab_commands() {
+        let commands: Vec<Command> = Command::all()
+            .filter(|command| command.palette_action().is_some())
+            .collect();
+
+        assert!(commands.contains(&Command::MoveTabLeft));
+        assert!(commands.contains(&Command::MoveTabRight));
+        assert!(!commands.contains(&Command::MoveTab));
+    }
+
+    #[test]
     fn filter_ranks_title_matches_before_description_matches() {
         let commands: Vec<Command> = Command::all()
             .filter(|command| command.palette_action().is_some())

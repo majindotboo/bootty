@@ -1236,6 +1236,113 @@ fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
     );
 }
 
+#[test]
+fn bootty_preset_tab_navigation_defaults_use_left_alt_shift() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "bootty"
+    "#});
+
+    assert!(
+        config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "left_alt+shift+n=next_tab")
+    );
+    assert!(
+        config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "left_alt+shift+p=previous_tab")
+    );
+    assert!(
+        !config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "alt+n=next_tab")
+    );
+    assert!(
+        !config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "alt+p=previous_tab")
+    );
+    assert!(
+        !config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "alt+shift+n=next_tab")
+    );
+    assert!(
+        !config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "alt+shift+p=previous_tab")
+    );
+}
+
+#[test]
+fn bootty_preset_move_tab_defaults_use_left_alt() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "bootty"
+    "#});
+
+    assert!(
+        config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "left_alt+shift+,=move_tab:-1")
+    );
+    assert!(
+        config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "left_alt+shift+.=move_tab:1")
+    );
+    assert!(
+        !config
+            .input
+            .keybind
+            .iter()
+            .any(|entry| entry == "alt+shift+,=move_tab:-1")
+    );
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    assert!(
+        !keybinds
+            .iter()
+            .any(|entry| entry == "right_alt+shift+,=move_tab:-1")
+    );
+}
+
+#[test]
+fn ghostty_preset_does_not_ship_move_tab_defaults() {
+    for table in [
+        ghostty_layout_keybinds_macos(),
+        ghostty_layout_keybinds_other(),
+    ] {
+        assert!(
+            table.iter().all(|entry| !entry.contains("move_tab")),
+            "Ghostty move-tab defaults should stay user-configured only"
+        );
+    }
+}
+
 // A remapped prefix must rebuild every prefixed chord and follow the external-tmux passthrough;
 // a regression leaves the old leader baked into the defaults.
 #[test]

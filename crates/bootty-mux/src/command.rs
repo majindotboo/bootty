@@ -42,6 +42,7 @@ pub enum MuxCommand {
     },
     MoveWindow {
         session_id: String,
+        window_id: Option<String>,
         delta: i32,
     },
     SplitPane {

@@ -940,6 +940,45 @@ mod tests {
     }
 
     #[test]
+    fn app_keybindings_match_partially_side_specific_modifier_chords() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "left_alt+shift+n=next_tab".to_owned(),
+            "right_alt+shift+n=previous_tab".to_owned(),
+        ])
+        .unwrap();
+
+        let left_action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::N,
+            mods: crate::terminal::KeyMods {
+                shift: true,
+                alt: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("N"),
+            unshifted: Some('n'),
+        });
+        let right_action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::N,
+            mods: crate::terminal::KeyMods {
+                shift: true,
+                alt: true,
+                right_alt: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("N"),
+            unshifted: Some('n'),
+        });
+
+        assert_eq!(left_action, Some(KeybindAction::Mux(MuxKeyAction::NextTab)));
+        assert_eq!(
+            right_action,
+            Some(KeybindAction::Mux(MuxKeyAction::PreviousTab))
+        );
+    }
+
+    #[test]
     fn split_app_actions_keeps_plain_paste_event_without_paste_binding() {
         let mut bindings = AppKeyBindings::default();
         let (terminal_events, actions) = split_app_actions_for_bindings(

@@ -109,7 +109,11 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
             MuxCommand::ActivateWindowIndex { session_id, index } => {
                 self.client.activate_window_index(&session_id, index)?;
             }
-            MuxCommand::MoveWindow { session_id, delta } => {
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id: _,
+                delta,
+            } => {
                 self.client.move_window(&session_id, delta)?;
             }
             MuxCommand::SplitPane {
@@ -223,6 +227,7 @@ impl RmuxSessionClient for SdkRmuxClient {
     fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
         rmux_execute(MuxCommand::MoveWindow {
             session_id: session_name.to_owned(),
+            window_id: None,
             delta,
         })
     }
@@ -881,6 +886,7 @@ mod tests {
         backend
             .execute(MuxCommand::MoveWindow {
                 session_id: "project".to_owned(),
+                window_id: None,
                 delta: -1,
             })
             .unwrap();

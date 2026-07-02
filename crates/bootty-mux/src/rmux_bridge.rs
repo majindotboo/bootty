@@ -373,9 +373,11 @@ impl RmuxBridgeState {
             MuxCommand::ActivateWindowIndex { session_id, index } => {
                 self.activate_window_index(&session_id, index).await
             }
-            MuxCommand::MoveWindow { session_id, delta } => {
-                self.move_window(&session_id, delta).await
-            }
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id: _,
+                delta,
+            } => self.move_window(&session_id, delta).await,
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,

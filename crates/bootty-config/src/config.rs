@@ -1297,10 +1297,8 @@ fn prefixed_keybinds(prefix: &str, entries: &[(&str, &str)]) -> Vec<String> {
 // per-backend relay to an external config.
 fn navigation_keybinds() -> &'static [&'static str] {
     &[
-        "alt+n=next_tab",
-        "alt+shift+n=next_tab",
-        "alt+p=previous_tab",
-        "alt+shift+p=previous_tab",
+        "left_alt+shift+n=next_tab",
+        "left_alt+shift+p=previous_tab",
         "alt+shift+]=next_tab",
         "alt+shift+[=previous_tab",
         "alt+Tab=last_tab",
@@ -1313,8 +1311,8 @@ fn navigation_keybinds() -> &'static [&'static str] {
         "alt+7=select_tab:7",
         "alt+8=select_tab:8",
         "alt+9=select_tab:9",
-        "alt+shift+,=move_tab:-1",
-        "alt+shift+.=move_tab:1",
+        "left_alt+shift+,=move_tab:-1",
+        "left_alt+shift+.=move_tab:1",
         "alt+h=select_pane:left",
         "alt+j=select_pane:down",
         "alt+k=select_pane:up",
@@ -1484,8 +1482,6 @@ fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
         "ctrl+PageUp=previous_tab",
         "performable:ctrl+shift+ArrowLeft=previous_tab",
         "performable:ctrl+shift+ArrowRight=next_tab",
-        "performable:ctrl+shift+PageUp=move_tab:-1",
-        "performable:ctrl+shift+PageDown=move_tab:1",
         "alt+1=select_tab:1",
         "alt+2=select_tab:2",
         "alt+3=select_tab:3",

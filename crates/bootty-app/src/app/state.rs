@@ -2024,6 +2024,12 @@ impl AppState {
         } = inputs;
         let mut effects = Vec::new();
 
+        // A command-palette choice from the previous frame runs as soon as viewport/effects are
+        // available, before mux refresh can retarget selected-window actions back to backend-active.
+        if let Some(action) = self.pending_command.take() {
+            self.apply_keybind_action(action, viewport, &mut effects);
+        }
+
         self.sync_macos_non_native_fullscreen_presentation();
         // Drain the focused pane plus every live sibling in the active native window so background
         // panes keep processing output. For non-native this is just the single attach surface.
@@ -2557,12 +2563,6 @@ impl AppState {
             self.apply_keybind_action(action, viewport, effects);
         }
 
-        // A command-palette choice from last frame runs here, where viewport and
-        // effects are in scope.
-        if let Some(action) = self.pending_command.take() {
-            self.apply_keybind_action(action, viewport, effects);
-        }
-
         for command in commands {
             self.apply_terminal_input(command, effects);
         }
@@ -2774,7 +2774,10 @@ impl AppState {
                 }
                 effects.push(AppEffect::RequestRepaint);
             }
-            KeybindAction::Mux(action) => self.apply_mux_key_action(action),
+            KeybindAction::Mux(action) => {
+                self.apply_mux_key_action(action);
+                effects.push(AppEffect::RequestRepaint);
+            }
             KeybindAction::Scroll(action) => self.apply_terminal_scroll_action(action),
             KeybindAction::Write(bytes) => {
                 if let Err(error) = self.terminal.write_input(&bytes) {
@@ -2961,6 +2964,7 @@ impl AppState {
             },
             MuxKeyAction::MoveTab(delta) => MuxCommand::MoveWindow {
                 session_id: selected_session,
+                window_id: self.mux.selected_window().map(str::to_owned),
                 delta,
             },
             MuxKeyAction::SplitPane(_) => {
@@ -3721,6 +3725,24 @@ mod tests {
         assert!(state.take_dialog().is_some());
     }
 
+    fn test_frame_inputs(events: Vec<egui::Event>, hover_pos: Option<egui::Pos2>) -> FrameInputs {
+        FrameInputs {
+            now: Instant::now(),
+            stable_dt_ms: 16.0,
+            events,
+            dropped_file_paths: Vec::new(),
+            modifiers: egui::Modifiers::default(),
+            hover_pos,
+            pressed_mouse_button: None,
+            viewport: ViewportSnapshot::default(),
+            renderer_metrics: RendererMetrics::default(),
+            terminal_cell_width: 10.0,
+            terminal_cell_height: 20.0,
+            terminal_scale_factor: 1.0,
+            terminal_view_transform: ViewTransform::IDENTITY,
+        }
+    }
+
     fn test_state() -> AppState {
         test_state_with_config(|_| {})
     }
@@ -4217,6 +4239,104 @@ mod tests {
             after > before,
             "before={before} after={after} selected={selected:?}"
         );
+    }
+
+    #[test]
+    fn move_tab_action_reorders_selected_session_windows() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("move-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let moved = state
+            .mux()
+            .selected_window()
+            .map(str::to_owned)
+            .expect("new tab selected");
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let before_index = before
+            .iter()
+            .position(|id| id == &moved)
+            .expect("selected tab is in window list");
+        assert!(
+            before_index > 0,
+            "new tab should be movable left: {before:?}"
+        );
+
+        state.apply_mux_key_action(MuxKeyAction::MoveTab(-1));
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(after[before_index - 1], moved);
+    }
+
+    #[test]
+    fn command_palette_move_tab_action_reorders_selected_session_windows() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("palette-move-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let moved = state
+            .mux()
+            .selected_window()
+            .map(str::to_owned)
+            .expect("new tab selected");
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let before_index = before
+            .iter()
+            .position(|id| id == &moved)
+            .expect("selected tab is in window list");
+        assert!(
+            before_index > 0,
+            "new tab should be movable left: {before:?}"
+        );
+
+        state.apply_command_palette_event(
+            CommandPaletteDialog::open(&[]),
+            CommandPaletteEvent::Run("move_tab:-1"),
+        );
+        let effects = state.update_frame(test_frame_inputs(Vec::new(), None));
+        assert!(
+            effects.contains(&AppEffect::RequestRepaint),
+            "palette move-tab must schedule an immediate repaint so status tabs re-render"
+        );
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(after[before_index - 1], moved);
     }
 
     #[test]
