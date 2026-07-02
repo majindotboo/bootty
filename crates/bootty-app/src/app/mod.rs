@@ -421,6 +421,16 @@ impl BoottyApp {
     }
 
     fn resolve_status_segments(&self, sidebar_visible: bool) -> Vec<chrome::ResolvedSegment> {
+        let palette = self.state.ui_theme().palette;
+        let mux_view = self.current_extension_mux_view();
+        let windows_theme = crate::extensions::BuiltinWindowsTheme {
+            accent: palette.accent,
+            surface: palette.surface,
+            base: palette.base,
+            subtext: palette.subtext,
+            text: palette.text,
+        };
+
         self.state
             .config()
             .chrome
@@ -430,9 +440,14 @@ impl BoottyApp {
             .filter_map(|segment| {
                 let seg_fg = segment.fg.map(crate::theme::config_color32);
                 let seg_bg = segment.bg.map(crate::theme::config_color32);
-                let items = self
-                    .status_extensions
-                    .items(&segment.module)
+                let module_items = if segment.module == "windows"
+                    && !self.status_extensions.has_user_module("windows")
+                {
+                    crate::extensions::builtin_windows_items(&mux_view, windows_theme)
+                } else {
+                    self.status_extensions.items(&segment.module)
+                };
+                let items = module_items
                     .into_iter()
                     .map(|item| chrome::ResolvedItem {
                         text: item.text,
@@ -461,7 +476,7 @@ impl BoottyApp {
 
     fn current_extension_mux_view(&self) -> crate::extensions::MuxView {
         let selected = self.state.mux().selected_window();
-        let windows = self
+        let mut windows = self
             .state
             .mux()
             .selected_session_windows()
@@ -473,7 +488,8 @@ impl BoottyApp {
                 active: selected == Some(window.id.as_str())
                     || (selected.is_none() && window.active),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        windows.sort_by_key(|window| window.index);
         let session = chrome::selected_session_name(
             self.state.mux().sessions(),
             self.state.mux().selected_session(),

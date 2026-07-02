@@ -163,6 +163,160 @@ pub struct MuxView {
     pub keep_awake: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltinWindowsTheme {
+    pub accent: Color32,
+    pub surface: Color32,
+    pub base: Color32,
+    pub subtext: Color32,
+    pub text: Color32,
+}
+
+pub fn builtin_windows_items(view: &MuxView, theme: BuiltinWindowsTheme) -> Vec<ModuleItem> {
+    let accent = view
+        .session_color
+        .as_deref()
+        .and_then(parse_hex_color)
+        .unwrap_or(theme.accent);
+    let mut items = Vec::with_capacity(view.windows.len() * 2);
+    for (position, window) in view.windows.iter().enumerate() {
+        let last = position + 1 == view.windows.len();
+        let active = window.active;
+        let index_fill = if active { accent } else { theme.base };
+        let name_fill = if active { theme.surface } else { theme.base };
+        let index_fg = if active { theme.base } else { theme.subtext };
+        let name_fg = if active { theme.text } else { theme.subtext };
+
+        let mut index_primitives = Vec::new();
+        if let Some(previous) = position
+            .checked_sub(1)
+            .and_then(|index| view.windows.get(index))
+        {
+            let previous_fill = if previous.active {
+                theme.surface
+            } else {
+                theme.base
+            };
+            index_primitives.push(windows_underlay(previous_fill));
+        }
+        index_primitives.push(windows_rect(index_fill, windows_left_radius()));
+
+        let mut name_primitives = vec![windows_rect(name_fill, windows_right_radius(last))];
+        if active {
+            name_primitives.push(windows_left_chevron(accent));
+        }
+
+        push_window_item(
+            &mut items,
+            window,
+            ModuleItem {
+                text: window.index.to_string(),
+                fg: Some(index_fg),
+                primitives: index_primitives,
+                join: Some(false),
+                gap: Some(false),
+                ..ModuleItem::default()
+            },
+        );
+        push_window_item(
+            &mut items,
+            window,
+            ModuleItem {
+                text: window.name.clone(),
+                fg: Some(name_fg),
+                primitives: name_primitives,
+                pad_left: WINDOWS_WEDGE_PX,
+                gap: Some(false),
+                ..ModuleItem::default()
+            },
+        );
+    }
+    items
+}
+
+const WINDOWS_RADIUS_PX: u8 = 6;
+const WINDOWS_WEDGE_PX: f32 = 8.0;
+
+fn push_window_item(items: &mut Vec<ModuleItem>, window: &WindowView, mut item: ModuleItem) {
+    item.action = Some(format!("activate-window:{}", window.id));
+    item.reorder_anchor = Some(window.id.clone());
+    items.push(item);
+}
+
+fn windows_left_radius() -> ModuleCornerRadius {
+    egui::CornerRadius {
+        nw: WINDOWS_RADIUS_PX,
+        sw: WINDOWS_RADIUS_PX,
+        ..egui::CornerRadius::default()
+    }
+}
+
+fn windows_right_radius(enabled: bool) -> ModuleCornerRadius {
+    let radius = if enabled { WINDOWS_RADIUS_PX } else { 0 };
+    egui::CornerRadius {
+        ne: radius,
+        se: radius,
+        ..egui::CornerRadius::default()
+    }
+}
+
+fn windows_rect(fill: Color32, radius: ModuleCornerRadius) -> ModulePrimitive {
+    ModulePrimitive::Rect {
+        fill: Some(fill),
+        stroke: None,
+        x: ModuleCoord::default(),
+        y: ModuleCoord::default(),
+        w: ModuleCoord { frac: 1.0, px: 0.0 },
+        h: ModuleCoord { frac: 1.0, px: 0.0 },
+        radius,
+    }
+}
+
+fn windows_underlay(fill: Color32) -> ModulePrimitive {
+    ModulePrimitive::Rect {
+        fill: Some(fill),
+        stroke: None,
+        x: ModuleCoord::default(),
+        y: ModuleCoord::default(),
+        w: ModuleCoord {
+            frac: 0.0,
+            px: WINDOWS_RADIUS_PX as f32,
+        },
+        h: ModuleCoord { frac: 1.0, px: 0.0 },
+        radius: egui::CornerRadius::default(),
+    }
+}
+
+fn windows_left_chevron(fill: Color32) -> ModulePrimitive {
+    ModulePrimitive::Polygon {
+        fill: Some(fill),
+        stroke: None,
+        points: vec![
+            (
+                ModuleCoord {
+                    frac: 0.0,
+                    px: -1.0,
+                },
+                ModuleCoord { frac: 0.0, px: 0.0 },
+            ),
+            (
+                ModuleCoord {
+                    frac: 0.0,
+                    px: WINDOWS_WEDGE_PX,
+                },
+                ModuleCoord { frac: 0.5, px: 0.0 },
+            ),
+            (
+                ModuleCoord {
+                    frac: 0.0,
+                    px: -1.0,
+                },
+                ModuleCoord { frac: 1.0, px: 0.0 },
+            ),
+        ],
+    }
+}
+
 /// Cross-platform system metrics gathered natively (no per-OS shell-outs), so
 /// modules read them through `bootty.metrics()` on any platform.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -846,6 +1000,7 @@ impl Waker {
 
 /// Owns the Luau worker thread, the shared item map the UI reads, and the mux snapshot the UI feeds.
 pub struct ExtensionHost {
+    dir: PathBuf,
     items: Arc<RwLock<HashMap<String, Vec<ModuleItem>>>>,
     mux: Arc<RwLock<MuxView>>,
     metrics: Arc<RwLock<Metrics>>,
@@ -897,6 +1052,7 @@ impl ExtensionHost {
         let pending_window_actions: Arc<RwLock<Vec<WindowOutcome>>> = Arc::default();
         let next_window_id = Arc::new(AtomicU64::new(1));
         let waker: Arc<Waker> = Arc::default();
+        let module_dir = dir.clone();
         let run_jobs = Arc::new(PlatformRunJobs::default());
         cleanup_stale_platform_shell_run_jobs();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -938,6 +1094,7 @@ impl ExtensionHost {
             })
             .ok();
         Self {
+            dir: module_dir,
             items,
             mux,
             metrics,
@@ -970,6 +1127,11 @@ impl ExtensionHost {
             .ok()
             .and_then(|map| map.get(name).cloned())
             .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn has_user_module(&self, name: &str) -> bool {
+        user_module_exists(&self.dir, name)
     }
 
     #[must_use]
@@ -1285,6 +1447,16 @@ fn is_extension_module_file(path: &Path) -> bool {
             path.extension().and_then(|ext| ext.to_str()),
             Some("lua" | "luau")
         )
+}
+
+fn user_module_exists(dir: &Path, name: &str) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            is_extension_module_file(&path)
+                && path.file_stem().and_then(|stem| stem.to_str()) == Some(name)
+        })
+    })
 }
 
 fn refresh_metrics(
@@ -3447,6 +3619,80 @@ mod tests {
             .collect();
         // Each window contributes two cells (index + name) sharing the window id anchor.
         assert_eq!(anchors, vec!["@1", "@1", "@2", "@2"]);
+    }
+
+    #[test]
+    fn builtin_windows_items_reflects_active_window_without_worker_cache() {
+        let theme = BuiltinWindowsTheme {
+            accent: Color32::from_rgb(1, 2, 3),
+            surface: Color32::from_rgb(4, 5, 6),
+            base: Color32::from_rgb(7, 8, 9),
+            subtext: Color32::from_rgb(10, 11, 12),
+            text: Color32::from_rgb(13, 14, 15),
+        };
+        let view = MuxView {
+            windows: vec![
+                WindowView {
+                    id: "@1".to_owned(),
+                    index: 1,
+                    name: "edit".to_owned(),
+                    active: false,
+                },
+                WindowView {
+                    id: "@2".to_owned(),
+                    index: 2,
+                    name: "logs".to_owned(),
+                    active: true,
+                },
+            ],
+            session_color: Some("#89b4fa".to_owned()),
+            ..MuxView::default()
+        };
+
+        let items = builtin_windows_items(&view, theme);
+        let texts = items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["1", "edit", "2", "logs"]);
+        assert_eq!(items[0].fg, Some(theme.subtext));
+        assert_eq!(items[1].fg, Some(theme.subtext));
+        assert_eq!(items[2].fg, Some(theme.base));
+        assert_eq!(items[3].fg, Some(theme.text));
+        assert_eq!(items[2].action.as_deref(), Some("activate-window:@2"));
+        assert_eq!(items[3].action.as_deref(), Some("activate-window:@2"));
+        assert_eq!(items[2].reorder_anchor.as_deref(), Some("@2"));
+        assert_eq!(items[3].reorder_anchor.as_deref(), Some("@2"));
+        assert!(items[3].primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                ModulePrimitive::Polygon {
+                    fill: Some(fill),
+                    ..
+                } if *fill == Color32::from_rgb(0x89, 0xb4, 0xfa)
+            )
+        }));
+    }
+
+    #[test]
+    fn extension_host_detects_user_module_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host = ExtensionHost::spawn_status(
+            dir.path().to_path_buf(),
+            egui::Context::default(),
+            Vec::new(),
+        );
+
+        assert!(!host.has_user_module("windows"));
+        std::fs::write(
+            dir.path().join("windows.luau"),
+            "return function() return '' end",
+        )
+        .expect("write user windows override");
+
+        assert!(host.has_user_module("windows"));
+        assert!(!host.has_user_module("window"));
     }
 
     #[test]
