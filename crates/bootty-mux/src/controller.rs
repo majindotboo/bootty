@@ -29,12 +29,17 @@ struct SessionRefreshRequest {
     config: MultiplexerConfig,
 }
 
-type MuxCommandResult = std::result::Result<Option<String>, String>;
+type MuxCommandResult = std::result::Result<MuxCommandCompletion, String>;
+
+struct MuxCommandCompletion {
+    selected_session: Option<String>,
+    selected_window: Option<String>,
+}
 
 struct MuxCommandJob {
     config: MultiplexerConfig,
     command: MuxCommand,
-    selected_session: Option<String>,
+    completion: MuxCommandCompletion,
 }
 
 fn selected_window_after_refresh(
@@ -86,6 +91,24 @@ fn optimistic_window_after_command(
                 .iter()
                 .find(|window| window.index == *index)
                 .map(|window| window.id.clone());
+        }
+        MuxCommand::MoveWindow {
+            session_id,
+            window_id,
+            ..
+        } => {
+            let session = sessions
+                .iter()
+                .find(|session| session.id == *session_id || session.name == *session_id)?;
+            let current_id = window_id
+                .as_deref()
+                .or(selected_window)
+                .or(session.active_window_id.as_deref())?;
+            return session
+                .windows
+                .iter()
+                .any(|window| window.id == current_id)
+                .then(|| current_id.to_owned());
         }
         _ => return None,
     };
@@ -356,9 +379,15 @@ impl MuxController {
             };
             completed = true;
             match result {
-                Ok(selected_session) => {
-                    if let Some(session) = selected_session {
-                        self.activate_session(&session);
+                Ok(completion) => {
+                    match (completion.selected_session, completion.selected_window) {
+                        (Some(session), Some(window)) => {
+                            self.set_selected_session(Some(session));
+                            self.selected_window = Some(window);
+                        }
+                        (Some(session), None) => self.activate_session(&session),
+                        (None, Some(window)) => self.selected_window = Some(window),
+                        (None, None) => {}
                     }
                     self.last_session_refresh = Some(Instant::now() - MUX_SESSION_REFRESH_INTERVAL);
                     self.session_refresh_generation =
@@ -416,7 +445,15 @@ impl MuxController {
             repaint();
             return;
         }
-        self.enqueue_command(repaint, config, command, Some(session_id.to_owned()));
+        self.enqueue_command(
+            repaint,
+            config,
+            command,
+            MuxCommandCompletion {
+                selected_session: Some(session_id.to_owned()),
+                selected_window: Some(window_id.to_owned()),
+            },
+        );
     }
     pub fn rename_window(
         &mut self,
@@ -443,7 +480,15 @@ impl MuxController {
             repaint();
             return;
         }
-        self.enqueue_command(repaint, config, command, Some(session_id.to_owned()));
+        self.enqueue_command(
+            repaint,
+            config,
+            command,
+            MuxCommandCompletion {
+                selected_session: Some(session_id.to_owned()),
+                selected_window: None,
+            },
+        );
     }
 
     pub fn create_project_session(
@@ -469,7 +514,15 @@ impl MuxController {
             return;
         }
         self.activate_session(&request.session_id);
-        self.enqueue_command(repaint, config, command, Some(request.session_id));
+        self.enqueue_command(
+            repaint,
+            config,
+            command,
+            MuxCommandCompletion {
+                selected_session: Some(request.session_id),
+                selected_window: None,
+            },
+        );
     }
 
     fn poll_session_refresh(&mut self) -> Option<SessionRefreshResult> {
@@ -520,15 +573,33 @@ impl MuxController {
         command: MuxCommand,
     ) {
         let selected_session = Some(command_session_id(&command).to_owned());
+        let preferred_window = optimistic_window_after_command(
+            &self.sessions,
+            self.selected_window.as_deref(),
+            &command,
+        );
         if self
-            .execute_native_command(config, command.clone(), selected_session.clone(), None)
+            .execute_native_command(
+                config,
+                command.clone(),
+                selected_session.clone(),
+                preferred_window.clone(),
+            )
             .is_ok()
         {
             repaint();
             return;
         }
-        self.apply_optimistic_command_selection(&command);
-        self.enqueue_command(repaint, config, command, selected_session);
+        let selected_window = self.apply_optimistic_command_selection(&command);
+        self.enqueue_command(
+            repaint,
+            config,
+            command,
+            MuxCommandCompletion {
+                selected_session,
+                selected_window,
+            },
+        );
     }
 
     fn execute_native_command(
@@ -584,16 +655,16 @@ impl MuxController {
             active_window_id_of(&self.sessions, self.selected_session.as_deref());
     }
 
-    fn apply_optimistic_command_selection(&mut self, command: &MuxCommand) {
+    fn apply_optimistic_command_selection(&mut self, command: &MuxCommand) -> Option<String> {
         let session_id = command_session_id(command).to_owned();
-        if let Some(window_id) = optimistic_window_after_command(
+        let window_id = optimistic_window_after_command(
             &self.sessions,
             self.selected_window.as_deref(),
             command,
-        ) {
-            self.set_selected_session(Some(session_id));
-            self.selected_window = Some(window_id);
-        }
+        )?;
+        self.set_selected_session(Some(session_id));
+        self.selected_window = Some(window_id.clone());
+        Some(window_id)
     }
 
     fn ensure_command_worker(&mut self, repaint: &RepaintHandle) {
@@ -609,7 +680,7 @@ impl MuxController {
                 let mut backend = build_backend(&job.config);
                 let result = backend
                     .execute(job.command)
-                    .map(|()| job.selected_session)
+                    .map(|()| job.completion)
                     .map_err(|error| error.to_string());
                 if result_tx.send(result).is_err() {
                     break;
@@ -626,13 +697,13 @@ impl MuxController {
         repaint: &RepaintHandle,
         config: &MultiplexerConfig,
         command: MuxCommand,
-        selected_session: Option<String>,
+        completion: MuxCommandCompletion,
     ) {
         self.ensure_command_worker(repaint);
         let job = MuxCommandJob {
             config: config.clone(),
             command,
-            selected_session,
+            completion,
         };
         let Some(tx) = &self.mux_command_tx else {
             return;
@@ -807,6 +878,65 @@ mod tests {
             index: 2,
         });
         assert_eq!(controller.selected_window(), Some("@2"));
+
+        controller.apply_optimistic_command_selection(&MuxCommand::MoveWindow {
+            session_id: "$1".to_owned(),
+            window_id: Some("@2".to_owned()),
+            delta: -1,
+        });
+        assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    #[test]
+    fn targeted_command_completion_preserves_selected_window_until_refresh() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let (result_tx, rx) = mpsc::channel();
+        result_tx
+            .send(Ok(MuxCommandCompletion {
+                selected_session: Some("$1".to_owned()),
+                selected_window: Some("@2".to_owned()),
+            }))
+            .expect("send command completion");
+        let mut controller = MuxController {
+            sessions: vec![work],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            mux_command_rx: Some(rx),
+            ..Default::default()
+        };
+
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    #[test]
+    fn session_only_command_completion_keeps_session_activation_semantics() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let (result_tx, rx) = mpsc::channel();
+        result_tx
+            .send(Ok(MuxCommandCompletion {
+                selected_session: Some("$1".to_owned()),
+                selected_window: None,
+            }))
+            .expect("send command completion");
+        let mut controller = MuxController {
+            sessions: vec![work],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            mux_command_rx: Some(rx),
+            ..Default::default()
+        };
+
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), None);
     }
 
     #[test]

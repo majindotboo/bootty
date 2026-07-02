@@ -427,9 +427,12 @@ impl RmuxBridgeState {
             }
             MuxCommand::MoveWindow {
                 session_id,
-                window_id: _,
+                window_id,
                 delta,
-            } => self.move_window(&session_id, delta).await,
+            } => {
+                self.move_window(&session_id, window_id.as_deref(), delta)
+                    .await
+            }
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
@@ -558,7 +561,18 @@ impl RmuxBridgeState {
         Ok(())
     }
 
-    async fn move_window(&mut self, _session_name: &str, delta: i32) -> Result<()> {
+    async fn move_window(
+        &mut self,
+        session_name: &str,
+        window_id: Option<&str>,
+        delta: i32,
+    ) -> Result<()> {
+        if let Some(window_id) = window_id
+            && let Some((session_name, index)) =
+                self.window_index_by_id(session_name, window_id).await?
+        {
+            self.window(&session_name, index).await?.select().await?;
+        }
         let rmux = self.rmux().await?;
         let target = if delta > 0 { "+1" } else { "-1" };
         for _ in 0..delta.unsigned_abs() {
