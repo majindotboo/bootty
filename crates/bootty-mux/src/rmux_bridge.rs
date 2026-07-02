@@ -394,6 +394,7 @@ impl RmuxBridgeState {
             } => self.close_pane(&session_id, pane_id.as_deref()).await,
             MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
+            | MuxCommand::SelectPreviousPane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {
                 anyhow::bail!("rmux backend does not support mux command {command:?}")
             }

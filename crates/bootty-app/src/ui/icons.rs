@@ -180,6 +180,7 @@ mod tests {
             "folder",
             "coffee-cup",
             "coffee-cup-filled",
+            "plug",
             "plug-zap",
             "battery-charging",
             "battery-full",

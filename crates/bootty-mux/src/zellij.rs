@@ -97,6 +97,7 @@ impl<R: CommandRunner> MuxBackend for ZellijBackend<R> {
             | MuxCommand::SplitPane { .. }
             | MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }
+            | MuxCommand::SelectPreviousPane { .. }
             | MuxCommand::KillPane { .. }
             | MuxCommand::ClosePane { .. }
             | MuxCommand::TogglePaneZoom { .. } => {

@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::SettingsWindow;
-use crate::config::load_or_create_config_document;
+use crate::config::{KeybindPreset, load_or_create_config_document};
 
 /// Which keybind list is being edited: the global list, one of the per-backend lists, or the
 /// sidebar navigation list (which has its own action vocabulary).
@@ -77,12 +77,14 @@ fn action_options(scope: KeybindScope) -> Vec<(&'static str, &'static str, &'sta
 }
 
 /// One editable binding: a trigger (one combo, or a `>`-joined chord), an action, and editor-only
-/// state for whether newly recorded modifiers should keep left/right side information.
+/// state for whether newly recorded modifiers should keep left/right side information and whether
+/// recording composes the trigger as `{prefix}>{key}` instead of capturing literally.
 #[derive(Default)]
 pub(super) struct BindingRow {
     pub trigger: String,
     pub action: String,
     pub side_sensitive: bool,
+    pub prefixed: bool,
 }
 
 /// In-progress chord capture: steps accumulate until `deadline` passes with no new key.
@@ -199,8 +201,10 @@ const MODIFIER_TOKENS: &[&str] = &[
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
+    let direct_chords = std::mem::take(&mut win.recorder_chords);
 
     shortcut_options(win, ui);
+    preset_options(win, ui, &direct_chords);
 
     super::section(ui, palette, "KEYBINDINGS");
     ui.horizontal(|ui| {
@@ -236,8 +240,15 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let mut rows = win.keybind_rows.take().unwrap_or_default();
     let mut clear = win.keybind_clear;
     let mut capture = win.keybind_capture.take();
-    let direct_chords = std::mem::take(&mut win.recorder_chords);
     let mut changed = false;
+    // Prefixed chords are idiomatic in the global and native/rmux scopes; the tmux backend
+    // relays raw bytes and the sidebar has no chord support, so those record literally.
+    let effective_prefix = match scope {
+        KeybindScope::Global | KeybindScope::Native | KeybindScope::Rmux => {
+            win.config.input.effective_prefix()
+        }
+        _ => None,
+    };
 
     // "Configure this command's keybinding" (from the palette): surface the row for
     // the requested action — adding an empty one if absent — and filter the list to
@@ -249,6 +260,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 trigger: String::new(),
                 action: target.clone(),
                 side_sensitive: false,
+                prefixed: false,
             });
         }
         let search_id = ui.make_persistent_id(("settings_keybind_search", scope));
@@ -270,7 +282,14 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let search: String = ui.memory(|memory| memory.data.get_temp(search_id).unwrap_or_default());
     let needle = search.trim().to_ascii_lowercase();
 
-    handle_capture(ui, &mut capture, &mut rows, &mut changed, &direct_chords);
+    handle_capture(
+        ui,
+        &mut capture,
+        &mut rows,
+        &mut changed,
+        &direct_chords,
+        effective_prefix.as_deref(),
+    );
 
     let invalid_count = rows
         .iter()
@@ -309,6 +328,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                 BindingEditorContext {
                     scope,
                     index,
+                    prefix: effective_prefix.as_deref(),
                     capture: capture.as_ref(),
                     changed: &mut changed,
                     toggle_capture: &mut toggle_capture,
@@ -325,6 +345,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     }
 
     if let Some(index) = toggle_capture {
+        win.prefix_capture = false;
         capture = match capture {
             Some(cap) if cap.row == index => None,
             _ => Some(ChordCapture {
@@ -352,6 +373,8 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     win.keybind_clear = clear;
     if changed {
         write_scope(win, scope, clear, &rows);
+        // Keep the resolved-shortcuts panel in sync with what was just written.
+        super::reload_settings_config(win);
     }
     win.keybind_rows = Some(rows);
     win.keybind_capture = capture;
@@ -412,6 +435,104 @@ fn shortcut_options(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     );
     ui.add_space(6.0);
     modifier_remaps(win, ui);
+}
+
+/// Preset picker + prefix recorder. Switching preset (or prefix) only swaps which built-in
+/// defaults the user's override rows layer on top of; the rows themselves are never touched.
+fn preset_options(win: &mut SettingsWindow, ui: &mut egui::Ui, direct_chords: &[String]) {
+    let palette = win.palette;
+    super::section(ui, palette, "PRESET");
+
+    super::settings_row(
+        ui,
+        palette,
+        "Keybinding preset",
+        "Built-in defaults to start from. Your own binding rows stay unchanged.",
+        |ui| {
+            let labels: Vec<&str> = KeybindPreset::ALL
+                .iter()
+                .map(|preset| preset.label())
+                .collect();
+            let current = KeybindPreset::ALL
+                .iter()
+                .position(|preset| *preset == win.config.input.preset)
+                .unwrap_or(0);
+            if let Some(index) = super::settings_segmented(ui, palette, &labels, current) {
+                let preset = KeybindPreset::ALL[index];
+                win.set_str(&["input", "preset"], preset.as_str());
+                // Re-resolve so the built-in default tables (and effective prefix) swap over.
+                super::reload_settings_config(win);
+                win.keybind_loaded_scope = None;
+            }
+        },
+    );
+
+    let preset = win.config.input.preset;
+    if preset.default_prefix().is_none() {
+        win.prefix_capture = false;
+        return;
+    }
+    let prefix = win.config.input.effective_prefix().unwrap_or_default();
+    let recording = win.prefix_capture;
+    let mut toggle_recording = false;
+    let mut reset_prefix = false;
+    super::settings_row(
+        ui,
+        palette,
+        "Prefix",
+        "Leader combo for prefixed shortcuts: press it, then the bound key.",
+        |ui| {
+            let capture_text = "Press a combo… Esc to cancel";
+            if record_cell(ui, palette, &prefix, recording, capture_text).clicked() {
+                toggle_recording = true;
+            }
+            if record_dot_button(ui, palette, recording).clicked() {
+                toggle_recording = true;
+            }
+            if win.config.input.prefix.is_some()
+                && super::settings_icon_button(ui, palette, "x", "Reset to the preset default")
+                    .clicked()
+            {
+                reset_prefix = true;
+            }
+        },
+    );
+    if toggle_recording {
+        win.prefix_capture = !recording;
+        win.keybind_capture = None;
+    }
+    if reset_prefix {
+        win.prefix_capture = false;
+        win.remove(&["input", "prefix"]);
+        super::reload_settings_config(win);
+        win.keybind_loaded_scope = None;
+    }
+    if win.prefix_capture {
+        handle_prefix_capture(win, ui, direct_chords);
+    }
+}
+
+/// Single-combo capture for the prefix recorder: the first step commits immediately (a prefix is
+/// one combo, never a chord). Escape cancels.
+fn handle_prefix_capture(win: &mut SettingsWindow, ui: &egui::Ui, direct_chords: &[String]) {
+    ui.ctx().request_repaint();
+    let step = if let Some((key, modifiers)) = drain_first_key_press(ui) {
+        if key == egui::Key::Escape {
+            win.prefix_capture = false;
+            return;
+        }
+        trigger_step(key, modifiers)
+    } else {
+        direct_chords.first().map(|step| strip_modifier_sides(step))
+    };
+    let Some(step) = step else {
+        return;
+    };
+    win.prefix_capture = false;
+    win.set_str(&["input", "prefix"], &step);
+    // Re-resolve so the prefixed default chords rebuild against the new prefix.
+    super::reload_settings_config(win);
+    win.keybind_loaded_scope = None;
 }
 
 /// Per-scope toggle for whether Bootty's built-in shortcuts stay active. Stored as a `clear`
@@ -619,7 +740,7 @@ fn effective_bindings_panel(win: &SettingsWindow, ui: &mut egui::Ui, scope: Keyb
                     );
                     return;
                 }
-                let cols = ((ui.available_width() / 340.0).floor() as usize).clamp(1, 4);
+                let cols = ((ui.available_width() / 280.0).floor() as usize).clamp(1, 6);
                 // egui::Grid keeps columns aligned (each column sizes to its widest cell) rather than
                 // packing each cell to its own content width, which staggered the old layout.
                 egui::Grid::new(("resolved_shortcuts_grid", scope))
@@ -694,6 +815,40 @@ fn binding_editor_row(
                         }
                     })
                     .unwrap_or_default();
+                if let Some(prefix) = ctx.prefix {
+                    let mut prefixed = row.prefixed;
+                    // Center the checkbox against the taller record cell next to it.
+                    let response = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(0.0, ROW_CONTROL_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.checkbox(
+                                    &mut prefixed,
+                                    egui::RichText::new("prefix")
+                                        .color(palette.subtext)
+                                        .size(11.0),
+                                )
+                            },
+                        )
+                        .inner
+                        .on_hover_text(format!(
+                            "Prefixed: recording captures one key and stores it as {prefix} > key"
+                        ));
+                    if response.changed() {
+                        row.prefixed = prefixed;
+                        if !combo.is_empty() {
+                            let combo = if prefixed {
+                                prefix_combo(&combo, prefix)
+                            } else {
+                                unprefix_combo(&combo, prefix)
+                            };
+                            row.trigger = join_trigger_flags(&flags, &combo);
+                            *ctx.changed = true;
+                        }
+                    }
+                }
+
                 if record_cell(ui, palette, &combo, recording, &capture_text).clicked() {
                     *ctx.toggle_capture = Some(ctx.index);
                 }
@@ -713,7 +868,9 @@ fn binding_editor_row(
 
                 // Spread the action + value across the leftover width, reserving a right cluster for
                 // the status, flags, and remove controls so the row uses its full width.
-                let right_cluster = 150.0;
+                // Wide enough for the "incomplete" status label plus the flags and remove buttons,
+                // so the right-to-left cluster never overlaps the value field.
+                let right_cluster = 200.0;
                 let fields = (ui.available_width() - right_cluster).max(240.0);
                 let action_width = (fields * 0.58 - 8.0).clamp(150.0, 320.0);
                 let value_width = (fields - action_width - 8.0).clamp(90.0, 240.0);
@@ -1060,6 +1217,8 @@ fn keycap_chip(ui: &mut egui::Ui, palette: bootty_ui::ThemePalette, trigger: &st
 struct BindingEditorContext<'a> {
     scope: KeybindScope,
     index: usize,
+    /// The active preset's prefix, when this scope supports prefixed chords.
+    prefix: Option<&'a str>,
     capture: Option<&'a ChordCapture>,
     changed: &'a mut bool,
     toggle_capture: &'a mut Option<usize>,
@@ -1080,6 +1239,7 @@ fn handle_capture(
     rows: &mut [BindingRow],
     changed: &mut bool,
     direct_chords: &[String],
+    prefix: Option<&str>,
 ) {
     if capture.is_none() {
         return;
@@ -1124,8 +1284,21 @@ fn handle_capture(
     }
 
     let commit = capture.as_ref().and_then(|cap| {
-        (cap.deadline.is_some_and(|deadline| now >= deadline) && !cap.steps.is_empty())
-            .then(|| (cap.row, cap.steps.join(">")))
+        // A prefixed row records exactly one key: commit on the first step, composed with the
+        // prefix, instead of waiting out the chord timeout.
+        let row_prefix = prefix.filter(|_| rows.get(cap.row).is_some_and(|row| row.prefixed));
+        let ready = if row_prefix.is_some() {
+            !cap.steps.is_empty()
+        } else {
+            cap.deadline.is_some_and(|deadline| now >= deadline) && !cap.steps.is_empty()
+        };
+        ready.then(|| {
+            let combo = match row_prefix {
+                Some(prefix) => format!("{prefix}>{}", cap.steps[0]),
+                None => cap.steps.join(">"),
+            };
+            (cap.row, combo)
+        })
     });
     if let Some((row, combo)) = commit {
         if let Some(entry) = rows.get_mut(row) {
@@ -1175,6 +1348,31 @@ fn drain_first_key_press(ui: &egui::Ui) -> Option<(egui::Key, egui::Modifiers)> 
         });
         first
     })
+}
+
+/// Whether a combo is exactly `{prefix}>{one step}` — the shape the Prefixed checkbox produces.
+fn combo_is_prefixed(combo: &str, prefix: &str) -> bool {
+    combo
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('>'))
+        .is_some_and(|rest| !rest.is_empty() && !rest.contains('>'))
+}
+
+fn prefix_combo(combo: &str, prefix: &str) -> String {
+    if combo_is_prefixed(combo, prefix) {
+        combo.to_owned()
+    } else {
+        format!("{prefix}>{combo}")
+    }
+}
+
+fn unprefix_combo(combo: &str, prefix: &str) -> String {
+    combo
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('>'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(combo)
+        .to_owned()
 }
 
 fn combo_has_modifier_sides(combo: &str) -> bool {
@@ -1272,6 +1470,12 @@ fn trigger_step(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
 }
 
 fn read_scope_entries(win: &SettingsWindow, scope: KeybindScope) -> (bool, Vec<BindingRow>) {
+    let prefix = match scope {
+        KeybindScope::Global | KeybindScope::Native | KeybindScope::Rmux => {
+            win.config.input.effective_prefix()
+        }
+        _ => None,
+    };
     let Ok(document) = load_or_create_config_document(&win.config_path) else {
         return (false, Vec::new());
     };
@@ -1299,9 +1503,12 @@ fn read_scope_entries(win: &SettingsWindow, scope: KeybindScope) -> (bool, Vec<B
         let (trigger, action) = split_entry(entry);
         let (_, combo) = parse_trigger_flags(&trigger);
         rows.push(BindingRow {
+            side_sensitive: combo_has_modifier_sides(&combo),
+            prefixed: prefix
+                .as_deref()
+                .is_some_and(|prefix| combo_is_prefixed(&combo, prefix)),
             trigger,
             action,
-            side_sensitive: combo_has_modifier_sides(&combo),
         });
     }
     (clear, rows)
@@ -1398,15 +1605,20 @@ fn humanize_action(name: &str) -> String {
     }
 }
 
+/// The shortcuts that actually apply for `scope`: backend scopes show the fully merged view
+/// (global rows + the backend's own rows, including prefixed chords), matching what the runtime
+/// resolves for that backend. Global shows the merge for the currently configured backend, since
+/// that's what actually fires while using the app.
 fn effective_bindings(win: &SettingsWindow, scope: KeybindScope) -> Vec<String> {
+    use crate::config::MultiplexerBackendConfig;
     let input = &win.config.input;
     match scope {
-        KeybindScope::Global => input.keybind.clone(),
-        KeybindScope::Native => input.backend_keybinds.native.clone(),
-        KeybindScope::Rmux => input.backend_keybinds.rmux.clone(),
+        KeybindScope::Global => input.keybinds_for_backend(win.config.multiplexer.backend),
+        KeybindScope::Native => input.keybinds_for_backend(MultiplexerBackendConfig::Native),
+        KeybindScope::Rmux => input.keybinds_for_backend(MultiplexerBackendConfig::Rmux),
         #[cfg(not(windows))]
-        KeybindScope::Tmux => input.backend_keybinds.tmux.clone(),
-        KeybindScope::Zellij => input.backend_keybinds.zellij.clone(),
+        KeybindScope::Tmux => input.keybinds_for_backend(MultiplexerBackendConfig::Tmux),
+        KeybindScope::Zellij => input.keybinds_for_backend(MultiplexerBackendConfig::Zellij),
         KeybindScope::Sidebar => input.sidebar_keybind.clone(),
     }
 }
@@ -1459,6 +1671,8 @@ fn key_token(key: egui::Key) -> Option<String> {
         Key::Plus | Key::Equals => "=",
         Key::Backslash => "\\",
         Key::Backtick => "`",
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
         Key::Space => "space",
         Key::Enter => "Enter",
         Key::Tab => "Tab",
@@ -1541,6 +1755,24 @@ mod tests {
             join_trigger_flags(&flags, &combo),
             "performable:unconsumed:cmd+v"
         );
+    }
+
+    #[test]
+    fn prefixed_combo_detection_requires_exactly_one_step_after_prefix() {
+        assert!(combo_is_prefixed("ctrl+space>c", "ctrl+space"));
+        // Longer chords and bare/foreign combos must read as manual recordings, or toggling the
+        // checkbox would mangle their triggers.
+        assert!(!combo_is_prefixed("ctrl+space>c>d", "ctrl+space"));
+        assert!(!combo_is_prefixed("ctrl+space", "ctrl+space"));
+        assert!(!combo_is_prefixed("cmd+t", "ctrl+space"));
+    }
+
+    #[test]
+    fn prefix_toggle_round_trips_a_combo() {
+        assert_eq!(prefix_combo("c", "ctrl+b"), "ctrl+b>c");
+        assert_eq!(prefix_combo("ctrl+b>c", "ctrl+b"), "ctrl+b>c");
+        assert_eq!(unprefix_combo("ctrl+b>c", "ctrl+b"), "c");
+        assert_eq!(unprefix_combo("cmd+t", "ctrl+b"), "cmd+t");
     }
 
     #[test]

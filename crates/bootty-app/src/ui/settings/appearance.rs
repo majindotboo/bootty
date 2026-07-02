@@ -7,7 +7,6 @@ use libghostty_vt::style::RgbColor;
 use super::SettingsWindow;
 use crate::{
     color::Color,
-    config::load_config_from_path,
     config::{AppearanceBranchConfig, AppearanceMode, AppearanceVariant, ColorConfig},
 };
 
@@ -304,20 +303,13 @@ fn appearance_config_path<'a>(variant: AppearanceVariant, path: &'a [&'a str]) -
     full
 }
 
-fn reload_settings_config(win: &mut SettingsWindow) {
-    match load_config_from_path(&win.config_path) {
-        Ok(config) => win.config = config,
-        Err(error) => win.last_write_error = Some(error.to_string()),
-    }
-}
-
 fn remove_branch_config_value(win: &mut SettingsWindow, variant: AppearanceVariant, path: &[&str]) {
     let full_path = appearance_config_path(variant, path);
     win.remove(&full_path);
     if variant == AppearanceVariant::Dark {
         win.remove(path);
     }
-    reload_settings_config(win);
+    super::reload_settings_config(win);
 }
 
 fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVariant) {
@@ -356,7 +348,7 @@ fn theme_row(win: &mut SettingsWindow, ui: &mut egui::Ui, variant: AppearanceVar
                 let chosen = themes[index].clone();
                 branch_mut(&mut win.config, variant).theme = Some(chosen.clone());
                 win.set_str(&["appearance", branch_key(variant), "theme"], &chosen);
-                reload_settings_config(win);
+                super::reload_settings_config(win);
             }
         },
     );

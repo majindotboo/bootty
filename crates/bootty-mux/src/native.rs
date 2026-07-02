@@ -516,6 +516,9 @@ impl MuxBackend for NativeBackend {
                 }
             },
             MuxCommand::SelectNextPane { session_id } => state.select_relative_pane(&session_id, 1),
+            MuxCommand::SelectPreviousPane { session_id } => {
+                state.select_relative_pane(&session_id, -1)
+            }
             MuxCommand::KillPane {
                 session_id,
                 pane_id,

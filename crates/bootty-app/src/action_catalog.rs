@@ -85,6 +85,11 @@ pub enum Command {
     )]
     NextPane,
     #[strum(
+        message = "Previous Pane",
+        detailed_message = "Move focus to the previous pane"
+    )]
+    PreviousPane,
+    #[strum(
         message = "Toggle Pane Zoom",
         detailed_message = "Zoom the focused pane to fill the window, or restore it"
     )]
@@ -290,6 +295,7 @@ impl Command {
             Self::SplitRight => "split_right",
             Self::SplitDown => "split_down",
             Self::NextPane => "next_pane",
+            Self::PreviousPane => "previous_pane",
             Self::TogglePaneZoom => "toggle_pane_zoom",
             Self::KillPane => "kill_pane",
             Self::ClosePane => "close_surface",
@@ -348,6 +354,7 @@ impl Command {
             Self::SplitRight => "columns-2",
             Self::SplitDown => "rows-2",
             Self::NextPane => "layout-grid",
+            Self::PreviousPane => "layout-grid",
             Self::TogglePaneZoom => "maximize-2",
             Self::KillPane => "x",
             Self::ClosePane => "square-x",

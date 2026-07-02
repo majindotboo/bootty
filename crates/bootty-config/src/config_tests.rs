@@ -886,6 +886,7 @@ fn keybind_entries_without_clear_layer_on_defaults() {
         version = 1
 
         [input]
+        preset = "bootty"
         keybind = ["cmd+b=esc:090;8~"]
     "#});
 
@@ -999,9 +1000,16 @@ fn config_accepts_native_multiplexer_backend() {
     assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Native);
 }
 
+// Rmux is a native-layout backend: it must ship the same layout bindings as the native backend
+// for every preset, or split/pane shortcuts silently vanish when switching backends.
 #[test]
-fn rmux_backend_defaults_include_native_layout_bindings() {
-    let config = BoottyConfig::default();
+fn rmux_backend_defaults_mirror_native_layout_bindings() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "bootty"
+    "#});
     let keybinds = config
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Rmux);
@@ -1017,6 +1025,13 @@ fn rmux_backend_defaults_include_native_layout_bindings() {
             .any(|entry| entry == "ctrl+space>-=split_down")
     );
     assert!(keybinds.iter().any(|entry| entry == "ctrl+space>c=new_tab"));
+
+    let default_input = &BoottyConfig::default().input;
+    assert!(!default_input.backend_keybinds.rmux.is_empty());
+    assert_eq!(
+        default_input.backend_keybinds.rmux,
+        default_input.backend_keybinds.native
+    );
 }
 
 // The platform default tables are cfg-selected, so these tests address both tables directly to
@@ -1041,21 +1056,35 @@ fn binding_triggers(entries: &[&str]) -> Vec<BindingTrigger> {
 }
 
 // Every shipped default keybind must parse; catches an invalid key token or action name (e.g. the
-// PageUp/PageDown additions or a future typo) before it reaches users.
+// tmux preset's shifted symbol keys or a future typo) before it reaches users.
 #[test]
 fn default_keybind_tables_parse() {
-    let tables: &[&[&str]] = &[
+    let static_tables: &[&[&str]] = &[
         common_keybinds_macos(),
         common_keybinds_other(),
         common_keybinds_windows(),
-        native_keybinds(),
+        ghostty_common_keybinds_macos(),
+        ghostty_common_keybinds_other(),
+        ghostty_layout_keybinds_macos(),
+        ghostty_layout_keybinds_other(),
         native_scroll_keybinds_macos(),
         native_scroll_keybinds_other(),
         tmux_keybinds(),
     ];
+    let mut tables: Vec<Vec<String>> = static_tables
+        .iter()
+        .map(|table| owned_keybinds(table))
+        .collect();
+    tables.push(prefixed_keybinds("ctrl+space", BOOTTY_PREFIX_KEYBINDS));
+    tables.push(prefixed_keybinds("ctrl+b", TMUX_PREFIX_KEYBINDS));
+    tables.push(
+        prefix_passthrough_keybind("ctrl+space")
+            .into_iter()
+            .collect(),
+    );
     for table in tables {
         let mut set = BindingSet::default();
-        for entry in *table {
+        for entry in &table {
             set.parse_and_put(entry).unwrap_or_else(|error| {
                 panic!("default keybind {entry:?} failed to parse: {error:?}")
             });
@@ -1096,6 +1125,200 @@ fn common_keybind_triggers_are_unique_per_platform() {
             );
         }
     }
+}
+
+// A repeated trigger across a preset's merged Global+layout defaults silently shadows an action;
+// every preset/platform combination must keep the full chord chain unique.
+#[test]
+fn preset_merged_default_triggers_are_unique() {
+    let mut cases: Vec<(String, Vec<String>)> = Vec::new();
+    for (platform, global, scroll) in [
+        (
+            "macos",
+            common_keybinds_macos(),
+            native_scroll_keybinds_macos(),
+        ),
+        (
+            "other",
+            common_keybinds_other(),
+            native_scroll_keybinds_other(),
+        ),
+        (
+            "windows",
+            common_keybinds_windows(),
+            native_scroll_keybinds_other(),
+        ),
+    ] {
+        for (preset, table, prefix) in [
+            ("bootty", BOOTTY_PREFIX_KEYBINDS, "ctrl+space"),
+            ("tmux", TMUX_PREFIX_KEYBINDS, "ctrl+b"),
+        ] {
+            let mut merged = owned_keybinds(global);
+            merged.extend(owned_keybinds(navigation_keybinds()));
+            merged.extend(prefixed_keybinds(prefix, table));
+            merged.extend(owned_keybinds(scroll));
+            cases.push((format!("{preset}-{platform}"), merged));
+        }
+    }
+    for (platform, global, layout) in [
+        (
+            "macos",
+            ghostty_common_keybinds_macos(),
+            ghostty_layout_keybinds_macos(),
+        ),
+        (
+            "other",
+            ghostty_common_keybinds_other(),
+            ghostty_layout_keybinds_other(),
+        ),
+    ] {
+        let mut merged = owned_keybinds(global);
+        merged.extend(owned_keybinds(layout));
+        cases.push((format!("ghostty-{platform}"), merged));
+    }
+    for (name, merged) in cases {
+        let chains: Vec<Vec<BindingTrigger>> = merged
+            .iter()
+            .map(|entry| {
+                parse_binding_elements(entry)
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|element| match element {
+                        BindingElement::Leader(trigger) => Some(trigger),
+                        BindingElement::Binding(binding) => Some(binding.trigger),
+                        BindingElement::Chain(_) => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        for (index, chain) in chains.iter().enumerate() {
+            assert!(
+                !chains[index + 1..].contains(chain),
+                "duplicate trigger for {:?} in {name} preset defaults",
+                merged[index]
+            );
+        }
+    }
+}
+
+// Switching preset must swap the built-in default tables while user override rows keep layering
+// on top; a regression here either loses the user's rows or leaves the old preset's chords live.
+#[test]
+fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "tmux"
+        keybind = ["cmd+g=new_tab"]
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    assert!(keybinds.iter().any(|entry| entry == "ctrl+b>c=new_tab"));
+    assert!(!keybinds.iter().any(|entry| entry == "ctrl+space>c=new_tab"));
+    assert!(keybinds.iter().any(|entry| entry == "cmd+g=new_tab"));
+    // tmux's send-prefix: prefix twice delivers the raw prefix byte to the terminal.
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+b>ctrl+b=text:\\x02")
+    );
+    assert!(
+        keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+b>:=command_palette")
+    );
+    assert!(
+        config.input.backend_keybinds.tmux.is_empty(),
+        "tmux preset leaves the prefix unbound on the tmux backend so real tmux receives it"
+    );
+}
+
+// A remapped prefix must rebuild every prefixed chord and follow the external-tmux passthrough;
+// a regression leaves the old leader baked into the defaults.
+#[test]
+fn prefix_override_rebuilds_prefixed_chords() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "bootty"
+        prefix = "ctrl+a"
+    "#});
+
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    assert!(keybinds.iter().any(|entry| entry == "ctrl+a>v=split_right"));
+    assert!(
+        !keybinds
+            .iter()
+            .any(|entry| entry.starts_with("ctrl+space>"))
+    );
+
+    let tmux_keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Tmux);
+    assert!(
+        tmux_keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+a=text:\\x01")
+    );
+    assert!(
+        !tmux_keybinds
+            .iter()
+            .any(|entry| entry == "ctrl+space=text:\\x00")
+    );
+}
+
+// Ghostty has no prefix concept: a configured prefix must not leak chords into its tables.
+#[test]
+fn ghostty_preset_ignores_prefix_and_ships_direct_combos() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "ghostty"
+        prefix = "ctrl+a"
+    "#});
+
+    assert_eq!(config.input.effective_prefix(), None);
+    let keybinds = config
+        .input
+        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    assert!(keybinds.iter().all(|entry| !entry.contains('>')));
+    assert!(config.input.backend_keybinds.tmux.is_empty());
+}
+
+// An empty prefix (recorder cleared) must fall back to the preset default instead of producing
+// `>key=` chords with an empty leader.
+#[test]
+fn empty_prefix_falls_back_to_preset_default() {
+    let config = load_config_source(indoc! {r#"
+        version = 1
+
+        [input]
+        preset = "bootty"
+        prefix = ""
+    "#});
+
+    assert_eq!(
+        config.input.effective_prefix().as_deref(),
+        Some("ctrl+space")
+    );
+}
+
+// Known-answer control-byte encoding for the external-tmux prefix passthrough.
+#[rstest]
+#[case("ctrl+space", Some("ctrl+space=text:\\x00"))]
+#[case("ctrl+a", Some("ctrl+a=text:\\x01"))]
+#[case("ctrl+b", Some("ctrl+b=text:\\x02"))]
+#[case("cmd+a", None)]
+#[case("ctrl+shift+a", None)]
+fn prefix_passthrough_encodes_control_bytes(#[case] prefix: &str, #[case] expected: Option<&str>) {
+    assert_eq!(prefix_passthrough_keybind(prefix).as_deref(), expected);
 }
 
 // Known-answer: the Linux/Windows session shortcuts resolve to the WezTerm-style Ctrl+Shift combos.
@@ -1140,5 +1363,22 @@ fn windows_paste_defaults_include_standard_terminal_shortcuts() {
         set.get(&BindingTrigger::from_str("shift+Insert").unwrap())
             .map(|binding| &binding.action),
         Some(&BindingAction::PasteFromClipboard)
+    );
+}
+#[test]
+fn preset_only_config_keeps_default_appearance() {
+    let missing = ConfigSandbox::new().load().unwrap();
+    let preset_only = load_config_source("[input]\npreset = \"tmux\"\n");
+    assert_eq!(
+        missing.appearance.light.theme,
+        preset_only.appearance.light.theme
+    );
+    assert_eq!(
+        missing.appearance.dark.theme,
+        preset_only.appearance.dark.theme
+    );
+    assert_eq!(
+        missing.colors_for_appearance(AppearanceVariant::Light),
+        preset_only.colors_for_appearance(AppearanceVariant::Light)
     );
 }

@@ -1386,6 +1386,23 @@ impl AppState {
         }
     }
 
+    fn focus_pane_relative(&mut self, delta: isize) {
+        let key = self.current_window_key();
+        let Some(layout) = self.pane_layouts.get(&key) else {
+            return;
+        };
+        let panes = layout.panes();
+        if panes.len() < 2 {
+            return;
+        }
+        let Some(index) = panes.iter().position(|pane| pane == layout.focused()) else {
+            return;
+        };
+        let next = (index as isize + delta).rem_euclid(panes.len() as isize) as usize;
+        let pane = panes[next].clone();
+        self.focus_pane(&pane);
+    }
+
     pub fn activate_session_from_ui(&mut self, session_id: &str) {
         self.mux.activate_session(session_id);
         self.sync_native_layout_terminal_now();
@@ -2896,6 +2913,19 @@ impl AppState {
             self.focus_pane_neighbor(layout_direction(direction));
             return;
         }
+        // Likewise next/previous pane cycle focus across the split layout's leaves; the mux-state
+        // pane selection the command path mutates is invisible to the native layout.
+        if self.uses_native_terminal_layout() {
+            let delta = match action {
+                MuxKeyAction::NextPane => Some(1),
+                MuxKeyAction::PreviousPane => Some(-1),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.focus_pane_relative(delta);
+                return;
+            }
+        }
         if matches!(action, MuxKeyAction::NewTab) && self.mux.selected_session().is_none() {
             let request = new_mux_session_request(self.config());
             let mux_config = self.config().multiplexer.clone();
@@ -2941,6 +2971,9 @@ impl AppState {
                 direction,
             },
             MuxKeyAction::NextPane => MuxCommand::SelectNextPane {
+                session_id: selected_session,
+            },
+            MuxKeyAction::PreviousPane => MuxCommand::SelectPreviousPane {
                 session_id: selected_session,
             },
             MuxKeyAction::KillPane => MuxCommand::KillPane {
