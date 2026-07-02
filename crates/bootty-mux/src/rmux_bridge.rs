@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -9,10 +10,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use bootty_terminal::terminal_engine::{TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM};
 use rmux_sdk::{
     EnsureSession, EnsureSessionPolicy, Pane, PaneAttributes, PaneCell, PaneColor, PaneCursor,
-    PaneId, PaneOutputChunk, PaneOutputStart, PaneSnapshot, ProcessSpec, Rmux, RmuxEndpoint,
-    SessionName, SplitDirection as SdkSplitDirection, TerminalSizeSpec, WindowRef,
+    PaneId, PaneOutputChunk, PaneOutputStart, PaneSnapshot, Rmux, RmuxEndpoint, SessionName,
+    SplitDirection as SdkSplitDirection, TerminalSizeSpec, WindowRef,
 };
 use tokio::runtime::Builder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -25,6 +27,56 @@ use crate::{
 
 const RMUX_OUTPUT_POLL_MIN_DELAY: Duration = Duration::from_millis(1);
 const RMUX_OUTPUT_POLL_MAX_DELAY: Duration = Duration::from_millis(16);
+
+const TERM_ENV: &str = "TERM";
+const COLORTERM_ENV: &str = "COLORTERM";
+const TERMINFO_ENV: &str = "TERMINFO";
+const TERM_PROGRAM_ENV: &str = "TERM_PROGRAM";
+const TERM_PROGRAM_VERSION_ENV: &str = "TERM_PROGRAM_VERSION";
+
+fn bootty_rmux_process_environment() -> Vec<String> {
+    bootty_rmux_process_environment_with_terminfo(bootty_runtime::terminfo::vendored_terminfo_dir())
+}
+
+fn bootty_rmux_process_environment_with_terminfo(terminfo_dir: Option<&Path>) -> Vec<String> {
+    let term = if terminfo_dir.is_some() {
+        TERMINAL_TERM
+    } else {
+        "xterm-256color"
+    };
+    let mut environment = vec![
+        format!("{TERM_ENV}={term}"),
+        format!("{COLORTERM_ENV}=truecolor"),
+        format!("{TERM_PROGRAM_ENV}={TERMINAL_PROGRAM}"),
+        format!("{TERM_PROGRAM_VERSION_ENV}={TERMINAL_PROGRAM_VERSION}"),
+    ];
+    if let Some(terminfo_dir) = terminfo_dir {
+        environment.push(format!("{TERMINFO_ENV}={}", terminfo_dir.to_string_lossy()));
+    }
+    environment
+}
+
+fn apply_bootty_rmux_environment_to_window<'a>(
+    mut builder: rmux_sdk::NewWindowBuilder<'a>,
+) -> rmux_sdk::NewWindowBuilder<'a> {
+    for entry in bootty_rmux_process_environment() {
+        if let Some((name, value)) = entry.split_once('=') {
+            builder = builder.env(name, value);
+        }
+    }
+    builder
+}
+
+fn apply_bootty_rmux_environment_to_split<'a>(
+    mut builder: rmux_sdk::PaneSplitBuilder<'a>,
+) -> rmux_sdk::PaneSplitBuilder<'a> {
+    for entry in bootty_rmux_process_environment() {
+        if let Some((name, value)) = entry.split_once('=') {
+            builder = builder.env(name, value);
+        }
+    }
+    builder
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RmuxPaneTarget {
@@ -413,7 +465,7 @@ impl RmuxBridgeState {
                 .detached(true)
                 .working_directory(cwd)
                 .size(TerminalSizeSpec::new(80, 24))
-                .process(ProcessSpec::default()),
+                .environment(bootty_rmux_process_environment()),
         )
         .await?;
         Ok(())
@@ -456,7 +508,7 @@ impl RmuxBridgeState {
         let rmux = self.rmux().await?;
         let name = SessionName::new(session_name).context("invalid rmux session name")?;
         let session = rmux.session(name).await?;
-        let mut builder = session.new_window_with();
+        let mut builder = apply_bootty_rmux_environment_to_window(session.new_window_with());
         if let Some(cwd) = cwd {
             builder = builder.cwd(cwd);
         }
@@ -544,7 +596,7 @@ impl RmuxBridgeState {
             MuxSplitDirection::Right => SdkSplitDirection::Right,
             MuxSplitDirection::Down => SdkSplitDirection::Down,
         };
-        pane.split(direction).await?;
+        apply_bootty_rmux_environment_to_split(pane.split_with(direction)).await?;
         Ok(())
     }
 
@@ -684,7 +736,13 @@ async fn run_pane_io_inner(
     let pane = pane_for_target(&rmux, &target).await?;
     let mut output_stream = pane.output_stream_starting_at(PaneOutputStart::Now).await?;
     let restore_valid = Arc::new(AtomicBool::new(true));
-    let mut restore_started = false;
+    start_restore_capture(
+        target.clone(),
+        max_scrollback,
+        output_tx.clone(),
+        Arc::clone(&restore_valid),
+    );
+    let mut restore_started = true;
     let mut output_poll_delay = RMUX_OUTPUT_POLL_MIN_DELAY;
 
     loop {
@@ -724,17 +782,12 @@ async fn run_pane_io_inner(
                     output_poll_delay = RMUX_OUTPUT_POLL_MIN_DELAY;
                     if !restore_started {
                         restore_started = true;
-                        let restore_pane = pane.clone();
-                        let restore_output_tx = output_tx.clone();
-                        let restore_valid = Arc::clone(&restore_valid);
-                        tokio::spawn(async move {
-                            let Ok(bytes) = restore_capture(&restore_pane, max_scrollback).await else {
-                                return;
-                            };
-                            if !bytes.is_empty() && restore_valid.load(Ordering::Relaxed) {
-                                let _ = restore_output_tx.send(RmuxPaneEvent::Capture(bytes));
-                            }
-                        });
+                        start_restore_capture(
+                            target.clone(),
+                            max_scrollback,
+                            output_tx.clone(),
+                            Arc::clone(&restore_valid),
+                        );
                     }
                 }
             }
@@ -742,6 +795,28 @@ async fn run_pane_io_inner(
         }
     }
     Ok(())
+}
+
+fn start_restore_capture(
+    target: RmuxPaneTarget,
+    max_scrollback: usize,
+    output_tx: mpsc::Sender<RmuxPaneEvent>,
+    restore_valid: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        let Ok(rmux) = connect_bootty_rmux().await else {
+            return;
+        };
+        let Ok(pane) = pane_for_target(&rmux, &target).await else {
+            return;
+        };
+        let Ok(bytes) = restore_capture(&pane, max_scrollback).await else {
+            return;
+        };
+        if !bytes.is_empty() && restore_valid.load(Ordering::Relaxed) {
+            let _ = output_tx.send(RmuxPaneEvent::Capture(bytes));
+        }
+    });
 }
 
 async fn restore_capture(pane: &Pane, max_scrollback: usize) -> Result<Vec<u8>> {
@@ -904,9 +979,42 @@ async fn pane_for_target(rmux: &Rmux, target: &RmuxPaneTarget) -> Result<Pane> {
 mod tests {
     use super::*;
     use std::{
+        path::Path,
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn rmux_process_environment_advertises_bootty_terminal_identity() {
+        let environment =
+            bootty_rmux_process_environment_with_terminfo(Some(Path::new("/bootty/terminfo")));
+
+        assert_eq!(
+            environment,
+            vec![
+                "TERM=xterm-bootty".to_owned(),
+                "COLORTERM=truecolor".to_owned(),
+                "TERM_PROGRAM=ghostty".to_owned(),
+                format!("TERM_PROGRAM_VERSION={TERMINAL_PROGRAM_VERSION}"),
+                "TERMINFO=/bootty/terminfo".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rmux_process_environment_falls_back_without_bootty_terminfo() {
+        let environment = bootty_rmux_process_environment_with_terminfo(None);
+
+        assert_eq!(
+            environment,
+            vec![
+                "TERM=xterm-256color".to_owned(),
+                "COLORTERM=truecolor".to_owned(),
+                "TERM_PROGRAM=ghostty".to_owned(),
+                format!("TERM_PROGRAM_VERSION={TERMINAL_PROGRAM_VERSION}"),
+            ]
+        );
+    }
 
     #[test]
     fn restore_cursor_sequence_uses_one_based_terminal_coordinates() {
