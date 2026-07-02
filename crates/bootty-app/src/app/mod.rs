@@ -1438,6 +1438,21 @@ impl BoottyApp {
         }
     }
 
+    fn show_terminal_find_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.take_terminal_find_dialog() else {
+            return;
+        };
+        let event = dialog.show(ctx, self.state.ui_theme());
+        let searched = matches!(
+            event,
+            crate::ui::terminal_find::TerminalFindEvent::Search { .. }
+        );
+        self.state.apply_terminal_find_event(dialog, event);
+        if searched {
+            ctx.request_repaint();
+        }
+    }
+
     fn show_theme_picker_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.state.take_theme_picker_dialog() else {
             return;
@@ -1625,6 +1640,7 @@ impl eframe::App for BoottyApp {
             self.show_ditch_session_dialog(ui.ctx());
             self.show_keybind_help_dialog(ui.ctx());
             self.show_command_palette_dialog(ui.ctx());
+            self.show_terminal_find_dialog(ui.ctx());
             self.show_theme_picker_dialog(ui.ctx());
             self.drive_lua_windows(ui.ctx());
         }

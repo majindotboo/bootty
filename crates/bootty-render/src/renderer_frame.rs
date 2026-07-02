@@ -9,7 +9,8 @@ use crate::{
     geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface},
     paint_plan::{
         BackgroundRect, CursorBlinkPhase, DecorationLine, DecorationStyle, PaintPlanner, PlanColor,
-        TerminalPaintPlan, TextAttrs, TextRun,
+        TerminalPaintPlan, TextAttrs, TextRun, active_search_match_background,
+        active_search_match_text_foreground, search_match_background, search_match_text_foreground,
     },
     selection::TerminalSelection,
     terminal::{CellStyle, CursorSnapshot, RenderFrame},
@@ -195,6 +196,22 @@ impl RendererFrame {
             source_dirty: frame.dirty,
             paint_plan,
         };
+        for search_match in &frame.search_matches {
+            renderer.mark_cells(
+                search_match.row,
+                search_match.start_col..search_match.end_col.saturating_add(1),
+                search_match_text_foreground(),
+                search_match_background(),
+            );
+        }
+        if let Some(active_search_match) = frame.active_search_match {
+            renderer.mark_cells(
+                active_search_match.row,
+                active_search_match.start_col..active_search_match.end_col.saturating_add(1),
+                active_search_match_text_foreground(),
+                active_search_match_background(),
+            );
+        }
         for selection in &frame.selections {
             renderer.select_cells(
                 selection.row,
@@ -262,6 +279,16 @@ impl RendererFrame {
     pub fn select_cells(&mut self, row: u16, cols: Range<u16>) {
         let foreground = self.selection_foreground.unwrap_or(self.default_background);
         let background = self.selection_background.unwrap_or(self.default_foreground);
+        self.mark_cells(row, cols, foreground, background);
+    }
+
+    fn mark_cells(
+        &mut self,
+        row: u16,
+        cols: Range<u16>,
+        foreground: PlanColor,
+        background: PlanColor,
+    ) {
         for cell in &mut self.cells {
             if cell.y == row && cols.contains(&cell.x) {
                 cell.selection = RendererSelectionIntent::Selected {

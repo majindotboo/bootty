@@ -314,6 +314,69 @@ fn terminal_engine_extracts_osc8_hyperlink_uri() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_engine_search_viewport_moves_to_scrollback_match() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        test_geometry(16, 3),
+        TerminalColorConfig::default(),
+        1_000,
+    )?;
+    engine.write_vt(b"first\r\ntarget needle\r\nthird\r\nfourth\r\nfifth");
+
+    assert!(
+        !visible_text_rows(engine.extract_frame()?)
+            .iter()
+            .any(|row| row.contains("target needle"))
+    );
+
+    assert!(engine.search_viewport("target needle", TerminalSearchDirection::Previous)?);
+
+    assert!(
+        visible_text_rows(engine.extract_frame()?)
+            .iter()
+            .any(|row| row.contains("target needle"))
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_search_viewport_highlights_visible_match() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(16, 3))?;
+    engine.write_vt(b"one items\r\ntwo\r\nthree");
+
+    assert!(engine.search_viewport("items", TerminalSearchDirection::Current)?);
+
+    assert_eq!(
+        engine.extract_frame()?.search_matches,
+        vec![FrameSelection {
+            row: 0,
+            start_col: 4,
+            end_col: 8,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_engine_search_viewport_matches_wrapped_scrollback_line() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        test_geometry(8, 3),
+        TerminalColorConfig::default(),
+        1_000,
+    )?;
+    engine.write_vt(b"before\r\nwrapped needle continues\r\nafter\r\ntail\r\nend");
+
+    assert!(engine.search_viewport("needle continues", TerminalSearchDirection::Previous)?);
+
+    let rows = visible_text_rows(engine.extract_frame()?);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("needle") || row.contains("continues")),
+        "search should scroll to the wrapped matching line, got {rows:?}"
+    );
+    Ok(())
+}
+
 fn test_geometry(cols: u16, rows: u16) -> TerminalGeometry {
     TerminalGeometry {
         cols,

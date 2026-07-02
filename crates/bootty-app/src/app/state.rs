@@ -14,8 +14,9 @@ use eframe::egui::{self, Pos2, Rect};
 use crate::{
     app_actions::{
         AppAction, AppKeyBindings, FontSizeAction, KeybindAction, MuxKeyAction, SidebarAction,
-        SidebarKeyBindings, TerminalScrollAction, builtin_app_action_for_direct_key,
-        keybind_action_for_name, split_app_actions_for_bindings_with_modifier_sides,
+        SidebarKeyBindings, TerminalFindAction, TerminalScrollAction,
+        builtin_app_action_for_direct_key, keybind_action_for_name,
+        split_app_actions_for_bindings_with_modifier_sides,
     },
     config::{
         AppearanceMode, AppearanceVariant, BoottyConfig, ConfigState, WindowConfig,
@@ -28,8 +29,10 @@ use crate::{
     direct_input::{DirectKeyInput, ModifierSideState},
     geometry::{SurfacePoint, TerminalSurface, ViewTransform},
     input::{
-        InputSnapshot, TerminalInputCommand, WheelScrollState, focus::InputFocus,
-        router::route_events, terminal_input_commands_with_wheel_state,
+        InputSnapshot, TerminalInputCommand, WheelScrollState,
+        focus::InputFocus,
+        router::{RoutedInput, route_events},
+        terminal_input_commands_with_wheel_state,
     },
     layout::{Direction, Divider, PaneLayout, SplitDirection},
     modifier_remap::ModifierRemapSet,
@@ -49,7 +52,10 @@ use crate::{
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
     session_order::SessionOrderStore,
-    terminal::{DrainStats, KeyInput, MouseButton, TerminalKey, TerminalSessionConfig},
+    terminal::{
+        DrainStats, KeyInput, MouseButton, TerminalKey, TerminalSearchDirection,
+        TerminalSessionConfig,
+    },
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
@@ -59,6 +65,7 @@ use crate::{
         new_session_picker::{NewMuxSessionDialog, NewSessionPickerEvent},
         rename::{RenameSessionDialog, RenameSessionEvent, RenameTabDialog, RenameTabEvent},
         session_picker::{SessionPickerDialog, SessionPickerEvent},
+        terminal_find::{TerminalFindDialog, TerminalFindEvent, TerminalFindResult},
         theme_picker::{ThemePickerDialog, ThemePickerEvent},
     },
 };
@@ -161,6 +168,7 @@ pub struct AppState {
     /// rather than here, so input gating reads this mirror to stop feeding the terminal behind it.
     lua_window_open: bool,
     terminal_selection_drag_active: bool,
+    terminal_selection_drag_pos: Option<Pos2>,
     /// Screen rects of chrome resize handles (sidebar edge, pane dividers) registered during the
     /// previous frame's UI build. A primary press inside one of these must not begin a terminal
     /// text selection — the handle owns that drag. Populated each frame in `show_fixed_layout`.
@@ -185,6 +193,8 @@ pub struct AppState {
     keybind_help_dialog: Option<KeybindHelpDialog>,
     command_palette_dialog: Option<CommandPaletteDialog>,
     theme_picker_dialog: Option<ThemePickerDialog>,
+    terminal_find_dialog: Option<TerminalFindDialog>,
+    last_terminal_search: String,
     theme_picker_restore_config: Option<BoottyConfig>,
     /// A command-palette choice waiting to be dispatched on the next input pass,
     /// where the viewport snapshot and effect sink are in scope.
@@ -218,6 +228,49 @@ fn remove_first_paste_event(events: &mut Vec<egui::Event>) -> bool {
     } else {
         false
     }
+}
+
+fn route_find_modeless_events(
+    focus: InputFocus,
+    events: Vec<egui::Event>,
+    find_rect: Option<egui::Rect>,
+    hover_pos: Option<Pos2>,
+) -> RoutedInput {
+    let Some(find_rect) = find_rect else {
+        return route_events(focus, events);
+    };
+
+    let mut routed = RoutedInput::default();
+    for event in events {
+        let inside_find = event_pointer_pos(&event)
+            .or(hover_pos.filter(|_| matches!(event, egui::Event::MouseWheel { .. })))
+            .is_some_and(|pos| find_rect.contains(pos));
+        if inside_find {
+            routed.ui_events.push(event);
+        } else if focus.terminal_owns_input() || event_is_terminal_pointer(&event) {
+            routed.terminal_events.push(event);
+        } else {
+            routed.ui_events.push(event);
+        }
+    }
+    routed
+}
+
+fn event_pointer_pos(event: &egui::Event) -> Option<Pos2> {
+    match event {
+        egui::Event::PointerMoved(pos) => Some(*pos),
+        egui::Event::PointerButton { pos, .. } => Some(*pos),
+        _ => None,
+    }
+}
+
+fn event_is_terminal_pointer(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::PointerMoved(_)
+            | egui::Event::PointerButton { .. }
+            | egui::Event::MouseWheel { .. }
+    )
 }
 
 fn layout_direction(direction: crate::mux::command::MuxDirection) -> Direction {
@@ -261,19 +314,33 @@ fn focus_after_native_layout_reconcile(
 enum TerminalSelectionAction {
     Begin(TerminalSelectionEvent),
     Update(TerminalSelectionEvent),
+    Scroll(isize),
     End(Option<TerminalSelectionEvent>),
+}
+
+struct TerminalSelectionRouteContext<'a> {
+    surface: Option<TerminalSurface>,
+    view: ViewTransform,
+    mouse_tracking: bool,
+    frame_modifiers: egui::Modifiers,
+    chrome_handle_rects: &'a [egui::Rect],
 }
 
 fn route_terminal_selection_events(
     events: Vec<egui::Event>,
-    surface: Option<TerminalSurface>,
-    view: ViewTransform,
+    context: TerminalSelectionRouteContext<'_>,
     active: &mut bool,
-    mouse_tracking: bool,
-    frame_modifiers: egui::Modifiers,
-    chrome_handle_rects: &[egui::Rect],
+    drag_pos: &mut Option<Pos2>,
 ) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
+    let TerminalSelectionRouteContext {
+        surface,
+        view,
+        mouse_tracking,
+        frame_modifiers,
+        chrome_handle_rects,
+    } = context;
     let Some(surface) = surface else {
+        *drag_pos = None;
         *active = false;
         return (events, Vec::new());
     };
@@ -295,6 +362,7 @@ fn route_terminal_selection_events(
                 if let Some(selection_event) =
                     terminal_selection_event(surface, view, pos, rectangle)
                 {
+                    *drag_pos = None;
                     *active = true;
                     selection_actions.push(TerminalSelectionAction::Begin(selection_event));
                     continue;
@@ -307,8 +375,10 @@ fn route_terminal_selection_events(
                 });
             }
             egui::Event::PointerMoved(pos) if *active => {
-                if let Some(selection_event) =
-                    terminal_selection_event(surface, view, pos, frame_modifiers.alt)
+                *drag_pos = Some(pos);
+                if selection_drag_scroll_delta(surface, pos) == 0
+                    && let Some(selection_event) =
+                        terminal_selection_event_clamped(surface, view, pos, frame_modifiers.alt)
                 {
                     selection_actions.push(TerminalSelectionAction::Update(selection_event));
                 }
@@ -319,13 +389,14 @@ fn route_terminal_selection_events(
                 pressed: false,
                 modifiers,
             } if *active => {
-                let selection_event = terminal_selection_event(
+                let selection_event = terminal_selection_event_clamped(
                     surface,
                     view,
                     pos,
                     modifiers.alt || frame_modifiers.alt,
                 );
                 selection_actions.push(TerminalSelectionAction::End(selection_event));
+                *drag_pos = None;
                 *active = false;
             }
             event => terminal_events.push(event),
@@ -350,6 +421,100 @@ fn terminal_selection_event(
         },
         rectangle,
     })
+}
+
+fn previous_inside_coordinate(min: f32, max: f32) -> f32 {
+    if max <= min {
+        return min;
+    }
+
+    let inset = max.abs().max(1.0) * f32::EPSILON * 8.0;
+    (max - inset).max(min)
+}
+
+fn terminal_grid_edge(surface: TerminalSurface) -> Pos2 {
+    let geometry = surface.geometry();
+    let right =
+        surface.rect.left() + surface.padding.left + f32::from(geometry.cols) * surface.cell.width;
+    let bottom =
+        surface.rect.top() + surface.padding.top + f32::from(geometry.rows) * surface.cell.height;
+    Pos2::new(
+        right.min(surface.rect.right()),
+        bottom.min(surface.rect.bottom()),
+    )
+}
+
+fn terminal_selection_event_clamped(
+    surface: TerminalSurface,
+    view: ViewTransform,
+    pos: Pos2,
+    rectangle: bool,
+) -> Option<TerminalSelectionEvent> {
+    let pos = view.inverse_point(pos);
+    let grid_edge = terminal_grid_edge(surface);
+    let max_x = previous_inside_coordinate(surface.rect.left(), grid_edge.x);
+    let max_y = previous_inside_coordinate(surface.rect.top(), grid_edge.y);
+    let pos = Pos2::new(
+        pos.x.clamp(surface.rect.left(), max_x),
+        pos.y.clamp(surface.rect.top(), max_y),
+    );
+    terminal_selection_event(surface, ViewTransform::IDENTITY, pos, rectangle)
+}
+
+fn selection_drag_scroll_delta(surface: TerminalSurface, pos: Pos2) -> isize {
+    let top = surface.rect.top();
+    let bottom = terminal_grid_edge(surface).y;
+    let hot_zone = (surface.cell.height * 0.35)
+        .clamp(4.0, 12.0)
+        .min(((bottom - top) / 2.0).max(0.0));
+
+    if pos.y < top {
+        -selection_drag_scroll_rows(surface, top - pos.y)
+    } else if pos.y <= top + hot_zone {
+        -selection_drag_scroll_rows(surface, top + hot_zone - pos.y)
+    } else if pos.y > bottom {
+        selection_drag_scroll_rows(surface, pos.y - bottom)
+    } else if pos.y >= bottom - hot_zone {
+        selection_drag_scroll_rows(surface, pos.y - (bottom - hot_zone))
+    } else {
+        0
+    }
+}
+
+fn selection_drag_scroll_rows(surface: TerminalSurface, distance: f32) -> isize {
+    let rows = (distance / surface.cell.height).ceil().max(1.0) as isize;
+    rows.min(surface.geometry().rows.max(1) as isize)
+}
+
+fn terminal_selection_autoscroll_actions(
+    surface: Option<TerminalSurface>,
+    view: ViewTransform,
+    active: bool,
+    drag_pos: Option<Pos2>,
+    modifiers: egui::Modifiers,
+) -> Vec<TerminalSelectionAction> {
+    if !active {
+        return Vec::new();
+    }
+    let Some(surface) = surface else {
+        return Vec::new();
+    };
+    let Some(pos) = drag_pos else {
+        return Vec::new();
+    };
+
+    let delta = selection_drag_scroll_delta(surface, pos);
+    if delta == 0 {
+        return Vec::new();
+    }
+
+    let mut actions = vec![TerminalSelectionAction::Scroll(delta)];
+    if let Some(selection_event) =
+        terminal_selection_event_clamped(surface, view, pos, modifiers.alt)
+    {
+        actions.push(TerminalSelectionAction::Update(selection_event));
+    }
+    actions
 }
 
 fn copy_shortcut_pressed(event: &egui::Event) -> bool {
@@ -773,6 +938,7 @@ impl AppState {
             settings_open: false,
             lua_window_open: false,
             terminal_selection_drag_active: false,
+            terminal_selection_drag_pos: None,
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
@@ -791,6 +957,8 @@ impl AppState {
             terminal_tab_titles: HashMap::new(),
             command_palette_dialog: None,
             theme_picker_dialog: None,
+            terminal_find_dialog: None,
+            last_terminal_search: String::new(),
             theme_picker_restore_config: None,
             pending_command: None,
             ditch_session_dialog: None,
@@ -1615,6 +1783,39 @@ impl AppState {
         }
     }
 
+    pub fn take_terminal_find_dialog(&mut self) -> Option<TerminalFindDialog> {
+        self.terminal_find_dialog.take()
+    }
+
+    pub fn apply_terminal_find_event(
+        &mut self,
+        mut dialog: TerminalFindDialog,
+        event: TerminalFindEvent,
+    ) {
+        match event {
+            TerminalFindEvent::None => {
+                self.terminal_find_dialog = Some(dialog);
+            }
+            TerminalFindEvent::Close => {
+                self.input_focus = InputFocus::Terminal;
+                self.clear_terminal_search();
+            }
+            TerminalFindEvent::FocusFind => {
+                self.input_focus = InputFocus::Picker;
+                self.terminal_find_dialog = Some(dialog);
+            }
+            TerminalFindEvent::FocusTerminal => {
+                self.input_focus = InputFocus::Terminal;
+                self.terminal_find_dialog = Some(dialog);
+            }
+            TerminalFindEvent::Search { query, direction } => {
+                let result = self.search_terminal(&query, direction);
+                dialog.set_result(result);
+                self.terminal_find_dialog = Some(dialog);
+            }
+        }
+    }
+
     pub fn take_ditch_session_dialog(&mut self) -> Option<DitchSessionDialog> {
         self.ditch_session_dialog.take()
     }
@@ -2137,6 +2338,7 @@ impl AppState {
         self.keybind_help_dialog = None;
         self.command_palette_dialog = None;
         self.theme_picker_dialog = None;
+        self.terminal_find_dialog = None;
         restored_preview
     }
 
@@ -2230,6 +2432,18 @@ impl AppState {
             .keybinds_for_backend(config.multiplexer.backend);
         self.close_overlay_dialogs();
         self.command_palette_dialog = Some(CommandPaletteDialog::open(&bindings));
+        self.input_focus = InputFocus::Picker;
+    }
+
+    fn open_terminal_find_dialog(&mut self) {
+        let query = self.last_terminal_search.clone();
+        self.close_overlay_dialogs();
+        let mut dialog = TerminalFindDialog::open(query.clone());
+        if !query.trim().is_empty() {
+            let result = self.search_terminal(&query, TerminalSearchDirection::Current);
+            dialog.set_result(result);
+        }
+        self.terminal_find_dialog = Some(dialog);
         self.input_focus = InputFocus::Picker;
     }
 
@@ -2470,6 +2684,9 @@ impl AppState {
                 TerminalSelectionAction::Begin(event) => {
                     TerminalRenderSource::begin_selection(&mut self.terminal, event)
                 }
+                TerminalSelectionAction::Scroll(delta) => {
+                    TerminalRenderSource::scroll_viewport_delta(&mut self.terminal, delta)
+                }
                 TerminalSelectionAction::Update(event) => {
                     TerminalRenderSource::update_selection(&mut self.terminal, event)
                 }
@@ -2505,15 +2722,34 @@ impl AppState {
             .flatten();
         let mouse_tracking =
             self.terminal_mouse_tracking_for_selection(&events, terminal_input_enabled);
+        let mut chrome_handle_rects = self.chrome_handle_rects.clone();
+        if let Some(rect) = self
+            .terminal_find_dialog
+            .as_ref()
+            .and_then(TerminalFindDialog::last_rect)
+        {
+            chrome_handle_rects.push(rect);
+        }
         let (mut events, selection_actions) = route_terminal_selection_events(
             events,
+            TerminalSelectionRouteContext {
+                surface: selection_surface,
+                view: self.terminal_view_transform,
+                mouse_tracking,
+                frame_modifiers: modifiers,
+                chrome_handle_rects: &chrome_handle_rects,
+            },
+            &mut self.terminal_selection_drag_active,
+            &mut self.terminal_selection_drag_pos,
+        );
+        let mut selection_actions = selection_actions;
+        selection_actions.extend(terminal_selection_autoscroll_actions(
             selection_surface,
             self.terminal_view_transform,
-            &mut self.terminal_selection_drag_active,
-            mouse_tracking,
+            self.terminal_selection_drag_active,
+            self.terminal_selection_drag_pos,
             modifiers,
-            &self.chrome_handle_rects,
-        );
+        ));
         let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
         let copy_selection_count = self.consume_copy_shortcut_for_terminal_selection(&mut events);
         // `cmd+shift+,` over a palette row jumps to that command's keybinding editor.
@@ -2531,9 +2767,20 @@ impl AppState {
             }
         }
         let (events, actions) = self.split_app_actions(events);
-        let routed = route_events(self.input_focus, events);
+        let routed = if self.terminal_find_dialog.is_some() {
+            route_find_modeless_events(
+                self.input_focus,
+                events,
+                self.terminal_find_dialog
+                    .as_ref()
+                    .and_then(TerminalFindDialog::last_rect),
+                hover_pos,
+            )
+        } else {
+            route_events(self.input_focus, events)
+        };
         let sidebar_count = self.handle_sidebar_input(routed.ui_events);
-        let events = if terminal_input_enabled {
+        let events = if terminal_input_enabled || self.terminal_find_dialog.is_some() {
             routed.terminal_events
         } else {
             Vec::new()
@@ -2787,6 +3034,7 @@ impl AppState {
                 }
             }
             KeybindAction::Font(action) => self.apply_font_size_action(action, effects),
+            KeybindAction::Find(action) => self.apply_terminal_find_action(action, effects),
             KeybindAction::CopyToClipboard => {
                 self.copy_terminal_selection_or_request_copy(effects);
             }
@@ -3094,6 +3342,111 @@ impl AppState {
         sessions.get(next).map(|session| session.id.clone())
     }
 
+    fn apply_terminal_find_action(
+        &mut self,
+        action: TerminalFindAction,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        match action {
+            TerminalFindAction::Prompt => {
+                self.open_terminal_find_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
+            TerminalFindAction::Close => {
+                self.terminal_find_dialog = None;
+                self.clear_terminal_search();
+                self.input_focus = InputFocus::Terminal;
+                effects.push(AppEffect::RequestRepaint);
+            }
+            TerminalFindAction::Search(query) => {
+                self.search_terminal(&query, TerminalSearchDirection::Current);
+                effects.push(AppEffect::RequestRepaint);
+            }
+            TerminalFindAction::SearchSelection => {
+                if let Some(query) = self.selected_terminal_text() {
+                    self.search_terminal(&query, TerminalSearchDirection::Current);
+                    effects.push(AppEffect::RequestRepaint);
+                }
+            }
+            TerminalFindAction::Previous => {
+                let query = self.last_terminal_search.clone();
+                if query.is_empty() {
+                    self.open_terminal_find_dialog();
+                } else {
+                    self.search_terminal(&query, TerminalSearchDirection::Previous);
+                }
+                effects.push(AppEffect::RequestRepaint);
+            }
+            TerminalFindAction::Next => {
+                let query = self.last_terminal_search.clone();
+                if query.is_empty() {
+                    self.open_terminal_find_dialog();
+                } else {
+                    self.search_terminal(&query, TerminalSearchDirection::Next);
+                }
+                effects.push(AppEffect::RequestRepaint);
+            }
+        }
+    }
+
+    fn selected_terminal_text(&mut self) -> Option<String> {
+        match self
+            .terminal
+            .format_selection(TerminalSelectionFormat::PlainText)
+        {
+            Ok(Some(bytes)) => Some(String::from_utf8_lossy(&bytes).trim().to_owned())
+                .filter(|text| !text.is_empty()),
+            Ok(None) => None,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                None
+            }
+        }
+    }
+
+    fn clear_terminal_search(&mut self) {
+        if let Err(error) = self
+            .terminal
+            .search_viewport("", TerminalSearchDirection::Current)
+        {
+            self.last_error = Some(error.to_string());
+        }
+    }
+
+    fn search_terminal(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+    ) -> TerminalFindResult {
+        let query = query.trim();
+        if query.is_empty() {
+            self.clear_terminal_search();
+            return TerminalFindResult::default();
+        }
+        self.last_terminal_search = query.to_owned();
+        match self.terminal.search_viewport(query, direction) {
+            Ok(found) => {
+                let (active_index, match_count) = self
+                    .terminal
+                    .extract_frame()
+                    .map(|frame| (frame.active_search_match_index, frame.search_match_count))
+                    .unwrap_or_else(|error| {
+                        self.last_error = Some(error.to_string());
+                        (None, 0)
+                    });
+                TerminalFindResult {
+                    found,
+                    active_index,
+                    match_count,
+                }
+            }
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                TerminalFindResult::default()
+            }
+        }
+    }
+
     fn apply_terminal_scroll_action(&mut self, action: TerminalScrollAction) {
         let delta = match action {
             TerminalScrollAction::Top => -1_000_000,
@@ -3277,6 +3630,52 @@ mod tests {
     }
 
     #[test]
+    fn find_bar_focus_keeps_text_in_ui_but_routes_terminal_pointer_events() {
+        let find_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 40.0));
+        let outside_press = egui::Event::PointerButton {
+            pos: egui::Pos2::new(120.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let routed = route_find_modeless_events(
+            InputFocus::Picker,
+            vec![outside_press.clone(), egui::Event::Text("a".to_owned())],
+            Some(find_rect),
+            None,
+        );
+
+        assert_eq!(routed.terminal_events, vec![outside_press]);
+        assert_eq!(routed.ui_events, vec![egui::Event::Text("a".to_owned())]);
+    }
+
+    #[test]
+    fn terminal_focus_does_not_route_find_bar_pointer_events_to_terminal() {
+        let find_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 40.0));
+        let inside_press = egui::Event::PointerButton {
+            pos: egui::Pos2::new(20.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let outside_press = egui::Event::PointerButton {
+            pos: egui::Pos2::new(120.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let routed = route_find_modeless_events(
+            InputFocus::Terminal,
+            vec![inside_press.clone(), outside_press.clone()],
+            Some(find_rect),
+            None,
+        );
+
+        assert_eq!(routed.ui_events, vec![inside_press]);
+        assert_eq!(routed.terminal_events, vec![outside_press]);
+    }
+
+    #[test]
     fn bootty_selection_drag_is_not_sent_to_terminal_input() {
         let surface = TerminalSurface::for_rect(
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
@@ -3302,12 +3701,15 @@ mod tests {
 
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
-            Some(surface),
-            ViewTransform::IDENTITY,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
             &mut active,
-            false,
-            egui::Modifiers::default(),
-            &[],
+            &mut None,
         );
 
         assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
@@ -3325,6 +3727,252 @@ mod tests {
             TerminalSelectionAction::End(_)
         ));
         assert!(!active);
+    }
+
+    #[test]
+    fn selection_drag_above_terminal_scrolls_and_updates_at_viewport_edge() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut drag_pos = None;
+        let mut active = false;
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: egui::Pos2::new(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(egui::Pos2::new(20.0, -25.0)),
+        ];
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
+            &mut active,
+            &mut drag_pos,
+        );
+
+        assert!(terminal_events.is_empty());
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert_eq!(selection_actions.len(), 1);
+        let scroll_actions = terminal_selection_autoscroll_actions(
+            Some(surface),
+            ViewTransform::IDENTITY,
+            active,
+            drag_pos,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(scroll_actions[0], TerminalSelectionAction::Scroll(-2));
+        let TerminalSelectionAction::Update(event) = scroll_actions[1] else {
+            panic!("expected edge update after scroll");
+        };
+        assert_eq!(event.position.y, 0.0);
+        assert!(active);
+    }
+
+    #[test]
+    fn selection_drag_below_terminal_scrolls_and_updates_at_viewport_edge() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let mut drag_pos = None;
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: egui::Pos2::new(10.0, 30.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerMoved(egui::Pos2::new(20.0, 205.0)),
+        ];
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
+            &mut active,
+            &mut drag_pos,
+        );
+
+        assert!(terminal_events.is_empty());
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert_eq!(selection_actions.len(), 1);
+        let scroll_actions = terminal_selection_autoscroll_actions(
+            Some(surface),
+            ViewTransform::IDENTITY,
+            active,
+            drag_pos,
+            egui::Modifiers::default(),
+        );
+        assert_eq!(scroll_actions[0], TerminalSelectionAction::Scroll(3));
+        let TerminalSelectionAction::Update(event) = scroll_actions[1] else {
+            panic!("expected edge update after scroll");
+        };
+        assert!(event.position.y < 160.0);
+        assert!(event.position.y >= 140.0);
+        assert!(active);
+    }
+
+    #[test]
+    fn held_selection_below_terminal_repeats_downward_scroll_without_pointer_motion() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+
+        let actions = terminal_selection_autoscroll_actions(
+            Some(surface),
+            ViewTransform::IDENTITY,
+            true,
+            Some(egui::Pos2::new(20.0, 205.0)),
+            egui::Modifiers::default(),
+        );
+
+        assert_eq!(actions[0], TerminalSelectionAction::Scroll(3));
+        let TerminalSelectionAction::Update(event) = actions[1] else {
+            panic!("expected edge update after repeated scroll");
+        };
+        assert!(event.position.y < 160.0);
+        assert!(event.position.y >= 140.0);
+    }
+
+    #[test]
+    fn selection_press_only_near_edge_does_not_autoscroll_until_drag_moves() {
+        let mut state = test_state();
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        state.record_surface(surface);
+
+        let effects = state.update_frame(test_frame_inputs(
+            vec![egui::Event::PointerButton {
+                pos: egui::Pos2::new(10.0, 155.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            Some(egui::Pos2::new(10.0, 155.0)),
+        ));
+
+        assert!(state.terminal_selection_drag_active);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, AppEffect::RequestRepaint))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn selection_drag_inside_bottom_hot_zone_scrolls_downward() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+
+        assert_eq!(
+            selection_drag_scroll_delta(surface, egui::Pos2::new(20.0, 155.0)),
+            1
+        );
+        assert_eq!(
+            selection_drag_scroll_delta(surface, egui::Pos2::new(20.0, 150.0)),
+            0
+        );
+    }
+
+    #[test]
+    fn update_frame_repeats_selection_downscroll_without_new_pointer_events() {
+        let mut state = test_state();
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        state.record_surface(surface);
+
+        let first_frame = state.update_frame(test_frame_inputs(
+            vec![
+                egui::Event::PointerButton {
+                    pos: egui::Pos2::new(10.0, 30.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerMoved(egui::Pos2::new(20.0, 155.0)),
+            ],
+            Some(egui::Pos2::new(20.0, 155.0)),
+        ));
+        assert!(state.terminal_selection_drag_active);
+        assert_eq!(
+            first_frame
+                .iter()
+                .filter(|effect| matches!(effect, AppEffect::RequestRepaint))
+                .count(),
+            3
+        );
+
+        let repeat_frame = state.update_frame(test_frame_inputs(Vec::new(), None));
+        assert_eq!(
+            repeat_frame
+                .iter()
+                .filter(|effect| matches!(effect, AppEffect::RequestRepaint))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn selection_drag_into_partial_bottom_cell_scrolls_downward() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 165.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let pos = egui::Pos2::new(20.0, 162.0);
+
+        assert_eq!(selection_drag_scroll_delta(surface, pos), 1);
+        let event = terminal_selection_event_clamped(surface, ViewTransform::IDENTITY, pos, false)
+            .expect("clamped selection event");
+
+        assert!(event.position.y < 160.0);
+        assert!(event.position.y >= 140.0);
+    }
+
+    #[test]
+    fn selection_drag_below_small_pane_uses_widget_edge_not_minimum_grid_edge() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let pos = egui::Pos2::new(20.0, 125.0);
+
+        assert_eq!(selection_drag_scroll_delta(surface, pos), 3);
+        let event = terminal_selection_event_clamped(surface, ViewTransform::IDENTITY, pos, false)
+            .expect("clamped selection event");
+
+        assert!(event.position.y < 80.0);
+        assert!(event.position.y >= 60.0);
     }
 
     #[test]
@@ -3353,12 +4001,15 @@ mod tests {
 
         let (_, selection_actions) = route_terminal_selection_events(
             events,
-            Some(surface),
-            ViewTransform::IDENTITY,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[handle],
+            },
             &mut active,
-            false,
-            egui::Modifiers::default(),
-            &[handle],
+            &mut None,
         );
 
         assert!(selection_actions.is_empty());
@@ -3382,12 +4033,15 @@ mod tests {
 
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
-            Some(surface),
-            ViewTransform::IDENTITY,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: true,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
             &mut active,
-            true,
-            egui::Modifiers::default(),
-            &[],
+            &mut None,
         );
 
         assert_eq!(terminal_events, original);
@@ -3415,12 +4069,15 @@ mod tests {
 
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
-            Some(surface),
-            ViewTransform::IDENTITY,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: true,
+                frame_modifiers: shift,
+                chrome_handle_rects: &[],
+            },
             &mut active,
-            true,
-            shift,
-            &[],
+            &mut None,
         );
 
         assert!(terminal_events.is_empty());
@@ -3452,12 +4109,15 @@ mod tests {
 
         let (terminal_events, selection_actions) = route_terminal_selection_events(
             events,
-            Some(surface),
-            ViewTransform::IDENTITY,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: true,
+                frame_modifiers: shift,
+                chrome_handle_rects: &[],
+            },
             &mut active,
-            true,
-            shift,
-            &[],
+            &mut None,
         );
 
         assert!(terminal_events.is_empty());

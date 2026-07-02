@@ -218,6 +218,50 @@ fn native_terminal_scrolls_viewport_through_owned_scrollback() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_selection_survives_downward_viewport_scroll() -> Result<()> {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 8,
+            rows: 2,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )?;
+    let surface = TerminalSurface::for_logical_size(
+        80.0,
+        40.0,
+        CellMetrics::new(10.0, 20.0),
+        TerminalPadding::default(),
+    );
+    let event = |x, y| TerminalSelectionEvent {
+        surface,
+        position: SurfacePoint { x, y },
+        rectangle: false,
+    };
+
+    engine.write_vt(b"one11111\r\ntwo22222\r\nthree333\r\nfour4444");
+    engine.scroll_viewport_delta(-2);
+    assert_eq!(row_text(engine.extract_frame()?, 0), "one11111");
+
+    engine.begin_selection(event(0.0, 10.0))?;
+    engine.update_selection(event(70.0, 30.0))?;
+    engine.scroll_viewport_delta(1);
+    engine.update_selection(event(70.0, 30.0))?;
+
+    assert_eq!(row_text(engine.extract_frame()?, 0), "two22222");
+    let text = engine
+        .format_selection(TerminalSelectionFormat::PlainText)?
+        .expect("active selection");
+    assert!(
+        String::from_utf8_lossy(&text).contains("three"),
+        "selection after downward scroll was {text:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_projects_active_selection_into_render_frame() -> Result<()> {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 8,

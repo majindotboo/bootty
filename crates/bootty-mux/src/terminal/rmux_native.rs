@@ -19,8 +19,8 @@ use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCursorConfig,
-        TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat,
-        TerminalSideEffect,
+        TerminalEngine, TerminalFeatureConfig, TerminalSearchDirection, TerminalSelectionEvent,
+        TerminalSelectionFormat, TerminalSideEffect,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MouseInput},
@@ -114,6 +114,11 @@ enum RmuxTerminalCommand {
     FormatSelection {
         format: TerminalSelectionFormat,
         done: mpsc::Sender<std::result::Result<Option<Vec<u8>>, String>>,
+    },
+    SearchViewport {
+        query: String,
+        direction: TerminalSearchDirection,
+        done: mpsc::Sender<std::result::Result<bool, String>>,
     },
     IsMouseTracking {
         done: mpsc::Sender<std::result::Result<bool, String>>,
@@ -391,6 +396,14 @@ impl TerminalRenderSource for RmuxNativeTerminal {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.send_command(RmuxTerminalCommand::MouseViewportScroll { delta })
+    }
+
+    fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        self.request(|done| RmuxTerminalCommand::SearchViewport {
+            query: query.to_owned(),
+            direction,
+            done,
+        })
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -729,6 +742,19 @@ impl RmuxWorker {
                         .engine
                         .format_selection(format)
                         .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                RmuxTerminalCommand::SearchViewport {
+                    query,
+                    direction,
+                    done,
+                } => {
+                    self.mark_input_fast_path();
+                    let response = self
+                        .engine
+                        .search_viewport(&query, direction)
+                        .map_err(|error| error.to_string());
+                    stats.terminal_changed = true;
                     let _ = done.send(response);
                 }
                 RmuxTerminalCommand::IsMouseTracking { done } => {

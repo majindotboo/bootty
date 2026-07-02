@@ -157,6 +157,11 @@ pub enum Command {
     )]
     ResetFontSize,
     #[strum(
+        message = "Find in Terminal",
+        detailed_message = "Search the terminal scrollback"
+    )]
+    Find,
+    #[strum(
         message = "Keyboard Shortcuts",
         detailed_message = "Browse the active keybindings"
     )]
@@ -320,6 +325,7 @@ impl Command {
             Self::IncreaseFontSize => "increase_font_size",
             Self::DecreaseFontSize => "decrease_font_size",
             Self::ResetFontSize => "reset_font_size",
+            Self::Find => "start_search",
             Self::KeyboardShortcuts => "show_keybinds",
             Self::UseSystemAppearance => "change_appearance:system",
             Self::UseLightAppearance => "change_appearance:light",
@@ -379,6 +385,7 @@ impl Command {
             Self::IncreaseFontSize => "zoom-in",
             Self::DecreaseFontSize => "zoom-out",
             Self::ResetFontSize | Self::SetFontSize => "type",
+            Self::Find => "search",
             Self::KeyboardShortcuts => "keyboard",
             Self::UseSystemAppearance | Self::UseLightAppearance | Self::UseDarkAppearance => {
                 "sun-moon"

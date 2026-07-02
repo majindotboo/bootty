@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
-use bootty_terminal::{terminal_engine::TerminalSelectionEvent, terminal_frame::RenderFrame};
+use bootty_terminal::{
+    terminal_engine::{TerminalSearchDirection, TerminalSelectionEvent},
+    terminal_frame::RenderFrame,
+};
 
 use crate::terminal_session::TerminalSession;
 
@@ -22,6 +25,13 @@ pub trait TerminalRenderSource {
     }
     fn scroll_viewport_delta(&mut self, _delta: isize) -> Result<()> {
         Ok(())
+    }
+    fn search_viewport(
+        &mut self,
+        _query: &str,
+        _direction: TerminalSearchDirection,
+    ) -> Result<bool> {
+        Ok(false)
     }
     fn begin_selection(&mut self, _event: TerminalSelectionEvent) -> Result<()> {
         Ok(())
@@ -57,6 +67,10 @@ impl TerminalRenderSource for TerminalSession {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         Self::scroll_viewport_delta(self, delta)
+    }
+
+    fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        Self::search_viewport(self, query, direction)
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {

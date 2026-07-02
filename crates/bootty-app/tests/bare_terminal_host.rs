@@ -1049,6 +1049,13 @@ fn render_frame_with_text(ch: char) -> RenderFrame {
         },
         cursor: None,
         row_dirty: vec![true],
+        row_wraps: vec![false],
+        row_wrap_continuations: vec![false],
+        search_matches: Vec::new(),
+        active_search_match: None,
+        active_search_match_index: None,
+        search_match_count: 0,
+        search_pulse: 0,
         selections: Vec::new(),
         cells: vec![RenderCell {
             x: 0,

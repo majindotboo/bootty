@@ -194,6 +194,13 @@ pub enum TerminalSelectionFormat {
     Html,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalSearchDirection {
+    Previous,
+    Current,
+    Next,
+}
+
 impl TerminalSelectionFormat {
     fn emit_format(self) -> Format {
         match self {
@@ -232,6 +239,8 @@ struct CachedRenderRow {
     text: Vec<char>,
     virtual_cells: Vec<KittyVirtualCell>,
     selection: Option<FrameSelection>,
+    wrapped: bool,
+    wrap_continuation: bool,
 }
 
 impl CachedRenderRow {
@@ -240,6 +249,8 @@ impl CachedRenderRow {
         self.text.clear();
         self.virtual_cells.clear();
         self.selection = None;
+        self.wrapped = false;
+        self.wrap_continuation = false;
     }
 }
 
@@ -304,6 +315,8 @@ fn extract_render_row(
 ) -> Result<()> {
     out.clear();
     let raw_row = row.raw_row()?;
+    out.wrapped = raw_row.is_wrapped().unwrap_or(false);
+    out.wrap_continuation = raw_row.is_wrap_continuation().unwrap_or(false);
     let row_has_hyperlink = raw_row.has_hyperlink().unwrap_or(false);
     out.selection = row.selection()?.map(|selection| FrameSelection {
         row: row_index,
@@ -461,6 +474,9 @@ pub struct TerminalEngine {
     colors: TerminalColorConfig,
     xterm_color_overrides: XtermColorOverrides,
     color_scheme: Arc<Mutex<ColorScheme>>,
+    search_query: String,
+    search_active_index: usize,
+    search_pulse: u64,
     content_epoch: u64,
     extracted_content_epoch: u64,
     kitty_graphics_touched: bool,
@@ -1555,6 +1571,9 @@ impl TerminalEngine {
             color_scheme,
             colors,
             xterm_color_overrides: XtermColorOverrides::default(),
+            search_query: String::new(),
+            search_active_index: 0,
+            search_pulse: 0,
             content_epoch: 0,
             extracted_content_epoch: u64::MAX,
             kitty_graphics_touched: false,
@@ -2476,6 +2495,108 @@ impl TerminalEngine {
         self.mark_content_changed();
     }
 
+    pub fn search_viewport(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+    ) -> Result<bool> {
+        let query = query.trim();
+        if query.is_empty() {
+            self.search_query.clear();
+            self.search_active_index = 0;
+            self.mark_content_changed();
+            let _ = self.extract_frame()?;
+            return Ok(false);
+        }
+
+        if self.search_query != query {
+            self.search_query = query.to_owned();
+            self.search_active_index = 0;
+            self.mark_content_changed();
+        }
+
+        let initial_offset = self.current_scroll_offset()?;
+        let visible_count = frame_search_matches(self.extract_frame()?, query).len();
+        if visible_count > 0 {
+            match direction {
+                TerminalSearchDirection::Current => return Ok(true),
+                TerminalSearchDirection::Next if self.search_active_index + 1 < visible_count => {
+                    self.search_active_index += 1;
+                    self.bump_search_pulse();
+                    let _ = self.extract_frame()?;
+                    return Ok(true);
+                }
+                TerminalSearchDirection::Previous if self.search_active_index > 0 => {
+                    self.search_active_index -= 1;
+                    self.bump_search_pulse();
+                    let _ = self.extract_frame()?;
+                    return Ok(true);
+                }
+                TerminalSearchDirection::Next | TerminalSearchDirection::Previous => {}
+            }
+        }
+
+        let delta = match direction {
+            TerminalSearchDirection::Current | TerminalSearchDirection::Previous => {
+                -(self.geometry.rows.max(1) as isize)
+            }
+            TerminalSearchDirection::Next => self.geometry.rows.max(1) as isize,
+        };
+
+        loop {
+            let before = self.current_scroll_offset()?;
+            self.scroll_viewport_delta(delta);
+            let frame = self.extract_frame()?;
+            let after = frame.scrollbar.map_or(before, |scrollbar| scrollbar.offset);
+            if after == before {
+                break;
+            }
+            let found_count = frame_search_matches(frame, query).len();
+            if found_count > 0 {
+                self.search_active_index = match direction {
+                    TerminalSearchDirection::Previous => found_count - 1,
+                    TerminalSearchDirection::Current | TerminalSearchDirection::Next => 0,
+                };
+                if direction != TerminalSearchDirection::Current {
+                    self.bump_search_pulse();
+                }
+                let _ = self.extract_frame()?;
+                return Ok(true);
+            }
+        }
+
+        let current_offset = self.current_scroll_offset()?;
+        let restore_delta = initial_offset as i128 - current_offset as i128;
+        if restore_delta != 0 {
+            self.scroll_viewport_delta(
+                restore_delta.clamp(isize::MIN as i128, isize::MAX as i128) as isize
+            );
+            let _ = self.extract_frame()?;
+        }
+        let found = frame_search_matches(self.extract_frame()?, query).len();
+        if found > 0 {
+            self.search_active_index = self.search_active_index.min(found - 1);
+            if direction != TerminalSearchDirection::Current {
+                self.bump_search_pulse();
+                let _ = self.extract_frame()?;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn bump_search_pulse(&mut self) {
+        self.search_pulse = self.search_pulse.wrapping_add(1);
+        self.mark_content_changed();
+    }
+
+    fn current_scroll_offset(&mut self) -> Result<u64> {
+        Ok(self
+            .extract_frame()?
+            .scrollbar
+            .map_or(0, |scrollbar| scrollbar.offset))
+    }
+
     pub fn is_mouse_tracking(&self) -> Result<bool> {
         self.terminal.is_mouse_tracking().map_err(Into::into)
     }
@@ -2491,10 +2612,17 @@ impl TerminalEngine {
         row_dirty: Vec<bool>,
     ) -> Result<&RenderFrame> {
         self.frame.row_dirty = row_dirty;
+        self.frame.row_wraps.clear();
+        self.frame.row_wrap_continuations.clear();
         self.frame.cells.clear();
         self.frame.text.clear();
         self.frame.images = KittyImageFrame::default();
         self.frame.selections.clear();
+        self.frame.search_matches.clear();
+        self.frame.active_search_match = None;
+        self.frame.active_search_match_index = None;
+        self.frame.search_match_count = 0;
+        self.frame.search_pulse = self.search_pulse;
         self.frame.stats = FrameStats {
             render_state_update_us,
             ..FrameStats::default()
@@ -2505,6 +2633,10 @@ impl TerminalEngine {
             if let Some(selection) = row.selection {
                 self.frame.selections.push(selection);
             }
+            self.frame.row_wraps.push(row.wrapped);
+            self.frame
+                .row_wrap_continuations
+                .push(row.wrap_continuation);
             virtual_cells.extend(row.virtual_cells.iter().cloned());
             let text_offset = self.frame.text.len();
             self.frame.text.extend_from_slice(&row.text);
@@ -2516,6 +2648,21 @@ impl TerminalEngine {
                     cell.text_start += text_offset;
                     cell
                 }));
+        }
+        if !self.search_query.is_empty() {
+            self.frame.search_matches = frame_search_matches(&self.frame, &self.search_query);
+            self.frame.search_match_count = self.frame.search_matches.len();
+            if self.frame.search_match_count > 0 {
+                self.search_active_index = self
+                    .search_active_index
+                    .min(self.frame.search_match_count - 1);
+                self.frame.active_search_match_index = Some(self.search_active_index + 1);
+                self.frame.active_search_match = self
+                    .frame
+                    .search_matches
+                    .get(self.search_active_index)
+                    .copied();
+            }
         }
         self.frame.stats.dirty_rows = self.frame.row_dirty.iter().filter(|dirty| **dirty).count();
 
@@ -2673,6 +2820,96 @@ impl TerminalEngine {
         snapshot.set_dirty(Dirty::Clean)?;
         self.assemble_cached_frame(extract_start, render_state_update_us, row_dirty)
     }
+}
+
+fn frame_search_matches(frame: &RenderFrame, query: &str) -> Vec<FrameSelection> {
+    let query: Vec<char> = query.chars().map(search_char).collect();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let rows = frame_text_rows(frame);
+    let mut matches = Vec::new();
+    let mut logical = Vec::new();
+    let mut positions = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        for (col_index, ch) in row.chars().enumerate() {
+            logical.push(search_char(ch));
+            positions.push((row_index as u16, col_index as u16));
+        }
+        if !frame.row_wraps.get(row_index).copied().unwrap_or(false) {
+            push_logical_search_matches(&mut matches, &logical, &positions, &query);
+            logical.clear();
+            positions.clear();
+        }
+    }
+    push_logical_search_matches(&mut matches, &logical, &positions, &query);
+    matches
+}
+
+fn push_logical_search_matches(
+    matches: &mut Vec<FrameSelection>,
+    logical: &[char],
+    positions: &[(u16, u16)],
+    query: &[char],
+) {
+    if query.len() > logical.len() {
+        return;
+    }
+    for start in 0..=logical.len() - query.len() {
+        if logical[start..start + query.len()] == *query {
+            push_position_range(matches, &positions[start..start + query.len()]);
+        }
+    }
+}
+
+fn push_position_range(matches: &mut Vec<FrameSelection>, positions: &[(u16, u16)]) {
+    let Some(&(mut row, mut start_col)) = positions.first() else {
+        return;
+    };
+    let mut end_col = start_col;
+    for &(next_row, next_col) in &positions[1..] {
+        if next_row == row && next_col == end_col.saturating_add(1) {
+            end_col = next_col;
+            continue;
+        }
+        matches.push(FrameSelection {
+            row,
+            start_col,
+            end_col,
+        });
+        row = next_row;
+        start_col = next_col;
+        end_col = next_col;
+    }
+    matches.push(FrameSelection {
+        row,
+        start_col,
+        end_col,
+    });
+}
+
+fn search_char(ch: char) -> char {
+    ch.to_ascii_lowercase()
+}
+
+fn frame_text_rows(frame: &RenderFrame) -> Vec<String> {
+    let mut rows = vec![vec![' '; usize::from(frame.cols)]; usize::from(frame.rows)];
+    for cell in frame.cells.iter().filter(|cell| cell.text_len > 0) {
+        let Some(row) = rows.get_mut(usize::from(cell.y)) else {
+            continue;
+        };
+        let start = cell.text_start;
+        let end = start.saturating_add(cell.text_len).min(frame.text.len());
+        for (offset, ch) in frame.text[start..end].iter().enumerate() {
+            if let Some(slot) = row.get_mut(usize::from(cell.x).saturating_add(offset)) {
+                *slot = *ch;
+            }
+        }
+    }
+    rows.into_iter()
+        .map(|row| row.into_iter().collect::<String>().trim_end().to_owned())
+        .collect()
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use libghostty_vt::{
 
 use crate::{
     geometry::{SurfaceRect, TerminalSurface},
-    terminal::{RenderCell, RenderFrame},
+    terminal::{FrameSelection, RenderCell, RenderFrame},
 };
 
 const TEXT_Y_OFFSET: f32 = 2.0;
@@ -212,6 +212,8 @@ impl PaintPlanner {
         );
 
         plan_backgrounds(&mut self.plan, surface, frame, default_fg, default_bg);
+        plan_search_matches(&mut self.plan, surface, frame);
+        plan_active_search_match(&mut self.plan, surface, frame);
         plan_selections(&mut self.plan, surface, frame, default_fg);
         plan_text_runs(
             &mut self.plan,
@@ -294,7 +296,11 @@ fn plan_text_runs(
     default_bg: PlanColor,
     font_size: f32,
 ) {
-    let selection_fg = selection_text_foreground(frame, default_bg);
+    let colors = OverlayTextColors {
+        selection: selection_text_foreground(frame, default_bg),
+        search: search_match_text_foreground(),
+        active_search: active_search_match_text_foreground(),
+    };
     let mut cell_index = 0;
     while cell_index < frame.cells.len() {
         let first = &frame.cells[cell_index];
@@ -305,13 +311,7 @@ fn plan_text_runs(
             continue;
         }
 
-        let attrs = paint_attrs(
-            first,
-            default_fg,
-            default_bg,
-            selection_fg,
-            cell_selected(frame, first.x, first.y),
-        );
+        let attrs = paint_attrs(first, frame, default_fg, default_bg, colors);
         let mut run_text = pool.pop().unwrap_or_default();
         run_text.clear();
         run_text.extend(first_text);
@@ -327,13 +327,7 @@ fn plan_text_runs(
                 || next.x != end_x
                 || next.style.invisible
                 || next_text.is_empty()
-                || paint_attrs(
-                    next,
-                    default_fg,
-                    default_bg,
-                    selection_fg,
-                    cell_selected(frame, next.x, next.y),
-                ) != attrs
+                || paint_attrs(next, frame, default_fg, default_bg, colors) != attrs
             {
                 break;
             }
@@ -541,18 +535,85 @@ fn plan_selections(
         .map(PlanColor::opaque)
         .unwrap_or(default_fg);
     for selection in &frame.selections {
-        if selection.end_col < selection.start_col {
-            continue;
-        }
-        let cells = selection
-            .end_col
-            .saturating_sub(selection.start_col)
-            .saturating_add(1);
-        push_background(
-            &mut plan.backgrounds,
-            surface.run_rect(selection.start_col, selection.row, cells),
-            background,
-        );
+        plan_frame_selection_background(plan, surface, *selection, background);
+    }
+}
+
+fn plan_search_matches(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+) {
+    let background = search_match_background();
+    for selection in &frame.search_matches {
+        plan_frame_selection_background(plan, surface, *selection, background);
+    }
+}
+
+fn plan_active_search_match(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    frame: &RenderFrame,
+) {
+    let Some(selection) = frame.active_search_match else {
+        return;
+    };
+    plan_frame_selection_background(plan, surface, selection, active_search_match_background());
+}
+
+fn plan_frame_selection_background(
+    plan: &mut TerminalPaintPlan,
+    surface: TerminalSurface,
+    selection: FrameSelection,
+    background: PlanColor,
+) {
+    if selection.end_col < selection.start_col {
+        return;
+    }
+    let cells = selection
+        .end_col
+        .saturating_sub(selection.start_col)
+        .saturating_add(1);
+    push_background(
+        &mut plan.backgrounds,
+        surface.run_rect(selection.start_col, selection.row, cells),
+        background,
+    );
+}
+
+pub(crate) fn search_match_background() -> PlanColor {
+    PlanColor {
+        r: 245,
+        g: 194,
+        b: 66,
+        a: 210,
+    }
+}
+
+pub(crate) fn search_match_text_foreground() -> PlanColor {
+    PlanColor {
+        r: 20,
+        g: 20,
+        b: 20,
+        a: 255,
+    }
+}
+
+pub(crate) fn active_search_match_background() -> PlanColor {
+    PlanColor {
+        r: 255,
+        g: 235,
+        b: 120,
+        a: 255,
+    }
+}
+
+pub(crate) fn active_search_match_text_foreground() -> PlanColor {
+    PlanColor {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
     }
 }
 
@@ -571,6 +632,19 @@ fn cell_selected(frame: &RenderFrame, x: u16, y: u16) -> bool {
         .any(|selection| selection.row == y && x >= selection.start_col && x <= selection.end_col)
 }
 
+fn cell_search_matched(frame: &RenderFrame, x: u16, y: u16) -> bool {
+    frame
+        .search_matches
+        .iter()
+        .any(|selection| selection.row == y && x >= selection.start_col && x <= selection.end_col)
+}
+
+fn cell_active_search_matched(frame: &RenderFrame, x: u16, y: u16) -> bool {
+    frame.active_search_match.is_some_and(|selection| {
+        selection.row == y && x >= selection.start_col && x <= selection.end_col
+    })
+}
+
 fn cell_background(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanColor) -> PlanColor {
     if cell.style.inverse {
         cell.fg.map_or(default_fg, PlanColor::opaque)
@@ -579,16 +653,27 @@ fn cell_background(cell: &RenderCell, default_fg: PlanColor, default_bg: PlanCol
     }
 }
 
+#[derive(Clone, Copy)]
+struct OverlayTextColors {
+    selection: PlanColor,
+    search: PlanColor,
+    active_search: PlanColor,
+}
+
 fn paint_attrs(
     cell: &RenderCell,
+    frame: &RenderFrame,
     default_fg: PlanColor,
     default_bg: PlanColor,
-    selection_fg: PlanColor,
-    selected: bool,
+    colors: OverlayTextColors,
 ) -> TextAttrs {
     let (mut fg, _) = cell_colors(cell, default_fg, default_bg);
-    if selected {
-        fg = selection_fg;
+    if cell_selected(frame, cell.x, cell.y) {
+        fg = colors.selection;
+    } else if cell_active_search_matched(frame, cell.x, cell.y) {
+        fg = colors.active_search;
+    } else if cell_search_matched(frame, cell.x, cell.y) {
+        fg = colors.search;
     }
     TextAttrs {
         fg,
@@ -648,6 +733,13 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            row_wraps: vec![false, false],
+            row_wrap_continuations: vec![false, false],
+            search_matches: Vec::new(),
+            active_search_match: None,
+            active_search_match_index: None,
+            search_match_count: 0,
+            search_pulse: 0,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
@@ -726,6 +818,59 @@ mod tests {
         assert_eq!(
             plan.text_runs[1].attrs.fg,
             PlanColor::opaque(rgb(220, 230, 240))
+        );
+    }
+
+    #[test]
+    fn frame_search_matches_plan_find_background_and_text_color() {
+        let mut frame = frame_from_cells(vec![
+            (0, 0, 'a', style()),
+            (1, 0, 'b', style()),
+            (2, 0, 'c', style()),
+        ]);
+        frame.search_matches.push(FrameSelection {
+            row: 0,
+            start_col: 1,
+            end_col: 2,
+        });
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 1);
+        assert_eq!(plan.backgrounds[0].rect, surface().run_rect(1, 0, 2));
+        assert_eq!(plan.backgrounds[0].color, search_match_background());
+        assert_eq!(plan.text_runs.len(), 2);
+        assert_eq!(plan.text_runs[0].text, "a");
+        assert_eq!(plan.text_runs[1].text, "bc");
+        assert_eq!(plan.text_runs[1].attrs.fg, search_match_text_foreground());
+    }
+
+    #[test]
+    fn active_search_match_overrides_regular_search_match_colors() {
+        let mut frame = frame_from_cells(vec![
+            (0, 0, 'a', style()),
+            (1, 0, 'b', style()),
+            (2, 0, 'c', style()),
+        ]);
+        let selection = FrameSelection {
+            row: 0,
+            start_col: 1,
+            end_col: 2,
+        };
+        frame.search_matches.push(selection);
+        frame.active_search_match = Some(selection);
+
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan(surface(), &frame, 16.0);
+
+        assert_eq!(plan.backgrounds.len(), 2);
+        assert_eq!(plan.backgrounds[0].color, search_match_background());
+        assert_eq!(plan.backgrounds[1].color, active_search_match_background());
+        assert_eq!(plan.text_runs.len(), 2);
+        assert_eq!(
+            plan.text_runs[1].attrs.fg,
+            active_search_match_text_foreground()
         );
     }
 
