@@ -13,8 +13,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -25,6 +23,19 @@ use eframe::egui::{self, Color32};
 use mlua::{Function, Lua, Table, Value};
 use starship_battery::{Manager as BatteryManager, State as BatteryState, units::time::second};
 use sysinfo::{MemoryRefreshKind, System};
+
+mod codexbar;
+mod http;
+
+#[cfg(test)]
+use codexbar::command_invokes_usage as command_invokes_codexbar_usage;
+use codexbar::{
+    reject_reserved_shell_command, resolve_program as resolve_codexbar_program,
+    validate_provider as validate_codexbar_provider,
+};
+use http::get_local as http_get_local;
+#[cfg(test)]
+use http::response_body as http_response_body;
 
 /// Default refresh cadence for a module that doesn't declare its own `interval`.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
@@ -788,173 +799,6 @@ impl CodexBarClient {
             "codexbar serve did not become healthy",
         ))
     }
-}
-
-fn validate_codexbar_provider(provider: &str) -> std::io::Result<()> {
-    let valid = !provider.is_empty()
-        && provider
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    if valid {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid codexbar provider",
-        ))
-    }
-}
-
-fn reject_reserved_shell_command(cmd: &str) -> std::io::Result<()> {
-    if command_invokes_codexbar_usage(cmd) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "bootty.run cannot invoke codexbar usage; use bootty.codexbar_usage(provider)",
-        ));
-    }
-    Ok(())
-}
-
-fn command_invokes_codexbar_usage(cmd: &str) -> bool {
-    let tokens = shellish_tokens(cmd);
-    let mut command_start = true;
-    let mut previous_command_is_codexbar = false;
-    for (index, token) in tokens.iter().enumerate() {
-        if index > 0 && contains_shell_command_separator(&cmd[tokens[index - 1].1..token.0]) {
-            command_start = true;
-            previous_command_is_codexbar = false;
-        }
-        let token = token.2;
-        if previous_command_is_codexbar && token == "usage" {
-            return true;
-        }
-        previous_command_is_codexbar = command_start
-            && token
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name == "codexbar");
-        if command_start && is_shell_assignment(token) {
-            continue;
-        }
-        command_start = false;
-    }
-    false
-}
-
-fn shellish_tokens(cmd: &str) -> Vec<(usize, usize, &str)> {
-    let mut tokens = Vec::new();
-    let mut start = None;
-    for (index, ch) in cmd.char_indices() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | '=') {
-            start.get_or_insert(index);
-        } else if let Some(token_start) = start.take() {
-            tokens.push((token_start, index, &cmd[token_start..index]));
-        }
-    }
-    if let Some(token_start) = start {
-        tokens.push((token_start, cmd.len(), &cmd[token_start..]));
-    }
-    tokens
-}
-
-fn contains_shell_command_separator(value: &str) -> bool {
-    value
-        .chars()
-        .any(|ch| matches!(ch, ';' | '&' | '|' | '\n' | '\r' | '(' | '`'))
-}
-
-fn is_shell_assignment(token: &str) -> bool {
-    token
-        .split_once('=')
-        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/'))
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_codexbar_program() -> std::io::Result<String> {
-    bootty_mux::process::resolve_program("codexbar").map_err(std::io::Error::other)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn resolve_codexbar_program() -> std::io::Result<String> {
-    Ok("codexbar".to_owned())
-}
-
-fn http_get_local(port: u16, path: &str, timeout: Duration) -> std::io::Result<String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    http_response_body(&response)
-}
-
-fn http_response_body(response: &[u8]) -> std::io::Result<String> {
-    let header_end = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTTP headers")
-        })?;
-    let header = std::str::from_utf8(&response[..header_end])
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let mut lines = header.lines();
-    let status = lines.next().unwrap_or_default();
-    if status.split_whitespace().nth(1) != Some("200") {
-        return Err(std::io::Error::other(format!(
-            "codexbar request failed: {status}"
-        )));
-    }
-    let body = &response[header_end + 4..];
-    let is_chunked = lines.any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
-    });
-    let body = if is_chunked {
-        decode_chunked_body(body)?
-    } else {
-        body.to_vec()
-    };
-    String::from_utf8(body)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-}
-
-fn decode_chunked_body(body: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    let mut offset = 0;
-    loop {
-        let Some(line_end) = find_crlf(&body[offset..]) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid chunked body",
-            ));
-        };
-        let size_line = std::str::from_utf8(&body[offset..offset + line_end])
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let size_hex = size_line.split(';').next().unwrap_or_default().trim();
-        let size = usize::from_str_radix(size_hex, 16)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        offset += line_end + 2;
-        if size == 0 {
-            return Ok(decoded);
-        }
-        if body.len() < offset + size + 2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "truncated chunked body",
-            ));
-        }
-        decoded.extend_from_slice(&body[offset..offset + size]);
-        offset += size + 2;
-    }
-}
-
-fn find_crlf(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(2).position(|window| window == b"\r\n")
 }
 
 /// Wakes the worker out of its tick wait so reorders and structural mux changes apply promptly
