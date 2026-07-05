@@ -770,6 +770,121 @@ mod tests {
     }
 
     #[test]
+    fn move_tab_bindings_route_from_egui_and_direct_input() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "alt+shift+,=move_tab:-1".to_owned(),
+            "alt+shift+.=move_tab:1".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            bindings.action_for_key_with_modifier_sides(
+                egui::Key::Comma,
+                egui::Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+                ModifierSideState {
+                    right_alt: true,
+                    ..Default::default()
+                },
+            ),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+        );
+
+        assert_eq!(
+            bindings.action_for_input(KeyInput {
+                key: TerminalKey::Comma,
+                mods: crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    right_alt: true,
+                    ..Default::default()
+                },
+                repeat: false,
+                utf8: Some("<"),
+                unshifted: Some(','),
+            }),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+        );
+        assert_eq!(
+            bindings.action_for_input(KeyInput {
+                key: TerminalKey::Period,
+                mods: crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+                repeat: false,
+                utf8: Some(">"),
+                unshifted: Some('.'),
+            }),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(1)))
+        );
+    }
+
+    #[test]
+    fn explicit_move_tab_bindings_accept_left_and_right_alt() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "left_alt+shift+,=move_tab:-1".to_owned(),
+            "right_alt+shift+,=move_tab:-1".to_owned(),
+            "left_alt+shift+.=move_tab:1".to_owned(),
+            "right_alt+shift+.=move_tab:1".to_owned(),
+        ])
+        .unwrap();
+
+        for (side, mods) in [
+            (
+                ModifierSideState {
+                    left_alt: true,
+                    ..Default::default()
+                },
+                crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                ModifierSideState {
+                    right_alt: true,
+                    ..Default::default()
+                },
+                crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    right_alt: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                bindings.action_for_key_with_modifier_sides(
+                    egui::Key::Comma,
+                    egui::Modifiers {
+                        shift: true,
+                        alt: true,
+                        ..Default::default()
+                    },
+                    side,
+                ),
+                Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+            );
+            assert_eq!(
+                bindings.action_for_input(KeyInput {
+                    key: TerminalKey::Comma,
+                    mods,
+                    repeat: false,
+                    utf8: Some("<"),
+                    unshifted: Some(','),
+                }),
+                Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+            );
+        }
+    }
+
+    #[test]
     fn builtin_new_session_shortcut_creates_mux_session_not_terminal_input() {
         let modifiers = if cfg!(target_os = "macos") {
             egui::Modifiers {
