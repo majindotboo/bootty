@@ -169,6 +169,8 @@ pub struct AppState {
     lua_window_open: bool,
     terminal_selection_drag_active: bool,
     terminal_selection_drag_pos: Option<Pos2>,
+    terminal_selection_pending_start: Option<TerminalSelectionEvent>,
+    terminal_selection_passthrough_active: bool,
     /// Screen rects of chrome resize handles (sidebar edge, pane dividers) registered during the
     /// previous frame's UI build. A primary press inside one of these must not begin a terminal
     /// text selection — the handle owns that drag. Populated each frame in `show_fixed_layout`.
@@ -331,6 +333,8 @@ fn route_terminal_selection_events(
     context: TerminalSelectionRouteContext<'_>,
     active: &mut bool,
     drag_pos: &mut Option<Pos2>,
+    pending_start: &mut Option<TerminalSelectionEvent>,
+    passthrough_active: Option<&mut bool>,
 ) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
     let TerminalSelectionRouteContext {
         surface,
@@ -339,8 +343,12 @@ fn route_terminal_selection_events(
         frame_modifiers,
         chrome_handle_rects,
     } = context;
+    let mut local_passthrough_active = false;
+    let passthrough_active = passthrough_active.unwrap_or(&mut local_passthrough_active);
     let Some(surface) = surface else {
         *drag_pos = None;
+        *pending_start = None;
+        *passthrough_active = false;
         *active = false;
         return (events, Vec::new());
     };
@@ -355,17 +363,23 @@ fn route_terminal_selection_events(
                 pressed: true,
                 modifiers,
             } if surface.rect.contains(pos)
-                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos))
-                && (modifiers.shift || frame_modifiers.shift || !mouse_tracking) =>
+                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos)) =>
             {
                 let rectangle = modifiers.alt || frame_modifiers.alt;
-                if let Some(selection_event) =
-                    terminal_selection_event(surface, view, pos, rectangle)
-                {
-                    *drag_pos = None;
-                    *active = true;
-                    selection_actions.push(TerminalSelectionAction::Begin(selection_event));
-                    continue;
+                let selecting_with_modifier = modifiers.shift || frame_modifiers.shift;
+                if selecting_with_modifier {
+                    if let Some(selection_event) =
+                        terminal_selection_event(surface, view, pos, rectangle)
+                    {
+                        *drag_pos = None;
+                        *pending_start = None;
+                        *passthrough_active = false;
+                        *active = true;
+                        selection_actions.push(TerminalSelectionAction::Begin(selection_event));
+                        continue;
+                    }
+                } else if !mouse_tracking {
+                    *pending_start = terminal_selection_event(surface, view, pos, rectangle);
                 }
                 terminal_events.push(egui::Event::PointerButton {
                     pos,
@@ -382,6 +396,31 @@ fn route_terminal_selection_events(
                 {
                     selection_actions.push(TerminalSelectionAction::Update(selection_event));
                 }
+                if *passthrough_active {
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                }
+            }
+            egui::Event::PointerMoved(pos) if pending_start.is_some() => {
+                if mouse_tracking {
+                    *pending_start = None;
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                } else if let Some(start) = pending_start.take() {
+                    *active = true;
+                    *passthrough_active = true;
+                    *drag_pos = Some(pos);
+                    selection_actions.push(TerminalSelectionAction::Begin(start));
+                    if selection_drag_scroll_delta(surface, pos) == 0
+                        && let Some(selection_event) = terminal_selection_event_clamped(
+                            surface,
+                            view,
+                            pos,
+                            frame_modifiers.alt,
+                        )
+                    {
+                        selection_actions.push(TerminalSelectionAction::Update(selection_event));
+                    }
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                }
             }
             egui::Event::PointerButton {
                 pos,
@@ -397,7 +436,31 @@ fn route_terminal_selection_events(
                 );
                 selection_actions.push(TerminalSelectionAction::End(selection_event));
                 *drag_pos = None;
+                *pending_start = None;
+                if *passthrough_active {
+                    terminal_events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers,
+                    });
+                }
+                *passthrough_active = false;
                 *active = false;
+            }
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            } if pending_start.is_some() => {
+                *pending_start = None;
+                terminal_events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                });
             }
             event => terminal_events.push(event),
         }
@@ -939,6 +1002,8 @@ impl AppState {
             lua_window_open: false,
             terminal_selection_drag_active: false,
             terminal_selection_drag_pos: None,
+            terminal_selection_pending_start: None,
+            terminal_selection_passthrough_active: false,
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
@@ -2741,6 +2806,8 @@ impl AppState {
             },
             &mut self.terminal_selection_drag_active,
             &mut self.terminal_selection_drag_pos,
+            &mut self.terminal_selection_pending_start,
+            Some(&mut self.terminal_selection_passthrough_active),
         );
         let mut selection_actions = selection_actions;
         selection_actions.extend(terminal_selection_autoscroll_actions(
@@ -3682,12 +3749,16 @@ mod tests {
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
         let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 10.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, 10.0)),
             egui::Event::PointerButton {
@@ -3710,6 +3781,8 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
@@ -3737,12 +3810,16 @@ mod tests {
         );
         let mut drag_pos = None;
         let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 10.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, -25.0)),
         ];
@@ -3758,6 +3835,8 @@ mod tests {
             },
             &mut active,
             &mut drag_pos,
+            &mut None,
+            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -3789,12 +3868,16 @@ mod tests {
         );
         let mut active = false;
         let mut drag_pos = None;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 30.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, 205.0)),
         ];
@@ -3810,6 +3893,8 @@ mod tests {
             },
             &mut active,
             &mut drag_pos,
+            &mut None,
+            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -3866,12 +3951,16 @@ mod tests {
         );
         state.record_surface(surface);
 
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let effects = state.update_frame(test_frame_inputs(
             vec![egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 155.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             }],
             Some(egui::Pos2::new(10.0, 155.0)),
         ));
@@ -3911,6 +4000,10 @@ mod tests {
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
         state.record_surface(surface);
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
 
         let first_frame = state.update_frame(test_frame_inputs(
             vec![
@@ -3918,7 +4011,7 @@ mod tests {
                     pos: egui::Pos2::new(10.0, 30.0),
                     button: egui::PointerButton::Primary,
                     pressed: true,
-                    modifiers: egui::Modifiers::default(),
+                    modifiers: shift,
                 },
                 egui::Event::PointerMoved(egui::Pos2::new(20.0, 155.0)),
             ],
@@ -4010,6 +4103,8 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert!(selection_actions.is_empty());
@@ -4042,10 +4137,62 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert_eq!(terminal_events, original);
         assert!(selection_actions.is_empty());
+        assert!(!active);
+    }
+
+    #[test]
+    fn plain_mouse_drag_starts_selection_when_mouse_reporting_is_inactive() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let press = egui::Event::PointerButton {
+            pos: egui::Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let motion = egui::Event::PointerMoved(egui::Pos2::new(20.0, 10.0));
+        let release = egui::Event::PointerButton {
+            pos: egui::Pos2::new(20.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let events = vec![press.clone(), motion.clone(), release.clone()];
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
+            &mut active,
+            &mut None,
+            &mut None,
+            None,
+        );
+
+        assert_eq!(terminal_events, vec![press, motion, release]);
+        assert_eq!(selection_actions.len(), 3);
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert!(matches!(
+            selection_actions[2],
+            TerminalSelectionAction::End(_)
+        ));
         assert!(!active);
     }
 
@@ -4078,6 +4225,8 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -4118,8 +4267,9 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
-
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
         assert!(matches!(
