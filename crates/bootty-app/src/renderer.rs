@@ -267,6 +267,7 @@ impl TerminalWidget {
             self.view,
         );
         self.paint_search_pulse(ui, surface, frame.as_ref());
+        self.paint_copy_mode_position_overlay(ui, surface, frame.as_ref());
         self.metrics.cursor_blinking = cursor_blinking;
         self.metrics.text_runs = self.render_cache.text_runs();
         self.paint_scrollbar(ui, surface, frame.as_ref());
@@ -620,6 +621,61 @@ impl TerminalWidget {
         );
         ui.ctx().request_repaint_after(Duration::from_millis(16));
     }
+
+    fn paint_copy_mode_position_overlay(
+        &self,
+        ui: &mut egui::Ui,
+        surface: TerminalSurface,
+        frame: &RenderFrame,
+    ) {
+        let Some(label) = copy_mode_position_label(frame) else {
+            return;
+        };
+
+        let foreground = frame.colors.foreground;
+        let background = frame.colors.background;
+        let text_color = Color32::from_rgb(foreground.r, foreground.g, foreground.b);
+        let fill = Color32::from_rgba_unmultiplied(background.r, background.g, background.b, 220);
+        let stroke = Color32::from_rgba_unmultiplied(foreground.r, foreground.g, foreground.b, 100);
+        let font_id =
+            egui::FontId::monospace((self.text_config.font_size * 0.78).clamp(10.0, 14.0));
+        let painter = ui.painter();
+        let galley = painter.layout_no_wrap(label, font_id, text_color);
+        let padding = egui::vec2(6.0, 3.0);
+        let grid = transformed_surface_rect(surface.grid_rect(frame.cols, frame.rows), self.view);
+        let scrollbar_clearance = frame.scrollbar.map_or(0.0, |_| SCROLLBAR_HIT_WIDTH);
+        let rect = Rect::from_min_size(
+            Pos2::new(
+                grid.right() - scrollbar_clearance - galley.size().x - padding.x * 2.0 - 6.0,
+                grid.top() + 6.0,
+            ),
+            galley.size() + padding * 2.0,
+        );
+        painter.rect_filled(rect, 4.0, fill);
+        painter.rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.0, stroke),
+            egui::StrokeKind::Outside,
+        );
+        painter.galley(rect.min + padding, galley, text_color);
+    }
+}
+
+fn copy_mode_position_label(frame: &RenderFrame) -> Option<String> {
+    frame.copy_mode?;
+    let cursor = frame.cursor?;
+    let total = frame
+        .scrollbar
+        .map_or(u64::from(frame.rows.max(1)), |scrollbar| {
+            scrollbar.total.max(1)
+        });
+    let offset = frame.scrollbar.map_or(0, |scrollbar| scrollbar.offset);
+    let current = offset
+        .saturating_add(u64::from(cursor.y))
+        .saturating_add(1)
+        .min(total);
+    Some(format!("[{current}/{total}]"))
 }
 
 const SEARCH_PULSE_DURATION: Duration = Duration::from_millis(180);
@@ -838,12 +894,14 @@ mod tests {
         geometry::{CellMetrics, DEFAULT_FONT_SIZE, TerminalGeometry, TerminalPadding},
         paint_plan::{CursorShape, PlanColor, TerminalPaintPlan},
         terminal::{
-            CellStyle, CursorSnapshot, FrameColors, RenderCell, RenderFrame, TerminalEngine,
+            CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, RenderCell, RenderFrame,
+            TerminalEngine,
         },
         terminal_image::{KittyImageFrame, KittyImageLayer, KittyImagePlacement},
         terminal_render::{CursorCommand, FillCommand, FillRole, TerminalRenderCommand},
         terminal_text::terminal_text_config_for_plan,
     };
+    use bootty_terminal::terminal_frame::FrameCopyMode;
     use libghostty_vt::{
         render::{CursorVisualStyle, Dirty},
         style::RgbColor,
@@ -894,6 +952,45 @@ mod tests {
             Some("https://example.com")
         );
         assert_eq!(hyperlink_at(&frame, surface, Pos2::new(5.0, 10.0)), None);
+    }
+
+    #[test]
+    fn copy_mode_position_label_tracks_cursor_line_in_scrollback() {
+        let frame = RenderFrame {
+            rows: 4,
+            cursor: Some(cursor_at(0, 2, false)),
+            copy_mode: Some(FrameCopyMode {
+                selecting: false,
+                rectangle: false,
+            }),
+            scrollbar: Some(FrameScrollbar {
+                total: 1421,
+                offset: 40,
+                len: 4,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            copy_mode_position_label(&frame).as_deref(),
+            Some("[43/1421]")
+        );
+    }
+
+    #[test]
+    fn copy_mode_position_label_is_absent_outside_copy_mode() {
+        let frame = RenderFrame {
+            rows: 4,
+            cursor: Some(cursor_at(0, 0, false)),
+            scrollbar: Some(FrameScrollbar {
+                total: 10,
+                offset: 0,
+                len: 4,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(copy_mode_position_label(&frame), None);
     }
 
     #[test]
