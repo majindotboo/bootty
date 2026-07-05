@@ -55,6 +55,7 @@ pub enum KeybindAction {
     Font(FontSizeAction),
     Find(TerminalFindAction),
     CopyToClipboard,
+    CopyMode,
     PasteFromClipboard,
 }
 
@@ -450,6 +451,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::ResetFontSize => Ok(KeybindAction::Font(FontSizeAction::Reset)),
         BindingAction::SetFontSize(size) => Ok(KeybindAction::Font(FontSizeAction::Set(size))),
         BindingAction::CopyToClipboard(_) => Ok(KeybindAction::CopyToClipboard),
+        BindingAction::CopyMode => Ok(KeybindAction::CopyMode),
         BindingAction::PasteFromClipboard => Ok(KeybindAction::PasteFromClipboard),
         unsupported => anyhow::bail!("{} has no Bootty app behavior", unsupported.format_entry()),
     }
@@ -726,6 +728,24 @@ mod tests {
                 }
             ),
             Some(KeybindAction::App(AppAction::SessionPicker))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cmd_y_enters_copy_mode_in_default_ghostty_bindings() {
+        let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
+
+        assert_eq!(
+            action_for_key(
+                &mut bindings,
+                egui::Key::Y,
+                egui::Modifiers {
+                    command: true,
+                    ..Default::default()
+                }
+            ),
+            Some(KeybindAction::CopyMode)
         );
     }
 

@@ -18,9 +18,10 @@ use bootty_runtime::{
 use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
-        NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCursorConfig,
-        TerminalEngine, TerminalFeatureConfig, TerminalSearchDirection, TerminalSelectionEvent,
-        TerminalSelectionFormat, TerminalSideEffect,
+        NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCopyModeAction,
+        TerminalCopyModeOutcome, TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig,
+        TerminalSearchDirection, TerminalSelectionEvent, TerminalSelectionFormat,
+        TerminalSideEffectEvent,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MouseInput},
@@ -108,12 +109,20 @@ enum RmuxTerminalCommand {
     MouseViewportScroll {
         delta: isize,
     },
+    EnterCopyMode,
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
     SelectionEnd(Option<TerminalSelectionEvent>),
     FormatSelection {
         format: TerminalSelectionFormat,
         done: mpsc::Sender<std::result::Result<Option<Vec<u8>>, String>>,
+    },
+    CopyModeActive {
+        done: mpsc::Sender<std::result::Result<bool, String>>,
+    },
+    CopyModeAction {
+        action: TerminalCopyModeAction,
+        done: mpsc::Sender<std::result::Result<TerminalCopyModeOutcome, String>>,
     },
     SearchViewport {
         query: String,
@@ -157,7 +166,8 @@ struct RmuxWorker {
     closed: Arc<AtomicBool>,
     error_tx: mpsc::Sender<String>,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
-    side_effect_tx: Option<mpsc::Sender<TerminalSideEffect>>,
+    side_effect_tx: Option<mpsc::Sender<TerminalSideEffectEvent>>,
+    side_effect_pane_id: Option<String>,
     output_buf: Vec<u8>,
     last_frame_publish: Instant,
     has_unpublished_frame: bool,
@@ -398,6 +408,21 @@ impl TerminalRenderSource for RmuxNativeTerminal {
         self.send_command(RmuxTerminalCommand::MouseViewportScroll { delta })
     }
 
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::EnterCopyMode)
+    }
+
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        self.request(|done| RmuxTerminalCommand::CopyModeActive { done })
+    }
+
+    fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        self.request(|done| RmuxTerminalCommand::CopyModeAction { action, done })
+    }
+
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
         self.request(|done| RmuxTerminalCommand::SearchViewport {
             query: query.to_owned(),
@@ -531,6 +556,7 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
             error_tx: config.error_tx,
             repaint_wakeup: config.repaint_wakeup,
             side_effect_tx: config.terminal_config.side_effect_tx,
+            side_effect_pane_id: config.terminal_config.side_effect_pane_id,
             output_buf: Vec::with_capacity(1024),
             last_frame_publish: Instant::now() - RMUX_INITIAL_FRAME_AGE,
             has_unpublished_frame: false,
@@ -719,6 +745,12 @@ impl RmuxWorker {
                     self.engine.scroll_viewport_delta(delta);
                     stats.terminal_changed = true;
                 }
+                RmuxTerminalCommand::EnterCopyMode => {
+                    self.mark_input_fast_path();
+                    if self.engine.enter_copy_mode().is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
                 RmuxTerminalCommand::SelectionBegin(event) => {
                     self.mark_input_fast_path();
                     if self.engine.begin_selection(event).is_ok() {
@@ -742,6 +774,18 @@ impl RmuxWorker {
                         .engine
                         .format_selection(format)
                         .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                RmuxTerminalCommand::CopyModeActive { done } => {
+                    let _ = done.send(Ok(self.engine.copy_mode_active()));
+                }
+                RmuxTerminalCommand::CopyModeAction { action, done } => {
+                    self.mark_input_fast_path();
+                    let response = self
+                        .engine
+                        .handle_copy_mode_action(action)
+                        .map_err(|error| error.to_string());
+                    stats.terminal_changed = true;
                     let _ = done.send(response);
                 }
                 RmuxTerminalCommand::SearchViewport {
@@ -937,7 +981,8 @@ impl RmuxWorker {
         };
         let mut disconnected = false;
         for effect in self.engine.drain_side_effects() {
-            if tx.send(effect).is_err() {
+            let event = TerminalSideEffectEvent::new(self.side_effect_pane_id.clone(), effect);
+            if tx.send(event).is_err() {
                 disconnected = true;
                 break;
             }
@@ -1150,6 +1195,7 @@ mod tests {
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         }
     }

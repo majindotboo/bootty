@@ -15,6 +15,7 @@ pub struct TerminalFindDialog {
     query: String,
     focus: bool,
     result: Option<TerminalFindResult>,
+    enter_direction: Option<TerminalSearchDirection>,
     last_rect: Option<egui::Rect>,
 }
 
@@ -32,10 +33,15 @@ pub enum TerminalFindEvent {
 
 impl TerminalFindDialog {
     pub fn open(query: String) -> Self {
+        Self::open_with_direction(query, TerminalSearchDirection::Next)
+    }
+
+    pub fn open_with_direction(query: String, direction: TerminalSearchDirection) -> Self {
         Self {
             query,
             focus: true,
             result: None,
+            enter_direction: Some(direction),
             last_rect: None,
         }
     }
@@ -104,7 +110,8 @@ impl TerminalFindDialog {
                                 let direction = if ui.input(|input| input.modifiers.shift) {
                                     TerminalSearchDirection::Previous
                                 } else {
-                                    TerminalSearchDirection::Next
+                                    self.enter_direction
+                                        .unwrap_or(TerminalSearchDirection::Next)
                                 };
                                 event = TerminalFindEvent::Search {
                                     query: query.clone(),

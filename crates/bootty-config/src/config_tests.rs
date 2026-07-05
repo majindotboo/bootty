@@ -1034,6 +1034,22 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
     );
 }
 
+#[test]
+fn copy_mode_defaults_match_ghostty_bootty_and_tmux_entry_points() {
+    assert!(ghostty_common_keybinds_macos().contains(&"cmd+y=copy_mode"));
+    assert!(native_scroll_keybinds_macos().contains(&"cmd+y=copy_mode"));
+    assert!(
+        prefixed_keybinds("ctrl+space", BOOTTY_PREFIX_KEYBINDS)
+            .iter()
+            .any(|entry| entry == "ctrl+space>[=copy_mode")
+    );
+    assert!(
+        prefixed_keybinds("ctrl+b", TMUX_PREFIX_KEYBINDS)
+            .iter()
+            .any(|entry| entry == "ctrl+b>[=copy_mode")
+    );
+}
+
 // The platform default tables are cfg-selected, so these tests address both tables directly to
 // validate the Linux/Windows table from any build host.
 fn binding_triggers(entries: &[&str]) -> Vec<BindingTrigger> {

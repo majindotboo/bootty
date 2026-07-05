@@ -142,6 +142,11 @@ pub enum Command {
     )]
     ScrollToBottom,
     #[strum(
+        message = "Copy Mode",
+        detailed_message = "Enter tmux-style scrollback navigation and text selection"
+    )]
+    CopyMode,
+    #[strum(
         message = "Increase Font Size",
         detailed_message = "Make the terminal text larger"
     )]
@@ -322,6 +327,7 @@ impl Command {
             Self::ToggleFullscreen => "toggle_fullscreen",
             Self::ScrollToTop => "scroll_to_top",
             Self::ScrollToBottom => "scroll_to_bottom",
+            Self::CopyMode => "copy_mode",
             Self::IncreaseFontSize => "increase_font_size",
             Self::DecreaseFontSize => "decrease_font_size",
             Self::ResetFontSize => "reset_font_size",
@@ -382,6 +388,7 @@ impl Command {
             Self::ToggleFullscreen => "maximize",
             Self::ScrollToTop => "arrow-up-to-line",
             Self::ScrollToBottom => "arrow-down-to-line",
+            Self::CopyMode => "copy",
             Self::IncreaseFontSize => "zoom-in",
             Self::DecreaseFontSize => "zoom-out",
             Self::ResetFontSize | Self::SetFontSize => "type",

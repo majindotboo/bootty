@@ -167,6 +167,25 @@ pub enum TerminalSideEffect {
     UnsupportedHostCommand { protocol: String, command: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSideEffectEvent {
+    pub source_pane_id: Option<String>,
+    pub effect: TerminalSideEffect,
+}
+
+impl TerminalSideEffectEvent {
+    pub fn new(source_pane_id: Option<String>, effect: TerminalSideEffect) -> Self {
+        Self {
+            source_pane_id,
+            effect,
+        }
+    }
+
+    pub fn unscoped(effect: TerminalSideEffect) -> Self {
+        Self::new(None, effect)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalSelectionEvent {
     pub surface: TerminalSurface,
