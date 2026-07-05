@@ -42,10 +42,16 @@ struct MuxCommandJob {
     completion: MuxCommandCompletion,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActiveWindow {
+    session_id: String,
+    window_id: String,
+}
+
 fn selected_window_after_refresh(
     selected_session: Option<&str>,
     current: Option<String>,
-    previous_active: Option<&str>,
+    previous_active: Option<&ActiveWindow>,
     snapshot: &MuxSnapshot,
 ) -> Option<String> {
     let selected_session = selected_session?;
@@ -54,11 +60,14 @@ fn selected_window_after_refresh(
         .iter()
         .find(|session| session.id == selected_session || session.name == selected_session)?;
     let active = session.active_window_id.as_deref();
+    let previous_active = previous_active
+        .filter(|previous| previous.session_id == session.id)
+        .map(|previous| previous.window_id.as_str());
     // Follow an external switch: when tmux's active window moved since the last
     // snapshot, the highlight tracks it (e.g. windows changed from inside tmux).
     // Otherwise keep the current selection, stable across refreshes and during an
     // optimistic local switch that the snapshot hasn't caught up to yet.
-    if active.is_some() && active != previous_active {
+    if previous_active.is_some() && active.is_some() && active != previous_active {
         return active.map(str::to_owned);
     }
     current
@@ -66,12 +75,33 @@ fn selected_window_after_refresh(
         .or_else(|| session.active_window_id.clone())
 }
 
-fn active_window_id_of(sessions: &[MuxSession], selected_session: Option<&str>) -> Option<String> {
+fn active_window_of(
+    sessions: &[MuxSession],
+    selected_session: Option<&str>,
+) -> Option<ActiveWindow> {
     let selected_session = selected_session?;
-    sessions
+    let session = sessions
         .iter()
-        .find(|session| session.id == selected_session || session.name == selected_session)
-        .and_then(|session| session.active_window_id.clone())
+        .find(|session| session.id == selected_session || session.name == selected_session)?;
+    Some(ActiveWindow {
+        session_id: session.id.clone(),
+        window_id: session.active_window_id.clone()?,
+    })
+}
+
+fn selected_window_for_session<'a>(
+    session: &'a MuxSession,
+    selected_window: Option<&str>,
+) -> Option<&'a crate::snapshot::MuxWindow> {
+    selected_window
+        .and_then(|id| session.windows.iter().find(|window| window.id == id))
+        .or_else(|| {
+            session
+                .active_window_id
+                .as_deref()
+                .and_then(|id| session.windows.iter().find(|window| window.id == id))
+        })
+        .or_else(|| session.windows.first())
 }
 
 fn optimistic_window_after_command(
@@ -184,9 +214,9 @@ pub struct MuxController {
     selected_session: Option<String>,
     previous_selected_session: Option<String>,
     selected_window: Option<String>,
-    /// The selected session's active window id from the previous snapshot, used to
-    /// detect window switches made outside bootty so the highlight follows them.
-    last_active_window: Option<String>,
+    /// The selected session's active window from the previous snapshot, used to detect window
+    /// switches made outside bootty so the highlight follows them.
+    last_active_window: Option<ActiveWindow>,
     current_backend: Option<MuxBackendKind>,
     last_session_refresh: Option<Instant>,
     session_refresh_generation: u64,
@@ -227,11 +257,7 @@ impl MuxController {
             .sessions
             .iter()
             .find(|session| session.id == selected || session.name == selected)?;
-        if let Some(selected_window) = self.selected_window.as_deref()
-            && let Some(window) = session
-                .windows
-                .iter()
-                .find(|window| window.id == selected_window)
+        if let Some(window) = selected_window_for_session(session, self.selected_window.as_deref())
         {
             return Some(&window.anchor);
         }
@@ -263,13 +289,7 @@ impl MuxController {
         else {
             return &[];
         };
-        let window_id = self
-            .selected_window
-            .as_deref()
-            .or(session.active_window_id.as_deref());
-        window_id
-            .and_then(|id| session.windows.iter().find(|window| window.id == id))
-            .or_else(|| session.windows.first())
+        selected_window_for_session(session, self.selected_window.as_deref())
             .map(|window| window.panes.as_slice())
             .unwrap_or_default()
     }
@@ -280,13 +300,7 @@ impl MuxController {
             .sessions
             .iter()
             .find(|session| session.id == selected || session.name == selected)?;
-        let window_id = self
-            .selected_window
-            .as_deref()
-            .or(session.active_window_id.as_deref());
-        window_id
-            .and_then(|id| session.windows.iter().find(|window| window.id == id))
-            .or_else(|| session.windows.first())
+        selected_window_for_session(session, self.selected_window.as_deref())
             .and_then(|window| window.layout.as_ref())
     }
 
@@ -646,13 +660,13 @@ impl MuxController {
         self.selected_window = selected_window_after_refresh(
             self.selected_session.as_deref(),
             preferred_window,
-            self.last_active_window.as_deref(),
+            self.last_active_window.as_ref(),
             &snapshot,
         );
         self.current_backend = Some(backend);
         self.sessions = snapshot.sessions;
         self.last_active_window =
-            active_window_id_of(&self.sessions, self.selected_session.as_deref());
+            active_window_of(&self.sessions, self.selected_session.as_deref());
     }
 
     fn apply_optimistic_command_selection(&mut self, command: &MuxCommand) -> Option<String> {
@@ -770,7 +784,7 @@ mod tests {
             controller
                 .selected_session_anchor()
                 .and_then(|anchor| anchor.pane_id.as_deref()),
-            Some("%9")
+            Some("%11")
         );
 
         controller.selected_window = Some("@2".to_owned());
@@ -779,6 +793,55 @@ mod tests {
                 .selected_session_anchor()
                 .and_then(|anchor| anchor.pane_id.as_deref()),
             Some("%11")
+        );
+    }
+
+    #[test]
+    fn selected_session_anchor_falls_back_to_active_window_pane() {
+        let mut active = window("@2", 2);
+        active.anchor = MuxPaneAnchor {
+            session_id: "$1".to_owned(),
+            pane_id: Some("%2".to_owned()),
+            cwd: None,
+            process: Some("fish".to_owned()),
+        };
+        let mut inactive = window("@1", 1);
+        inactive.anchor = MuxPaneAnchor {
+            session_id: "$1".to_owned(),
+            pane_id: Some("%1".to_owned()),
+            cwd: None,
+            process: Some("zsh".to_owned()),
+        };
+        let mut work = session("$1", "work");
+        work.active_window_id = Some("@2".to_owned());
+        work.windows = vec![inactive, active];
+        let mut controller = MuxController {
+            sessions: vec![work],
+            selected_session: Some("$1".to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%2")
+        );
+
+        controller.selected_window = Some("@missing".to_owned());
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%2")
+        );
+
+        controller.selected_window = Some("@1".to_owned());
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%1")
         );
     }
 
@@ -999,14 +1062,60 @@ mod tests {
         // tmux's active window moved (@1 -> @2) since the last snapshot, so the
         // highlight follows it even though the local selection still points at @1.
         assert_eq!(
-            selected_window_after_refresh(Some("$1"), Some("@1".to_owned()), Some("@1"), &snapshot),
+            selected_window_after_refresh(
+                Some("$1"),
+                Some("@1".to_owned()),
+                Some(&active_window("$1", "@1")),
+                &snapshot,
+            ),
             Some("@2".to_owned())
         );
         // No external change (@2 unchanged): the optimistic local selection wins,
         // so a just-issued local switch doesn't get reverted by a lagging snapshot.
         assert_eq!(
-            selected_window_after_refresh(Some("$1"), Some("@1".to_owned()), Some("@2"), &snapshot),
+            selected_window_after_refresh(
+                Some("$1"),
+                Some("@1".to_owned()),
+                Some(&active_window("$1", "@2")),
+                &snapshot,
+            ),
             Some("@1".to_owned())
         );
+    }
+
+    #[test]
+    fn refreshed_snapshot_does_not_revert_local_tab_switch_after_other_session_was_active() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let mut other = session("$2", "other");
+        other.windows = vec![window("@9", 1)];
+        other.active_window_id = Some("@9".to_owned());
+        let mut controller = MuxController {
+            sessions: vec![work.clone(), other],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            last_active_window: Some(active_window("$2", "@9")),
+            current_backend: Some(MuxBackendKind::Rmux),
+            ..Default::default()
+        };
+
+        controller.apply_refreshed_snapshot(
+            MuxBackendKind::Rmux,
+            MuxSnapshot {
+                sessions: vec![work],
+                active_session_id: Some("$1".to_owned()),
+            },
+        );
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    fn active_window(session_id: &str, window_id: &str) -> ActiveWindow {
+        ActiveWindow {
+            session_id: session_id.to_owned(),
+            window_id: window_id.to_owned(),
+        }
     }
 }
