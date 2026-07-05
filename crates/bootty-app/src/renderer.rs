@@ -241,12 +241,15 @@ impl TerminalWidget {
         let cursor_blinking = frame.cursor.is_some_and(|cursor| cursor.blinking);
         let cursor_blink_phase = self.cursor_blink.phase(Instant::now(), frame.cursor);
         if !self.render_cache.matches(surface, &frame) {
-            let plan = self.planner.plan_with_cursor_blink_phase(
-                surface,
-                &frame,
-                self.text_config.font_size,
-                CursorBlinkPhase::visible(),
-            );
+            let plan = self
+                .planner
+                .plan_with_cursor_blink_phase_and_text_cell_height(
+                    surface,
+                    &frame,
+                    self.text_config.font_size,
+                    self.base_cell.height,
+                    CursorBlinkPhase::visible(),
+                );
             let text_contract =
                 TerminalTextContract::for_terminal_paint_plan(plan, &self.text_config);
             let text_runs = plan.text_runs.len();
