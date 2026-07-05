@@ -1874,7 +1874,7 @@ fn setup_lua(
     theme: &[(String, String)],
     mux: Arc<RwLock<MuxView>>,
     metrics: Arc<RwLock<Metrics>>,
-    reorders: Arc<RwLock<Vec<SessionReorder>>>,
+    session_reorders: Arc<RwLock<Vec<SessionReorder>>>,
     run_cache: Arc<RunCache>,
 ) -> mlua::Result<Lua> {
     let lua = Lua::new();
@@ -2005,7 +2005,7 @@ fn setup_lua(
     bootty.set(
         "reorder_session",
         lua.create_function(move |_, (source, before): (String, Option<String>)| {
-            if let Ok(mut queue) = reorders.write() {
+            if let Ok(mut queue) = session_reorders.write() {
                 queue.push(SessionReorder { source, before });
             }
             Ok(())
@@ -3555,28 +3555,6 @@ mod tests {
             "bootty.run: extension host stopped",
             Duration::from_secs(2)
         ));
-    }
-
-    #[test]
-    fn built_in_windows_module_defines_on_reorder() {
-        let lua = setup_lua(
-            &[],
-            Arc::default(),
-            Arc::default(),
-            Arc::default(),
-            Arc::default(),
-        )
-        .unwrap();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let modules = load_modules(&lua, dir.path(), BUILTIN_STATUS_EXTENSIONS);
-        let windows = modules
-            .iter()
-            .find(|module| module.name == "windows")
-            .expect("built-in windows module loaded");
-        assert!(
-            windows.on_reorder.is_some(),
-            "windows.luau must define on_reorder so dragging a tab reorders it"
-        );
     }
 
     #[test]

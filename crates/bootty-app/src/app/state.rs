@@ -1673,6 +1673,47 @@ impl AppState {
             .rename_window(&session_id, &window_id, name, &self.repaint, &mux_config);
     }
 
+    pub fn reorder_window_before_from_ui(&mut self, source: &str, before: Option<&str>) -> bool {
+        let Some(session_id) = self.mux.selected_session().map(str::to_owned) else {
+            return false;
+        };
+        if before == Some(source) {
+            return false;
+        }
+        let windows = self.mux.selected_session_windows();
+        let Some(from) = windows.iter().position(|window| window.id == source) else {
+            return false;
+        };
+        let mut target_ids = windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .filter(|id| *id != source)
+            .collect::<Vec<_>>();
+        let to = before
+            .and_then(|before| target_ids.iter().position(|id| *id == before))
+            .unwrap_or(target_ids.len());
+        target_ids.insert(to, source);
+        let Some(to) = target_ids.iter().position(|id| *id == source) else {
+            return false;
+        };
+        let delta = to as i32 - from as i32;
+        if delta == 0 {
+            return false;
+        }
+
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id: Some(source.to_owned()),
+                delta,
+            },
+        );
+        self.sync_native_layout_terminal_now();
+        true
+    }
     fn sync_session_order(&mut self) {
         let ordered_names = self.session_order.sync_sessions(
             self.mux
@@ -5094,6 +5135,76 @@ mod tests {
             .map(|window| window.id.clone())
             .collect::<Vec<_>>();
         assert_eq!(after[before_index - 1], moved);
+    }
+
+    #[test]
+    fn window_reorder_from_ui_moves_non_active_tab_to_end() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("drag-move-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let moved = before[0].clone();
+
+        assert!(state.reorder_window_before_from_ui(&moved, None));
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after,
+            vec![before[1].clone(), before[2].clone(), before[0].clone()]
+        );
+    }
+
+    #[test]
+    fn window_reorder_from_ui_ignores_self_drop() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("self-drop-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let moved = before[0].clone();
+
+        assert!(!state.reorder_window_before_from_ui(&moved, Some(&moved)));
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
     }
 
     #[test]
