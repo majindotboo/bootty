@@ -5,6 +5,12 @@ use libghostty_vt::{
 
 use crate::terminal_image::KittyImageFrame;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameCopyMode {
+    pub selecting: bool,
+    pub rectangle: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderFrame {
     pub cols: u16,
@@ -20,6 +26,7 @@ pub struct RenderFrame {
     pub active_search_match_index: Option<usize>,
     pub search_match_count: usize,
     pub search_pulse: u64,
+    pub copy_mode: Option<FrameCopyMode>,
     pub selections: Vec<FrameSelection>,
     pub cells: Vec<RenderCell>,
     pub text: Vec<char>,
@@ -44,6 +51,7 @@ impl Default for RenderFrame {
             active_search_match_index: None,
             search_match_count: 0,
             search_pulse: 0,
+            copy_mode: None,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),

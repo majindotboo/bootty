@@ -740,6 +740,7 @@ mod tests {
             active_search_match_index: None,
             search_match_count: 0,
             search_pulse: 0,
+            copy_mode: None,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),

@@ -481,6 +481,7 @@ fn render_frame(cells: Vec<RenderCell>) -> RenderFrame {
         active_search_match_index: None,
         search_match_count: 0,
         search_pulse: 0,
+        copy_mode: None,
         selections: Vec::new(),
         cells,
         text: vec!['A', 'B', 'C'],

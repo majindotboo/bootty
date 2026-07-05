@@ -349,6 +349,7 @@ pub fn renderer_parity_gallery_frame() -> RendererFrame {
         active_search_match_index: None,
         search_match_count: 0,
         search_pulse: 0,
+        copy_mode: None,
         selections: Vec::new(),
         cells: vec![
             gallery_cell(0, 0, 0, 1, CellStyle::default()),
