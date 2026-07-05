@@ -5,7 +5,7 @@ use eframe::egui::{self, CornerRadius, Pos2, Rect, Stroke, StrokeKind};
 
 use crate::{
     config::SegmentAlign,
-    extensions::{ModuleCoord, ModulePrimitive},
+    extensions::ModulePrimitive,
     ui::icons::{has_slug, paint_icon_slug},
 };
 
@@ -60,7 +60,10 @@ pub struct ResolvedItem {
     pub module: String,
 }
 
+mod item_primitives;
 mod sidebar_panel;
+
+use item_primitives::{paint_item_hover_overlay, paint_item_primitives, primitive_background};
 
 pub(crate) use sidebar_panel::MACOS_TITLEBAR_BUTTON_SAFE_WIDTH;
 pub use sidebar_panel::{
@@ -923,242 +926,6 @@ fn paint_battery_gauge(
     }
 }
 
-fn coord_x(rect: Rect, coord: ModuleCoord) -> f32 {
-    rect.min.x + rect.width() * coord.frac + coord.px
-}
-
-fn coord_y(rect: Rect, coord: ModuleCoord) -> f32 {
-    rect.min.y + rect.height() * coord.frac + coord.px
-}
-
-fn coord_w(rect: Rect, coord: ModuleCoord) -> f32 {
-    rect.width() * coord.frac + coord.px
-}
-
-fn coord_h(rect: Rect, coord: ModuleCoord) -> f32 {
-    rect.height() * coord.frac + coord.px
-}
-
-fn blend_toward(color: egui::Color32, background: egui::Color32, keep: f32) -> egui::Color32 {
-    if keep >= 1.0 {
-        return color;
-    }
-    if keep <= 0.0 {
-        return background;
-    }
-    let mix = |fg: u8, bg: u8| (bg as f32 + (fg as f32 - bg as f32) * keep).round() as u8;
-    egui::Color32::from_rgb(
-        mix(color.r(), background.r()),
-        mix(color.g(), background.g()),
-        mix(color.b(), background.b()),
-    )
-}
-
-fn paint_item_primitives(
-    painter: &egui::Painter,
-    item_rect: Rect,
-    primitives: &[ModulePrimitive],
-    default_color: egui::Color32,
-    background: egui::Color32,
-    // Sidebar session rows pick intentionally dim, hue-tinted colors; honor them verbatim instead of
-    // running them through readable_color, whose AAA contrast gate flattens dim tints to white. The
-    // status bar and footer keep the gate so module colors stay legible on varied backgrounds.
-    respect_color: bool,
-    // Fraction of each color to keep before blending the rest toward the background. 1.0 paints the
-    // color as-is; unfocused session rows pass < 1.0 so every element dims in its own hue.
-    keep: f32,
-) {
-    let dim = |color: egui::Color32| blend_toward(color, background, keep);
-    let resolve = |color: &Option<egui::Color32>| {
-        let value = color.unwrap_or(default_color);
-        let value = if respect_color {
-            value
-        } else {
-            readable_color(background, value)
-        };
-        dim(value)
-    };
-    for primitive in primitives {
-        match primitive {
-            ModulePrimitive::Rect {
-                fill,
-                stroke,
-                x,
-                y,
-                w,
-                h,
-                radius,
-            } => {
-                let rect = Rect::from_min_size(
-                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
-                    egui::vec2(coord_w(item_rect, *w), coord_h(item_rect, *h)),
-                );
-                if let Some(fill) = fill {
-                    painter.rect_filled(rect, *radius, dim(*fill));
-                }
-                if let Some(stroke) = stroke {
-                    painter.rect_stroke(
-                        rect,
-                        *radius,
-                        Stroke::new(1.0, dim(*stroke)),
-                        StrokeKind::Inside,
-                    );
-                }
-            }
-            ModulePrimitive::Polygon {
-                fill,
-                stroke,
-                points,
-            } => {
-                let points = points
-                    .iter()
-                    .map(|(x, y)| Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)))
-                    .collect::<Vec<_>>();
-                if points.len() >= 3 {
-                    if let Some(fill) = fill {
-                        painter.add(egui::Shape::convex_polygon(
-                            points.clone(),
-                            dim(*fill),
-                            Stroke::new(0.0, egui::Color32::TRANSPARENT),
-                        ));
-                    }
-                    if let Some(stroke) = stroke {
-                        painter.add(egui::Shape::closed_line(
-                            points,
-                            Stroke::new(1.0, dim(*stroke)),
-                        ));
-                    }
-                }
-            }
-            ModulePrimitive::Text {
-                text,
-                color,
-                x,
-                y,
-                size,
-                align,
-                min_width,
-            } => {
-                if min_width.is_some_and(|min_width| item_rect.width() < min_width) {
-                    continue;
-                }
-                painter.text(
-                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
-                    primitive_align(align),
-                    text,
-                    egui::FontId::monospace(*size),
-                    resolve(color),
-                );
-            }
-            ModulePrimitive::Icon {
-                icon,
-                color,
-                x,
-                y,
-                size,
-                min_width,
-            } => {
-                if min_width.is_some_and(|min_width| item_rect.width() < min_width) {
-                    continue;
-                }
-                paint_icon_slug(
-                    painter,
-                    icon,
-                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
-                    *size,
-                    resolve(color),
-                );
-            }
-        }
-    }
-}
-
-fn paint_item_hover_overlay(
-    painter: &egui::Painter,
-    item_rect: Rect,
-    primitives: &[ModulePrimitive],
-    color: egui::Color32,
-) {
-    for primitive in primitives {
-        match primitive {
-            ModulePrimitive::Rect {
-                fill: Some(_),
-                x,
-                y,
-                w,
-                h,
-                radius,
-                ..
-            } => {
-                let rect = Rect::from_min_size(
-                    Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)),
-                    egui::vec2(coord_w(item_rect, *w), coord_h(item_rect, *h)),
-                );
-                painter.rect_filled(rect, *radius, color);
-            }
-            ModulePrimitive::Polygon {
-                fill: Some(_),
-                points,
-                ..
-            } => {
-                let points = points
-                    .iter()
-                    .map(|(x, y)| Pos2::new(coord_x(item_rect, *x), coord_y(item_rect, *y)))
-                    .collect::<Vec<_>>();
-                if points.len() >= 3 {
-                    painter.add(egui::Shape::convex_polygon(
-                        points,
-                        color,
-                        Stroke::new(0.0, egui::Color32::TRANSPARENT),
-                    ));
-                }
-            }
-            ModulePrimitive::Rect { fill: None, .. }
-            | ModulePrimitive::Polygon { fill: None, .. }
-            | ModulePrimitive::Text { .. }
-            | ModulePrimitive::Icon { .. } => {}
-        }
-    }
-}
-
-fn primitive_align(value: &str) -> egui::Align2 {
-    match value {
-        "left_top" => egui::Align2::LEFT_TOP,
-        "left_center" => egui::Align2::LEFT_CENTER,
-        "left_bottom" => egui::Align2::LEFT_BOTTOM,
-        "center_top" => egui::Align2::CENTER_TOP,
-        "center_center" | "center" => egui::Align2::CENTER_CENTER,
-        "center_bottom" => egui::Align2::CENTER_BOTTOM,
-        "right_top" => egui::Align2::RIGHT_TOP,
-        "right_center" => egui::Align2::RIGHT_CENTER,
-        "right_bottom" => egui::Align2::RIGHT_BOTTOM,
-        _ => egui::Align2::LEFT_CENTER,
-    }
-}
-
-fn primitive_background(primitives: &[ModulePrimitive]) -> Option<egui::Color32> {
-    primitives
-        .iter()
-        .rev()
-        .find_map(|primitive| match primitive {
-            ModulePrimitive::Rect { fill, .. } => *fill,
-            ModulePrimitive::Polygon { .. }
-            | ModulePrimitive::Text { .. }
-            | ModulePrimitive::Icon { .. } => None,
-        })
-        .or_else(|| {
-            primitives
-                .iter()
-                .rev()
-                .find_map(|primitive| match primitive {
-                    ModulePrimitive::Polygon { fill, .. } => *fill,
-                    ModulePrimitive::Rect { .. }
-                    | ModulePrimitive::Text { .. }
-                    | ModulePrimitive::Icon { .. } => None,
-                })
-        })
-}
-
 fn paint_status_item_background(
     painter: &egui::Painter,
     item_rect: Rect,
@@ -1367,30 +1134,7 @@ fn draw_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn primitive_background_prefers_cell_rect_over_chevron_polygon() {
-        let rect_fill = egui::Color32::from_rgb(0xee, 0xee, 0xee);
-        let chevron_fill = egui::Color32::from_rgb(0x4c, 0x7d, 0xd9);
-        let primitives = [
-            ModulePrimitive::Rect {
-                fill: Some(rect_fill),
-                stroke: None,
-                x: ModuleCoord::default(),
-                y: ModuleCoord::default(),
-                w: ModuleCoord { frac: 1.0, px: 0.0 },
-                h: ModuleCoord { frac: 1.0, px: 0.0 },
-                radius: egui::CornerRadius::ZERO,
-            },
-            ModulePrimitive::Polygon {
-                fill: Some(chevron_fill),
-                stroke: None,
-                points: Vec::new(),
-            },
-        ];
-
-        assert_eq!(primitive_background(&primitives), Some(rect_fill));
-    }
+    use crate::extensions::ModuleCoord;
 
     #[test]
     fn status_segments_width_ignores_empty_segments() {

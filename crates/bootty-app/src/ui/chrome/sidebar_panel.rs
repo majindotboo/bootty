@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-use super::{paint_item_primitives, start_window_drag_on_primary_press};
+use super::{item_primitives::paint_item_primitives, start_window_drag_on_primary_press};
 
 #[derive(Clone)]
 pub struct SidebarModel<'a> {
