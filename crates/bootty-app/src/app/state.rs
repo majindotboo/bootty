@@ -497,7 +497,7 @@ impl AppState {
         #[cfg(debug_assertions)]
         let diagnostic_action_driver = DiagnosticActionDriver::from_env();
 
-        let mut state = Self {
+        Ok(Self {
             terminal: ActiveTerminal::new(
                 TerminalWidget::initial_geometry(),
                 &config.multiplexer,
@@ -564,23 +564,11 @@ impl AppState {
             diagnostic_action_driver,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
-        };
-        state.ensure_initial_native_session();
-        Ok(state)
+        })
     }
 
     pub fn config(&self) -> &BoottyConfig {
         self.config_state.current()
-    }
-
-    fn ensure_initial_native_session(&mut self) {
-        if !self.uses_native_terminal_layout() || !self.mux.sessions().is_empty() {
-            return;
-        }
-        let request = new_mux_session_request(self.config());
-        let mux_config = self.config().multiplexer.clone();
-        self.mux
-            .create_project_session(request, &self.repaint, &mux_config);
     }
 
     /// Apply a dragged sidebar width to the live config without touching disk, so the layout
@@ -4640,6 +4628,17 @@ mod tests {
         AppState::new(config, repaint, None, None).expect("state")
     }
 
+    #[test]
+    fn native_startup_waits_for_user_to_open_first_session() {
+        let state = test_state();
+
+        assert!(
+            state.mux.sessions().is_empty(),
+            "startup must not open a session before the user asks for one"
+        );
+        assert_eq!(state.mux.selected_session(), None);
+    }
+
     fn sync_initial_native_terminal(state: &mut AppState) {
         let mux_config = state.config_state.current().multiplexer.clone();
         if let Some(error) = state.mux.refresh_sessions(&state.repaint, &mux_config) {
@@ -5481,6 +5480,7 @@ mod tests {
             .expect("source tab should remain present");
         assert_eq!(first_window.name, first_original_name);
         assert_eq!(second_window.name, "⠼ agents");
+        assert_eq!(state.mux.selected_window(), Some(first_window_id.as_str()));
         assert_eq!(effects, Vec::<AppEffect>::new());
     }
 

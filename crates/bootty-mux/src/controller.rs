@@ -486,8 +486,8 @@ impl MuxController {
             .execute_native_command(
                 config,
                 command.clone(),
-                Some(session_id.to_owned()),
-                Some(window_id.to_owned()),
+                self.selected_session.clone(),
+                self.selected_window.clone(),
             )
             .is_ok()
         {
@@ -499,7 +499,7 @@ impl MuxController {
             config,
             command,
             MuxCommandCompletion {
-                selected_session: Some(session_id.to_owned()),
+                selected_session: None,
                 selected_window: None,
             },
         );
@@ -1000,6 +1000,35 @@ mod tests {
 
         assert_eq!(controller.selected_session(), Some("$1"));
         assert_eq!(controller.selected_window(), None);
+    }
+
+    #[test]
+    fn rename_window_completion_does_not_activate_source_session() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let mut agents = session("$2", "agents");
+        agents.windows = vec![window("@9", 1)];
+        agents.active_window_id = Some("@9".to_owned());
+        let (result_tx, rx) = mpsc::channel();
+        result_tx
+            .send(Ok(MuxCommandCompletion {
+                selected_session: None,
+                selected_window: None,
+            }))
+            .expect("send rename completion");
+        let mut controller = MuxController {
+            sessions: vec![work, agents],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            mux_command_rx: Some(rx),
+            ..Default::default()
+        };
+
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), Some("@2"));
     }
 
     #[test]

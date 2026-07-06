@@ -668,6 +668,7 @@ dependencies = [
  "strum",
  "sysinfo",
  "tempfile",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]

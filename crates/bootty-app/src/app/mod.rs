@@ -41,6 +41,16 @@ const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MIN_PANE_PX: f32 = 80.0;
 /// Minimum grab width (px) for a split divider handle, so a thin configured divider stays draggable.
 const MIN_PANE_DIVIDER_GRAB: f32 = 8.0;
+const EGUI_SYMBOL_FALLBACK_FAMILIES: &[&str] = &[
+    "Apple Symbols",
+    "Segoe UI Symbol",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "DejaVu Sans",
+    "Symbola",
+    "Arial Unicode MS",
+];
+const EGUI_SYMBOL_FALLBACK_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 fn status_segment_visible(segment: &crate::config::StatusSegment, sidebar_visible: bool) -> bool {
     !(sidebar_visible && segment.module == "session")
@@ -1702,38 +1712,133 @@ fn take_scroll_for_pan(events: &mut Vec<egui::Event>, line_height: f32) -> Vec2 
 fn configure_egui_fonts(ctx: &egui::Context, families: &[String]) {
     let db = bootty_render::font_database::system_font_database();
     let mut fonts = FontDefinitions::default();
+    let mut loaded_text_font = false;
     for family in families.iter().rev() {
-        let query_families = [fontdb::Family::Name(family)];
-        let query = fontdb::Query {
-            families: &query_families,
-            ..fontdb::Query::default()
-        };
-        let Some(id) = db.query(&query) else {
-            continue;
-        };
-        let Some((bytes, index)) = db.with_face_data(id, |data, index| (data.to_vec(), index))
-        else {
-            continue;
-        };
-        let name = format!("bootty-ui-{family}");
-        let mut font_data = FontData::from_owned(bytes);
-        font_data.index = index;
-        fonts
-            .font_data
-            .insert(name.clone(), std::sync::Arc::new(font_data));
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .insert(0, name.clone());
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, name);
+        loaded_text_font |= add_egui_font_family(&mut fonts, db, family, EguiFontPlacement::First);
     }
+    if !loaded_text_font {
+        add_egui_default_text_font(&mut fonts, db);
+    }
+    add_egui_symbol_fallback_fonts(&mut fonts, db);
     crate::ui::icons::add_icon_fonts(&mut fonts);
     ctx.set_fonts(fonts);
+}
+
+#[derive(Clone, Copy)]
+enum EguiFontPlacement {
+    First,
+    Last,
+}
+
+fn add_egui_default_text_font(fonts: &mut FontDefinitions, db: &fontdb::Database) -> bool {
+    let query_families = [fontdb::Family::Monospace];
+    let query = fontdb::Query {
+        families: &query_families,
+        ..fontdb::Query::default()
+    };
+    let Some(id) = db.query(&query) else {
+        return false;
+    };
+    add_egui_font_face(
+        fonts,
+        db,
+        id,
+        "bootty-ui-default-monospace",
+        EguiFontPlacement::First,
+    )
+}
+
+fn add_egui_symbol_fallback_fonts(fonts: &mut FontDefinitions, db: &fontdb::Database) {
+    for family in EGUI_SYMBOL_FALLBACK_FAMILIES {
+        add_egui_font_family(fonts, db, family, EguiFontPlacement::Last);
+    }
+    for ch in EGUI_SYMBOL_FALLBACK_CHARS {
+        add_egui_font_for_char(fonts, db, *ch);
+    }
+}
+
+fn add_egui_font_family(
+    fonts: &mut FontDefinitions,
+    db: &fontdb::Database,
+    family: &str,
+    placement: EguiFontPlacement,
+) -> bool {
+    let name = egui_font_name(family);
+    let query_families = [fontdb::Family::Name(family)];
+    let query = fontdb::Query {
+        families: &query_families,
+        ..fontdb::Query::default()
+    };
+    let Some(id) = db.query(&query) else {
+        return false;
+    };
+    add_egui_font_face(fonts, db, id, &name, placement)
+}
+
+fn add_egui_font_for_char(fonts: &mut FontDefinitions, db: &fontdb::Database, ch: char) -> bool {
+    let Some(face) = egui_symbol_fallback_face(db, ch) else {
+        return false;
+    };
+    let name = format!(
+        "bootty-ui-symbol-U{:04X}-{}",
+        u32::from(ch),
+        face.post_script_name
+    );
+    add_egui_font_face(fonts, db, face.id, &name, EguiFontPlacement::Last)
+}
+
+fn add_egui_font_face(
+    fonts: &mut FontDefinitions,
+    db: &fontdb::Database,
+    id: fontdb::ID,
+    name: &str,
+    placement: EguiFontPlacement,
+) -> bool {
+    if fonts.font_data.contains_key(name) {
+        return false;
+    }
+    let Some((bytes, index)) = db.with_face_data(id, |data, index| (data.to_vec(), index)) else {
+        return false;
+    };
+
+    let mut font_data = FontData::from_owned(bytes);
+    font_data.index = index;
+    fonts
+        .font_data
+        .insert(name.to_owned(), std::sync::Arc::new(font_data));
+    for family in [FontFamily::Monospace, FontFamily::Proportional] {
+        let entries = fonts.families.entry(family).or_default();
+        match placement {
+            EguiFontPlacement::First => entries.insert(0, name.to_owned()),
+            EguiFontPlacement::Last => entries.push(name.to_owned()),
+        }
+    }
+    true
+}
+
+fn egui_symbol_fallback_face(db: &fontdb::Database, ch: char) -> Option<&fontdb::FaceInfo> {
+    let mut fallback = None;
+    for face in db.faces() {
+        if !font_face_supports_char(db, face.id, ch) {
+            continue;
+        }
+        if face.monospaced {
+            return Some(face);
+        }
+        fallback.get_or_insert(face);
+    }
+    fallback
+}
+
+fn font_face_supports_char(db: &fontdb::Database, id: fontdb::ID, ch: char) -> bool {
+    db.with_face_data(id, |data, index| {
+        ttf_parser::Face::parse(data, index).is_ok_and(|face| face.glyph_index(ch).is_some())
+    })
+    .unwrap_or(false)
+}
+
+fn egui_font_name(family: &str) -> String {
+    format!("bootty-ui-{family}")
 }
 
 #[cfg(test)]
@@ -1751,6 +1856,27 @@ mod tests {
 
         config.chrome.status_bar = true;
         assert!(uses_custom_egui_fonts(&config));
+    }
+
+    #[test]
+    fn custom_egui_fonts_append_symbol_fallbacks_for_spinner_titles() {
+        let db = bootty_render::font_database::system_font_database();
+        for ch in EGUI_SYMBOL_FALLBACK_CHARS {
+            assert!(egui_symbol_fallback_face(db, *ch).is_some());
+        }
+
+        let context = egui::Context::default();
+        configure_egui_fonts(&context, &[]);
+        context.begin_pass(egui::RawInput::default());
+        context.fonts_mut(|fonts| {
+            for ch in EGUI_SYMBOL_FALLBACK_CHARS {
+                assert!(
+                    fonts.has_glyph(&egui::FontId::monospace(12.0), *ch),
+                    "status/tab labels should render every Braille spinner frame through egui fallback fonts"
+                );
+            }
+        });
+        let _ = context.end_pass();
     }
 
     #[test]
