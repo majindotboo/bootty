@@ -567,10 +567,12 @@ impl RmuxBridgeState {
         window_id: Option<&str>,
         delta: i32,
     ) -> Result<()> {
-        if let Some(window_id) = window_id
-            && let Some((session_name, index)) =
+        if let Some(window_id) = window_id {
+            let Some((session_name, index)) =
                 self.window_index_by_id(session_name, window_id).await?
-        {
+            else {
+                anyhow::bail!("rmux window {window_id} not found in session {session_name}");
+            };
             self.window(&session_name, index).await?.select().await?;
         }
         let rmux = self.rmux().await?;
@@ -698,12 +700,17 @@ fn should_retry_rmux_error(error: &anyhow::Error) -> bool {
 }
 
 fn display_window_index(rows: &[RmuxWindowRow], row: &RmuxWindowRow) -> u32 {
-    let offset = if rows.iter().map(|window| window.index).min() == Some(0) {
-        1
-    } else {
-        0
-    };
-    row.index.saturating_add(offset)
+    let mut ordered = rows.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    ordered
+        .iter()
+        .position(|candidate| candidate.session_name == row.session_name && candidate.id == row.id)
+        .map(|position| position as u32 + 1)
+        .unwrap_or(row.index)
 }
 
 async fn snapshot_session(rmux: &Rmux, name: &SessionName) -> Result<crate::snapshot::MuxSession> {
@@ -997,6 +1004,30 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn display_window_index_uses_compact_visual_order_for_skipped_rmux_indexes() {
+        let rows = vec![
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@10".to_owned(),
+                index: 0,
+                active: false,
+                name: "one".to_owned(),
+                layout: None,
+            },
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@12".to_owned(),
+                index: 2,
+                active: true,
+                name: "three".to_owned(),
+                layout: None,
+            },
+        ];
+
+        assert_eq!(display_window_index(&rows, &rows[1]), 2);
+    }
 
     #[test]
     fn rmux_process_environment_advertises_bootty_terminal_identity() {

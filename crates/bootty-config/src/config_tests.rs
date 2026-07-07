@@ -1034,6 +1034,22 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
     );
 }
 
+#[test]
+fn copy_mode_defaults_match_ghostty_bootty_and_tmux_entry_points() {
+    assert!(ghostty_common_keybinds_macos().contains(&"cmd+y=copy_mode"));
+    assert!(native_scroll_keybinds_macos().contains(&"cmd+y=copy_mode"));
+    assert!(
+        prefixed_keybinds("ctrl+space", BOOTTY_PREFIX_KEYBINDS)
+            .iter()
+            .any(|entry| entry == "ctrl+space>[=copy_mode")
+    );
+    assert!(
+        prefixed_keybinds("ctrl+b", TMUX_PREFIX_KEYBINDS)
+            .iter()
+            .any(|entry| entry == "ctrl+b>[=copy_mode")
+    );
+}
+
 // The platform default tables are cfg-selected, so these tests address both tables directly to
 // validate the Linux/Windows table from any build host.
 fn binding_triggers(entries: &[&str]) -> Vec<BindingTrigger> {
@@ -1290,7 +1306,7 @@ fn bootty_preset_tab_navigation_defaults_use_left_alt_shift() {
 }
 
 #[test]
-fn bootty_preset_move_tab_defaults_use_left_alt() {
+fn bootty_preset_move_tab_defaults_bind_both_option_sides() {
     let config = load_config_source(indoc! {r#"
         version = 1
 
@@ -1298,20 +1314,17 @@ fn bootty_preset_move_tab_defaults_use_left_alt() {
         preset = "bootty"
     "#});
 
-    assert!(
-        config
-            .input
-            .keybind
-            .iter()
-            .any(|entry| entry == "left_alt+shift+,=move_tab:-1")
-    );
-    assert!(
-        config
-            .input
-            .keybind
-            .iter()
-            .any(|entry| entry == "left_alt+shift+.=move_tab:1")
-    );
+    for entry in [
+        "left_alt+shift+,=move_tab:-1",
+        "right_alt+shift+,=move_tab:-1",
+        "left_alt+shift+.=move_tab:1",
+        "right_alt+shift+.=move_tab:1",
+    ] {
+        assert!(
+            config.input.keybind.iter().any(|keybind| keybind == entry),
+            "missing raw keybind {entry}"
+        );
+    }
     assert!(
         !config
             .input
@@ -1323,11 +1336,15 @@ fn bootty_preset_move_tab_defaults_use_left_alt() {
     let keybinds = config
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Native);
-    assert!(
-        !keybinds
-            .iter()
-            .any(|entry| entry == "right_alt+shift+,=move_tab:-1")
-    );
+    for entry in [
+        "left_alt+shift+,=move_tab:-1",
+        "right_alt+shift+,=move_tab:-1",
+    ] {
+        assert!(
+            keybinds.iter().any(|keybind| keybind == entry),
+            "missing resolved keybind {entry}"
+        );
+    }
 }
 
 #[test]

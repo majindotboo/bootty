@@ -360,6 +360,7 @@ pub enum BindingAction {
     CopyUrlToClipboard,
     CopyTitleToClipboard,
     PasteFromClipboard,
+    CopyMode,
     PasteFromSelection,
     IncreaseFontSize(f32),
     DecreaseFontSize(f32),
@@ -636,6 +637,7 @@ impl BindingAction {
             Self::CopyUrlToClipboard => "copy_url_to_clipboard".to_owned(),
             Self::CopyTitleToClipboard => "copy_title_to_clipboard".to_owned(),
             Self::PasteFromClipboard => "paste_from_clipboard".to_owned(),
+            Self::CopyMode => "copy_mode".to_owned(),
             Self::PasteFromSelection => "paste_from_selection".to_owned(),
             Self::IncreaseFontSize(value) => format!("increase_font_size:{value}"),
             Self::DecreaseFontSize(value) => format!("decrease_font_size:{value}"),
@@ -870,6 +872,7 @@ pub fn parse_action(input: &str) -> Result<BindingAction, BindingParseError> {
         "copy_title_to_clipboard" => parse_unit(value, BindingAction::CopyTitleToClipboard),
         "paste_from_clipboard" => parse_unit(value, BindingAction::PasteFromClipboard),
         "paste_from_selection" => parse_unit(value, BindingAction::PasteFromSelection),
+        "copy_mode" => parse_unit(value, BindingAction::CopyMode),
         "increase_font_size" => parse_required(value, |value| {
             Ok(BindingAction::IncreaseFontSize(parse_f32(value)?))
         }),
@@ -1343,6 +1346,7 @@ mod tests {
             ),
             ("a=paste_from_clipboard", BindingAction::PasteFromClipboard),
             ("a=paste_from_selection", BindingAction::PasteFromSelection),
+            ("a=copy_mode", BindingAction::CopyMode),
             (
                 "a=increase_font_size:1.5",
                 BindingAction::IncreaseFontSize(1.5),
@@ -1541,6 +1545,7 @@ mod tests {
             (BindingAction::Csi("0m".to_owned()), "csi:0m"),
             (BindingAction::Esc("7".to_owned()), "esc:7"),
             (BindingAction::Text("plain".to_owned()), "text:plain"),
+            (BindingAction::CopyMode, "copy_mode"),
         ] {
             assert_eq!(action.format_entry(), expected);
         }

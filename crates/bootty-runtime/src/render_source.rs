@@ -3,7 +3,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
-    terminal_engine::{TerminalSearchDirection, TerminalSelectionEvent},
+    terminal_engine::{
+        TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalSearchDirection,
+        TerminalSelectionEvent,
+    },
     terminal_frame::RenderFrame,
 };
 
@@ -25,6 +28,18 @@ pub trait TerminalRenderSource {
     }
     fn scroll_viewport_delta(&mut self, _delta: isize) -> Result<()> {
         Ok(())
+    }
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+    fn handle_copy_mode_action(
+        &mut self,
+        _action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        Ok(TerminalCopyModeOutcome::default())
     }
     fn search_viewport(
         &mut self,
@@ -67,6 +82,21 @@ impl TerminalRenderSource for TerminalSession {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         Self::scroll_viewport_delta(self, delta)
+    }
+
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        Self::enter_copy_mode(self)
+    }
+
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        Self::copy_mode_active(self)
+    }
+
+    fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        Self::handle_copy_mode_action(self, action)
     }
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {

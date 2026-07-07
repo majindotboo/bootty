@@ -1056,6 +1056,7 @@ fn render_frame_with_text(ch: char) -> RenderFrame {
         active_search_match_index: None,
         search_match_count: 0,
         search_pulse: 0,
+        copy_mode: None,
         selections: Vec::new(),
         cells: vec![RenderCell {
             x: 0,

@@ -20,8 +20,9 @@ use bootty_runtime::{
 };
 use bootty_terminal::{
     terminal_engine::{
-        TerminalColorConfig, TerminalCursorConfig, TerminalFeatureConfig, TerminalSearchDirection,
-        TerminalSelectionEvent, TerminalSelectionFormat,
+        TerminalColorConfig, TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalCursorConfig,
+        TerminalFeatureConfig, TerminalSearchDirection, TerminalSelectionEvent,
+        TerminalSelectionFormat,
     },
     terminal_input_model::{KeyInput, MouseInput},
 };
@@ -110,6 +111,21 @@ impl TerminalRenderSource for ActiveTerminalRuntime {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.0.scroll_viewport_delta(delta)
+    }
+
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        self.0.enter_copy_mode()
+    }
+
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        self.0.copy_mode_active()
+    }
+
+    fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        self.0.handle_copy_mode_action(action)
     }
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
@@ -302,6 +318,7 @@ enum QueuedStartupCommand {
         scroll_delta: isize,
     },
     ScrollViewport(isize),
+    EnterCopyMode,
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
     SelectionEnd(Option<TerminalSelectionEvent>),
@@ -434,6 +451,7 @@ fn apply_queued_startup_command(
             scroll_delta,
         } => terminal.handle_mouse_wheel(input, scroll_delta),
         QueuedStartupCommand::ScrollViewport(delta) => terminal.scroll_viewport_delta(delta),
+        QueuedStartupCommand::EnterCopyMode => terminal.enter_copy_mode(),
         QueuedStartupCommand::SelectionBegin(event) => terminal.begin_selection(event),
         QueuedStartupCommand::SelectionUpdate(event) => terminal.update_selection(event),
         QueuedStartupCommand::SelectionEnd(event) => terminal.end_selection(event),
@@ -488,6 +506,29 @@ impl TerminalRenderSource for StartingNativeTerminal {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.queue_or_apply(QueuedStartupCommand::ScrollViewport(delta))
+    }
+
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::EnterCopyMode)
+    }
+
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.copy_mode_active()
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        if let Some(terminal) = self.ready_terminal()? {
+            terminal.handle_copy_mode_action(action)
+        } else {
+            Ok(TerminalCopyModeOutcome::default())
+        }
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -785,16 +826,20 @@ impl BackendPaneTerminal {
                 if backend == MuxBackendKind::Native {
                     return self.spawn_native_runtime(target);
                 }
+                let mut config = self.terminal_config.clone();
+                config.side_effect_pane_id = target.pane_id().map(str::to_owned);
                 Ok(ActiveTerminalRuntime(Box::new(RmuxNativeTerminal::new(
                     target.clone(),
                     self.native_window_spawn_geometry.unwrap_or(self.geometry),
-                    self.terminal_config.clone(),
+                    config,
                     Arc::clone(&self.repaint_wakeup),
                 )?)))
             }
             MuxBackendKind::Tmux | MuxBackendKind::Zellij => {
+                let mut terminal_config = self.terminal_config.clone();
+                terminal_config.side_effect_pane_id = target.pane_id().map(str::to_owned);
                 let config = backend_attach_session_config(
-                    self.terminal_config.clone(),
+                    terminal_config,
                     backend,
                     target.session_id(),
                     bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
@@ -813,6 +858,7 @@ impl BackendPaneTerminal {
     fn spawn_native_runtime(&self, target: &MuxPaneTarget) -> Result<ActiveTerminalRuntime> {
         let mut config = self.terminal_config.clone();
         config.launch.working_directory = target.cwd().map(Path::new).map(Path::to_path_buf);
+        config.side_effect_pane_id = target.pane_id().map(str::to_owned);
         Ok(ActiveTerminalRuntime(Box::new(
             StartingNativeTerminal::spawn(
                 self.native_window_spawn_geometry.unwrap_or(self.geometry),
@@ -1061,6 +1107,21 @@ impl BackendPaneTerminal {
         self.terminal.scroll_viewport_delta(delta)
     }
 
+    pub fn enter_copy_mode(&mut self) -> Result<()> {
+        self.terminal.enter_copy_mode()
+    }
+
+    pub fn copy_mode_active(&mut self) -> Result<bool> {
+        self.terminal.copy_mode_active()
+    }
+
+    pub fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        self.terminal.handle_copy_mode_action(action)
+    }
+
     pub fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         self.terminal.format_selection(format)
     }
@@ -1165,6 +1226,21 @@ impl TerminalRenderSource for BackendPaneTerminal {
         self.terminal.scroll_viewport_delta(delta)
     }
 
+    fn enter_copy_mode(&mut self) -> Result<()> {
+        self.terminal.enter_copy_mode()
+    }
+
+    fn copy_mode_active(&mut self) -> Result<bool> {
+        self.terminal.copy_mode_active()
+    }
+
+    fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        self.terminal.handle_copy_mode_action(action)
+    }
+
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
         self.terminal.search_viewport(query, direction)
     }
@@ -1219,6 +1295,13 @@ impl MuxPaneTarget {
         match self {
             Self::Pane { pane_id, .. } => pane_id,
             target => target.session_id(),
+        }
+    }
+
+    fn pane_id(&self) -> Option<&str> {
+        match self {
+            Self::Pane { pane_id, .. } => Some(pane_id),
+            Self::Session { .. } => None,
         }
     }
 
@@ -1773,6 +1856,7 @@ mod tests {
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         }
     }
@@ -2229,6 +2313,7 @@ mod tests {
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         };
 
@@ -2267,6 +2352,7 @@ mod tests {
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         };
 
@@ -2295,6 +2381,7 @@ mod tests {
             max_scrollback: 0,
             macos_option_as_alt: Default::default(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         };
         let (program, args) = backend_attach_launch(MuxBackendKind::Tmux, "agents");

@@ -70,7 +70,8 @@ use crate::{
     },
 };
 use bootty_terminal::terminal_engine::{
-    TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+    TerminalCopyModeAction, TerminalCopyModeMotion, TerminalSelectionEvent,
+    TerminalSelectionFormat, TerminalSideEffect, TerminalSideEffectEvent,
     encode_iterm2_report_cell_size, encode_iterm2_report_variable, encode_osc52_response,
 };
 
@@ -153,9 +154,11 @@ pub struct AppState {
     sidebar_key_bindings: SidebarKeyBindings,
     has_new_session_config_changes: bool,
     mux: MuxController,
+    custom_tab_names: HashSet<(String, String)>,
+    terminal_tab_titles: HashMap<(String, String), String>,
     repaint: RepaintHandle,
-    terminal_side_effect_tx: mpsc::Sender<TerminalSideEffect>,
-    terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffect>,
+    terminal_side_effect_tx: mpsc::Sender<TerminalSideEffectEvent>,
+    terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffectEvent>,
     direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
     modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     modifier_sides: ModifierSideState,
@@ -169,6 +172,8 @@ pub struct AppState {
     lua_window_open: bool,
     terminal_selection_drag_active: bool,
     terminal_selection_drag_pos: Option<Pos2>,
+    terminal_selection_pending_start: Option<TerminalSelectionEvent>,
+    terminal_selection_passthrough_active: bool,
     /// Screen rects of chrome resize handles (sidebar edge, pane dividers) registered during the
     /// previous frame's UI build. A primary press inside one of these must not begin a terminal
     /// text selection — the handle owns that drag. Populated each frame in `show_fixed_layout`.
@@ -187,14 +192,14 @@ pub struct AppState {
     session_picker_dialog: Option<SessionPickerDialog>,
     rename_session_dialog: Option<RenameSessionDialog>,
     rename_tab_dialog: Option<RenameTabDialog>,
-    custom_tab_names: HashSet<(String, String)>,
-    terminal_tab_titles: HashMap<(String, String), String>,
     ditch_session_dialog: Option<DitchSessionDialog>,
     keybind_help_dialog: Option<KeybindHelpDialog>,
     command_palette_dialog: Option<CommandPaletteDialog>,
     theme_picker_dialog: Option<ThemePickerDialog>,
     terminal_find_dialog: Option<TerminalFindDialog>,
+    terminal_find_return_focus_after_search: bool,
     last_terminal_search: String,
+    last_terminal_search_direction: TerminalSearchDirection,
     theme_picker_restore_config: Option<BoottyConfig>,
     /// A command-palette choice waiting to be dispatched on the next input pass,
     /// where the viewport snapshot and effect sink are in scope.
@@ -208,7 +213,7 @@ pub struct AppState {
 fn terminal_session_config_with_side_effects(
     config: &BoottyConfig,
     variant: AppearanceVariant,
-    side_effect_tx: &mpsc::Sender<TerminalSideEffect>,
+    side_effect_tx: &mpsc::Sender<TerminalSideEffectEvent>,
 ) -> TerminalSessionConfig {
     let mut session_config = config.terminal_session_config();
     session_config.colors = config
@@ -331,6 +336,8 @@ fn route_terminal_selection_events(
     context: TerminalSelectionRouteContext<'_>,
     active: &mut bool,
     drag_pos: &mut Option<Pos2>,
+    pending_start: &mut Option<TerminalSelectionEvent>,
+    passthrough_active: Option<&mut bool>,
 ) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
     let TerminalSelectionRouteContext {
         surface,
@@ -339,8 +346,12 @@ fn route_terminal_selection_events(
         frame_modifiers,
         chrome_handle_rects,
     } = context;
+    let mut local_passthrough_active = false;
+    let passthrough_active = passthrough_active.unwrap_or(&mut local_passthrough_active);
     let Some(surface) = surface else {
         *drag_pos = None;
+        *pending_start = None;
+        *passthrough_active = false;
         *active = false;
         return (events, Vec::new());
     };
@@ -355,17 +366,23 @@ fn route_terminal_selection_events(
                 pressed: true,
                 modifiers,
             } if surface.rect.contains(pos)
-                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos))
-                && (modifiers.shift || frame_modifiers.shift || !mouse_tracking) =>
+                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos)) =>
             {
                 let rectangle = modifiers.alt || frame_modifiers.alt;
-                if let Some(selection_event) =
-                    terminal_selection_event(surface, view, pos, rectangle)
-                {
-                    *drag_pos = None;
-                    *active = true;
-                    selection_actions.push(TerminalSelectionAction::Begin(selection_event));
-                    continue;
+                let selecting_with_modifier = modifiers.shift || frame_modifiers.shift;
+                if selecting_with_modifier {
+                    if let Some(selection_event) =
+                        terminal_selection_event(surface, view, pos, rectangle)
+                    {
+                        *drag_pos = None;
+                        *pending_start = None;
+                        *passthrough_active = false;
+                        *active = true;
+                        selection_actions.push(TerminalSelectionAction::Begin(selection_event));
+                        continue;
+                    }
+                } else if !mouse_tracking {
+                    *pending_start = terminal_selection_event(surface, view, pos, rectangle);
                 }
                 terminal_events.push(egui::Event::PointerButton {
                     pos,
@@ -382,6 +399,31 @@ fn route_terminal_selection_events(
                 {
                     selection_actions.push(TerminalSelectionAction::Update(selection_event));
                 }
+                if *passthrough_active {
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                }
+            }
+            egui::Event::PointerMoved(pos) if pending_start.is_some() => {
+                if mouse_tracking {
+                    *pending_start = None;
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                } else if let Some(start) = pending_start.take() {
+                    *active = true;
+                    *passthrough_active = true;
+                    *drag_pos = Some(pos);
+                    selection_actions.push(TerminalSelectionAction::Begin(start));
+                    if selection_drag_scroll_delta(surface, pos) == 0
+                        && let Some(selection_event) = terminal_selection_event_clamped(
+                            surface,
+                            view,
+                            pos,
+                            frame_modifiers.alt,
+                        )
+                    {
+                        selection_actions.push(TerminalSelectionAction::Update(selection_event));
+                    }
+                    terminal_events.push(egui::Event::PointerMoved(pos));
+                }
             }
             egui::Event::PointerButton {
                 pos,
@@ -397,7 +439,31 @@ fn route_terminal_selection_events(
                 );
                 selection_actions.push(TerminalSelectionAction::End(selection_event));
                 *drag_pos = None;
+                *pending_start = None;
+                if *passthrough_active {
+                    terminal_events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers,
+                    });
+                }
+                *passthrough_active = false;
                 *active = false;
+            }
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            } if pending_start.is_some() => {
+                *pending_start = None;
+                terminal_events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                });
             }
             event => terminal_events.push(event),
         }
@@ -536,6 +602,385 @@ fn direct_copy_shortcut_pressed(input: KeyInput) -> bool {
         && !input.mods.ctrl
         && !input.mods.alt
         && !input.repeat
+}
+
+fn copy_mode_key_input_present(events: &[egui::Event]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)))
+}
+
+fn copy_mode_egui_key_should_pass_to_app(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    modifiers.alt || (modifiers.command && !copy_mode_egui_key_is_copy_shortcut(key, modifiers))
+}
+
+fn copy_mode_egui_key_is_copy_shortcut(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+    key == egui::Key::C && modifiers.command && !modifiers.ctrl && !modifiers.alt
+}
+
+fn copy_mode_input_should_pass_to_app(input: KeyInput) -> bool {
+    input.mods.alt || (input.mods.command && !direct_copy_shortcut_pressed(input))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CopyModeKeyAction {
+    Terminal(TerminalCopyModeAction),
+    SearchPrompt(TerminalSearchDirection),
+    SearchWord(TerminalSearchDirection),
+    SearchRepeat(CopyModeSearchRepeat),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyModeSearchRepeat {
+    SameDirection,
+    OppositeDirection,
+}
+
+impl CopyModeSearchRepeat {
+    fn direction(self, started_direction: TerminalSearchDirection) -> TerminalSearchDirection {
+        match self {
+            Self::SameDirection => started_direction,
+            Self::OppositeDirection => opposite_terminal_search_direction(started_direction),
+        }
+    }
+}
+
+fn opposite_terminal_search_direction(
+    direction: TerminalSearchDirection,
+) -> TerminalSearchDirection {
+    match direction {
+        TerminalSearchDirection::Previous => TerminalSearchDirection::Next,
+        TerminalSearchDirection::Current | TerminalSearchDirection::Next => {
+            TerminalSearchDirection::Previous
+        }
+    }
+}
+
+fn copy_mode_terminal_action(action: TerminalCopyModeAction) -> Option<CopyModeKeyAction> {
+    Some(CopyModeKeyAction::Terminal(action))
+}
+
+fn copy_mode_action_for_egui_event(
+    event: &egui::Event,
+    suppress_next_text: &mut bool,
+) -> Option<CopyModeKeyAction> {
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            let action = copy_mode_action_for_egui_key(*key, *modifiers);
+            *suppress_next_text = action.is_some() && copy_mode_egui_key_may_emit_text(*key);
+            action
+        }
+        egui::Event::Text(text) => {
+            if std::mem::take(suppress_next_text) {
+                None
+            } else {
+                text.chars().find_map(copy_mode_action_for_char)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn copy_mode_egui_key_may_emit_text(key: egui::Key) -> bool {
+    matches!(
+        key,
+        egui::Key::Questionmark
+            | egui::Key::Slash
+            | egui::Key::A
+            | egui::Key::B
+            | egui::Key::C
+            | egui::Key::D
+            | egui::Key::E
+            | egui::Key::F
+            | egui::Key::G
+            | egui::Key::H
+            | egui::Key::I
+            | egui::Key::J
+            | egui::Key::K
+            | egui::Key::L
+            | egui::Key::M
+            | egui::Key::N
+            | egui::Key::O
+            | egui::Key::P
+            | egui::Key::Q
+            | egui::Key::R
+            | egui::Key::S
+            | egui::Key::T
+            | egui::Key::U
+            | egui::Key::V
+            | egui::Key::W
+            | egui::Key::X
+            | egui::Key::Y
+            | egui::Key::Z
+            | egui::Key::Num0
+            | egui::Key::Num1
+            | egui::Key::Num2
+            | egui::Key::Num3
+            | egui::Key::Num4
+            | egui::Key::Num5
+            | egui::Key::Num6
+            | egui::Key::Num7
+            | egui::Key::Num8
+            | egui::Key::Num9
+            | egui::Key::Space
+    )
+}
+
+fn copy_mode_action_for_egui_key(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> Option<CopyModeKeyAction> {
+    if key == egui::Key::C && modifiers.command && !modifiers.ctrl && !modifiers.alt {
+        return copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel);
+    }
+    if modifiers.command || modifiers.alt {
+        return None;
+    }
+    if modifiers.ctrl {
+        return copy_mode_ctrl_key_action(key);
+    }
+    match key {
+        egui::Key::Questionmark => {
+            return Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Previous,
+            ));
+        }
+        egui::Key::Slash if modifiers.shift => {
+            return Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Previous,
+            ));
+        }
+        egui::Key::Slash => {
+            return Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Next,
+            ));
+        }
+        egui::Key::Num3 if modifiers.shift => {
+            return Some(CopyModeKeyAction::SearchWord(
+                TerminalSearchDirection::Previous,
+            ));
+        }
+        egui::Key::Num8 if modifiers.shift => {
+            return Some(CopyModeKeyAction::SearchWord(TerminalSearchDirection::Next));
+        }
+        _ => {}
+    }
+    if modifiers.shift {
+        return match key {
+            egui::Key::G => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
+            egui::Key::H => copy_mode_motion(TerminalCopyModeMotion::TopLine),
+            egui::Key::L => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
+            egui::Key::M => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
+            egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
+            egui::Key::Num4 => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
+            egui::Key::Num6 => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
+            _ => None,
+        };
+    }
+    match key {
+        egui::Key::Escape => {
+            copy_mode_terminal_action(TerminalCopyModeAction::CancelOrClearSelection)
+        }
+        egui::Key::Enter => {
+            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
+        }
+        egui::Key::Space => copy_mode_terminal_action(TerminalCopyModeAction::BeginSelection),
+        egui::Key::ArrowLeft => copy_mode_motion(TerminalCopyModeMotion::Left),
+        egui::Key::ArrowRight => copy_mode_motion(TerminalCopyModeMotion::Right),
+        egui::Key::ArrowUp => copy_mode_motion(TerminalCopyModeMotion::Up),
+        egui::Key::ArrowDown => copy_mode_motion(TerminalCopyModeMotion::Down),
+        egui::Key::PageUp => copy_mode_motion(TerminalCopyModeMotion::PageUp),
+        egui::Key::PageDown => copy_mode_motion(TerminalCopyModeMotion::PageDown),
+        egui::Key::Home => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
+        egui::Key::End => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
+        egui::Key::H => copy_mode_motion(TerminalCopyModeMotion::Left),
+        egui::Key::J => copy_mode_motion(TerminalCopyModeMotion::Down),
+        egui::Key::K => copy_mode_motion(TerminalCopyModeMotion::Up),
+        egui::Key::L => copy_mode_motion(TerminalCopyModeMotion::Right),
+        egui::Key::N => Some(CopyModeKeyAction::SearchRepeat(
+            CopyModeSearchRepeat::SameDirection,
+        )),
+        egui::Key::G => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
+        egui::Key::W => copy_mode_motion(TerminalCopyModeMotion::NextWord),
+        egui::Key::B => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
+        egui::Key::E => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
+        egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
+        egui::Key::Y => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
+        egui::Key::Q => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
+        egui::Key::Num0 => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
+        _ => None,
+    }
+}
+
+fn copy_mode_action_for_input(input: KeyInput) -> Option<CopyModeKeyAction> {
+    if direct_copy_shortcut_pressed(input) {
+        return copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel);
+    }
+    if input.mods.command || input.mods.alt {
+        return None;
+    }
+    if input.mods.ctrl {
+        return copy_mode_ctrl_terminal_key_action(input.key);
+    }
+    if input.mods.shift {
+        return copy_mode_shift_terminal_key_action(input.key).or_else(|| {
+            input
+                .utf8
+                .and_then(single_char)
+                .and_then(copy_mode_action_for_char)
+        });
+    }
+    copy_mode_terminal_key_action(input.key).or_else(|| {
+        input
+            .utf8
+            .and_then(single_char)
+            .and_then(copy_mode_action_for_char)
+    })
+}
+
+fn single_char(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    let ch = chars.next()?;
+    chars.next().is_none().then_some(ch)
+}
+
+fn copy_mode_ctrl_key_action(key: egui::Key) -> Option<CopyModeKeyAction> {
+    match key {
+        egui::Key::B => copy_mode_motion(TerminalCopyModeMotion::PageUp),
+        egui::Key::C | egui::Key::G => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
+        egui::Key::D => copy_mode_motion(TerminalCopyModeMotion::HalfPageDown),
+        egui::Key::E => copy_mode_motion(TerminalCopyModeMotion::ScrollDown),
+        egui::Key::F => copy_mode_motion(TerminalCopyModeMotion::PageDown),
+        egui::Key::J => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
+        egui::Key::N => copy_mode_motion(TerminalCopyModeMotion::Down),
+        egui::Key::P => copy_mode_motion(TerminalCopyModeMotion::Up),
+        egui::Key::U => copy_mode_motion(TerminalCopyModeMotion::HalfPageUp),
+        egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleRectangle),
+        egui::Key::Y => copy_mode_motion(TerminalCopyModeMotion::ScrollUp),
+        _ => None,
+    }
+}
+
+fn copy_mode_ctrl_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
+    match key {
+        TerminalKey::B => copy_mode_motion(TerminalCopyModeMotion::PageUp),
+        TerminalKey::C | TerminalKey::G => {
+            copy_mode_terminal_action(TerminalCopyModeAction::Cancel)
+        }
+        TerminalKey::D => copy_mode_motion(TerminalCopyModeMotion::HalfPageDown),
+        TerminalKey::E => copy_mode_motion(TerminalCopyModeMotion::ScrollDown),
+        TerminalKey::F => copy_mode_motion(TerminalCopyModeMotion::PageDown),
+        TerminalKey::J | TerminalKey::Enter | TerminalKey::NumpadEnter => {
+            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
+        }
+        TerminalKey::N => copy_mode_motion(TerminalCopyModeMotion::Down),
+        TerminalKey::P => copy_mode_motion(TerminalCopyModeMotion::Up),
+        TerminalKey::U => copy_mode_motion(TerminalCopyModeMotion::HalfPageUp),
+        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleRectangle),
+        TerminalKey::Y => copy_mode_motion(TerminalCopyModeMotion::ScrollUp),
+        _ => None,
+    }
+}
+
+fn copy_mode_shift_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
+    match key {
+        TerminalKey::G => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
+        TerminalKey::H => copy_mode_motion(TerminalCopyModeMotion::TopLine),
+        TerminalKey::L => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
+        TerminalKey::M => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
+        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
+        TerminalKey::Digit4 => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
+        TerminalKey::Digit6 => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
+        _ => None,
+    }
+}
+
+fn copy_mode_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
+    match key {
+        TerminalKey::Escape => {
+            copy_mode_terminal_action(TerminalCopyModeAction::CancelOrClearSelection)
+        }
+        TerminalKey::Enter | TerminalKey::NumpadEnter => {
+            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
+        }
+        TerminalKey::Space => copy_mode_terminal_action(TerminalCopyModeAction::BeginSelection),
+        TerminalKey::ArrowLeft => copy_mode_motion(TerminalCopyModeMotion::Left),
+        TerminalKey::ArrowRight => copy_mode_motion(TerminalCopyModeMotion::Right),
+        TerminalKey::ArrowUp => copy_mode_motion(TerminalCopyModeMotion::Up),
+        TerminalKey::ArrowDown => copy_mode_motion(TerminalCopyModeMotion::Down),
+        TerminalKey::PageUp => copy_mode_motion(TerminalCopyModeMotion::PageUp),
+        TerminalKey::PageDown => copy_mode_motion(TerminalCopyModeMotion::PageDown),
+        TerminalKey::Home => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
+        TerminalKey::End => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
+        TerminalKey::H => copy_mode_motion(TerminalCopyModeMotion::Left),
+        TerminalKey::J => copy_mode_motion(TerminalCopyModeMotion::Down),
+        TerminalKey::K => copy_mode_motion(TerminalCopyModeMotion::Up),
+        TerminalKey::N => Some(CopyModeKeyAction::SearchRepeat(
+            CopyModeSearchRepeat::SameDirection,
+        )),
+        TerminalKey::L => copy_mode_motion(TerminalCopyModeMotion::Right),
+        TerminalKey::G => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
+        TerminalKey::W => copy_mode_motion(TerminalCopyModeMotion::NextWord),
+        TerminalKey::B => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
+        TerminalKey::E => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
+        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
+        TerminalKey::Y => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
+        TerminalKey::Q => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
+        TerminalKey::Digit0 | TerminalKey::Numpad0 => {
+            copy_mode_motion(TerminalCopyModeMotion::StartOfLine)
+        }
+        _ => None,
+    }
+}
+
+fn copy_mode_action_for_char(ch: char) -> Option<CopyModeKeyAction> {
+    match ch {
+        '/' => Some(CopyModeKeyAction::SearchPrompt(
+            TerminalSearchDirection::Next,
+        )),
+        '?' => Some(CopyModeKeyAction::SearchPrompt(
+            TerminalSearchDirection::Previous,
+        )),
+        '*' => Some(CopyModeKeyAction::SearchWord(TerminalSearchDirection::Next)),
+        '#' => Some(CopyModeKeyAction::SearchWord(
+            TerminalSearchDirection::Previous,
+        )),
+        '$' => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
+        '^' => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
+        '0' => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
+        'b' => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
+        'e' => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
+        'g' => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
+        'G' => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
+        'h' => copy_mode_motion(TerminalCopyModeMotion::Left),
+        'H' => copy_mode_motion(TerminalCopyModeMotion::TopLine),
+        'j' => copy_mode_motion(TerminalCopyModeMotion::Down),
+        'k' => copy_mode_motion(TerminalCopyModeMotion::Up),
+        'l' => copy_mode_motion(TerminalCopyModeMotion::Right),
+        'L' => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
+        'M' => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
+        'n' => Some(CopyModeKeyAction::SearchRepeat(
+            CopyModeSearchRepeat::SameDirection,
+        )),
+        'N' => Some(CopyModeKeyAction::SearchRepeat(
+            CopyModeSearchRepeat::OppositeDirection,
+        )),
+        'q' => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
+        'v' => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
+        'V' => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
+        'w' => copy_mode_motion(TerminalCopyModeMotion::NextWord),
+        'y' => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
+        _ => None,
+    }
+}
+
+fn copy_mode_motion(motion: TerminalCopyModeMotion) -> Option<CopyModeKeyAction> {
+    copy_mode_terminal_action(TerminalCopyModeAction::Move(motion))
 }
 
 /// Lowercase a single-letter key in a recorded chord (the physical-key serializer emits uppercase
@@ -927,6 +1372,8 @@ impl AppState {
             sidebar_key_bindings,
             has_new_session_config_changes: false,
             mux: MuxController::new(),
+            custom_tab_names: HashSet::new(),
+            terminal_tab_titles: HashMap::new(),
             terminal_side_effect_tx,
             terminal_side_effect_rx,
             repaint,
@@ -939,6 +1386,8 @@ impl AppState {
             lua_window_open: false,
             terminal_selection_drag_active: false,
             terminal_selection_drag_pos: None,
+            terminal_selection_pending_start: None,
+            terminal_selection_passthrough_active: false,
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
@@ -953,12 +1402,12 @@ impl AppState {
             session_picker_dialog: None,
             rename_session_dialog: None,
             rename_tab_dialog: None,
-            custom_tab_names: HashSet::new(),
-            terminal_tab_titles: HashMap::new(),
             command_palette_dialog: None,
             theme_picker_dialog: None,
             terminal_find_dialog: None,
+            terminal_find_return_focus_after_search: false,
             last_terminal_search: String::new(),
+            last_terminal_search_direction: TerminalSearchDirection::Next,
             theme_picker_restore_config: None,
             pending_command: None,
             ditch_session_dialog: None,
@@ -1584,28 +2033,47 @@ impl AppState {
             .activate_window(session_id, window_id, &self.repaint, &mux_config);
         self.sync_native_layout_terminal_now();
     }
-    fn selected_native_window_key(&self) -> Option<(String, String)> {
-        if !self.uses_native_terminal_layout() {
-            return None;
-        }
-        let session_id = self.mux.selected_session().map(str::to_owned)?;
-        let window_id = self.mux.selected_window().map(str::to_owned).or_else(|| {
-            self.mux
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id || session.name == session_id)
-                .and_then(|session| session.active_window_id.clone())
-        })?;
-        Some((session_id, window_id))
-    }
 
-    fn rename_selected_native_window(&mut self, name: String) {
-        let Some((session_id, window_id)) = self.selected_native_window_key() else {
-            return;
+    pub fn reorder_window_before_from_ui(&mut self, source: &str, before: Option<&str>) -> bool {
+        let Some(session_id) = self.mux.selected_session().map(str::to_owned) else {
+            return false;
         };
+        if before == Some(source) {
+            return false;
+        }
+        let windows = self.mux.selected_session_windows();
+        let Some(from) = windows.iter().position(|window| window.id == source) else {
+            return false;
+        };
+        let mut target_ids = windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .filter(|id| *id != source)
+            .collect::<Vec<_>>();
+        let to = before
+            .and_then(|before| target_ids.iter().position(|id| *id == before))
+            .unwrap_or(target_ids.len());
+        target_ids.insert(to, source);
+        let Some(to) = target_ids.iter().position(|id| *id == source) else {
+            return false;
+        };
+        let delta = to as i32 - from as i32;
+        if delta == 0 {
+            return false;
+        }
+
         let mux_config = self.config().multiplexer.clone();
-        self.mux
-            .rename_window(&session_id, &window_id, name, &self.repaint, &mux_config);
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id: Some(source.to_owned()),
+                delta,
+            },
+        );
+        self.sync_native_layout_terminal_now();
+        true
     }
 
     fn sync_session_order(&mut self) {
@@ -1616,25 +2084,6 @@ impl AppState {
                 .map(|session| session.name.as_str()),
         );
         self.mux.apply_session_order(&ordered_names);
-    }
-
-    fn prune_custom_tab_names(&mut self) {
-        let sessions = self.mux.sessions();
-        self.custom_tab_names.retain(|(session_id, window_id)| {
-            sessions
-                .iter()
-                .find(|session| session.id == *session_id || session.name == *session_id)
-                .is_some_and(|session| session.windows.iter().any(|window| window.id == *window_id))
-        });
-        self.terminal_tab_titles
-            .retain(|(session_id, window_id), _| {
-                sessions
-                    .iter()
-                    .find(|session| session.id == *session_id || session.name == *session_id)
-                    .is_some_and(|session| {
-                        session.windows.iter().any(|window| window.id == *window_id)
-                    })
-            });
     }
 
     fn move_selected_session(&mut self, delta: i32) -> bool {
@@ -1753,30 +2202,16 @@ impl AppState {
                 window_id,
                 name,
             } => {
-                if name.trim().is_empty() {
-                    let key = (session_id.clone(), window_id.clone());
+                let name = name.trim();
+                let key = (session_id.clone(), window_id.clone());
+                if name.is_empty() {
                     self.custom_tab_names.remove(&key);
                     if let Some(title) = self.terminal_tab_titles.get(&key).cloned() {
-                        let mux_config = self.config().multiplexer.clone();
-                        self.mux.rename_window(
-                            &session_id,
-                            &window_id,
-                            title,
-                            &self.repaint,
-                            &mux_config,
-                        );
+                        self.rename_window_for_terminal_title(&session_id, &window_id, &title);
                     }
                 } else {
-                    self.custom_tab_names
-                        .insert((session_id.clone(), window_id.clone()));
-                    let mux_config = self.config().multiplexer.clone();
-                    self.mux.rename_window(
-                        &session_id,
-                        &window_id,
-                        name,
-                        &self.repaint,
-                        &mux_config,
-                    );
+                    self.custom_tab_names.insert(key);
+                    self.rename_window(&session_id, &window_id, name);
                 }
                 self.input_focus = InputFocus::Terminal;
             }
@@ -1799,6 +2234,7 @@ impl AppState {
             TerminalFindEvent::Close => {
                 self.input_focus = InputFocus::Terminal;
                 self.clear_terminal_search();
+                self.terminal_find_return_focus_after_search = false;
             }
             TerminalFindEvent::FocusFind => {
                 self.input_focus = InputFocus::Picker;
@@ -1811,6 +2247,11 @@ impl AppState {
             TerminalFindEvent::Search { query, direction } => {
                 let result = self.search_terminal(&query, direction);
                 dialog.set_result(result);
+                if direction != TerminalSearchDirection::Current
+                    && self.terminal_find_return_focus_after_search
+                {
+                    self.input_focus = InputFocus::Terminal;
+                }
                 self.terminal_find_dialog = Some(dialog);
             }
         }
@@ -1999,7 +2440,7 @@ impl AppState {
     ) {
         let side_effects = self.terminal_side_effect_rx.try_iter().collect::<Vec<_>>();
         for side_effect in side_effects {
-            self.apply_terminal_side_effect(
+            self.apply_terminal_side_effect_event(
                 side_effect,
                 effects,
                 terminal_cell_width,
@@ -2009,15 +2450,19 @@ impl AppState {
         }
     }
 
-    fn apply_terminal_side_effect(
+    fn apply_terminal_side_effect_event(
         &mut self,
-        side_effect: TerminalSideEffect,
+        event: TerminalSideEffectEvent,
         effects: &mut Vec<AppEffect>,
         terminal_cell_width: f32,
         terminal_cell_height: f32,
         terminal_scale_factor: f32,
     ) {
-        match side_effect {
+        let TerminalSideEffectEvent {
+            source_pane_id,
+            effect,
+        } = event;
+        match effect {
             TerminalSideEffect::Bell => effects.push(AppEffect::Bell),
             TerminalSideEffect::ClipboardWrite(text) => {
                 if let Err(error) = write_clipboard_text(&text) {
@@ -2037,17 +2482,7 @@ impl AppState {
                 Err(error) => self.last_error = Some(error.to_string()),
             },
             TerminalSideEffect::WindowTitle(title) => {
-                let selected_window = self.selected_native_window_key();
-                if let Some(window) = selected_window.clone() {
-                    self.terminal_tab_titles.insert(window, title.clone());
-                }
-                if selected_window
-                    .as_ref()
-                    .is_none_or(|window| !self.custom_tab_names.contains(window))
-                {
-                    self.rename_selected_native_window(title.clone());
-                }
-                effects.push(AppEffect::SetWindowTitle(title));
+                self.apply_terminal_window_title(source_pane_id.as_deref(), title, effects);
             }
             TerminalSideEffect::WindowIcon(_) => {}
             TerminalSideEffect::DesktopNotification { title, body } => {
@@ -2091,6 +2526,70 @@ impl AppState {
             | TerminalSideEffect::Iterm2File(_)
             | TerminalSideEffect::UnsupportedHostCommand { .. } => {}
         }
+    }
+
+    fn apply_terminal_window_title(
+        &mut self,
+        source_pane_id: Option<&str>,
+        title: String,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        let window_key = source_pane_id
+            .and_then(|pane_id| self.window_key_for_pane(pane_id))
+            .or_else(|| source_pane_id.is_none().then(|| self.current_window_key()))
+            .filter(|(_, window_id)| !window_id.is_empty());
+        if let Some((session_id, window_id)) = window_key {
+            let key = (session_id.clone(), window_id.clone());
+            self.terminal_tab_titles.insert(key.clone(), title.clone());
+            if !self.custom_tab_names.contains(&key) {
+                self.rename_window_for_terminal_title(&session_id, &window_id, &title);
+            }
+        }
+        if source_pane_id.is_none() || self.terminal.focused_pane_id() == source_pane_id {
+            effects.push(AppEffect::SetWindowTitle(title));
+        }
+    }
+
+    fn window_key_for_pane(&self, pane_id: &str) -> Option<(String, String)> {
+        self.mux.sessions().iter().find_map(|session| {
+            session.windows.iter().find_map(|window| {
+                let anchor_matches = window.anchor.pane_id.as_deref() == Some(pane_id);
+                let pane_matches = window
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id.as_deref() == Some(pane_id));
+                (anchor_matches || pane_matches).then(|| (session.id.clone(), window.id.clone()))
+            })
+        })
+    }
+
+    fn rename_window_for_terminal_title(&mut self, session_id: &str, window_id: &str, title: &str) {
+        if self.window_name_for_key(session_id, window_id) == Some(title) {
+            return;
+        }
+        self.rename_window(session_id, window_id, title);
+    }
+
+    fn rename_window(&mut self, session_id: &str, window_id: &str, name: &str) {
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.rename_window(
+            session_id,
+            window_id,
+            name.to_owned(),
+            &self.repaint,
+            &mux_config,
+        );
+    }
+
+    fn window_name_for_key(&self, session_id: &str, window_id: &str) -> Option<&str> {
+        self.mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)?
+            .windows
+            .iter()
+            .find(|window| window.id == window_id)
+            .map(|window| window.name.as_str())
     }
 
     fn effective_terminal_cursor_icon(&self) -> egui::CursorIcon {
@@ -2268,7 +2767,6 @@ impl AppState {
             effects.push(AppEffect::RepaintAfter(after));
         }
         self.sync_session_order();
-        self.prune_custom_tab_names();
         if let Err(error) = self.sync_terminal_panes() {
             self.last_error = Some(error.to_string());
         }
@@ -2339,6 +2837,7 @@ impl AppState {
         self.command_palette_dialog = None;
         self.theme_picker_dialog = None;
         self.terminal_find_dialog = None;
+        self.terminal_find_return_focus_after_search = false;
         restored_preview
     }
 
@@ -2436,14 +2935,19 @@ impl AppState {
     }
 
     fn open_terminal_find_dialog(&mut self) {
+        self.open_terminal_find_dialog_with_direction(TerminalSearchDirection::Next);
+    }
+
+    fn open_terminal_find_dialog_with_direction(&mut self, direction: TerminalSearchDirection) {
         let query = self.last_terminal_search.clone();
         self.close_overlay_dialogs();
-        let mut dialog = TerminalFindDialog::open(query.clone());
+        let mut dialog = TerminalFindDialog::open_with_direction(query.clone(), direction);
         if !query.trim().is_empty() {
             let result = self.search_terminal(&query, TerminalSearchDirection::Current);
             dialog.set_result(result);
         }
         self.terminal_find_dialog = Some(dialog);
+        self.terminal_find_return_focus_after_search = false;
         self.input_focus = InputFocus::Picker;
     }
 
@@ -2648,17 +3152,17 @@ impl AppState {
         &mut self,
         events: &[egui::Event],
         terminal_input_enabled: bool,
+        pressed_mouse_button: Option<MouseButton>,
     ) -> bool {
+        let primary_drag_active = pressed_mouse_button == Some(MouseButton::Left);
         if !terminal_input_enabled
-            || !events.iter().any(|event| {
-                matches!(
-                    event,
-                    egui::Event::PointerButton {
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        ..
-                    }
-                )
+            || !events.iter().any(|event| match event {
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    ..
+                } => true,
+                egui::Event::PointerMoved(_) => primary_drag_active,
+                _ => false,
             })
         {
             return false;
@@ -2702,6 +3206,156 @@ impl AppState {
         count
     }
 
+    fn terminal_copy_mode_active(&mut self) -> bool {
+        match TerminalRenderSource::copy_mode_active(&mut self.terminal) {
+            Ok(active) => active,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn enter_terminal_copy_mode(&mut self, effects: &mut Vec<AppEffect>) {
+        match TerminalRenderSource::enter_copy_mode(&mut self.terminal) {
+            Ok(()) => effects.push(AppEffect::RequestRepaint),
+            Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
+    fn apply_copy_mode_key_action(
+        &mut self,
+        action: CopyModeKeyAction,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
+        match action {
+            CopyModeKeyAction::Terminal(action) => {
+                self.apply_terminal_copy_mode_action(action, effects)
+            }
+            CopyModeKeyAction::SearchPrompt(direction) => {
+                self.record_terminal_search_direction(direction);
+                self.open_terminal_find_dialog_with_direction(direction);
+                self.terminal_find_return_focus_after_search = true;
+                effects.push(AppEffect::RequestRepaint);
+                true
+            }
+            CopyModeKeyAction::SearchWord(direction) => self.apply_terminal_copy_mode_action(
+                TerminalCopyModeAction::SearchWord(direction),
+                effects,
+            ),
+            CopyModeKeyAction::SearchRepeat(repeat) => {
+                let direction = repeat.direction(self.last_terminal_search_direction);
+                let query = self.last_terminal_search.clone();
+                if !query.trim().is_empty() {
+                    let result =
+                        self.search_terminal_with_direction_recording(&query, direction, false);
+                    if let Some(dialog) = self.terminal_find_dialog.as_mut() {
+                        dialog.set_result(result);
+                    }
+                    effects.push(AppEffect::RequestRepaint);
+                }
+                true
+            }
+        }
+    }
+
+    fn record_terminal_search_direction(&mut self, direction: TerminalSearchDirection) {
+        if direction != TerminalSearchDirection::Current {
+            self.last_terminal_search_direction = direction;
+        }
+    }
+
+    fn apply_terminal_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
+        let search_direction = match &action {
+            TerminalCopyModeAction::Search { direction, .. }
+            | TerminalCopyModeAction::SearchWord(direction) => Some(*direction),
+            _ => None,
+        };
+        match TerminalRenderSource::handle_copy_mode_action(&mut self.terminal, action) {
+            Ok(outcome) => {
+                if let Some(bytes) = outcome.copied {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if let Err(error) = write_clipboard_text(&text) {
+                        self.last_error = Some(error.to_string());
+                    }
+                }
+                let search_result = outcome.search.map(|search| {
+                    self.last_terminal_search = search.query;
+                    if let Some(direction) = search_direction {
+                        self.record_terminal_search_direction(direction);
+                    }
+                    self.terminal_find_result_from_frame(search.found)
+                });
+                if let Some(result) = search_result
+                    && let Some(dialog) = self.terminal_find_dialog.as_mut()
+                {
+                    dialog.set_result(result);
+                }
+                effects.push(AppEffect::RequestRepaint);
+                outcome.active
+            }
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn consume_copy_mode_egui_events(
+        &mut self,
+        events: &mut Vec<egui::Event>,
+        effects: &mut Vec<AppEffect>,
+        terminal_input_enabled: bool,
+    ) -> usize {
+        if !terminal_input_enabled
+            || (self.terminal_find_dialog.is_some() && self.input_focus != InputFocus::Terminal)
+            || !copy_mode_key_input_present(events)
+            || !self.terminal_copy_mode_active()
+        {
+            return 0;
+        }
+
+        let mut count = 0;
+        let mut retained = Vec::with_capacity(events.len());
+        let mut suppress_next_text = false;
+        let mut pass_next_text_to_app = false;
+        for event in events.drain(..) {
+            match &event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if copy_mode_egui_key_should_pass_to_app(*key, *modifiers) => {
+                    pass_next_text_to_app = copy_mode_egui_key_may_emit_text(*key);
+                    retained.push(event);
+                }
+                egui::Event::Text(_) if std::mem::take(&mut pass_next_text_to_app) => {
+                    retained.push(event);
+                }
+                _ if matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)) => {
+                    pass_next_text_to_app = false;
+                    count += 1;
+                    if let Some(action) =
+                        copy_mode_action_for_egui_event(&event, &mut suppress_next_text)
+                    {
+                        self.apply_copy_mode_key_action(action, effects);
+                    }
+                }
+                _ => {
+                    pass_next_text_to_app = false;
+                    retained.push(event);
+                }
+            }
+        }
+        *events = retained;
+        count
+    }
+
     fn handle_egui_input(
         &mut self,
         events: Vec<egui::Event>,
@@ -2720,8 +3374,11 @@ impl AppState {
         let selection_surface = terminal_input_enabled
             .then_some(self.terminal_surface)
             .flatten();
-        let mouse_tracking =
-            self.terminal_mouse_tracking_for_selection(&events, terminal_input_enabled);
+        let mouse_tracking = self.terminal_mouse_tracking_for_selection(
+            &events,
+            terminal_input_enabled,
+            pressed_mouse_button,
+        );
         let mut chrome_handle_rects = self.chrome_handle_rects.clone();
         if let Some(rect) = self
             .terminal_find_dialog
@@ -2741,6 +3398,8 @@ impl AppState {
             },
             &mut self.terminal_selection_drag_active,
             &mut self.terminal_selection_drag_pos,
+            &mut self.terminal_selection_pending_start,
+            Some(&mut self.terminal_selection_passthrough_active),
         );
         let mut selection_actions = selection_actions;
         selection_actions.extend(terminal_selection_autoscroll_actions(
@@ -2751,6 +3410,8 @@ impl AppState {
             modifiers,
         ));
         let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
+        let copy_mode_count =
+            self.consume_copy_mode_egui_events(&mut events, effects, terminal_input_enabled);
         let copy_selection_count = self.consume_copy_shortcut_for_terminal_selection(&mut events);
         // `cmd+shift+,` over a palette row jumps to that command's keybinding editor.
         // Consume it here so it doesn't also fire its own global binding.
@@ -2803,8 +3464,12 @@ impl AppState {
             self.macos_option_as_alt,
             &mut self.wheel_scroll_state,
         );
-        let count =
-            commands.len() + actions.len() + sidebar_count + selection_count + copy_selection_count;
+        let count = commands.len()
+            + actions.len()
+            + sidebar_count
+            + selection_count
+            + copy_mode_count
+            + copy_selection_count;
 
         for action in actions {
             self.apply_keybind_action(action, viewport, effects);
@@ -2845,12 +3510,26 @@ impl AppState {
         }
         let inputs = std::mem::take(&mut self.pending_direct_input);
         let count = inputs.len();
+        if count == 0 {
+            return 0;
+        }
         if !self.direct_terminal_input_enabled() {
             return count;
         }
+
+        let mut copy_mode_active = self.terminal_copy_mode_active();
         for input in inputs {
             let mut input = input.input();
             input.mods = self.modifier_remaps.apply(input.mods);
+            if copy_mode_active {
+                if let Some(action) = copy_mode_action_for_input(input) {
+                    copy_mode_active = self.apply_copy_mode_key_action(action, effects);
+                    continue;
+                }
+                if !copy_mode_input_should_pass_to_app(input) {
+                    continue;
+                }
+            }
             if direct_copy_shortcut_pressed(input) && self.copy_terminal_selection_if_any() {
                 continue;
             }
@@ -2865,6 +3544,9 @@ impl AppState {
                 builtin_app_action_for_direct_key(input)
             {
                 self.open_new_mux_session_dialog();
+                continue;
+            }
+            if copy_mode_active {
                 continue;
             }
             if input.mods.command {
@@ -3037,6 +3719,9 @@ impl AppState {
             KeybindAction::Find(action) => self.apply_terminal_find_action(action, effects),
             KeybindAction::CopyToClipboard => {
                 self.copy_terminal_selection_or_request_copy(effects);
+            }
+            KeybindAction::CopyMode => {
+                self.enter_terminal_copy_mode(effects);
             }
             KeybindAction::PasteFromClipboard => match read_clipboard_text() {
                 Ok(Some(text)) => {
@@ -3418,32 +4103,73 @@ impl AppState {
         query: &str,
         direction: TerminalSearchDirection,
     ) -> TerminalFindResult {
+        self.search_terminal_with_direction_recording(query, direction, true)
+    }
+
+    fn search_terminal_with_direction_recording(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        record_direction: bool,
+    ) -> TerminalFindResult {
         let query = query.trim();
         if query.is_empty() {
             self.clear_terminal_search();
             return TerminalFindResult::default();
         }
         self.last_terminal_search = query.to_owned();
+        if record_direction {
+            self.record_terminal_search_direction(direction);
+        }
+        if self.terminal_copy_mode_active() {
+            return self.search_copy_mode_terminal(query, direction);
+        }
         match self.terminal.search_viewport(query, direction) {
-            Ok(found) => {
-                let (active_index, match_count) = self
-                    .terminal
-                    .extract_frame()
-                    .map(|frame| (frame.active_search_match_index, frame.search_match_count))
-                    .unwrap_or_else(|error| {
-                        self.last_error = Some(error.to_string());
-                        (None, 0)
-                    });
-                TerminalFindResult {
-                    found,
-                    active_index,
-                    match_count,
-                }
-            }
+            Ok(found) => self.terminal_find_result_from_frame(found),
             Err(error) => {
                 self.last_error = Some(error.to_string());
                 TerminalFindResult::default()
             }
+        }
+    }
+
+    fn search_copy_mode_terminal(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+    ) -> TerminalFindResult {
+        match TerminalRenderSource::handle_copy_mode_action(
+            &mut self.terminal,
+            TerminalCopyModeAction::Search {
+                query: query.to_owned(),
+                direction,
+            },
+        ) {
+            Ok(outcome) => outcome
+                .search
+                .map_or_else(TerminalFindResult::default, |search| {
+                    self.terminal_find_result_from_frame(search.found)
+                }),
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                TerminalFindResult::default()
+            }
+        }
+    }
+
+    fn terminal_find_result_from_frame(&mut self, found: bool) -> TerminalFindResult {
+        let (active_index, match_count) = self
+            .terminal
+            .extract_frame()
+            .map(|frame| (frame.active_search_match_index, frame.search_match_count))
+            .unwrap_or_else(|error| {
+                self.last_error = Some(error.to_string());
+                (None, 0)
+            });
+        TerminalFindResult {
+            found,
+            active_index,
+            match_count,
         }
     }
 
@@ -3682,12 +4408,16 @@ mod tests {
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
         let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 10.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, 10.0)),
             egui::Event::PointerButton {
@@ -3710,6 +4440,8 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
@@ -3737,12 +4469,16 @@ mod tests {
         );
         let mut drag_pos = None;
         let mut active = false;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 10.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, -25.0)),
         ];
@@ -3758,6 +4494,8 @@ mod tests {
             },
             &mut active,
             &mut drag_pos,
+            &mut None,
+            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -3789,12 +4527,16 @@ mod tests {
         );
         let mut active = false;
         let mut drag_pos = None;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let events = vec![
             egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 30.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             },
             egui::Event::PointerMoved(egui::Pos2::new(20.0, 205.0)),
         ];
@@ -3810,6 +4552,8 @@ mod tests {
             },
             &mut active,
             &mut drag_pos,
+            &mut None,
+            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -3866,12 +4610,16 @@ mod tests {
         );
         state.record_surface(surface);
 
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
         let effects = state.update_frame(test_frame_inputs(
             vec![egui::Event::PointerButton {
                 pos: egui::Pos2::new(10.0, 155.0),
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::default(),
+                modifiers: shift,
             }],
             Some(egui::Pos2::new(10.0, 155.0)),
         ));
@@ -3884,6 +4632,283 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn copy_mode_key_layer_supports_tmux_vim_navigation_and_selection() {
+        fn terminal(action: TerminalCopyModeAction) -> Option<CopyModeKeyAction> {
+            Some(CopyModeKeyAction::Terminal(action))
+        }
+
+        assert_eq!(
+            copy_mode_action_for_egui_key(egui::Key::J, egui::Modifiers::default()),
+            terminal(TerminalCopyModeAction::Move(TerminalCopyModeMotion::Down))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('n'),
+            Some(CopyModeKeyAction::SearchRepeat(
+                CopyModeSearchRepeat::SameDirection
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('N'),
+            Some(CopyModeKeyAction::SearchRepeat(
+                CopyModeSearchRepeat::OppositeDirection
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_input(KeyInput {
+                key: TerminalKey::N,
+                mods: crate::terminal::KeyMods::default(),
+                repeat: false,
+                utf8: Some("n"),
+                unshifted: Some('n'),
+            }),
+            Some(CopyModeKeyAction::SearchRepeat(
+                CopyModeSearchRepeat::SameDirection
+            ))
+        );
+
+        let mut suppress_next_text = false;
+        assert_eq!(
+            copy_mode_action_for_egui_event(
+                &key_event(egui::Key::J, egui::Modifiers::default()),
+                &mut suppress_next_text,
+            ),
+            terminal(TerminalCopyModeAction::Move(TerminalCopyModeMotion::Down))
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_event(
+                &egui::Event::Text("j".to_owned()),
+                &mut suppress_next_text,
+            ),
+            None
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_event(
+                &egui::Event::Text("/".to_owned()),
+                &mut suppress_next_text,
+            ),
+            Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Next
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_key(egui::Key::ArrowUp, egui::Modifiers::default()),
+            terminal(TerminalCopyModeAction::Move(TerminalCopyModeMotion::Up))
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_key(egui::Key::Space, egui::Modifiers::default()),
+            terminal(TerminalCopyModeAction::BeginSelection)
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_key(egui::Key::V, egui::Modifiers::default()),
+            terminal(TerminalCopyModeAction::ToggleSelection)
+        );
+        assert_eq!(
+            copy_mode_action_for_egui_key(
+                egui::Key::V,
+                egui::Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                }
+            ),
+            terminal(TerminalCopyModeAction::ToggleRectangle)
+        );
+
+        assert_eq!(
+            copy_mode_action_for_egui_key(
+                egui::Key::V,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                }
+            ),
+            terminal(TerminalCopyModeAction::SelectLine)
+        );
+        assert_eq!(
+            copy_mode_action_for_char('v'),
+            terminal(TerminalCopyModeAction::ToggleSelection)
+        );
+        assert_eq!(
+            copy_mode_action_for_input(KeyInput {
+                key: TerminalKey::V,
+                mods: crate::terminal::KeyMods::default(),
+                repeat: false,
+                utf8: Some("v"),
+                unshifted: Some('v'),
+            }),
+            terminal(TerminalCopyModeAction::ToggleSelection)
+        );
+        assert_eq!(
+            copy_mode_action_for_char('$'),
+            terminal(TerminalCopyModeAction::Move(
+                TerminalCopyModeMotion::EndOfLine
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('/'),
+            Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Next
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('?'),
+            Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Previous
+            ))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('*'),
+            Some(CopyModeKeyAction::SearchWord(TerminalSearchDirection::Next))
+        );
+        assert_eq!(
+            copy_mode_action_for_char('#'),
+            Some(CopyModeKeyAction::SearchWord(
+                TerminalSearchDirection::Previous
+            ))
+        );
+    }
+
+    #[test]
+    fn copy_mode_search_repeat_uses_the_direction_that_started_search() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchPrompt(TerminalSearchDirection::Previous),
+            &mut effects,
+        );
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Previous
+        );
+
+        state.last_terminal_search = "needle".to_owned();
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchRepeat(CopyModeSearchRepeat::SameDirection),
+            &mut effects,
+        );
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Previous
+        );
+
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchRepeat(CopyModeSearchRepeat::OppositeDirection),
+            &mut effects,
+        );
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Previous,
+            "opposite repeat must not change the sticky search mode"
+        );
+
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchRepeat(CopyModeSearchRepeat::SameDirection),
+            &mut effects,
+        );
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Previous,
+            "next same-direction repeat should still follow the original backward search mode"
+        );
+
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchPrompt(TerminalSearchDirection::Next),
+            &mut effects,
+        );
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Next,
+            "a new explicit search prompt should replace the sticky search mode"
+        );
+    }
+
+    #[test]
+    fn copy_mode_egui_question_mark_opens_backward_search_prompt() {
+        let mut suppress_next_text = false;
+        assert_eq!(
+            copy_mode_action_for_egui_event(
+                &key_event(egui::Key::Questionmark, egui::Modifiers::default()),
+                &mut suppress_next_text,
+            ),
+            Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Previous
+            ))
+        );
+
+        let mut suppress_next_text = false;
+        assert_eq!(
+            copy_mode_action_for_egui_event(
+                &key_event(
+                    egui::Key::Slash,
+                    egui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                ),
+                &mut suppress_next_text,
+            ),
+            Some(CopyModeKeyAction::SearchPrompt(
+                TerminalSearchDirection::Previous
+            ))
+        );
+    }
+
+    #[test]
+    fn copy_mode_search_submit_returns_focus_to_terminal_for_repeat_keys() {
+        let mut state = test_state();
+        let mut effects = Vec::new();
+        state.apply_copy_mode_key_action(
+            CopyModeKeyAction::SearchPrompt(TerminalSearchDirection::Previous),
+            &mut effects,
+        );
+        assert_eq!(state.input_focus, InputFocus::Picker);
+
+        state.apply_terminal_find_event(
+            TerminalFindDialog::open_with_direction(
+                "needle".to_owned(),
+                TerminalSearchDirection::Previous,
+            ),
+            TerminalFindEvent::Search {
+                query: "needle".to_owned(),
+                direction: TerminalSearchDirection::Previous,
+            },
+        );
+        assert_eq!(state.input_focus, InputFocus::Terminal);
+        assert!(state.terminal_find_dialog.is_some());
+
+        assert_eq!(
+            state.last_terminal_search_direction,
+            TerminalSearchDirection::Previous,
+            "submitting a backward copy-mode search keeps backward repeat mode"
+        );
+    }
+
+    #[test]
+    fn default_app_bindings_leave_alt_s_and_alt_enter_for_terminal_input() {
+        let mut bindings = AppKeyBindings::from_config(&BoottyConfig::default().input)
+            .expect("default app bindings");
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let (terminal_events, actions) = split_app_actions_for_bindings_with_modifier_sides(
+            &mut bindings,
+            vec![
+                key_event(egui::Key::S, alt),
+                egui::Event::Text("s".to_owned()),
+                key_event(egui::Key::Enter, alt),
+            ],
+            ModifierSideState {
+                left_alt: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(actions.is_empty());
+        assert_eq!(terminal_events.len(), 3);
     }
 
     #[test]
@@ -3911,6 +4936,10 @@ mod tests {
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
         state.record_surface(surface);
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
 
         let first_frame = state.update_frame(test_frame_inputs(
             vec![
@@ -3918,7 +4947,7 @@ mod tests {
                     pos: egui::Pos2::new(10.0, 30.0),
                     button: egui::PointerButton::Primary,
                     pressed: true,
-                    modifiers: egui::Modifiers::default(),
+                    modifiers: shift,
                 },
                 egui::Event::PointerMoved(egui::Pos2::new(20.0, 155.0)),
             ],
@@ -4010,6 +5039,8 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert!(selection_actions.is_empty());
@@ -4042,10 +5073,62 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
 
         assert_eq!(terminal_events, original);
         assert!(selection_actions.is_empty());
+        assert!(!active);
+    }
+
+    #[test]
+    fn plain_mouse_drag_starts_selection_when_mouse_reporting_is_inactive() {
+        let surface = TerminalSurface::for_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
+            crate::geometry::CellMetrics::new(10.0, 20.0),
+        );
+        let mut active = false;
+        let press = egui::Event::PointerButton {
+            pos: egui::Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let motion = egui::Event::PointerMoved(egui::Pos2::new(20.0, 10.0));
+        let release = egui::Event::PointerButton {
+            pos: egui::Pos2::new(20.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let events = vec![press.clone(), motion.clone(), release.clone()];
+
+        let (terminal_events, selection_actions) = route_terminal_selection_events(
+            events,
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
+            &mut active,
+            &mut None,
+            &mut None,
+            None,
+        );
+
+        assert_eq!(terminal_events, vec![press, motion, release]);
+        assert_eq!(selection_actions.len(), 3);
+        assert!(matches!(
+            selection_actions[0],
+            TerminalSelectionAction::Begin(_)
+        ));
+        assert!(matches!(
+            selection_actions[2],
+            TerminalSelectionAction::End(_)
+        ));
         assert!(!active);
     }
 
@@ -4078,8 +5161,9 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
-
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
         assert!(matches!(
@@ -4118,8 +5202,9 @@ mod tests {
             },
             &mut active,
             &mut None,
+            &mut None,
+            None,
         );
-
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
         assert!(matches!(
@@ -4261,7 +5346,13 @@ mod tests {
         let mut state = test_state();
         let mut effects = Vec::new();
 
-        state.apply_terminal_side_effect(TerminalSideEffect::Bell, &mut effects, 10.0, 20.0, 1.0);
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::unscoped(TerminalSideEffect::Bell),
+            &mut effects,
+            10.0,
+            20.0,
+            1.0,
+        );
 
         assert_eq!(effects, vec![AppEffect::Bell]);
     }
@@ -4947,6 +6038,76 @@ mod tests {
     }
 
     #[test]
+    fn window_reorder_from_ui_moves_non_active_tab_to_end() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("drag-move-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let moved = before[0].clone();
+
+        assert!(state.reorder_window_before_from_ui(&moved, None));
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after,
+            vec![before[1].clone(), before[2].clone(), before[0].clone()]
+        );
+    }
+
+    #[test]
+    fn window_reorder_from_ui_ignores_self_drop() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("self-drop-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id,
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let moved = before[0].clone();
+
+        assert!(!state.reorder_window_before_from_ui(&moved, Some(&moved)));
+
+        let after = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn command_palette_move_tab_action_reorders_selected_session_windows() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
@@ -5000,6 +6161,62 @@ mod tests {
     }
 
     #[test]
+    fn copy_mode_leaves_global_shortcuts_for_app_keybindings() {
+        let alt_shift = egui::Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert!(copy_mode_egui_key_should_pass_to_app(
+            egui::Key::Comma,
+            alt_shift
+        ));
+        assert!(copy_mode_input_should_pass_to_app(KeyInput {
+            key: TerminalKey::Comma,
+            mods: crate::terminal::KeyMods {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("<"),
+            unshifted: Some(','),
+        }));
+
+        assert!(!copy_mode_egui_key_should_pass_to_app(
+            egui::Key::J,
+            egui::Modifiers::default()
+        ));
+        assert!(!copy_mode_input_should_pass_to_app(KeyInput {
+            key: TerminalKey::J,
+            mods: crate::terminal::KeyMods::default(),
+            repeat: false,
+            utf8: Some("j"),
+            unshifted: Some('j'),
+        }));
+
+        let command = egui::Modifiers {
+            command: true,
+            ..Default::default()
+        };
+        assert!(!copy_mode_egui_key_should_pass_to_app(
+            egui::Key::C,
+            command
+        ));
+        assert!(copy_mode_egui_key_should_pass_to_app(egui::Key::F, command));
+        assert!(!copy_mode_input_should_pass_to_app(KeyInput {
+            key: TerminalKey::C,
+            mods: crate::terminal::KeyMods {
+                command: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: None,
+            unshifted: Some('c'),
+        }));
+    }
+
+    #[test]
     fn rename_tab_action_opens_dialog_and_renames_selected_tab() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
@@ -5044,7 +6261,7 @@ mod tests {
     }
 
     #[test]
-    fn native_window_title_side_effect_renames_selected_tab() {
+    fn unscoped_window_title_side_effect_renames_selected_tab() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
         let session_id = format!("title-tab-{}", unique_test_id());
@@ -5059,8 +6276,10 @@ mod tests {
         let window_id = state.mux.selected_session_windows()[0].id.clone();
         let mut effects = Vec::new();
 
-        state.apply_terminal_side_effect(
-            TerminalSideEffect::WindowTitle("editor".to_owned()),
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::unscoped(TerminalSideEffect::WindowTitle(
+                "⠼ agents".to_owned(),
+            )),
             &mut effects,
             8.0,
             16.0,
@@ -5073,11 +6292,67 @@ mod tests {
             .iter()
             .find(|window| window.id == window_id)
             .expect("selected window should remain present");
-        assert_eq!(window.name, "editor");
+        assert_eq!(window.name, "⠼ agents");
         assert_eq!(
             effects,
-            vec![AppEffect::SetWindowTitle("editor".to_owned())]
+            vec![AppEffect::SetWindowTitle("⠼ agents".to_owned())]
         );
+    }
+
+    #[test]
+    fn scoped_window_title_side_effect_renames_source_tab_not_selected_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("scoped-title-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let first_window_id = state.mux.selected_session_windows()[0].id.clone();
+        let first_original_name = state.mux.selected_session_windows()[0].name.clone();
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let second_window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id != first_window_id)
+            .expect("second tab should be present")
+            .clone();
+        let second_pane_id = second_window
+            .anchor
+            .pane_id
+            .clone()
+            .expect("native tab should have a source pane id");
+        state.activate_window_from_ui(&session_id, &first_window_id);
+        let mut effects = Vec::new();
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id),
+                TerminalSideEffect::WindowTitle("⠼ agents".to_owned()),
+            ),
+            &mut effects,
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        let windows = state.mux.selected_session_windows();
+        let first_window = windows
+            .iter()
+            .find(|window| window.id == first_window_id)
+            .expect("selected tab should remain present");
+        let second_window = windows
+            .iter()
+            .find(|window| window.id == second_window.id)
+            .expect("source tab should remain present");
+        assert_eq!(first_window.name, first_original_name);
+        assert_eq!(second_window.name, "⠼ agents");
+        assert_eq!(effects, Vec::<AppEffect>::new());
     }
 
     #[test]
@@ -5104,8 +6379,8 @@ mod tests {
         );
         let mut effects = Vec::new();
 
-        state.apply_terminal_side_effect(
-            TerminalSideEffect::WindowTitle("editor".to_owned()),
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::unscoped(TerminalSideEffect::WindowTitle("editor".to_owned())),
             &mut effects,
             8.0,
             16.0,
@@ -5126,10 +6401,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_tab_custom_name_allows_terminal_title_renames_again() {
+    fn blank_tab_rename_restores_terminal_title_following() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
-        let session_id = format!("reset-title-tab-{}", unique_test_id());
+        let session_id = format!("blank-title-tab-{}", unique_test_id());
         state.mux.create_project_session(
             crate::mux::controller::NewMuxSessionRequest {
                 session_id: session_id.clone(),
@@ -5139,6 +6414,13 @@ mod tests {
             &mux_config,
         );
         let window_id = state.mux.selected_session_windows()[0].id.clone();
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::unscoped(TerminalSideEffect::WindowTitle("editor".to_owned())),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
         state.apply_rename_tab_event(
             RenameTabDialog::open(session_id.clone(), window_id.clone(), "tab-1".to_owned()),
             RenameTabEvent::Rename {
@@ -5147,8 +6429,8 @@ mod tests {
                 name: "build".to_owned(),
             },
         );
-        state.apply_terminal_side_effect(
-            TerminalSideEffect::WindowTitle("editor".to_owned()),
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::unscoped(TerminalSideEffect::WindowTitle("server".to_owned())),
             &mut Vec::new(),
             8.0,
             16.0,
@@ -5169,7 +6451,7 @@ mod tests {
             .iter()
             .find(|window| window.id == window_id)
             .expect("selected window should remain present");
-        assert_eq!(window.name, "editor");
+        assert_eq!(window.name, "server");
     }
 
     #[test]

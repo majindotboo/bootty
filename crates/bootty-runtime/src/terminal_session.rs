@@ -23,8 +23,9 @@ use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM, TerminalColorConfig,
-        TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalSearchDirection,
-        TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
+        TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalCursorConfig, TerminalEngine,
+        TerminalFeatureConfig, TerminalSearchDirection, TerminalSelectionEvent,
+        TerminalSelectionFormat, TerminalSideEffectEvent,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
@@ -65,7 +66,8 @@ pub struct TerminalSessionConfig {
     pub features: TerminalFeatureConfig,
     pub max_scrollback: usize,
     pub macos_option_as_alt: MacosOptionAsAlt,
-    pub side_effect_tx: Option<Sender<TerminalSideEffect>>,
+    pub side_effect_tx: Option<Sender<TerminalSideEffectEvent>>,
+    pub side_effect_pane_id: Option<String>,
     pub benchmark_trace: Option<BenchmarkTrace>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +175,8 @@ impl PublishedFrame {
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
 type MouseTrackingResponse = std::result::Result<bool, String>;
 type SearchViewportResponse = std::result::Result<bool, String>;
+type CopyModeActiveResponse = std::result::Result<bool, String>;
+type CopyModeActionResponse = std::result::Result<TerminalCopyModeOutcome, String>;
 enum TerminalCommand {
     DisplayScale(f32),
     RenderCellMetrics(CellMetrics),
@@ -192,12 +196,18 @@ enum TerminalCommand {
     MouseViewportScroll {
         delta: isize,
     },
+    EnterCopyMode,
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
     SelectionEnd(Option<TerminalSelectionEvent>),
     FormatSelection {
         format: TerminalSelectionFormat,
         done: SyncSender<SelectionFormatResponse>,
+    },
+    CopyModeActive(SyncSender<CopyModeActiveResponse>),
+    CopyModeAction {
+        action: TerminalCopyModeAction,
+        done: SyncSender<CopyModeActionResponse>,
     },
     SearchViewport {
         query: String,
@@ -251,6 +261,7 @@ impl TerminalSession {
             current_working_directory: current_working_directory.clone(),
             repaint_wakeup,
             side_effect_tx: config.side_effect_tx,
+            side_effect_pane_id: config.side_effect_pane_id,
             benchmark_trace,
         })?;
 
@@ -381,6 +392,36 @@ impl TerminalSession {
         self.send_command(TerminalCommand::MouseViewportScroll { delta })
     }
 
+    pub fn enter_copy_mode(&mut self) -> Result<()> {
+        self.send_command(TerminalCommand::EnterCopyMode)
+    }
+
+    pub fn copy_mode_active(&mut self) -> Result<bool> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::CopyModeActive(done_tx))?;
+        done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("terminal worker stopped before reporting copy mode"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::CopyModeAction {
+            action,
+            done: done_tx,
+        })?;
+        done_rx
+            .recv()
+            .map_err(|_| {
+                anyhow::anyhow!("terminal worker stopped before handling copy mode action")
+            })?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
         self.send_command(TerminalCommand::SelectionBegin(event))
     }
@@ -474,7 +515,8 @@ struct TerminalWorkerConfig {
     pending_pty_len: Arc<AtomicUsize>,
     current_working_directory: Arc<Mutex<Option<String>>>,
     repaint_wakeup: RepaintWakeup,
-    side_effect_tx: Option<Sender<TerminalSideEffect>>,
+    side_effect_tx: Option<Sender<TerminalSideEffectEvent>>,
+    side_effect_pane_id: Option<String>,
     benchmark_trace: Option<BenchmarkTrace>,
 }
 
@@ -514,6 +556,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             current_working_directory: config.current_working_directory,
             repaint_wakeup: config.repaint_wakeup,
             side_effect_tx: config.side_effect_tx,
+            side_effect_pane_id: config.side_effect_pane_id,
             benchmark_trace: config.benchmark_trace,
             output_buf: Vec::with_capacity(1024),
             pending_pty: PtyBacklog::with_capacity(MAX_COLLECT_CHUNKS_PER_TICK),
@@ -551,7 +594,8 @@ struct TerminalWorker {
     pending_pty_len: Arc<AtomicUsize>,
     current_working_directory: Arc<Mutex<Option<String>>>,
     repaint_wakeup: RepaintWakeup,
-    side_effect_tx: Option<Sender<TerminalSideEffect>>,
+    side_effect_tx: Option<Sender<TerminalSideEffectEvent>>,
+    side_effect_pane_id: Option<String>,
     output_buf: Vec<u8>,
     pending_pty: PtyBacklog,
     last_frame_publish: Instant,
@@ -766,6 +810,12 @@ impl TerminalWorker {
                     self.engine.scroll_viewport_delta(delta);
                     stats.terminal_changed = true;
                 }
+                TerminalCommand::EnterCopyMode => {
+                    self.mark_input_fast_path();
+                    if self.engine.enter_copy_mode().is_ok() {
+                        stats.terminal_changed = true;
+                    }
+                }
                 TerminalCommand::SelectionBegin(event) => {
                     self.mark_input_fast_path();
                     if self.engine.begin_selection(event).is_ok() {
@@ -789,6 +839,18 @@ impl TerminalWorker {
                         .engine
                         .format_selection(format)
                         .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                TerminalCommand::CopyModeActive(done) => {
+                    let _ = done.send(Ok(self.engine.copy_mode_active()));
+                }
+                TerminalCommand::CopyModeAction { action, done } => {
+                    self.mark_input_fast_path();
+                    let response = self
+                        .engine
+                        .handle_copy_mode_action(action)
+                        .map_err(|error| error.to_string());
+                    stats.terminal_changed = true;
                     let _ = done.send(response);
                 }
                 TerminalCommand::SearchViewport {
@@ -951,7 +1013,8 @@ impl TerminalWorker {
         };
         let mut disconnected = false;
         for effect in self.engine.drain_side_effects() {
-            if tx.send(effect).is_err() {
+            let event = TerminalSideEffectEvent::new(self.side_effect_pane_id.clone(), effect);
+            if tx.send(event).is_err() {
                 disconnected = true;
                 break;
             }

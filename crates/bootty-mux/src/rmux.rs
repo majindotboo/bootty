@@ -447,21 +447,19 @@ pub(crate) fn session_from_rows(
     window_rows: &[RmuxWindowRow],
     pane_rows: &[RmuxPaneRow],
 ) -> MuxSession {
-    let index_offset = if window_rows
+    let mut session_window_rows = window_rows
         .iter()
         .filter(|window| window.session_name == name)
-        .map(|window| window.index)
-        .min()
-        == Some(0)
-    {
-        1
-    } else {
-        0
-    };
-    let mut windows = window_rows
+        .collect::<Vec<_>>();
+    session_window_rows.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut windows = session_window_rows
         .iter()
-        .filter(|window| window.session_name == name)
-        .map(|window| {
+        .enumerate()
+        .map(|(position, window)| {
             let mut window_pane_rows = pane_rows
                 .iter()
                 .filter(|pane| pane.session_name == name && pane.window_id == window.id)
@@ -484,7 +482,7 @@ pub(crate) fn session_from_rows(
                 });
             MuxWindow {
                 id: window.id.clone(),
-                index: window.index.saturating_add(index_offset),
+                index: position as u32 + 1,
                 name: window.name.clone(),
                 active: window.active,
                 panes: window_panes,
@@ -1459,6 +1457,38 @@ mod tests {
             vec!["%2", "%1"]
         );
         assert_eq!(snapshot.windows[0].anchor.pane_id.as_deref(), Some("%2"));
+    }
+    #[test]
+    fn rmux_snapshot_compacts_skipped_window_indexes_for_display() {
+        let windows = vec![
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@10".to_owned(),
+                index: 0,
+                active: false,
+                name: "one".to_owned(),
+                layout: None,
+            },
+            RmuxWindowRow {
+                session_name: "alpha".to_owned(),
+                id: "@12".to_owned(),
+                index: 2,
+                active: true,
+                name: "three".to_owned(),
+                layout: None,
+            },
+        ];
+
+        let snapshot = session_from_rows("alpha", &windows, &[]);
+
+        assert_eq!(
+            snapshot
+                .windows
+                .iter()
+                .map(|window| (window.id.as_str(), window.index))
+                .collect::<Vec<_>>(),
+            vec![("@10", 1), ("@12", 2)]
+        );
     }
 
     #[test]

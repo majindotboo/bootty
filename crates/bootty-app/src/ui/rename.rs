@@ -88,19 +88,17 @@ impl RenameTabDialog {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, theme: Theme) -> RenameTabEvent {
-        let name = self.name.trim().to_owned();
+        let normalized = normalized_tab_name(&self.name);
 
         let result = FloatingWindow::new("rename-tab-dialog", "Rename Tab")
             .icon("square-pen")
             .hint("Enter rename   Esc close")
-            .footer("Clear the field to follow terminal title codes again")
             .width(overlay::panel_width(ctx, 520.0, 360.0))
+            .footer("Clear the field to follow terminal title codes again")
             .show(ctx, theme, |ui, _palette| {
                 TextPrompt::new("rename-tab-field")
                     .caption("tab name")
                     .hint("new tab name...")
-                    .validation(None)
-                    .submit_disabled(false)
                     .show(ui, theme, &mut self.name, &mut self.focus)
             });
 
@@ -108,7 +106,7 @@ impl RenameTabDialog {
             return RenameTabEvent::Rename {
                 session_id: self.session_id.clone(),
                 window_id: self.window_id.clone(),
-                name,
+                name: normalized,
             };
         }
         if result.escaped || result.clicked_outside {
@@ -125,6 +123,10 @@ fn normalized_name(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+fn normalized_tab_name(raw: &str) -> String {
+    raw.trim().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +137,13 @@ mod tests {
         assert_eq!(normalized_name("  spaced  "), Some("spaced".to_owned()));
         assert_eq!(normalized_name(""), None);
         assert_eq!(normalized_name("   "), None);
+    }
+
+    #[test]
+    fn normalized_tab_name_trims_but_allows_blank() {
+        assert_eq!(normalized_tab_name("bootty"), "bootty");
+        assert_eq!(normalized_tab_name("  spaced  "), "spaced");
+        assert_eq!(normalized_tab_name(""), "");
+        assert_eq!(normalized_tab_name("   "), "");
     }
 }

@@ -1275,10 +1275,16 @@ impl BoottyApp {
                     source,
                     before,
                 }) => {
-                    // Hand window-tab reordering to the module's `on_reorder` (windows.luau runs
-                    // the tmux move-window). No native commit; the extension owns it.
-                    self.status_extensions
-                        .request_reorder(&module, source, before);
+                    if module == "windows"
+                        && self
+                            .state
+                            .reorder_window_before_from_ui(&source, before.as_deref())
+                    {
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.status_extensions
+                            .request_reorder(&module, source, before);
+                    }
                 }
                 None => {}
             }

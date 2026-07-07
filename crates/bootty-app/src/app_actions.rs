@@ -55,6 +55,7 @@ pub enum KeybindAction {
     Font(FontSizeAction),
     Find(TerminalFindAction),
     CopyToClipboard,
+    CopyMode,
     PasteFromClipboard,
 }
 
@@ -450,6 +451,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::ResetFontSize => Ok(KeybindAction::Font(FontSizeAction::Reset)),
         BindingAction::SetFontSize(size) => Ok(KeybindAction::Font(FontSizeAction::Set(size))),
         BindingAction::CopyToClipboard(_) => Ok(KeybindAction::CopyToClipboard),
+        BindingAction::CopyMode => Ok(KeybindAction::CopyMode),
         BindingAction::PasteFromClipboard => Ok(KeybindAction::PasteFromClipboard),
         unsupported => anyhow::bail!("{} has no Bootty app behavior", unsupported.format_entry()),
     }
@@ -729,6 +731,24 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cmd_y_enters_copy_mode_in_default_ghostty_bindings() {
+        let mut bindings = AppKeyBindings::from_config(&InputConfig::default()).unwrap();
+
+        assert_eq!(
+            action_for_key(
+                &mut bindings,
+                egui::Key::Y,
+                egui::Modifiers {
+                    command: true,
+                    ..Default::default()
+                }
+            ),
+            Some(KeybindAction::CopyMode)
+        );
+    }
+
     // Bracket keys have no `unshifted` char in egui's Key enum by name; a regression here makes
     // every default `[`/`]` binding (cmd+shift+[ previous_tab, cmd+] next_pane, …) dead keys.
     #[cfg(target_os = "macos")]
@@ -767,6 +787,121 @@ mod tests {
             action_for_key(&mut bindings, egui::Key::CloseBracket, cmd),
             Some(KeybindAction::Mux(MuxKeyAction::NextPane))
         );
+    }
+
+    #[test]
+    fn move_tab_bindings_route_from_egui_and_direct_input() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "alt+shift+,=move_tab:-1".to_owned(),
+            "alt+shift+.=move_tab:1".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            bindings.action_for_key_with_modifier_sides(
+                egui::Key::Comma,
+                egui::Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+                ModifierSideState {
+                    right_alt: true,
+                    ..Default::default()
+                },
+            ),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+        );
+
+        assert_eq!(
+            bindings.action_for_input(KeyInput {
+                key: TerminalKey::Comma,
+                mods: crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    right_alt: true,
+                    ..Default::default()
+                },
+                repeat: false,
+                utf8: Some("<"),
+                unshifted: Some(','),
+            }),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+        );
+        assert_eq!(
+            bindings.action_for_input(KeyInput {
+                key: TerminalKey::Period,
+                mods: crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+                repeat: false,
+                utf8: Some(">"),
+                unshifted: Some('.'),
+            }),
+            Some(KeybindAction::Mux(MuxKeyAction::MoveTab(1)))
+        );
+    }
+
+    #[test]
+    fn explicit_move_tab_bindings_accept_left_and_right_alt() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "left_alt+shift+,=move_tab:-1".to_owned(),
+            "right_alt+shift+,=move_tab:-1".to_owned(),
+            "left_alt+shift+.=move_tab:1".to_owned(),
+            "right_alt+shift+.=move_tab:1".to_owned(),
+        ])
+        .unwrap();
+
+        for (side, mods) in [
+            (
+                ModifierSideState {
+                    left_alt: true,
+                    ..Default::default()
+                },
+                crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                ModifierSideState {
+                    right_alt: true,
+                    ..Default::default()
+                },
+                crate::terminal::KeyMods {
+                    shift: true,
+                    alt: true,
+                    right_alt: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                bindings.action_for_key_with_modifier_sides(
+                    egui::Key::Comma,
+                    egui::Modifiers {
+                        shift: true,
+                        alt: true,
+                        ..Default::default()
+                    },
+                    side,
+                ),
+                Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+            );
+            assert_eq!(
+                bindings.action_for_input(KeyInput {
+                    key: TerminalKey::Comma,
+                    mods,
+                    repeat: false,
+                    utf8: Some("<"),
+                    unshifted: Some(','),
+                }),
+                Some(KeybindAction::Mux(MuxKeyAction::MoveTab(-1)))
+            );
+        }
     }
 
     #[test]

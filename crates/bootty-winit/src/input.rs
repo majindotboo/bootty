@@ -586,6 +586,62 @@ mod tests {
     }
 
     #[test]
+    fn tui_alt_s_and_alt_enter_are_routed_to_terminal_encoder() {
+        let commands = terminal_input_commands(InputSnapshot {
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::S,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: modifiers(false, true, false),
+                },
+                egui::Event::Text("s".to_owned()),
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: modifiers(false, true, false),
+                },
+            ],
+            modifiers: egui::Modifiers::default(),
+            modifier_sides: ModifierSideState::default(),
+            hover_pos: None,
+            pressed_mouse_button: None,
+            surface: None,
+            mouse_exclusion: None,
+            view: ViewTransform::IDENTITY,
+        });
+
+        assert_eq!(
+            commands,
+            vec![
+                TerminalInputCommand::Key(KeyInput {
+                    key: TerminalKey::S,
+                    mods: KeyMods {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    repeat: false,
+                    utf8: Some("s"),
+                    unshifted: Some('s'),
+                }),
+                TerminalInputCommand::Key(KeyInput {
+                    key: TerminalKey::Enter,
+                    mods: KeyMods {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    repeat: false,
+                    utf8: None,
+                    unshifted: None,
+                }),
+            ]
+        );
+    }
+
+    #[test]
     fn unmodified_printable_text_is_not_double_encoded() {
         let commands = commands_for(vec![egui::Event::Key {
             key: egui::Key::A,

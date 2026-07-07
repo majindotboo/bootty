@@ -775,6 +775,7 @@ impl BoottyConfig {
             max_scrollback: self.session.max_scrollback,
             macos_option_as_alt: self.input.macos_option_as_alt.into(),
             side_effect_tx: None,
+            side_effect_pane_id: None,
             benchmark_trace: None,
         }
     }
@@ -1220,6 +1221,7 @@ const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     ("x", "ditch_session"),
     ("shift+x", "ditch_session"),
     ("r", "rename_session"),
+    ("[", "copy_mode"),
     ("?", "show_keybinds"),
     ("1", "select_session:1"),
     ("2", "select_session:2"),
@@ -1239,7 +1241,7 @@ const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
 // `;` last-pane → next_pane, `(`/`)` switch-client → previous/next_session, `:` command-prompt
 // → command_palette, `/` describe-key → show_keybinds, `C` customize-mode → open_settings,
 // `]` paste-buffer → paste_from_clipboard, `w` choose-window → session_picker, `[` copy-mode
-// → scroll_page_up, `PPage` copy-mode -u → scroll_page_up, `M-n`/`M-p` alerted-window nav
+// → copy_mode, `PPage` copy-mode -u → scroll_page_up, `M-n`/`M-p` alerted-window nav
 // → plain tab nav. tmux defaults
 // layouts (Space, M-1..5, E), break-pane (!), detach/client chooser (d, D), display-panes (q),
 // clock (t), window info (i), marks (m, M), buffers (# - =), find-window (f), select-window 0
@@ -1283,7 +1285,7 @@ const TMUX_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     (":", "command_palette"),
     ("shift+c", "open_settings"),
     ("]", "paste_from_clipboard"),
-    ("[", "scroll_page_up"),
+    ("[", "copy_mode"),
     ("PageUp", "scroll_page_up"),
     ("?", "show_keybinds"),
     ("/", "show_keybinds"),
@@ -1316,7 +1318,9 @@ fn navigation_keybinds() -> &'static [&'static str] {
         "alt+8=select_tab:8",
         "alt+9=select_tab:9",
         "left_alt+shift+,=move_tab:-1",
+        "right_alt+shift+,=move_tab:-1",
         "left_alt+shift+.=move_tab:1",
+        "right_alt+shift+.=move_tab:1",
         "alt+h=select_pane:left",
         "alt+j=select_pane:down",
         "alt+k=select_pane:up",
@@ -1339,7 +1343,7 @@ fn native_scroll_keybinds() -> &'static [&'static str] {
 
 fn native_scroll_keybinds_macos() -> &'static [&'static str] {
     &[
-        "cmd+y=scroll_page_up",
+        "cmd+y=copy_mode",
         "cmd+shift+y=scroll_page_down",
         "cmd+ArrowUp=scroll_page_lines:-1",
         "cmd+ArrowDown=scroll_page_lines:1",
@@ -1390,6 +1394,7 @@ fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
         "cmd+o=new_mux_session",
         "cmd+Home=scroll_to_top",
         "cmd+End=scroll_to_bottom",
+        "cmd+y=copy_mode",
         "cmd+PageUp=scroll_page_up",
         "cmd+PageDown=scroll_page_down",
     ]

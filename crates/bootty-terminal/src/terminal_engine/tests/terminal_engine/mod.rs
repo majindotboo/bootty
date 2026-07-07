@@ -1,3 +1,4 @@
+mod copy_mode_tests;
 mod focus_tests;
 mod mouse_tests;
 mod osc_tests;

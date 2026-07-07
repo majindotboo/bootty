@@ -159,12 +159,19 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                 ])?;
             }
             MuxCommand::MoveWindow {
-                session_id: _,
-                window_id: _,
+                session_id,
+                window_id,
                 delta,
             } => {
-                // Relative swap, following the moved window. tmux resolves the unscoped relative
-                // target against the attached client's current session (the one bootty attached).
+                if delta != 0 {
+                    self.run_owned(vec![
+                        "select-window".into(),
+                        "-t".into(),
+                        window_id.unwrap_or(session_id),
+                    ])?;
+                }
+                // Relative swap, following the moved window, matching tmux/rmux copy of the
+                // active-window move behavior after selecting the requested source window.
                 let target = if delta < 0 { "-1" } else { "+1" };
                 for _ in 0..delta.unsigned_abs() {
                     self.run(&["swap-window", "-t", target])?;
@@ -552,6 +559,33 @@ mod tests {
                 RecordedCall::foreground(["tmux", "next-window", "-t", "$1"]),
                 RecordedCall::foreground(["tmux", "select-pane", "-t", "$1", "-L"]),
                 RecordedCall::foreground(["tmux", "resize-pane", "-Z", "-t", "$1"]),
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn tmux_adapter_moves_target_window_relative_and_follows_it() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::MoveWindow {
+                session_id: "$1".to_owned(),
+                window_id: Some("@2".to_owned()),
+                delta: -2,
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                RecordedCall::foreground(["tmux", "select-window", "-t", "@2"]),
+                RecordedCall::foreground(["tmux", "swap-window", "-t", "-1"]),
+                RecordedCall::foreground(["tmux", "select-window", "-t", "-1"]),
+                RecordedCall::foreground(["tmux", "swap-window", "-t", "-1"]),
+                RecordedCall::foreground(["tmux", "select-window", "-t", "-1"]),
             ]
             .as_slice()
         );

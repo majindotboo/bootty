@@ -192,7 +192,29 @@ impl PaintPlanner {
         frame: &RenderFrame,
         font_size: f32,
     ) -> &TerminalPaintPlan {
-        self.plan_with_cursor_blink_phase(surface, frame, font_size, CursorBlinkPhase::visible())
+        self.plan_with_cursor_blink_phase_and_text_cell_height(
+            surface,
+            frame,
+            font_size,
+            surface.cell.height,
+            CursorBlinkPhase::visible(),
+        )
+    }
+
+    pub fn plan_with_text_cell_height(
+        &mut self,
+        surface: TerminalSurface,
+        frame: &RenderFrame,
+        font_size: f32,
+        text_cell_height: f32,
+    ) -> &TerminalPaintPlan {
+        self.plan_with_cursor_blink_phase_and_text_cell_height(
+            surface,
+            frame,
+            font_size,
+            text_cell_height,
+            CursorBlinkPhase::visible(),
+        )
     }
 
     pub fn plan_with_cursor_blink_phase(
@@ -200,6 +222,23 @@ impl PaintPlanner {
         surface: TerminalSurface,
         frame: &RenderFrame,
         font_size: f32,
+        cursor_blink_phase: CursorBlinkPhase,
+    ) -> &TerminalPaintPlan {
+        self.plan_with_cursor_blink_phase_and_text_cell_height(
+            surface,
+            frame,
+            font_size,
+            surface.cell.height,
+            cursor_blink_phase,
+        )
+    }
+
+    pub fn plan_with_cursor_blink_phase_and_text_cell_height(
+        &mut self,
+        surface: TerminalSurface,
+        frame: &RenderFrame,
+        font_size: f32,
+        text_cell_height: f32,
         cursor_blink_phase: CursorBlinkPhase,
     ) -> &TerminalPaintPlan {
         let default_bg = PlanColor::opaque(frame.colors.background);
@@ -220,9 +259,12 @@ impl PaintPlanner {
             &mut self.run_text_pool,
             surface,
             frame,
-            default_fg,
-            default_bg,
-            font_size,
+            TextPlanContext {
+                default_fg,
+                default_bg,
+                font_size,
+                text_cell_height,
+            },
         );
         plan_cursor(
             &mut self.plan,
@@ -230,6 +272,7 @@ impl PaintPlanner {
             frame,
             default_fg,
             default_bg,
+            text_cell_height,
             cursor_blink_phase,
         );
 
@@ -287,17 +330,23 @@ fn push_background(backgrounds: &mut Vec<BackgroundRect>, rect: SurfaceRect, col
     backgrounds.push(BackgroundRect { rect, color });
 }
 
+#[derive(Clone, Copy)]
+struct TextPlanContext {
+    default_fg: PlanColor,
+    default_bg: PlanColor,
+    font_size: f32,
+    text_cell_height: f32,
+}
+
 fn plan_text_runs(
     plan: &mut TerminalPaintPlan,
     pool: &mut Vec<String>,
     surface: TerminalSurface,
     frame: &RenderFrame,
-    default_fg: PlanColor,
-    default_bg: PlanColor,
-    font_size: f32,
+    context: TextPlanContext,
 ) {
     let colors = OverlayTextColors {
-        selection: selection_text_foreground(frame, default_bg),
+        selection: selection_text_foreground(frame, context.default_bg),
         search: search_match_text_foreground(),
         active_search: active_search_match_text_foreground(),
     };
@@ -311,7 +360,7 @@ fn plan_text_runs(
             continue;
         }
 
-        let attrs = paint_attrs(first, frame, default_fg, default_bg, colors);
+        let attrs = paint_attrs(first, frame, context.default_fg, context.default_bg, colors);
         let mut run_text = pool.pop().unwrap_or_default();
         run_text.clear();
         run_text.extend(first_text);
@@ -327,7 +376,7 @@ fn plan_text_runs(
                 || next.x != end_x
                 || next.style.invisible
                 || next_text.is_empty()
-                || paint_attrs(next, frame, default_fg, default_bg, colors) != attrs
+                || paint_attrs(next, frame, context.default_fg, context.default_bg, colors) != attrs
             {
                 break;
             }
@@ -337,7 +386,8 @@ fn plan_text_runs(
             next_index += 1;
         }
 
-        let rect = surface.run_rect(start_x, start_y, end_x - start_x);
+        let row_rect = surface.run_rect(start_x, start_y, end_x - start_x);
+        let rect = text_rect_for_row(row_rect, context.text_cell_height);
         plan.text_runs.push(TextRun {
             rect,
             cells: end_x - start_x,
@@ -345,7 +395,7 @@ fn plan_text_runs(
             attrs,
         });
 
-        plan_decorations(&mut plan.decorations, rect, attrs, font_size);
+        plan_decorations(&mut plan.decorations, rect, attrs, context.font_size);
         cell_index = next_index;
     }
 }
@@ -403,6 +453,7 @@ fn plan_cursor(
     frame: &RenderFrame,
     default_fg: PlanColor,
     default_bg: PlanColor,
+    text_cell_height: f32,
     cursor_blink_phase: CursorBlinkPhase,
 ) {
     let Some(cursor) = frame.cursor else {
@@ -449,7 +500,7 @@ fn plan_cursor(
             let text = frame.cell_text(cell).iter().collect::<String>();
             let (_, cell_bg) = cell_colors(cell, default_fg, default_bg);
             (!text.is_empty()).then_some(CursorTextPlan {
-                rect,
+                rect: text_rect_for_row(rect, text_cell_height),
                 text,
                 color: frame
                     .colors
@@ -468,6 +519,21 @@ fn plan_cursor(
         shape,
         text_under_cursor,
     });
+}
+
+fn text_rect_for_row(row_rect: SurfaceRect, text_cell_height: f32) -> SurfaceRect {
+    let height = if text_cell_height.is_finite() && text_cell_height > 0.0 {
+        text_cell_height.min(row_rect.height())
+    } else {
+        row_rect.height()
+    };
+    let y_offset = ((row_rect.height() - height) * 0.5).max(0.0);
+    SurfaceRect::from_min_size(
+        row_rect.min_x,
+        row_rect.min_y + y_offset,
+        row_rect.width(),
+        height,
+    )
 }
 
 fn cursor_cell(frame: &RenderFrame, x: u16, y: u16) -> Option<&RenderCell> {
@@ -740,6 +806,7 @@ mod tests {
             active_search_match_index: None,
             search_match_count: 0,
             search_pulse: 0,
+            copy_mode: None,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
@@ -1211,6 +1278,43 @@ mod tests {
         assert_eq!(plan.text_runs[0].text, "界");
         assert_eq!(plan.text_runs[0].cells, 2);
         assert_eq!(plan.text_runs[0].rect, surface().run_rect(0, 0, 2));
+    }
+
+    #[test]
+    fn fitted_row_height_expands_line_spacing_without_stretching_text_runs() {
+        let fitted_surface = TerminalSurface::for_size(
+            Vec2::new(200.0, 96.0),
+            CellMetrics::new(10.0, 24.0),
+            TerminalPadding::uniform(5.0),
+        );
+        let mut frame = frame_from_cells(vec![(0, 0, 'x', style())]);
+        frame.cursor = Some(CursorSnapshot {
+            x: 0,
+            y: 0,
+            at_wide_tail: false,
+            style: CursorVisualStyle::Block,
+            blinking: false,
+            color: None,
+        });
+        let mut planner = PaintPlanner::default();
+        let plan = planner.plan_with_text_cell_height(fitted_surface, &frame, 16.0, 20.0);
+
+        let row_rect = fitted_surface.cell_rect(0, 0);
+        let text_rect =
+            SurfaceRect::from_min_size(row_rect.min_x, row_rect.min_y + 2.0, 10.0, 20.0);
+
+        assert_eq!(plan.text_runs[0].rect, text_rect);
+        assert_eq!(plan.cursor.as_ref().unwrap().rect, row_rect);
+        assert_eq!(
+            plan.cursor
+                .as_ref()
+                .unwrap()
+                .text_under_cursor
+                .as_ref()
+                .unwrap()
+                .rect,
+            text_rect
+        );
     }
 
     #[test]

@@ -186,7 +186,8 @@ impl NativeMuxState {
                 .position(|window| window.id == target)
             {
                 let next = clamp_move_index(index, delta, session.windows.len());
-                session.windows.swap(index, next);
+                let window = session.windows.remove(index);
+                session.windows.insert(next, window);
                 session.active_window_id = target;
                 for (index, window) in session.windows.iter_mut().enumerate() {
                     window.index = index as u32 + 1;
@@ -748,6 +749,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn move_window_inserts_target_for_multi_step_delta() {
+        let mut state = local_state();
+        state.new_window("local", None);
+        state.new_window("local", None);
+        state.move_window("local", Some("tab-1"), 2);
+
+        let session = &state.sessions[0];
+        let ids = session
+            .windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["tab-2", "tab-3", "tab-1"]);
+        assert_eq!(session.active_window_id, "tab-1");
     }
     #[test]
     fn new_window_after_closing_middle_tab_keeps_window_ids_unique() {

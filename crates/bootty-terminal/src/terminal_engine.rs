@@ -26,7 +26,7 @@ use libghostty_vt::{
     kitty::graphics::set_png_decoder,
     mouse, paste,
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIteration, RowIterator},
-    selection::{FormatOptions as SelectionFormatOptions, gesture},
+    selection::{FormatOptions as SelectionFormatOptions, Selection, gesture},
     style::RgbColor,
     terminal::{
         ColorScheme, ConformanceLevel, CursorStyle, DeviceAttributeFeature, DeviceAttributes,
@@ -37,8 +37,8 @@ use libghostty_vt::{
 use memchr::memchr3_iter;
 
 use crate::terminal_frame::{
-    CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, FrameSelection, FrameStats, RenderCell,
-    RenderFrame,
+    CellStyle, CursorSnapshot, FrameColors, FrameCopyMode, FrameScrollbar, FrameSelection,
+    FrameStats, RenderCell, RenderFrame,
 };
 use crate::terminal_input_model::{
     KeyInput, MacosOptionAsAlt, MouseAction, MouseEncoderSize, MouseInput,
@@ -167,6 +167,25 @@ pub enum TerminalSideEffect {
     UnsupportedHostCommand { protocol: String, command: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSideEffectEvent {
+    pub source_pane_id: Option<String>,
+    pub effect: TerminalSideEffect,
+}
+
+impl TerminalSideEffectEvent {
+    pub fn new(source_pane_id: Option<String>, effect: TerminalSideEffect) -> Self {
+        Self {
+            source_pane_id,
+            effect,
+        }
+    }
+
+    pub fn unscoped(effect: TerminalSideEffect) -> Self {
+        Self::new(None, effect)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalSelectionEvent {
     pub surface: TerminalSurface,
@@ -199,6 +218,83 @@ pub enum TerminalSearchDirection {
     Previous,
     Current,
     Next,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalCopyModeAction {
+    Cancel,
+    CancelOrClearSelection,
+    ClearSelection,
+    BeginSelection,
+    ToggleSelection,
+    SelectLine,
+    ToggleRectangle,
+    CopySelectionAndCancel,
+    CopyEndOfLineAndCancel,
+    Search {
+        query: String,
+        direction: TerminalSearchDirection,
+    },
+    SearchWord(TerminalSearchDirection),
+    Move(TerminalCopyModeMotion),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalCopyModeMotion {
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    HistoryTop,
+    HistoryBottom,
+    StartOfLine,
+    EndOfLine,
+    BackToIndentation,
+    TopLine,
+    MiddleLine,
+    BottomLine,
+    NextWord,
+    PreviousWord,
+    NextWordEnd,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalCopyModeOutcome {
+    pub copied: Option<Vec<u8>>,
+    pub search: Option<TerminalCopyModeSearchOutcome>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCopyModeSearchOutcome {
+    pub query: String,
+    pub found: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CopyModeSearchMatch {
+    start: PointCoordinate,
+    end: PointCoordinate,
+}
+
+#[derive(Debug)]
+struct CopyModeState {
+    cursor: PointCoordinate,
+    anchor: Option<PointCoordinate>,
+    rectangle: bool,
+    desired_col: u16,
+}
+
+impl CopyModeState {
+    fn selecting(&self) -> bool {
+        self.anchor.is_some()
+    }
 }
 
 impl TerminalSelectionFormat {
@@ -477,6 +573,7 @@ pub struct TerminalEngine {
     search_query: String,
     search_active_index: usize,
     search_pulse: u64,
+    copy_mode: Option<CopyModeState>,
     content_epoch: u64,
     extracted_content_epoch: u64,
     kitty_graphics_touched: bool,
@@ -1574,6 +1671,7 @@ impl TerminalEngine {
             search_query: String::new(),
             search_active_index: 0,
             search_pulse: 0,
+            copy_mode: None,
             content_epoch: 0,
             extracted_content_epoch: u64::MAX,
             kitty_graphics_touched: false,
@@ -2597,6 +2695,746 @@ impl TerminalEngine {
             .map_or(0, |scrollbar| scrollbar.offset))
     }
 
+    pub fn enter_copy_mode(&mut self) -> Result<()> {
+        let cursor = self.copy_mode_entry_point()?;
+        self.copy_mode = Some(CopyModeState {
+            cursor,
+            anchor: None,
+            rectangle: false,
+            desired_col: cursor.x,
+        });
+        self.terminal.set_selection(None)?;
+        self.ensure_copy_mode_cursor_visible()?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    pub fn copy_mode_active(&self) -> bool {
+        self.copy_mode.is_some()
+    }
+
+    pub fn handle_copy_mode_action(
+        &mut self,
+        action: TerminalCopyModeAction,
+    ) -> Result<TerminalCopyModeOutcome> {
+        if self.copy_mode.is_none() {
+            return Ok(TerminalCopyModeOutcome::default());
+        }
+
+        match action {
+            TerminalCopyModeAction::Cancel => self.cancel_copy_mode()?,
+            TerminalCopyModeAction::CancelOrClearSelection => {
+                if self
+                    .copy_mode
+                    .as_ref()
+                    .is_some_and(CopyModeState::selecting)
+                {
+                    self.clear_copy_mode_selection()?;
+                } else {
+                    self.cancel_copy_mode()?;
+                }
+            }
+            TerminalCopyModeAction::ClearSelection => self.clear_copy_mode_selection()?,
+            TerminalCopyModeAction::BeginSelection => self.begin_copy_mode_selection(false)?,
+            TerminalCopyModeAction::ToggleSelection => self.toggle_copy_mode_selection()?,
+            TerminalCopyModeAction::SelectLine => self.select_copy_mode_line()?,
+            TerminalCopyModeAction::ToggleRectangle => self.toggle_copy_mode_rectangle()?,
+            TerminalCopyModeAction::Search { query, direction } => {
+                let found = self.search_copy_mode_query(&query, direction)?;
+                return Ok(TerminalCopyModeOutcome {
+                    copied: None,
+                    search: Some(TerminalCopyModeSearchOutcome { query, found }),
+                    active: self.copy_mode.is_some(),
+                });
+            }
+            TerminalCopyModeAction::SearchWord(direction) => {
+                let Some(query) = self.copy_mode_word_under_cursor()? else {
+                    return Ok(TerminalCopyModeOutcome {
+                        copied: None,
+                        search: None,
+                        active: self.copy_mode.is_some(),
+                    });
+                };
+                let found = self.search_copy_mode_query(&query, direction)?;
+                return Ok(TerminalCopyModeOutcome {
+                    copied: None,
+                    search: Some(TerminalCopyModeSearchOutcome { query, found }),
+                    active: self.copy_mode.is_some(),
+                });
+            }
+            TerminalCopyModeAction::CopySelectionAndCancel => {
+                let copied = self.copy_mode_selection_and_cancel()?;
+                return Ok(TerminalCopyModeOutcome {
+                    copied,
+                    search: None,
+                    active: false,
+                });
+            }
+            TerminalCopyModeAction::CopyEndOfLineAndCancel => {
+                if !self
+                    .copy_mode
+                    .as_ref()
+                    .is_some_and(CopyModeState::selecting)
+                {
+                    self.begin_copy_mode_selection(false)?;
+                }
+                self.move_copy_mode_cursor(TerminalCopyModeMotion::EndOfLine)?;
+                let copied = self.copy_mode_selection_and_cancel()?;
+                return Ok(TerminalCopyModeOutcome {
+                    copied,
+                    search: None,
+                    active: false,
+                });
+            }
+            TerminalCopyModeAction::Move(motion) => self.move_copy_mode_cursor(motion)?,
+        }
+
+        Ok(TerminalCopyModeOutcome {
+            copied: None,
+            search: None,
+            active: self.copy_mode.is_some(),
+        })
+    }
+
+    fn copy_mode_entry_point(&mut self) -> Result<PointCoordinate> {
+        let viewport_top = self.viewport_top_screen_row()?;
+        let max_y = (self.terminal.total_rows()?.max(1) as u32).saturating_sub(1);
+        let max_x = self.geometry.cols.saturating_sub(1);
+        let last_row = u32::from(self.geometry.rows.max(1).saturating_sub(1));
+        let cursor = self.extract_frame()?.cursor;
+        if let Some(cursor) = cursor {
+            return Ok(PointCoordinate {
+                x: cursor.x.min(max_x),
+                y: viewport_top
+                    .saturating_add(u32::from(
+                        cursor.y.min(self.geometry.rows.saturating_sub(1)),
+                    ))
+                    .min(max_y),
+            });
+        }
+
+        Ok(PointCoordinate {
+            x: 0,
+            y: viewport_top.saturating_add(last_row).min(max_y),
+        })
+    }
+
+    fn copy_mode_screen_point(&self) -> Option<PointCoordinate> {
+        self.copy_mode.as_ref().map(|state| state.cursor)
+    }
+
+    fn begin_copy_mode_selection(&mut self, rectangle: bool) -> Result<()> {
+        let Some(point) = self.copy_mode_screen_point() else {
+            return Ok(());
+        };
+        if let Some(state) = &mut self.copy_mode {
+            state.anchor = Some(point);
+            state.rectangle = rectangle;
+        }
+        self.sync_copy_mode_selection()?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn toggle_copy_mode_selection(&mut self) -> Result<()> {
+        if self
+            .copy_mode
+            .as_ref()
+            .is_some_and(CopyModeState::selecting)
+        {
+            self.clear_copy_mode_selection()
+        } else {
+            self.begin_copy_mode_selection(false)
+        }
+    }
+
+    fn clear_copy_mode_selection(&mut self) -> Result<()> {
+        if let Some(state) = &mut self.copy_mode {
+            state.anchor = None;
+            state.rectangle = false;
+        }
+        self.terminal.set_selection(None)?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn cancel_copy_mode(&mut self) -> Result<()> {
+        self.copy_mode = None;
+        self.terminal.set_selection(None)?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn toggle_copy_mode_rectangle(&mut self) -> Result<()> {
+        if !self
+            .copy_mode
+            .as_ref()
+            .is_some_and(CopyModeState::selecting)
+        {
+            self.begin_copy_mode_selection(true)?;
+            return Ok(());
+        }
+        if let Some(state) = &mut self.copy_mode {
+            state.rectangle = !state.rectangle;
+        }
+        self.sync_copy_mode_selection()?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn select_copy_mode_line(&mut self) -> Result<()> {
+        let Some(mut point) = self.copy_mode_screen_point() else {
+            return Ok(());
+        };
+        let start = PointCoordinate { x: 0, y: point.y };
+        point.x = self.screen_row_end_col(point.y)?;
+        if let Some(state) = &mut self.copy_mode {
+            state.anchor = Some(start);
+            state.rectangle = false;
+            state.cursor = point;
+            state.desired_col = point.x;
+        }
+        self.ensure_copy_mode_cursor_visible()?;
+        self.sync_copy_mode_selection()?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn copy_mode_selection_and_cancel(&mut self) -> Result<Option<Vec<u8>>> {
+        self.sync_copy_mode_selection()?;
+        let copied = self.format_selection(TerminalSelectionFormat::PlainText)?;
+        self.copy_mode = None;
+        self.terminal.set_selection(None)?;
+        self.mark_content_changed();
+        Ok(copied)
+    }
+
+    fn move_copy_mode_cursor(&mut self, motion: TerminalCopyModeMotion) -> Result<()> {
+        let Some(point) = self.copy_mode_screen_point() else {
+            return Ok(());
+        };
+        let desired_col = self
+            .copy_mode
+            .as_ref()
+            .map_or(point.x, |state| state.desired_col);
+        let (next, update_desired_col) =
+            self.copy_mode_motion_target(point, desired_col, motion)?;
+        self.set_copy_mode_cursor(next, update_desired_col)
+    }
+
+    fn copy_mode_motion_target(
+        &mut self,
+        point: PointCoordinate,
+        desired_col: u16,
+        motion: TerminalCopyModeMotion,
+    ) -> Result<(PointCoordinate, bool)> {
+        let total_rows = self.terminal.total_rows()?.max(1) as u32;
+        let max_y = total_rows.saturating_sub(1);
+        let max_x = self.geometry.cols.saturating_sub(1);
+        let page = u32::from(self.geometry.rows.max(1));
+        let half_page = (page / 2).max(1);
+        let mut next = point;
+        let mut update_desired_col = true;
+
+        match motion {
+            TerminalCopyModeMotion::Left => {
+                if next.x > 0 {
+                    next.x -= 1;
+                } else if next.y > 0 {
+                    next.y -= 1;
+                    next.x = self.screen_row_end_col(next.y)?;
+                }
+            }
+            TerminalCopyModeMotion::Right => {
+                if next.x < max_x {
+                    next.x += 1;
+                } else if next.y < max_y {
+                    next.y += 1;
+                    next.x = 0;
+                }
+            }
+            TerminalCopyModeMotion::Up => {
+                next.y = next.y.saturating_sub(1);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::Down => {
+                next.y = next.y.saturating_add(1).min(max_y);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::PageUp => {
+                next.y = next.y.saturating_sub(page);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::PageDown => {
+                next.y = next.y.saturating_add(page).min(max_y);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::HalfPageUp => {
+                next.y = next.y.saturating_sub(half_page);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::HalfPageDown => {
+                next.y = next.y.saturating_add(half_page).min(max_y);
+                next.x = desired_col.min(max_x);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::HistoryTop => {
+                next.y = 0;
+                next.x = 0;
+            }
+            TerminalCopyModeMotion::HistoryBottom => {
+                next.y = max_y;
+                next.x = self.screen_row_end_col(next.y)?;
+            }
+            TerminalCopyModeMotion::StartOfLine => next.x = 0,
+            TerminalCopyModeMotion::EndOfLine => next.x = self.screen_row_end_col(next.y)?,
+            TerminalCopyModeMotion::BackToIndentation => {
+                next.x = self.screen_row_first_nonblank_col(next.y)?;
+            }
+            TerminalCopyModeMotion::TopLine => next.y = self.viewport_top_screen_row()?,
+            TerminalCopyModeMotion::MiddleLine => {
+                next.y = self
+                    .viewport_top_screen_row()?
+                    .saturating_add(page / 2)
+                    .min(max_y);
+            }
+            TerminalCopyModeMotion::BottomLine => {
+                next.y = self
+                    .viewport_top_screen_row()?
+                    .saturating_add(page.saturating_sub(1))
+                    .min(max_y);
+            }
+            TerminalCopyModeMotion::NextWord => next = self.next_word_start(point)?,
+            TerminalCopyModeMotion::PreviousWord => next = self.previous_word_start(point)?,
+            TerminalCopyModeMotion::NextWordEnd => next = self.next_word_end(point)?,
+            TerminalCopyModeMotion::ScrollUp => {
+                let before_top = self.viewport_top_screen_row()?;
+                self.scroll_viewport_delta(-1);
+                let after_top = self.viewport_top_screen_row()?;
+                next.y = Self::shifted_screen_row(next.y, before_top, after_top, max_y);
+                update_desired_col = false;
+            }
+            TerminalCopyModeMotion::ScrollDown => {
+                let before_top = self.viewport_top_screen_row()?;
+                self.scroll_viewport_delta(1);
+                let after_top = self.viewport_top_screen_row()?;
+                next.y = Self::shifted_screen_row(next.y, before_top, after_top, max_y);
+                update_desired_col = false;
+            }
+        }
+
+        next.x = next.x.min(max_x);
+        next.y = next.y.min(max_y);
+        Ok((next, update_desired_col))
+    }
+    fn shifted_screen_row(row: u32, before_top: u32, after_top: u32, max_y: u32) -> u32 {
+        let delta = i128::from(after_top) - i128::from(before_top);
+        (i128::from(row) + delta).clamp(0, i128::from(max_y)) as u32
+    }
+
+    fn set_copy_mode_cursor(
+        &mut self,
+        point: PointCoordinate,
+        update_desired_col: bool,
+    ) -> Result<()> {
+        if let Some(state) = &mut self.copy_mode {
+            state.cursor = point;
+            if update_desired_col {
+                state.desired_col = point.x;
+            }
+        }
+        self.ensure_copy_mode_cursor_visible()?;
+        self.sync_copy_mode_selection()?;
+        self.mark_content_changed();
+        Ok(())
+    }
+
+    fn search_copy_mode_query(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+    ) -> Result<bool> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(false);
+        }
+        if self.search_query != query {
+            self.search_query = query.to_owned();
+            self.search_active_index = 0;
+            self.mark_content_changed();
+        }
+
+        let Some(cursor) = self.copy_mode_screen_point() else {
+            return Ok(false);
+        };
+        let matches = self.copy_mode_search_matches(query)?;
+        let Some(found) = Self::copy_mode_search_target(&matches, cursor, direction) else {
+            self.bump_search_pulse();
+            let _ = self.extract_frame()?;
+            return Ok(false);
+        };
+
+        self.set_copy_mode_cursor(found.start, true)?;
+        self.align_copy_mode_active_search_match()?;
+        self.bump_search_pulse();
+        Ok(true)
+    }
+
+    fn copy_mode_word_under_cursor(&self) -> Result<Option<String>> {
+        let Some(point) = self.copy_mode_screen_point() else {
+            return Ok(None);
+        };
+        let chars = self.screen_row_chars(point.y)?;
+        let Some(ch) = chars.get(usize::from(point.x)).copied() else {
+            return Ok(None);
+        };
+        if ch.is_whitespace() {
+            return Ok(None);
+        }
+
+        let mut start = usize::from(point.x);
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let mut end = usize::from(point.x);
+        while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+            end += 1;
+        }
+
+        let word: String = chars[start..=end].iter().collect();
+        Ok((!word.is_empty()).then_some(word))
+    }
+
+    fn copy_mode_search_matches(&self, query: &str) -> Result<Vec<CopyModeSearchMatch>> {
+        let query: Vec<char> = query.chars().map(search_char).collect();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total_rows = self.terminal.total_rows()?.max(1) as u32;
+        let mut matches = Vec::new();
+        let mut logical = Vec::new();
+        let mut positions = Vec::new();
+        for y in 0..total_rows {
+            let chars = self.screen_row_chars(y)?;
+            for (x, ch) in chars.into_iter().enumerate() {
+                logical.push(search_char(ch));
+                positions.push(PointCoordinate { x: x as u16, y });
+            }
+            if !self.screen_row_wrapped(y)? {
+                push_copy_mode_logical_search_matches(&mut matches, &logical, &positions, &query);
+                logical.clear();
+                positions.clear();
+            }
+        }
+        push_copy_mode_logical_search_matches(&mut matches, &logical, &positions, &query);
+        Ok(matches)
+    }
+
+    fn copy_mode_search_target(
+        matches: &[CopyModeSearchMatch],
+        cursor: PointCoordinate,
+        direction: TerminalSearchDirection,
+    ) -> Option<CopyModeSearchMatch> {
+        match direction {
+            TerminalSearchDirection::Current => matches
+                .iter()
+                .copied()
+                .find(|candidate| Self::copy_mode_search_match_contains(*candidate, cursor))
+                .or_else(|| {
+                    matches
+                        .iter()
+                        .copied()
+                        .find(|candidate| Self::point_after(candidate.start, cursor))
+                })
+                .or_else(|| matches.first().copied()),
+            TerminalSearchDirection::Next => matches
+                .iter()
+                .copied()
+                .find(|candidate| {
+                    !Self::copy_mode_search_match_contains(*candidate, cursor)
+                        && Self::point_after(candidate.start, cursor)
+                })
+                .or_else(|| {
+                    matches.iter().copied().find(|candidate| {
+                        !Self::copy_mode_search_match_contains(*candidate, cursor)
+                    })
+                })
+                .or_else(|| matches.first().copied()),
+            TerminalSearchDirection::Previous => matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|candidate| {
+                    !Self::copy_mode_search_match_contains(*candidate, cursor)
+                        && Self::point_before(candidate.start, cursor)
+                })
+                .or_else(|| {
+                    matches.iter().rev().copied().find(|candidate| {
+                        !Self::copy_mode_search_match_contains(*candidate, cursor)
+                    })
+                })
+                .or_else(|| matches.last().copied()),
+        }
+    }
+
+    fn align_copy_mode_active_search_match(&mut self) -> Result<()> {
+        let Some(point) = self.copy_mode_screen_point() else {
+            return Ok(());
+        };
+        let viewport_top = self.viewport_top_screen_row()?;
+        let Some(row) = point.y.checked_sub(viewport_top) else {
+            return Ok(());
+        };
+        let Ok(row) = u16::try_from(row) else {
+            return Ok(());
+        };
+        let index = {
+            let frame = self.extract_frame()?;
+            frame.search_matches.iter().position(|selection| {
+                selection.row == row
+                    && selection.start_col <= point.x
+                    && point.x <= selection.end_col
+            })
+        };
+        if let Some(index) = index {
+            self.search_active_index = index;
+            self.mark_content_changed();
+            let _ = self.extract_frame()?;
+        }
+        Ok(())
+    }
+
+    fn copy_mode_search_match_contains(
+        candidate: CopyModeSearchMatch,
+        point: PointCoordinate,
+    ) -> bool {
+        !Self::point_before(point, candidate.start) && !Self::point_after(point, candidate.end)
+    }
+
+    fn point_before(point: PointCoordinate, cursor: PointCoordinate) -> bool {
+        point.y < cursor.y || point.y == cursor.y && point.x < cursor.x
+    }
+
+    fn point_after(point: PointCoordinate, cursor: PointCoordinate) -> bool {
+        point.y > cursor.y || point.y == cursor.y && point.x > cursor.x
+    }
+
+    fn sync_copy_mode_selection(&mut self) -> Result<()> {
+        let Some(state) = &self.copy_mode else {
+            self.terminal.set_selection(None)?;
+            return Ok(());
+        };
+        let Some(anchor) = state.anchor else {
+            self.terminal.set_selection(None)?;
+            return Ok(());
+        };
+        let start = self.terminal.grid_ref(Point::Screen(anchor))?;
+        let end = self.terminal.grid_ref(Point::Screen(state.cursor))?;
+        let selection = Selection::new(start, end, state.rectangle);
+        self.terminal.set_selection(Some(&selection))?;
+        Ok(())
+    }
+
+    fn ensure_copy_mode_cursor_visible(&mut self) -> Result<()> {
+        let Some(point) = self.copy_mode_screen_point() else {
+            return Ok(());
+        };
+        let top = self.viewport_top_screen_row()?;
+        let bottom = top.saturating_add(u32::from(self.geometry.rows.max(1)).saturating_sub(1));
+        let delta = if point.y < top {
+            i128::from(point.y) - i128::from(top)
+        } else if point.y > bottom {
+            i128::from(point.y) - i128::from(bottom)
+        } else {
+            0
+        };
+        if delta != 0 {
+            self.scroll_viewport_delta(
+                delta.clamp(isize::MIN as i128, isize::MAX as i128) as isize,
+            );
+        }
+        Ok(())
+    }
+
+    fn viewport_top_screen_row(&self) -> Result<u32> {
+        Ok(self.terminal.scrollbar()?.offset as u32)
+    }
+
+    fn screen_row_chars(&self, row: u32) -> Result<Vec<char>> {
+        let mut chars = Vec::with_capacity(usize::from(self.geometry.cols));
+        for x in 0..self.geometry.cols {
+            let cell = self
+                .terminal
+                .grid_ref(Point::Screen(PointCoordinate { x, y: row }))?
+                .cell()?;
+            let ch = if cell.has_text()? {
+                char::from_u32(cell.codepoint()?).unwrap_or(' ')
+            } else {
+                ' '
+            };
+            chars.push(ch);
+        }
+        Ok(chars)
+    }
+
+    fn screen_row_end_col(&self, row: u32) -> Result<u16> {
+        let chars = self.screen_row_chars(row)?;
+        Ok(chars
+            .iter()
+            .rposition(|ch| !ch.is_whitespace())
+            .map_or(0, |index| index as u16))
+    }
+
+    fn screen_row_first_nonblank_col(&self, row: u32) -> Result<u16> {
+        let chars = self.screen_row_chars(row)?;
+        Ok(chars
+            .iter()
+            .position(|ch| !ch.is_whitespace())
+            .map_or(0, |index| index as u16))
+    }
+
+    fn screen_char(&self, point: PointCoordinate) -> Result<char> {
+        let cell = self.terminal.grid_ref(Point::Screen(point))?.cell()?;
+        if cell.has_text()? {
+            Ok(char::from_u32(cell.codepoint()?).unwrap_or(' '))
+        } else {
+            Ok(' ')
+        }
+    }
+
+    fn screen_row_wrapped(&self, row: u32) -> Result<bool> {
+        Ok(self
+            .terminal
+            .grid_ref(Point::Screen(PointCoordinate { x: 0, y: row }))?
+            .row()?
+            .is_wrapped()
+            .unwrap_or(false))
+    }
+
+    fn next_screen_point(&self, point: PointCoordinate) -> Result<Option<PointCoordinate>> {
+        let max_x = self.geometry.cols.saturating_sub(1);
+        let max_y = (self.terminal.total_rows()?.max(1) as u32).saturating_sub(1);
+        if point.x < max_x {
+            Ok(Some(PointCoordinate {
+                x: point.x + 1,
+                y: point.y,
+            }))
+        } else if point.y < max_y {
+            Ok(Some(PointCoordinate {
+                x: 0,
+                y: point.y + 1,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn previous_screen_point(&self, point: PointCoordinate) -> Result<Option<PointCoordinate>> {
+        if point.x > 0 {
+            Ok(Some(PointCoordinate {
+                x: point.x - 1,
+                y: point.y,
+            }))
+        } else if point.y > 0 {
+            Ok(Some(PointCoordinate {
+                x: self.geometry.cols.saturating_sub(1),
+                y: point.y - 1,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn next_word_start(&self, point: PointCoordinate) -> Result<PointCoordinate> {
+        let mut current = point;
+        let mut left_word = self.screen_char(current)?.is_whitespace();
+        while let Some(next) = self.next_screen_point(current)? {
+            current = next;
+            let is_word = !self.screen_char(current)?.is_whitespace();
+            if left_word && is_word {
+                return Ok(current);
+            }
+            if !is_word {
+                left_word = true;
+            }
+        }
+        Ok(current)
+    }
+
+    fn previous_word_start(&self, point: PointCoordinate) -> Result<PointCoordinate> {
+        let mut current = point;
+        while let Some(previous) = self.previous_screen_point(current)? {
+            current = previous;
+            if !self.screen_char(current)?.is_whitespace() {
+                break;
+            }
+        }
+        while let Some(previous) = self.previous_screen_point(current)? {
+            if self.screen_char(previous)?.is_whitespace() {
+                break;
+            }
+            current = previous;
+        }
+        Ok(current)
+    }
+
+    fn next_word_end(&self, point: PointCoordinate) -> Result<PointCoordinate> {
+        let mut current = point;
+        while let Some(next) = self.next_screen_point(current)? {
+            current = next;
+            if !self.screen_char(current)?.is_whitespace() {
+                break;
+            }
+        }
+        while let Some(next) = self.next_screen_point(current)? {
+            if self.screen_char(next)?.is_whitespace() {
+                break;
+            }
+            current = next;
+        }
+        Ok(current)
+    }
+
+    fn copy_mode_frame_state(copy_mode: Option<&CopyModeState>) -> Option<FrameCopyMode> {
+        copy_mode.map(|state| FrameCopyMode {
+            selecting: state.selecting(),
+            rectangle: state.rectangle,
+        })
+    }
+
+    fn apply_copy_mode_frame_cursor(
+        frame: &mut RenderFrame,
+        copy_mode: Option<&CopyModeState>,
+        viewport_top: u32,
+    ) {
+        let Some(point) = copy_mode.map(|state| state.cursor) else {
+            return;
+        };
+        let Some(row) = point.y.checked_sub(viewport_top) else {
+            return;
+        };
+        let Ok(y) = u16::try_from(row) else {
+            return;
+        };
+        if point.x >= frame.cols || y >= frame.rows {
+            return;
+        }
+        frame.cursor = Some(CursorSnapshot {
+            x: point.x,
+            y,
+            at_wide_tail: false,
+            style: CursorVisualStyle::BlockHollow,
+            blinking: false,
+            color: frame.colors.cursor.or(Some(frame.colors.foreground)),
+        });
+    }
+
     pub fn is_mouse_tracking(&self) -> Result<bool> {
         self.terminal.is_mouse_tracking().map_err(Into::into)
     }
@@ -2623,6 +3461,7 @@ impl TerminalEngine {
         self.frame.active_search_match_index = None;
         self.frame.search_match_count = 0;
         self.frame.search_pulse = self.search_pulse;
+        self.frame.copy_mode = Self::copy_mode_frame_state(self.copy_mode.as_ref());
         self.frame.stats = FrameStats {
             render_state_update_us,
             ..FrameStats::default()
@@ -2696,6 +3535,8 @@ impl TerminalEngine {
             self.frame.images = images;
         }
 
+        let viewport_top = self.viewport_top_screen_row()?;
+        Self::apply_copy_mode_frame_cursor(&mut self.frame, self.copy_mode.as_ref(), viewport_top);
         self.frame.stats.extraction_us = extract_start.elapsed().as_micros() as u64;
         self.extracted_content_epoch = self.content_epoch;
         Ok(&self.frame)
@@ -2761,6 +3602,9 @@ impl TerminalEngine {
             offset: scrollbar.offset,
             len: scrollbar.len,
         });
+        let viewport_top = scrollbar.offset as u32;
+        self.frame.copy_mode = Self::copy_mode_frame_state(self.copy_mode.as_ref());
+        Self::apply_copy_mode_frame_cursor(&mut self.frame, self.copy_mode.as_ref(), viewport_top);
         if can_reuse_clean_frame {
             self.frame.row_dirty.clear();
             self.frame
@@ -2845,6 +3689,25 @@ fn frame_search_matches(frame: &RenderFrame, query: &str) -> Vec<FrameSelection>
     }
     push_logical_search_matches(&mut matches, &logical, &positions, &query);
     matches
+}
+
+fn push_copy_mode_logical_search_matches(
+    matches: &mut Vec<CopyModeSearchMatch>,
+    logical: &[char],
+    positions: &[PointCoordinate],
+    query: &[char],
+) {
+    if query.len() > logical.len() {
+        return;
+    }
+    for start in 0..=logical.len() - query.len() {
+        if logical[start..start + query.len()] == *query {
+            matches.push(CopyModeSearchMatch {
+                start: positions[start],
+                end: positions[start + query.len() - 1],
+            });
+        }
+    }
 }
 
 fn push_logical_search_matches(
