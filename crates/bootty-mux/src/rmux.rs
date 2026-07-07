@@ -28,7 +28,7 @@ pub trait RmuxSessionClient {
     fn activate_previous_window(&self, session_name: &str) -> Result<()>;
     fn activate_last_window(&self, session_name: &str) -> Result<()>;
     fn activate_window_index(&self, session_name: &str, index: u32) -> Result<()>;
-    fn move_window(&self, session_name: &str, delta: i32) -> Result<()>;
+    fn move_window(&self, session_name: &str, window_id: Option<&str>, delta: i32) -> Result<()>;
     fn split_pane(
         &self,
         session_name: &str,
@@ -109,8 +109,13 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
             MuxCommand::ActivateWindowIndex { session_id, index } => {
                 self.client.activate_window_index(&session_id, index)?;
             }
-            MuxCommand::MoveWindow { session_id, delta } => {
-                self.client.move_window(&session_id, delta)?;
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id,
+                delta,
+            } => {
+                self.client
+                    .move_window(&session_id, window_id.as_deref(), delta)?;
             }
             MuxCommand::SplitPane {
                 session_id,
@@ -220,9 +225,10 @@ impl RmuxSessionClient for SdkRmuxClient {
         })
     }
 
-    fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+    fn move_window(&self, session_name: &str, window_id: Option<&str>, delta: i32) -> Result<()> {
         rmux_execute(MuxCommand::MoveWindow {
             session_id: session_name.to_owned(),
+            window_id: window_id.map(str::to_owned),
             delta,
         })
     }
@@ -627,10 +633,16 @@ mod tests {
             Ok(())
         }
 
-        fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+        fn move_window(
+            &self,
+            session_name: &str,
+            window_id: Option<&str>,
+            delta: i32,
+        ) -> Result<()> {
             self.calls.borrow_mut().push(vec![
                 "move_window".to_owned(),
                 session_name.to_owned(),
+                window_id.unwrap_or_default().to_owned(),
                 delta.to_string(),
             ]);
             Ok(())
@@ -749,10 +761,16 @@ mod tests {
             Ok(())
         }
 
-        fn move_window(&self, session_name: &str, delta: i32) -> Result<()> {
+        fn move_window(
+            &self,
+            session_name: &str,
+            window_id: Option<&str>,
+            delta: i32,
+        ) -> Result<()> {
             self.calls.borrow_mut().push(vec![
                 "move_window".to_owned(),
                 session_name.to_owned(),
+                window_id.unwrap_or_default().to_owned(),
                 delta.to_string(),
             ]);
             Ok(())
@@ -881,6 +899,7 @@ mod tests {
         backend
             .execute(MuxCommand::MoveWindow {
                 session_id: "project".to_owned(),
+                window_id: Some("@2".to_owned()),
                 delta: -1,
             })
             .unwrap();
@@ -921,6 +940,7 @@ mod tests {
                 vec![
                     "move_window".to_owned(),
                     "project".to_owned(),
+                    "@2".to_owned(),
                     "-1".to_owned()
                 ],
             ]
@@ -1208,6 +1228,36 @@ mod tests {
             |controller| {
                 controller.selected_session() == Some(other_session.as_str())
                     && controller.selected_window().map(str::to_owned) != active_before_switch
+            },
+        )?;
+        let moved_window = controller
+            .selected_session_windows()
+            .get(1)
+            .map(|window| window.id.clone())
+            .context("controller should have a second rmux window to move")?;
+        let before_move_index = 1;
+        controller.execute_command(
+            &repaint,
+            &config,
+            MuxCommand::MoveWindow {
+                session_id: other_session.clone(),
+                window_id: Some(moved_window.clone()),
+                delta: -1,
+            },
+        );
+        wait_for_controller(
+            "controller move window",
+            &mut controller,
+            &repaint,
+            &config,
+            |controller| {
+                controller.selected_session() == Some(other_session.as_str())
+                    && controller.selected_window() == Some(moved_window.as_str())
+                    && controller
+                        .selected_session_windows()
+                        .iter()
+                        .position(|window| window.id == moved_window)
+                        .is_some_and(|index| index + 1 == before_move_index)
             },
         )?;
         client.kill_session(&session)?;

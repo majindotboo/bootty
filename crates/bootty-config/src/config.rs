@@ -1075,6 +1075,7 @@ fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+q=quit",
         "cmd+alt+ctrl+f=toggle_fullscreen",
         "cmd+,=open_settings",
+        "cmd+f=start_search",
         "cmd+p=command_palette",
         "cmd+shift+o=session_picker",
         "cmd+o=toggle_sidebar_focus",
@@ -1121,6 +1122,7 @@ fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+w=close_surface",
         "ctrl+shift+q=quit",
         "ctrl+shift+alt+f=toggle_fullscreen",
+        "ctrl+shift+f=start_search",
         "ctrl+shift+p=command_palette",
         "ctrl+shift+alt+o=session_picker",
         "ctrl+shift+o=toggle_sidebar_focus",
@@ -1165,6 +1167,7 @@ fn common_keybinds_windows() -> &'static [&'static str] {
         "ctrl+shift+q=quit",
         "ctrl+shift+alt+f=toggle_fullscreen",
         "ctrl+shift+p=command_palette",
+        "ctrl+shift+f=start_search",
         "ctrl+shift+alt+o=session_picker",
         "ctrl+shift+o=toggle_sidebar_focus",
         "ctrl+shift+e=toggle_sidebar_visibility",
@@ -1235,9 +1238,9 @@ const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
 // tmux window ≈ bootty tab; several rows are nearest-action ports rather than exact semantics:
 // `;` last-pane → next_pane, `(`/`)` switch-client → previous/next_session, `:` command-prompt
 // → command_palette, `/` describe-key → show_keybinds, `C` customize-mode → open_settings,
-// `]` paste-buffer → paste_from_clipboard, `w` choose-window → session_picker, `PPage`
-// copy-mode -u → scroll_page_up, `M-n`/`M-p` alerted-window nav → plain tab nav. tmux defaults
-// with no bootty equivalent at all are omitted: copy-mode entry ([), swap-pane ({ } C-o M-o),
+// `]` paste-buffer → paste_from_clipboard, `w` choose-window → session_picker, `[` copy-mode
+// → scroll_page_up, `PPage` copy-mode -u → scroll_page_up, `M-n`/`M-p` alerted-window nav
+// → plain tab nav. tmux defaults
 // layouts (Space, M-1..5, E), break-pane (!), detach/client chooser (d, D), display-panes (q),
 // clock (t), window info (i), marks (m, M), buffers (# - =), find-window (f), select-window 0
 // / by prompted index (0, '), move-window (. — tmux prompts for an absolute index while
@@ -1280,6 +1283,7 @@ const TMUX_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     (":", "command_palette"),
     ("shift+c", "open_settings"),
     ("]", "paste_from_clipboard"),
+    ("[", "scroll_page_up"),
     ("PageUp", "scroll_page_up"),
     ("?", "show_keybinds"),
     ("/", "show_keybinds"),
@@ -1297,10 +1301,8 @@ fn prefixed_keybinds(prefix: &str, entries: &[(&str, &str)]) -> Vec<String> {
 // per-backend relay to an external config.
 fn navigation_keybinds() -> &'static [&'static str] {
     &[
-        "alt+n=next_tab",
-        "alt+shift+n=next_tab",
-        "alt+p=previous_tab",
-        "alt+shift+p=previous_tab",
+        "left_alt+shift+n=next_tab",
+        "left_alt+shift+p=previous_tab",
         "alt+shift+]=next_tab",
         "alt+shift+[=previous_tab",
         "alt+Tab=last_tab",
@@ -1313,8 +1315,8 @@ fn navigation_keybinds() -> &'static [&'static str] {
         "alt+7=select_tab:7",
         "alt+8=select_tab:8",
         "alt+9=select_tab:9",
-        "alt+shift+,=move_tab:-1",
-        "alt+shift+.=move_tab:1",
+        "left_alt+shift+,=move_tab:-1",
+        "left_alt+shift+.=move_tab:1",
         "alt+h=select_pane:left",
         "alt+j=select_pane:down",
         "alt+k=select_pane:up",
@@ -1368,6 +1370,7 @@ fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+shift+,=reload_config",
         "cmd+,=open_settings",
+        "cmd+f=start_search",
         "performable:cmd+c=copy_to_clipboard",
         "performable:cmd+v=paste_from_clipboard",
         "cmd+==increase_font_size:1",
@@ -1398,6 +1401,7 @@ fn ghostty_common_keybinds_other() -> &'static [&'static str] {
     &[
         "ctrl+shift+,=reload_config",
         "ctrl+,=open_settings",
+        "ctrl+shift+f=start_search",
         "performable:ctrl+shift+c=copy_to_clipboard",
         "performable:ctrl+shift+v=paste_from_clipboard",
         "performable:ctrl+Insert=copy_to_clipboard",
@@ -1484,8 +1488,6 @@ fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
         "ctrl+PageUp=previous_tab",
         "performable:ctrl+shift+ArrowLeft=previous_tab",
         "performable:ctrl+shift+ArrowRight=next_tab",
-        "performable:ctrl+shift+PageUp=move_tab:-1",
-        "performable:ctrl+shift+PageDown=move_tab:1",
         "alt+1=select_tab:1",
         "alt+2=select_tab:2",
         "alt+3=select_tab:3",

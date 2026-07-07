@@ -23,8 +23,8 @@ use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM, TerminalColorConfig,
-        TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent,
-        TerminalSelectionFormat, TerminalSideEffect,
+        TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalSearchDirection,
+        TerminalSelectionEvent, TerminalSelectionFormat, TerminalSideEffect,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
@@ -172,6 +172,7 @@ impl PublishedFrame {
 
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
 type MouseTrackingResponse = std::result::Result<bool, String>;
+type SearchViewportResponse = std::result::Result<bool, String>;
 enum TerminalCommand {
     DisplayScale(f32),
     RenderCellMetrics(CellMetrics),
@@ -197,6 +198,11 @@ enum TerminalCommand {
     FormatSelection {
         format: TerminalSelectionFormat,
         done: SyncSender<SelectionFormatResponse>,
+    },
+    SearchViewport {
+        query: String,
+        direction: TerminalSearchDirection,
+        done: SyncSender<SearchViewportResponse>,
     },
     IsMouseTracking(SyncSender<MouseTrackingResponse>),
     DiscardPendingOutput(SyncSender<()>),
@@ -396,6 +402,23 @@ impl TerminalSession {
         done_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("terminal worker stopped before formatting selection"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn search_viewport(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+    ) -> Result<bool> {
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        self.send_command(TerminalCommand::SearchViewport {
+            query: query.to_owned(),
+            direction,
+            done: done_tx,
+        })?;
+        done_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("terminal worker stopped before searching scrollback"))?
             .map_err(anyhow::Error::msg)
     }
 
@@ -766,6 +789,19 @@ impl TerminalWorker {
                         .engine
                         .format_selection(format)
                         .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                TerminalCommand::SearchViewport {
+                    query,
+                    direction,
+                    done,
+                } => {
+                    self.mark_input_fast_path();
+                    let response = self
+                        .engine
+                        .search_viewport(&query, direction)
+                        .map_err(|error| error.to_string());
+                    stats.terminal_changed = true;
                     let _ = done.send(response);
                 }
                 TerminalCommand::IsMouseTracking(done) => {

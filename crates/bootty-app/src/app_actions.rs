@@ -8,8 +8,8 @@ use crate::{
     direct_input::ModifierSideState,
     input::terminal_key,
     input_binding::{
-        AppearanceChoice, BindingAction, BindingElement, BindingKey, BindingTrigger, PaneDirection,
-        parse_action, parse_binding_elements,
+        AppearanceChoice, BindingAction, BindingElement, BindingKey, BindingTrigger,
+        NavigateSearch, PaneDirection, parse_action, parse_binding_elements,
     },
     mux::command::MuxDirection,
     terminal::{KeyInput, KeyMods, TerminalKey},
@@ -36,6 +36,16 @@ pub enum AppAction {
     ShowKeybinds,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalFindAction {
+    Prompt,
+    Search(String),
+    SearchSelection,
+    Next,
+    Previous,
+    Close,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeybindAction {
     App(AppAction),
@@ -43,6 +53,7 @@ pub enum KeybindAction {
     Scroll(TerminalScrollAction),
     Write(Vec<u8>),
     Font(FontSizeAction),
+    Find(TerminalFindAction),
     CopyToClipboard,
     PasteFromClipboard,
 }
@@ -417,6 +428,16 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         BindingAction::ScrollPageLines(lines) => {
             Ok(KeybindAction::Scroll(TerminalScrollAction::Lines(lines)))
         }
+        BindingAction::StartSearch => Ok(KeybindAction::Find(TerminalFindAction::Prompt)),
+        BindingAction::EndSearch => Ok(KeybindAction::Find(TerminalFindAction::Close)),
+        BindingAction::Search(value) => Ok(KeybindAction::Find(TerminalFindAction::Search(value))),
+        BindingAction::SearchSelection => {
+            Ok(KeybindAction::Find(TerminalFindAction::SearchSelection))
+        }
+        BindingAction::NavigateSearch(direction) => Ok(KeybindAction::Find(match direction {
+            NavigateSearch::Previous => TerminalFindAction::Previous,
+            NavigateSearch::Next => TerminalFindAction::Next,
+        })),
         BindingAction::Csi(value) => Ok(KeybindAction::Write(csi_bytes(&value))),
         BindingAction::Esc(value) => Ok(KeybindAction::Write(esc_bytes(&value))),
         BindingAction::Text(value) => Ok(KeybindAction::Write(text_action_bytes(&value))),
@@ -937,6 +958,45 @@ mod tests {
         );
 
         assert_eq!(action, Some(KeybindAction::Mux(MuxKeyAction::PreviousTab)));
+    }
+
+    #[test]
+    fn app_keybindings_match_partially_side_specific_modifier_chords() {
+        let mut bindings = AppKeyBindings::from_keybinds(&[
+            "left_alt+shift+n=next_tab".to_owned(),
+            "right_alt+shift+n=previous_tab".to_owned(),
+        ])
+        .unwrap();
+
+        let left_action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::N,
+            mods: crate::terminal::KeyMods {
+                shift: true,
+                alt: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("N"),
+            unshifted: Some('n'),
+        });
+        let right_action = bindings.action_for_input(KeyInput {
+            key: TerminalKey::N,
+            mods: crate::terminal::KeyMods {
+                shift: true,
+                alt: true,
+                right_alt: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("N"),
+            unshifted: Some('n'),
+        });
+
+        assert_eq!(left_action, Some(KeybindAction::Mux(MuxKeyAction::NextTab)));
+        assert_eq!(
+            right_action,
+            Some(KeybindAction::Mux(MuxKeyAction::PreviousTab))
+        );
     }
 
     #[test]

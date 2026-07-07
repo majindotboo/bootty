@@ -36,6 +36,7 @@ pub struct TerminalWidget {
     target_format: Option<wgpu::TextureFormat>,
     render_cache: TerminalRenderCache,
     terminal_cursor_icon: egui::CursorIcon,
+    search_pulse: SearchPulse,
     transition_key: Option<String>,
     transition_pending: bool,
     view: ViewTransform,
@@ -265,6 +266,7 @@ impl TerminalWidget {
             self.target_format,
             self.view,
         );
+        self.paint_search_pulse(ui, surface, frame.as_ref());
         self.metrics.cursor_blinking = cursor_blinking;
         self.metrics.text_runs = self.render_cache.text_runs();
         self.paint_scrollbar(ui, surface, frame.as_ref());
@@ -567,6 +569,79 @@ fn cursor_blink_alpha(phase: CursorBlinkPhase) -> u8 {
 }
 
 #[derive(Default)]
+struct SearchPulse {
+    last_pulse: u64,
+    started_at: Option<Instant>,
+}
+
+impl TerminalWidget {
+    fn paint_search_pulse(
+        &mut self,
+        ui: &mut egui::Ui,
+        surface: TerminalSurface,
+        frame: &RenderFrame,
+    ) {
+        let Some(selection) = frame.active_search_match else {
+            self.search_pulse.started_at = None;
+            self.search_pulse.last_pulse = frame.search_pulse;
+            return;
+        };
+        if frame.search_pulse == 0 {
+            self.search_pulse.last_pulse = 0;
+            self.search_pulse.started_at = None;
+            return;
+        }
+        let now = Instant::now();
+        if self.search_pulse.last_pulse != frame.search_pulse {
+            self.search_pulse.last_pulse = frame.search_pulse;
+            self.search_pulse.started_at = Some(now);
+        }
+        let Some(started_at) = self.search_pulse.started_at else {
+            return;
+        };
+        let elapsed = now.duration_since(started_at);
+        if elapsed >= SEARCH_PULSE_DURATION {
+            self.search_pulse.started_at = None;
+            return;
+        }
+
+        let cells = selection
+            .end_col
+            .saturating_sub(selection.start_col)
+            .saturating_add(1);
+        let rect = surface.run_rect(selection.start_col, selection.row, cells);
+        let rect = transformed_surface_rect(rect, self.view).expand(2.0 + 7.0 * pulse_t(elapsed));
+        let alpha = ((1.0 - pulse_t(elapsed)) * 180.0).round() as u8;
+        ui.painter().rect_stroke(
+            rect,
+            5.0,
+            egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 238, 128, alpha)),
+            egui::StrokeKind::Outside,
+        );
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+const SEARCH_PULSE_DURATION: Duration = Duration::from_millis(180);
+
+fn pulse_t(elapsed: Duration) -> f32 {
+    (elapsed.as_secs_f32() / SEARCH_PULSE_DURATION.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+fn transformed_surface_rect(rect: SurfaceRect, view: ViewTransform) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            rect.min_x * view.zoom + view.pan_x,
+            rect.min_y * view.zoom + view.pan_y,
+        ),
+        Pos2::new(
+            rect.max_x * view.zoom + view.pan_x,
+            rect.max_y * view.zoom + view.pan_y,
+        ),
+    )
+}
+
+#[derive(Default)]
 struct ScrollbarVisibility {
     last_offset: Option<u64>,
     active_until: Option<Instant>,
@@ -841,6 +916,13 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            row_wraps: vec![false, false],
+            row_wrap_continuations: vec![false, false],
+            search_matches: Vec::new(),
+            active_search_match: None,
+            active_search_match_index: None,
+            search_match_count: 0,
+            search_pulse: 0,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),
@@ -880,6 +962,13 @@ mod tests {
             },
             cursor: None,
             row_dirty: vec![true, true],
+            row_wraps: vec![false, false],
+            row_wrap_continuations: vec![false, false],
+            search_matches: Vec::new(),
+            active_search_match: None,
+            active_search_match_index: None,
+            search_match_count: 0,
+            search_pulse: 0,
             selections: Vec::new(),
             cells: Vec::new(),
             text: Vec::new(),

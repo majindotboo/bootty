@@ -19,8 +19,8 @@ use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE, TerminalColorConfig, TerminalCursorConfig,
-        TerminalEngine, TerminalFeatureConfig, TerminalSelectionEvent, TerminalSelectionFormat,
-        TerminalSideEffect,
+        TerminalEngine, TerminalFeatureConfig, TerminalSearchDirection, TerminalSelectionEvent,
+        TerminalSelectionFormat, TerminalSideEffect,
     },
     terminal_frame::RenderFrame,
     terminal_input_model::{KeyInput, MouseInput},
@@ -115,6 +115,11 @@ enum RmuxTerminalCommand {
         format: TerminalSelectionFormat,
         done: mpsc::Sender<std::result::Result<Option<Vec<u8>>, String>>,
     },
+    SearchViewport {
+        query: String,
+        direction: TerminalSearchDirection,
+        done: mpsc::Sender<std::result::Result<bool, String>>,
+    },
     IsMouseTracking {
         done: mpsc::Sender<std::result::Result<bool, String>>,
     },
@@ -135,6 +140,7 @@ struct RmuxWorkerConfig {
     closed: Arc<AtomicBool>,
     error_tx: mpsc::Sender<String>,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
+    waiting_initial_remote_frame: bool,
 }
 
 struct RmuxWorker {
@@ -158,6 +164,7 @@ struct RmuxWorker {
     force_next_frame_publish: bool,
     sync_output_since: Option<Instant>,
     last_terminal_change: Option<Instant>,
+    waiting_initial_remote_frame: bool,
     scroll_bottom_after_output: bool,
     command_disconnected: bool,
     output_closed: bool,
@@ -256,6 +263,7 @@ impl RmuxNativeTerminal {
         let pane_io = open_rmux_pane_io(pane_target, restore_lines)?;
         let (command_tx, command_rx) = mpsc::channel();
         let (error_tx, error_rx) = mpsc::channel();
+        let waiting_initial_remote_frame = true;
         let latest_frame = Arc::new(RmuxPublishedFrame::new());
         let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
         let pending_output_len = Arc::new(AtomicUsize::new(0));
@@ -271,6 +279,7 @@ impl RmuxNativeTerminal {
             closed: Arc::clone(&closed),
             error_tx,
             repaint_wakeup,
+            waiting_initial_remote_frame,
         })?;
         Ok(Self {
             command_tx,
@@ -387,6 +396,14 @@ impl TerminalRenderSource for RmuxNativeTerminal {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.send_command(RmuxTerminalCommand::MouseViewportScroll { delta })
+    }
+
+    fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        self.request(|done| RmuxTerminalCommand::SearchViewport {
+            query: query.to_owned(),
+            direction,
+            done,
+        })
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -520,6 +537,7 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
             force_next_frame_publish: false,
             sync_output_since: None,
             last_terminal_change: None,
+            waiting_initial_remote_frame: config.waiting_initial_remote_frame,
             scroll_bottom_after_output: false,
             command_disconnected: false,
             output_closed: false,
@@ -542,6 +560,9 @@ impl RmuxWorker {
             let mut terminal_changed = command_stats.terminal_changed;
             did_work |= self.collect_pane_output();
             let stats = self.drain_pending_output();
+            if stats.bytes > 0 && self.pending_restore_output.is_empty() {
+                self.waiting_initial_remote_frame = false;
+            }
             terminal_changed |= stats.bytes > 0;
             did_work |= stats.bytes > 0;
             terminal_changed |= self.drain_engine_input();
@@ -594,7 +615,7 @@ impl RmuxWorker {
                     self.mark_unpublished_frame();
                 }
                 RmuxTerminalCommand::Resize(geometry) => {
-                    self.mark_input_fast_path();
+                    self.force_next_frame_publish = true;
                     self.geometry = geometry;
                     self.queue_resize(geometry);
                     if self.engine.resize(geometry).is_ok() {
@@ -602,7 +623,7 @@ impl RmuxWorker {
                     }
                 }
                 RmuxTerminalCommand::ForceResize => {
-                    self.mark_input_fast_path();
+                    self.force_next_frame_publish = true;
                     self.queue_resize(self.geometry);
                     stats.terminal_changed = true;
                 }
@@ -721,6 +742,19 @@ impl RmuxWorker {
                         .engine
                         .format_selection(format)
                         .map_err(|error| error.to_string());
+                    let _ = done.send(response);
+                }
+                RmuxTerminalCommand::SearchViewport {
+                    query,
+                    direction,
+                    done,
+                } => {
+                    self.mark_input_fast_path();
+                    let response = self
+                        .engine
+                        .search_viewport(&query, direction)
+                        .map_err(|error| error.to_string());
+                    stats.terminal_changed = true;
                     let _ = done.send(response);
                 }
                 RmuxTerminalCommand::IsMouseTracking { done } => {
@@ -852,7 +886,7 @@ impl RmuxWorker {
             )
         };
         if stats.bytes == 0
-            && !self.force_next_frame_publish
+            && (!self.force_next_frame_publish || self.waiting_initial_remote_frame)
             && self.pending_output.is_empty()
             && !self.pending_restore_output.is_empty()
         {
@@ -922,6 +956,9 @@ impl RmuxWorker {
     }
 
     fn should_publish_frame(&mut self) -> bool {
+        if self.waiting_initial_remote_frame {
+            return false;
+        }
         let sync_output_suppressed = self.sync_output_suppressed();
         should_publish_frame_after_work(
             self.has_unpublished_frame,
@@ -962,6 +999,7 @@ impl RmuxWorker {
 
     fn mark_input_fast_path(&mut self) {
         self.discard_pending_restore_output();
+        self.waiting_initial_remote_frame = false;
         self.force_next_frame_publish = true;
     }
 
@@ -1114,6 +1152,18 @@ mod tests {
             side_effect_tx: None,
             benchmark_trace: None,
         }
+    }
+
+    #[test]
+    fn fresh_rmux_frame_cache_starts_with_empty_placeholder() {
+        let cache = RmuxPublishedFrame::new();
+
+        let frame = cache.load().unwrap();
+
+        assert_eq!(frame.cols, 0);
+        assert_eq!(frame.rows, 0);
+        assert!(frame.cells.is_empty());
+        assert!(frame.text.is_empty());
     }
 
     #[test]
@@ -1442,7 +1492,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
-    fn rmux_live_drop_and_reopen_preserves_process_and_restores_history() -> Result<()> {
+    fn rmux_live_drop_and_reopen_preserves_process_and_restores_history_after_initial_resize()
+    -> Result<()> {
         std::env::var_os("RMUX_TMPDIR")
             .context("set RMUX_TMPDIR to an empty temporary directory before running this test")?;
         use crate::rmux::{RmuxSessionClient, SdkRmuxClient};
@@ -1466,18 +1517,9 @@ mod tests {
             cwd: None,
         };
 
-        {
-            let mut terminal = RmuxNativeTerminal::new(
-                target.clone(),
-                test_geometry(),
-                test_config(),
-                Arc::new(|| {}),
-            )?;
-            terminal.write_input(
-                b"BOOTTY_RMUX_PERSIST=kept; export BOOTTY_RMUX_PERSIST; printf 'BOOTTY_PERSIST_HISTORY\\n'\r",
-            )?;
-            wait_rmux_capture_contains(&pane_id, "BOOTTY_PERSIST_HISTORY")?;
-        }
+        let marker = format!("BOOTTY_STARTUP_RESTORE_{}", std::process::id());
+        rmux_live_send_text(&session, &pane_id, &format!("printf '{marker}\\n'\r"))?;
+        wait_rmux_sdk_capture_contains(&session, &pane_id, &marker)?;
 
         let mut reopened =
             RmuxNativeTerminal::new(target, test_geometry(), test_config(), Arc::new(|| {}))?;
@@ -1488,7 +1530,7 @@ mod tests {
             reopened.check_worker_error()?;
             let frame = reopened.extract_frame()?;
             let text = frame.text.iter().collect::<String>();
-            if text.contains("BOOTTY_PERSIST_HISTORY") {
+            if text.contains(&marker) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -1497,8 +1539,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
-        reopened.write_input(b"printf 'BOOTTY_PERSIST_%s\\n' \"$BOOTTY_RMUX_PERSIST\"\r")?;
-        wait_rmux_capture_contains(&pane_id, "BOOTTY_PERSIST_kept")?;
+        drop(reopened);
+        let after_marker = format!("BOOTTY_AFTER_STARTUP_RESTORE_{}", std::process::id());
+        rmux_live_send_text(&session, &pane_id, &format!("printf '{after_marker}\\n'\r"))?;
+        wait_rmux_sdk_capture_contains(&session, &pane_id, &after_marker)?;
         client.kill_session(&session)?;
         let _ = std::process::Command::new("rmux")
             .arg("kill-server")
@@ -1586,6 +1630,59 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .status();
         Ok(())
+    }
+
+    fn rmux_live_pane_id(pane_id: &str) -> Result<rmux_sdk::PaneId> {
+        let pane_id = pane_id
+            .strip_prefix('%')
+            .context("rmux pane id should use tmux-style prefix")?
+            .parse::<u32>()?;
+        Ok(rmux_sdk::PaneId::from(pane_id))
+    }
+
+    fn rmux_live_send_text(session: &str, pane_id: &str, text: &str) -> Result<()> {
+        let pane_id = rmux_live_pane_id(pane_id)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let rmux = crate::rmux_bridge::connect_bootty_rmux().await?;
+            rmux.pane_by_id(rmux_sdk::SessionName::new(session)?, pane_id)
+                .await?
+                .send_text(text)
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn rmux_sdk_capture_text(session: &str, pane_id: &str) -> Result<String> {
+        let pane_id = rmux_live_pane_id(pane_id)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let rmux = crate::rmux_bridge::connect_bootty_rmux().await?;
+            let capture = rmux
+                .pane_by_id(rmux_sdk::SessionName::new(session)?, pane_id)
+                .await?
+                .capture_pane()
+                .await?;
+            Ok(String::from_utf8_lossy(&capture.stdout).into_owned())
+        })
+    }
+
+    fn wait_rmux_sdk_capture_contains(session: &str, pane_id: &str, needle: &str) -> Result<()> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let text = rmux_sdk_capture_text(session, pane_id)?;
+            if text.contains(needle) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("expected {needle:?} in rmux SDK pane capture:\n{text}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     fn rmux_live_pane_cursor(session: &str, pane_id: &str) -> Result<(u16, u16)> {

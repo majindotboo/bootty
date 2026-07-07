@@ -67,6 +67,16 @@ pub enum Command {
         detailed_message = "Toggle back to the most recently used tab"
     )]
     LastTab,
+    #[strum(
+        message = "Move Tab Left",
+        detailed_message = "Reorder the current tab one position left"
+    )]
+    MoveTabLeft,
+    #[strum(
+        message = "Move Tab Right",
+        detailed_message = "Reorder the current tab one position right"
+    )]
+    MoveTabRight,
     #[strum(message = "Rename Tab", detailed_message = "Rename the current tab")]
     RenameTab,
     #[strum(
@@ -146,6 +156,11 @@ pub enum Command {
         detailed_message = "Restore the configured font size"
     )]
     ResetFontSize,
+    #[strum(
+        message = "Find in Terminal",
+        detailed_message = "Search the terminal scrollback"
+    )]
+    Find,
     #[strum(
         message = "Keyboard Shortcuts",
         detailed_message = "Browse the active keybindings"
@@ -276,8 +291,8 @@ impl Command {
         self.get_detailed_message().unwrap_or("")
     }
 
-    /// The binding-action *base* name (e.g. `"select_tab"`), matching the binding
-    /// parser and the keybind editor's action field.
+    /// The binding action string used by the keybind editor and, for concrete
+    /// palette commands, by dispatch.
     pub fn action(self) -> &'static str {
         match self {
             Self::NewSession => "new_mux_session",
@@ -291,6 +306,8 @@ impl Command {
             Self::NextTab => "next_tab",
             Self::PreviousTab => "previous_tab",
             Self::LastTab => "last_tab",
+            Self::MoveTabLeft => "move_tab:-1",
+            Self::MoveTabRight => "move_tab:1",
             Self::RenameTab => "rename_tab",
             Self::SplitRight => "split_right",
             Self::SplitDown => "split_down",
@@ -308,6 +325,7 @@ impl Command {
             Self::IncreaseFontSize => "increase_font_size",
             Self::DecreaseFontSize => "decrease_font_size",
             Self::ResetFontSize => "reset_font_size",
+            Self::Find => "start_search",
             Self::KeyboardShortcuts => "show_keybinds",
             Self::UseSystemAppearance => "change_appearance:system",
             Self::UseLightAppearance => "change_appearance:light",
@@ -367,6 +385,7 @@ impl Command {
             Self::IncreaseFontSize => "zoom-in",
             Self::DecreaseFontSize => "zoom-out",
             Self::ResetFontSize | Self::SetFontSize => "type",
+            Self::Find => "search",
             Self::KeyboardShortcuts => "keyboard",
             Self::UseSystemAppearance | Self::UseLightAppearance | Self::UseDarkAppearance => {
                 "sun-moon"
@@ -379,7 +398,7 @@ impl Command {
             Self::CloseWindow => "x",
             Self::Ignore => "ban",
             Self::SelectTab | Self::SelectSession => "hash",
-            Self::MoveTab => "move-horizontal",
+            Self::MoveTab | Self::MoveTabLeft | Self::MoveTabRight => "move-horizontal",
             Self::SelectPane => "layout",
             Self::MoveSession => "move-vertical",
             Self::ScrollPageUp => "chevrons-up",
@@ -398,6 +417,8 @@ impl Command {
         match self {
             Self::IncreaseFontSize => Some("increase_font_size:1"),
             Self::DecreaseFontSize => Some("decrease_font_size:1"),
+            Self::MoveTabLeft => Some("move_tab:-1"),
+            Self::MoveTabRight => Some("move_tab:1"),
             Self::CommandPalette
             | Self::CloseWindow
             | Self::Ignore
@@ -419,7 +440,7 @@ impl Command {
         }
     }
 
-    /// The command whose base action is `name`, for resolving a stored binding row
+    /// The command whose action string is `name`, for resolving a stored binding row
     /// back to its title/description.
     pub fn from_action(name: &str) -> Option<Self> {
         Self::all().find(|command| command.action() == name)
@@ -464,5 +485,12 @@ mod tests {
                 command.icon()
             );
         }
+    }
+
+    #[test]
+    fn move_tab_left_and_right_are_palette_commands() {
+        assert_eq!(Command::MoveTab.palette_action(), None);
+        assert_eq!(Command::MoveTabLeft.palette_action(), Some("move_tab:-1"));
+        assert_eq!(Command::MoveTabRight.palette_action(), Some("move_tab:1"));
     }
 }

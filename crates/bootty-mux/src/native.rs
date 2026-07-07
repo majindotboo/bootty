@@ -177,17 +177,20 @@ impl NativeMuxState {
         }
     }
 
-    fn move_active_window(&mut self, session_id: &str, delta: i32) {
-        if let Some(session) = self.active_session_mut(session_id)
-            && let Some(index) = session
+    fn move_window(&mut self, session_id: &str, window_id: Option<&str>, delta: i32) {
+        if let Some(session) = self.active_session_mut(session_id) {
+            let target = window_id.unwrap_or(&session.active_window_id).to_owned();
+            if let Some(index) = session
                 .windows
                 .iter()
-                .position(|window| window.id == session.active_window_id)
-        {
-            let next = clamp_move_index(index, delta, session.windows.len());
-            session.windows.swap(index, next);
-            for (index, window) in session.windows.iter_mut().enumerate() {
-                window.index = index as u32 + 1;
+                .position(|window| window.id == target)
+            {
+                let next = clamp_move_index(index, delta, session.windows.len());
+                session.windows.swap(index, next);
+                session.active_window_id = target;
+                for (index, window) in session.windows.iter_mut().enumerate() {
+                    window.index = index as u32 + 1;
+                }
             }
         }
     }
@@ -496,8 +499,12 @@ impl MuxBackend for NativeBackend {
             MuxCommand::ActivateWindowIndex { session_id, index } => {
                 state.activate_window_index(&session_id, index);
             }
-            MuxCommand::MoveWindow { session_id, delta } => {
-                state.move_active_window(&session_id, delta);
+            MuxCommand::MoveWindow {
+                session_id,
+                window_id,
+                delta,
+            } => {
+                state.move_window(&session_id, window_id.as_deref(), delta);
             }
             MuxCommand::SplitPane {
                 session_id,
@@ -716,6 +723,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn move_window_can_target_a_non_active_tab() {
+        let mut state = local_state();
+        state.new_window("local", None);
+        state.new_window("local", None);
+        assert_eq!(state.sessions[0].active_window_id, "tab-3");
+
+        state.move_window("local", Some("tab-1"), 1);
+
+        let session = &state.sessions[0];
+        let ids = session
+            .windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["tab-2", "tab-1", "tab-3"]);
+        assert_eq!(session.active_window_id, "tab-1");
+        assert_eq!(
+            session
+                .windows
+                .iter()
+                .map(|window| window.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
     #[test]
     fn new_window_after_closing_middle_tab_keeps_window_ids_unique() {
         let mut state = local_state();

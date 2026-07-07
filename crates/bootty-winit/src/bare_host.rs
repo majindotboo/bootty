@@ -342,6 +342,13 @@ pub fn renderer_parity_gallery_frame() -> RendererFrame {
             color: None,
         }),
         row_dirty: vec![true],
+        row_wraps: vec![false],
+        row_wrap_continuations: vec![false],
+        search_matches: Vec::new(),
+        active_search_match: None,
+        active_search_match_index: None,
+        search_match_count: 0,
+        search_pulse: 0,
         selections: Vec::new(),
         cells: vec![
             gallery_cell(0, 0, 0, 1, CellStyle::default()),

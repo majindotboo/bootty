@@ -20,8 +20,8 @@ use bootty_runtime::{
 };
 use bootty_terminal::{
     terminal_engine::{
-        TerminalColorConfig, TerminalCursorConfig, TerminalFeatureConfig, TerminalSelectionEvent,
-        TerminalSelectionFormat,
+        TerminalColorConfig, TerminalCursorConfig, TerminalFeatureConfig, TerminalSearchDirection,
+        TerminalSelectionEvent, TerminalSelectionFormat,
     },
     terminal_input_model::{KeyInput, MouseInput},
 };
@@ -110,6 +110,10 @@ impl TerminalRenderSource for ActiveTerminalRuntime {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.0.scroll_viewport_delta(delta)
+    }
+
+    fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        self.0.search_viewport(query, direction)
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -407,6 +411,8 @@ fn startup_placeholder_frame(geometry: TerminalGeometry) -> Arc<RenderFrame> {
         cols: geometry.cols,
         rows: geometry.rows,
         row_dirty: vec![true; geometry.rows as usize],
+        row_wraps: vec![false; geometry.rows as usize],
+        row_wrap_continuations: vec![false; geometry.rows as usize],
         ..RenderFrame::default()
     };
     frame.stats.dirty_rows = geometry.rows as usize;
@@ -1157,6 +1163,10 @@ impl TerminalRenderSource for BackendPaneTerminal {
 
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.terminal.scroll_viewport_delta(delta)
+    }
+
+    fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        self.terminal.search_viewport(query, direction)
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {

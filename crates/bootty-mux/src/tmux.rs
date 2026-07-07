@@ -160,6 +160,7 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
             }
             MuxCommand::MoveWindow {
                 session_id: _,
+                window_id: _,
                 delta,
             } => {
                 // Relative swap, following the moved window. tmux resolves the unscoped relative
