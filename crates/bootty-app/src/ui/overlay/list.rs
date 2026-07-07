@@ -107,15 +107,17 @@ impl<'a> ListView<'a> {
     }
 
     pub fn show(self, ui: &mut egui::Ui, palette: ThemePalette) -> ListOutcome {
-        let (next, previous, enter) = ui.input(|input| {
+        let (next, previous, enter, pointer_pos) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::ArrowDown)
                     || (input.key_pressed(egui::Key::N) && input.modifiers.ctrl),
                 input.key_pressed(egui::Key::ArrowUp)
                     || (input.key_pressed(egui::Key::P) && input.modifiers.ctrl),
                 input.key_pressed(egui::Key::Enter),
+                input.pointer.hover_pos(),
             )
         });
+        let pointer_moved = pointer_moved_since_last_frame(ui, self.id_salt, pointer_pos);
 
         if self.rows.is_empty() {
             let (rect, _) = ui.allocate_exact_size(
@@ -162,7 +164,12 @@ impl<'a> ListView<'a> {
                             ui.allocate_exact_size(egui::vec2(width, self.row_height), sense);
                         let row_selected = !row.section && index == selected;
                         paint_row(ui.painter(), rect, palette, row, row_selected);
-                        if !row.section && response.hovered() {
+                        let pointer_over_row = pointer_pos.is_some_and(|pos| rect.contains(pos));
+                        let pointer_selected = pointer_over_row
+                            && (pointer_moved
+                                || response.is_pointer_button_down_on()
+                                || response.clicked());
+                        if !row.section && pointer_selected {
                             selected = index;
                             hovered = Some(index);
                         }
@@ -358,6 +365,23 @@ fn paint_highlighted_text(painter: &egui::Painter, text: HighlightedText<'_>) {
     painter.galley(text.pos + offset, galley, text.color);
 }
 
+fn pointer_moved_since_last_frame(
+    ui: &egui::Ui,
+    id_salt: egui::Id,
+    pointer_pos: Option<Pos2>,
+) -> bool {
+    let id = id_salt.with("last-pointer-hover-pos");
+    let previous = ui.memory(|memory| memory.data.get_temp::<Pos2>(id));
+    ui.memory_mut(|memory| {
+        if let Some(pos) = pointer_pos {
+            memory.data.insert_temp(id, pos);
+        } else {
+            memory.data.remove_temp::<Pos2>(id);
+        }
+    });
+    previous.is_some_and(|previous| pointer_pos.is_some_and(|current| current != previous))
+}
+
 fn selectable_selection_after_nav(
     selected: usize,
     rows: &[ListRow],
@@ -409,6 +433,84 @@ mod tests {
         assert_eq!(selection_after_nav(2, 3, false, true), 1);
         assert_eq!(selection_after_nav(0, 3, false, true), 0);
         assert_eq!(selection_after_nav(5, 0, true, true), 0);
+    }
+
+    #[test]
+    fn stationary_pointer_does_not_select_hovered_row() {
+        let context = egui::Context::default();
+        let rows = vec![
+            ListRow {
+                primary: "first".to_owned(),
+                ..ListRow::default()
+            },
+            ListRow {
+                primary: "second".to_owned(),
+                ..ListRow::default()
+            },
+            ListRow {
+                primary: "third".to_owned(),
+                ..ListRow::default()
+            },
+        ];
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let hover_third_row = Pos2::new(12.0, ROW_HEIGHT * 2.0 + ROW_HEIGHT * 0.5);
+
+        let _ = show_test_list(
+            &context,
+            &rows,
+            0,
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(hover_third_row)],
+                ..Default::default()
+            },
+        );
+
+        let second = show_test_list(
+            &context,
+            &rows,
+            0,
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::Text("a".to_owned())],
+                ..Default::default()
+            },
+        );
+        assert_eq!(second.selected, 0);
+        assert_eq!(second.hovered, None);
+
+        let moved = show_test_list(
+            &context,
+            &rows,
+            0,
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                events: vec![egui::Event::PointerMoved(Pos2::new(
+                    12.0,
+                    ROW_HEIGHT + ROW_HEIGHT * 0.5,
+                ))],
+                ..Default::default()
+            },
+        );
+        assert_eq!(moved.selected, 1);
+        assert_eq!(moved.hovered, Some(1));
+    }
+
+    fn show_test_list(
+        context: &egui::Context,
+        rows: &[ListRow],
+        selected: usize,
+        input: egui::RawInput,
+    ) -> ListOutcome {
+        let mut outcome = None;
+        let _ = context.run_ui(input, |ui| {
+            outcome = Some(
+                ListView::new("test-list", rows, selected)
+                    .max_height(ROW_HEIGHT * rows.len() as f32)
+                    .show(ui, ThemePalette::default()),
+            );
+        });
+        outcome.expect("list rendered")
     }
 
     #[test]
