@@ -5,11 +5,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(debug_assertions)]
-use std::{fs::File, io::Write};
-
 use anyhow::Result;
 use eframe::egui::{self, Pos2, Rect};
+
+mod copy_mode;
+#[cfg(debug_assertions)]
+mod diagnostic_actions;
+mod recorded_chord;
+mod selection;
+
+use copy_mode::{
+    CopyModeKeyAction, copy_mode_action_for_egui_event, copy_mode_action_for_input,
+    copy_mode_egui_key_may_emit_text, copy_mode_egui_key_should_pass_to_app,
+    copy_mode_input_should_pass_to_app, copy_mode_key_input_present, copy_shortcut_pressed,
+    direct_copy_shortcut_pressed,
+};
+#[cfg(test)]
+use copy_mode::{CopyModeSearchRepeat, copy_mode_action_for_char, copy_mode_action_for_egui_key};
+#[cfg(debug_assertions)]
+use diagnostic_actions::{DiagnosticAction, DiagnosticActionDriver, DiagnosticRecord};
+use recorded_chord::normalize_recorded_chord;
+use selection::{TerminalSelectionAction, TerminalSelectionRouteContext, TerminalSelectionRouter};
+#[cfg(test)]
+use selection::{selection_drag_scroll_delta, terminal_selection_event_clamped};
 
 use crate::{
     app_actions::{
@@ -27,7 +45,7 @@ use crate::{
         STATUS_METRICS_SAMPLE_INTERVAL, StabilityTrace, StabilityTraceSample, StatusMetrics,
     },
     direct_input::{DirectKeyInput, ModifierSideState},
-    geometry::{SurfacePoint, TerminalSurface, ViewTransform},
+    geometry::{TerminalSurface, ViewTransform},
     input::{
         InputSnapshot, TerminalInputCommand, WheelScrollState,
         focus::InputFocus,
@@ -52,10 +70,7 @@ use crate::{
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
     session_order::SessionOrderStore,
-    terminal::{
-        DrainStats, KeyInput, MouseButton, TerminalKey, TerminalSearchDirection,
-        TerminalSessionConfig,
-    },
+    terminal::{DrainStats, MouseButton, TerminalSearchDirection, TerminalSessionConfig},
     terminal_text::TerminalTextConfig,
     theme::theme_from_config,
     ui::{
@@ -70,10 +85,14 @@ use crate::{
     },
 };
 use bootty_terminal::terminal_engine::{
-    TerminalCopyModeAction, TerminalCopyModeMotion, TerminalSelectionEvent,
-    TerminalSelectionFormat, TerminalSideEffect, TerminalSideEffectEvent,
+    TerminalCopyModeAction, TerminalSelectionFormat, TerminalSideEffect, TerminalSideEffectEvent,
     encode_iterm2_report_cell_size, encode_iterm2_report_variable, encode_osc52_response,
 };
+
+#[cfg(test)]
+use crate::terminal::{KeyInput, TerminalKey};
+#[cfg(test)]
+use bootty_terminal::terminal_engine::TerminalCopyModeMotion;
 
 fn mux_refresh_repaint_after(config: &crate::config::MultiplexerConfig) -> Option<Duration> {
     (selected_backend(config) != MuxBackendKind::Native).then_some(MUX_SESSION_REFRESH_INTERVAL)
@@ -170,10 +189,7 @@ pub struct AppState {
     /// Mirrors whether a Luau-opened floating window is showing. That window lives on `BoottyApp`
     /// rather than here, so input gating reads this mirror to stop feeding the terminal behind it.
     lua_window_open: bool,
-    terminal_selection_drag_active: bool,
-    terminal_selection_drag_pos: Option<Pos2>,
-    terminal_selection_pending_start: Option<TerminalSelectionEvent>,
-    terminal_selection_passthrough_active: bool,
+    terminal_selection: TerminalSelectionRouter,
     /// Screen rects of chrome resize handles (sidebar edge, pane dividers) registered during the
     /// previous frame's UI build. A primary press inside one of these must not begin a terminal
     /// text selection — the handle owns that drag. Populated each frame in `show_fixed_layout`.
@@ -315,710 +331,6 @@ fn focus_after_native_layout_reconcile(
     new_panes.first().cloned()
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum TerminalSelectionAction {
-    Begin(TerminalSelectionEvent),
-    Update(TerminalSelectionEvent),
-    Scroll(isize),
-    End(Option<TerminalSelectionEvent>),
-}
-
-struct TerminalSelectionRouteContext<'a> {
-    surface: Option<TerminalSurface>,
-    view: ViewTransform,
-    mouse_tracking: bool,
-    frame_modifiers: egui::Modifiers,
-    chrome_handle_rects: &'a [egui::Rect],
-}
-
-fn route_terminal_selection_events(
-    events: Vec<egui::Event>,
-    context: TerminalSelectionRouteContext<'_>,
-    active: &mut bool,
-    drag_pos: &mut Option<Pos2>,
-    pending_start: &mut Option<TerminalSelectionEvent>,
-    passthrough_active: Option<&mut bool>,
-) -> (Vec<egui::Event>, Vec<TerminalSelectionAction>) {
-    let TerminalSelectionRouteContext {
-        surface,
-        view,
-        mouse_tracking,
-        frame_modifiers,
-        chrome_handle_rects,
-    } = context;
-    let mut local_passthrough_active = false;
-    let passthrough_active = passthrough_active.unwrap_or(&mut local_passthrough_active);
-    let Some(surface) = surface else {
-        *drag_pos = None;
-        *pending_start = None;
-        *passthrough_active = false;
-        *active = false;
-        return (events, Vec::new());
-    };
-
-    let mut terminal_events = Vec::with_capacity(events.len());
-    let mut selection_actions = Vec::new();
-    for event in events {
-        match event {
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers,
-            } if surface.rect.contains(pos)
-                && !chrome_handle_rects.iter().any(|rect| rect.contains(pos)) =>
-            {
-                let rectangle = modifiers.alt || frame_modifiers.alt;
-                let selecting_with_modifier = modifiers.shift || frame_modifiers.shift;
-                if selecting_with_modifier {
-                    if let Some(selection_event) =
-                        terminal_selection_event(surface, view, pos, rectangle)
-                    {
-                        *drag_pos = None;
-                        *pending_start = None;
-                        *passthrough_active = false;
-                        *active = true;
-                        selection_actions.push(TerminalSelectionAction::Begin(selection_event));
-                        continue;
-                    }
-                } else if !mouse_tracking {
-                    *pending_start = terminal_selection_event(surface, view, pos, rectangle);
-                }
-                terminal_events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers,
-                });
-            }
-            egui::Event::PointerMoved(pos) if *active => {
-                *drag_pos = Some(pos);
-                if selection_drag_scroll_delta(surface, pos) == 0
-                    && let Some(selection_event) =
-                        terminal_selection_event_clamped(surface, view, pos, frame_modifiers.alt)
-                {
-                    selection_actions.push(TerminalSelectionAction::Update(selection_event));
-                }
-                if *passthrough_active {
-                    terminal_events.push(egui::Event::PointerMoved(pos));
-                }
-            }
-            egui::Event::PointerMoved(pos) if pending_start.is_some() => {
-                if mouse_tracking {
-                    *pending_start = None;
-                    terminal_events.push(egui::Event::PointerMoved(pos));
-                } else if let Some(start) = pending_start.take() {
-                    *active = true;
-                    *passthrough_active = true;
-                    *drag_pos = Some(pos);
-                    selection_actions.push(TerminalSelectionAction::Begin(start));
-                    if selection_drag_scroll_delta(surface, pos) == 0
-                        && let Some(selection_event) = terminal_selection_event_clamped(
-                            surface,
-                            view,
-                            pos,
-                            frame_modifiers.alt,
-                        )
-                    {
-                        selection_actions.push(TerminalSelectionAction::Update(selection_event));
-                    }
-                    terminal_events.push(egui::Event::PointerMoved(pos));
-                }
-            }
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers,
-            } if *active => {
-                let selection_event = terminal_selection_event_clamped(
-                    surface,
-                    view,
-                    pos,
-                    modifiers.alt || frame_modifiers.alt,
-                );
-                selection_actions.push(TerminalSelectionAction::End(selection_event));
-                *drag_pos = None;
-                *pending_start = None;
-                if *passthrough_active {
-                    terminal_events.push(egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: false,
-                        modifiers,
-                    });
-                }
-                *passthrough_active = false;
-                *active = false;
-            }
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers,
-            } if pending_start.is_some() => {
-                *pending_start = None;
-                terminal_events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers,
-                });
-            }
-            event => terminal_events.push(event),
-        }
-    }
-
-    (terminal_events, selection_actions)
-}
-
-fn terminal_selection_event(
-    surface: TerminalSurface,
-    view: ViewTransform,
-    pos: Pos2,
-    rectangle: bool,
-) -> Option<TerminalSelectionEvent> {
-    let position = surface.relative_position(view.inverse_point(pos))?;
-    Some(TerminalSelectionEvent {
-        surface,
-        position: SurfacePoint {
-            x: position.x,
-            y: position.y,
-        },
-        rectangle,
-    })
-}
-
-fn previous_inside_coordinate(min: f32, max: f32) -> f32 {
-    if max <= min {
-        return min;
-    }
-
-    let inset = max.abs().max(1.0) * f32::EPSILON * 8.0;
-    (max - inset).max(min)
-}
-
-fn terminal_grid_edge(surface: TerminalSurface) -> Pos2 {
-    let geometry = surface.geometry();
-    let right =
-        surface.rect.left() + surface.padding.left + f32::from(geometry.cols) * surface.cell.width;
-    let bottom =
-        surface.rect.top() + surface.padding.top + f32::from(geometry.rows) * surface.cell.height;
-    Pos2::new(
-        right.min(surface.rect.right()),
-        bottom.min(surface.rect.bottom()),
-    )
-}
-
-fn terminal_selection_event_clamped(
-    surface: TerminalSurface,
-    view: ViewTransform,
-    pos: Pos2,
-    rectangle: bool,
-) -> Option<TerminalSelectionEvent> {
-    let pos = view.inverse_point(pos);
-    let grid_edge = terminal_grid_edge(surface);
-    let max_x = previous_inside_coordinate(surface.rect.left(), grid_edge.x);
-    let max_y = previous_inside_coordinate(surface.rect.top(), grid_edge.y);
-    let pos = Pos2::new(
-        pos.x.clamp(surface.rect.left(), max_x),
-        pos.y.clamp(surface.rect.top(), max_y),
-    );
-    terminal_selection_event(surface, ViewTransform::IDENTITY, pos, rectangle)
-}
-
-fn selection_drag_scroll_delta(surface: TerminalSurface, pos: Pos2) -> isize {
-    let top = surface.rect.top();
-    let bottom = terminal_grid_edge(surface).y;
-    let hot_zone = (surface.cell.height * 0.35)
-        .clamp(4.0, 12.0)
-        .min(((bottom - top) / 2.0).max(0.0));
-
-    if pos.y < top {
-        -selection_drag_scroll_rows(surface, top - pos.y)
-    } else if pos.y <= top + hot_zone {
-        -selection_drag_scroll_rows(surface, top + hot_zone - pos.y)
-    } else if pos.y > bottom {
-        selection_drag_scroll_rows(surface, pos.y - bottom)
-    } else if pos.y >= bottom - hot_zone {
-        selection_drag_scroll_rows(surface, pos.y - (bottom - hot_zone))
-    } else {
-        0
-    }
-}
-
-fn selection_drag_scroll_rows(surface: TerminalSurface, distance: f32) -> isize {
-    let rows = (distance / surface.cell.height).ceil().max(1.0) as isize;
-    rows.min(surface.geometry().rows.max(1) as isize)
-}
-
-fn terminal_selection_autoscroll_actions(
-    surface: Option<TerminalSurface>,
-    view: ViewTransform,
-    active: bool,
-    drag_pos: Option<Pos2>,
-    modifiers: egui::Modifiers,
-) -> Vec<TerminalSelectionAction> {
-    if !active {
-        return Vec::new();
-    }
-    let Some(surface) = surface else {
-        return Vec::new();
-    };
-    let Some(pos) = drag_pos else {
-        return Vec::new();
-    };
-
-    let delta = selection_drag_scroll_delta(surface, pos);
-    if delta == 0 {
-        return Vec::new();
-    }
-
-    let mut actions = vec![TerminalSelectionAction::Scroll(delta)];
-    if let Some(selection_event) =
-        terminal_selection_event_clamped(surface, view, pos, modifiers.alt)
-    {
-        actions.push(TerminalSelectionAction::Update(selection_event));
-    }
-    actions
-}
-
-fn copy_shortcut_pressed(event: &egui::Event) -> bool {
-    matches!(
-        event,
-        egui::Event::Key {
-            key: egui::Key::C,
-            pressed: true,
-            repeat: false,
-            modifiers,
-            ..
-        } if modifiers.command && !modifiers.ctrl && !modifiers.alt
-    )
-}
-
-fn direct_copy_shortcut_pressed(input: KeyInput) -> bool {
-    input.key == TerminalKey::C
-        && input.mods.command
-        && !input.mods.ctrl
-        && !input.mods.alt
-        && !input.repeat
-}
-
-fn copy_mode_key_input_present(events: &[egui::Event]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)))
-}
-
-fn copy_mode_egui_key_should_pass_to_app(key: egui::Key, modifiers: egui::Modifiers) -> bool {
-    modifiers.alt || (modifiers.command && !copy_mode_egui_key_is_copy_shortcut(key, modifiers))
-}
-
-fn copy_mode_egui_key_is_copy_shortcut(key: egui::Key, modifiers: egui::Modifiers) -> bool {
-    key == egui::Key::C && modifiers.command && !modifiers.ctrl && !modifiers.alt
-}
-
-fn copy_mode_input_should_pass_to_app(input: KeyInput) -> bool {
-    input.mods.alt || (input.mods.command && !direct_copy_shortcut_pressed(input))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CopyModeKeyAction {
-    Terminal(TerminalCopyModeAction),
-    SearchPrompt(TerminalSearchDirection),
-    SearchWord(TerminalSearchDirection),
-    SearchRepeat(CopyModeSearchRepeat),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CopyModeSearchRepeat {
-    SameDirection,
-    OppositeDirection,
-}
-
-impl CopyModeSearchRepeat {
-    fn direction(self, started_direction: TerminalSearchDirection) -> TerminalSearchDirection {
-        match self {
-            Self::SameDirection => started_direction,
-            Self::OppositeDirection => opposite_terminal_search_direction(started_direction),
-        }
-    }
-}
-
-fn opposite_terminal_search_direction(
-    direction: TerminalSearchDirection,
-) -> TerminalSearchDirection {
-    match direction {
-        TerminalSearchDirection::Previous => TerminalSearchDirection::Next,
-        TerminalSearchDirection::Current | TerminalSearchDirection::Next => {
-            TerminalSearchDirection::Previous
-        }
-    }
-}
-
-fn copy_mode_terminal_action(action: TerminalCopyModeAction) -> Option<CopyModeKeyAction> {
-    Some(CopyModeKeyAction::Terminal(action))
-}
-
-fn copy_mode_action_for_egui_event(
-    event: &egui::Event,
-    suppress_next_text: &mut bool,
-) -> Option<CopyModeKeyAction> {
-    match event {
-        egui::Event::Key {
-            key,
-            pressed: true,
-            modifiers,
-            ..
-        } => {
-            let action = copy_mode_action_for_egui_key(*key, *modifiers);
-            *suppress_next_text = action.is_some() && copy_mode_egui_key_may_emit_text(*key);
-            action
-        }
-        egui::Event::Text(text) => {
-            if std::mem::take(suppress_next_text) {
-                None
-            } else {
-                text.chars().find_map(copy_mode_action_for_char)
-            }
-        }
-        _ => None,
-    }
-}
-
-fn copy_mode_egui_key_may_emit_text(key: egui::Key) -> bool {
-    matches!(
-        key,
-        egui::Key::Questionmark
-            | egui::Key::Slash
-            | egui::Key::A
-            | egui::Key::B
-            | egui::Key::C
-            | egui::Key::D
-            | egui::Key::E
-            | egui::Key::F
-            | egui::Key::G
-            | egui::Key::H
-            | egui::Key::I
-            | egui::Key::J
-            | egui::Key::K
-            | egui::Key::L
-            | egui::Key::M
-            | egui::Key::N
-            | egui::Key::O
-            | egui::Key::P
-            | egui::Key::Q
-            | egui::Key::R
-            | egui::Key::S
-            | egui::Key::T
-            | egui::Key::U
-            | egui::Key::V
-            | egui::Key::W
-            | egui::Key::X
-            | egui::Key::Y
-            | egui::Key::Z
-            | egui::Key::Num0
-            | egui::Key::Num1
-            | egui::Key::Num2
-            | egui::Key::Num3
-            | egui::Key::Num4
-            | egui::Key::Num5
-            | egui::Key::Num6
-            | egui::Key::Num7
-            | egui::Key::Num8
-            | egui::Key::Num9
-            | egui::Key::Space
-    )
-}
-
-fn copy_mode_action_for_egui_key(
-    key: egui::Key,
-    modifiers: egui::Modifiers,
-) -> Option<CopyModeKeyAction> {
-    if key == egui::Key::C && modifiers.command && !modifiers.ctrl && !modifiers.alt {
-        return copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel);
-    }
-    if modifiers.command || modifiers.alt {
-        return None;
-    }
-    if modifiers.ctrl {
-        return copy_mode_ctrl_key_action(key);
-    }
-    match key {
-        egui::Key::Questionmark => {
-            return Some(CopyModeKeyAction::SearchPrompt(
-                TerminalSearchDirection::Previous,
-            ));
-        }
-        egui::Key::Slash if modifiers.shift => {
-            return Some(CopyModeKeyAction::SearchPrompt(
-                TerminalSearchDirection::Previous,
-            ));
-        }
-        egui::Key::Slash => {
-            return Some(CopyModeKeyAction::SearchPrompt(
-                TerminalSearchDirection::Next,
-            ));
-        }
-        egui::Key::Num3 if modifiers.shift => {
-            return Some(CopyModeKeyAction::SearchWord(
-                TerminalSearchDirection::Previous,
-            ));
-        }
-        egui::Key::Num8 if modifiers.shift => {
-            return Some(CopyModeKeyAction::SearchWord(TerminalSearchDirection::Next));
-        }
-        _ => {}
-    }
-    if modifiers.shift {
-        return match key {
-            egui::Key::G => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
-            egui::Key::H => copy_mode_motion(TerminalCopyModeMotion::TopLine),
-            egui::Key::L => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
-            egui::Key::M => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
-            egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
-            egui::Key::Num4 => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
-            egui::Key::Num6 => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
-            _ => None,
-        };
-    }
-    match key {
-        egui::Key::Escape => {
-            copy_mode_terminal_action(TerminalCopyModeAction::CancelOrClearSelection)
-        }
-        egui::Key::Enter => {
-            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
-        }
-        egui::Key::Space => copy_mode_terminal_action(TerminalCopyModeAction::BeginSelection),
-        egui::Key::ArrowLeft => copy_mode_motion(TerminalCopyModeMotion::Left),
-        egui::Key::ArrowRight => copy_mode_motion(TerminalCopyModeMotion::Right),
-        egui::Key::ArrowUp => copy_mode_motion(TerminalCopyModeMotion::Up),
-        egui::Key::ArrowDown => copy_mode_motion(TerminalCopyModeMotion::Down),
-        egui::Key::PageUp => copy_mode_motion(TerminalCopyModeMotion::PageUp),
-        egui::Key::PageDown => copy_mode_motion(TerminalCopyModeMotion::PageDown),
-        egui::Key::Home => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
-        egui::Key::End => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
-        egui::Key::H => copy_mode_motion(TerminalCopyModeMotion::Left),
-        egui::Key::J => copy_mode_motion(TerminalCopyModeMotion::Down),
-        egui::Key::K => copy_mode_motion(TerminalCopyModeMotion::Up),
-        egui::Key::L => copy_mode_motion(TerminalCopyModeMotion::Right),
-        egui::Key::N => Some(CopyModeKeyAction::SearchRepeat(
-            CopyModeSearchRepeat::SameDirection,
-        )),
-        egui::Key::G => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
-        egui::Key::W => copy_mode_motion(TerminalCopyModeMotion::NextWord),
-        egui::Key::B => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
-        egui::Key::E => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
-        egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
-        egui::Key::Y => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
-        egui::Key::Q => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
-        egui::Key::Num0 => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
-        _ => None,
-    }
-}
-
-fn copy_mode_action_for_input(input: KeyInput) -> Option<CopyModeKeyAction> {
-    if direct_copy_shortcut_pressed(input) {
-        return copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel);
-    }
-    if input.mods.command || input.mods.alt {
-        return None;
-    }
-    if input.mods.ctrl {
-        return copy_mode_ctrl_terminal_key_action(input.key);
-    }
-    if input.mods.shift {
-        return copy_mode_shift_terminal_key_action(input.key).or_else(|| {
-            input
-                .utf8
-                .and_then(single_char)
-                .and_then(copy_mode_action_for_char)
-        });
-    }
-    copy_mode_terminal_key_action(input.key).or_else(|| {
-        input
-            .utf8
-            .and_then(single_char)
-            .and_then(copy_mode_action_for_char)
-    })
-}
-
-fn single_char(value: &str) -> Option<char> {
-    let mut chars = value.chars();
-    let ch = chars.next()?;
-    chars.next().is_none().then_some(ch)
-}
-
-fn copy_mode_ctrl_key_action(key: egui::Key) -> Option<CopyModeKeyAction> {
-    match key {
-        egui::Key::B => copy_mode_motion(TerminalCopyModeMotion::PageUp),
-        egui::Key::C | egui::Key::G => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
-        egui::Key::D => copy_mode_motion(TerminalCopyModeMotion::HalfPageDown),
-        egui::Key::E => copy_mode_motion(TerminalCopyModeMotion::ScrollDown),
-        egui::Key::F => copy_mode_motion(TerminalCopyModeMotion::PageDown),
-        egui::Key::J => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
-        egui::Key::N => copy_mode_motion(TerminalCopyModeMotion::Down),
-        egui::Key::P => copy_mode_motion(TerminalCopyModeMotion::Up),
-        egui::Key::U => copy_mode_motion(TerminalCopyModeMotion::HalfPageUp),
-        egui::Key::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleRectangle),
-        egui::Key::Y => copy_mode_motion(TerminalCopyModeMotion::ScrollUp),
-        _ => None,
-    }
-}
-
-fn copy_mode_ctrl_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
-    match key {
-        TerminalKey::B => copy_mode_motion(TerminalCopyModeMotion::PageUp),
-        TerminalKey::C | TerminalKey::G => {
-            copy_mode_terminal_action(TerminalCopyModeAction::Cancel)
-        }
-        TerminalKey::D => copy_mode_motion(TerminalCopyModeMotion::HalfPageDown),
-        TerminalKey::E => copy_mode_motion(TerminalCopyModeMotion::ScrollDown),
-        TerminalKey::F => copy_mode_motion(TerminalCopyModeMotion::PageDown),
-        TerminalKey::J | TerminalKey::Enter | TerminalKey::NumpadEnter => {
-            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
-        }
-        TerminalKey::N => copy_mode_motion(TerminalCopyModeMotion::Down),
-        TerminalKey::P => copy_mode_motion(TerminalCopyModeMotion::Up),
-        TerminalKey::U => copy_mode_motion(TerminalCopyModeMotion::HalfPageUp),
-        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleRectangle),
-        TerminalKey::Y => copy_mode_motion(TerminalCopyModeMotion::ScrollUp),
-        _ => None,
-    }
-}
-
-fn copy_mode_shift_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
-    match key {
-        TerminalKey::G => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
-        TerminalKey::H => copy_mode_motion(TerminalCopyModeMotion::TopLine),
-        TerminalKey::L => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
-        TerminalKey::M => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
-        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
-        TerminalKey::Digit4 => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
-        TerminalKey::Digit6 => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
-        _ => None,
-    }
-}
-
-fn copy_mode_terminal_key_action(key: TerminalKey) -> Option<CopyModeKeyAction> {
-    match key {
-        TerminalKey::Escape => {
-            copy_mode_terminal_action(TerminalCopyModeAction::CancelOrClearSelection)
-        }
-        TerminalKey::Enter | TerminalKey::NumpadEnter => {
-            copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel)
-        }
-        TerminalKey::Space => copy_mode_terminal_action(TerminalCopyModeAction::BeginSelection),
-        TerminalKey::ArrowLeft => copy_mode_motion(TerminalCopyModeMotion::Left),
-        TerminalKey::ArrowRight => copy_mode_motion(TerminalCopyModeMotion::Right),
-        TerminalKey::ArrowUp => copy_mode_motion(TerminalCopyModeMotion::Up),
-        TerminalKey::ArrowDown => copy_mode_motion(TerminalCopyModeMotion::Down),
-        TerminalKey::PageUp => copy_mode_motion(TerminalCopyModeMotion::PageUp),
-        TerminalKey::PageDown => copy_mode_motion(TerminalCopyModeMotion::PageDown),
-        TerminalKey::Home => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
-        TerminalKey::End => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
-        TerminalKey::H => copy_mode_motion(TerminalCopyModeMotion::Left),
-        TerminalKey::J => copy_mode_motion(TerminalCopyModeMotion::Down),
-        TerminalKey::K => copy_mode_motion(TerminalCopyModeMotion::Up),
-        TerminalKey::N => Some(CopyModeKeyAction::SearchRepeat(
-            CopyModeSearchRepeat::SameDirection,
-        )),
-        TerminalKey::L => copy_mode_motion(TerminalCopyModeMotion::Right),
-        TerminalKey::G => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
-        TerminalKey::W => copy_mode_motion(TerminalCopyModeMotion::NextWord),
-        TerminalKey::B => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
-        TerminalKey::E => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
-        TerminalKey::V => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
-        TerminalKey::Y => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
-        TerminalKey::Q => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
-        TerminalKey::Digit0 | TerminalKey::Numpad0 => {
-            copy_mode_motion(TerminalCopyModeMotion::StartOfLine)
-        }
-        _ => None,
-    }
-}
-
-fn copy_mode_action_for_char(ch: char) -> Option<CopyModeKeyAction> {
-    match ch {
-        '/' => Some(CopyModeKeyAction::SearchPrompt(
-            TerminalSearchDirection::Next,
-        )),
-        '?' => Some(CopyModeKeyAction::SearchPrompt(
-            TerminalSearchDirection::Previous,
-        )),
-        '*' => Some(CopyModeKeyAction::SearchWord(TerminalSearchDirection::Next)),
-        '#' => Some(CopyModeKeyAction::SearchWord(
-            TerminalSearchDirection::Previous,
-        )),
-        '$' => copy_mode_motion(TerminalCopyModeMotion::EndOfLine),
-        '^' => copy_mode_motion(TerminalCopyModeMotion::BackToIndentation),
-        '0' => copy_mode_motion(TerminalCopyModeMotion::StartOfLine),
-        'b' => copy_mode_motion(TerminalCopyModeMotion::PreviousWord),
-        'e' => copy_mode_motion(TerminalCopyModeMotion::NextWordEnd),
-        'g' => copy_mode_motion(TerminalCopyModeMotion::HistoryTop),
-        'G' => copy_mode_motion(TerminalCopyModeMotion::HistoryBottom),
-        'h' => copy_mode_motion(TerminalCopyModeMotion::Left),
-        'H' => copy_mode_motion(TerminalCopyModeMotion::TopLine),
-        'j' => copy_mode_motion(TerminalCopyModeMotion::Down),
-        'k' => copy_mode_motion(TerminalCopyModeMotion::Up),
-        'l' => copy_mode_motion(TerminalCopyModeMotion::Right),
-        'L' => copy_mode_motion(TerminalCopyModeMotion::BottomLine),
-        'M' => copy_mode_motion(TerminalCopyModeMotion::MiddleLine),
-        'n' => Some(CopyModeKeyAction::SearchRepeat(
-            CopyModeSearchRepeat::SameDirection,
-        )),
-        'N' => Some(CopyModeKeyAction::SearchRepeat(
-            CopyModeSearchRepeat::OppositeDirection,
-        )),
-        'q' => copy_mode_terminal_action(TerminalCopyModeAction::Cancel),
-        'v' => copy_mode_terminal_action(TerminalCopyModeAction::ToggleSelection),
-        'V' => copy_mode_terminal_action(TerminalCopyModeAction::SelectLine),
-        'w' => copy_mode_motion(TerminalCopyModeMotion::NextWord),
-        'y' => copy_mode_terminal_action(TerminalCopyModeAction::CopySelectionAndCancel),
-        _ => None,
-    }
-}
-
-fn copy_mode_motion(motion: TerminalCopyModeMotion) -> Option<CopyModeKeyAction> {
-    copy_mode_terminal_action(TerminalCopyModeAction::Move(motion))
-}
-
-/// Lowercase a single-letter key in a recorded chord (the physical-key serializer emits uppercase
-/// letters, but bootty's default keybinds and the egui-path recorder use lowercase, e.g. `cmd+x`).
-/// Multi-character key names like `Tab`/`F5` and non-letters are left untouched.
-fn normalize_recorded_chord(chord: String) -> String {
-    match chord.rsplit_once('+') {
-        Some((mods, key)) => match normalize_recorded_key(key) {
-            Some(key) => format!("{mods}+{key}"),
-            None => chord,
-        },
-        None => normalize_recorded_key(&chord).unwrap_or(chord),
-    }
-}
-
-fn normalize_recorded_key(key: &str) -> Option<String> {
-    if is_single_ascii_letter(key) {
-        return Some(key.to_ascii_lowercase());
-    }
-    if let Some(letter) = key.strip_prefix("Key")
-        && is_single_ascii_letter(letter)
-    {
-        return Some(letter.to_ascii_lowercase());
-    }
-    if let Some(digit) = key.strip_prefix("Digit")
-        && digit.len() == 1
-        && digit.as_bytes()[0].is_ascii_digit()
-    {
-        return Some(digit.to_owned());
-    }
-    None
-}
-
-fn is_single_ascii_letter(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_alphabetic())
-}
-
 fn terminal_cursor_icon_for_mouse_shape(shape: &str) -> Option<egui::CursorIcon> {
     let normalized = shape.to_ascii_lowercase().replace('_', "-");
     for token in normalized
@@ -1152,167 +464,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug)]
-enum DiagnosticAction {
-    NewTab,
-    NextTab,
-    PreviousTab,
-    SplitRight,
-    SplitDown,
-    SelectPaneLeft,
-    SelectPaneRight,
-    SelectPaneUp,
-    SelectPaneDown,
-    NextPane,
-}
-
-#[cfg(debug_assertions)]
-impl DiagnosticAction {
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "new_tab" => Some(Self::NewTab),
-            "next_tab" => Some(Self::NextTab),
-            "previous_tab" => Some(Self::PreviousTab),
-            "split_right" => Some(Self::SplitRight),
-            "split_down" => Some(Self::SplitDown),
-            "select_pane_left" => Some(Self::SelectPaneLeft),
-            "select_pane_right" => Some(Self::SelectPaneRight),
-            "select_pane_up" => Some(Self::SelectPaneUp),
-            "select_pane_down" => Some(Self::SelectPaneDown),
-            "next_pane" => Some(Self::NextPane),
-            _ => None,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::NewTab => "new_tab",
-            Self::NextTab => "next_tab",
-            Self::PreviousTab => "previous_tab",
-            Self::SplitRight => "split_right",
-            Self::SplitDown => "split_down",
-            Self::SelectPaneLeft => "select_pane_left",
-            Self::SelectPaneRight => "select_pane_right",
-            Self::SelectPaneUp => "select_pane_up",
-            Self::SelectPaneDown => "select_pane_down",
-            Self::NextPane => "next_pane",
-        }
-    }
-
-    fn mux_action(self) -> MuxKeyAction {
-        match self {
-            Self::NewTab => MuxKeyAction::NewTab,
-            Self::NextTab => MuxKeyAction::NextTab,
-            Self::PreviousTab => MuxKeyAction::PreviousTab,
-            Self::SplitRight => MuxKeyAction::SplitPane(SplitDirection::Right),
-            Self::SplitDown => MuxKeyAction::SplitPane(SplitDirection::Down),
-            Self::SelectPaneLeft => {
-                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Left)
-            }
-            Self::SelectPaneRight => {
-                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Right)
-            }
-            Self::SelectPaneUp => MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Up),
-            Self::SelectPaneDown => {
-                MuxKeyAction::SelectPane(crate::mux::command::MuxDirection::Down)
-            }
-            Self::NextPane => MuxKeyAction::NextPane,
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug)]
-struct DiagnosticStep {
-    at: Duration,
-    action: DiagnosticAction,
-}
-
-#[cfg(debug_assertions)]
-struct DiagnosticRecord<'a> {
-    phase: &'a str,
-    action: DiagnosticAction,
-    action_elapsed_us: u128,
-    selected_session: Option<&'a str>,
-    selected_window: Option<&'a str>,
-    pane_count: usize,
-    last_error: Option<&'a str>,
-}
-
-#[cfg(debug_assertions)]
-struct DiagnosticActionDriver {
-    started_at: Instant,
-    steps: Vec<DiagnosticStep>,
-    next_step: usize,
-    trace: Option<File>,
-}
-
-#[cfg(debug_assertions)]
-impl DiagnosticActionDriver {
-    fn from_env() -> Option<Self> {
-        let script = std::env::var("BOOTTY_DIAGNOSTIC_ACTIONS").ok()?;
-        let mut steps = Vec::new();
-        for raw in script.split(',') {
-            let (at, action) = raw.split_once(':')?;
-            let at = at.trim().parse::<u64>().ok()?;
-            let action = DiagnosticAction::parse(action)?;
-            steps.push(DiagnosticStep {
-                at: Duration::from_millis(at),
-                action,
-            });
-        }
-        if steps.is_empty() {
-            return None;
-        }
-        steps.sort_by_key(|step| step.at);
-        let mut trace =
-            std::env::var_os("BOOTTY_DIAGNOSTIC_TRACE").and_then(|path| File::create(path).ok());
-        if let Some(trace) = &mut trace {
-            let _ = writeln!(
-                trace,
-                "elapsed_ms,phase,action,action_elapsed_us,selected_session,selected_window,pane_count,last_error"
-            );
-        }
-        Some(Self {
-            started_at: Instant::now(),
-            steps,
-            next_step: 0,
-            trace,
-        })
-    }
-
-    fn due_actions(&mut self, now: Instant) -> Vec<DiagnosticAction> {
-        let elapsed = now.duration_since(self.started_at);
-        let mut actions = Vec::new();
-        while let Some(step) = self.steps.get(self.next_step)
-            && elapsed >= step.at
-        {
-            actions.push(step.action);
-            self.next_step += 1;
-        }
-        actions
-    }
-
-    fn record(&mut self, record: DiagnosticRecord<'_>) {
-        let Some(trace) = &mut self.trace else {
-            return;
-        };
-        let _ = writeln!(
-            trace,
-            "{},{},{},{},{},{},{},{}",
-            self.started_at.elapsed().as_millis(),
-            record.phase,
-            record.action.label(),
-            record.action_elapsed_us,
-            record.selected_session.unwrap_or(""),
-            record.selected_window.unwrap_or(""),
-            record.pane_count,
-            record.last_error.unwrap_or("")
-        );
-    }
-}
-
 impl AppState {
     pub fn new(
         config: BoottyConfig,
@@ -1384,10 +535,7 @@ impl AppState {
             suppress_next_egui_paste: false,
             settings_open: false,
             lua_window_open: false,
-            terminal_selection_drag_active: false,
-            terminal_selection_drag_pos: None,
-            terminal_selection_pending_start: None,
-            terminal_selection_passthrough_active: false,
+            terminal_selection: TerminalSelectionRouter::default(),
             wheel_scroll_state: WheelScrollState::default(),
             modifier_remaps,
             terminal_cursor_icon: egui::CursorIcon::Default,
@@ -3387,7 +2535,7 @@ impl AppState {
         {
             chrome_handle_rects.push(rect);
         }
-        let (mut events, selection_actions) = route_terminal_selection_events(
+        let (mut events, mut selection_actions) = self.terminal_selection.route_events(
             events,
             TerminalSelectionRouteContext {
                 surface: selection_surface,
@@ -3396,17 +2544,10 @@ impl AppState {
                 frame_modifiers: modifiers,
                 chrome_handle_rects: &chrome_handle_rects,
             },
-            &mut self.terminal_selection_drag_active,
-            &mut self.terminal_selection_drag_pos,
-            &mut self.terminal_selection_pending_start,
-            Some(&mut self.terminal_selection_passthrough_active),
         );
-        let mut selection_actions = selection_actions;
-        selection_actions.extend(terminal_selection_autoscroll_actions(
+        selection_actions.extend(self.terminal_selection.autoscroll_actions(
             selection_surface,
             self.terminal_view_transform,
-            self.terminal_selection_drag_active,
-            self.terminal_selection_drag_pos,
             modifiers,
         ));
         let selection_count = self.apply_terminal_selection_actions(selection_actions, effects);
@@ -4337,6 +3478,19 @@ mod tests {
         format!("{nanos}-{sequence}")
     }
 
+    fn route_selection_test_events(
+        events: Vec<egui::Event>,
+        context: TerminalSelectionRouteContext<'_>,
+    ) -> (
+        Vec<egui::Event>,
+        Vec<TerminalSelectionAction>,
+        TerminalSelectionRouter,
+    ) {
+        let mut router = TerminalSelectionRouter::default();
+        let (terminal_events, selection_actions) = router.route_events(events, context);
+        (terminal_events, selection_actions, router)
+    }
+
     #[test]
     fn remove_first_paste_event_removes_only_one_paste_event() {
         let mut events = vec![
@@ -4407,7 +3561,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
         let shift = egui::Modifiers {
             shift: true,
             ..Default::default()
@@ -4429,7 +3582,7 @@ mod tests {
             egui::Event::Text("x".to_owned()),
         ];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -4438,10 +3591,6 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
 
         assert_eq!(terminal_events, vec![egui::Event::Text("x".to_owned())]);
@@ -4458,7 +3607,7 @@ mod tests {
             selection_actions[2],
             TerminalSelectionAction::End(_)
         ));
-        assert!(!active);
+        assert!(!router.is_active());
     }
 
     #[test]
@@ -4467,8 +3616,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut drag_pos = None;
-        let mut active = false;
         let shift = egui::Modifiers {
             shift: true,
             ..Default::default()
@@ -4483,7 +3630,7 @@ mod tests {
             egui::Event::PointerMoved(egui::Pos2::new(20.0, -25.0)),
         ];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -4492,10 +3639,6 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut drag_pos,
-            &mut None,
-            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -4504,11 +3647,9 @@ mod tests {
             TerminalSelectionAction::Begin(_)
         ));
         assert_eq!(selection_actions.len(), 1);
-        let scroll_actions = terminal_selection_autoscroll_actions(
+        let scroll_actions = router.autoscroll_actions(
             Some(surface),
             ViewTransform::IDENTITY,
-            active,
-            drag_pos,
             egui::Modifiers::default(),
         );
         assert_eq!(scroll_actions[0], TerminalSelectionAction::Scroll(-2));
@@ -4516,7 +3657,7 @@ mod tests {
             panic!("expected edge update after scroll");
         };
         assert_eq!(event.position.y, 0.0);
-        assert!(active);
+        assert!(router.is_active());
     }
 
     #[test]
@@ -4525,8 +3666,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(220.0, 160.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
-        let mut drag_pos = None;
         let shift = egui::Modifiers {
             shift: true,
             ..Default::default()
@@ -4541,7 +3680,7 @@ mod tests {
             egui::Event::PointerMoved(egui::Pos2::new(20.0, 205.0)),
         ];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -4550,10 +3689,6 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut drag_pos,
-            &mut None,
-            None,
         );
 
         assert!(terminal_events.is_empty());
@@ -4562,11 +3697,9 @@ mod tests {
             TerminalSelectionAction::Begin(_)
         ));
         assert_eq!(selection_actions.len(), 1);
-        let scroll_actions = terminal_selection_autoscroll_actions(
+        let scroll_actions = router.autoscroll_actions(
             Some(surface),
             ViewTransform::IDENTITY,
-            active,
-            drag_pos,
             egui::Modifiers::default(),
         );
         assert_eq!(scroll_actions[0], TerminalSelectionAction::Scroll(3));
@@ -4575,7 +3708,7 @@ mod tests {
         };
         assert!(event.position.y < 160.0);
         assert!(event.position.y >= 140.0);
-        assert!(active);
+        assert!(router.is_active());
     }
 
     #[test]
@@ -4585,11 +3718,32 @@ mod tests {
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
 
-        let actions = terminal_selection_autoscroll_actions(
+        let mut router = TerminalSelectionRouter::default();
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let _ = router.route_events(
+            vec![
+                egui::Event::PointerButton {
+                    pos: egui::Pos2::new(10.0, 30.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: shift,
+                },
+                egui::Event::PointerMoved(egui::Pos2::new(20.0, 205.0)),
+            ],
+            TerminalSelectionRouteContext {
+                surface: Some(surface),
+                view: ViewTransform::IDENTITY,
+                mouse_tracking: false,
+                frame_modifiers: egui::Modifiers::default(),
+                chrome_handle_rects: &[],
+            },
+        );
+        let actions = router.autoscroll_actions(
             Some(surface),
             ViewTransform::IDENTITY,
-            true,
-            Some(egui::Pos2::new(20.0, 205.0)),
             egui::Modifiers::default(),
         );
 
@@ -4624,7 +3778,7 @@ mod tests {
             Some(egui::Pos2::new(10.0, 155.0)),
         ));
 
-        assert!(state.terminal_selection_drag_active);
+        assert!(state.terminal_selection.is_active());
         assert_eq!(
             effects
                 .iter()
@@ -4953,7 +4107,7 @@ mod tests {
             ],
             Some(egui::Pos2::new(20.0, 155.0)),
         ));
-        assert!(state.terminal_selection_drag_active);
+        assert!(state.terminal_selection.is_active());
         assert_eq!(
             first_frame
                 .iter()
@@ -5017,7 +4171,6 @@ mod tests {
         let press_pos = egui::Pos2::new(8.0, 10.0);
         assert!(surface.rect.contains(press_pos));
         assert!(handle.contains(press_pos));
-        let mut active = false;
         let events = vec![
             egui::Event::PointerButton {
                 pos: press_pos,
@@ -5028,7 +4181,7 @@ mod tests {
             egui::Event::PointerMoved(egui::Pos2::new(40.0, 10.0)),
         ];
 
-        let (_, selection_actions) = route_terminal_selection_events(
+        let (_, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -5037,14 +4190,10 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[handle],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
 
         assert!(selection_actions.is_empty());
-        assert!(!active);
+        assert!(!router.is_active());
     }
 
     #[test]
@@ -5053,7 +4202,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
         let events = vec![egui::Event::PointerButton {
             pos: egui::Pos2::new(10.0, 10.0),
             button: egui::PointerButton::Primary,
@@ -5062,7 +4210,7 @@ mod tests {
         }];
         let original = events.clone();
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -5071,15 +4219,11 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
 
         assert_eq!(terminal_events, original);
         assert!(selection_actions.is_empty());
-        assert!(!active);
+        assert!(!router.is_active());
     }
 
     #[test]
@@ -5088,7 +4232,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
         let press = egui::Event::PointerButton {
             pos: egui::Pos2::new(10.0, 10.0),
             button: egui::PointerButton::Primary,
@@ -5104,7 +4247,7 @@ mod tests {
         };
         let events = vec![press.clone(), motion.clone(), release.clone()];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -5113,10 +4256,6 @@ mod tests {
                 frame_modifiers: egui::Modifiers::default(),
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
 
         assert_eq!(terminal_events, vec![press, motion, release]);
@@ -5129,7 +4268,7 @@ mod tests {
             selection_actions[2],
             TerminalSelectionAction::End(_)
         ));
-        assert!(!active);
+        assert!(!router.is_active());
     }
 
     #[test]
@@ -5138,7 +4277,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
         let shift = egui::Modifiers {
             shift: true,
             ..Default::default()
@@ -5150,7 +4288,7 @@ mod tests {
             modifiers: shift,
         }];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -5159,10 +4297,6 @@ mod tests {
                 frame_modifiers: shift,
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
@@ -5170,7 +4304,7 @@ mod tests {
             selection_actions[0],
             TerminalSelectionAction::Begin(_)
         ));
-        assert!(active);
+        assert!(router.is_active());
     }
 
     #[test]
@@ -5179,7 +4313,6 @@ mod tests {
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(100.0, 80.0)),
             crate::geometry::CellMetrics::new(10.0, 20.0),
         );
-        let mut active = false;
         let shift = egui::Modifiers {
             shift: true,
             ..Default::default()
@@ -5191,7 +4324,7 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         }];
 
-        let (terminal_events, selection_actions) = route_terminal_selection_events(
+        let (terminal_events, selection_actions, router) = route_selection_test_events(
             events,
             TerminalSelectionRouteContext {
                 surface: Some(surface),
@@ -5200,10 +4333,6 @@ mod tests {
                 frame_modifiers: shift,
                 chrome_handle_rects: &[],
             },
-            &mut active,
-            &mut None,
-            &mut None,
-            None,
         );
         assert!(terminal_events.is_empty());
         assert_eq!(selection_actions.len(), 1);
@@ -5211,7 +4340,7 @@ mod tests {
             selection_actions[0],
             TerminalSelectionAction::Begin(_)
         ));
-        assert!(active);
+        assert!(router.is_active());
     }
 
     #[test]
