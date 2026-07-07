@@ -89,6 +89,15 @@ fn active_window_of(
     })
 }
 
+fn sessions_have_renderable_pane(sessions: &[MuxSession]) -> bool {
+    sessions.iter().any(|session| {
+        session
+            .windows
+            .iter()
+            .any(|window| !window.panes.is_empty())
+    })
+}
+
 fn selected_window_for_session<'a>(
     session: &'a MuxSession,
     selected_window: Option<&str>,
@@ -486,8 +495,8 @@ impl MuxController {
             .execute_native_command(
                 config,
                 command.clone(),
-                Some(session_id.to_owned()),
-                Some(window_id.to_owned()),
+                self.selected_session.clone(),
+                self.selected_window.clone(),
             )
             .is_ok()
         {
@@ -499,7 +508,7 @@ impl MuxController {
             config,
             command,
             MuxCommandCompletion {
-                selected_session: Some(session_id.to_owned()),
+                selected_session: None,
                 selected_window: None,
             },
         );
@@ -640,6 +649,19 @@ impl MuxController {
 
     fn apply_refreshed_snapshot(&mut self, backend: MuxBackendKind, snapshot: MuxSnapshot) {
         let same_backend = self.current_backend == Some(backend);
+        if backend == MuxBackendKind::Rmux
+            && !snapshot.sessions.is_empty()
+            && !sessions_have_renderable_pane(&snapshot.sessions)
+        {
+            return;
+        }
+        if backend == MuxBackendKind::Rmux
+            && same_backend
+            && sessions_have_renderable_pane(&self.sessions)
+            && !sessions_have_renderable_pane(&snapshot.sessions)
+        {
+            return;
+        }
         let current_session = same_backend.then(|| self.selected_session.take()).flatten();
         let current_window = same_backend.then(|| self.selected_window.take()).flatten();
         self.apply_snapshot(backend, snapshot, current_session, current_window);
@@ -1003,6 +1025,35 @@ mod tests {
     }
 
     #[test]
+    fn rename_window_completion_does_not_activate_source_session() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let mut agents = session("$2", "agents");
+        agents.windows = vec![window("@9", 1)];
+        agents.active_window_id = Some("@9".to_owned());
+        let (result_tx, rx) = mpsc::channel();
+        result_tx
+            .send(Ok(MuxCommandCompletion {
+                selected_session: None,
+                selected_window: None,
+            }))
+            .expect("send rename completion");
+        let mut controller = MuxController {
+            sessions: vec![work, agents],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            mux_command_rx: Some(rx),
+            ..Default::default()
+        };
+
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    #[test]
     fn native_refresh_keeps_empty_startup_snapshot_without_worker() {
         let repaint: RepaintHandle = std::sync::Arc::new(|| {});
         let config = MultiplexerConfig {
@@ -1110,6 +1161,111 @@ mod tests {
 
         assert_eq!(controller.selected_session(), Some("$1"));
         assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    #[test]
+    fn rmux_refresh_ignores_nonrenderable_snapshot_while_current_state_has_panes() {
+        let mut work = session("work", "work");
+        let mut editor = window("@1", 1);
+        editor.anchor = MuxPaneAnchor {
+            session_id: "work".to_owned(),
+            pane_id: Some("%1".to_owned()),
+            cwd: Some("/repo".to_owned()),
+            process: Some("nvim".to_owned()),
+        };
+        editor.panes = vec![editor.anchor.clone()];
+        editor.active = true;
+        work.anchor = editor.anchor.clone();
+        work.active_window_id = Some("@1".to_owned());
+        work.windows = vec![editor];
+        let mut controller = MuxController {
+            sessions: vec![work],
+            selected_session: Some("work".to_owned()),
+            selected_window: Some("@1".to_owned()),
+            current_backend: Some(MuxBackendKind::Rmux),
+            ..Default::default()
+        };
+
+        controller.apply_refreshed_snapshot(MuxBackendKind::Rmux, MuxSnapshot::default());
+        controller.apply_refreshed_snapshot(MuxBackendKind::Rmux, MuxSnapshot::default());
+
+        assert_eq!(controller.selected_session(), Some("work"));
+        assert_eq!(controller.selected_window(), Some("@1"));
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%1")
+        );
+        assert_eq!(controller.sessions().len(), 1);
+
+        let mut paneless = session("work", "work");
+        paneless.windows = vec![window("@1", 1)];
+        paneless.active_window_id = Some("@1".to_owned());
+        controller.apply_refreshed_snapshot(
+            MuxBackendKind::Rmux,
+            MuxSnapshot {
+                sessions: vec![paneless],
+                active_session_id: Some("work".to_owned()),
+            },
+        );
+
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%1")
+        );
+        assert_eq!(controller.sessions().len(), 1);
+    }
+
+    #[test]
+    fn rmux_refresh_ignores_paneless_snapshot_before_first_renderable_state() {
+        let mut paneless = session("work", "work");
+        paneless.windows = vec![window("@1", 1), window("@2", 2)];
+        paneless.active_window_id = Some("@1".to_owned());
+        let mut controller = MuxController::default();
+
+        controller.apply_refreshed_snapshot(
+            MuxBackendKind::Rmux,
+            MuxSnapshot {
+                sessions: vec![paneless],
+                active_session_id: Some("work".to_owned()),
+            },
+        );
+
+        assert_eq!(controller.selected_session(), None);
+        assert!(controller.sessions().is_empty());
+
+        let mut work = session("work", "work");
+        let mut editor = window("@1", 1);
+        editor.anchor = MuxPaneAnchor {
+            session_id: "work".to_owned(),
+            pane_id: Some("%1".to_owned()),
+            cwd: Some("/repo".to_owned()),
+            process: Some("nvim".to_owned()),
+        };
+        editor.panes = vec![editor.anchor.clone()];
+        editor.active = true;
+        work.anchor = editor.anchor.clone();
+        work.active_window_id = Some("@1".to_owned());
+        work.windows = vec![editor];
+
+        controller.apply_refreshed_snapshot(
+            MuxBackendKind::Rmux,
+            MuxSnapshot {
+                sessions: vec![work],
+                active_session_id: Some("work".to_owned()),
+            },
+        );
+
+        assert_eq!(controller.selected_session(), Some("work"));
+        assert_eq!(
+            controller
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.pane_id.as_deref()),
+            Some("%1")
+        );
     }
 
     fn active_window(session_id: &str, window_id: &str) -> ActiveWindow {

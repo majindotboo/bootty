@@ -668,6 +668,7 @@ dependencies = [
  "strum",
  "sysinfo",
  "tempfile",
+ "ttf-parser",
  "wgpu",
  "winit",
 ]
@@ -4567,9 +4568,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-ipc"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "355c81c048a6a17ee6238bbd2d5e0ccbf389ac6eedccf61cf3b2fdae47c89497"
+checksum = "8771b4a0193492ecf8b82a66088291656fcc4d133f4844736cc540cab643ce82"
 dependencies = [
  "libc",
  "rmux-os",
@@ -4581,9 +4582,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-os"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9891678c03d0400c55da8286682c37d064e4b05af6e636fdce4f92b4daedb814"
+checksum = "04610368a0c58e2b05bfdb28e24efc969a9e238519d319bd88e91e61e04ccd25"
 dependencies = [
  "libc",
  "rmux-types",
@@ -4593,9 +4594,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-proto"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6c5050623a58e0c44f37d2643922ab8974abce0e798acccc86a57ba33d266b1"
+checksum = "f3d69422fc536bc1250db0eb1e33d6e291c1ac3b1e5953326c127f1417cacaec"
 dependencies = [
  "bincode",
  "rmux-types",
@@ -4605,9 +4606,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-sdk"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "337f8474fdae1273d4e8720a0e60e8819f04dcc7458d31019b0d3647298afa59"
+checksum = "03b6f3efa0e11cd28cad454cad68f9d2b85f28ccd91118d0a16de56d8ef4667e"
 dependencies = [
  "libc",
  "rmux-ipc",
@@ -4623,9 +4624,9 @@ dependencies = [
 
 [[package]]
 name = "rmux-types"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06047df616a4ebc2af345741480110f002243af28baf335b5636435044f49305"
+checksum = "0c9b2e6cb80cf32aa51e70c60826c852a5d2d7e1575b739205552a8d398fd614"
 dependencies = [
  "serde",
 ]
