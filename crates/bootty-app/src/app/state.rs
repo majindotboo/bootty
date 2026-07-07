@@ -4803,12 +4803,12 @@ mod tests {
         let mut state = test_state_with_config(|config| {
             config.session.shell = Some("/usr/bin/true".to_owned());
         });
-        sync_initial_native_terminal(&mut state);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
         let previous = state
             .terminal
             .focused_pane_id()
             .map(str::to_owned)
-            .expect("initial focused pane");
+            .expect("first native tab focused pane");
 
         state.apply_mux_key_action(MuxKeyAction::NewTab);
 
