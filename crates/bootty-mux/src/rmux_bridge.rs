@@ -1,5 +1,7 @@
 use std::{
-    path::Path,
+    env,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -205,6 +207,7 @@ pub(crate) fn open_rmux_pane_io(
 }
 
 pub(crate) async fn connect_bootty_rmux() -> Result<Rmux> {
+    ensure_rmux_sdk_daemon_binary();
     let endpoint = rmux_ipc::default_endpoint()
         .context("resolve default rmux endpoint")?
         .into_path();
@@ -214,6 +217,66 @@ pub(crate) async fn connect_bootty_rmux() -> Result<Rmux> {
         .connect_or_start()
         .await
         .map_err(Into::into)
+}
+
+fn ensure_rmux_sdk_daemon_binary() {
+    static RESOLVED: OnceLock<()> = OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        if env::var_os(rmux_sdk::bootstrap::discovery::SDK_DAEMON_BINARY_ENV).is_some() {
+            return;
+        }
+        let Some(binary) = resolve_rmux_sdk_daemon_binary(
+            env::var_os("PATH").as_deref(),
+            env::var_os("CARGO_HOME").as_deref(),
+            env::var_os("HOME").as_deref(),
+        ) else {
+            return;
+        };
+        // rmux-sdk 0.8 exposes the command binary only through this process
+        // environment variable; set it once before Bootty starts rmux workers.
+        unsafe {
+            env::set_var(
+                rmux_sdk::bootstrap::discovery::SDK_DAEMON_BINARY_ENV,
+                binary,
+            );
+        }
+    });
+}
+
+fn resolve_rmux_sdk_daemon_binary(
+    path: Option<&OsStr>,
+    cargo_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<OsString> {
+    path.into_iter()
+        .flat_map(env::split_paths)
+        .map(|dir| dir.join("rmux"))
+        .find(|candidate| candidate.is_file() && !is_mise_shim(candidate))
+        .or_else(|| fallback_rmux_binary(cargo_home, home))
+        .map(PathBuf::into_os_string)
+}
+
+fn fallback_rmux_binary(cargo_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    cargo_home
+        .map(PathBuf::from)
+        .map(|path| path.join("bin").join("rmux"))
+        .filter(|candidate| candidate.is_file())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .map(|path| path.join(".cargo").join("bin").join("rmux"))
+                .filter(|candidate| candidate.is_file())
+        })
+}
+
+fn is_mise_shim(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "shims")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "mise")
 }
 
 fn request_control_sync<T>(
@@ -1059,6 +1122,46 @@ mod tests {
                 format!("TERM_PROGRAM_VERSION={TERMINAL_PROGRAM_VERSION}"),
             ]
         );
+    }
+
+    #[test]
+    fn rmux_sdk_daemon_binary_skips_mise_shim_when_real_binary_is_later_on_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim_dir = dir.path().join("mise").join("shims");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&shim_dir).expect("create shim dir");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        std::fs::write(shim_dir.join("rmux"), "").expect("write shim");
+        let real = bin_dir.join("rmux");
+        std::fs::write(&real, "").expect("write real binary");
+        let path = env::join_paths([shim_dir, bin_dir]).expect("join path");
+
+        let resolved = resolve_rmux_sdk_daemon_binary(Some(path.as_os_str()), None, None)
+            .expect("real rmux should resolve");
+
+        assert_eq!(PathBuf::from(resolved), real);
+    }
+
+    #[test]
+    fn rmux_sdk_daemon_binary_falls_back_to_cargo_bin_when_path_only_has_mise_shim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim_dir = dir.path().join("mise").join("shims");
+        let cargo_home = dir.path().join("cargo");
+        let cargo_bin = cargo_home.join("bin");
+        std::fs::create_dir_all(&shim_dir).expect("create shim dir");
+        std::fs::create_dir_all(&cargo_bin).expect("create cargo bin");
+        std::fs::write(shim_dir.join("rmux"), "").expect("write shim");
+        let real = cargo_bin.join("rmux");
+        std::fs::write(&real, "").expect("write real binary");
+
+        let resolved = resolve_rmux_sdk_daemon_binary(
+            Some(shim_dir.as_os_str()),
+            Some(cargo_home.as_os_str()),
+            None,
+        )
+        .expect("cargo rmux should resolve");
+
+        assert_eq!(PathBuf::from(resolved), real);
     }
 
     #[test]
