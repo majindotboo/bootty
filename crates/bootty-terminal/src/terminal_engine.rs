@@ -1814,6 +1814,9 @@ impl TerminalEngine {
                 let second = parts.next();
                 let (state, value) = match second {
                     Some(value) => (conemu_progress_state(first), value.parse::<u8>().ok()),
+                    None if matches!(first, "0" | "1" | "2" | "3" | "4") => {
+                        (conemu_progress_state(first), None)
+                    }
                     None => ("normal", first.parse::<u8>().ok()),
                 };
                 self.side_effects.push(TerminalSideEffect::ConEmuProgress {

@@ -212,6 +212,12 @@ function ui.bar_row(ctx, spec)
 		return nil
 	end
 	local value = ui.clamp(spec.value, 0, 100)
+	local fill = if spec.indeterminate then 25 else value
+	local offset = 0
+	if spec.indeterminate then
+		local phase = (bootty.time() % 1.5) / 1.5
+		offset = (1 - fill / 100) * (1 - math.abs(2 * phase - 1))
+	end
 	local x = ui.row_x(ctx.detail_indent)
 	local width_px = (spec.right_px or -54) - x
 	return ui.row({
@@ -238,18 +244,18 @@ function ui.bar_row(ctx, spec)
 				fill = spec.track,
 			}),
 			ui.rect({
-				x = 0,
-				x_px = x,
+				x = offset,
+				x_px = x + width_px * offset,
 				y = 0.5,
 				y_px = -2,
-				w = value / 100,
-				w_px = width_px * value / 100,
+				w = fill / 100,
+				w_px = width_px * fill / 100,
 				h = 0,
 				h_px = 4,
 				radius = 2,
 				fill = spec.fill,
 			}),
-			ui.text(string.format("%d%%", value), {
+			ui.text(if spec.indeterminate then "..." else string.format("%d%%", value), {
 				x = 1,
 				x_px = -12,
 				color = spec.label_color,

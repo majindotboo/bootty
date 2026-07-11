@@ -12,6 +12,7 @@ return {
 		local items = {}
 		local radius = 6
 		local wedge = 8
+		local progress_height = 2
 
 		local function left_radius()
 			return { nw = radius, sw = radius }
@@ -74,6 +75,34 @@ return {
 			local name_primitives = { rect(name_fill, right_radius(last)) }
 			if active then
 				name_primitives[#name_primitives + 1] = left_chevron(accent)
+			end
+			if window.progress then
+				local width = if window.progress_indeterminate then 0.25 else window.progress / 100
+				local offset = 0
+				if window.progress_indeterminate then
+					local phase = (bootty.time() % 1.5) / 1.5
+					offset = (1 - width) * (1 - math.abs(2 * phase - 1))
+				end
+				name_primitives[#name_primitives + 1] = {
+					type = "rect",
+					fill = bootty.theme.border,
+					x = 0,
+					y = 1,
+					y_px = -progress_height,
+					w = 1,
+					h = 0,
+					h_px = progress_height,
+				}
+				name_primitives[#name_primitives + 1] = {
+					type = "rect",
+					fill = accent,
+					x = offset,
+					y = 1,
+					y_px = -progress_height,
+					w = width,
+					h = 0,
+					h_px = progress_height,
+				}
 			end
 
 			push(window, {

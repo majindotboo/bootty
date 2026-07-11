@@ -59,7 +59,7 @@ use crate::{
         command::{MuxCommand, MuxSplitDirection},
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
-        snapshot::MuxPaneAnchor,
+        snapshot::{MuxPaneAnchor, MuxWindow},
         terminal::{ActiveTerminal, ActiveTerminalRuntime},
     },
     platform::{
@@ -148,6 +148,45 @@ pub enum AppEffect {
     ConfigureKeybind(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalProgressState {
+    Normal,
+    Error,
+    Indeterminate,
+    Warning,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalProgress {
+    pub state: TerminalProgressState,
+    pub value: Option<u8>,
+}
+
+impl TerminalProgress {
+    fn from_conemu(state: &str, value: Option<u8>) -> Option<Self> {
+        let state = match state {
+            "normal" => TerminalProgressState::Normal,
+            "error" => TerminalProgressState::Error,
+            "indeterminate" => TerminalProgressState::Indeterminate,
+            "warning" => TerminalProgressState::Warning,
+            "inactive" => return None,
+            _ => return None,
+        };
+        Some(Self { state, value })
+    }
+
+    pub(crate) fn fraction(self) -> Option<f32> {
+        self.value
+            .map(|value| f32::from(value) / 100.0)
+            .or((self.state == TerminalProgressState::Indeterminate).then_some(0.5))
+    }
+
+    fn percent(self) -> Option<u8> {
+        self.value
+            .or((self.state == TerminalProgressState::Indeterminate).then_some(50))
+    }
+}
+
 pub struct AppState {
     terminal: ActiveTerminal,
     repaint_scheduler: RepaintScheduler,
@@ -175,6 +214,8 @@ pub struct AppState {
     mux: MuxController,
     custom_tab_names: HashSet<(String, String)>,
     terminal_tab_titles: HashMap<(String, String), String>,
+    terminal_progress: HashMap<String, TerminalProgress>,
+    unscoped_terminal_progress: Option<TerminalProgress>,
     repaint: RepaintHandle,
     terminal_side_effect_tx: mpsc::Sender<TerminalSideEffectEvent>,
     terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffectEvent>,
@@ -525,6 +566,8 @@ impl AppState {
             mux: MuxController::new(),
             custom_tab_names: HashSet::new(),
             terminal_tab_titles: HashMap::new(),
+            terminal_progress: HashMap::new(),
+            unscoped_terminal_progress: None,
             terminal_side_effect_tx,
             terminal_side_effect_rx,
             repaint,
@@ -991,6 +1034,51 @@ impl AppState {
     pub fn focused_pane(&self) -> Option<String> {
         self.current_pane_layout()
             .map(|layout| layout.focused().to_owned())
+    }
+
+    pub(crate) fn current_terminal_progress(&self) -> Option<TerminalProgress> {
+        self.focused_pane()
+            .as_deref()
+            .and_then(|pane_id| self.terminal_progress.get(pane_id).copied())
+            .or_else(|| {
+                self.mux
+                    .selected_session_anchor()
+                    .and_then(|anchor| anchor.pane_id.as_deref())
+                    .and_then(|pane_id| self.terminal_progress.get(pane_id).copied())
+            })
+            .or(self.unscoped_terminal_progress)
+    }
+
+    pub(crate) fn pane_progress(&self, pane_id: &str) -> Option<TerminalProgress> {
+        self.terminal_progress.get(pane_id).copied()
+    }
+
+    pub(crate) fn has_indeterminate_terminal_progress(&self) -> bool {
+        self.terminal_progress
+            .values()
+            .chain(self.unscoped_terminal_progress.iter())
+            .any(|progress| progress.state == TerminalProgressState::Indeterminate)
+    }
+
+    pub(crate) fn window_has_indeterminate_progress(&self, window: &MuxWindow) -> bool {
+        window
+            .panes
+            .iter()
+            .chain(std::iter::once(&window.anchor))
+            .filter_map(|pane| pane.pane_id.as_deref())
+            .filter_map(|pane_id| self.pane_progress(pane_id))
+            .any(|progress| progress.state == TerminalProgressState::Indeterminate)
+    }
+
+    pub(crate) fn window_progress(&self, window: &MuxWindow) -> Option<u8> {
+        window
+            .panes
+            .iter()
+            .chain(std::iter::once(&window.anchor))
+            .filter_map(|pane| pane.pane_id.as_deref())
+            .filter_map(|pane_id| self.pane_progress(pane_id))
+            .filter_map(TerminalProgress::percent)
+            .max()
     }
 
     pub fn pane_rects(&self, area: Rect, gap: f32) -> Vec<(String, Rect)> {
@@ -1654,13 +1742,39 @@ impl AppState {
                     self.last_error = Some(error.to_string());
                 }
             }
-            TerminalSideEffect::ConEmuProgress { .. } => {}
+            TerminalSideEffect::ConEmuProgress { state, value } => {
+                self.apply_terminal_progress(source_pane_id.as_deref(), state, value);
+                effects.push(AppEffect::RequestRepaint);
+            }
             TerminalSideEffect::SemanticPrompt(_)
             | TerminalSideEffect::KittyTextSizing(_)
             | TerminalSideEffect::ConEmuControl(_)
             | TerminalSideEffect::Iterm2Control(_)
             | TerminalSideEffect::Iterm2File(_)
             | TerminalSideEffect::UnsupportedHostCommand { .. } => {}
+        }
+    }
+
+    fn apply_terminal_progress(
+        &mut self,
+        source_pane_id: Option<&str>,
+        state: String,
+        value: Option<u8>,
+    ) {
+        if state == "unknown" {
+            return;
+        }
+        let progress = TerminalProgress::from_conemu(&state, value);
+        match source_pane_id {
+            Some(pane_id) => match progress {
+                Some(progress) => {
+                    self.terminal_progress.insert(pane_id.to_owned(), progress);
+                }
+                None => {
+                    self.terminal_progress.remove(pane_id);
+                }
+            },
+            None => self.unscoped_terminal_progress = progress,
         }
     }
 
@@ -5482,6 +5596,88 @@ mod tests {
         assert_eq!(second_window.name, "⠼ agents");
         assert_eq!(state.mux.selected_window(), Some(first_window_id.as_str()));
         assert_eq!(effects, Vec::<AppEffect>::new());
+    }
+
+    #[test]
+    fn scoped_terminal_progress_updates_and_clears_its_inactive_window_indicator() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("progress-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let first_window_id = state.mux.selected_session_windows()[0].id.clone();
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let second_window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id != first_window_id)
+            .expect("second tab should be present")
+            .clone();
+        let second_pane_id = second_window
+            .anchor
+            .pane_id
+            .clone()
+            .expect("native tab should have a source pane id");
+        state.activate_window_from_ui(&session_id, &first_window_id);
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id.clone()),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "normal".to_owned(),
+                    value: Some(42),
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert_eq!(state.window_progress(&second_window), Some(42));
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id.clone()),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "indeterminate".to_owned(),
+                    value: None,
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert!(state.has_indeterminate_terminal_progress());
+        assert_eq!(state.window_progress(&second_window), Some(50));
+        assert!(state.window_has_indeterminate_progress(&second_window));
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "inactive".to_owned(),
+                    value: Some(0),
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert_eq!(state.window_progress(&second_window), None);
+        assert!(!state.has_indeterminate_terminal_progress());
+        assert!(!state.window_has_indeterminate_progress(&second_window));
     }
 
     #[test]

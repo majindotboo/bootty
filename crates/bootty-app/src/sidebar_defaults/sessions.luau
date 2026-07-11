@@ -474,6 +474,23 @@ local function session_details(_, facts)
 end
 
 
+
+local function session_progress(ctx, _)
+	local session = ctx.session
+	if not session.progress then
+		return nil
+	end
+	return {
+		key = "progress",
+		value = session.progress,
+		indeterminate = session.progress_indeterminate,
+		track = bootty.theme.border,
+		fill = session.color or bootty.theme.accent,
+		label_color = session.dim_color or bootty.theme.muted,
+	}
+end
+
+
 return {
 	interval = 0.1,
 	render = function()
@@ -493,6 +510,7 @@ return {
 			facts = cached_session_facts,
 			right = session_right,
 			details = session_details,
+			progress = session_progress,
 		})
 	end,
 }
