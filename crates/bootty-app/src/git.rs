@@ -154,6 +154,31 @@ pub fn main_worktree(cwd: &str) -> Option<String> {
         .parent()
         .map(|parent| parent.to_string_lossy().into_owned())
 }
+/// The root directory of the Git worktree containing `cwd`.
+pub fn worktree_root(cwd: &str) -> Option<String> {
+    read(cwd, &["rev-parse", "--show-toplevel"])
+}
+
+/// Suggest a grouped session name for a worktree, or a basename for a plain directory.
+pub fn suggested_session_name(cwd: &str) -> String {
+    let Some(worktree) = worktree_root(cwd) else {
+        return crate::strings::session_name_for_path(cwd);
+    };
+    let status = status(&worktree);
+
+    let group = main_worktree(&worktree)
+        .as_deref()
+        .map(crate::strings::session_name_for_path)
+        .unwrap_or_else(|| crate::strings::session_name_for_path(&worktree));
+    let leaf = status
+        .branch
+        .as_deref()
+        .and_then(|branch| branch.rsplit('/').next())
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::strings::session_name_for_path(&worktree));
+    format!("{group}/{leaf}")
+}
 
 fn read(cwd: &str, args: &[&str]) -> Option<String> {
     let output = git_command(cwd, args).output().ok()?;
@@ -233,6 +258,69 @@ mod tests {
             ],
         );
         (root, main, worktree)
+    }
+
+    #[test]
+    fn suggested_session_name_groups_branch_worktrees() {
+        let (_root, main, worktree) = repo_with_worktree();
+
+        assert_eq!(suggested_session_name(main.to_str().unwrap()), "main/main");
+        assert_eq!(
+            suggested_session_name(worktree.to_str().unwrap()),
+            "main/feature"
+        );
+    }
+    #[test]
+    fn suggested_session_name_uses_the_worktree_root_from_a_nested_directory() {
+        let (_root, _main, worktree) = repo_with_worktree();
+        let nested = worktree.join("nested");
+        fs::create_dir(&nested).expect("create nested directory");
+
+        assert_eq!(
+            suggested_session_name(nested.to_str().unwrap()),
+            "main/feature"
+        );
+    }
+
+    #[test]
+    fn suggested_session_name_uses_directory_for_detached_worktrees() {
+        let (_root, main, worktree) = repo_with_worktree();
+        git_ok(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree
+                    .parent()
+                    .unwrap()
+                    .join("detached")
+                    .to_str()
+                    .unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            suggested_session_name(
+                worktree
+                    .parent()
+                    .unwrap()
+                    .join("detached")
+                    .to_str()
+                    .unwrap()
+            ),
+            "main/detached"
+        );
+    }
+
+    #[test]
+    fn suggested_session_name_keeps_plain_directories_ungrouped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            suggested_session_name(dir.path().to_str().unwrap()),
+            crate::strings::session_name_for_path(dir.path().to_str().unwrap())
+        );
     }
 
     #[test]

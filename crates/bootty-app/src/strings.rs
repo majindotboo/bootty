@@ -76,6 +76,31 @@ pub fn push_truncated_label(out: &mut String, text: &str, max_chars: usize) {
 
     out.push_str(text);
 }
+pub fn unique_session_name<'a, I>(candidate: &str, existing: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let existing = existing
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    if !existing.contains(candidate) {
+        return candidate.to_owned();
+    }
+
+    let (group, leaf) = candidate.rsplit_once('/').unwrap_or(("", candidate));
+    for suffix in 2.. {
+        let suffixed_leaf = format!("{leaf}-{suffix}");
+        let name = if group.is_empty() {
+            suffixed_leaf
+        } else {
+            format!("{group}/{suffixed_leaf}")
+        };
+        if !existing.contains(name.as_str()) {
+            return name;
+        }
+    }
+    unreachable!("session name suffix range is unbounded")
+}
 
 pub fn csv_field(value: &str) -> String {
     if value.contains([',', '"', '\n', '\r']) {
@@ -126,6 +151,27 @@ mod tests {
         push_truncated_label(&mut out, "abc", 0);
 
         assert_eq!(out, "prefix");
+    }
+
+    #[test]
+    fn unique_session_name_suffixes_collisions_inside_a_group() {
+        assert_eq!(
+            unique_session_name("bootty/review", ["bootty/review", "bootty/review-2"]),
+            "bootty/review-3"
+        );
+    }
+
+    #[test]
+    fn unique_session_name_suffixes_ungrouped_collisions() {
+        assert_eq!(unique_session_name("scratch", ["scratch"]), "scratch-2");
+    }
+
+    #[test]
+    fn unique_session_name_keeps_available_names() {
+        assert_eq!(
+            unique_session_name("bootty/main", ["other/main"]),
+            "bootty/main"
+        );
     }
 
     #[cfg(windows)]

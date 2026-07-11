@@ -1725,12 +1725,36 @@ where
         .collect::<BTreeMap<OsString, OsString>>();
     if let Some(login_env) = login_env {
         for (key, value) in login_env {
-            if key == "PATH" || !env.contains_key(&OsString::from(&key)) {
-                env.insert(OsString::from(key), OsString::from(value));
+            let key = OsString::from(key);
+            if key == "PATH" {
+                let login_path = OsString::from(value);
+                let current_path = env.get(&key);
+                env.insert(
+                    key,
+                    login_path_with_current_fallbacks(login_path, current_path),
+                );
+            } else {
+                env.entry(key).or_insert_with(|| OsString::from(value));
             }
         }
     }
     env
+}
+
+#[cfg(target_os = "macos")]
+fn login_path_with_current_fallbacks(
+    login_path: OsString,
+    current_path: Option<&OsString>,
+) -> OsString {
+    let mut entries = std::env::split_paths(&login_path).collect::<Vec<_>>();
+    if let Some(current_path) = current_path {
+        for path in std::env::split_paths(current_path) {
+            if !entries.contains(&path) {
+                entries.push(path);
+            }
+        }
+    }
+    std::env::join_paths(entries).unwrap_or(login_path)
 }
 
 #[cfg(target_os = "macos")]
@@ -2520,7 +2544,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_shell_run_environment_uses_login_path_without_clobbering_existing_vars() {
+    fn macos_shell_run_environment_uses_login_path_with_current_path_fallbacks() {
         let env = macos_shell_run_environment_from(
             [
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
@@ -2535,7 +2559,7 @@ mod tests {
 
         assert_eq!(
             env.get(&OsString::from("PATH")),
-            Some(&OsString::from("/opt/bin:/usr/bin"))
+            Some(&OsString::from("/opt/bin:/usr/bin:/bin"))
         );
         assert_eq!(
             env.get(&OsString::from("HOME")),
