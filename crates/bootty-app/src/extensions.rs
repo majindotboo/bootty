@@ -40,7 +40,7 @@ use http::response_body as http_response_body;
 /// Default refresh cadence for a module that doesn't declare its own `interval`.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 /// Background poll granularity; a module fires on the first tick at or after its interval elapses.
-const TICK: Duration = Duration::from_millis(100);
+const TICK: Duration = Duration::from_millis(8);
 /// How often extension dirs are re-scanned for edited/added/removed module files (hot reload).
 const RELOAD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const CODEXBAR_SERVER_PORT: u16 = 17_613;
@@ -152,6 +152,14 @@ pub struct WindowView {
     pub progress_indeterminate: bool,
 }
 
+/// Progress reported by one terminal pane in a session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionProgressView {
+    pub process: String,
+    pub value: u8,
+    pub indeterminate: bool,
+}
+
 /// A mux session as exposed to sidebar/status extensions via `bootty.sessions()`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionView {
@@ -164,6 +172,7 @@ pub struct SessionView {
     pub dim_color: Option<String>,
     pub progress: Option<u8>,
     pub progress_indeterminate: bool,
+    pub progresses: Vec<SessionProgressView>,
 }
 
 /// Mux state shared with the worker thread so modules can render it.
@@ -1903,6 +1912,15 @@ fn setup_lua(
                     entry.set("selected", session.selected)?;
                     entry.set("progress", session.progress)?;
                     entry.set("progress_indeterminate", session.progress_indeterminate)?;
+                    let progresses = lua.create_table()?;
+                    for (progress_index, progress) in session.progresses.iter().enumerate() {
+                        let progress_entry = lua.create_table()?;
+                        progress_entry.set("process", progress.process.as_str())?;
+                        progress_entry.set("value", progress.value)?;
+                        progress_entry.set("indeterminate", progress.indeterminate)?;
+                        progresses.set(progress_index + 1, progress_entry)?;
+                    }
+                    entry.set("progresses", progresses)?;
                     if let Some(value) = &session.cwd {
                         entry.set("cwd", value.as_str())?;
                     }
@@ -3367,15 +3385,28 @@ mod tests {
                 dim_color: Some("#455a7d".to_owned()),
                 progress: Some(42),
                 progress_indeterminate: false,
+                progresses: vec![
+                    SessionProgressView {
+                        process: "pi".to_owned(),
+                        value: 50,
+                        indeterminate: true,
+                    },
+                    SessionProgressView {
+                        process: "cargo".to_owned(),
+                        value: 42,
+                        indeterminate: false,
+                    },
+                ],
             }],
             ..MuxView::default()
         }));
         let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
-                "return function() local s = bootty.sessions()[1] \
-                 return { kind = 'session', text = s.name .. ':' .. s.cwd .. ':' .. tostring(s.process) .. ':' .. s.progress, \
-                 session_id = s.id, fg = s.color } end",
+                r#"return function() local s = bootty.sessions()[1]
+                   local p = s.progresses
+                   return { kind = 'session', text = s.name .. ':' .. s.cwd .. ':' .. p[1].process .. ':' .. p[2].value,
+                   session_id = s.id, fg = s.color } end"#,
             )
             .eval::<Value>()
             .unwrap();
@@ -3383,7 +3414,7 @@ mod tests {
         let items = run_module(&module.body);
 
         assert_eq!(items[0].kind.as_deref(), Some("session"));
-        assert_eq!(items[0].text, "work/api:/tmp/work/api:nil:42");
+        assert_eq!(items[0].text, "work/api:/tmp/work/api:pi:42");
         assert_eq!(items[0].session_id.as_deref(), Some("$1"));
         assert_eq!(items[0].fg, Some(Color32::from_rgb(0x89, 0xb4, 0xfa)));
     }

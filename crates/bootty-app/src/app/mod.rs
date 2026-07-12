@@ -1,7 +1,7 @@
 mod state;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{OnceLock, mpsc},
     time::{Duration, Instant},
@@ -640,6 +640,26 @@ impl BoottyApp {
                         .windows
                         .iter()
                         .any(|window| self.state.window_has_indeterminate_progress(window));
+                let mut reported_panes = HashSet::new();
+                let mut progresses = Vec::new();
+                for window in &session.windows {
+                    for pane in window.panes.iter().chain(std::iter::once(&window.anchor)) {
+                        if let Some(pane_id) = pane.pane_id.as_deref()
+                            && reported_panes.insert(pane_id)
+                            && let Some(progress) = self.state.pane_progress(pane_id)
+                        {
+                            progresses.push(crate::extensions::SessionProgressView {
+                                process: pane
+                                    .process
+                                    .clone()
+                                    .unwrap_or_else(|| "terminal".to_owned()),
+                                value: progress.value.unwrap_or(50),
+                                indeterminate: progress.state
+                                    == TerminalProgressState::Indeterminate,
+                            });
+                        }
+                    }
+                }
                 crate::extensions::SessionView {
                     id: session.id.clone(),
                     name: session.name.clone(),
@@ -650,6 +670,7 @@ impl BoottyApp {
                     dim_color: Some(dim_color),
                     progress,
                     progress_indeterminate,
+                    progresses,
                 }
             })
             .collect()

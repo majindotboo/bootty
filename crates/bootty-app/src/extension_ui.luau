@@ -218,8 +218,54 @@ function ui.bar_row(ctx, spec)
 		local phase = (bootty.time() % 1.5) / 1.5
 		offset = (1 - fill / 100) * (1 - math.abs(2 * phase - 1))
 	end
+	local value_label = if spec.indeterminate then "..." else string.format("%d%%", value)
 	local x = ui.row_x(ctx.detail_indent)
-	local width_px = (spec.right_px or -54) - x
+	local label_width = if spec.label and spec.label ~= "" then spec.label_width or 72 else 0
+	local bar_x = x + label_width
+	local width_px = (spec.right_px or -54) - bar_x
+	local primitives = {
+		ui.rect({
+			x = 0,
+			x_px = bar_x,
+			y = 0.5,
+			y_px = -1,
+			w = 1,
+			w_px = width_px,
+			h = 0,
+			h_px = 2,
+			radius = 1,
+			fill = spec.track,
+		}),
+		ui.rect({
+			x = offset,
+			x_px = bar_x + width_px * offset,
+			y = 0.5,
+			y_px = -1,
+			w = fill / 100,
+			w_px = width_px * fill / 100,
+			h = 0,
+			h_px = 2,
+			radius = 1,
+			fill = spec.fill,
+		}),
+	}
+	if spec.label and spec.label ~= "" then
+		primitives[#primitives + 1] = ui.text(spec.label, {
+			x = 0,
+			x_px = x,
+			color = spec.label_color,
+			align = "left_center",
+			size = 11,
+			min_width = 160,
+		})
+	end
+	primitives[#primitives + 1] = ui.text(value_label, {
+		x = 1,
+		x_px = -12,
+		color = spec.label_color,
+		align = "right_center",
+		size = 11,
+	})
 	return ui.row({
 		key = if spec.key then ctx.session.id .. ":" .. spec.key else nil,
 		text = "",
@@ -230,39 +276,7 @@ function ui.bar_row(ctx, spec)
 		fg = ctx.session.color,
 		dim_fg = ctx.session.dim_color,
 		current = ctx.session.selected,
-		primitives = {
-			ui.rect({
-				x = 0,
-				x_px = x,
-				y = 0.5,
-				y_px = -2,
-				w = 1,
-				w_px = width_px,
-				h = 0,
-				h_px = 4,
-				radius = 2,
-				fill = spec.track,
-			}),
-			ui.rect({
-				x = offset,
-				x_px = x + width_px * offset,
-				y = 0.5,
-				y_px = -2,
-				w = fill / 100,
-				w_px = width_px * fill / 100,
-				h = 0,
-				h_px = 4,
-				radius = 2,
-				fill = spec.fill,
-			}),
-			ui.text(if spec.indeterminate then "..." else string.format("%d%%", value), {
-				x = 1,
-				x_px = -12,
-				color = spec.label_color,
-				align = "right_center",
-				size = 11,
-			}),
-		},
+		primitives = primitives,
 	})
 end
 
@@ -376,7 +390,10 @@ function ui.session_items(options)
 				progress = { value = progress }
 			end
 			if progress then
-				ui.push(items, ui.bar_row(ctx, progress))
+				local rows = if progress.value ~= nil then { progress } else progress
+				for _, row in ipairs(rows) do
+					ui.push(items, ui.bar_row(ctx, row))
+				end
 			end
 		end
 		ctx.summary.emitted += 1
