@@ -138,6 +138,7 @@ fn text_attrs(fg: PlanColor) -> TextAttrs {
 
 fn text_run(rect: SurfaceRect, cells: u16, text: &str, fg: PlanColor) -> TextRun {
     TextRun {
+        cell_rect: rect,
         rect,
         cells,
         text: text.to_owned(),

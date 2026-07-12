@@ -966,6 +966,7 @@ mod tests {
 
     fn run(text: &str) -> TextRun {
         TextRun {
+            cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 18.0, 16.0),
             rect: SurfaceRect::from_min_size(0.0, 0.0, 18.0, 16.0),
             cells: 3,
             text: text.to_owned(),

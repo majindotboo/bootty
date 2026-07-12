@@ -254,6 +254,7 @@ impl RendererFrame {
                 continue;
             }
             plan.text_runs.push(TextRun {
+                cell_rect: cell.rect,
                 rect: cell.rect,
                 cells: text_cell_width(&cell.text),
                 text: cell.text.clone(),

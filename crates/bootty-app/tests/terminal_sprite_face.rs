@@ -1071,6 +1071,7 @@ fn sprite_atlas_rasterizes_inverse_diagonal_clear_masks() {
 
 fn run(text: &str) -> TextRun {
     TextRun {
+        cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 30.0, 20.0),
         rect: SurfaceRect::from_min_size(0.0, 0.0, 30.0, 20.0),
         cells: 3,
         text: text.to_owned(),
