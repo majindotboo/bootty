@@ -186,7 +186,10 @@ struct FontPatch {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeConfig {
     pub sidebar: bool,
-    pub status_bar: bool,
+    /// Whether to show the module bar above the terminal.
+    pub top_bar: bool,
+    /// Whether to show the module bar below the terminal.
+    pub bottom_bar: bool,
     pub status_background: Option<Color>,
     pub sidebar_width: f32,
     pub status_height: f32,
@@ -208,15 +211,19 @@ pub struct ChromeConfig {
     pub pane_corner_radius: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,
-    /// Ordered status-bar segments. Composed left/center/right; builtins plus Lua modules.
-    pub status_segments: Vec<StatusSegment>,
+    /// Ordered top-bar segments. Composed left/center/right; builtins plus Lua modules.
+    pub top_segments: Vec<StatusSegment>,
+    /// Ordered bottom-bar segments. Composed left/center/right; builtins plus Lua modules.
+    pub bottom_segments: Vec<StatusSegment>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct ChromePatch {
     sidebar: Option<bool>,
-    status_bar: Option<bool>,
+    #[serde(alias = "status-bar")]
+    top_bar: Option<bool>,
+    bottom_bar: Option<bool>,
     #[serde(rename = "window-tabs")]
     _window_tabs: Option<bool>,
     sidebar_width: Option<f32>,
@@ -231,7 +238,9 @@ struct ChromePatch {
     pane_corner_radius: Option<f32>,
     unfocused_sidebar_dim: Option<f32>,
     unfocused_terminal_dim: Option<f32>,
-    status_segment: Option<Vec<StatusSegment>>,
+    #[serde(alias = "status-segment")]
+    top_segment: Option<Vec<StatusSegment>>,
+    bottom_segment: Option<Vec<StatusSegment>>,
 }
 
 /// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
@@ -701,7 +710,8 @@ impl Default for ChromeConfig {
     fn default() -> Self {
         Self {
             sidebar: true,
-            status_bar: true,
+            top_bar: true,
+            bottom_bar: false,
             status_background: None,
             sidebar_width: 286.0,
             status_height: 30.0,
@@ -714,7 +724,8 @@ impl Default for ChromeConfig {
             pane_corner_radius: 0.0,
             unfocused_sidebar_dim: 0.16,
             unfocused_terminal_dim: 0.08,
-            status_segments: default_status_segments(),
+            top_segments: default_status_segments(),
+            bottom_segments: Vec::new(),
         }
     }
 }
@@ -1592,7 +1603,8 @@ fn apply_font_features(font: &mut FontConfig, features: Vec<String>) -> ConfigRe
 
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_value(&mut chrome.sidebar, partial.sidebar);
-    apply_value(&mut chrome.status_bar, partial.status_bar);
+    apply_value(&mut chrome.top_bar, partial.top_bar);
+    apply_value(&mut chrome.bottom_bar, partial.bottom_bar);
     apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
     apply_value(&mut chrome.status_height, partial.status_height);
     apply_present(&mut chrome.status_background, partial.status_background);
@@ -1620,8 +1632,11 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         &mut chrome.unfocused_terminal_dim,
         partial.unfocused_terminal_dim,
     );
-    if let Some(segments) = partial.status_segment {
-        chrome.status_segments = segments;
+    if let Some(segments) = partial.top_segment {
+        chrome.top_segments = segments;
+    }
+    if let Some(segments) = partial.bottom_segment {
+        chrome.bottom_segments = segments;
     }
 }
 

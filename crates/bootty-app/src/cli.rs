@@ -151,6 +151,7 @@ mod tests {
             "600",
             "--sidebar",
             "--status-bar",
+            "--bottom-bar",
             "--font-size",
             "14",
             "--font-family",
@@ -172,7 +173,8 @@ mod tests {
         assert_eq!(config.window.width, 800.0);
         assert_eq!(config.window.height, 600.0);
         assert!(config.chrome.sidebar);
-        assert!(config.chrome.status_bar);
+        assert!(config.chrome.top_bar);
+        assert!(config.chrome.bottom_bar);
         assert_eq!(config.font.size, 14.0);
         assert_eq!(config.font.family, ["Mono A", "Mono B"]);
         assert_eq!(config.session.shell.as_deref(), Some("/bin/bash"));

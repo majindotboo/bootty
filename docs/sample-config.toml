@@ -53,41 +53,48 @@ size = 15
 fit-cell-height = true
 
 [chrome]
-# Live-reloaded app chrome.
+# Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
+# independently when its configured modules should be visible.
 sidebar = true
-status-bar = true
+top-bar = true
+bottom-bar = false
 sidebar-width = 286
 status-height = 30
 # status-background = "#11131a"
 # In dark mode on notched fullscreen displays, use solid black for sidebar,
-# status bar, and split dividers so the notch band blends into the screen.
+# top/bottom bars, and split dividers so the notch band blends into the screen.
 notched-fullscreen-black-chrome = true
 gap = 1
 # Dim inactive panes by overlay opacity in the 0.0-1.0 range.
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.08
 
-# Status-bar segments, composed left/center/right. Each segment names a Luau module: a built-in
-# (session, windows, clock, sysinfo) or a *.luau file stem under ~/.config/bootty/status/. Built-ins
-# are overridable by a same-named file. Only referenced modules run. Items carry an optional lucide
-# icon slug (rendered as an SVG via the sidebar icon set, not a glyph font) and fg/bg fills the module
-# leaves unset. The session/windows built-ins tint with the session's sidebar color via
-# bootty.session_color(); see docs/status/.
-[[chrome.status-segment]]
+# Top- and bottom-bar segments are each composed left/center/right. Each segment names a Luau
+# module: a built-in (session, windows, clock, sysinfo) or a *.luau file stem under
+# ~/.config/bootty/status/. Built-ins are overridable by a same-named file. Only referenced modules
+# in visible bars run. Items carry an optional lucide icon slug (rendered as an SVG via the sidebar
+# icon set, not a glyph font) and fg/bg fills the module leaves unset. The session/windows built-ins
+# tint with the session's sidebar color via bootty.session_color(); see docs/status/.
+[[chrome.top-segment]]
 align = "left"
 module = "session"
 
-[[chrome.status-segment]]
+[[chrome.top-segment]]
 align = "left"
 module = "windows"
 
-[[chrome.status-segment]]
+[[chrome.top-segment]]
 align = "right"
 module = "sysinfo"
 
-[[chrome.status-segment]]
+[[chrome.top-segment]]
 align = "right"
 module = "clock"
+
+# To place a module below the terminal, set bottom-bar = true and add entries here.
+# [[chrome.bottom-segment]]
+# align = "right"
+# module = "clock"
 
 [sidebar]
 # Sidebar placement and color overrides. Drag the sidebar's inner edge to resize

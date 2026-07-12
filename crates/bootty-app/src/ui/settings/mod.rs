@@ -652,12 +652,19 @@ impl SettingsSurface {
                 }
                 ui.label(RichText::new("Sidebar").color(self.palette.subtext));
                 ui.add_space(16.0);
-                let mut status_bar = self.config.chrome.status_bar;
-                if settings_toggle(ui, self.palette, &mut status_bar) {
-                    self.config.chrome.status_bar = status_bar;
-                    self.set_bool(&["chrome", "status-bar"], status_bar);
+                let mut top_bar = self.config.chrome.top_bar;
+                if settings_toggle(ui, self.palette, &mut top_bar) {
+                    self.config.chrome.top_bar = top_bar;
+                    self.set_top_bar(top_bar);
                 }
-                ui.label(RichText::new("Status bar").color(self.palette.subtext));
+                ui.label(RichText::new("Top bar").color(self.palette.subtext));
+                ui.add_space(16.0);
+                let mut bottom_bar = self.config.chrome.bottom_bar;
+                if settings_toggle(ui, self.palette, &mut bottom_bar) {
+                    self.config.chrome.bottom_bar = bottom_bar;
+                    self.set_bool(&["chrome", "bottom-bar"], bottom_bar);
+                }
+                ui.label(RichText::new("Bottom bar").color(self.palette.subtext));
             },
         );
     }
@@ -877,11 +884,21 @@ impl SettingsSurface {
         self.write(|document| document.remove_item(path));
     }
 
-    /// Write the whole `chrome.status-segment` array from the working copy.
-    fn set_status_segments(&mut self) {
+    fn set_top_bar(&mut self, enabled: bool) {
+        self.write(move |document| {
+            document.remove_item(&["chrome", "status-bar"])?;
+            document.set_item(
+                &["chrome", "top-bar"],
+                bootty_config::toml_edit::value(enabled),
+            )
+        });
+    }
+
+    /// Write one bar's ordered module segments from the working copy.
+    fn set_status_segments(&mut self, position: status_bar::StatusBarPosition) {
         use bootty_config::toml_edit;
         let mut array = toml_edit::Array::new();
-        for segment in &self.config.chrome.status_segments {
+        for segment in position.segments(&self.config.chrome) {
             let mut table = toml_edit::InlineTable::new();
             let align = match segment.align {
                 crate::config::SegmentAlign::Left => "left",
@@ -904,7 +921,10 @@ impl SettingsSurface {
             array.push(table);
         }
         self.write(move |document| {
-            document.set_item(&["chrome", "status-segment"], toml_edit::value(array))
+            if position == status_bar::StatusBarPosition::Top {
+                document.remove_item(&["chrome", "status-segment"])?;
+            }
+            document.set_item(&["chrome", position.segment_key()], toml_edit::value(array))
         });
     }
 }
@@ -1942,67 +1962,99 @@ fn status_preview(ui: &mut egui::Ui, palette: ThemePalette, config: &BoottyConfi
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             let height = config.chrome.status_height.clamp(24.0, 40.0);
-            let (bar, _) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), height),
-                egui::Sense::hover(),
-            );
             let status_background = config
                 .chrome
                 .status_background
                 .map_or(palette.mantle, color_to_egui);
-            ui.painter().rect_filled(
-                bar,
-                egui::CornerRadius::same(palette.radius),
-                status_background,
-            );
-
-            for (align, x_anchor) in [
-                (crate::config::SegmentAlign::Left, bar.left() + 10.0),
-                (crate::config::SegmentAlign::Center, bar.center().x),
-                (crate::config::SegmentAlign::Right, bar.right() - 10.0),
-            ] {
-                let modules: Vec<_> = config
-                    .chrome
-                    .status_segments
-                    .iter()
-                    .filter(|segment| segment.align == align)
-                    .collect();
-                let width = modules.len() as f32 * 92.0;
-                let mut x = match align {
-                    crate::config::SegmentAlign::Left => x_anchor,
-                    crate::config::SegmentAlign::Center => x_anchor - width * 0.5,
-                    crate::config::SegmentAlign::Right => x_anchor - width,
-                };
-                for segment in modules {
-                    let bg = segment.bg.map_or(palette.hover, color_to_egui);
-                    let fg = readable_color(bg, segment.fg.map_or(palette.text, color_to_egui));
-                    let chip = Rect::from_min_size(
-                        Pos2::new(x, bar.center().y - 12.0),
-                        Vec2::new(84.0, 24.0),
-                    );
-                    ui.painter()
-                        .rect_filled(chip, egui::CornerRadius::same(5), bg);
-                    ui.painter().rect_stroke(
-                        chip,
-                        egui::CornerRadius::same(5),
-                        egui::Stroke::new(1.0, palette.border),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        chip.center(),
-                        egui::Align2::CENTER_CENTER,
-                        segment
-                            .icon
-                            .as_ref()
-                            .map_or(segment.module.as_str(), String::as_str),
-                        egui::FontId::monospace(12.0),
-                        fg,
-                    );
-                    x += 92.0;
+            let mut visible = false;
+            if config.chrome.top_bar {
+                status_preview_bar(
+                    ui,
+                    palette,
+                    height,
+                    status_background,
+                    &config.chrome.top_segments,
+                );
+                visible = true;
+            }
+            if config.chrome.bottom_bar {
+                if visible {
+                    ui.add_space(6.0);
                 }
+                status_preview_bar(
+                    ui,
+                    palette,
+                    height,
+                    status_background,
+                    &config.chrome.bottom_segments,
+                );
+                visible = true;
+            }
+            if !visible {
+                ui.label(RichText::new("Both module bars are hidden.").color(palette.muted));
             }
         });
     ui.add_space(10.0);
+}
+
+fn status_preview_bar(
+    ui: &mut egui::Ui,
+    palette: ThemePalette,
+    height: f32,
+    status_background: Color32,
+    segments: &[crate::config::StatusSegment],
+) {
+    let (bar, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(
+        bar,
+        egui::CornerRadius::same(palette.radius),
+        status_background,
+    );
+
+    for (align, x_anchor) in [
+        (crate::config::SegmentAlign::Left, bar.left() + 10.0),
+        (crate::config::SegmentAlign::Center, bar.center().x),
+        (crate::config::SegmentAlign::Right, bar.right() - 10.0),
+    ] {
+        let modules: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.align == align)
+            .collect();
+        let width = modules.len() as f32 * 92.0;
+        let mut x = match align {
+            crate::config::SegmentAlign::Left => x_anchor,
+            crate::config::SegmentAlign::Center => x_anchor - width * 0.5,
+            crate::config::SegmentAlign::Right => x_anchor - width,
+        };
+        for segment in modules {
+            let bg = segment.bg.map_or(palette.hover, color_to_egui);
+            let fg = readable_color(bg, segment.fg.map_or(palette.text, color_to_egui));
+            let chip =
+                Rect::from_min_size(Pos2::new(x, bar.center().y - 12.0), Vec2::new(84.0, 24.0));
+            ui.painter()
+                .rect_filled(chip, egui::CornerRadius::same(5), bg);
+            ui.painter().rect_stroke(
+                chip,
+                egui::CornerRadius::same(5),
+                egui::Stroke::new(1.0, palette.border),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                segment
+                    .icon
+                    .as_ref()
+                    .map_or(segment.module.as_str(), String::as_str),
+                egui::FontId::monospace(12.0),
+                fg,
+            );
+            x += 92.0;
+        }
+    }
 }
 
 fn color_to_egui(color: Color) -> Color32 {
