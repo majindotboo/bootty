@@ -29,6 +29,8 @@ use crate::{
 
 const RMUX_OUTPUT_POLL_MIN_DELAY: Duration = Duration::from_millis(1);
 const RMUX_OUTPUT_POLL_MAX_DELAY: Duration = Duration::from_millis(16);
+const RMUX_KEYBOARD_PROTOCOL_BOOTSTRAP_POLLS: usize = 4;
+const RMUX_KEYBOARD_PROTOCOL_SCAN_TAIL_BYTES: usize = 64;
 
 const TERM_ENV: &str = "TERM";
 const COLORTERM_ENV: &str = "COLORTERM";
@@ -110,6 +112,8 @@ impl RmuxPaneTarget {
 pub(crate) enum RmuxPaneEvent {
     Capture(Vec<u8>),
     Chunks(Vec<PaneOutputChunk>),
+    KeyboardProtocol(Vec<u8>),
+
     Error(String),
 }
 
@@ -807,6 +811,61 @@ async fn run_pane_io(
     }
 }
 
+async fn replay_retained_kitty_keyboard_protocol(
+    pane: &Pane,
+    output_tx: &mpsc::Sender<RmuxPaneEvent>,
+) -> Result<()> {
+    let mut output_stream = pane
+        .output_stream_starting_at(PaneOutputStart::Oldest)
+        .await?;
+    let mut tail = Vec::new();
+    for _ in 0..RMUX_KEYBOARD_PROTOCOL_BOOTSTRAP_POLLS {
+        let chunks = output_stream.poll_once().await?;
+        if chunks.is_empty() {
+            break;
+        }
+        for chunk in chunks {
+            let PaneOutputChunk::Bytes { bytes, .. } = chunk else {
+                continue;
+            };
+            tail.extend_from_slice(&bytes);
+            if let Some(sequence) = kitty_keyboard_protocol_query(&tail) {
+                let _ = output_tx.send(RmuxPaneEvent::KeyboardProtocol(sequence));
+                return Ok(());
+            }
+            if tail.len() > RMUX_KEYBOARD_PROTOCOL_SCAN_TAIL_BYTES {
+                let start = tail.len() - RMUX_KEYBOARD_PROTOCOL_SCAN_TAIL_BYTES;
+                tail.drain(..start);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn kitty_keyboard_protocol_query(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut search_start = 0;
+    while let Some(relative_start) = bytes[search_start..]
+        .windows(3)
+        .position(|window| window == b"\x1b[>")
+    {
+        let start = search_start + relative_start;
+        let flags_start = start + 3;
+        let relative_end = bytes[flags_start..].iter().position(|byte| *byte == b'u')?;
+        let flags_end = flags_start + relative_end;
+        if flags_end == flags_start || !bytes[flags_start..flags_end].iter().all(u8::is_ascii_digit)
+        {
+            search_start = flags_end + 1;
+            continue;
+        }
+        let query_end = flags_end + 5;
+        if bytes.get(flags_end + 1..query_end) == Some(b"\x1b[?u") {
+            return Some(bytes[start..query_end].to_vec());
+        }
+        search_start = flags_end + 1;
+    }
+    None
+}
+
 async fn run_pane_io_inner(
     target: RmuxPaneTarget,
     max_scrollback: usize,
@@ -818,6 +877,7 @@ async fn run_pane_io_inner(
     target.session_name()?;
     let rmux = connect_bootty_rmux().await?;
     let pane = pane_for_target(&rmux, &target).await?;
+    replay_retained_kitty_keyboard_protocol(&pane, output_tx).await?;
     let mut output_stream = pane.output_stream_starting_at(PaneOutputStart::Now).await?;
     let restore_valid = Arc::new(AtomicBool::new(true));
     start_restore_capture(
@@ -1237,6 +1297,16 @@ mod tests {
             bytes,
             b"\x1b[?25l\x1b[H\x1b[J\x1b[1;1H\x1b[0;1;4;38;2;1;2;3;48;5;4;58;5;10mx\x1b[1;2H\x1b[0;41m \x1b[0m\x1b[1;2H\x1b[?25h"
         );
+    }
+
+    #[test]
+    fn retained_kitty_keyboard_query_is_replayed_without_screen_output() {
+        assert_eq!(
+            kitty_keyboard_protocol_query(b"prompt\x1b[>7u\x1b[?u\x1b[c"),
+            Some(b"\x1b[>7u\x1b[?u".to_vec())
+        );
+        assert_eq!(kitty_keyboard_protocol_query(b"\x1b[>7u\x1b[?"), None);
+        assert_eq!(kitty_keyboard_protocol_query(b"\x1b[>xu\x1b[?u"), None);
     }
 
     #[test]

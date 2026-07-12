@@ -859,6 +859,9 @@ impl RmuxWorker {
                         }
                     }
                 }
+                RmuxPaneEvent::KeyboardProtocol(bytes) => {
+                    self.engine.write_vt(&bytes);
+                }
                 RmuxPaneEvent::Error(error) => {
                     self.send_error(anyhow::anyhow!(error));
                     self.output_closed = true;
@@ -1376,6 +1379,7 @@ mod tests {
             .status();
         Ok(())
     }
+
     #[test]
     #[ignore = "requires an rmux binary; set RMUX_TMPDIR to isolate the daemon"]
     fn rmux_live_input_latency_stays_interactive() -> Result<()> {
