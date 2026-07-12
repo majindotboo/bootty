@@ -1,6 +1,11 @@
 mod state;
 
-use std::{collections::HashMap, path::PathBuf, sync::mpsc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{OnceLock, mpsc},
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use eframe::{
@@ -11,6 +16,7 @@ use eframe::{
 };
 
 pub use state::{AppEffect, AppState, FrameInputs, ViewportSnapshot};
+use state::{TerminalProgress, TerminalProgressState};
 
 use crate::{
     config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig},
@@ -140,6 +146,65 @@ fn paint_pane_corner_masks(painter: &egui::Painter, rect: Rect, radius: f32, bg:
         }
     }
     painter.add(egui::Shape::mesh(mesh));
+}
+
+const TERMINAL_PROGRESS_HEIGHT: f32 = 2.0;
+const INDETERMINATE_PROGRESS_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const INDETERMINATE_PROGRESS_WIDTH: f32 = 0.25;
+const INDETERMINATE_PROGRESS_CYCLE: f64 = 1.5;
+
+fn terminal_progress_color(
+    progress: TerminalProgress,
+    palette: bootty_ui::ThemePalette,
+) -> egui::Color32 {
+    match progress.state {
+        TerminalProgressState::Normal | TerminalProgressState::Indeterminate => palette.accent,
+        TerminalProgressState::Error => palette.destructive,
+        TerminalProgressState::Warning => palette.warning,
+    }
+}
+
+fn progress_animation_time() -> f64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+fn indeterminate_progress_left(track_width: f32, time: f64) -> f32 {
+    let segment_width = track_width * INDETERMINATE_PROGRESS_WIDTH;
+    let phase = (time / INDETERMINATE_PROGRESS_CYCLE).fract() as f32;
+    let travel = 1.0 - (phase * 2.0 - 1.0).abs();
+    (track_width - segment_width).max(0.0) * travel
+}
+
+fn paint_terminal_progress(
+    painter: &egui::Painter,
+    rect: Rect,
+    progress: TerminalProgress,
+    palette: bootty_ui::ThemePalette,
+    time: f64,
+) {
+    let track = Rect::from_min_size(
+        rect.min,
+        egui::vec2(rect.width(), TERMINAL_PROGRESS_HEIGHT.min(rect.height())),
+    );
+    painter.rect_filled(track, 0.0, palette.border);
+    let (fill_left, fill_width) = if progress.state == TerminalProgressState::Indeterminate {
+        let fill_width = track.width() * INDETERMINATE_PROGRESS_WIDTH;
+        (
+            track.min.x + indeterminate_progress_left(track.width(), time),
+            fill_width,
+        )
+    } else {
+        let Some(fraction) = progress.fraction() else {
+            return;
+        };
+        (track.min.x, track.width() * fraction.clamp(0.0, 1.0))
+    };
+    let fill = Rect::from_min_size(
+        Pos2::new(fill_left, track.min.y),
+        egui::vec2(fill_width, track.height()),
+    );
+    painter.rect_filled(fill, 0.0, terminal_progress_color(progress, palette));
 }
 
 /// Shrink a divider's visual rect along its long axis by the pane corner radius (per end), so it
@@ -439,6 +504,7 @@ impl BoottyApp {
             base: palette.base,
             subtext: palette.subtext,
             text: palette.text,
+            border: palette.border,
         };
 
         self.state
@@ -491,12 +557,21 @@ impl BoottyApp {
             .mux()
             .selected_session_windows()
             .iter()
-            .map(|window| crate::extensions::WindowView {
-                id: window.id.clone(),
-                index: window.index,
-                name: window.name.clone(),
-                active: selected == Some(window.id.as_str())
-                    || (selected.is_none() && window.active),
+            .map(|window| {
+                let active =
+                    selected == Some(window.id.as_str()) || (selected.is_none() && window.active);
+                let progress = (!active)
+                    .then(|| self.state.window_progress(window))
+                    .flatten();
+                crate::extensions::WindowView {
+                    id: window.id.clone(),
+                    index: window.index,
+                    name: window.name.clone(),
+                    active,
+                    progress,
+                    progress_indeterminate: progress.is_some()
+                        && self.state.window_has_indeterminate_progress(window),
+                }
             })
             .collect::<Vec<_>>();
         windows.sort_by_key(|window| window.index);
@@ -555,6 +630,36 @@ impl BoottyApp {
                     .get(&session.id)
                     .cloned()
                     .unwrap_or_else(|| (fallback_color.clone(), fallback_dim_color.clone()));
+                let progress = session
+                    .windows
+                    .iter()
+                    .filter_map(|window| self.state.window_progress(window))
+                    .max();
+                let progress_indeterminate = progress.is_some()
+                    && session
+                        .windows
+                        .iter()
+                        .any(|window| self.state.window_has_indeterminate_progress(window));
+                let mut reported_panes = HashSet::new();
+                let mut progresses = Vec::new();
+                for window in &session.windows {
+                    for pane in window.panes.iter().chain(std::iter::once(&window.anchor)) {
+                        if let Some(pane_id) = pane.pane_id.as_deref()
+                            && reported_panes.insert(pane_id)
+                            && let Some(progress) = self.state.pane_progress(pane_id)
+                        {
+                            progresses.push(crate::extensions::SessionProgressView {
+                                process: pane
+                                    .process
+                                    .clone()
+                                    .unwrap_or_else(|| "terminal".to_owned()),
+                                value: progress.value.unwrap_or(50),
+                                indeterminate: progress.state
+                                    == TerminalProgressState::Indeterminate,
+                            });
+                        }
+                    }
+                }
                 crate::extensions::SessionView {
                     id: session.id.clone(),
                     name: session.name.clone(),
@@ -563,6 +668,9 @@ impl BoottyApp {
                     cwd: session.anchor.cwd.clone(),
                     color: Some(color),
                     dim_color: Some(dim_color),
+                    progress,
+                    progress_indeterminate,
+                    progresses,
                 }
             })
             .collect()
@@ -660,6 +768,15 @@ impl BoottyApp {
             Err(error) => self.state.record_render_error(error),
         }
         paint_pane_corner_masks(ui.painter(), rect, corner_radius_px, background);
+        if let Some(progress) = self.state.current_terminal_progress() {
+            paint_terminal_progress(
+                ui.painter(),
+                rect,
+                progress,
+                self.state.ui_theme().palette,
+                progress_animation_time(),
+            );
+        }
     }
 
     /// Render every pane of the active native window into its split sub-rect: the focused pane via
@@ -781,6 +898,15 @@ impl BoottyApp {
             }
             // Round the pane by masking its corners with the window background.
             paint_pane_corner_masks(ui.painter(), *rect, corner_radius_px, background);
+            if let Some(progress) = state.pane_progress(pane_id) {
+                paint_terminal_progress(
+                    ui.painter(),
+                    *rect,
+                    progress,
+                    palette,
+                    progress_animation_time(),
+                );
+            }
             if is_focused && border_width > 0.0 {
                 ui.painter().rect_stroke(
                     *rect,
@@ -1641,6 +1767,9 @@ impl eframe::App for BoottyApp {
         };
         let effects = self.state.update_frame(inputs);
         self.apply_effects(ctx, effects);
+        if self.state.has_indeterminate_terminal_progress() {
+            ctx.request_repaint_after(INDETERMINATE_PROGRESS_FRAME_INTERVAL);
+        }
         ctx.set_cursor_icon(self.terminal_cursor_icon);
 
         if crate::menu::settings_requested() {
@@ -1845,6 +1974,12 @@ fn egui_font_name(family: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn indeterminate_progress_bounces_across_the_full_track() {
+        assert_eq!(indeterminate_progress_left(100.0, 0.0), 0.0);
+        assert_eq!(indeterminate_progress_left(100.0, 0.75), 75.0);
+        assert_eq!(indeterminate_progress_left(100.0, 1.5), 0.0);
+    }
     #[test]
     fn custom_egui_fonts_only_load_for_visible_chrome() {
         let mut config = BoottyConfig::default();

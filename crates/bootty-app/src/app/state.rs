@@ -59,7 +59,7 @@ use crate::{
         command::{MuxCommand, MuxSplitDirection},
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
-        snapshot::MuxPaneAnchor,
+        snapshot::{MuxPaneAnchor, MuxWindow},
         terminal::{ActiveTerminal, ActiveTerminalRuntime},
     },
     platform::{
@@ -69,6 +69,7 @@ use crate::{
     },
     renderer::{RendererMetrics, TerminalRenderSource, TerminalWidget},
     scheduler::{RepaintScheduler, RepaintSignal},
+    session_names::SessionNameStore,
     session_order::SessionOrderStore,
     terminal::{DrainStats, MouseButton, TerminalSearchDirection, TerminalSessionConfig},
     terminal_text::TerminalTextConfig,
@@ -148,6 +149,50 @@ pub enum AppEffect {
     ConfigureKeybind(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalProgressState {
+    Normal,
+    Error,
+    Indeterminate,
+    Warning,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalProgress {
+    pub state: TerminalProgressState,
+    pub value: Option<u8>,
+}
+
+impl TerminalProgress {
+    fn from_conemu(state: &str, value: Option<u8>) -> Option<Self> {
+        let state = match state {
+            "normal" => TerminalProgressState::Normal,
+            "error" => TerminalProgressState::Error,
+            "indeterminate" => TerminalProgressState::Indeterminate,
+            "warning" => TerminalProgressState::Warning,
+            "inactive" => return None,
+            _ => return None,
+        };
+        Some(Self { state, value })
+    }
+
+    pub(crate) fn fraction(self) -> Option<f32> {
+        self.value
+            .map(|value| f32::from(value) / 100.0)
+            .or((self.state == TerminalProgressState::Indeterminate).then_some(0.5))
+    }
+
+    fn percent(self) -> Option<u8> {
+        self.value
+            .or((self.state == TerminalProgressState::Indeterminate).then_some(50))
+    }
+}
+#[derive(Clone, Debug)]
+struct PendingGeneratedName {
+    cwd: String,
+    name: String,
+}
+
 pub struct AppState {
     terminal: ActiveTerminal,
     repaint_scheduler: RepaintScheduler,
@@ -175,6 +220,8 @@ pub struct AppState {
     mux: MuxController,
     custom_tab_names: HashSet<(String, String)>,
     terminal_tab_titles: HashMap<(String, String), String>,
+    terminal_progress: HashMap<String, TerminalProgress>,
+    unscoped_terminal_progress: Option<TerminalProgress>,
     repaint: RepaintHandle,
     terminal_side_effect_tx: mpsc::Sender<TerminalSideEffectEvent>,
     terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffectEvent>,
@@ -203,6 +250,8 @@ pub struct AppState {
     stability_trace: Option<StabilityTrace>,
     config_hot_reload: ConfigHotReload,
     session_order: SessionOrderStore,
+    session_names: SessionNameStore,
+    pending_generated_names: HashMap<String, PendingGeneratedName>,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
@@ -406,16 +455,6 @@ fn new_mux_session_request_with_name(
     }
 }
 
-fn new_mux_session_request(
-    config: &BoottyConfig,
-) -> crate::ui::new_session_picker::NewMuxSessionRequest {
-    let request = new_mux_session_request_with_name(config, "");
-    crate::ui::new_session_picker::NewMuxSessionRequest {
-        session_id: crate::strings::session_name_for_path(&request.cwd),
-        cwd: request.cwd,
-    }
-}
-
 fn terminal_cwd_for_mux_command(
     live_terminal_cwd: Option<String>,
     anchor_cwd: Option<String>,
@@ -489,6 +528,7 @@ impl AppState {
         );
         let config_hot_reload = ConfigHotReload::new(&config.config_path);
         let session_order = SessionOrderStore::lazy_for_config_path(&config.config_path);
+        let session_names = SessionNameStore::lazy_for_config_path(&config.config_path);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
         let macos_non_native_fullscreen_applied =
             apply_macos_non_native_fullscreen_presentation(&config.window);
@@ -525,6 +565,8 @@ impl AppState {
             mux: MuxController::new(),
             custom_tab_names: HashSet::new(),
             terminal_tab_titles: HashMap::new(),
+            terminal_progress: HashMap::new(),
+            unscoped_terminal_progress: None,
             terminal_side_effect_tx,
             terminal_side_effect_rx,
             repaint,
@@ -545,6 +587,8 @@ impl AppState {
             stability_trace,
             config_hot_reload,
             session_order,
+            session_names,
+            pending_generated_names: HashMap::new(),
             new_mux_session_dialog: None,
             sidebar_hovered_session: None,
             session_picker_dialog: None,
@@ -993,6 +1037,51 @@ impl AppState {
             .map(|layout| layout.focused().to_owned())
     }
 
+    pub(crate) fn current_terminal_progress(&self) -> Option<TerminalProgress> {
+        self.focused_pane()
+            .as_deref()
+            .and_then(|pane_id| self.terminal_progress.get(pane_id).copied())
+            .or_else(|| {
+                self.mux
+                    .selected_session_anchor()
+                    .and_then(|anchor| anchor.pane_id.as_deref())
+                    .and_then(|pane_id| self.terminal_progress.get(pane_id).copied())
+            })
+            .or(self.unscoped_terminal_progress)
+    }
+
+    pub(crate) fn pane_progress(&self, pane_id: &str) -> Option<TerminalProgress> {
+        self.terminal_progress.get(pane_id).copied()
+    }
+
+    pub(crate) fn has_indeterminate_terminal_progress(&self) -> bool {
+        self.terminal_progress
+            .values()
+            .chain(self.unscoped_terminal_progress.iter())
+            .any(|progress| progress.state == TerminalProgressState::Indeterminate)
+    }
+
+    pub(crate) fn window_has_indeterminate_progress(&self, window: &MuxWindow) -> bool {
+        window
+            .panes
+            .iter()
+            .chain(std::iter::once(&window.anchor))
+            .filter_map(|pane| pane.pane_id.as_deref())
+            .filter_map(|pane_id| self.pane_progress(pane_id))
+            .any(|progress| progress.state == TerminalProgressState::Indeterminate)
+    }
+
+    pub(crate) fn window_progress(&self, window: &MuxWindow) -> Option<u8> {
+        window
+            .panes
+            .iter()
+            .chain(std::iter::once(&window.anchor))
+            .filter_map(|pane| pane.pane_id.as_deref())
+            .filter_map(|pane_id| self.pane_progress(pane_id))
+            .filter_map(TerminalProgress::percent)
+            .max()
+    }
+
     pub fn pane_rects(&self, area: Rect, gap: f32) -> Vec<(String, Rect)> {
         self.current_pane_layout()
             .map(|layout| layout.rects(area, gap))
@@ -1220,6 +1309,158 @@ impl AppState {
                 .map(|session| session.name.as_str()),
         );
         self.mux.apply_session_order(&ordered_names);
+    }
+    fn sync_generated_session_names(&mut self) {
+        let sessions = self.mux.sessions().to_vec();
+        let mut renames = Vec::new();
+        self.pending_generated_names.retain(|session_id, pending| {
+            sessions.iter().any(|session| {
+                session.id == *session_id
+                    && session
+                        .anchor
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| Self::session_root(cwd) == pending.cwd)
+            })
+        });
+        let mut planned_names = self
+            .pending_generated_names
+            .values()
+            .map(|pending| pending.name.clone())
+            .collect::<HashSet<_>>();
+        let rename_supported = selected_backend(&self.config().multiplexer) != MuxBackendKind::Rmux;
+
+        for session in &sessions {
+            let Some(raw_cwd) = session.anchor.cwd.as_deref() else {
+                continue;
+            };
+            let cwd = Self::session_root(raw_cwd);
+            let record = if let Some(record) =
+                self.session_names
+                    .observe_session(&session.id, &session.name, &cwd)
+            {
+                record
+            } else {
+                let legacy_name = crate::strings::session_name_for_path(&cwd);
+                if session.name == legacy_name {
+                    self.session_names
+                        .remember_generated(&session.id, &cwd, &session.name);
+                } else {
+                    self.session_names
+                        .mark_explicit(&session.id, &session.name, &cwd);
+                }
+                self.session_names
+                    .observe_session(&session.id, &session.name, &cwd)
+                    .expect("session name metadata should be observable after recording")
+            };
+
+            if let Some(pending) = self.pending_generated_names.get(&session.id).cloned() {
+                if pending.cwd == cwd {
+                    if session.name == pending.name {
+                        planned_names.remove(&pending.name);
+                        self.session_names
+                            .remember_generated(&session.id, &cwd, &pending.name);
+                        self.pending_generated_names.remove(&session.id);
+                    } else if session.name != record.generated_name {
+                        planned_names.remove(&pending.name);
+                        self.pending_generated_names.remove(&session.id);
+                        self.session_names
+                            .mark_explicit(&session.id, &session.name, &cwd);
+                    }
+                    continue;
+                }
+                self.pending_generated_names.remove(&session.id);
+            }
+            if record.explicit {
+                continue;
+            }
+            if session.name != record.generated_name {
+                self.session_names
+                    .mark_explicit(&session.id, &session.name, &cwd);
+                continue;
+            }
+
+            let existing_names = sessions
+                .iter()
+                .filter(|other| other.id != session.id)
+                .map(|other| other.name.as_str())
+                .chain(planned_names.iter().map(String::as_str));
+            let desired = crate::strings::unique_session_name(
+                &crate::git::suggested_session_name(&cwd),
+                existing_names,
+            );
+            if desired == session.name || !rename_supported {
+                continue;
+            }
+            planned_names.insert(desired.clone());
+            self.pending_generated_names.insert(
+                session.id.clone(),
+                PendingGeneratedName {
+                    cwd,
+                    name: desired.clone(),
+                },
+            );
+            renames.push((session.id.clone(), desired));
+        }
+
+        if renames.is_empty() {
+            return;
+        }
+        let mux_config = self.config().multiplexer.clone();
+        for (session_id, name) in renames {
+            self.mux.execute_command(
+                &self.repaint,
+                &mux_config,
+                MuxCommand::RenameSession { session_id, name },
+            );
+        }
+    }
+
+    fn create_project_session_for_cwd(&mut self, cwd: String) {
+        let cwd = Self::session_root(&cwd);
+        if let Some(session_id) = self.mux.sessions().iter().find_map(|session| {
+            session
+                .anchor
+                .cwd
+                .as_deref()
+                .is_some_and(|open_cwd| Self::session_root(open_cwd) == cwd)
+                .then(|| session.id.clone())
+        }) {
+            self.activate_session_from_ui(&session_id);
+            return;
+        }
+
+        let existing_names = self
+            .mux
+            .sessions()
+            .iter()
+            .map(|session| session.name.as_str())
+            .chain(
+                self.pending_generated_names
+                    .values()
+                    .map(|pending| pending.name.as_str()),
+            )
+            .collect::<Vec<_>>();
+        let session_id = crate::strings::unique_session_name(
+            &crate::git::suggested_session_name(&cwd),
+            existing_names,
+        );
+        self.session_names
+            .remember_generated(&session_id, &cwd, &session_id);
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.create_project_session(
+            crate::ui::new_session_picker::NewMuxSessionRequest { session_id, cwd },
+            &self.repaint,
+            &mux_config,
+        );
+    }
+
+    fn session_root(cwd: &str) -> String {
+        let cwd = crate::git::worktree_root(cwd).unwrap_or_else(|| cwd.to_owned());
+        std::fs::canonicalize(&cwd)
+            .unwrap_or_else(|_| PathBuf::from(cwd))
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn move_selected_session(&mut self, delta: i32) -> bool {
@@ -1531,13 +1772,7 @@ impl AppState {
             NewSessionPickerEvent::CreateWorktree { repo, branch } => {
                 match crate::git::add_worktree(&repo, &branch) {
                     Ok(path) => {
-                        let request = crate::ui::new_session_picker::NewMuxSessionRequest {
-                            session_id: crate::strings::session_name_for_path(&path),
-                            cwd: path,
-                        };
-                        let mux_config = self.config().multiplexer.clone();
-                        self.mux
-                            .create_project_session(request, &self.repaint, &mux_config);
+                        self.create_project_session_for_cwd(path);
                         self.input_focus = InputFocus::Terminal;
                     }
                     Err(error) => {
@@ -1546,10 +1781,8 @@ impl AppState {
                     }
                 }
             }
-            NewSessionPickerEvent::CreateSession(request) => {
-                let mux_config = self.config().multiplexer.clone();
-                self.mux
-                    .create_project_session(request, &self.repaint, &mux_config);
+            NewSessionPickerEvent::CreateSession { cwd } => {
+                self.create_project_session_for_cwd(cwd);
                 self.input_focus = InputFocus::Terminal;
             }
         }
@@ -1654,13 +1887,39 @@ impl AppState {
                     self.last_error = Some(error.to_string());
                 }
             }
-            TerminalSideEffect::ConEmuProgress { .. } => {}
+            TerminalSideEffect::ConEmuProgress { state, value } => {
+                self.apply_terminal_progress(source_pane_id.as_deref(), state, value);
+                effects.push(AppEffect::RequestRepaint);
+            }
             TerminalSideEffect::SemanticPrompt(_)
             | TerminalSideEffect::KittyTextSizing(_)
             | TerminalSideEffect::ConEmuControl(_)
             | TerminalSideEffect::Iterm2Control(_)
             | TerminalSideEffect::Iterm2File(_)
             | TerminalSideEffect::UnsupportedHostCommand { .. } => {}
+        }
+    }
+
+    fn apply_terminal_progress(
+        &mut self,
+        source_pane_id: Option<&str>,
+        state: String,
+        value: Option<u8>,
+    ) {
+        if state == "unknown" {
+            return;
+        }
+        let progress = TerminalProgress::from_conemu(&state, value);
+        match source_pane_id {
+            Some(pane_id) => match progress {
+                Some(progress) => {
+                    self.terminal_progress.insert(pane_id.to_owned(), progress);
+                }
+                None => {
+                    self.terminal_progress.remove(pane_id);
+                }
+            },
+            None => self.unscoped_terminal_progress = progress,
         }
     }
 
@@ -1891,7 +2150,13 @@ impl AppState {
         }
 
         if let Some(result) = self.mux.poll_command() {
-            self.last_error = result.err();
+            match result {
+                Ok(()) => self.last_error = None,
+                Err(error) => {
+                    self.pending_generated_names.clear();
+                    self.last_error = Some(error);
+                }
+            }
         }
         if let Some(error) = self
             .mux
@@ -1902,6 +2167,7 @@ impl AppState {
         if let Some(after) = mux_refresh_repaint_after(&self.config_state.current().multiplexer) {
             effects.push(AppEffect::RepaintAfter(after));
         }
+        self.sync_generated_session_names();
         self.sync_session_order();
         if let Err(error) = self.sync_terminal_panes() {
             self.last_error = Some(error.to_string());
@@ -2218,6 +2484,8 @@ impl AppState {
             || self.has_new_session_config_changes;
         self.config_state.accept(next);
         self.set_mouse_pointer_hidden_while_typing(self.mouse_pointer_hidden_while_typing, effects);
+        self.session_names = SessionNameStore::lazy_for_config_path(&self.config().config_path);
+        self.pending_generated_names.clear();
         self.session_order = SessionOrderStore::lazy_for_config_path(&self.config().config_path);
         self.sync_session_order();
         self.last_error = if self.has_new_session_config_changes {
@@ -2992,10 +3260,8 @@ impl AppState {
             }
         }
         if matches!(action, MuxKeyAction::NewTab) && self.mux.selected_session().is_none() {
-            let request = new_mux_session_request(self.config());
-            let mux_config = self.config().multiplexer.clone();
-            self.mux
-                .create_project_session(request, &self.repaint, &mux_config);
+            let cwd = new_mux_session_request_with_name(self.config(), "").cwd;
+            self.create_project_session_for_cwd(cwd);
             self.sync_native_layout_terminal_now();
             return;
         }
@@ -5482,6 +5748,88 @@ mod tests {
         assert_eq!(second_window.name, "⠼ agents");
         assert_eq!(state.mux.selected_window(), Some(first_window_id.as_str()));
         assert_eq!(effects, Vec::<AppEffect>::new());
+    }
+
+    #[test]
+    fn scoped_terminal_progress_updates_and_clears_its_inactive_window_indicator() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("progress-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "repo".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let first_window_id = state.mux.selected_session_windows()[0].id.clone();
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let second_window = state
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| window.id != first_window_id)
+            .expect("second tab should be present")
+            .clone();
+        let second_pane_id = second_window
+            .anchor
+            .pane_id
+            .clone()
+            .expect("native tab should have a source pane id");
+        state.activate_window_from_ui(&session_id, &first_window_id);
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id.clone()),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "normal".to_owned(),
+                    value: Some(42),
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert_eq!(state.window_progress(&second_window), Some(42));
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id.clone()),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "indeterminate".to_owned(),
+                    value: None,
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert!(state.has_indeterminate_terminal_progress());
+        assert_eq!(state.window_progress(&second_window), Some(50));
+        assert!(state.window_has_indeterminate_progress(&second_window));
+
+        state.apply_terminal_side_effect_event(
+            TerminalSideEffectEvent::new(
+                Some(second_pane_id),
+                TerminalSideEffect::ConEmuProgress {
+                    state: "inactive".to_owned(),
+                    value: Some(0),
+                },
+            ),
+            &mut Vec::new(),
+            8.0,
+            16.0,
+            1.0,
+        );
+
+        assert_eq!(state.window_progress(&second_window), None);
+        assert!(!state.has_indeterminate_terminal_progress());
+        assert!(!state.window_has_indeterminate_progress(&second_window));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::{
     project_catalog::{
         ProjectPickerEntry, discover_project_picker_entries, toggle_favorite_project_path,
     },
-    strings::{display_path, session_name_for_path},
+    strings::display_path,
     ui::overlay::{self, FloatingWindow, ListRow, ListView, list},
     worktree_catalog::{WorktreePickerEntry, discover_worktree_picker_entries},
 };
@@ -34,7 +34,7 @@ pub enum NewSessionPickerEvent {
     Close,
     Error(String),
     CreateWorktree { repo: String, branch: String },
-    CreateSession(NewMuxSessionRequest),
+    CreateSession { cwd: String },
 }
 
 impl NewMuxSessionDialog {
@@ -252,10 +252,7 @@ impl NewMuxSessionDialog {
         if let [only] = real.as_slice()
             && let Some(cwd) = only.path.clone()
         {
-            return NewSessionPickerEvent::CreateSession(NewMuxSessionRequest {
-                session_id: session_name_for_path(&cwd),
-                cwd,
-            });
+            return NewSessionPickerEvent::CreateSession { cwd };
         }
 
         self.selected = default_worktree_selection(&worktrees, open_cwds);
@@ -276,10 +273,7 @@ impl NewMuxSessionDialog {
             self.focus_filter = true;
             NewSessionPickerEvent::None
         } else if let Some(cwd) = entry.path {
-            NewSessionPickerEvent::CreateSession(NewMuxSessionRequest {
-                session_id: session_name_for_path(&cwd),
-                cwd,
-            })
+            NewSessionPickerEvent::CreateSession { cwd }
         } else {
             NewSessionPickerEvent::Close
         }

@@ -474,8 +474,27 @@ local function session_details(_, facts)
 end
 
 
+
+local function session_progress(ctx, _)
+	local rows = {}
+	for index, progress in ipairs(ctx.session.progresses) do
+		rows[#rows + 1] = {
+			key = "progress:" .. tostring(index),
+			value = progress.value,
+			indeterminate = progress.indeterminate,
+			track = bootty.theme.border,
+			fill = ctx.session.color or bootty.theme.accent,
+			label = progress.process,
+			label_width = 72,
+			label_color = ctx.session.dim_color or bootty.theme.muted,
+		}
+	end
+	return rows
+end
+
+
 return {
-	interval = 0.1,
+	interval = 1 / 120,
 	render = function()
 		local sessions = bootty.sessions()
 		local now = bootty.time()
@@ -493,6 +512,7 @@ return {
 			facts = cached_session_facts,
 			right = session_right,
 			details = session_details,
+			progress = session_progress,
 		})
 	end,
 }

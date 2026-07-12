@@ -260,6 +260,22 @@ fn terminal_engine_collects_raw_protocol_side_effects() -> Result<()> {
 }
 
 #[test]
+fn terminal_engine_treats_bare_osc9_progress_state_as_indeterminate() -> Result<()> {
+    let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
+
+    engine.write_vt(b"\x1b]9;4;3\x07");
+
+    assert_eq!(
+        engine.drain_side_effects(),
+        vec![TerminalSideEffect::ConEmuProgress {
+            state: "indeterminate".to_owned(),
+            value: None,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_engine_handles_iterm2_copy_open_and_reports() -> Result<()> {
     let mut engine = TerminalEngine::new(test_geometry(12, 1))?;
 

@@ -224,10 +224,39 @@ pub(super) fn primitive_background(primitives: &[ModulePrimitive]) -> Option<egu
         .iter()
         .rev()
         .find_map(|primitive| match primitive {
-            ModulePrimitive::Rect { fill, .. } => *fill,
-            ModulePrimitive::Polygon { .. }
+            ModulePrimitive::Rect {
+                fill: Some(fill),
+                x,
+                y,
+                w,
+                h,
+                ..
+            } if x.frac == 0.0
+                && x.px == 0.0
+                && y.frac == 0.0
+                && y.px == 0.0
+                && w.frac == 1.0
+                && w.px == 0.0
+                && h.frac == 1.0
+                && h.px == 0.0 =>
+            {
+                Some(*fill)
+            }
+            ModulePrimitive::Rect { .. }
+            | ModulePrimitive::Polygon { .. }
             | ModulePrimitive::Text { .. }
             | ModulePrimitive::Icon { .. } => None,
+        })
+        .or_else(|| {
+            primitives
+                .iter()
+                .rev()
+                .find_map(|primitive| match primitive {
+                    ModulePrimitive::Rect { fill, .. } => *fill,
+                    ModulePrimitive::Polygon { .. }
+                    | ModulePrimitive::Text { .. }
+                    | ModulePrimitive::Icon { .. } => None,
+                })
         })
         .or_else(|| {
             primitives
@@ -258,6 +287,18 @@ mod tests {
                 y: ModuleCoord::default(),
                 w: ModuleCoord { frac: 1.0, px: 0.0 },
                 h: ModuleCoord { frac: 1.0, px: 0.0 },
+                radius: egui::CornerRadius::ZERO,
+            },
+            ModulePrimitive::Rect {
+                fill: Some(egui::Color32::from_rgb(0x89, 0xb4, 0xfa)),
+                stroke: None,
+                x: ModuleCoord { frac: 0.0, px: 8.0 },
+                y: ModuleCoord {
+                    frac: 1.0,
+                    px: -2.0,
+                },
+                w: ModuleCoord { frac: 0.0, px: 8.0 },
+                h: ModuleCoord { frac: 0.0, px: 2.0 },
                 radius: egui::CornerRadius::ZERO,
             },
             ModulePrimitive::Polygon {

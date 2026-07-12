@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Color32};
@@ -40,7 +40,7 @@ use http::response_body as http_response_body;
 /// Default refresh cadence for a module that doesn't declare its own `interval`.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 /// Background poll granularity; a module fires on the first tick at or after its interval elapses.
-const TICK: Duration = Duration::from_millis(100);
+const TICK: Duration = Duration::from_millis(8);
 /// How often extension dirs are re-scanned for edited/added/removed module files (hot reload).
 const RELOAD_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const CODEXBAR_SERVER_PORT: u16 = 17_613;
@@ -147,6 +147,17 @@ pub struct WindowView {
     pub index: u32,
     pub name: String,
     pub active: bool,
+    /// Terminal progress percentage for an inactive window, if any pane has reported it.
+    pub progress: Option<u8>,
+    pub progress_indeterminate: bool,
+}
+
+/// Progress reported by one terminal pane in a session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionProgressView {
+    pub process: String,
+    pub value: u8,
+    pub indeterminate: bool,
 }
 
 /// A mux session as exposed to sidebar/status extensions via `bootty.sessions()`.
@@ -159,6 +170,9 @@ pub struct SessionView {
     pub cwd: Option<String>,
     pub color: Option<String>,
     pub dim_color: Option<String>,
+    pub progress: Option<u8>,
+    pub progress_indeterminate: bool,
+    pub progresses: Vec<SessionProgressView>,
 }
 
 /// Mux state shared with the worker thread so modules can render it.
@@ -181,6 +195,7 @@ pub struct BuiltinWindowsTheme {
     pub base: Color32,
     pub subtext: Color32,
     pub text: Color32,
+    pub border: Color32,
 }
 
 pub fn builtin_windows_items(view: &MuxView, theme: BuiltinWindowsTheme) -> Vec<ModuleItem> {
@@ -216,6 +231,14 @@ pub fn builtin_windows_items(view: &MuxView, theme: BuiltinWindowsTheme) -> Vec<
         if active {
             name_primitives.push(windows_left_chevron(accent));
         }
+        if let Some(progress) = window.progress {
+            name_primitives.push(windows_progress_track(theme.border));
+            name_primitives.push(windows_progress_fill(
+                accent,
+                progress,
+                window.progress_indeterminate,
+            ));
+        }
 
         push_window_item(
             &mut items,
@@ -247,6 +270,9 @@ pub fn builtin_windows_items(view: &MuxView, theme: BuiltinWindowsTheme) -> Vec<
 
 const WINDOWS_RADIUS_PX: u8 = 6;
 const WINDOWS_WEDGE_PX: f32 = 8.0;
+const WINDOWS_PROGRESS_HEIGHT: f32 = 2.0;
+const WINDOWS_INDETERMINATE_PROGRESS_WIDTH: f32 = 0.25;
+const WINDOWS_INDETERMINATE_PROGRESS_CYCLE: f64 = 1.5;
 
 fn push_window_item(items: &mut Vec<ModuleItem>, window: &WindowView, mut item: ModuleItem) {
     item.action = Some(format!("activate-window:{}", window.id));
@@ -269,6 +295,67 @@ fn windows_right_radius(enabled: bool) -> ModuleCornerRadius {
         se: radius,
         ..egui::CornerRadius::default()
     }
+}
+
+fn windows_progress_track(fill: Color32) -> ModulePrimitive {
+    ModulePrimitive::Rect {
+        fill: Some(fill),
+        stroke: None,
+        x: ModuleCoord::default(),
+        y: ModuleCoord {
+            frac: 1.0,
+            px: -WINDOWS_PROGRESS_HEIGHT,
+        },
+        w: ModuleCoord { frac: 1.0, px: 0.0 },
+        h: ModuleCoord {
+            frac: 0.0,
+            px: WINDOWS_PROGRESS_HEIGHT,
+        },
+        radius: ModuleCornerRadius::ZERO,
+    }
+}
+
+fn windows_progress_fill(fill: Color32, progress: u8, indeterminate: bool) -> ModulePrimitive {
+    let (offset, width) = if indeterminate {
+        (
+            windows_indeterminate_progress_offset(window_progress_animation_time()),
+            WINDOWS_INDETERMINATE_PROGRESS_WIDTH,
+        )
+    } else {
+        (0.0, f32::from(progress) / 100.0)
+    };
+    ModulePrimitive::Rect {
+        fill: Some(fill),
+        stroke: None,
+        x: ModuleCoord {
+            frac: offset,
+            px: 0.0,
+        },
+        y: ModuleCoord {
+            frac: 1.0,
+            px: -WINDOWS_PROGRESS_HEIGHT,
+        },
+        w: ModuleCoord {
+            frac: width,
+            px: 0.0,
+        },
+        h: ModuleCoord {
+            frac: 0.0,
+            px: WINDOWS_PROGRESS_HEIGHT,
+        },
+        radius: ModuleCornerRadius::ZERO,
+    }
+}
+
+fn window_progress_animation_time() -> f64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+fn windows_indeterminate_progress_offset(time: f64) -> f32 {
+    let phase = (time / WINDOWS_INDETERMINATE_PROGRESS_CYCLE).fract() as f32;
+    let travel = 1.0 - (phase * 2.0 - 1.0).abs();
+    (1.0 - WINDOWS_INDETERMINATE_PROGRESS_WIDTH) * travel
 }
 
 fn windows_rect(fill: Color32, radius: ModuleCornerRadius) -> ModulePrimitive {
@@ -1647,12 +1734,36 @@ where
         .collect::<BTreeMap<OsString, OsString>>();
     if let Some(login_env) = login_env {
         for (key, value) in login_env {
-            if key == "PATH" || !env.contains_key(&OsString::from(&key)) {
-                env.insert(OsString::from(key), OsString::from(value));
+            let key = OsString::from(key);
+            if key == "PATH" {
+                let login_path = OsString::from(value);
+                let current_path = env.get(&key);
+                env.insert(
+                    key,
+                    login_path_with_current_fallbacks(login_path, current_path),
+                );
+            } else {
+                env.entry(key).or_insert_with(|| OsString::from(value));
             }
         }
     }
     env
+}
+
+#[cfg(target_os = "macos")]
+fn login_path_with_current_fallbacks(
+    login_path: OsString,
+    current_path: Option<&OsString>,
+) -> OsString {
+    let mut entries = std::env::split_paths(&login_path).collect::<Vec<_>>();
+    if let Some(current_path) = current_path {
+        for path in std::env::split_paths(current_path) {
+            if !entries.contains(&path) {
+                entries.push(path);
+            }
+        }
+    }
+    std::env::join_paths(entries).unwrap_or(login_path)
 }
 
 #[cfg(target_os = "macos")]
@@ -1779,6 +1890,8 @@ fn setup_lua(
                     entry.set("index", window.index)?;
                     entry.set("name", window.name.as_str())?;
                     entry.set("active", window.active)?;
+                    entry.set("progress", window.progress)?;
+                    entry.set("progress_indeterminate", window.progress_indeterminate)?;
                     array.set(index + 1, entry)?;
                 }
             }
@@ -1797,6 +1910,17 @@ fn setup_lua(
                     entry.set("name", session.name.as_str())?;
                     entry.set("active", session.active)?;
                     entry.set("selected", session.selected)?;
+                    entry.set("progress", session.progress)?;
+                    entry.set("progress_indeterminate", session.progress_indeterminate)?;
+                    let progresses = lua.create_table()?;
+                    for (progress_index, progress) in session.progresses.iter().enumerate() {
+                        let progress_entry = lua.create_table()?;
+                        progress_entry.set("process", progress.process.as_str())?;
+                        progress_entry.set("value", progress.value)?;
+                        progress_entry.set("indeterminate", progress.indeterminate)?;
+                        progresses.set(progress_index + 1, progress_entry)?;
+                    }
+                    entry.set("progresses", progresses)?;
                     if let Some(value) = &session.cwd {
                         entry.set("cwd", value.as_str())?;
                     }
@@ -2438,7 +2562,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_shell_run_environment_uses_login_path_without_clobbering_existing_vars() {
+    fn macos_shell_run_environment_uses_login_path_with_current_path_fallbacks() {
         let env = macos_shell_run_environment_from(
             [
                 (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
@@ -2453,7 +2577,7 @@ mod tests {
 
         assert_eq!(
             env.get(&OsString::from("PATH")),
-            Some(&OsString::from("/opt/bin:/usr/bin"))
+            Some(&OsString::from("/opt/bin:/usr/bin:/bin"))
         );
         assert_eq!(
             env.get(&OsString::from("HOME")),
@@ -3227,6 +3351,8 @@ mod tests {
                 index: 2,
                 name: "edit".to_owned(),
                 active: true,
+                progress: Some(42),
+                progress_indeterminate: false,
             }],
             session: Some("work".to_owned()),
             session_color: Some("#89b4fa".to_owned()),
@@ -3236,13 +3362,13 @@ mod tests {
         let value = lua
             .load(
                 "return function() local w = bootty.windows()[1] \
-                 return { text = w.index .. ':' .. w.name, action = 'activate-window:' .. w.id } end",
+                 return { text = w.index .. ':' .. w.name .. ':' .. w.progress, action = 'activate-window:' .. w.id } end",
             )
             .eval::<Value>()
             .unwrap();
         let module = loaded_module_from_value("test".to_owned(), value).unwrap();
         let items = run_module(&module.body);
-        assert_eq!(items[0].text, "2:edit");
+        assert_eq!(items[0].text, "2:edit:42");
         assert_eq!(items[0].action.as_deref(), Some("activate-window:@1"));
     }
 
@@ -3257,15 +3383,30 @@ mod tests {
                 cwd: Some("/tmp/work/api".to_owned()),
                 color: Some("#89b4fa".to_owned()),
                 dim_color: Some("#455a7d".to_owned()),
+                progress: Some(42),
+                progress_indeterminate: false,
+                progresses: vec![
+                    SessionProgressView {
+                        process: "pi".to_owned(),
+                        value: 50,
+                        indeterminate: true,
+                    },
+                    SessionProgressView {
+                        process: "cargo".to_owned(),
+                        value: 42,
+                        indeterminate: false,
+                    },
+                ],
             }],
             ..MuxView::default()
         }));
         let lua = setup_lua(&[], mux, Arc::default(), Arc::default(), Arc::default()).unwrap();
         let value = lua
             .load(
-                "return function() local s = bootty.sessions()[1] \
-                 return { kind = 'session', text = s.name .. ':' .. s.cwd .. ':' .. tostring(s.process), \
-                 session_id = s.id, fg = s.color } end",
+                r#"return function() local s = bootty.sessions()[1]
+                   local p = s.progresses
+                   return { kind = 'session', text = s.name .. ':' .. s.cwd .. ':' .. p[1].process .. ':' .. p[2].value,
+                   session_id = s.id, fg = s.color } end"#,
             )
             .eval::<Value>()
             .unwrap();
@@ -3273,7 +3414,7 @@ mod tests {
         let items = run_module(&module.body);
 
         assert_eq!(items[0].kind.as_deref(), Some("session"));
-        assert_eq!(items[0].text, "work/api:/tmp/work/api:nil");
+        assert_eq!(items[0].text, "work/api:/tmp/work/api:pi:42");
         assert_eq!(items[0].session_id.as_deref(), Some("$1"));
         assert_eq!(items[0].fg, Some(Color32::from_rgb(0x89, 0xb4, 0xfa)));
     }
@@ -3417,12 +3558,16 @@ mod tests {
                     index: 1,
                     name: "edit".to_owned(),
                     active: true,
+                    progress: None,
+                    progress_indeterminate: false,
                 },
                 WindowView {
                     id: "@2".to_owned(),
                     index: 2,
                     name: "logs".to_owned(),
                     active: false,
+                    progress: None,
+                    progress_indeterminate: false,
                 },
             ],
             ..MuxView::default()
@@ -3444,6 +3589,13 @@ mod tests {
     }
 
     #[test]
+    fn indeterminate_window_progress_bounces_across_its_track() {
+        assert_eq!(windows_indeterminate_progress_offset(0.0), 0.0);
+        assert_eq!(windows_indeterminate_progress_offset(0.75), 0.75);
+        assert_eq!(windows_indeterminate_progress_offset(1.5), 0.0);
+    }
+
+    #[test]
     fn builtin_windows_items_reflects_active_window_without_worker_cache() {
         let theme = BuiltinWindowsTheme {
             accent: Color32::from_rgb(1, 2, 3),
@@ -3451,6 +3603,7 @@ mod tests {
             base: Color32::from_rgb(7, 8, 9),
             subtext: Color32::from_rgb(10, 11, 12),
             text: Color32::from_rgb(13, 14, 15),
+            border: Color32::from_rgb(16, 17, 18),
         };
         let view = MuxView {
             windows: vec![
@@ -3459,12 +3612,16 @@ mod tests {
                     index: 1,
                     name: "edit".to_owned(),
                     active: false,
+                    progress: Some(42),
+                    progress_indeterminate: false,
                 },
                 WindowView {
                     id: "@2".to_owned(),
                     index: 2,
                     name: "logs".to_owned(),
                     active: true,
+                    progress: None,
+                    progress_indeterminate: false,
                 },
             ],
             session_color: Some("#89b4fa".to_owned()),
@@ -3486,6 +3643,19 @@ mod tests {
         assert_eq!(items[3].action.as_deref(), Some("activate-window:@2"));
         assert_eq!(items[2].reorder_anchor.as_deref(), Some("@2"));
         assert_eq!(items[3].reorder_anchor.as_deref(), Some("@2"));
+        assert_eq!(items[1].pad_left, WINDOWS_WEDGE_PX);
+        assert!(items[1].primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                ModulePrimitive::Rect {
+                    fill: Some(fill),
+                    w,
+                    ..
+                } if *fill == Color32::from_rgb(0x89, 0xb4, 0xfa)
+                    && w.frac == 0.42
+                    && w.px == 0.0
+            )
+        }));
         assert!(items[3].primitives.iter().any(|primitive| {
             matches!(
                 primitive,
