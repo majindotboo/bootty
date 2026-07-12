@@ -179,7 +179,7 @@ impl TerminalRenderFrame {
                     );
                     text_active = false;
                 }
-                self.push_sprite_fragment(run, cell_width, cell, ch, glyph, text_contract);
+                self.push_sprite_fragment(run, cell, ch, glyph, text_contract);
                 cell = cell.saturating_add(crate::terminal_text::terminal_char_cell_delta(ch));
                 continue;
             }
@@ -288,13 +288,13 @@ impl TerminalRenderFrame {
     fn push_sprite_fragment(
         &mut self,
         run: &TextRun,
-        cell_width: f32,
         cell: u16,
         ch: char,
         glyph: SpriteGlyph,
         text_contract: &TerminalTextContract,
     ) {
-        let rect = cell_rect(run.rect, cell_width, cell, 1);
+        let cell_width = run.cell_rect.width() / f32::from(run.cells.max(1));
+        let rect = cell_rect(run.cell_rect, cell_width, cell, 1);
         self.commands
             .push(TerminalRenderCommand::Sprite(SpriteCommandBatch {
                 ch,
@@ -333,6 +333,7 @@ impl TerminalRenderFrame {
 
         if let Some(cursor_text) = &cursor.text_under_cursor {
             let run = TextRun {
+                cell_rect: cursor.rect,
                 rect: cursor_text.rect,
                 cells: text_cell_width(&cursor_text.text),
                 text: cursor_text.text.clone(),
@@ -560,6 +561,7 @@ mod tests {
             backgrounds: Vec::new(),
             text_runs: vec![TextRun {
                 rect: SurfaceRect::from_min_size(0.0, 0.0, 50.0, 10.0),
+                cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 50.0, 10.0),
                 cells: 5,
                 text: "ab─cd".to_owned(),
                 attrs: attrs(),
@@ -604,6 +606,55 @@ mod tests {
     }
 
     #[test]
+    fn fitted_rows_stretch_sprites_without_stretching_text() {
+        let plan = TerminalPaintPlan {
+            surface: SurfaceRect::from_min_size(0.0, 0.0, 30.0, 20.0),
+            default_background: color(0),
+            backgrounds: Vec::new(),
+            text_runs: vec![TextRun {
+                cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 30.0, 20.0),
+                rect: SurfaceRect::from_min_size(0.0, 4.0, 30.0, 12.0),
+                cells: 3,
+                text: "a┃b".to_owned(),
+                attrs: attrs(),
+            }],
+            decorations: Vec::new(),
+            cursor: None,
+        };
+
+        let frame = TerminalRenderFrame::from_plan(&plan, &text_contract());
+        let text_rects = frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                TerminalRenderCommand::Text(command) => Some(command.rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let sprite = frame
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                TerminalRenderCommand::Sprite(command) => Some(command),
+                _ => None,
+            })
+            .expect("box-drawing character produces a sprite");
+
+        assert_eq!(
+            text_rects,
+            vec![
+                SurfaceRect::from_min_size(0.0, 4.0, 10.0, 12.0),
+                SurfaceRect::from_min_size(20.0, 4.0, 10.0, 12.0),
+            ]
+        );
+        assert_eq!(
+            sprite.rect,
+            SurfaceRect::from_min_size(10.0, 0.0, 10.0, 20.0),
+            "drawing glyphs must span the fitted cell rather than the font-sized text rect"
+        );
+    }
+
+    #[test]
     fn text_command_rect_spans_the_full_run_across_a_vs16_emoji() {
         // Regression: push_text_fragment tracked its running cell position with
         // terminal_char_width per character, which measures a VS16 (U+FE0F) as 0 cells instead
@@ -617,6 +668,7 @@ mod tests {
             backgrounds: Vec::new(),
             text_runs: vec![TextRun {
                 rect: SurfaceRect::from_min_size(0.0, 0.0, 40.0, 10.0),
+                cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 40.0, 10.0),
                 cells: 4,
                 text: "(\u{26A0}\u{FE0F})".to_owned(),
                 attrs: attrs(),
@@ -651,6 +703,7 @@ mod tests {
             backgrounds: Vec::new(),
             text_runs: vec![TextRun {
                 rect: SurfaceRect::from_min_size(0.0, 0.0, 90.0, 10.0),
+                cell_rect: SurfaceRect::from_min_size(0.0, 0.0, 90.0, 10.0),
                 cells: 9,
                 text: "fi fl st".to_owned(),
                 attrs: attrs(),
@@ -711,6 +764,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, bytes)| TextRun {
                     rect: SurfaceRect::from_min_size(0.0, index as f32 * 10.0, bytes.len() as f32 * 10.0, 10.0),
+                    cell_rect: SurfaceRect::from_min_size(0.0, index as f32 * 10.0, bytes.len() as f32 * 10.0, 10.0),
                     cells: bytes.len() as u16,
                     text: String::from_utf8(bytes.clone()).expect("generated ascii"),
                     attrs: attrs(),
@@ -758,6 +812,12 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, bytes)| TextRun {
+                cell_rect: SurfaceRect::from_min_size(
+                    0.0,
+                    index as f32 * 10.0,
+                    bytes.len() as f32 * 10.0,
+                    10.0,
+                ),
                 rect: SurfaceRect::from_min_size(
                     0.0,
                     index as f32 * 10.0,

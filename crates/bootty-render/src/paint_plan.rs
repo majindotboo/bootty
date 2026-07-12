@@ -57,6 +57,7 @@ pub struct BackgroundRect {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextRun {
     pub rect: SurfaceRect,
+    pub cell_rect: SurfaceRect,
     pub cells: u16,
     pub text: String,
     pub attrs: TextAttrs,
@@ -389,6 +390,7 @@ fn plan_text_runs(
         let row_rect = surface.run_rect(start_x, start_y, end_x - start_x);
         let rect = text_rect_for_row(row_rect, context.text_cell_height);
         plan.text_runs.push(TextRun {
+            cell_rect: row_rect,
             rect,
             cells: end_x - start_x,
             text: run_text,
