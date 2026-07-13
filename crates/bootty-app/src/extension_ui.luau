@@ -321,7 +321,10 @@ local function session_context(session, groups, last_group, options)
 	local summary = groups[group]
 	local grouped = group ~= "" and summary.count > 1
 	local last_in_group = grouped and summary.emitted + 1 == summary.count
-	local label = if grouped then label_of(session, group) else session.name
+	-- A lone session shows just its group (project) name; the "/leaf" suffix only appears
+	-- once a project holds more than one session. `group` == `session.name` for plain
+	-- directories with no "/", so those are unaffected.
+	local label = if grouped then label_of(session, group) else group
 	return {
 		session = session,
 		group = group,
