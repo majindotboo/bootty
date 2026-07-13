@@ -32,6 +32,8 @@ pub struct StatusBarModel<'a> {
     /// Number of tab rows to reserve for the windows segment. Other status modules stay on the
     /// bottom row.
     pub tab_rows: usize,
+    /// Stable per-bar interaction state key, so top and bottom bar drags cannot collide.
+    pub interaction_id: &'static str,
 }
 
 /// A status segment resolved for this frame: a module's items plus where the segment is aligned.
@@ -207,7 +209,7 @@ pub fn show_status_bar(
     let center = segments_for(SegmentAlign::Center);
     let left = segments_for(SegmentAlign::Left);
 
-    let drag_id = egui::Id::new("status-bar-drag");
+    let drag_id = egui::Id::new(model.interaction_id);
     let mut dragging = ui
         .ctx()
         .data_mut(|data| data.get_persisted::<StatusDragState>(drag_id));
@@ -1238,6 +1240,7 @@ mod tests {
                     row_height: screen_rect.height(),
                     notch_x: None,
                     tab_rows: 1,
+                    interaction_id: "status-bar-primary-press-test",
                 },
             );
         };
@@ -1303,6 +1306,7 @@ mod tests {
                     row_height: screen_rect.height(),
                     notch_x: None,
                     tab_rows: 1,
+                    interaction_id: "status-bar-action-test",
                 },
             );
         };
@@ -1535,6 +1539,7 @@ mod tests {
                                 row_height: 30.0,
                                 notch_x: None,
                                 tab_rows: 1,
+                                interaction_id: "status-bar-reorder-test",
                             },
                         );
                         if event.is_some() {

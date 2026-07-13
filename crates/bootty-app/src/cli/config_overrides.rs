@@ -262,13 +262,21 @@ pub(super) struct ConfigOverrides {
     #[arg(long, value_name = "#RRGGBB", value_parser = parse_color)]
     sidebar_border: Option<Color>,
 
-    /// Force the status bar on.
-    #[arg(long, conflicts_with = "no_status_bar")]
-    status_bar: bool,
+    /// Force the top bar on. `--status-bar` remains a compatibility alias.
+    #[arg(long, alias = "status-bar", conflicts_with = "no_top_bar")]
+    top_bar: bool,
 
-    /// Force the status bar off.
+    /// Force the top bar off. `--no-status-bar` remains a compatibility alias.
+    #[arg(long, alias = "no-status-bar")]
+    no_top_bar: bool,
+
+    /// Force the bottom bar on.
+    #[arg(long, conflicts_with = "no_bottom_bar")]
+    bottom_bar: bool,
+
+    /// Force the bottom bar off.
     #[arg(long)]
-    no_status_bar: bool,
+    no_bottom_bar: bool,
 
     /// Force status bar height.
     #[arg(long, value_name = "PX")]
@@ -479,8 +487,11 @@ impl ConfigOverrides {
         if let Some(sidebar) = bool_override(self.sidebar, self.no_sidebar) {
             config.chrome.sidebar = sidebar;
         }
-        if let Some(status_bar) = bool_override(self.status_bar, self.no_status_bar) {
-            config.chrome.status_bar = status_bar;
+        if let Some(top_bar) = bool_override(self.top_bar, self.no_top_bar) {
+            config.chrome.top_bar = top_bar;
+        }
+        if let Some(bottom_bar) = bool_override(self.bottom_bar, self.no_bottom_bar) {
+            config.chrome.bottom_bar = bottom_bar;
         }
         if let Some(sidebar_width) = self.sidebar_width {
             config.chrome.sidebar_width = sidebar_width;

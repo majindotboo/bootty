@@ -63,7 +63,8 @@ fit-cell-height = true
 
 [chrome]
 sidebar = true
-status-bar = true
+top-bar = true
+bottom-bar = false
 sidebar-width = 286
 status-height = 30
 status-background = "#1e1e2e"

@@ -3,14 +3,90 @@ use eframe::egui::{self, RichText};
 use super::SettingsWindow;
 use crate::{
     color::Color,
-    config::{SegmentAlign, StatusSegment},
+    config::{ChromeConfig, SegmentAlign, StatusSegment},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StatusBarPosition {
+    Top,
+    Bottom,
+}
+
+impl StatusBarPosition {
+    const ALL: [Self; 2] = [Self::Top, Self::Bottom];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        }
+    }
+
+    pub(super) fn segment_key(self) -> &'static str {
+        match self {
+            Self::Top => "top-segment",
+            Self::Bottom => "bottom-segment",
+        }
+    }
+
+    fn list_id(self) -> &'static str {
+        match self {
+            Self::Top => "top_status_segments",
+            Self::Bottom => "bottom_status_segments",
+        }
+    }
+
+    fn selection_id(self) -> &'static str {
+        match self {
+            Self::Top => "settings_top_status_selected_segment",
+            Self::Bottom => "settings_bottom_status_selected_segment",
+        }
+    }
+
+    pub(super) fn segments(self, chrome: &ChromeConfig) -> &[StatusSegment] {
+        match self {
+            Self::Top => &chrome.top_segments,
+            Self::Bottom => &chrome.bottom_segments,
+        }
+    }
+
+    fn segments_mut(self, chrome: &mut ChromeConfig) -> &mut Vec<StatusSegment> {
+        match self {
+            Self::Top => &mut chrome.top_segments,
+            Self::Bottom => &mut chrome.bottom_segments,
+        }
+    }
+}
 
 pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     let palette = win.palette;
 
-    super::section(ui, palette, "STATUS BAR");
-    super::settings_row(ui, palette, "Height", "Status strip height.", |ui| {
+    super::section(ui, palette, "BARS");
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Top bar",
+        "Show the module bar above the terminal.",
+        win.config.chrome.top_bar,
+        |enabled| {
+            win.config.chrome.top_bar = enabled;
+            win.set_top_bar(enabled);
+        },
+    );
+    super::settings_toggle_row(
+        ui,
+        palette,
+        "Bottom bar",
+        "Show the module bar below the terminal.",
+        win.config.chrome.bottom_bar,
+        |enabled| {
+            win.config.chrome.bottom_bar = enabled;
+            win.set_bool(&["chrome", "bottom-bar"], enabled);
+        },
+    );
+
+    super::section(ui, palette, "STATUS BARS");
+    super::settings_row(ui, palette, "Height", "Module strip height.", |ui| {
         let mut height = win.config.chrome.status_height;
         if super::settings_slider_with_edit(
             ui,
@@ -48,6 +124,18 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     );
     ui.add_space(6.0);
 
+    let selected_bar_id = ui.make_persistent_id("settings_status_selected_bar");
+    let mut selected_bar = ui
+        .memory(|memory| memory.data.get_temp(selected_bar_id).unwrap_or(0usize))
+        .min(StatusBarPosition::ALL.len() - 1);
+    let labels = StatusBarPosition::ALL.map(StatusBarPosition::label);
+    if let Some(index) = super::settings_segmented(ui, palette, &labels, selected_bar) {
+        selected_bar = index;
+    }
+    ui.memory_mut(|memory| memory.data.insert_temp(selected_bar_id, selected_bar));
+    let position = StatusBarPosition::ALL[selected_bar];
+    ui.add_space(8.0);
+
     let available = win
         .config_path
         .parent()
@@ -56,8 +144,8 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
 
     let mut changed = false;
     let mut remove_index: Option<usize> = None;
-    let count = win.config.chrome.status_segments.len();
-    let selected_id = ui.make_persistent_id("settings_status_selected_segment");
+    let count = position.segments(&win.config.chrome).len();
+    let selected_id = ui.make_persistent_id(position.selection_id());
     let mut selected: usize = ui
         .memory(|memory| memory.data.get_temp(selected_id).unwrap_or(0usize))
         .min(count.saturating_sub(1));
@@ -70,12 +158,13 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         super::reorderable_list(
             ui,
             palette,
-            "status_segments",
+            position.list_id(),
             count,
             |ui, index, handle| {
                 segment_list_row(
                     win,
                     ui,
+                    position,
                     SegmentListContext {
                         index,
                         selected,
@@ -87,9 +176,6 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
         )
     };
     let reorder = if available_width >= 920.0 {
-        // Two columns: the reorderable list on the left, the detail editor in its own top-down
-        // column on the right. Allocating the detail column top-down is what keeps its labels
-        // stacking vertically instead of smearing across one row.
         let detail_width = 360.0;
         let list_width = (available_width - detail_width - 18.0).max(420.0);
         ui.horizontal_top(|ui| {
@@ -109,6 +195,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
                         segment_detail_panel(
                             win,
                             ui,
+                            position,
                             SegmentDetailContext {
                                 available: &available,
                                 index: selected,
@@ -128,6 +215,7 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             segment_detail_panel(
                 win,
                 ui,
+                position,
                 SegmentDetailContext {
                     available: &available,
                     index: selected,
@@ -139,12 +227,13 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     };
 
     if let Some((from, slot)) = reorder {
-        super::apply_reorder(&mut win.config.chrome.status_segments, from, slot);
+        super::apply_reorder(position.segments_mut(&mut win.config.chrome), from, slot);
         changed = true;
     }
     if let Some(index) = remove_index {
-        win.config.chrome.status_segments.remove(index);
-        if selected >= win.config.chrome.status_segments.len() {
+        let segments = position.segments_mut(&mut win.config.chrome);
+        segments.remove(index);
+        if selected >= segments.len() {
             selected = selected.saturating_sub(1);
         }
         changed = true;
@@ -157,16 +246,18 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
             .first()
             .cloned()
             .unwrap_or_else(|| "clock".to_owned());
-        win.config.chrome.status_segments.push(StatusSegment {
-            align: SegmentAlign::Left,
-            module,
-            ..StatusSegment::default()
-        });
+        position
+            .segments_mut(&mut win.config.chrome)
+            .push(StatusSegment {
+                align: SegmentAlign::Left,
+                module,
+                ..StatusSegment::default()
+            });
         changed = true;
     }
 
     if changed {
-        win.set_status_segments();
+        win.set_status_segments(position);
     }
 
     if !available.is_empty() {
@@ -179,7 +270,12 @@ pub(super) fn ui(win: &mut SettingsWindow, ui: &mut egui::Ui) {
     }
 }
 
-fn segment_list_row(win: &mut SettingsWindow, ui: &mut egui::Ui, ctx: SegmentListContext<'_>) {
+fn segment_list_row(
+    win: &mut SettingsWindow,
+    ui: &mut egui::Ui,
+    position: StatusBarPosition,
+    ctx: SegmentListContext<'_>,
+) {
     let palette = win.palette;
     let selected = *ctx.selected == ctx.index;
     // Allocate the row's clickable surface first so its interaction registers before the inner
@@ -216,7 +312,7 @@ fn segment_list_row(win: &mut SettingsWindow, ui: &mut egui::Ui, ctx: SegmentLis
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let segment = &win.config.chrome.status_segments[ctx.index];
+    let segment = &position.segments(&win.config.chrome)[ctx.index];
     let module_name = module_label(segment.module.as_str()).to_owned();
     let module_id = segment.module.clone();
     let icon_slug = segment.icon.clone();
@@ -297,6 +393,7 @@ fn segment_marker(ui: &mut egui::Ui, palette: bootty_ui::ThemePalette, icon: Opt
 fn segment_detail_panel(
     win: &mut SettingsWindow,
     ui: &mut egui::Ui,
+    position: StatusBarPosition,
     ctx: SegmentDetailContext<'_>,
 ) {
     let palette = win.palette;
@@ -311,7 +408,7 @@ fn segment_detail_panel(
         .inner_margin(egui::Margin::symmetric(12, 12))
         .show(ui, |ui| {
             ui.set_min_width(control_width);
-            let segment = &mut win.config.chrome.status_segments[ctx.index];
+            let segment = &mut position.segments_mut(&mut win.config.chrome)[ctx.index];
             ui.label(
                 RichText::new("Module details")
                     .color(palette.subtext)
@@ -351,7 +448,7 @@ fn segment_detail_panel(
                 if let Some(choice) = super::searchable_combo(
                     ui,
                     palette,
-                    &format!("status_module_{}", ctx.index),
+                    &format!("{}_module_{}", position.segment_key(), ctx.index),
                     selected,
                     control_width,
                     &options,

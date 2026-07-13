@@ -239,6 +239,7 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
                     row_height: 30.0,
                     notch_x: None,
                     tab_rows: 1,
+                    interaction_id: "status-bar-bench",
                 },
             );
         },

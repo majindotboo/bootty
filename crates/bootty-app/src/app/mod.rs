@@ -495,7 +495,11 @@ impl BoottyApp {
         }
     }
 
-    fn resolve_status_segments(&self, sidebar_visible: bool) -> Vec<chrome::ResolvedSegment> {
+    fn resolve_status_segments(
+        &self,
+        segments: &[crate::config::StatusSegment],
+        sidebar_visible: bool,
+    ) -> Vec<chrome::ResolvedSegment> {
         let palette = self.state.ui_theme().palette;
         let mux_view = self.current_extension_mux_view();
         let windows_theme = crate::extensions::BuiltinWindowsTheme {
@@ -507,10 +511,7 @@ impl BoottyApp {
             border: palette.border,
         };
 
-        self.state
-            .config()
-            .chrome
-            .status_segments
+        segments
             .iter()
             .filter(|segment| status_segment_visible(segment, sidebar_visible))
             .filter_map(|segment| {
@@ -677,20 +678,22 @@ impl BoottyApp {
     }
 
     /// Pushes Bootty-owned mux/session state to extension workers so Luau modules can render it.
-    fn publish_extension_mux_view(&self, sidebar_visible: bool, status_bar_visible: bool) {
-        if status_bar_visible {
-            self.status_extensions.set_active(
-                self.state
-                    .config()
-                    .chrome
-                    .status_segments
-                    .iter()
-                    .filter(|segment| status_segment_visible(segment, sidebar_visible))
-                    .map(|segment| segment.module.clone()),
-            );
-        } else {
-            self.status_extensions.set_active(Vec::new());
-        }
+    fn publish_extension_mux_view(
+        &self,
+        sidebar_visible: bool,
+        top_bar_visible: bool,
+        bottom_bar_visible: bool,
+    ) {
+        let chrome = &self.state.config().chrome;
+        self.status_extensions.set_active(
+            top_bar_visible
+                .then_some(chrome.top_segments.as_slice())
+                .into_iter()
+                .chain(bottom_bar_visible.then_some(chrome.bottom_segments.as_slice()))
+                .flatten()
+                .filter(|segment| status_segment_visible(segment, sidebar_visible))
+                .map(|segment| segment.module.clone()),
+        );
 
         if sidebar_visible {
             self.sidebar_extensions
@@ -708,7 +711,8 @@ impl BoottyApp {
         if self.keep_awake.take().is_some() {
             self.publish_extension_mux_view(
                 self.state.config().chrome.sidebar,
-                self.state.config().chrome.status_bar,
+                self.state.config().chrome.top_bar,
+                self.state.config().chrome.bottom_bar,
             );
             return;
         }
@@ -726,8 +730,45 @@ impl BoottyApp {
         }
         self.publish_extension_mux_view(
             self.state.config().chrome.sidebar,
-            self.state.config().chrome.status_bar,
+            self.state.config().chrome.top_bar,
+            self.state.config().chrome.bottom_bar,
         );
+    }
+    fn handle_status_bar_event(
+        &mut self,
+        ctx: &egui::Context,
+        status_event: Option<chrome::StatusBarEvent>,
+    ) {
+        match status_event {
+            Some(chrome::StatusBarEvent::Action(action)) => match action.as_str() {
+                "toggle-caffeinate" => self.toggle_keep_awake(),
+                other => {
+                    if let Some(window_id) = other.strip_prefix("activate-window:")
+                        && let Some(session_id) =
+                            self.state.mux().selected_session().map(str::to_owned)
+                    {
+                        self.state.activate_window_from_ui(&session_id, window_id);
+                    }
+                }
+            },
+            Some(chrome::StatusBarEvent::Reorder {
+                module,
+                source,
+                before,
+            }) => {
+                if module == "windows"
+                    && self
+                        .state
+                        .reorder_window_before_from_ui(&source, before.as_deref())
+                {
+                    ctx.request_repaint();
+                } else {
+                    self.status_extensions
+                        .request_reorder(&module, source, before);
+                }
+            }
+            None => {}
+        }
     }
 
     /// Make `terminal_widget` the renderer for pane `key`, swapping the previous focused pane's
@@ -1038,7 +1079,8 @@ impl BoottyApp {
             theme_palette_from_config(self.state.config(), self.state.active_appearance_variant());
         let chrome_config = self.state.config().chrome.clone();
         let sidebar = chrome_config.sidebar;
-        let status_bar = chrome_config.status_bar;
+        let top_bar = chrome_config.top_bar;
+        let bottom_bar = chrome_config.bottom_bar;
         let configured_sidebar_width = chrome_config.sidebar_width;
         let status_height_config = chrome_config.status_height;
         let chrome_gap = chrome_config.gap;
@@ -1098,7 +1140,7 @@ impl BoottyApp {
             self.state
                 .reorder_session_before(&reorder.source, reorder.before.as_deref());
         }
-        self.publish_extension_mux_view(sidebar, status_bar);
+        self.publish_extension_mux_view(sidebar, top_bar, bottom_bar);
         let sidebar_session_items = if sidebar {
             self.sidebar_extensions.items("sessions")
         } else {
@@ -1143,8 +1185,8 @@ impl BoottyApp {
             )
         };
         // When the sidebar is not on the left edge, macOS traffic-light buttons land over the
-        // content's top-left instead of the sidebar, so inset the status bar to clear them.
-        let status_left_inset = if (!sidebar || sidebar_on_right)
+        // content's top-left instead of the sidebar, so inset the top bar to clear them.
+        let top_bar_left_inset = if (!sidebar || sidebar_on_right)
             && self
                 .state
                 .config()
@@ -1156,12 +1198,18 @@ impl BoottyApp {
             0.0
         };
         let status_left_padding = status_bar_left_padding(sidebar, sidebar_on_right);
-        let segments = if status_bar {
-            self.resolve_status_segments(sidebar)
+        let top_segments = if top_bar {
+            self.resolve_status_segments(&chrome_config.top_segments, sidebar)
         } else {
             Vec::new()
         };
-        let base_status_height = if status_bar {
+        let bottom_segments = if bottom_bar {
+            self.resolve_status_segments(&chrome_config.bottom_segments, sidebar)
+        } else {
+            Vec::new()
+        };
+        let top_base_status_height = if top_bar { status_height_config } else { 0.0 };
+        let bottom_base_status_height = if bottom_bar {
             status_height_config
         } else {
             0.0
@@ -1172,25 +1220,43 @@ impl BoottyApp {
         } else {
             None
         };
-        let candidate_status_rect = Rect::from_min_max(
+        let candidate_top_status_rect = Rect::from_min_max(
             Pos2::new(
-                (right_rect.min.x + status_left_inset).min(right_rect.max.x),
+                (right_rect.min.x + top_bar_left_inset).min(right_rect.max.x),
                 right_rect.min.y,
             ),
-            Pos2::new(right_rect.max.x, right_rect.min.y + base_status_height),
+            Pos2::new(right_rect.max.x, right_rect.min.y + top_base_status_height),
         );
-        let tab_row_count = if status_bar {
+        let top_tab_row_count = if top_bar {
             chrome::status_bar_window_tab_row_count(
                 ui,
-                candidate_status_rect,
-                &segments,
+                candidate_top_status_rect,
+                &top_segments,
                 status_left_padding,
                 notch_span,
             )
         } else {
             1
         };
-        let extra_tab_rows_clear_notch = tabs_in_notch && tab_row_count > 1;
+        let candidate_bottom_status_rect = Rect::from_min_max(
+            right_rect.min,
+            Pos2::new(
+                right_rect.max.x,
+                right_rect.min.y + bottom_base_status_height,
+            ),
+        );
+        let bottom_tab_row_count = if bottom_bar {
+            chrome::status_bar_window_tab_row_count(
+                ui,
+                candidate_bottom_status_rect,
+                &bottom_segments,
+                status_left_padding,
+                None,
+            )
+        } else {
+            1
+        };
+        let extra_tab_rows_clear_notch = tabs_in_notch && top_tab_row_count > 1;
         let auto_fullscreen_top_offset = self.state.config().window.fullscreen_top_offset.is_none();
         let status_top_offset = fullscreen_status_top_offset(
             fullscreen_top_offset,
@@ -1198,7 +1264,8 @@ impl BoottyApp {
             extra_tab_rows_clear_notch,
             auto_fullscreen_top_offset,
         );
-        let status_height = base_status_height * tab_row_count as f32;
+        let top_status_height = top_base_status_height * top_tab_row_count as f32;
+        let bottom_status_height = bottom_base_status_height * bottom_tab_row_count as f32;
         // Paint the notch band with the sidebar's fullscreen background so the strip above the
         // content matches the sidebar (the sidebar fills its own band). Content draws on top.
         if notch_context && status_top_offset > 0.0 {
@@ -1209,7 +1276,7 @@ impl BoottyApp {
             ui.painter().rect_filled(band, 0.0, notch_band_color);
         }
         // With tabs-in-notch the content rises into the notch band and the terminal drops by one
-        // row less than the notch so the status line's bottom edge lines up with the bottom of the
+        // row less than the notch so the top bar's bottom edge lines up with the bottom of the
         // notch. The terminal default background is overridden to the band color below so a tmux
         // `bg=default` status line matches the chrome.
         let terminal_cell_height = self.terminal_widget.cell_dimensions().1;
@@ -1221,19 +1288,25 @@ impl BoottyApp {
             auto_fullscreen_top_offset,
         );
         let content_top = (right_rect.min.y + content_offset).min(right_rect.max.y);
-        let status_rect = Rect::from_min_max(
+        let top_status_rect = Rect::from_min_max(
             Pos2::new(
-                (right_rect.min.x + status_left_inset).min(right_rect.max.x),
+                (right_rect.min.x + top_bar_left_inset).min(right_rect.max.x),
                 content_top,
             ),
             Pos2::new(
                 right_rect.max.x,
-                (content_top + status_height).min(right_rect.max.y),
+                (content_top + top_status_height).min(right_rect.max.y),
             ),
         );
-        let terminal_rect = Rect::from_min_max(
-            Pos2::new(right_rect.min.x, status_rect.max.y),
+        let bottom_status_top =
+            (right_rect.max.y - bottom_status_height).max(top_status_rect.max.y);
+        let bottom_status_rect = Rect::from_min_max(
+            Pos2::new(right_rect.min.x, bottom_status_top),
             right_rect.max,
+        );
+        let terminal_rect = Rect::from_min_max(
+            Pos2::new(right_rect.min.x, top_status_rect.max.y),
+            Pos2::new(right_rect.max.x, bottom_status_rect.min.y),
         );
 
         if sidebar {
@@ -1368,61 +1441,61 @@ impl BoottyApp {
             }
         }
 
-        if status_bar {
+        if top_bar || bottom_bar {
             // Tick once a second so the clock advances and module output refreshes when idle.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_secs(1));
             let status_background =
                 status_bar_background_color(&chrome_config, palette, notch_chrome_color);
-            let mut status_event = None;
-            ui.scope_builder(
-                UiBuilder::new()
-                    .max_rect(status_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    status_event = chrome::show_status_bar(
-                        ui,
-                        palette,
-                        StatusBarModel {
-                            segments: &segments,
-                            background: status_background,
-                            left_padding: status_left_padding,
-                            row_height: status_height_config,
-                            notch_x: notch_span.map(|(left, right)| left..right),
-                            tab_rows: tab_row_count,
-                        },
-                    );
-                },
-            );
-            match status_event {
-                Some(chrome::StatusBarEvent::Action(action)) => match action.as_str() {
-                    "toggle-caffeinate" => self.toggle_keep_awake(),
-                    other => {
-                        if let Some(window_id) = other.strip_prefix("activate-window:")
-                            && let Some(session_id) =
-                                self.state.mux().selected_session().map(str::to_owned)
-                        {
-                            self.state.activate_window_from_ui(&session_id, window_id);
-                        }
-                    }
-                },
-                Some(chrome::StatusBarEvent::Reorder {
-                    module,
-                    source,
-                    before,
-                }) => {
-                    if module == "windows"
-                        && self
-                            .state
-                            .reorder_window_before_from_ui(&source, before.as_deref())
-                    {
-                        ui.ctx().request_repaint();
-                    } else {
-                        self.status_extensions
-                            .request_reorder(&module, source, before);
-                    }
-                }
-                None => {}
+
+            if top_bar {
+                let mut status_event = None;
+                ui.scope_builder(
+                    UiBuilder::new()
+                        .max_rect(top_status_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        status_event = chrome::show_status_bar(
+                            ui,
+                            palette,
+                            StatusBarModel {
+                                segments: &top_segments,
+                                background: status_background,
+                                left_padding: status_left_padding,
+                                row_height: status_height_config,
+                                notch_x: notch_span.map(|(left, right)| left..right),
+                                tab_rows: top_tab_row_count,
+                                interaction_id: "bootty-top-status-bar-drag",
+                            },
+                        );
+                    },
+                );
+                self.handle_status_bar_event(ui.ctx(), status_event);
+            }
+
+            if bottom_bar {
+                let mut status_event = None;
+                ui.scope_builder(
+                    UiBuilder::new()
+                        .max_rect(bottom_status_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        status_event = chrome::show_status_bar(
+                            ui,
+                            palette,
+                            StatusBarModel {
+                                segments: &bottom_segments,
+                                background: status_background,
+                                left_padding: status_left_padding,
+                                row_height: status_height_config,
+                                notch_x: None,
+                                tab_rows: bottom_tab_row_count,
+                                interaction_id: "bootty-bottom-status-bar-drag",
+                            },
+                        );
+                    },
+                );
+                self.handle_status_bar_event(ui.ctx(), status_event);
             }
         }
 
@@ -1809,7 +1882,7 @@ impl eframe::App for BoottyApp {
 }
 
 fn uses_custom_egui_fonts(config: &BoottyConfig) -> bool {
-    config.chrome.sidebar || config.chrome.status_bar
+    config.chrome.sidebar || config.chrome.top_bar || config.chrome.bottom_bar
 }
 
 fn suppress_terminal_payload_for_settings(
@@ -1986,10 +2059,10 @@ mod tests {
         assert!(uses_custom_egui_fonts(&config));
 
         config.chrome.sidebar = false;
-        config.chrome.status_bar = false;
+        config.chrome.top_bar = false;
         assert!(!uses_custom_egui_fonts(&config));
 
-        config.chrome.status_bar = true;
+        config.chrome.bottom_bar = true;
         assert!(uses_custom_egui_fonts(&config));
     }
 

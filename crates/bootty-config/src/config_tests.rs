@@ -217,11 +217,11 @@ fn missing_config_file_loads_with_selected_path() {
 }
 
 #[test]
-fn defaults_include_session_status_segment_before_windows() {
+fn defaults_put_current_status_modules_in_visible_top_bar() {
     let config = load_config_source("");
     let modules = config
         .chrome
-        .status_segments
+        .top_segments
         .iter()
         .map(|segment| segment.module.as_str())
         .collect::<Vec<_>>();
@@ -234,7 +234,44 @@ fn defaults_include_session_status_segment_before_windows() {
         .position(|module| *module == "windows")
         .expect("windows status module is enabled by default");
 
+    assert!(config.chrome.top_bar);
+    assert!(!config.chrome.bottom_bar);
+    assert!(config.chrome.bottom_segments.is_empty());
     assert!(session < windows, "session should appear before windows");
+}
+
+#[test]
+fn chrome_bars_configure_visibility_and_modules_independently() {
+    let config = load_config_source(indoc! {r#"
+        [chrome]
+        top-bar = false
+        bottom-bar = true
+
+        [[chrome.top-segment]]
+        module = "clock"
+
+        [[chrome.bottom-segment]]
+        module = "sysinfo"
+    "#});
+
+    assert!(!config.chrome.top_bar);
+    assert!(config.chrome.bottom_bar);
+    assert_eq!(config.chrome.top_segments[0].module, "clock");
+    assert_eq!(config.chrome.bottom_segments[0].module, "sysinfo");
+}
+
+#[test]
+fn legacy_status_bar_config_maps_to_the_top_bar() {
+    let config = load_config_source(indoc! {r#"
+        [chrome]
+        status-bar = false
+
+        [[chrome.status-segment]]
+        module = "clock"
+    "#});
+
+    assert!(!config.chrome.top_bar);
+    assert_eq!(config.chrome.top_segments[0].module, "clock");
 }
 
 #[test]
