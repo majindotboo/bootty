@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hasher,
     path::PathBuf,
     sync::mpsc,
     time::{Duration, Instant},
@@ -59,7 +60,7 @@ use crate::{
         command::{MuxCommand, MuxSplitDirection},
         config::{MuxBackendKind, selected_backend},
         controller::{MUX_SESSION_REFRESH_INTERVAL, MuxController},
-        snapshot::{MuxPaneAnchor, MuxWindow},
+        snapshot::{MuxPaneAnchor, MuxSession, MuxWindow},
         terminal::{ActiveTerminal, ActiveTerminalRuntime},
     },
     platform::{
@@ -252,6 +253,10 @@ pub struct AppState {
     session_order: SessionOrderStore,
     session_names: SessionNameStore,
     pending_generated_names: HashMap<String, PendingGeneratedName>,
+    // Fingerprint of the sessions the last name reconciliation ran against. Reconciling forks a
+    // `git` subprocess per session (worktree lookup); skipping it while sessions are unchanged keeps
+    // that off the per-frame path.
+    generated_names_signature: Option<u64>,
     new_mux_session_dialog: Option<NewMuxSessionDialog>,
     sidebar_hovered_session: Option<String>,
     session_picker_dialog: Option<SessionPickerDialog>,
@@ -589,6 +594,7 @@ impl AppState {
             session_order,
             session_names,
             pending_generated_names: HashMap::new(),
+            generated_names_signature: None,
             new_mux_session_dialog: None,
             sidebar_hovered_session: None,
             session_picker_dialog: None,
@@ -1310,8 +1316,35 @@ impl AppState {
         );
         self.mux.apply_session_order(&ordered_names);
     }
+    /// Whether the generated-name reconciler needs to run for `sessions`, updating the stored
+    /// fingerprint as a side effect. Reconciling forks a `git` subprocess per session (worktree
+    /// lookup), so this returns `false` while no session's id, name, or cwd has changed, keeping
+    /// that work off the steady-state frame path.
+    fn generated_names_need_sync(&mut self, sessions: &[MuxSession]) -> bool {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for session in sessions {
+            hasher.write(session.id.as_bytes());
+            hasher.write_u8(0);
+            hasher.write(session.name.as_bytes());
+            hasher.write_u8(0);
+            if let Some(cwd) = session.anchor.cwd.as_deref() {
+                hasher.write(cwd.as_bytes());
+            }
+            hasher.write_u8(1);
+        }
+        let signature = hasher.finish();
+        if self.generated_names_signature == Some(signature) {
+            return false;
+        }
+        self.generated_names_signature = Some(signature);
+        true
+    }
+
     fn sync_generated_session_names(&mut self) {
         let sessions = self.mux.sessions().to_vec();
+        if !self.generated_names_need_sync(&sessions) {
+            return;
+        }
         let mut renames = Vec::new();
         self.pending_generated_names.retain(|session_id, pending| {
             sessions.iter().any(|session| {
@@ -4879,6 +4912,56 @@ mod tests {
 
     fn test_state() -> AppState {
         test_state_with_config(|_| {})
+    }
+
+    fn session_with(id: &str, name: &str, cwd: &str) -> MuxSession {
+        MuxSession {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            active: true,
+            anchor: MuxPaneAnchor {
+                session_id: id.to_owned(),
+                pane_id: Some(format!("{id}-pane")),
+                cwd: Some(cwd.to_owned()),
+                process: None,
+            },
+            active_window_id: None,
+            windows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generated_name_sync_skips_unchanged_sessions_and_reruns_on_change() {
+        // Guards the fix for the per-frame `git` fork: the reconciler must not repeat its
+        // per-session worktree lookups while the session set is unchanged, but must re-run when a
+        // session's name or cwd changes so generated names stay current.
+        let mut state = test_state();
+        let sessions = vec![session_with("s1", "alpha", "/repo/alpha")];
+
+        assert!(
+            state.generated_names_need_sync(&sessions),
+            "first observation of a session set must reconcile"
+        );
+        assert!(
+            !state.generated_names_need_sync(&sessions),
+            "an unchanged session set must be skipped (no per-frame git forks)"
+        );
+
+        let renamed = vec![session_with("s1", "beta", "/repo/alpha")];
+        assert!(
+            state.generated_names_need_sync(&renamed),
+            "a session rename must trigger reconciliation"
+        );
+
+        let moved = vec![session_with("s1", "beta", "/repo/beta")];
+        assert!(
+            state.generated_names_need_sync(&moved),
+            "a session cwd change must trigger reconciliation"
+        );
+        assert!(
+            !state.generated_names_need_sync(&moved),
+            "reconciliation must settle again once the session set stops changing"
+        );
     }
 
     fn test_state_with_config(mutate: impl FnOnce(&mut BoottyConfig)) -> AppState {
