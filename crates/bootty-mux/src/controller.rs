@@ -149,6 +149,20 @@ fn optimistic_window_after_command(
                 .any(|window| window.id == current_id)
                 .then(|| current_id.to_owned());
         }
+        MuxCommand::MoveWindowPreservingSelection {
+            session_id,
+            selected_window_id,
+            ..
+        } => {
+            let session = sessions
+                .iter()
+                .find(|session| session.id == *session_id || session.name == *session_id)?;
+            return session
+                .windows
+                .iter()
+                .any(|window| window.id == *selected_window_id)
+                .then(|| selected_window_id.clone());
+        }
         _ => return None,
     };
     let session = sessions
@@ -174,6 +188,7 @@ fn command_session_id(command: &MuxCommand) -> &str {
         | MuxCommand::ActivateLastWindow { session_id }
         | MuxCommand::ActivateWindowIndex { session_id, .. }
         | MuxCommand::MoveWindow { session_id, .. }
+        | MuxCommand::MoveWindowPreservingSelection { session_id, .. }
         | MuxCommand::SplitPane { session_id, .. }
         | MuxCommand::SelectPane { session_id, .. }
         | MuxCommand::SelectNextPane { session_id }
@@ -1023,6 +1038,14 @@ mod tests {
             session_id: "$1".to_owned(),
             window_id: Some("@2".to_owned()),
             delta: -1,
+        });
+        assert_eq!(controller.selected_window(), Some("@2"));
+
+        controller.apply_optimistic_command_selection(&MuxCommand::MoveWindowPreservingSelection {
+            session_id: "$1".to_owned(),
+            window_id: "@1".to_owned(),
+            delta: 1,
+            selected_window_id: "@2".to_owned(),
         });
         assert_eq!(controller.selected_window(), Some("@2"));
     }

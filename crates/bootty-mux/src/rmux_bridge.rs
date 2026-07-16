@@ -500,6 +500,16 @@ impl RmuxBridgeState {
                 self.move_window(&session_id, window_id.as_deref(), delta)
                     .await
             }
+            MuxCommand::MoveWindowPreservingSelection {
+                session_id,
+                window_id,
+                delta,
+                selected_window_id,
+            } => {
+                self.move_window(&session_id, Some(&window_id), delta)
+                    .await?;
+                self.activate_window(&session_id, &selected_window_id).await
+            }
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,

@@ -47,6 +47,7 @@ pub struct TabContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabContextTarget {
     pub window_id: String,
+    pub is_active: bool,
     pub can_close_pane: bool,
 }
 
@@ -54,6 +55,8 @@ pub struct TabContextTarget {
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedSegment {
     pub align: SegmentAlign,
+    /// Stable slot from the configured segment list, retained when window tabs wrap into rows.
+    pub source_slot: usize,
     pub items: Vec<ResolvedItem>,
 }
 
@@ -100,7 +103,11 @@ pub enum StatusBarEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabContextAction {
+    Activate,
     NewTab,
+    PreviousTab,
+    NextTab,
+    LastTab,
     Rename,
     MoveLeft,
     MoveRight,
@@ -645,6 +652,7 @@ fn split_left_segments_for_tab_rows(
         round_window_row_end(&mut row_items);
         rows[row_index].push(ResolvedSegment {
             align: window_segment.align,
+            source_slot: window_segment.source_slot,
             items: row_items,
         });
         item_start = item_end;
@@ -654,6 +662,7 @@ fn split_left_segments_for_tab_rows(
         round_window_row_end(&mut row_items);
         rows.push(vec![ResolvedSegment {
             align: window_segment.align,
+            source_slot: window_segment.source_slot,
             items: row_items,
         }]);
     }
@@ -802,7 +811,7 @@ fn draw_segments(
     let font = input.font.clone();
     let mut x = start_x;
     let mut drawn = 0;
-    for (segment_index, segment) in segments.iter().enumerate() {
+    for segment in segments {
         let width = segment_width(ui, segment, &font);
         if width <= 0.0 {
             continue;
@@ -813,11 +822,11 @@ fn draw_segments(
         let items = segment.items.iter().collect::<Vec<_>>();
         if x + width > bound {
             if segment_contains_module(segment, STATUS_WINDOWS_MODULE) && x < bound {
-                draw_items(ui, x, bound, segment, segment_index, &items, input);
+                draw_items(ui, x, bound, segment, &items, input);
             }
             break;
         }
-        draw_items(ui, x, x + width, segment, segment_index, &items, input);
+        draw_items(ui, x, x + width, segment, &items, input);
         drawn += 1;
         x += width;
     }
@@ -992,7 +1001,6 @@ fn draw_items(
     start_x: f32,
     bound: f32,
     segment: &ResolvedSegment,
-    segment_index: usize,
     items: &[&ResolvedItem],
     input: &mut StatusInput,
 ) {
@@ -1028,7 +1036,7 @@ fn draw_items(
                     .as_ref()
                     .map(|context| context.session_id.as_str()),
                 segment,
-                status_item_segment_slot(item, segment_index),
+                segment.source_slot,
                 item,
                 status_item_cell_index(items, index),
                 key,
@@ -1050,8 +1058,10 @@ fn draw_items(
                     .find(|(_, target)| target.window_id == window_id)?;
                 tab_context_action(
                     response,
+                    !target.is_active,
                     target_index > 0,
                     target_index + 1 < context.targets.len(),
+                    context.targets.len() > 1,
                     target.can_close_pane,
                 )
                 .map(|action| (context.session_id.clone(), window_id.to_owned(), action))
@@ -1085,7 +1095,9 @@ fn draw_items(
             }
         }
         if let Some(anchor) = item.reorder_anchor.as_deref()
-            && response.as_ref().is_some_and(egui::Response::drag_started)
+            && response
+                .as_ref()
+                .is_some_and(|response| response.drag_started_by(egui::PointerButton::Primary))
         {
             input.started = Some(StatusDragState {
                 module: item.module.clone(),
@@ -1193,7 +1205,7 @@ fn status_item_id(
     interaction_id: &'static str,
     session_id: Option<&str>,
     segment: &ResolvedSegment,
-    segment_index: usize,
+    segment_slot: usize,
     item: &ResolvedItem,
     item_index: usize,
     key: &str,
@@ -1208,20 +1220,12 @@ fn status_item_id(
         interaction_id,
         session_id.unwrap_or_default(),
         status_segment_align_id(segment.align),
-        segment_index,
+        segment_slot,
         item.module.as_str(),
         role,
         key,
         item_index,
     ))
-}
-
-fn status_item_segment_slot(item: &ResolvedItem, segment_index: usize) -> usize {
-    if tab_context_window_id(item).is_some() {
-        0
-    } else {
-        segment_index
-    }
 }
 
 fn status_item_cell_index(items: &[&ResolvedItem], index: usize) -> usize {
@@ -1256,37 +1260,73 @@ fn tab_context_window_id(item: &ResolvedItem) -> Option<&str> {
 
 fn tab_context_action(
     response: &egui::Response,
+    can_activate: bool,
     can_move_left: bool,
     can_move_right: bool,
+    can_navigate: bool,
     can_close_pane: bool,
 ) -> Option<TabContextAction> {
     let mut action = None;
     response.context_menu(|ui| {
-        if ui.button("New Tab").clicked() {
+        if ui
+            .add_enabled(can_activate, egui::Button::new("Activate Tab"))
+            .clicked()
+        {
+            action = Some(TabContextAction::Activate);
+        }
+        ui.separator();
+        if action.is_none() && ui.button("New Tab").clicked() {
             action = Some(TabContextAction::NewTab);
-        } else if ui.button("Rename Tab").clicked() {
-            action = Some(TabContextAction::Rename);
-        } else {
-            ui.separator();
-            if ui
-                .add_enabled(can_move_left, egui::Button::new("Move Tab Left"))
-                .clicked()
-            {
-                action = Some(TabContextAction::MoveLeft);
-            } else if ui
-                .add_enabled(can_move_right, egui::Button::new("Move Tab Right"))
-                .clicked()
-            {
-                action = Some(TabContextAction::MoveRight);
-            } else {
-                ui.separator();
+        }
+        if action.is_none() {
+            ui.menu_button("Navigate Tabs", |ui| {
                 if ui
-                    .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+                    .add_enabled(can_navigate, egui::Button::new("Previous Tab"))
                     .clicked()
                 {
-                    action = Some(TabContextAction::ClosePane);
+                    action = Some(TabContextAction::PreviousTab);
                 }
-            }
+                if action.is_none()
+                    && ui
+                        .add_enabled(can_navigate, egui::Button::new("Next Tab"))
+                        .clicked()
+                {
+                    action = Some(TabContextAction::NextTab);
+                }
+                if action.is_none()
+                    && ui
+                        .add_enabled(can_navigate, egui::Button::new("Last Tab"))
+                        .clicked()
+                {
+                    action = Some(TabContextAction::LastTab);
+                }
+            });
+        }
+        ui.separator();
+        if action.is_none() && ui.button("Rename Tab").clicked() {
+            action = Some(TabContextAction::Rename);
+        }
+        if action.is_none()
+            && ui
+                .add_enabled(can_move_left, egui::Button::new("Move Tab Left"))
+                .clicked()
+        {
+            action = Some(TabContextAction::MoveLeft);
+        }
+        if action.is_none()
+            && ui
+                .add_enabled(can_move_right, egui::Button::new("Move Tab Right"))
+                .clicked()
+        {
+            action = Some(TabContextAction::MoveRight);
+        }
+        ui.separator();
+        if action.is_none()
+            && ui
+                .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+                .clicked()
+        {
+            action = Some(TabContextAction::ClosePane);
         }
         if action.is_some() {
             ui.close();
@@ -1306,10 +1346,12 @@ mod tests {
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
         let empty = ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items: Vec::new(),
         };
         let non_empty = ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 1,
             items: vec![ResolvedItem {
                 text: "1".to_owned(),
                 ..ResolvedItem::default()
@@ -1340,13 +1382,14 @@ mod tests {
         };
         let segment = ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 3,
             items: vec![item.clone(), item.clone()],
         };
         let first = status_item_id(
             "top-status",
             Some("session-a"),
             &segment,
-            0,
+            segment.source_slot,
             &item,
             0,
             "tab-1",
@@ -1358,7 +1401,7 @@ mod tests {
                 "top-status",
                 Some("session-a"),
                 &segment,
-                status_item_segment_slot(&item, 8),
+                segment.source_slot,
                 &item,
                 0,
                 "tab-1",
@@ -1371,7 +1414,7 @@ mod tests {
                 "top-status",
                 Some("session-a"),
                 &segment,
-                0,
+                segment.source_slot,
                 &item,
                 1,
                 "tab-1",
@@ -1384,7 +1427,7 @@ mod tests {
                 "bottom-status",
                 Some("session-a"),
                 &segment,
-                0,
+                segment.source_slot,
                 &item,
                 0,
                 "tab-1",
@@ -1397,7 +1440,7 @@ mod tests {
                 "top-status",
                 Some("session-b"),
                 &segment,
-                0,
+                segment.source_slot,
                 &item,
                 0,
                 "tab-1",
@@ -1407,11 +1450,54 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_window_segments_have_distinct_interaction_ids() {
+        let item = ResolvedItem {
+            module: STATUS_WINDOWS_MODULE.to_owned(),
+            action: Some("activate-window:tab-1".to_owned()),
+            reorder_anchor: Some("tab-1".to_owned()),
+            ..ResolvedItem::default()
+        };
+        let first_segment = ResolvedSegment {
+            align: SegmentAlign::Left,
+            source_slot: 2,
+            items: vec![item.clone()],
+        };
+        let duplicate_segment = ResolvedSegment {
+            align: SegmentAlign::Left,
+            source_slot: 5,
+            items: vec![item.clone()],
+        };
+
+        assert_ne!(
+            status_item_id(
+                "top-status",
+                Some("session-a"),
+                &first_segment,
+                first_segment.source_slot,
+                &item,
+                0,
+                "tab-1",
+            ),
+            status_item_id(
+                "top-status",
+                Some("session-a"),
+                &duplicate_segment,
+                duplicate_segment.source_slot,
+                &item,
+                0,
+                "tab-1",
+            ),
+            "separate configured windows segments must not share popup or drag state"
+        );
+    }
+
+    #[test]
     fn status_bar_detects_window_tabs_crossing_notch_span() {
         let context = egui::Context::default();
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
         let segments = [ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items: vec![ResolvedItem {
                 text: "1 alpha-with-long-name".to_owned(),
                 module: STATUS_WINDOWS_MODULE.to_owned(),
@@ -1549,6 +1635,7 @@ mod tests {
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(500.0, 300.0));
         let segments = [ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items: vec![ResolvedItem {
                 text: "wake".to_owned(),
                 action: Some("toggle-caffeinate".to_owned()),
@@ -1631,6 +1718,7 @@ mod tests {
         items.extend(window_tab("@3", "3", "gamma"));
         let segment = ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 7,
             items,
         };
         let output = context.run_ui(
@@ -1655,6 +1743,7 @@ mod tests {
                 let top = &rows[0][0];
 
                 assert_eq!(top.items.len(), 2);
+                assert_eq!(top.source_slot, segment.source_slot);
                 assert!(
                     top.items
                         .iter()
@@ -1662,6 +1751,7 @@ mod tests {
                 );
 
                 assert_eq!(rows[1].len(), 1);
+                assert_eq!(rows[1][0].source_slot, segment.source_slot);
                 assert_eq!(rows[1][0].items[0].reorder_anchor.as_deref(), Some("@2"));
             },
         );
@@ -1701,6 +1791,7 @@ mod tests {
         items.extend(window_tab("@3", "3", "gamma"));
         let segments = [ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items,
         }];
         let output = context.run_ui(
@@ -1736,10 +1827,12 @@ mod tests {
         items.extend(window_tab("@3", "3", "gamma"));
         let windows = ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items,
         };
         let sysinfo = ResolvedSegment {
             align: SegmentAlign::Right,
+            source_slot: 1,
             items: vec![ResolvedItem {
                 text: "sysinfo-wide".to_owned(),
                 module: "sysinfo".to_owned(),
@@ -1767,8 +1860,7 @@ mod tests {
         assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
     }
 
-    #[test]
-    fn status_bar_drag_gesture_emits_window_reorder() {
+    fn status_bar_drag_event(button: egui::PointerButton) -> Option<StatusBarEvent> {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 30.0));
@@ -1778,6 +1870,7 @@ mod tests {
         items.extend(window_tab("@3", "3", "gamma"));
         let segments = [ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items,
         }];
 
@@ -1820,7 +1913,7 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: press,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
             }],
@@ -1834,15 +1927,20 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: far_right,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }],
             &mut captured,
         );
 
+        captured
+    }
+
+    #[test]
+    fn status_bar_primary_drag_emits_window_reorder() {
         assert_eq!(
-            captured,
+            status_bar_drag_event(egui::PointerButton::Primary),
             Some(StatusBarEvent::Reorder {
                 module: "windows".to_owned(),
                 source: "@1".to_owned(),
@@ -1852,18 +1950,25 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_secondary_drag_does_not_emit_window_reorder() {
+        assert_eq!(status_bar_drag_event(egui::PointerButton::Secondary), None);
+    }
+
+    #[test]
     fn status_bar_context_menu_emits_the_clicked_tab_target() {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
-        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 30.0));
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 300.0));
         let segments = [ResolvedSegment {
             align: SegmentAlign::Left,
+            source_slot: 0,
             items: window_tab("tab-1", "1", "alpha"),
         }];
         let tab_context = TabContext {
             session_id: "session-a".to_owned(),
             targets: vec![TabContextTarget {
                 window_id: "tab-1".to_owned(),
+                is_active: false,
                 can_close_pane: true,
             }],
         };
@@ -1898,8 +2003,7 @@ mod tests {
             );
         };
 
-        let tab = Pos2::new(28.0, 15.0);
-        let rename_tab = Pos2::new(60.0, 28.0);
+        let tab = Pos2::new(28.0, screen_rect.max.y - 15.0);
         let mut captured = None;
         frame(vec![egui::Event::PointerMoved(tab)], &mut captured);
         frame(
@@ -1920,10 +2024,25 @@ mod tests {
             }],
             &mut captured,
         );
-        frame(vec![egui::Event::PointerMoved(rename_tab)], &mut captured);
+        frame(vec![egui::Event::PointerMoved(tab)], &mut captured);
+        let popup_id = status_item_id(
+            "status-bar-context-menu-test",
+            Some("session-a"),
+            &segments[0],
+            segments[0].source_slot,
+            &segments[0].items[0],
+            0,
+            "tab-1",
+        )
+        .with("popup");
+        let popup_rect = context
+            .memory(|memory| memory.area_rect(popup_id))
+            .expect("context menu rect");
+        let activate_tab = Pos2::new(popup_rect.center().x, popup_rect.min.y + 16.0);
+        frame(vec![egui::Event::PointerMoved(activate_tab)], &mut captured);
         frame(
             vec![egui::Event::PointerButton {
-                pos: rename_tab,
+                pos: activate_tab,
                 button: egui::PointerButton::Primary,
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
@@ -1932,7 +2051,7 @@ mod tests {
         );
         frame(
             vec![egui::Event::PointerButton {
-                pos: rename_tab,
+                pos: activate_tab,
                 button: egui::PointerButton::Primary,
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
@@ -1945,7 +2064,7 @@ mod tests {
             Some(StatusBarEvent::ContextAction {
                 session_id: "session-a".to_owned(),
                 window_id: "tab-1".to_owned(),
-                action: TabContextAction::Rename,
+                action: TabContextAction::Activate,
             })
         );
     }

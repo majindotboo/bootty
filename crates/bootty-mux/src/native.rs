@@ -532,6 +532,15 @@ impl MuxBackend for NativeBackend {
             } => {
                 state.move_window(&session_id, window_id.as_deref(), delta);
             }
+            MuxCommand::MoveWindowPreservingSelection {
+                session_id,
+                window_id,
+                delta,
+                selected_window_id,
+            } => {
+                state.move_window(&session_id, Some(&window_id), delta);
+                state.activate_window(&session_id, &selected_window_id);
+            }
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
@@ -797,6 +806,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn context_move_window_preserves_the_active_tab() {
+        let mut state = local_state();
+        state.new_window("local", None);
+        state.new_window("local", None);
+        let mut backend = NativeBackend::with_state(state);
+
+        backend
+            .execute(MuxCommand::MoveWindowPreservingSelection {
+                session_id: "local".to_owned(),
+                window_id: "tab-1".to_owned(),
+                delta: 1,
+                selected_window_id: "tab-3".to_owned(),
+            })
+            .unwrap();
+
+        let session = &backend.snapshot().unwrap().sessions[0];
+        assert_eq!(
+            session
+                .windows
+                .iter()
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tab-2", "tab-1", "tab-3"]
+        );
+        assert_eq!(session.active_window_id.as_deref(), Some("tab-3"));
     }
 
     #[test]

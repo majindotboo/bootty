@@ -79,6 +79,31 @@ const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
 /// background, so each element fades in its own hue rather than washing toward white.
 const UNFOCUSED_ROW_KEEP: f32 = 0.5;
 
+fn sidebar_session_id<'a>(item: &SidebarItem<'a>) -> Option<&'a str> {
+    matches!(&item.kind, SidebarItemKind::Session { .. })
+        .then_some(item.session_id)
+        .flatten()
+}
+
+fn sidebar_context_session_id<'a>(item: &SidebarItem<'a>) -> Option<&'a str> {
+    item.selectable
+        .then_some(sidebar_session_id(item))
+        .flatten()
+}
+
+fn sidebar_session_ids<'a>(items: &[SidebarItem<'a>]) -> Vec<&'a str> {
+    let mut session_ids = Vec::new();
+    for item in items {
+        let Some(session_id) = sidebar_session_id(item) else {
+            continue;
+        };
+        if !session_ids.contains(&session_id) {
+            session_ids.push(session_id);
+        }
+    }
+    session_ids
+}
+
 fn sidebar_title_drag_rect(rect: Rect, reserve_titlebar_buttons: bool) -> Rect {
     let reserved = if reserve_titlebar_buttons {
         MACOS_TITLEBAR_BUTTON_SAFE_WIDTH
@@ -164,11 +189,7 @@ pub fn show_sidebar(
         .take(max_rows)
         .cloned()
         .collect::<Vec<_>>();
-    let session_ids = model
-        .items
-        .iter()
-        .filter_map(|item| item.selectable.then_some(item.session_id).flatten())
-        .collect::<Vec<_>>();
+    let session_ids = sidebar_session_ids(model.items);
     let preview_labels = sidebar_drag_preview_labels(&items);
     let drag_id = egui::Id::new("mux-sidebar-drag-anchor");
     let mut dragged = ui
@@ -207,7 +228,7 @@ pub fn show_sidebar(
             hover_color,
             current_color,
         );
-        if response.drag_started()
+        if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(anchor) = item.reorder_anchor
         {
             let state = SidebarDragState {
@@ -232,8 +253,7 @@ pub fn show_sidebar(
             event = Some(SidebarEvent::ActivateSession((*session_id).to_owned()));
         }
         if event.is_none()
-            && item.selectable
-            && let Some(session_id) = item.session_id
+            && let Some(session_id) = sidebar_context_session_id(item)
             && let Some(position) = session_ids
                 .iter()
                 .position(|candidate| *candidate == session_id)
@@ -1178,6 +1198,27 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_session_ids_use_real_session_rows_in_order() {
+        let sessions = vec![
+            test_session("s1", "alpha", true),
+            test_session("s2", "beta", false),
+        ];
+        let mut items = build_visible_sidebar_items(&sessions, Some("s1"), 32);
+        let mut detail = items[0].clone();
+        detail.id = crate::ui::sidebar::SidebarItemId::Row("s1-detail");
+        detail.display = SidebarDisplay::Text("branch");
+        detail.kind = SidebarItemKind::Row;
+        detail.selectable = true;
+        items.insert(1, detail);
+        let duplicate = items[2].clone();
+        items.push(duplicate);
+
+        assert_eq!(sidebar_session_ids(&items), vec!["s1", "s2"]);
+        assert_eq!(sidebar_context_session_id(&items[0]), Some("s1"));
+        assert_eq!(sidebar_context_session_id(&items[1]), None);
+    }
+
+    #[test]
     fn sidebar_header_collapses_when_title_is_hidden() {
         assert_eq!(sidebar_header_height(true), SIDEBAR_HEADER_HEIGHT);
         assert_eq!(sidebar_header_height(false), 0.0);
@@ -1417,8 +1458,7 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    #[test]
-    fn sidebar_drag_gesture_emits_reorder_event() {
+    fn sidebar_drag_event(button: egui::PointerButton) -> Option<SidebarEvent> {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
@@ -1453,7 +1493,7 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: row0,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
             }],
@@ -1470,20 +1510,30 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: row1_low,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }],
             &mut captured,
         );
 
+        captured
+    }
+
+    #[test]
+    fn sidebar_primary_drag_gesture_emits_reorder_event() {
         assert_eq!(
-            captured,
+            sidebar_drag_event(egui::PointerButton::Primary),
             Some(SidebarEvent::Reorder {
                 source: String::from("alpha"),
                 before: None,
             })
         );
+    }
+
+    #[test]
+    fn sidebar_secondary_drag_does_not_emit_reorder_event() {
+        assert_eq!(sidebar_drag_event(egui::PointerButton::Secondary), None);
     }
 
     #[test]

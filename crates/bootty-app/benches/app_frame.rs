@@ -225,6 +225,7 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
         |ui| {
             let segments = [chrome::ResolvedSegment {
                 align: bootty_app::config::SegmentAlign::Left,
+                source_slot: 0,
                 items: vec![chrome::ResolvedItem {
                     text: selected.unwrap_or("session").to_owned(),
                     ..Default::default()

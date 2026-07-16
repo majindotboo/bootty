@@ -519,8 +519,9 @@ impl BoottyApp {
 
         segments
             .iter()
-            .filter(|segment| status_segment_visible(segment, sidebar_visible))
-            .filter_map(|segment| {
+            .enumerate()
+            .filter(|(_, segment)| status_segment_visible(segment, sidebar_visible))
+            .filter_map(|(source_slot, segment)| {
                 let seg_fg = segment.fg.map(crate::theme::config_color32);
                 let seg_bg = segment.bg.map(crate::theme::config_color32);
                 let module_items = if segment.module == "windows"
@@ -551,6 +552,7 @@ impl BoottyApp {
                     .collect::<Vec<_>>();
                 (!items.is_empty()).then_some(chrome::ResolvedSegment {
                     align: segment.align,
+                    source_slot,
                     items,
                 })
             })
@@ -617,12 +619,18 @@ impl BoottyApp {
             })?;
         let mut windows = session.windows.iter().collect::<Vec<_>>();
         windows.sort_by_key(|window| window.index);
+        let active_window = self
+            .state
+            .mux()
+            .selected_window()
+            .or(session.active_window_id.as_deref());
         Some(chrome::TabContext {
             session_id: session.id.clone(),
             targets: windows
                 .into_iter()
                 .map(|window| chrome::TabContextTarget {
                     window_id: window.id.clone(),
+                    is_active: active_window == Some(window.id.as_str()),
                     can_close_pane: window.anchor.pane_id.is_some(),
                 })
                 .collect(),
@@ -783,9 +791,22 @@ impl BoottyApp {
                 action,
             }) => {
                 let handled = match action {
+                    chrome::TabContextAction::Activate => {
+                        self.state.activate_window_from_ui(&session_id, &window_id);
+                        true
+                    }
                     chrome::TabContextAction::NewTab => self
                         .state
                         .new_tab_for_window_from_ui(&session_id, &window_id),
+                    chrome::TabContextAction::PreviousTab => self
+                        .state
+                        .activate_relative_window_from_ui(&session_id, &window_id, -1),
+                    chrome::TabContextAction::NextTab => self
+                        .state
+                        .activate_relative_window_from_ui(&session_id, &window_id, 1),
+                    chrome::TabContextAction::LastTab => {
+                        self.state.activate_last_window_from_ui(&session_id)
+                    }
                     chrome::TabContextAction::Rename => self
                         .state
                         .open_rename_tab_dialog_for(&session_id, &window_id),
@@ -1442,11 +1463,11 @@ impl BoottyApp {
                                     chrome::SessionContextAction::SwitchSession => {
                                         self.state.open_session_picker_dialog_from_ui()
                                     }
-                                    chrome::SessionContextAction::PreviousSession => {
-                                        self.state.activate_relative_session_from_ui(-1)
-                                    }
+                                    chrome::SessionContextAction::PreviousSession => self
+                                        .state
+                                        .activate_relative_session_from_ui(&session_id, -1),
                                     chrome::SessionContextAction::NextSession => {
-                                        self.state.activate_relative_session_from_ui(1)
+                                        self.state.activate_relative_session_from_ui(&session_id, 1)
                                     }
                                     chrome::SessionContextAction::LastSession => {
                                         self.state.activate_last_session_from_ui()

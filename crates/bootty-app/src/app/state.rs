@@ -1258,10 +1258,16 @@ impl AppState {
         (self.repaint)();
     }
 
-    pub fn activate_relative_session_from_ui(&mut self, delta: isize) -> bool {
-        let Some(session_id) = self.relative_session(delta) else {
+    pub fn activate_relative_session_from_ui(&mut self, session_id: &str, delta: isize) -> bool {
+        let sessions = self.mux.sessions();
+        let Some(current) = sessions
+            .iter()
+            .position(|session| session.id == session_id || session.name == session_id)
+        else {
             return false;
         };
+        let next = (current as isize + delta).rem_euclid(sessions.len() as isize) as usize;
+        let session_id = sessions[next].id.clone();
         self.activate_session_from_ui(&session_id);
         true
     }
@@ -1279,6 +1285,52 @@ impl AppState {
         self.mux
             .activate_window(session_id, window_id, &self.repaint, &mux_config);
         self.sync_native_layout_terminal_now();
+    }
+
+    pub fn activate_relative_window_from_ui(
+        &mut self,
+        session_id: &str,
+        window_id: &str,
+        delta: isize,
+    ) -> bool {
+        let Some((session_id, window_id)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                let mut windows = session.windows.iter().collect::<Vec<_>>();
+                windows.sort_by_key(|window| window.index);
+                let current = windows.iter().position(|window| window.id == window_id)?;
+                let next = (current as isize + delta).rem_euclid(windows.len() as isize) as usize;
+                Some((session.id.clone(), windows[next].id.clone()))
+            })
+        else {
+            return false;
+        };
+        self.activate_window_from_ui(&session_id, &window_id);
+        true
+    }
+
+    pub fn activate_last_window_from_ui(&mut self, session_id: &str) -> bool {
+        let Some(session_id) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .filter(|session| session.windows.len() > 1)
+            .map(|session| session.id.clone())
+        else {
+            return false;
+        };
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::ActivateLastWindow { session_id },
+        );
+        self.sync_native_layout_terminal_now();
+        true
     }
 
     pub fn new_tab_for_window_from_ui(&mut self, session_id: &str, window_id: &str) -> bool {
@@ -1377,7 +1429,9 @@ impl AppState {
     }
 
     pub fn move_window_from_ui(&mut self, session_id: &str, window_id: &str, delta: i32) -> bool {
-        let Some((session_id, position, window_count)) = self
+        let selected_session = self.mux.selected_session().map(str::to_owned);
+        let selected_window = self.mux.selected_window().map(str::to_owned);
+        let Some((session_id, position, window_count, active_window_id)) = self
             .mux
             .sessions()
             .iter()
@@ -1385,10 +1439,25 @@ impl AppState {
             .and_then(|session| {
                 let mut windows = session.windows.iter().collect::<Vec<_>>();
                 windows.sort_by_key(|window| window.index);
+                let active_window_id = (selected_session
+                    .as_deref()
+                    .is_some_and(|selected| selected == session.id || selected == session.name))
+                .then_some(selected_window.as_deref())
+                .flatten()
+                .filter(|selected| windows.iter().any(|window| window.id == *selected))
+                .map(str::to_owned)
+                .or_else(|| session.active_window_id.clone());
                 windows
                     .iter()
                     .position(|window| window.id == window_id)
-                    .map(|position| (session.id.clone(), position, windows.len()))
+                    .map(|position| {
+                        (
+                            session.id.clone(),
+                            position,
+                            windows.len(),
+                            active_window_id,
+                        )
+                    })
             })
         else {
             return false;
@@ -1399,15 +1468,23 @@ impl AppState {
         }
 
         let mux_config = self.config().multiplexer.clone();
-        self.mux.execute_command(
-            &self.repaint,
-            &mux_config,
-            MuxCommand::MoveWindow {
+        let command = match active_window_id {
+            Some(selected_window_id) if selected_window_id.as_str() != window_id => {
+                MuxCommand::MoveWindowPreservingSelection {
+                    session_id,
+                    window_id: window_id.to_owned(),
+                    delta,
+                    selected_window_id,
+                }
+            }
+            _ => MuxCommand::MoveWindow {
                 session_id,
                 window_id: Some(window_id.to_owned()),
                 delta,
             },
-        );
+        };
+        self.mux
+            .execute_command(&self.repaint, &mux_config, command);
         self.sync_native_layout_terminal_now();
         true
     }
@@ -5639,11 +5716,51 @@ mod tests {
         assert!(state.take_session_picker_dialog().is_some());
         assert_eq!(state.mux.selected_session(), Some(second.as_str()));
 
-        assert!(state.activate_relative_session_from_ui(-1));
+        assert!(state.activate_relative_session_from_ui(&second, -1));
         assert_ne!(state.mux.selected_session(), Some(second.as_str()));
 
         assert!(state.activate_last_session_from_ui());
         assert_eq!(state.mux.selected_session(), Some(second.as_str()));
+    }
+
+    #[test]
+    fn context_session_navigation_anchors_to_the_clicked_session() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let unique = unique_test_id();
+        let first = format!("context-session-first-{unique}");
+        let clicked = format!("context-session-clicked-{unique}");
+        let next = format!("context-session-next-{unique}");
+        for session_id in [&first, &clicked, &next] {
+            state.mux.create_project_session(
+                crate::mux::controller::NewMuxSessionRequest {
+                    session_id: (*session_id).clone(),
+                    cwd: "/tmp".to_owned(),
+                },
+                &state.repaint,
+                &mux_config,
+            );
+        }
+        state.activate_session_from_ui(&first);
+        let sessions = state.mux.sessions();
+        let clicked_index = sessions
+            .iter()
+            .position(|session| session.id == clicked)
+            .expect("clicked session is present");
+        let selected_index = sessions
+            .iter()
+            .position(|session| session.id == first)
+            .expect("selected session is present");
+        let expected_clicked_next = sessions[(clicked_index + 1) % sessions.len()].id.clone();
+        let selected_next = sessions[(selected_index + 1) % sessions.len()].id.clone();
+        assert_ne!(expected_clicked_next, selected_next);
+
+        assert!(state.activate_relative_session_from_ui(&clicked, 1));
+
+        assert_eq!(
+            state.mux.selected_session(),
+            Some(expected_clicked_next.as_str())
+        );
     }
 
     #[test]
@@ -6025,6 +6142,7 @@ mod tests {
             .map(|window| window.id.clone())
             .collect::<Vec<_>>();
         let clicked = before[0].clone();
+        let active = before[2].clone();
 
         assert!(state.move_window_from_ui(&session_id, &clicked, 1));
 
@@ -6037,6 +6155,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![before[1].clone(), before[0].clone(), before[2].clone()]
         );
+        assert_eq!(state.mux().selected_window(), Some(active.as_str()));
+    }
+
+    #[test]
+    fn context_tab_navigation_anchors_to_the_clicked_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-navigate-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let tabs = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let clicked = tabs[1].clone();
+        state.activate_window_from_ui(&session_id, &tabs[0]);
+
+        assert!(state.activate_relative_window_from_ui(&session_id, &clicked, 1));
+
+        assert_eq!(state.mux().selected_window(), Some(tabs[2].as_str()));
     }
 
     #[test]
