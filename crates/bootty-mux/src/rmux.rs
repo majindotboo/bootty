@@ -117,6 +117,17 @@ impl<C: RmuxSessionClient> MuxBackend for RmuxBackend<C> {
                 self.client
                     .move_window(&session_id, window_id.as_deref(), delta)?;
             }
+            MuxCommand::MoveWindowPreservingSelection {
+                session_id,
+                window_id,
+                delta,
+                selected_window_id,
+            } => {
+                self.client
+                    .move_window(&session_id, Some(&window_id), delta)?;
+                self.client
+                    .activate_window(&session_id, &selected_window_id)?;
+            }
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
@@ -942,6 +953,40 @@ mod tests {
                     "-1".to_owned()
                 ],
             ]
+        );
+    }
+
+    #[test]
+    fn rmux_context_move_restores_the_previously_active_window() {
+        let client = RecordingClient::default();
+        let calls = client.calls.clone();
+        let mut backend = RmuxBackend::with_client(client);
+
+        backend
+            .execute(MuxCommand::MoveWindowPreservingSelection {
+                session_id: "project".to_owned(),
+                window_id: "@2".to_owned(),
+                delta: 1,
+                selected_window_id: "@3".to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                vec![
+                    "move_window".to_owned(),
+                    "project".to_owned(),
+                    "@2".to_owned(),
+                    "1".to_owned(),
+                ],
+                vec![
+                    "activate_window".to_owned(),
+                    "project".to_owned(),
+                    "@3".to_owned(),
+                ],
+            ]
+            .as_slice()
         );
     }
 

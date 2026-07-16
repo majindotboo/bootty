@@ -178,6 +178,26 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     self.run(&["select-window", "-t", target])?;
                 }
             }
+            MuxCommand::MoveWindowPreservingSelection {
+                session_id: _,
+                window_id,
+                delta,
+                selected_window_id,
+            } => {
+                if delta != 0 {
+                    self.run_owned(vec!["select-window".into(), "-t".into(), window_id])?;
+                }
+                let target = if delta < 0 { "-1" } else { "+1" };
+                for _ in 0..delta.unsigned_abs() {
+                    self.run(&["swap-window", "-t", target])?;
+                    self.run(&["select-window", "-t", target])?;
+                }
+                self.run_owned(vec![
+                    "select-window".into(),
+                    "-t".into(),
+                    selected_window_id,
+                ])?;
+            }
             MuxCommand::SplitPane {
                 session_id,
                 direction,
@@ -225,11 +245,18 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     format!("{session_id}:.-"),
                 ])?;
             }
-            MuxCommand::KillPane { session_id, .. } | MuxCommand::ClosePane { session_id, .. } => {
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            }
+            | MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => {
                 self.run_owned_allow_server_exit(vec![
                     "kill-pane".into(),
                     "-t".into(),
-                    session_id,
+                    pane_id.unwrap_or(session_id),
                 ])?;
             }
             MuxCommand::TogglePaneZoom { session_id } => {
@@ -521,6 +548,25 @@ mod tests {
     }
 
     #[test]
+    fn tmux_close_pane_targets_the_requested_pane() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "$1".to_owned(),
+                pane_id: Some("%9".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [RecordedCall::foreground(["tmux", "kill-pane", "-t", "%9"])].as_slice()
+        );
+    }
+
+    #[test]
     fn tmux_adapter_translates_window_and_pane_navigation() {
         let runner = RecordingRunner::default();
         let calls = runner.calls.clone();
@@ -586,6 +632,33 @@ mod tests {
                 RecordedCall::foreground(["tmux", "select-window", "-t", "-1"]),
                 RecordedCall::foreground(["tmux", "swap-window", "-t", "-1"]),
                 RecordedCall::foreground(["tmux", "select-window", "-t", "-1"]),
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn tmux_context_move_restores_the_previously_active_window() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::MoveWindowPreservingSelection {
+                session_id: "$1".to_owned(),
+                window_id: "@2".to_owned(),
+                delta: 1,
+                selected_window_id: "@3".to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                RecordedCall::foreground(["tmux", "select-window", "-t", "@2"]),
+                RecordedCall::foreground(["tmux", "swap-window", "-t", "+1"]),
+                RecordedCall::foreground(["tmux", "select-window", "-t", "+1"]),
+                RecordedCall::foreground(["tmux", "select-window", "-t", "@3"]),
             ]
             .as_slice()
         );

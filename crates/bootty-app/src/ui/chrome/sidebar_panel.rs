@@ -29,6 +29,7 @@ pub struct SidebarModel<'a> {
     pub top_inset: f32,
     pub border_visible: bool,
     pub separator_visible: bool,
+    pub can_return_to_last_session: bool,
     pub focused: bool,
     pub hovered_session: Option<&'a str>,
     pub unfocused_dim: f32,
@@ -42,10 +43,28 @@ pub struct SidebarModel<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarEvent {
     ActivateSession(String),
+    ContextAction {
+        session_id: String,
+        action: SessionContextAction,
+    },
     Reorder {
         source: String,
         before: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionContextAction {
+    Activate,
+    NewSession,
+    SwitchSession,
+    PreviousSession,
+    NextSession,
+    LastSession,
+    Rename,
+    MoveUp,
+    MoveDown,
+    Ditch,
 }
 
 const SIDEBAR_HEADER_HEIGHT: f32 = 44.0;
@@ -59,6 +78,31 @@ const MACOS_TITLEBAR_BUTTON_CENTER_Y: f32 = 16.0;
 /// Fraction of a color kept when dimming an unfocused session row; the rest blends to the row
 /// background, so each element fades in its own hue rather than washing toward white.
 const UNFOCUSED_ROW_KEEP: f32 = 0.5;
+
+fn sidebar_session_id<'a>(item: &SidebarItem<'a>) -> Option<&'a str> {
+    matches!(&item.kind, SidebarItemKind::Session { .. })
+        .then_some(item.session_id)
+        .flatten()
+}
+
+fn sidebar_context_session_id<'a>(item: &SidebarItem<'a>) -> Option<&'a str> {
+    item.selectable
+        .then_some(sidebar_session_id(item))
+        .flatten()
+}
+
+fn sidebar_session_ids<'a>(items: &[SidebarItem<'a>]) -> Vec<&'a str> {
+    let mut session_ids = Vec::new();
+    for item in items {
+        let Some(session_id) = sidebar_session_id(item) else {
+            continue;
+        };
+        if !session_ids.contains(&session_id) {
+            session_ids.push(session_id);
+        }
+    }
+    session_ids
+}
 
 fn sidebar_title_drag_rect(rect: Rect, reserve_titlebar_buttons: bool) -> Rect {
     let reserved = if reserve_titlebar_buttons {
@@ -145,6 +189,7 @@ pub fn show_sidebar(
         .take(max_rows)
         .cloned()
         .collect::<Vec<_>>();
+    let session_ids = sidebar_session_ids(model.items);
     let preview_labels = sidebar_drag_preview_labels(&items);
     let drag_id = egui::Id::new("mux-sidebar-drag-anchor");
     let mut dragged = ui
@@ -183,7 +228,7 @@ pub fn show_sidebar(
             hover_color,
             current_color,
         );
-        if response.drag_started()
+        if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(anchor) = item.reorder_anchor
         {
             let state = SidebarDragState {
@@ -206,6 +251,25 @@ pub fn show_sidebar(
             && let Some(session_id) = &item.session_id
         {
             event = Some(SidebarEvent::ActivateSession((*session_id).to_owned()));
+        }
+        if event.is_none()
+            && let Some(session_id) = sidebar_context_session_id(item)
+            && let Some(position) = session_ids
+                .iter()
+                .position(|candidate| *candidate == session_id)
+            && let Some(action) = session_context_action(
+                &response,
+                !item.current,
+                position > 0,
+                position + 1 < session_ids.len(),
+                session_ids.len() > 1,
+                model.can_return_to_last_session,
+            )
+        {
+            event = Some(SidebarEvent::ContextAction {
+                session_id: session_id.to_owned(),
+                action,
+            });
         }
     }
 
@@ -255,6 +319,85 @@ pub fn show_sidebar(
         painter.rect_filled(rect, 0.0, dim_overlay_color(model.unfocused_dim));
     }
     event
+}
+
+fn session_context_action(
+    response: &egui::Response,
+    can_activate: bool,
+    can_move_up: bool,
+    can_move_down: bool,
+    can_navigate: bool,
+    can_return_to_last_session: bool,
+) -> Option<SessionContextAction> {
+    let mut action = None;
+    response.context_menu(|ui| {
+        if ui
+            .add_enabled(can_activate, egui::Button::new("Activate Session"))
+            .clicked()
+        {
+            action = Some(SessionContextAction::Activate);
+        }
+        ui.separator();
+        if action.is_none() && ui.button("New Session…").clicked() {
+            action = Some(SessionContextAction::NewSession);
+        }
+        if action.is_none() && ui.button("Switch Session…").clicked() {
+            action = Some(SessionContextAction::SwitchSession);
+        }
+        if action.is_none() {
+            ui.menu_button("Navigate Sessions", |ui| {
+                if ui
+                    .add_enabled(can_navigate, egui::Button::new("Previous Session"))
+                    .clicked()
+                {
+                    action = Some(SessionContextAction::PreviousSession);
+                }
+                if action.is_none()
+                    && ui
+                        .add_enabled(can_navigate, egui::Button::new("Next Session"))
+                        .clicked()
+                {
+                    action = Some(SessionContextAction::NextSession);
+                }
+                if action.is_none()
+                    && ui
+                        .add_enabled(
+                            can_return_to_last_session,
+                            egui::Button::new("Last Session"),
+                        )
+                        .clicked()
+                {
+                    action = Some(SessionContextAction::LastSession);
+                }
+            });
+        }
+        ui.separator();
+        if action.is_none() && ui.button("Rename Session…").clicked() {
+            action = Some(SessionContextAction::Rename);
+        }
+        if action.is_none()
+            && ui
+                .add_enabled(can_move_up, egui::Button::new("Move Session Up"))
+                .clicked()
+        {
+            action = Some(SessionContextAction::MoveUp);
+        }
+        if action.is_none()
+            && ui
+                .add_enabled(can_move_down, egui::Button::new("Move Session Down"))
+                .clicked()
+        {
+            action = Some(SessionContextAction::MoveDown);
+        }
+        ui.separator();
+        if action.is_none() && ui.button("Ditch Session…").clicked() {
+            action = Some(SessionContextAction::Ditch);
+        }
+        if action.is_some() {
+            ui.close();
+        }
+    });
+    action
 }
 
 #[cfg(test)]
@@ -1042,6 +1185,7 @@ mod tests {
                 top_inset: 0.0,
                 border_visible: false,
                 separator_visible: false,
+                can_return_to_last_session: false,
                 focused: false,
                 hovered_session: None,
                 unfocused_dim: 0.0,
@@ -1051,6 +1195,27 @@ mod tests {
                 border_override: None,
             },
         )
+    }
+
+    #[test]
+    fn sidebar_session_ids_use_real_session_rows_in_order() {
+        let sessions = vec![
+            test_session("s1", "alpha", true),
+            test_session("s2", "beta", false),
+        ];
+        let mut items = build_visible_sidebar_items(&sessions, Some("s1"), 32);
+        let mut detail = items[0].clone();
+        detail.id = crate::ui::sidebar::SidebarItemId::Row("s1-detail");
+        detail.display = SidebarDisplay::Text("branch");
+        detail.kind = SidebarItemKind::Row;
+        detail.selectable = true;
+        items.insert(1, detail);
+        let duplicate = items[2].clone();
+        items.push(duplicate);
+
+        assert_eq!(sidebar_session_ids(&items), vec!["s1", "s2"]);
+        assert_eq!(sidebar_context_session_id(&items[0]), Some("s1"));
+        assert_eq!(sidebar_context_session_id(&items[1]), None);
     }
 
     #[test]
@@ -1110,6 +1275,84 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_context_menu_emits_the_clicked_session_target() {
+        let context = egui::Context::default();
+        crate::ui::icons::install_icon_fonts(&context);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
+        let sessions = vec![
+            test_session("s1", "alpha", true),
+            test_session("s2", "beta", false),
+        ];
+        let frame = |events: Vec<egui::Event>, captured: &mut Option<SidebarEvent>| {
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let event = show_test_sidebar(ui, &sessions);
+                        if event.is_some() {
+                            *captured = event;
+                        }
+                    });
+                },
+            );
+        };
+
+        let session = Pos2::new(20.0, SIDEBAR_ROW_HEIGHT * 1.5);
+        let activate = Pos2::new(60.0, SIDEBAR_ROW_HEIGHT * 2.15);
+        let mut captured = None;
+        frame(vec![egui::Event::PointerMoved(session)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: session,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: session,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(vec![egui::Event::PointerMoved(activate)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: activate,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: activate,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+
+        assert_eq!(
+            captured,
+            Some(SidebarEvent::ContextAction {
+                session_id: "s2".to_owned(),
+                action: SessionContextAction::Activate,
+            })
+        );
+    }
+
+    #[test]
     fn sidebar_detail_rows_with_session_id_do_not_activate() {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
@@ -1163,6 +1406,7 @@ mod tests {
                     top_inset: 0.0,
                     border_visible: false,
                     separator_visible: false,
+                    can_return_to_last_session: false,
                     focused: false,
                     hovered_session: None,
                     unfocused_dim: 0.0,
@@ -1214,8 +1458,7 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    #[test]
-    fn sidebar_drag_gesture_emits_reorder_event() {
+    fn sidebar_drag_event(button: egui::PointerButton) -> Option<SidebarEvent> {
         let context = egui::Context::default();
         crate::ui::icons::install_icon_fonts(&context);
         let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(286.0, 300.0));
@@ -1250,7 +1493,7 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: row0,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
             }],
@@ -1267,20 +1510,30 @@ mod tests {
         frame(
             vec![egui::Event::PointerButton {
                 pos: row1_low,
-                button: egui::PointerButton::Primary,
+                button,
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }],
             &mut captured,
         );
 
+        captured
+    }
+
+    #[test]
+    fn sidebar_primary_drag_gesture_emits_reorder_event() {
         assert_eq!(
-            captured,
+            sidebar_drag_event(egui::PointerButton::Primary),
             Some(SidebarEvent::Reorder {
                 source: String::from("alpha"),
                 before: None,
             })
         );
+    }
+
+    #[test]
+    fn sidebar_secondary_drag_does_not_emit_reorder_event() {
+        assert_eq!(sidebar_drag_event(egui::PointerButton::Secondary), None);
     }
 
     #[test]

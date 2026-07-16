@@ -199,6 +199,7 @@ fn sidebar_ui_frame(ui: &mut egui::Ui, sessions: &[MuxSession], selected: Option
                     top_inset: 0.0,
                     border_visible: true,
                     separator_visible: true,
+                    can_return_to_last_session: false,
                     focused: false,
                     hovered_session: None,
                     unfocused_dim: 0.0,
@@ -224,6 +225,7 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
         |ui| {
             let segments = [chrome::ResolvedSegment {
                 align: bootty_app::config::SegmentAlign::Left,
+                source_slot: 0,
                 items: vec![chrome::ResolvedItem {
                     text: selected.unwrap_or("session").to_owned(),
                     ..Default::default()
@@ -234,6 +236,7 @@ fn status_ui_frame(ui: &mut egui::Ui, selected: Option<&str>) {
                 bootty_ui::ThemePalette::default(),
                 StatusBarModel {
                     segments: &segments,
+                    tab_context: None,
                     background: bootty_ui::ThemePalette::default().base,
                     left_padding: chrome::STATUS_EDGE_PAD,
                     row_height: 30.0,

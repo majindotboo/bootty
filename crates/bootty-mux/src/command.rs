@@ -45,6 +45,14 @@ pub enum MuxCommand {
         window_id: Option<String>,
         delta: i32,
     },
+    /// Reorder a specific window, then restore the window that was active before the move.
+    /// Context-menu moves use this so moving an inactive tab does not steal focus.
+    MoveWindowPreservingSelection {
+        session_id: String,
+        window_id: String,
+        delta: i32,
+        selected_window_id: String,
+    },
     SplitPane {
         session_id: String,
         /// The pane to split (its cwd seeds the new pane). `None` splits the window's active pane.

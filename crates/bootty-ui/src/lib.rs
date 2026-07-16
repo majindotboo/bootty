@@ -223,6 +223,9 @@ pub fn configure_style(style: &mut egui::Style, theme: Theme) {
     style.visuals.override_text_color = None;
     style.visuals.window_fill = palette.pane;
     style.visuals.window_stroke = Stroke::new(1.0, palette.border);
+    style.visuals.window_corner_radius = CornerRadius::same(palette.radius);
+    style.visuals.menu_corner_radius = CornerRadius::same(palette.radius);
+    style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
     style.visuals.panel_fill = palette.base;
     style.visuals.extreme_bg_color = palette.mantle;
     style.visuals.faint_bg_color = palette.surface;

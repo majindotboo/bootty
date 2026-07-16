@@ -94,6 +94,7 @@ impl<R: CommandRunner> MuxBackend for ZellijBackend<R> {
             | MuxCommand::ActivateLastWindow { .. }
             | MuxCommand::ActivateWindowIndex { .. }
             | MuxCommand::MoveWindow { .. }
+            | MuxCommand::MoveWindowPreservingSelection { .. }
             | MuxCommand::SplitPane { .. }
             | MuxCommand::SelectPane { .. }
             | MuxCommand::SelectNextPane { .. }

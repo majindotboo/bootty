@@ -1258,11 +1258,132 @@ impl AppState {
         (self.repaint)();
     }
 
+    pub fn activate_relative_session_from_ui(&mut self, session_id: &str, delta: isize) -> bool {
+        let sessions = self.mux.sessions();
+        let Some(current) = sessions
+            .iter()
+            .position(|session| session.id == session_id || session.name == session_id)
+        else {
+            return false;
+        };
+        let next = (current as isize + delta).rem_euclid(sessions.len() as isize) as usize;
+        let session_id = sessions[next].id.clone();
+        self.activate_session_from_ui(&session_id);
+        true
+    }
+
+    pub fn activate_last_session_from_ui(&mut self) -> bool {
+        let Some(session_id) = self.mux.previous_selected_session().map(str::to_owned) else {
+            return false;
+        };
+        self.activate_session_from_ui(&session_id);
+        true
+    }
+
     pub fn activate_window_from_ui(&mut self, session_id: &str, window_id: &str) {
         let mux_config = self.config().multiplexer.clone();
         self.mux
             .activate_window(session_id, window_id, &self.repaint, &mux_config);
         self.sync_native_layout_terminal_now();
+    }
+
+    pub fn activate_relative_window_from_ui(
+        &mut self,
+        session_id: &str,
+        window_id: &str,
+        delta: isize,
+    ) -> bool {
+        let Some((session_id, window_id)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                let mut windows = session.windows.iter().collect::<Vec<_>>();
+                windows.sort_by_key(|window| window.index);
+                let current = windows.iter().position(|window| window.id == window_id)?;
+                let next = (current as isize + delta).rem_euclid(windows.len() as isize) as usize;
+                Some((session.id.clone(), windows[next].id.clone()))
+            })
+        else {
+            return false;
+        };
+        self.activate_window_from_ui(&session_id, &window_id);
+        true
+    }
+
+    pub fn activate_last_window_from_ui(&mut self, session_id: &str) -> bool {
+        let Some(session_id) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .filter(|session| session.windows.len() > 1)
+            .map(|session| session.id.clone())
+        else {
+            return false;
+        };
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::ActivateLastWindow { session_id },
+        );
+        self.sync_native_layout_terminal_now();
+        true
+    }
+
+    pub fn new_tab_for_window_from_ui(&mut self, session_id: &str, window_id: &str) -> bool {
+        let selected_session = self.mux.selected_session().map(str::to_owned);
+        let selected_window = self.mux.selected_window().map(str::to_owned);
+        let Some((resolved_session_id, anchor_cwd, target_is_current)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                let window = session
+                    .windows
+                    .iter()
+                    .find(|window| window.id == window_id)?;
+                let session_is_current = selected_session
+                    .as_deref()
+                    .is_some_and(|selected| selected == session.id || selected == session.name);
+                let window_is_current = selected_window.as_deref().map_or_else(
+                    || session.active_window_id.as_deref() == Some(window_id),
+                    |selected| selected == window_id,
+                );
+                Some((
+                    session.id.clone(),
+                    window
+                        .anchor
+                        .cwd
+                        .clone()
+                        .or_else(|| session.anchor.cwd.clone()),
+                    session_is_current && window_is_current,
+                ))
+            })
+        else {
+            return false;
+        };
+        let live_terminal_cwd = target_is_current
+            .then(|| self.terminal.current_working_directory().ok().flatten())
+            .flatten();
+        self.new_tab_from_ui(
+            resolved_session_id,
+            terminal_cwd_for_mux_command(live_terminal_cwd, anchor_cwd),
+        )
+    }
+
+    fn new_tab_from_ui(&mut self, session_id: String, cwd: Option<String>) -> bool {
+        let mux_config = self.config().multiplexer.clone();
+        self.mux.execute_command(
+            &self.repaint,
+            &mux_config,
+            MuxCommand::NewWindow { session_id, cwd },
+        );
+        self.sync_native_layout_terminal_now();
+        true
     }
 
     pub fn reorder_window_before_from_ui(&mut self, source: &str, before: Option<&str>) -> bool {
@@ -1304,6 +1425,120 @@ impl AppState {
             },
         );
         self.sync_native_layout_terminal_now();
+        true
+    }
+
+    pub fn move_window_from_ui(&mut self, session_id: &str, window_id: &str, delta: i32) -> bool {
+        let selected_session = self.mux.selected_session().map(str::to_owned);
+        let selected_window = self.mux.selected_window().map(str::to_owned);
+        let Some((session_id, position, window_count, active_window_id)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                let mut windows = session.windows.iter().collect::<Vec<_>>();
+                windows.sort_by_key(|window| window.index);
+                let active_window_id = (selected_session
+                    .as_deref()
+                    .is_some_and(|selected| selected == session.id || selected == session.name))
+                .then_some(selected_window.as_deref())
+                .flatten()
+                .filter(|selected| windows.iter().any(|window| window.id == *selected))
+                .map(str::to_owned)
+                .or_else(|| session.active_window_id.clone());
+                windows
+                    .iter()
+                    .position(|window| window.id == window_id)
+                    .map(|position| {
+                        (
+                            session.id.clone(),
+                            position,
+                            windows.len(),
+                            active_window_id,
+                        )
+                    })
+            })
+        else {
+            return false;
+        };
+        let target = (position as i32 + delta).clamp(0, window_count as i32 - 1) as usize;
+        if target == position {
+            return false;
+        }
+
+        let mux_config = self.config().multiplexer.clone();
+        let command = match active_window_id {
+            Some(selected_window_id) if selected_window_id.as_str() != window_id => {
+                MuxCommand::MoveWindowPreservingSelection {
+                    session_id,
+                    window_id: window_id.to_owned(),
+                    delta,
+                    selected_window_id,
+                }
+            }
+            _ => MuxCommand::MoveWindow {
+                session_id,
+                window_id: Some(window_id.to_owned()),
+                delta,
+            },
+        };
+        self.mux
+            .execute_command(&self.repaint, &mux_config, command);
+        self.sync_native_layout_terminal_now();
+        true
+    }
+
+    pub fn close_pane_for_window_from_ui(&mut self, session_id: &str, window_id: &str) -> bool {
+        let Some((session_id, window_id, pane_id)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                session
+                    .windows
+                    .iter()
+                    .find(|window| window.id == window_id)
+                    .and_then(|window| {
+                        window
+                            .anchor
+                            .pane_id
+                            .clone()
+                            .map(|pane_id| (session.id.clone(), window.id.clone(), pane_id))
+                    })
+            })
+        else {
+            return false;
+        };
+        let selected_session = self.mux.selected_session().map(str::to_owned);
+        let current_window = self.current_window_key();
+        let target_is_current = current_window.1 == window_id
+            && self
+                .mux
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .is_some_and(|session| {
+                    selected_session
+                        .as_deref()
+                        .is_some_and(|selected| selected == session.id || selected == session.name)
+                });
+        let mux_config = self.config().multiplexer.clone();
+        self.mux
+            .close_pane(&session_id, Some(&pane_id), &self.repaint, &mux_config);
+        self.terminal.discard_pane(&pane_id);
+        if self.uses_native_terminal_layout() {
+            if let Some(layout) = self
+                .pane_layouts
+                .get_mut(&(session_id.clone(), window_id.clone()))
+            {
+                layout.remove(&pane_id);
+            }
+            if target_is_current {
+                let _ = self.sync_terminal_panes();
+            }
+        }
         true
     }
 
@@ -1441,11 +1676,8 @@ impl AppState {
         }
         let mux_config = self.config().multiplexer.clone();
         for (session_id, name) in renames {
-            self.mux.execute_command(
-                &self.repaint,
-                &mux_config,
-                MuxCommand::RenameSession { session_id, name },
-            );
+            self.mux
+                .rename_session(&session_id, name, &self.repaint, &mux_config);
         }
     }
 
@@ -1497,20 +1729,24 @@ impl AppState {
     }
 
     fn move_selected_session(&mut self, delta: i32) -> bool {
-        let Some(selected) = self.mux.selected_session() else {
+        let Some(selected) = self.mux.selected_session().map(str::to_owned) else {
             return false;
         };
-        let Some(selected_name) = self
+        self.move_session_from_ui(&selected, delta)
+    }
+
+    pub fn move_session_from_ui(&mut self, session_id: &str, delta: i32) -> bool {
+        let Some(session_name) = self
             .mux
             .sessions()
             .iter()
-            .find(|session| session.id == selected || session.name == selected)
+            .find(|session| session.id == session_id || session.name == session_id)
             .map(|session| session.name.clone())
         else {
             return false;
         };
         if !self.session_order.move_session(
-            &selected_name,
+            &session_name,
             delta,
             self.mux
                 .sessions()
@@ -1585,11 +1821,8 @@ impl AppState {
             }
             RenameSessionEvent::Rename { session_id, name } => {
                 let mux_config = self.config().multiplexer.clone();
-                self.mux.execute_command(
-                    &self.repaint,
-                    &mux_config,
-                    MuxCommand::RenameSession { session_id, name },
-                );
+                self.mux
+                    .rename_session(&session_id, name, &self.repaint, &mux_config);
                 self.input_focus = InputFocus::Terminal;
             }
         }
@@ -1697,11 +1930,8 @@ impl AppState {
                     return;
                 }
                 let mux_config = self.config().multiplexer.clone();
-                self.mux.execute_command(
-                    &self.repaint,
-                    &mux_config,
-                    MuxCommand::DitchSession { session_id },
-                );
+                self.mux
+                    .ditch_session(&session_id, &self.repaint, &mux_config);
                 self.input_focus = InputFocus::Terminal;
             }
         }
@@ -2282,14 +2512,28 @@ impl AppState {
         self.input_focus = InputFocus::Picker;
     }
 
+    pub fn open_new_session_dialog_from_ui(&mut self) -> bool {
+        self.open_new_mux_session_dialog();
+        true
+    }
+
+    fn open_session_picker_dialog(&mut self) {
+        self.close_overlay_dialogs();
+        self.session_picker_dialog = Some(SessionPickerDialog::open());
+        self.input_focus = InputFocus::Picker;
+    }
+
+    pub fn open_session_picker_dialog_from_ui(&mut self) -> bool {
+        self.open_session_picker_dialog();
+        true
+    }
+
     fn toggle_session_picker_dialog(&mut self) {
         if self.session_picker_dialog.is_some() {
             self.session_picker_dialog = None;
             self.input_focus = InputFocus::Terminal;
         } else {
-            self.close_overlay_dialogs();
-            self.session_picker_dialog = Some(SessionPickerDialog::open());
-            self.input_focus = InputFocus::Picker;
+            self.open_session_picker_dialog();
         }
     }
 
@@ -2297,24 +2541,52 @@ impl AppState {
         let Some(selected) = self.mux.selected_session().map(str::to_owned) else {
             return;
         };
-        let name = self
+        self.open_rename_session_dialog_for(&selected);
+    }
+
+    pub fn open_rename_session_dialog_for(&mut self, session_id: &str) -> bool {
+        let Some((session_id, name)) = self
             .mux
             .sessions()
             .iter()
-            .find(|session| session.id == selected || session.name == selected)
-            .map_or_else(|| selected.clone(), |session| session.name.clone());
+            .find(|session| session.id == session_id || session.name == session_id)
+            .map(|session| (session.id.clone(), session.name.clone()))
+        else {
+            return false;
+        };
         self.close_overlay_dialogs();
-        self.rename_session_dialog = Some(RenameSessionDialog::open(selected, name));
+        self.rename_session_dialog = Some(RenameSessionDialog::open(session_id, name));
         self.input_focus = InputFocus::Picker;
+        true
     }
 
     fn open_rename_tab_dialog(&mut self) {
-        let Some((session_id, window_id, name)) = self.selected_window_for_rename() else {
+        let Some((session_id, window_id, _)) = self.selected_window_for_rename() else {
             return;
+        };
+        self.open_rename_tab_dialog_for(&session_id, &window_id);
+    }
+
+    pub fn open_rename_tab_dialog_for(&mut self, session_id: &str, window_id: &str) -> bool {
+        let Some((session_id, window_id, name)) = self
+            .mux
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .and_then(|session| {
+                session
+                    .windows
+                    .iter()
+                    .find(|window| window.id == window_id)
+                    .map(|window| (session.id.clone(), window.id.clone(), window.name.clone()))
+            })
+        else {
+            return false;
         };
         self.close_overlay_dialogs();
         self.rename_tab_dialog = Some(RenameTabDialog::open(session_id, window_id, name));
         self.input_focus = InputFocus::Picker;
+        true
     }
 
     fn selected_window_for_rename(&self) -> Option<(String, String, String)> {
@@ -2338,15 +2610,23 @@ impl AppState {
         let Some(selected) = self.mux.selected_session().map(str::to_owned) else {
             return;
         };
-        let cwd = self
+        self.open_ditch_session_dialog_for(&selected);
+    }
+
+    pub fn open_ditch_session_dialog_for(&mut self, session_id: &str) -> bool {
+        let Some((session_id, cwd)) = self
             .mux
             .sessions()
             .iter()
-            .find(|session| session.id == selected || session.name == selected)
-            .and_then(|session| session.anchor.cwd.clone());
+            .find(|session| session.id == session_id || session.name == session_id)
+            .map(|session| (session.id.clone(), session.anchor.cwd.clone()))
+        else {
+            return false;
+        };
         self.close_overlay_dialogs();
-        self.ditch_session_dialog = Some(DitchSessionDialog::open(selected, cwd));
+        self.ditch_session_dialog = Some(DitchSessionDialog::open(session_id, cwd));
         self.input_focus = InputFocus::Picker;
+        true
     }
 
     fn open_keybind_help_dialog(&mut self) {
@@ -5405,6 +5685,85 @@ mod tests {
     }
 
     #[test]
+    fn context_session_commands_open_their_picker_or_navigate_the_active_session() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let first = format!("context-session-command-first-{}", unique_test_id());
+        let second = format!("context-session-command-second-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: first.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: second.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.activate_session_from_ui(&second);
+
+        assert!(state.open_new_session_dialog_from_ui());
+        assert!(state.take_dialog().is_some());
+        assert_eq!(state.mux.selected_session(), Some(second.as_str()));
+
+        assert!(state.open_session_picker_dialog_from_ui());
+        assert!(state.take_session_picker_dialog().is_some());
+        assert_eq!(state.mux.selected_session(), Some(second.as_str()));
+
+        assert!(state.activate_relative_session_from_ui(&second, -1));
+        assert_ne!(state.mux.selected_session(), Some(second.as_str()));
+
+        assert!(state.activate_last_session_from_ui());
+        assert_eq!(state.mux.selected_session(), Some(second.as_str()));
+    }
+
+    #[test]
+    fn context_session_navigation_anchors_to_the_clicked_session() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let unique = unique_test_id();
+        let first = format!("context-session-first-{unique}");
+        let clicked = format!("context-session-clicked-{unique}");
+        let next = format!("context-session-next-{unique}");
+        for session_id in [&first, &clicked, &next] {
+            state.mux.create_project_session(
+                crate::mux::controller::NewMuxSessionRequest {
+                    session_id: (*session_id).clone(),
+                    cwd: "/tmp".to_owned(),
+                },
+                &state.repaint,
+                &mux_config,
+            );
+        }
+        state.activate_session_from_ui(&first);
+        let sessions = state.mux.sessions();
+        let clicked_index = sessions
+            .iter()
+            .position(|session| session.id == clicked)
+            .expect("clicked session is present");
+        let selected_index = sessions
+            .iter()
+            .position(|session| session.id == first)
+            .expect("selected session is present");
+        let expected_clicked_next = sessions[(clicked_index + 1) % sessions.len()].id.clone();
+        let selected_next = sessions[(selected_index + 1) % sessions.len()].id.clone();
+        assert_ne!(expected_clicked_next, selected_next);
+
+        assert!(state.activate_relative_session_from_ui(&clicked, 1));
+
+        assert_eq!(
+            state.mux.selected_session(),
+            Some(expected_clicked_next.as_str())
+        );
+    }
+
+    #[test]
     fn move_session_reorders_bootty_owned_session_order() {
         let mut state = test_state();
         let mux_config = state.config().multiplexer.clone();
@@ -5438,6 +5797,149 @@ mod tests {
             .sync_sessions([alpha.as_str(), beta.as_str()]);
 
         assert_eq!(ordered, vec![beta, alpha]);
+    }
+
+    #[test]
+    fn context_rename_session_targets_the_clicked_inactive_session() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let first = format!("context-session-first-{}", unique_test_id());
+        let second = format!("context-session-second-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: first.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: second.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+
+        state.open_rename_session_dialog_for(&first);
+
+        let dialog = state
+            .take_rename_session_dialog()
+            .expect("clicked session should open its rename dialog");
+        assert_eq!(
+            dialog,
+            RenameSessionDialog::open(first.clone(), first.clone())
+        );
+        state.apply_rename_session_event(
+            dialog,
+            RenameSessionEvent::Rename {
+                session_id: first.clone(),
+                name: "renamed-from-context".to_owned(),
+            },
+        );
+
+        assert_eq!(state.mux().selected_session(), Some(second.as_str()));
+        assert_eq!(
+            state
+                .mux()
+                .sessions()
+                .iter()
+                .find(|session| session.id == first)
+                .map(|session| session.name.as_str()),
+            Some("renamed-from-context")
+        );
+    }
+
+    #[test]
+    fn context_ditch_keeps_the_other_session_selected() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let first = format!("context-ditch-first-{}", unique_test_id());
+        let second = format!("context-ditch-second-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: first.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: second.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+
+        state.apply_ditch_session_event(
+            DitchSessionDialog::open(first.clone(), None),
+            DitchSessionEvent::Ditch {
+                session_id: first.clone(),
+                cwd: None,
+                action: DitchAction::KillOnly,
+            },
+        );
+
+        assert_eq!(state.mux().selected_session(), Some(second.as_str()));
+        assert!(
+            state
+                .mux()
+                .sessions()
+                .iter()
+                .all(|session| session.id != first)
+        );
+    }
+
+    #[test]
+    fn context_move_session_reorders_the_clicked_inactive_session() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let first = format!("context-move-session-first-{}", unique_test_id());
+        let second = format!("context-move-session-second-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: first.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: second.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        let before = state
+            .mux()
+            .sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let before_index = before
+            .iter()
+            .position(|session_id| session_id == &first)
+            .expect("clicked session should be present");
+        assert!(
+            before_index + 1 < before.len(),
+            "clicked session should have a following session: {before:?}"
+        );
+
+        assert!(state.move_session_from_ui(&first, 1));
+
+        assert_eq!(
+            state
+                .mux()
+                .sessions()
+                .iter()
+                .position(|session| session.id == first),
+            Some(before_index + 1)
+        );
     }
 
     #[test]
@@ -5512,6 +6014,177 @@ mod tests {
             .map(|window| window.id.clone())
             .collect::<Vec<_>>();
         assert_eq!(after[before_index - 1], moved);
+    }
+
+    #[test]
+    fn context_rename_tab_targets_the_clicked_inactive_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let windows = state.mux().selected_session_windows();
+        let clicked = windows[0].clone();
+        let selected = windows[1].id.clone();
+
+        state.open_rename_tab_dialog_for(&session_id, &clicked.id);
+
+        assert_eq!(
+            state.take_rename_tab_dialog(),
+            Some(RenameTabDialog::open(session_id, clicked.id, clicked.name,))
+        );
+        assert_eq!(state.mux().selected_window(), Some(selected.as_str()));
+    }
+
+    #[test]
+    fn context_new_tab_for_an_inactive_tab_uses_its_anchor_cwd() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-tab-cwd-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/context/tab-one".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.execute_command(
+            &state.repaint,
+            &mux_config,
+            MuxCommand::NewWindow {
+                session_id: session_id.clone(),
+                cwd: Some("/context/tab-two".to_owned()),
+            },
+        );
+        let clicked = state.mux().selected_session_windows()[0].id.clone();
+
+        assert!(state.new_tab_for_window_from_ui(&session_id, &clicked));
+
+        assert_eq!(
+            state
+                .mux()
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .and_then(|session| session.windows.last())
+                .and_then(|window| window.anchor.cwd.as_deref()),
+            Some("/context/tab-one")
+        );
+    }
+
+    #[test]
+    fn context_close_pane_closes_the_clicked_inactive_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-close-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.mux.execute_command(
+            &state.repaint,
+            &mux_config,
+            MuxCommand::NewWindow {
+                session_id: session_id.clone(),
+                cwd: None,
+            },
+        );
+        let clicked = state.mux().selected_session_windows()[0].id.clone();
+        let selected = state.mux().selected_session_windows()[1].id.clone();
+
+        assert!(state.close_pane_for_window_from_ui(&session_id, &clicked));
+
+        let remaining = state
+            .mux()
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("target session should stay open")
+            .windows
+            .iter()
+            .map(|window| window.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![selected.as_str()]);
+        assert_eq!(state.mux().selected_window(), Some(selected.as_str()));
+    }
+
+    #[test]
+    fn context_move_tab_reorders_the_clicked_inactive_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-move-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let before = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let clicked = before[0].clone();
+        let active = before[2].clone();
+
+        assert!(state.move_window_from_ui(&session_id, &clicked, 1));
+
+        assert_eq!(
+            state
+                .mux()
+                .selected_session_windows()
+                .iter()
+                .map(|window| window.id.clone())
+                .collect::<Vec<_>>(),
+            vec![before[1].clone(), before[0].clone(), before[2].clone()]
+        );
+        assert_eq!(state.mux().selected_window(), Some(active.as_str()));
+    }
+
+    #[test]
+    fn context_tab_navigation_anchors_to_the_clicked_tab() {
+        let mut state = test_state();
+        let mux_config = state.config().multiplexer.clone();
+        let session_id = format!("context-navigate-tab-{}", unique_test_id());
+        state.mux.create_project_session(
+            crate::mux::controller::NewMuxSessionRequest {
+                session_id: session_id.clone(),
+                cwd: "/tmp".to_owned(),
+            },
+            &state.repaint,
+            &mux_config,
+        );
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        state.apply_mux_key_action(MuxKeyAction::NewTab);
+        let tabs = state
+            .mux()
+            .selected_session_windows()
+            .iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>();
+        let clicked = tabs[1].clone();
+        state.activate_window_from_ui(&session_id, &tabs[0]);
+
+        assert!(state.activate_relative_window_from_ui(&session_id, &clicked, 1));
+
+        assert_eq!(state.mux().selected_window(), Some(tabs[2].as_str()));
     }
 
     #[test]
