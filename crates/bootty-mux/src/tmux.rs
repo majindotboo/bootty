@@ -225,11 +225,18 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
                     format!("{session_id}:.-"),
                 ])?;
             }
-            MuxCommand::KillPane { session_id, .. } | MuxCommand::ClosePane { session_id, .. } => {
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            }
+            | MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => {
                 self.run_owned_allow_server_exit(vec![
                     "kill-pane".into(),
                     "-t".into(),
-                    session_id,
+                    pane_id.unwrap_or(session_id),
                 ])?;
             }
             MuxCommand::TogglePaneZoom { session_id } => {
@@ -518,6 +525,25 @@ mod tests {
                 pane_id: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn tmux_close_pane_targets_the_requested_pane() {
+        let runner = RecordingRunner::default();
+        let calls = runner.calls.clone();
+        let mut backend = TmuxBackend::with_runner("tmux", runner);
+
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "$1".to_owned(),
+                pane_id: Some("%9".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [RecordedCall::foreground(["tmux", "kill-pane", "-t", "%9"])].as_slice()
+        );
     }
 
     #[test]

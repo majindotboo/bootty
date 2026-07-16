@@ -491,6 +491,61 @@ impl MuxController {
             window_id: window_id.to_owned(),
             name,
         };
+        self.execute_preserving_selection(repaint, config, command);
+    }
+
+    pub fn rename_session(
+        &mut self,
+        session_id: &str,
+        name: String,
+        repaint: &RepaintHandle,
+        config: &MultiplexerConfig,
+    ) {
+        let command = MuxCommand::RenameSession {
+            session_id: session_id.to_owned(),
+            name,
+        };
+        self.execute_preserving_selection(repaint, config, command);
+    }
+
+    pub fn ditch_session(
+        &mut self,
+        session_id: &str,
+        repaint: &RepaintHandle,
+        config: &MultiplexerConfig,
+    ) {
+        self.execute_preserving_selection(
+            repaint,
+            config,
+            MuxCommand::DitchSession {
+                session_id: session_id.to_owned(),
+            },
+        );
+    }
+
+    pub fn close_pane(
+        &mut self,
+        session_id: &str,
+        pane_id: Option<&str>,
+        repaint: &RepaintHandle,
+        config: &MultiplexerConfig,
+    ) {
+        self.execute_preserving_selection(
+            repaint,
+            config,
+            MuxCommand::ClosePane {
+                session_id: session_id.to_owned(),
+                pane_id: pane_id.map(str::to_owned),
+            },
+        );
+    }
+
+    fn execute_preserving_selection(
+        &mut self,
+        repaint: &RepaintHandle,
+        config: &MultiplexerConfig,
+        command: MuxCommand,
+    ) {
         if self
             .execute_native_command(
                 config,
@@ -1039,6 +1094,35 @@ mod tests {
                 selected_window: None,
             }))
             .expect("send rename completion");
+        let mut controller = MuxController {
+            sessions: vec![work, agents],
+            selected_session: Some("$1".to_owned()),
+            selected_window: Some("@2".to_owned()),
+            mux_command_rx: Some(rx),
+            ..Default::default()
+        };
+
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+
+        assert_eq!(controller.selected_session(), Some("$1"));
+        assert_eq!(controller.selected_window(), Some("@2"));
+    }
+
+    #[test]
+    fn inactive_session_ditch_completion_keeps_the_current_selection() {
+        let mut work = session("$1", "work");
+        work.windows = vec![window("@1", 1), window("@2", 2)];
+        work.active_window_id = Some("@1".to_owned());
+        let mut agents = session("$2", "agents");
+        agents.windows = vec![window("@9", 1)];
+        agents.active_window_id = Some("@9".to_owned());
+        let (result_tx, rx) = mpsc::channel();
+        result_tx
+            .send(Ok(MuxCommandCompletion {
+                selected_session: None,
+                selected_window: None,
+            }))
+            .expect("send ditch completion");
         let mut controller = MuxController {
             sessions: vec![work, agents],
             selected_session: Some("$1".to_owned()),

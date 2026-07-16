@@ -72,6 +72,12 @@ fn color_hex(color: egui::Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
 }
 
+fn sync_global_egui_style(ctx: &egui::Context, theme: bootty_ui::Theme) {
+    let mut style = (*ctx.global_style()).clone();
+    bootty_ui::configure_style(&mut style, theme);
+    ctx.set_global_style(style);
+}
+
 fn status_bar_left_padding(_sidebar_visible: bool, _sidebar_on_right: bool) -> f32 {
     chrome::STATUS_EDGE_PAD
 }
@@ -603,6 +609,26 @@ impl BoottyApp {
         }
     }
 
+    fn current_status_tab_context(&self) -> Option<chrome::TabContext> {
+        let selected_session = self.state.mux().selected_session()?;
+        let session =
+            self.state.mux().sessions().iter().find(|session| {
+                session.id == selected_session || session.name == selected_session
+            })?;
+        let mut windows = session.windows.iter().collect::<Vec<_>>();
+        windows.sort_by_key(|window| window.index);
+        Some(chrome::TabContext {
+            session_id: session.id.clone(),
+            targets: windows
+                .into_iter()
+                .map(|window| chrome::TabContextTarget {
+                    window_id: window.id.clone(),
+                    can_close_pane: window.anchor.pane_id.is_some(),
+                })
+                .collect(),
+        })
+    }
+
     fn current_extension_sessions(&self) -> Vec<crate::extensions::SessionView> {
         let palette = self.state.ui_theme().palette;
         let fallback_color = color_hex(palette.accent);
@@ -751,6 +777,32 @@ impl BoottyApp {
                     }
                 }
             },
+            Some(chrome::StatusBarEvent::ContextAction {
+                session_id,
+                window_id,
+                action,
+            }) => {
+                let handled = match action {
+                    chrome::TabContextAction::NewTab => self
+                        .state
+                        .new_tab_for_window_from_ui(&session_id, &window_id),
+                    chrome::TabContextAction::Rename => self
+                        .state
+                        .open_rename_tab_dialog_for(&session_id, &window_id),
+                    chrome::TabContextAction::MoveLeft => {
+                        self.state.move_window_from_ui(&session_id, &window_id, -1)
+                    }
+                    chrome::TabContextAction::MoveRight => {
+                        self.state.move_window_from_ui(&session_id, &window_id, 1)
+                    }
+                    chrome::TabContextAction::ClosePane => self
+                        .state
+                        .close_pane_for_window_from_ui(&session_id, &window_id),
+                };
+                if handled {
+                    ctx.request_repaint();
+                }
+            }
             Some(chrome::StatusBarEvent::Reorder {
                 module,
                 source,
@@ -1208,6 +1260,7 @@ impl BoottyApp {
         } else {
             Vec::new()
         };
+        let tab_context = self.current_status_tab_context();
         let top_base_status_height = if top_bar { status_height_config } else { 0.0 };
         let bottom_base_status_height = if bottom_bar {
             status_height_config
@@ -1357,6 +1410,11 @@ impl BoottyApp {
                             top_inset,
                             border_visible: !fullscreen_chrome,
                             separator_visible: !fullscreen_chrome,
+                            can_return_to_last_session: self
+                                .state
+                                .mux()
+                                .previous_selected_session()
+                                .is_some(),
                             focused: self.state.sidebar_focused(),
                             hovered_session: self.state.sidebar_hovered_session(),
                             unfocused_dim: self.state.config().chrome.unfocused_sidebar_dim,
@@ -1371,6 +1429,44 @@ impl BoottyApp {
                         match event {
                             chrome::SidebarEvent::ActivateSession(session_id) => {
                                 self.state.activate_session_from_ui(&session_id);
+                            }
+                            chrome::SidebarEvent::ContextAction { session_id, action } => {
+                                let handled = match action {
+                                    chrome::SessionContextAction::Activate => {
+                                        self.state.activate_session_from_ui(&session_id);
+                                        true
+                                    }
+                                    chrome::SessionContextAction::NewSession => {
+                                        self.state.open_new_session_dialog_from_ui()
+                                    }
+                                    chrome::SessionContextAction::SwitchSession => {
+                                        self.state.open_session_picker_dialog_from_ui()
+                                    }
+                                    chrome::SessionContextAction::PreviousSession => {
+                                        self.state.activate_relative_session_from_ui(-1)
+                                    }
+                                    chrome::SessionContextAction::NextSession => {
+                                        self.state.activate_relative_session_from_ui(1)
+                                    }
+                                    chrome::SessionContextAction::LastSession => {
+                                        self.state.activate_last_session_from_ui()
+                                    }
+                                    chrome::SessionContextAction::Rename => {
+                                        self.state.open_rename_session_dialog_for(&session_id)
+                                    }
+                                    chrome::SessionContextAction::MoveUp => {
+                                        self.state.move_session_from_ui(&session_id, -1)
+                                    }
+                                    chrome::SessionContextAction::MoveDown => {
+                                        self.state.move_session_from_ui(&session_id, 1)
+                                    }
+                                    chrome::SessionContextAction::Ditch => {
+                                        self.state.open_ditch_session_dialog_for(&session_id)
+                                    }
+                                };
+                                if handled {
+                                    ui.ctx().request_repaint();
+                                }
                             }
                             chrome::SidebarEvent::Reorder { source, before } => {
                                 // Session order is bootty-owned: commit it natively. The republished
@@ -1460,6 +1556,7 @@ impl BoottyApp {
                             palette,
                             StatusBarModel {
                                 segments: &top_segments,
+                                tab_context: tab_context.as_ref(),
                                 background: status_background,
                                 left_padding: status_left_padding,
                                 row_height: status_height_config,
@@ -1485,6 +1582,7 @@ impl BoottyApp {
                             palette,
                             StatusBarModel {
                                 segments: &bottom_segments,
+                                tab_context: tab_context.as_ref(),
                                 background: status_background,
                                 left_padding: status_left_padding,
                                 row_height: status_height_config,
@@ -1858,7 +1956,9 @@ impl eframe::App for BoottyApp {
         let variant = self.state.config().appearance.mode.variant(system_variant);
         self.state.set_appearance_variant(variant);
         self.sync_extension_theme(ui.ctx());
-        let palette = self.state.ui_theme().palette;
+        let theme = self.state.ui_theme();
+        sync_global_egui_style(ui.ctx(), theme);
+        let palette = theme.palette;
         egui::Frame::NONE.fill(palette.mantle).show(ui, |ui| {
             if self.settings_open {
                 self.show_settings(ui);
@@ -2193,5 +2293,24 @@ mod tests {
 
         assert!(events.is_empty());
         assert!(drops.is_empty());
+    }
+
+    #[test]
+    fn chrome_context_menus_use_the_active_theme_popup_style() {
+        let context = egui::Context::default();
+        let theme = bootty_ui::Theme::new(bootty_ui::ThemePalette::default());
+        sync_global_egui_style(&context, theme);
+
+        let palette = theme.palette;
+        let style = context.global_style();
+        assert_eq!(style.visuals.window_fill, palette.pane);
+        assert_eq!(style.visuals.window_stroke.color, palette.border);
+        assert_eq!(style.visuals.widgets.hovered.bg_fill, palette.hover);
+        assert!(style.visuals.dark_mode);
+        assert_eq!(
+            style.visuals.menu_corner_radius,
+            egui::CornerRadius::same(palette.radius)
+        );
+        assert_eq!(style.visuals.popup_shadow, egui::epaint::Shadow::NONE);
     }
 }

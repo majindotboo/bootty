@@ -20,6 +20,8 @@ const STATUS_WINDOWS_MODULE: &str = "windows";
 pub struct StatusBarModel<'a> {
     /// Ordered, resolved segments. Every segment is a Luau module's items; the app fills these in.
     pub segments: &'a [ResolvedSegment],
+    /// Targets that may receive the built-in tab context menu in the current selected session.
+    pub tab_context: Option<&'a TabContext>,
     /// Bar fill; set to the sidebar fullscreen background when the bar sits in the notch band.
     pub background: egui::Color32,
     /// Left edge inset before left-aligned segments; zero lets tab strips sit flush to adjacent chrome.
@@ -34,6 +36,18 @@ pub struct StatusBarModel<'a> {
     pub tab_rows: usize,
     /// Stable per-bar interaction state key, so top and bottom bar drags cannot collide.
     pub interaction_id: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabContext {
+    pub session_id: String,
+    pub targets: Vec<TabContextTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabContextTarget {
+    pub window_id: String,
+    pub can_close_pane: bool,
 }
 
 /// A status segment resolved for this frame: a module's items plus where the segment is aligned.
@@ -72,11 +86,25 @@ pub struct ResolvedItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StatusBarEvent {
     Action(String),
+    ContextAction {
+        session_id: String,
+        window_id: String,
+        action: TabContextAction,
+    },
     Reorder {
         module: String,
         source: String,
         before: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabContextAction {
+    NewTab,
+    Rename,
+    MoveLeft,
+    MoveRight,
+    ClosePane,
 }
 
 pub const STATUS_EDGE_PAD: f32 = 12.0;
@@ -232,6 +260,9 @@ pub fn show_status_bar(
         palette,
         font: font.clone(),
         clicked: None,
+        context_action: None,
+        tab_context: model.tab_context.cloned(),
+        interaction_id: model.interaction_id,
         primary_press_pos,
         drag_blocked: false,
         suppress_click: dragging.is_some(),
@@ -266,7 +297,17 @@ pub fn show_status_bar(
         ui.ctx().request_repaint();
     }
 
-    let mut event = input.clicked.take().map(StatusBarEvent::Action);
+    let mut event = input
+        .context_action
+        .take()
+        .map(
+            |(session_id, window_id, action)| StatusBarEvent::ContextAction {
+                session_id,
+                window_id,
+                action,
+            },
+        )
+        .or_else(|| input.clicked.take().map(StatusBarEvent::Action));
     if let Some(drag) = dragging.as_ref() {
         let drop = pointer_pos
             .and_then(|pos| status_drop_target(&input.blocks, &drag.module, &drag.anchor, pos));
@@ -319,6 +360,9 @@ struct StatusInput {
     palette: ThemePalette,
     font: egui::FontId,
     clicked: Option<String>,
+    context_action: Option<(String, String, TabContextAction)>,
+    tab_context: Option<TabContext>,
+    interaction_id: &'static str,
     primary_press_pos: Option<Pos2>,
     drag_blocked: bool,
     suppress_click: bool,
@@ -758,7 +802,7 @@ fn draw_segments(
     let font = input.font.clone();
     let mut x = start_x;
     let mut drawn = 0;
-    for segment in segments {
+    for (segment_index, segment) in segments.iter().enumerate() {
         let width = segment_width(ui, segment, &font);
         if width <= 0.0 {
             continue;
@@ -769,11 +813,11 @@ fn draw_segments(
         let items = segment.items.iter().collect::<Vec<_>>();
         if x + width > bound {
             if segment_contains_module(segment, STATUS_WINDOWS_MODULE) && x < bound {
-                draw_items(ui, x, bound, &items, input);
+                draw_items(ui, x, bound, segment, segment_index, &items, input);
             }
             break;
         }
-        draw_items(ui, x, x + width, &items, input);
+        draw_items(ui, x, x + width, segment, segment_index, &items, input);
         drawn += 1;
         x += width;
     }
@@ -947,6 +991,8 @@ fn draw_items(
     ui: &mut egui::Ui,
     start_x: f32,
     bound: f32,
+    segment: &ResolvedSegment,
+    segment_index: usize,
     items: &[&ResolvedItem],
     input: &mut StatusInput,
 ) {
@@ -971,11 +1017,22 @@ fn draw_items(
             egui::vec2(width, rect.height() - 6.0),
         );
 
-        // An anchored item drags; otherwise an action item just clicks. Key the id on the
-        // anchor/action (not position) so the press is recognized as the same widget.
+        // An anchored item drags; otherwise an action item just clicks. Keep the identity tied to
+        // the bar, segment, and cell rather than x so an open context menu survives text reflow.
         let interactive = item.reorder_anchor.as_deref().or(item.action.as_deref());
         let response = interactive.map(|key| {
-            let id = ui.make_persistent_id(("status-item", key, x as i32));
+            let id = status_item_id(
+                input.interaction_id,
+                input
+                    .tab_context
+                    .as_ref()
+                    .map(|context| context.session_id.as_str()),
+                segment,
+                status_item_segment_slot(item, segment_index),
+                item,
+                status_item_cell_index(items, index),
+                key,
+            );
             let sense = if item.reorder_anchor.is_some() {
                 egui::Sense::click_and_drag()
             } else {
@@ -983,6 +1040,26 @@ fn draw_items(
             };
             ui.interact(item_rect, id, sense)
         });
+        if let (Some(response), Some(window_id)) = (response.as_ref(), tab_context_window_id(item))
+        {
+            let context_action = input.tab_context.as_ref().and_then(|context| {
+                let (target_index, target) = context
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, target)| target.window_id == window_id)?;
+                tab_context_action(
+                    response,
+                    target_index > 0,
+                    target_index + 1 < context.targets.len(),
+                    target.can_close_pane,
+                )
+                .map(|action| (context.session_id.clone(), window_id.to_owned(), action))
+            });
+            if let Some(context_action) = context_action {
+                input.context_action = Some(context_action);
+            }
+        }
         if interactive.is_some()
             && input
                 .primary_press_pos
@@ -1112,6 +1189,112 @@ fn draw_items(
     }
 }
 
+fn status_item_id(
+    interaction_id: &'static str,
+    session_id: Option<&str>,
+    segment: &ResolvedSegment,
+    segment_index: usize,
+    item: &ResolvedItem,
+    item_index: usize,
+    key: &str,
+) -> egui::Id {
+    let role = if item.reorder_anchor.is_some() {
+        "reorder"
+    } else {
+        "action"
+    };
+    egui::Id::new((
+        "status-item",
+        interaction_id,
+        session_id.unwrap_or_default(),
+        status_segment_align_id(segment.align),
+        segment_index,
+        item.module.as_str(),
+        role,
+        key,
+        item_index,
+    ))
+}
+
+fn status_item_segment_slot(item: &ResolvedItem, segment_index: usize) -> usize {
+    if tab_context_window_id(item).is_some() {
+        0
+    } else {
+        segment_index
+    }
+}
+
+fn status_item_cell_index(items: &[&ResolvedItem], index: usize) -> usize {
+    let Some(anchor) = items[index].reorder_anchor.as_deref() else {
+        return index;
+    };
+    items[..index]
+        .iter()
+        .rev()
+        .take_while(|item| item.reorder_anchor.as_deref() == Some(anchor))
+        .count()
+}
+
+fn status_segment_align_id(align: SegmentAlign) -> &'static str {
+    match align {
+        SegmentAlign::Left => "left",
+        SegmentAlign::Center => "center",
+        SegmentAlign::Right => "right",
+    }
+}
+
+fn tab_context_window_id(item: &ResolvedItem) -> Option<&str> {
+    let window_id = item.reorder_anchor.as_deref()?;
+    (item.module == STATUS_WINDOWS_MODULE
+        && item
+            .action
+            .as_deref()
+            .and_then(|action| action.strip_prefix("activate-window:"))
+            == Some(window_id))
+    .then_some(window_id)
+}
+
+fn tab_context_action(
+    response: &egui::Response,
+    can_move_left: bool,
+    can_move_right: bool,
+    can_close_pane: bool,
+) -> Option<TabContextAction> {
+    let mut action = None;
+    response.context_menu(|ui| {
+        if ui.button("New Tab").clicked() {
+            action = Some(TabContextAction::NewTab);
+        } else if ui.button("Rename Tab").clicked() {
+            action = Some(TabContextAction::Rename);
+        } else {
+            ui.separator();
+            if ui
+                .add_enabled(can_move_left, egui::Button::new("Move Tab Left"))
+                .clicked()
+            {
+                action = Some(TabContextAction::MoveLeft);
+            } else if ui
+                .add_enabled(can_move_right, egui::Button::new("Move Tab Right"))
+                .clicked()
+            {
+                action = Some(TabContextAction::MoveRight);
+            } else {
+                ui.separator();
+                if ui
+                    .add_enabled(can_close_pane, egui::Button::new("Close Pane"))
+                    .clicked()
+                {
+                    action = Some(TabContextAction::ClosePane);
+                }
+            }
+        }
+        if action.is_some() {
+            ui.close();
+        }
+    });
+    action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,6 +1328,82 @@ mod tests {
             },
         );
         assert!(output.viewport_output.contains_key(&egui::ViewportId::ROOT));
+    }
+
+    #[test]
+    fn status_item_id_is_stable_across_reflow_and_scoped_to_its_tab_cell() {
+        let item = ResolvedItem {
+            module: STATUS_WINDOWS_MODULE.to_owned(),
+            action: Some("activate-window:tab-1".to_owned()),
+            reorder_anchor: Some("tab-1".to_owned()),
+            ..ResolvedItem::default()
+        };
+        let segment = ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: vec![item.clone(), item.clone()],
+        };
+        let first = status_item_id(
+            "top-status",
+            Some("session-a"),
+            &segment,
+            0,
+            &item,
+            0,
+            "tab-1",
+        );
+
+        assert_eq!(
+            first,
+            status_item_id(
+                "top-status",
+                Some("session-a"),
+                &segment,
+                status_item_segment_slot(&item, 8),
+                &item,
+                0,
+                "tab-1",
+            ),
+            "text reflow must not affect the context-menu owner id"
+        );
+        assert_ne!(
+            first,
+            status_item_id(
+                "top-status",
+                Some("session-a"),
+                &segment,
+                0,
+                &item,
+                1,
+                "tab-1",
+            ),
+            "the index and title cells for one tab must not collide"
+        );
+        assert_ne!(
+            first,
+            status_item_id(
+                "bottom-status",
+                Some("session-a"),
+                &segment,
+                0,
+                &item,
+                0,
+                "tab-1",
+            ),
+            "top and bottom bars must not share popup state"
+        );
+        assert_ne!(
+            first,
+            status_item_id(
+                "top-status",
+                Some("session-b"),
+                &segment,
+                0,
+                &item,
+                0,
+                "tab-1",
+            ),
+            "reused native tab ids in another session must not share popup state"
+        );
     }
 
     #[test]
@@ -1235,6 +1494,7 @@ mod tests {
                 ThemePalette::default(),
                 StatusBarModel {
                     segments: &[],
+                    tab_context: None,
                     background: ThemePalette::default().base,
                     left_padding: STATUS_EDGE_PAD,
                     row_height: screen_rect.height(),
@@ -1301,6 +1561,7 @@ mod tests {
                 ThemePalette::default(),
                 StatusBarModel {
                     segments: &segments,
+                    tab_context: None,
                     background: ThemePalette::default().base,
                     left_padding: STATUS_EDGE_PAD,
                     row_height: screen_rect.height(),
@@ -1534,6 +1795,7 @@ mod tests {
                             ThemePalette::default(),
                             StatusBarModel {
                                 segments: &segments,
+                                tab_context: None,
                                 background: ThemePalette::default().base,
                                 left_padding: STATUS_EDGE_PAD,
                                 row_height: 30.0,
@@ -1585,6 +1847,105 @@ mod tests {
                 module: "windows".to_owned(),
                 source: "@1".to_owned(),
                 before: None,
+            })
+        );
+    }
+
+    #[test]
+    fn status_bar_context_menu_emits_the_clicked_tab_target() {
+        let context = egui::Context::default();
+        crate::ui::icons::install_icon_fonts(&context);
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 30.0));
+        let segments = [ResolvedSegment {
+            align: SegmentAlign::Left,
+            items: window_tab("tab-1", "1", "alpha"),
+        }];
+        let tab_context = TabContext {
+            session_id: "session-a".to_owned(),
+            targets: vec![TabContextTarget {
+                window_id: "tab-1".to_owned(),
+                can_close_pane: true,
+            }],
+        };
+        let frame = |events: Vec<egui::Event>, captured: &mut Option<StatusBarEvent>| {
+            let _ = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let event = show_status_bar(
+                            ui,
+                            ThemePalette::default(),
+                            StatusBarModel {
+                                segments: &segments,
+                                tab_context: Some(&tab_context),
+                                background: ThemePalette::default().base,
+                                left_padding: STATUS_EDGE_PAD,
+                                row_height: 30.0,
+                                notch_x: None,
+                                tab_rows: 1,
+                                interaction_id: "status-bar-context-menu-test",
+                            },
+                        );
+                        if event.is_some() {
+                            *captured = event;
+                        }
+                    });
+                },
+            );
+        };
+
+        let tab = Pos2::new(28.0, 15.0);
+        let rename_tab = Pos2::new(60.0, 28.0);
+        let mut captured = None;
+        frame(vec![egui::Event::PointerMoved(tab)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: tab,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: tab,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(vec![egui::Event::PointerMoved(rename_tab)], &mut captured);
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: rename_tab,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+        frame(
+            vec![egui::Event::PointerButton {
+                pos: rename_tab,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut captured,
+        );
+
+        assert_eq!(
+            captured,
+            Some(StatusBarEvent::ContextAction {
+                session_id: "session-a".to_owned(),
+                window_id: "tab-1".to_owned(),
+                action: TabContextAction::Rename,
             })
         );
     }

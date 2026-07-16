@@ -264,49 +264,74 @@ impl NativeMuxState {
         }
     }
 
-    // Close the active pane; when it was the last pane in its window, cascade to remove the window
-    // (tab). A session left with no windows stays in the sidebar as an empty session.
-    fn close_active_pane(&mut self, session_id: &str) {
-        let Some(window) = self.active_window_mut(session_id) else {
-            return;
-        };
-        let Some(index) = window
-            .panes
-            .iter()
-            .position(|pane| pane.id == window.active_pane_id)
-        else {
-            return;
-        };
-        window.panes.remove(index);
-        if !window.panes.is_empty() {
-            window.active_pane_id = window.panes[index.min(window.panes.len() - 1)].id.clone();
+    // Close the requested pane; when it was the last pane in its window, cascade to remove that
+    // window. The target can belong to an inactive tab, so never route through active_window_mut.
+    fn close_pane(&mut self, session_id: &str, pane_id: Option<&str>) {
+        let mut changed_active_session = false;
+        {
+            let Some(session) = self.active_session_mut(session_id) else {
+                return;
+            };
+            let window_index = pane_id
+                .and_then(|pane_id| {
+                    session
+                        .windows
+                        .iter()
+                        .position(|window| window.panes.iter().any(|pane| pane.id == pane_id))
+                })
+                .or_else(|| {
+                    session
+                        .windows
+                        .iter()
+                        .position(|window| window.id == session.active_window_id)
+                });
+            let Some(window_index) = window_index else {
+                return;
+            };
+            let target_window_id = session.windows[window_index].id.clone();
+            let target_was_active = target_window_id == session.active_window_id;
+            let pane_index = {
+                let window = &session.windows[window_index];
+                pane_id
+                    .and_then(|pane_id| window.panes.iter().position(|pane| pane.id == pane_id))
+                    .or_else(|| {
+                        window
+                            .panes
+                            .iter()
+                            .position(|pane| pane.id == window.active_pane_id)
+                    })
+            };
+            let Some(pane_index) = pane_index else {
+                return;
+            };
+            let window = &mut session.windows[window_index];
+            let removed_active_pane = window.panes[pane_index].id == window.active_pane_id;
+            window.panes.remove(pane_index);
+            if !window.panes.is_empty() {
+                if removed_active_pane {
+                    window.active_pane_id = window.panes[pane_index.min(window.panes.len() - 1)]
+                        .id
+                        .clone();
+                }
+                changed_active_session = target_was_active;
+            } else {
+                session.windows.remove(window_index);
+                for (position, window) in session.windows.iter_mut().enumerate() {
+                    window.index = position as u32 + 1;
+                }
+                if target_was_active {
+                    session.active_window_id = session
+                        .windows
+                        .get(window_index.min(session.windows.len().saturating_sub(1)))
+                        .map(|window| window.id.clone())
+                        .unwrap_or_default();
+                    changed_active_session = true;
+                }
+            }
+        }
+        if changed_active_session {
             self.active_session_id = session_id.to_owned();
-            return;
         }
-        self.close_active_window(session_id);
-    }
-
-    fn close_active_window(&mut self, session_id: &str) {
-        let Some(session) = self.active_session_mut(session_id) else {
-            return;
-        };
-        let Some(index) = session
-            .windows
-            .iter()
-            .position(|window| window.id == session.active_window_id)
-        else {
-            return;
-        };
-        session.windows.remove(index);
-        for (position, window) in session.windows.iter_mut().enumerate() {
-            window.index = position as u32 + 1;
-        }
-        session.active_window_id = session
-            .windows
-            .get(index.min(session.windows.len().saturating_sub(1)))
-            .map(|window| window.id.clone())
-            .unwrap_or_default();
-        self.active_session_id = session_id.to_owned();
     }
 
     fn snapshot(&self) -> MuxSnapshot {
@@ -539,12 +564,7 @@ impl MuxBackend for NativeBackend {
             MuxCommand::ClosePane {
                 session_id,
                 pane_id,
-            } => {
-                if let Some(pane_id) = pane_id {
-                    state.set_active_pane(&session_id, &pane_id);
-                }
-                state.close_active_pane(&session_id);
-            }
+            } => state.close_pane(&session_id, pane_id.as_deref()),
             MuxCommand::TogglePaneZoom { .. } => {}
             MuxCommand::CreateProjectSession { session_id, cwd }
             | MuxCommand::CreateWorktreeSession { session_id, cwd } => {
@@ -677,11 +697,39 @@ mod tests {
     }
 
     #[test]
+    fn close_pane_command_targets_a_pane_in_an_inactive_tab() {
+        let mut backend = NativeBackend::with_state(local_state());
+        backend
+            .execute(MuxCommand::NewWindow {
+                session_id: "local".to_owned(),
+                cwd: None,
+            })
+            .unwrap();
+        let inactive_pane = backend.snapshot().unwrap().sessions[0].windows[0]
+            .anchor
+            .pane_id
+            .clone()
+            .expect("first tab should have a pane");
+
+        backend
+            .execute(MuxCommand::ClosePane {
+                session_id: "local".to_owned(),
+                pane_id: Some(inactive_pane),
+            })
+            .unwrap();
+
+        let session = &backend.snapshot().unwrap().sessions[0];
+        assert_eq!(session.windows.len(), 1);
+        assert_eq!(session.windows[0].id, "tab-2");
+        assert_eq!(session.active_window_id.as_deref(), Some("tab-2"));
+    }
+
+    #[test]
     fn close_pane_in_a_split_tab_keeps_the_tab() {
         let mut state = local_state();
         state.split_pane("local", None);
 
-        state.close_active_pane("local");
+        state.close_pane("local", None);
 
         let session = &state.sessions[0];
         assert_eq!(session.windows.len(), 1);
@@ -691,7 +739,7 @@ mod tests {
     #[test]
     fn new_window_revives_an_empty_session() {
         let mut state = local_state();
-        state.close_active_pane("local");
+        state.close_pane("local", None);
         assert!(state.sessions[0].windows.is_empty());
 
         state.new_window("local", None);
@@ -708,7 +756,7 @@ mod tests {
         state.new_window("local", None);
         state.new_window("local", None);
 
-        state.close_active_pane("local");
+        state.close_pane("local", None);
 
         let session = &state.sessions[0];
         assert_eq!(session.windows.len(), 2);
@@ -775,7 +823,7 @@ mod tests {
         state.new_window("local", None);
         state.activate_window("local", "tab-2");
 
-        state.close_active_pane("local");
+        state.close_pane("local", None);
         state.new_window("local", None);
 
         let ids = state.sessions[0]
