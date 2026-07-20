@@ -333,13 +333,51 @@ fn text_vertices_into_appends_without_replacing_existing_vertices() {
         uv: [8.0, 8.0],
         color: [7.0, 7.0, 7.0, 7.0],
     };
-    let expected = text_vertices(surface, &[quad]);
+    let expected = text_vertices(surface, 1.0, &[quad]);
     let mut vertices = vec![sentinel];
 
-    text_vertices_into(surface, &[quad], &mut vertices);
+    text_vertices_into(surface, 1.0, &[quad], &mut vertices);
 
     assert_eq!(vertices[0], sentinel);
     assert_eq!(&vertices[1..], expected.as_slice());
+}
+
+#[test]
+fn text_glyph_snaps_y_to_physical_pixel_grid_but_leaves_x_exact() {
+    // A fractional row origin (2.3) at 2x DPI lands the glyph on 4.6 physical pixels — the sub-pixel
+    // straddle that ghosts under `Fit rows to window`. Rendering must snap it to 5 physical pixels
+    // (logical 2.5) vertically while leaving x untouched, since column width stays integer.
+    let surface = SurfaceRect::from_min_size(0.0, 0.0, 10.0, 10.0);
+    let quad = TexturedGlyphQuad {
+        rect: SurfaceRect::from_min_size(1.3, 2.3, 3.0, 4.0),
+        uv: SurfaceRect::from_min_size(0.1, 0.2, 0.3, 0.4),
+        color: PlanColor {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
+    };
+
+    let vertices = text_vertices(surface, 2.0, &[quad]);
+    let top_left = vertices[0];
+    let bottom_left = vertices[1];
+
+    // NDC y for a surface of height 10 is `1 - y * 0.2`. Snapped top 2.5 -> 0.5, snapped bottom
+    // 6.5 -> -0.3; unsnapped would be 0.54 and -0.26.
+    assert!(
+        (top_left.position[1] - 0.5).abs() < 1e-4,
+        "top y not snapped"
+    );
+    assert!(
+        (bottom_left.position[1] - (-0.3)).abs() < 1e-4,
+        "bottom y not snapped"
+    );
+    // x is left exact: NDC x for 1.3 is `1.3 * 0.2 - 1.0 = -0.74`.
+    assert!(
+        (top_left.position[0] - (-0.74)).abs() < 1e-4,
+        "x should not be snapped"
+    );
 }
 
 #[test]

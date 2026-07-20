@@ -68,24 +68,35 @@ pub(super) fn background_quad_vertices(
 }
 
 #[cfg(test)]
-pub(super) fn text_vertices(surface: SurfaceRect, quads: &[TexturedGlyphQuad]) -> Vec<TextVertex> {
+pub(super) fn text_vertices(
+    surface: SurfaceRect,
+    ppp: f32,
+    quads: &[TexturedGlyphQuad],
+) -> Vec<TextVertex> {
     let mut vertices = Vec::with_capacity(quads.len() * 6);
-    text_vertices_into(surface, quads, &mut vertices);
+    text_vertices_into(surface, ppp, quads, &mut vertices);
     vertices
 }
 
 pub(super) fn text_vertices_into(
     surface: SurfaceRect,
+    ppp: f32,
     quads: &[TexturedGlyphQuad],
     vertices: &mut Vec<TextVertex>,
 ) {
     vertices.reserve(quads.len() * 6);
     let transform = SurfaceNdcTransform::new(surface);
+    // Snap each glyph's top and bottom to the physical pixel grid. `Fit rows to window` makes the
+    // cell height fractional, so unsnapped rows land on sub-pixel boundaries and the glyph texels
+    // straddle screen pixels — a couple pixels of vertical ghosting that grows down the column as
+    // the fractional offset accumulates. Images already snap the same way; X is left exact because
+    // column width stays integer. At an integer cell height the snap is a no-op.
+    let snap_y = |y: f32| snap_to_grid(y, surface.min_y, ppp);
     for quad in quads {
         let min_x = transform.x(quad.rect.min_x);
         let max_x = transform.x(quad.rect.max_x);
-        let min_y = transform.y(quad.rect.min_y);
-        let max_y = transform.y(quad.rect.max_y);
+        let min_y = transform.y(snap_y(quad.rect.min_y));
+        let max_y = transform.y(snap_y(quad.rect.max_y));
         let color = color_to_float(quad.color);
         let top_left = TextVertex {
             position: [min_x, min_y],
@@ -161,6 +172,15 @@ pub(super) fn image_vertices(
     ])
 }
 
+// Round `value` to the nearest physical pixel, measuring from `origin` so the grid is anchored to
+// the surface edge rather than logical zero. A non-positive or non-finite scale disables snapping.
+fn snap_to_grid(value: f32, origin: f32, scale: f32) -> f32 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return value;
+    }
+    origin + ((value - origin) * scale).round() / scale
+}
+
 fn snap_rect_to_pixel_grid(
     rect: SurfaceRect,
     surface: SurfaceRect,
@@ -171,11 +191,10 @@ fn snap_rect_to_pixel_grid(
     } else {
         1.0
     };
-    let snap = |value: f32, origin: f32| origin + ((value - origin) * scale).round() / scale;
-    let min_x = snap(rect.min_x, surface.min_x);
-    let min_y = snap(rect.min_y, surface.min_y);
-    let max_x = snap(rect.max_x, surface.min_x).max(min_x + 1.0 / scale);
-    let max_y = snap(rect.max_y, surface.min_y).max(min_y + 1.0 / scale);
+    let min_x = snap_to_grid(rect.min_x, surface.min_x, scale);
+    let min_y = snap_to_grid(rect.min_y, surface.min_y, scale);
+    let max_x = snap_to_grid(rect.max_x, surface.min_x, scale).max(min_x + 1.0 / scale);
+    let max_y = snap_to_grid(rect.max_y, surface.min_y, scale).max(min_y + 1.0 / scale);
     SurfaceRect {
         min_x,
         min_y,
