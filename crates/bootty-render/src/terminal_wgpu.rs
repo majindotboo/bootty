@@ -653,7 +653,10 @@ impl TerminalWgpuRenderer {
                 device,
                 queue,
                 text_builder,
-                render_surface,
+                TextRenderTarget {
+                    surface: render_surface,
+                    ppp: pixels_per_point,
+                },
                 text_batches[..text_batch_count].iter().map(Vec::as_slice),
                 &text_batch_dirty[..text_batch_count],
             );
@@ -770,7 +773,7 @@ impl TerminalWgpuRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         text_builder: &TextAtlasBuilder,
-        surface: SurfaceRect,
+        target: TextRenderTarget,
         batches: impl Iterator<Item = &'a [TexturedGlyphQuad]>,
         dirty_batches: &[bool],
     ) -> u32 {
@@ -792,14 +795,17 @@ impl TerminalWgpuRenderer {
         for (layer_index, quads) in batches.enumerate() {
             let changed = dirty_batches.get(layer_index).copied().unwrap_or(true);
             if let Some(layer) = resources.layers.get_mut(layer_index) {
-                if changed || layer.surface != Some(surface) {
-                    layer.update(device, queue, surface, quads, changed, &mut vertices);
+                if changed
+                    || layer.surface != Some(target.surface)
+                    || layer.pixels_per_point != target.ppp
+                {
+                    layer.update(device, queue, target, quads, changed, &mut vertices);
                 }
             } else {
                 resources.layers.push(TerminalTextLayerResources::new(
                     device,
                     queue,
-                    surface,
+                    target,
                     quads,
                     &mut vertices,
                 ));
@@ -979,9 +985,19 @@ impl TerminalTextAtlasTexture {
     }
 }
 
+/// The geometry a text layer's glyph quads are projected onto: the surface rect they map into and
+/// the physical pixel density they snap to. Bundled so the render path threads one value instead of
+/// a pair.
+#[derive(Clone, Copy)]
+struct TextRenderTarget {
+    surface: SurfaceRect,
+    ppp: f32,
+}
+
 struct TerminalTextLayerResources {
     vertex_buffer: wgpu::Buffer,
     surface: Option<SurfaceRect>,
+    pixels_per_point: f32,
     quads: Vec<TexturedGlyphQuad>,
     vertex_count: u32,
     byte_capacity: usize,
@@ -991,7 +1007,7 @@ impl TerminalTextLayerResources {
     fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        surface: SurfaceRect,
+        target: TextRenderTarget,
         quads: &[TexturedGlyphQuad],
         vertices: &mut Vec<TextVertex>,
     ) -> Self {
@@ -1003,11 +1019,12 @@ impl TerminalTextLayerResources {
                 mapped_at_creation: false,
             }),
             surface: None,
+            pixels_per_point: target.ppp,
             quads: Vec::new(),
             vertex_count: 0,
             byte_capacity: 0,
         };
-        resources.update(device, queue, surface, quads, true, vertices);
+        resources.update(device, queue, target, quads, true, vertices);
         resources
     }
 
@@ -1015,11 +1032,13 @@ impl TerminalTextLayerResources {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        surface: SurfaceRect,
+        target: TextRenderTarget,
         quads: &[TexturedGlyphQuad],
         changed: bool,
         vertices: &mut Vec<TextVertex>,
     ) {
+        let TextRenderTarget { surface, ppp } = target;
+        self.pixels_per_point = ppp;
         if quads.is_empty() {
             self.surface = None;
             self.quads.clear();
@@ -1034,7 +1053,7 @@ impl TerminalTextLayerResources {
         }
 
         vertices.clear();
-        text_vertices_into(surface, quads, vertices);
+        text_vertices_into(surface, ppp, quads, vertices);
         let vertex_count = vertices.len() as u32;
         let bytes = vertex_bytes(vertices);
         if bytes.len() > self.byte_capacity {
