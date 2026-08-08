@@ -937,6 +937,7 @@ dependencies = [
  "toml_writer",
  "tracing",
  "tracing-core",
+ "typenum",
  "uuid",
  "wasm-bindgen",
  "wayland-sys",

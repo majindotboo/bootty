@@ -27,7 +27,12 @@ use bootty_terminal::{
     terminal_input_model::{KeyInput, MouseInput},
 };
 
-use crate::{config::selected_backend, controller::MuxScope, snapshot::MuxPaneAnchor};
+use crate::{
+    config::{remote_transport, selected_backend},
+    controller::MuxScope,
+    snapshot::MuxPaneAnchor,
+    ssh::SshRemote,
+};
 
 use super::{rmux_native::RmuxNativeTerminal, startup::StartingNativeTerminal};
 
@@ -48,6 +53,9 @@ struct RmuxWindowResizeWorker {
 #[derive(Deref, DerefMut)]
 pub struct BackendPaneTerminal {
     backend: MultiplexerBackendConfig,
+    /// Set when this pane's multiplexer runs on another host: the attach client and the pane-local
+    /// options bootty sets alongside it all have to reach that host's server rather than this one's.
+    remote: Option<SshRemote>,
     active_target: Option<ScopedMuxPaneTarget>,
     geometry: TerminalGeometry,
     terminal_config: TerminalSessionConfig,
@@ -245,12 +253,14 @@ impl BackendPaneTerminal {
         terminal_config: TerminalSessionConfig,
         repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Self {
-        Self::new_with_backend(
+        let mut pane = Self::new_with_backend(
             geometry,
             selected_backend(config),
             terminal_config,
             repaint_wakeup,
-        )
+        );
+        pane.remote = remote_transport(config);
+        pane
     }
 
     pub(super) fn new_with_backend(
@@ -261,6 +271,7 @@ impl BackendPaneTerminal {
     ) -> Self {
         Self {
             backend,
+            remote: None,
             active_target: None,
             geometry,
             terminal_config,
@@ -303,10 +314,14 @@ impl BackendPaneTerminal {
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
         let backend = selected_backend(config);
+        let remote = remote_transport(config);
         let target = anchor
             .cloned()
             .map(|anchor| ScopedMuxPaneTarget::from_anchor(scope, anchor));
+        // A different host is a different server, so its sessions need their own attach client even
+        // when the backend and the target name are unchanged.
         if self.backend == backend
+            && self.remote == remote
             && scoped_target_matches_anchor(backend, scope, self.active_target.as_ref(), anchor)
         {
             // The tmux attach client follows pane/window changes server-side, so avoid
@@ -319,6 +334,12 @@ impl BackendPaneTerminal {
         }
 
         self.park_native_layout_terminal();
+        // Restore the outgoing host's pane options before the incoming one's are read, so a switch
+        // between hosts cannot leave an override behind on the server bootty is leaving.
+        if self.remote != remote {
+            self.deactivate_backend_side_effects();
+        }
+        self.remote = remote;
         let phase = bootty_runtime::latency::start();
         let terminal = self
             .start_terminal(backend, target.as_ref())
@@ -355,7 +376,7 @@ impl BackendPaneTerminal {
         if self.passthrough_all_panes.contains_key(pane_id) {
             return;
         }
-        if let Ok(previous) = take_pane_allow_passthrough(pane_id) {
+        if let Ok(previous) = take_pane_allow_passthrough(self.remote.as_ref(), pane_id) {
             self.passthrough_all_panes.insert(
                 pane_id.to_owned(),
                 TmuxPanePassthroughOverride {
@@ -367,8 +388,9 @@ impl BackendPaneTerminal {
     }
 
     fn restore_tmux_passthrough_overrides(&mut self) {
+        let remote = self.remote.clone();
         for (_, previous) in self.passthrough_all_panes.drain() {
-            let _ = restore_pane_allow_passthrough(&previous);
+            let _ = restore_pane_allow_passthrough(remote.as_ref(), &previous);
         }
     }
 
@@ -392,14 +414,15 @@ impl BackendPaneTerminal {
         {
             return;
         }
-        if set_session_status_hidden(session, true).is_ok() {
+        if set_session_status_hidden(self.remote.as_ref(), session, true).is_ok() {
             self.status_hidden_sessions.push(session.to_owned());
         }
     }
 
     fn restore_tmux_status_bars(&mut self) {
+        let remote = self.remote.clone();
         for session in self.status_hidden_sessions.drain(..) {
-            let _ = set_session_status_hidden(&session, false);
+            let _ = set_session_status_hidden(remote.as_ref(), &session, false);
         }
     }
 
@@ -454,6 +477,7 @@ impl BackendPaneTerminal {
                 config.side_effect_pane_id = target.side_effect_pane_id();
                 Ok(Box::new(RmuxNativeTerminal::new(
                     target.target.clone(),
+                    self.remote.as_ref(),
                     self.native_window_spawn_geometry.unwrap_or(self.geometry),
                     config,
                     Arc::clone(&self.repaint_wakeup),
@@ -470,6 +494,7 @@ impl BackendPaneTerminal {
                 let config = backend_attach_session_config(
                     terminal_config,
                     backend,
+                    self.remote.as_ref(),
                     target.session_id(),
                     bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
                 )?;
@@ -1162,6 +1187,40 @@ pub(super) fn backend_attach_launch(
     }
 }
 
+/// Chooses the remote client's terminal on the host that can answer the question, rather than
+/// guessing here or paying a round trip to ask.
+///
+/// Bootty compiles the xterm-bootty entry into its own state directory and points children at it
+/// through TERMINFO — on whichever machine bootty runs. A host that also has bootty can resolve the
+/// entry once TERMINFO says where it is; a host without bootty never can, and a client handed a
+/// terminal it cannot resolve refuses to start ("missing or unsuitable terminal"). So the remote
+/// looks, and falls back to the universally installed xterm-256color when the entry is absent.
+///
+/// `sh` runs this because the remote login shell may be anything — fish rejects the syntax outright
+/// — and `exec "$@"` leaves the client itself holding the PTY, with no shell in between.
+const REMOTE_TERM_SCRIPT: &str = r#"terminfo="${XDG_STATE_HOME:-$HOME/.local/state}/bootty/terminfo"
+if TERMINFO="$terminfo" infocmp -x xterm-bootty >/dev/null 2>&1; then
+  TERM=xterm-bootty
+  export TERMINFO="$terminfo" TERM
+else
+  TERM=xterm-256color
+  export TERM
+fi
+exec "$@"
+"#;
+
+fn remote_term_launch(program: String, args: Vec<String>) -> (String, Vec<String>) {
+    let mut script_args = vec![
+        "-c".to_owned(),
+        REMOTE_TERM_SCRIPT.to_owned(),
+        // $0 for the script, which names the process in the remote's own logs.
+        "bootty-attach".to_owned(),
+        program,
+    ];
+    script_args.extend(args);
+    ("sh".to_owned(), script_args)
+}
+
 fn backend_attach_env_remove(backend: MultiplexerBackendConfig) -> Vec<String> {
     match backend {
         MultiplexerBackendConfig::Tmux => vec!["TMUX".to_owned()],
@@ -1176,12 +1235,14 @@ fn backend_attach_env_remove(backend: MultiplexerBackendConfig) -> Vec<String> {
 fn backend_attach_session_config(
     config: TerminalSessionConfig,
     backend: MultiplexerBackendConfig,
+    remote: Option<&SshRemote>,
     attach_session: &str,
     bootty_terminfo_available: bool,
 ) -> Result<TerminalSessionConfig> {
     backend_attach_session_config_with_path(
         config,
         backend,
+        remote,
         attach_session,
         bootty_terminfo_available,
         env::var_os("PATH").as_deref(),
@@ -1191,11 +1252,20 @@ fn backend_attach_session_config(
 fn backend_attach_session_config_with_path(
     mut config: TerminalSessionConfig,
     backend: MultiplexerBackendConfig,
+    remote: Option<&SshRemote>,
     attach_session: &str,
     bootty_terminfo_available: bool,
     path: Option<&OsStr>,
 ) -> Result<TerminalSessionConfig> {
     let (program, args) = backend_attach_launch(backend, attach_session);
+    // A remote pane runs the same attach client, in the SSH session that carries its PTY.
+    let (program, args) = match remote {
+        Some(remote) => {
+            let (program, args) = remote_term_launch(program, args);
+            remote.tty_command(&program, &args)
+        }
+        None => (program, args),
+    };
     config.launch.shell = Some(resolve_launch_program_with_path(&program, path)?);
     config.launch.args = args;
     config.launch.env_remove = backend_attach_env_remove(backend);
@@ -1203,7 +1273,14 @@ fn backend_attach_session_config_with_path(
     // only resolves through Bootty's vendored terminfo; anything else falls
     // back to the universally installed xterm-256color, with required
     // features pinned via the -T attach flag either way.
-    if config.launch.term != bootty_runtime::terminfo::XTERM_BOOTTY || !bootty_terminfo_available {
+    //
+    // That vendored terminfo is on this machine. SSH forwards the name of the
+    // terminal and nothing else, so a remote client looks xterm-bootty up in the
+    // other host's terminfo and refuses to start: "missing or unsuitable
+    // terminal". A remote attach therefore always takes the fallback.
+    let terminfo_reaches_the_client = bootty_terminfo_available && remote.is_none();
+    if config.launch.term != bootty_runtime::terminfo::XTERM_BOOTTY || !terminfo_reaches_the_client
+    {
         config.launch.term = "xterm-256color".to_owned();
     }
     Ok(config)
@@ -1249,10 +1326,13 @@ fn passthrough_override_target(
 /// nothing extra once the process exists, and it saves a second fork when the pane has no local
 /// value. A pane-local value prints its own line first, so two lines means local and one means the
 /// pane was inheriting the global.
-fn take_pane_allow_passthrough(pane_id: &str) -> Result<TmuxOptionValue> {
-    let program = resolve_launch_program("tmux")?;
-    let output = Command::new(program)
-        .args([
+fn take_pane_allow_passthrough(
+    remote: Option<&SshRemote>,
+    pane_id: &str,
+) -> Result<TmuxOptionValue> {
+    let stdout = run_tmux(
+        remote,
+        &[
             "show-options",
             "-p",
             "-t",
@@ -1269,18 +1349,34 @@ fn take_pane_allow_passthrough(pane_id: &str) -> Result<TmuxOptionValue> {
             pane_id,
             "allow-passthrough",
             "all",
-        ])
+        ],
+        "allow-passthrough read-and-set",
+    )?;
+    parse_allow_passthrough(&stdout)
+        .ok_or_else(|| anyhow::anyhow!("tmux reported no allow-passthrough value"))
+}
+
+/// Run one tmux command against the server the pane's runtime is attached to: this machine's, or
+/// the remote binding's over SSH. Pane-local options only mean anything on the server that owns the
+/// pane, so every one of these has to follow the attach client to its host.
+fn run_tmux(remote: Option<&SshRemote>, args: &[&str], what: &str) -> Result<String> {
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let (program, args) = match remote {
+        Some(remote) => remote.command("tmux", &args),
+        None => ("tmux".to_owned(), args),
+    };
+    let output = Command::new(resolve_launch_program(&program)?)
+        .args(&args)
         .env_remove("TMUX")
         .env_remove("ZELLIJ")
         .output()?;
     if !output.status.success() {
         anyhow::bail!(
-            "tmux allow-passthrough read-and-set failed: {}",
+            "tmux {what} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    parse_allow_passthrough(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| anyhow::anyhow!("tmux reported no allow-passthrough value"))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Pick the effective `allow-passthrough` out of the paired `show-options` output.
@@ -1299,50 +1395,43 @@ fn parse_allow_passthrough(stdout: &str) -> Option<TmuxOptionValue> {
     })
 }
 
-fn set_pane_allow_passthrough(pane_id: &str, value: &str) -> Result<()> {
-    let program = resolve_launch_program("tmux")?;
-    let output = Command::new(program)
-        .args([
+fn set_pane_allow_passthrough(
+    remote: Option<&SshRemote>,
+    pane_id: &str,
+    value: &str,
+) -> Result<()> {
+    run_tmux(
+        remote,
+        &[
             "set-option",
             "-p",
             "-t",
             pane_id,
             "allow-passthrough",
             value,
-        ])
-        .env_remove("TMUX")
-        .env_remove("ZELLIJ")
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "tmux set-option allow-passthrough failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+        ],
+        "set-option allow-passthrough",
+    )
+    .map(|_| ())
 }
 
-fn restore_pane_allow_passthrough(previous: &TmuxPanePassthroughOverride) -> Result<()> {
+fn restore_pane_allow_passthrough(
+    remote: Option<&SshRemote>,
+    previous: &TmuxPanePassthroughOverride,
+) -> Result<()> {
     if previous.previous.local {
-        return set_pane_allow_passthrough(&previous.pane_id, &previous.previous.value);
+        return set_pane_allow_passthrough(remote, &previous.pane_id, &previous.previous.value);
     }
-    unset_pane_allow_passthrough(&previous.pane_id)
+    unset_pane_allow_passthrough(remote, &previous.pane_id)
 }
 
-fn unset_pane_allow_passthrough(pane_id: &str) -> Result<()> {
-    let program = resolve_launch_program("tmux")?;
-    let output = Command::new(program)
-        .args(["set-option", "-u", "-p", "-t", pane_id, "allow-passthrough"])
-        .env_remove("TMUX")
-        .env_remove("ZELLIJ")
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "tmux unset-option allow-passthrough failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+fn unset_pane_allow_passthrough(remote: Option<&SshRemote>, pane_id: &str) -> Result<()> {
+    run_tmux(
+        remote,
+        &["set-option", "-u", "-p", "-t", pane_id, "allow-passthrough"],
+        "unset-option allow-passthrough",
+    )
+    .map(|_| ())
 }
 
 /// The session whose tmux status bar should be hidden: only with the feature on,
@@ -1364,23 +1453,17 @@ fn status_bar_hidden_target(
 /// bootty attached. Hiding sets it off for that session alone; restoring unsets
 /// the session override so it falls back to the global default. Never sets a
 /// global option, so it cannot affect any other session.
-fn set_session_status_hidden(session_id: &str, hidden: bool) -> Result<()> {
-    let program = resolve_launch_program("tmux")?;
-    let mut command = Command::new(program);
-    if hidden {
-        command.args(["set-option", "-t", session_id, "status", "off"]);
+fn set_session_status_hidden(
+    remote: Option<&SshRemote>,
+    session_id: &str,
+    hidden: bool,
+) -> Result<()> {
+    let args: &[&str] = if hidden {
+        &["set-option", "-t", session_id, "status", "off"]
     } else {
-        command.args(["set-option", "-u", "-t", session_id, "status"]);
-    }
-    command.env_remove("TMUX").env_remove("ZELLIJ");
-    let output = command.output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "tmux set-option status failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+        &["set-option", "-u", "-t", session_id, "status"]
+    };
+    run_tmux(remote, args, "set-option status").map(|_| ())
 }
 
 #[cfg(test)]
@@ -2394,6 +2477,7 @@ mod tests {
         let with_terminfo = backend_attach_session_config_with_path(
             config.clone(),
             MultiplexerBackendConfig::Tmux,
+            None,
             "agents",
             true,
             Some(path.path().as_os_str()),
@@ -2404,12 +2488,110 @@ mod tests {
         let without_terminfo = backend_attach_session_config_with_path(
             config,
             MultiplexerBackendConfig::Tmux,
+            None,
             "agents",
             false,
             Some(path.path().as_os_str()),
         )
         .expect("attach config");
         assert_eq!(without_terminfo.launch.term, "xterm-256color");
+    }
+
+    /// A remote pane is the same attach client, run on the other host. Launching tmux locally here
+    /// would attach to whatever session this machine happens to have under that name — or fail on a
+    /// machine without tmux at all, which is the whole reason the binding is remote.
+    #[test]
+    fn a_remote_binding_attaches_over_ssh_instead_of_running_tmux_here() {
+        let config = TerminalSessionConfig {
+            launch: bootty_runtime::SessionLaunchConfig {
+                term: bootty_runtime::terminfo::XTERM_BOOTTY.to_owned(),
+                ..Default::default()
+            },
+            colors: TerminalColorConfig::default(),
+            cursor: TerminalCursorConfig::default(),
+            features: TerminalFeatureConfig::default(),
+            max_scrollback: 0,
+            macos_option_as_alt: Default::default(),
+            side_effect_tx: None,
+            side_effect_pane_id: None,
+            benchmark_trace: None,
+        };
+        let remote = SshRemote::new(bootty_config::config::SshRemoteConfig {
+            host: "devbox".to_owned(),
+            user: None,
+            port: None,
+            program: "ssh".to_owned(),
+            args: Vec::new(),
+        });
+
+        let path = fake_backend_path("ssh");
+        let attach = backend_attach_session_config_with_path(
+            config,
+            MultiplexerBackendConfig::Tmux,
+            Some(&remote),
+            "agents",
+            true,
+            Some(path.path().as_os_str()),
+        )
+        .expect("attach config");
+
+        assert_eq!(
+            Path::new(attach.launch.shell.as_deref().expect("attach program")).file_name(),
+            Some(OsStr::new("ssh"))
+        );
+        assert!(attach.launch.args.contains(&"-t".to_owned()));
+        // The client runs under sh, which picks the terminal on the host that can resolve it, and
+        // execs the same tmux invocation a local attach would run.
+        assert_eq!(
+            attach.launch.args.last().map(String::as_str),
+            Some(
+                format!(
+                    "'sh' '-c' {} 'bootty-attach' 'tmux' '-T' '{TMUX_CLIENT_FEATURES}' 'attach-session' '-t' 'agents'",
+                    crate::tmux_protocol::shell_quote(REMOTE_TERM_SCRIPT)
+                )
+                .as_str()
+            )
+        );
+    }
+
+    /// The remote's terminal choice, run by the same `sh` that will run it over there: bootty's
+    /// entry when that host has it compiled, and the universally installed fallback when it does
+    /// not. A client handed a terminal its host cannot resolve refuses to start, which is exactly
+    /// what a remote attach hit before this existed.
+    #[cfg(unix)]
+    #[test]
+    fn the_remote_picks_bootty_terminfo_when_its_host_has_it_and_falls_back_when_it_does_not() {
+        fn term_chosen_with_state_dir(state_home: &Path) -> String {
+            let output = Command::new("sh")
+                .args([
+                    "-c",
+                    REMOTE_TERM_SCRIPT,
+                    "bootty-attach",
+                    "sh",
+                    "-c",
+                    r#"printf %s "$TERM""#,
+                ])
+                .env("XDG_STATE_HOME", state_home)
+                .output()
+                .expect("run the remote terminal script");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+
+        let without_bootty = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            term_chosen_with_state_dir(without_bootty.path()),
+            "xterm-256color"
+        );
+
+        let with_bootty = tempfile::tempdir().expect("tempdir");
+        bootty_runtime::terminfo::ensure_xterm_bootty_terminfo_in(
+            &with_bootty.path().join("bootty"),
+        )
+        .expect("compile the vendored terminfo");
+        assert_eq!(
+            term_chosen_with_state_dir(with_bootty.path()),
+            bootty_runtime::terminfo::XTERM_BOOTTY
+        );
     }
 
     #[test]
@@ -2433,6 +2615,7 @@ mod tests {
         let attach = backend_attach_session_config_with_path(
             config,
             MultiplexerBackendConfig::Tmux,
+            None,
             "agents",
             true,
             Some(path.path().as_os_str()),
