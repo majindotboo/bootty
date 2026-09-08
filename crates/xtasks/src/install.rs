@@ -60,7 +60,7 @@ fn install_macos(layout: &package::Layout) -> Result<()> {
     let home = home_dir()?;
     let cli_dir = select_cli_dir(&home);
     fs::create_dir_all(&cli_dir)?;
-    let cli = cli_dir.join(layout.cli_name);
+    let cli = cli_dir.join(&layout.cli_name);
     remove_link_target(&cli)?;
     symlink(target.join("Contents/MacOS/bootty"), &cli)
         .with_context(|| format!("failed to create {}", cli.display()))?;
@@ -72,8 +72,13 @@ fn install_macos(layout: &package::Layout) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn install_linux(layout: &package::Layout) -> Result<()> {
     let home = home_dir()?;
-    let prefix =
+    let prefix_root =
         env::var_os("BOOTTY_INSTALL_PREFIX").map_or_else(|| home.join(".local"), PathBuf::from);
+    let prefix = if let Some(namespace) = &layout.development_namespace {
+        prefix_root.join(namespace)
+    } else {
+        prefix_root
+    };
     let root = layout
         .dist_dir
         .join(format!("{}-linux-{}", layout.app_name, env::consts::ARCH));
@@ -81,8 +86,8 @@ fn install_linux(layout: &package::Layout) -> Result<()> {
         bail!("packaged app not found at {}", root.display());
     }
     filesystem::copy_executable(
-        &root.join("bin").join(layout.cli_name),
-        &prefix.join("bin").join(layout.cli_name),
+        &root.join("bin").join(&layout.cli_name),
+        &prefix.join("bin").join(&layout.cli_name),
     )?;
     filesystem::copy_executable(
         &root.join("bin/bootty-daemon"),
@@ -119,7 +124,7 @@ fn install_linux(layout: &package::Layout) -> Result<()> {
     run_optional_cache_update("gtk-update-icon-cache", &prefix.join("share/icons/hicolor"));
     println!(
         "Installed {}",
-        prefix.join("bin").join(layout.cli_name).display()
+        prefix.join("bin").join(&layout.cli_name).display()
     );
     Ok(())
 }

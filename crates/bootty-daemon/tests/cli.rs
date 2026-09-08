@@ -4,6 +4,10 @@ use assert_fs::prelude::*;
 use pretty_assertions::assert_eq;
 use rusqlite::{Connection, params};
 
+fn development_namespace() -> &'static str {
+    bootty_identity::ApplicationIdentity::Development.namespace()
+}
+
 fn create_fixture_dir(
     path: impl AsRef<std::path::Path>,
 ) -> std::result::Result<(), assert_fs::fixture::FixtureError> {
@@ -270,7 +274,7 @@ fn production_and_development_catalogs_use_separate_default_state_paths() {
     }
 
     let production = state.join("bootty/daemon.sqlite");
-    let development = state.join("bootty-dev/daemon.sqlite");
+    let development = state.join(development_namespace()).join("daemon.sqlite");
     assert!(production.is_file());
     assert!(development.is_file());
     assert_ne!(production, development);
@@ -300,10 +304,15 @@ fn inherited_local_identity_does_not_change_a_remote_command() {
     let config = directory.path().join("config");
     let state = directory.path().join("state");
     let daemon = env!("CARGO_BIN_EXE_bootty-daemon");
+    let inherited_namespace = "bootty-dev-0123456789abcdef";
 
     let created = Command::new(daemon)
         .env_remove("BOOTTY_DAEMON_STATE")
         .env(bootty_identity::APPLICATION_IDENTITY_ENV, "bootty-dev")
+        .env(
+            bootty_identity::DEVELOPMENT_NAMESPACE_ENV,
+            inherited_namespace,
+        )
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
         .args([
@@ -319,7 +328,42 @@ fn inherited_local_identity_does_not_change_a_remote_command() {
 
     assert_success(&created);
     assert!(state.join("bootty/daemon.sqlite").is_file());
-    assert!(!state.join("bootty-dev/daemon.sqlite").exists());
+    assert!(
+        !state
+            .join(inherited_namespace)
+            .join("daemon.sqlite")
+            .exists()
+    );
+}
+
+#[test]
+fn explicit_development_identity_uses_the_inherited_worktree_namespace() {
+    let directory = assert_fs::TempDir::new().expect("tempdir");
+    let config = directory.path().join("config");
+    let state = directory.path().join("state");
+    let namespace = "bootty-dev-0123456789abcdef";
+
+    let created = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+        .env_remove("BOOTTY_DAEMON_STATE")
+        .env(bootty_identity::DEVELOPMENT_NAMESPACE_ENV, namespace)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_STATE_HOME", &state)
+        .args([
+            "--application-identity",
+            "bootty-dev",
+            "remote-space",
+            "create",
+            "--name",
+            "This worktree",
+            "--backend",
+            "tmux",
+        ])
+        .output()
+        .expect("create worktree-local development Space");
+
+    assert_success(&created);
+    assert!(state.join(namespace).join("daemon.sqlite").is_file());
+    assert!(!state.join("bootty").join("daemon.sqlite").exists());
 }
 
 #[test]
@@ -348,7 +392,12 @@ fn explicit_daemon_state_override_is_exact_and_ignores_identity_namespace() {
         .expect("create overridden remote Space");
     assert_success(&created);
     assert!(override_path.is_file());
-    assert!(!state.join("bootty-dev/daemon.sqlite").exists());
+    assert!(
+        !state
+            .join(development_namespace())
+            .join("daemon.sqlite")
+            .exists()
+    );
 
     let listed = Command::new(daemon)
         .env("BOOTTY_DAEMON_STATE", &override_path)
@@ -387,14 +436,14 @@ fn legacy_config_and_session_order_are_isolated_by_application_identity() {
     let daemon = env!("CARGO_BIN_EXE_bootty-daemon");
 
     create_fixture_dir(config.join("bootty")).expect("production config");
-    create_fixture_dir(config.join("bootty-dev")).expect("development config");
+    create_fixture_dir(config.join(development_namespace())).expect("development config");
     write_fixture(
         config.join("bootty/config.toml"),
         "[multiplexer]\nbackend = \"tmux\"\n",
     )
     .expect("production config file");
     write_fixture(
-        config.join("bootty-dev/config.toml"),
+        config.join(development_namespace()).join("config.toml"),
         "[multiplexer]\nbackend = \"rmux\"\n",
     )
     .expect("development config file");
@@ -406,7 +455,9 @@ fn legacy_config_and_session_order_are_isolated_by_application_identity() {
         "production-session",
     );
     seed_legacy_catalog(
-        &config.join("bootty-dev/session-order.sqlite3"),
+        &config
+            .join(development_namespace())
+            .join("session-order.sqlite3"),
         "development-id",
         "Development legacy",
         "inherit",
@@ -442,7 +493,10 @@ fn legacy_config_and_session_order_are_isolated_by_application_identity() {
         std::fs::read(&production_state).expect("production state"),
         production_bytes
     );
-    assert_eq!(migration_marker(&state.join("bootty-dev/daemon.sqlite")), 1);
+    assert_eq!(
+        migration_marker(&state.join(development_namespace()).join("daemon.sqlite")),
+        1
+    );
 }
 
 #[test]
@@ -679,7 +733,10 @@ fn development_does_not_fall_back_to_a_production_legacy_catalog() {
         serde_json::from_slice(&development.stdout).expect("development catalog JSON");
     assert_eq!(spaces, serde_json::json!([]));
     assert!(!state.join("bootty/daemon.sqlite").exists());
-    assert_eq!(migration_marker(&state.join("bootty-dev/daemon.sqlite")), 1);
+    assert_eq!(
+        migration_marker(&state.join(development_namespace()).join("daemon.sqlite")),
+        1
+    );
 }
 
 #[test]

@@ -1,9 +1,12 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bootty_identity::ApplicationIdentity;
 use bootty_mux::{
     command::{MuxCommand, MuxSplitDirection},
     snapshot::{SESSION_IDENTITY_OPTION, SESSION_SPACE_OPTION},
 };
-use bootty_rmux::{RemoteRmuxRequest, numeric_session_id, session_tag_option, tag_option_id};
+use bootty_rmux::{
+    RemoteRmuxRequest, numeric_session_id, session_tag_option, socket_name, tag_option_id,
+};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -88,4 +91,16 @@ fn unowned_or_malformed_identifiers_are_rejected() {
         assert_eq!(tag_option_id(option), None);
     }
     assert_eq!(numeric_session_id("nonsense"), None);
+}
+
+#[rstest]
+fn local_rmux_socket_names_isolate_development_worktrees() {
+    assert_eq!(
+        socket_name(ApplicationIdentity::Production, 8),
+        "bootty-wire8"
+    );
+    assert_eq!(
+        socket_name(ApplicationIdentity::Development, 8),
+        format!("{}-wire8", ApplicationIdentity::Development.namespace())
+    );
 }

@@ -53,9 +53,14 @@ Use this language when you write code and when you talk to us.
 their workspace SQLite, their control endpoint, their rmux endpoint, and their
 tmux server. A Production app launch exits when that identity already has a
 live owner. A Production command invocation instead targets that live owner and
-can mutate the user's real Spaces. Use `mise run launch` for an optimized
-development launch, or `mise run install:dev` and `mise run package:dev` for
-isolated development packages; all three enable the `bootty-dev` feature.
+can mutate the user's real Spaces. Use `mise run launch` for normal development
+and UI acceptance; it runs this worktree's isolated development identity without
+installing anything. Use `mise run package:dev` only when you need a macOS app
+bundle; it writes this worktree's uniquely named `BoottyDev-<workspace-hash>.app`
+under `dist/<development-namespace>/`. There is intentionally no `install:dev`
+task because installing per-worktree builds would litter `/Applications`.
+`launch` and `package:dev` enable the `bootty-dev` feature and keep Production
+state apart.
 
 **Never reach for the standalone `rmux` executable.** Bootty owns rmux through
 the embedded Rust API - `rmux-sdk`, `rmux-client`, `rmux-proto`, `rmux-server`,

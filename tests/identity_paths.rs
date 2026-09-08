@@ -12,22 +12,31 @@ use proptest_derive::Arbitrary;
 use rstest::rstest;
 
 #[rstest]
-#[case(ApplicationIdentity::Production, "Bootty", "bootty", true)]
-#[case(ApplicationIdentity::Development, "BoottyDev", "bootty-dev", false)]
-fn identity_metadata_drives_user_visible_names_and_updates(
-    #[case] identity: ApplicationIdentity,
-    #[case] display_name: &str,
-    #[case] cli_name: &str,
-    #[case] automatic_updates: bool,
-) {
+#[case(ApplicationIdentity::Production)]
+#[case(ApplicationIdentity::Development)]
+fn identity_metadata_drives_user_visible_names_and_updates(#[case] identity: ApplicationIdentity) {
+    let names = identity.names_for_workspace(Path::new("/worktrees/example"));
+    assert_eq!(names.cli_name(), names.namespace());
     assert_eq!(
-        (
-            identity.display_name(),
-            identity.cli_name(),
-            identity.automatic_updates_enabled(),
-        ),
-        (display_name, cli_name, automatic_updates),
+        identity.automatic_updates_enabled(),
+        identity == ApplicationIdentity::Production,
     );
+    match identity {
+        ApplicationIdentity::Production => {
+            assert_eq!(names.display_name(), "Bootty");
+            assert_eq!(names.namespace(), "bootty");
+            assert_eq!(names.bundle_identifier(), "dev.bootty.desktop");
+        }
+        ApplicationIdentity::Development => {
+            assert!(names.display_name().starts_with("BoottyDev-"));
+            assert!(names.namespace().starts_with("bootty-dev-"));
+            assert!(
+                names
+                    .bundle_identifier()
+                    .starts_with("dev.bootty.desktop.dev.")
+            );
+        }
+    }
 }
 
 #[test]
@@ -44,7 +53,7 @@ fn identities_use_separate_default_config_trees() {
     );
     assert_eq!(
         development.parent().and_then(Path::file_name),
-        Some("bootty-dev".as_ref()),
+        Some(ApplicationIdentity::Development.namespace().as_ref()),
     );
     assert_ne!(production, development);
 }
@@ -61,7 +70,10 @@ fn identities_use_separate_local_rmux_endpoint_names() {
             socket_name(ApplicationIdentity::Production, 8),
             socket_name(ApplicationIdentity::Development, 8),
         ),
-        ("bootty-wire8".to_owned(), "bootty-dev-wire8".to_owned()),
+        (
+            "bootty-wire8".to_owned(),
+            format!("{}-wire8", ApplicationIdentity::Development.namespace()),
+        ),
     );
     assert_eq!(production.parent(), development.parent());
     assert_ne!(production, development);
@@ -101,10 +113,11 @@ proptest! {
         let home = absolute(&inputs.home);
         let explicit = absolute(&inputs.explicit);
 
-        for (identity, namespace) in [
-            (ApplicationIdentity::Production, "bootty"),
-            (ApplicationIdentity::Development, "bootty-dev"),
+        for identity in [
+            ApplicationIdentity::Production,
+            ApplicationIdentity::Development,
         ] {
+            let namespace = identity.namespace();
             let daemon = |base: &Path| Some(base.join(namespace).join("daemon.sqlite"));
             prop_assert_eq!(
                 (

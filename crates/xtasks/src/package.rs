@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
+use bootty_identity::ApplicationIdentity;
 use clap::Args as ClapArgs;
 #[cfg(unix)]
 use toml_edit::DocumentMut;
@@ -40,11 +41,12 @@ pub(crate) enum Linkage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Layout {
-    pub app_name: &'static str,
+    pub development_namespace: Option<String>,
+    pub app_name: String,
     #[cfg(unix)]
-    pub cli_name: &'static str,
+    pub cli_name: String,
     #[cfg(unix)]
-    pub bundle_identifier: &'static str,
+    pub bundle_identifier: String,
     pub profile: &'static str,
     #[cfg(unix)]
     pub daemon_profile: &'static str,
@@ -58,10 +60,26 @@ pub(crate) struct Layout {
 
 impl Layout {
     pub(crate) fn from_args(args: Args) -> Self {
-        let target_root =
-            env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
+        let names = if args.dev {
+            crate::development_names()
+        } else {
+            ApplicationIdentity::Production.names_for_workspace(&crate::workspace_root())
+        };
+        let development_namespace = args.dev.then(|| names.namespace().to_owned());
+        let dist_root = absolute_workspace_path(
+            env::var_os("BOOTTY_DIST_DIR").map_or_else(|| PathBuf::from("dist"), PathBuf::from),
+        );
+        let dist_dir = if let Some(namespace) = &development_namespace {
+            dist_root.join(namespace)
+        } else {
+            dist_root
+        };
+        let target_root = absolute_workspace_path(
+            env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from),
+        );
         let daemon_output_dir = env::var_os("BOOTTY_DAEMON_OUTPUT_DIR")
             .map_or_else(|| target_root.join("bootty-daemons"), PathBuf::from);
+        let daemon_output_dir = absolute_workspace_path(daemon_output_dir);
         let linkage = if args.r#static {
             Linkage::Static
         } else {
@@ -75,15 +93,12 @@ impl Layout {
             "release"
         };
         Self {
-            app_name: if args.dev { "BoottyDev" } else { "Bootty" },
+            development_namespace: development_namespace.clone(),
+            app_name: names.display_name().to_owned(),
             #[cfg(unix)]
-            cli_name: if args.dev { "bootty-dev" } else { "bootty" },
+            cli_name: names.cli_name().to_owned(),
             #[cfg(unix)]
-            bundle_identifier: if args.dev {
-                "dev.bootty.desktop.dev"
-            } else {
-                "dev.bootty.desktop"
-            },
+            bundle_identifier: names.bundle_identifier().to_owned(),
             profile,
             #[cfg(unix)]
             daemon_profile: if args.fast {
@@ -92,8 +107,7 @@ impl Layout {
                 "daemon-release"
             },
             linkage,
-            dist_dir: env::var_os("BOOTTY_DIST_DIR")
-                .map_or_else(|| PathBuf::from("dist"), PathBuf::from),
+            dist_dir,
             target_root,
             daemon_output_dir,
             #[cfg(unix)]
@@ -115,6 +129,14 @@ impl Layout {
             "release" => vec!["--release"],
             profile => vec!["--profile", profile],
         }
+    }
+}
+
+fn absolute_workspace_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        crate::workspace_root().join(path)
     }
 }
 

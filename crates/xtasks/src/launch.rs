@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use bootty_identity::DEVELOPMENT_NAMESPACE_ENV;
 use clap::Args as ClapArgs;
 
 #[derive(Clone, Debug, ClapArgs)]
@@ -46,8 +47,10 @@ pub fn run(args: Args) -> Result<()> {
     let library_path = env::join_paths(library_dirs).context("failed to construct library path")?;
 
     let mut command = Command::new(&binary);
+    let development_names = crate::development_names();
     command
         .args(args.arguments)
+        .env(DEVELOPMENT_NAMESPACE_ENV, development_names.namespace())
         .env(library_path_variable(), library_path);
     execute(command, &binary)
 }

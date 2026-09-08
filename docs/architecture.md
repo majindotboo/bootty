@@ -40,10 +40,13 @@ This file describes the current production structure.
 
 ## Process composition
 
-`ApplicationIdentity` has two values: Production and Development.
+`ApplicationIdentity` has two values: Production and Development. Production uses
+one fixed namespace. Development derives a stable namespace from the canonical Git
+worktree so independently built and installed `BoottyDev` applications can coexist.
 
-The identity selects the config tree, state tree, control descriptor, local
-daemon catalog, rmux endpoint, and tmux server.
+The identity and local Development worktree select the config tree, state tree,
+control descriptor, local daemon catalog, rmux endpoint, tmux server, application
+bundle identifier, and development CLI name.
 
 The `bootty` executable launches the GUI only when the selected identity has no
 live owner. An argumented invocation uses the owner-local control endpoint.

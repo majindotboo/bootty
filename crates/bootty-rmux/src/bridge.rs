@@ -218,8 +218,14 @@ pub fn prepare_local_rmux_daemon(identity: bootty_identity::ApplicationIdentity)
             unsafe {
                 env::set_var(
                     bootty_identity::APPLICATION_IDENTITY_ENV,
-                    identity.namespace(),
+                    match identity {
+                        bootty_identity::ApplicationIdentity::Production => "bootty",
+                        bootty_identity::ApplicationIdentity::Development => "bootty-dev",
+                    },
                 );
+                if let Some((name, value)) = identity.development_namespace_environment() {
+                    env::set_var(name, value);
+                }
                 env::set_var(
                     rmux_sdk::bootstrap::discovery::SDK_DAEMON_BINARY_ENV,
                     binary,

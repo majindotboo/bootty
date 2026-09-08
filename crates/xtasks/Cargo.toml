@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+bootty-identity = { path = "../bootty-identity" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

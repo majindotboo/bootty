@@ -906,6 +906,8 @@ name = "bootty-identity"
 version = "0.0.0"
 dependencies = [
  "bootty-workspace-hack",
+ "pretty_assertions",
+ "rstest",
  "thiserror 2.0.20",
 ]
 
@@ -8431,6 +8433,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "assert_fs",
+ "bootty-identity",
  "bootty-workspace-hack",
  "clap",
  "mslnk",

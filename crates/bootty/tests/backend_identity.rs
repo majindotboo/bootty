@@ -83,7 +83,10 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
     assert_eq!(production.stdout, "kill-session\n-t\nbuild\n");
     assert_eq!(
         development.stdout,
-        "-L\nbootty-dev\nkill-session\n-t\nbuild\n"
+        format!(
+            "-L\n{}\nkill-session\n-t\nbuild\n",
+            ApplicationIdentity::Development.namespace()
+        )
     );
 
     let remote = SshRemote::new(SshTarget {
@@ -96,6 +99,10 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
     let remote = TmuxControlRunner::for_remote(remote)
         .run("tmux", &command)
         .expect("remote tmux command");
-    assert!(!remote.stdout.contains("bootty-dev"));
+    assert!(
+        !remote
+            .stdout
+            .contains(ApplicationIdentity::Development.namespace())
+    );
     assert!(remote.stdout.contains("'tmux' 'kill-session' '-t' 'build'"));
 }

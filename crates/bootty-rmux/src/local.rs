@@ -16,6 +16,8 @@ pub fn endpoint_path_for(identity: ApplicationIdentity) -> anyhow::Result<PathBu
 pub fn socket_name(identity: ApplicationIdentity, wire_version: u32) -> String {
     match identity {
         ApplicationIdentity::Production => format!("bootty-wire{wire_version}"),
-        ApplicationIdentity::Development => format!("bootty-dev-wire{wire_version}"),
+        ApplicationIdentity::Development => {
+            format!("{}-wire{wire_version}", identity.namespace())
+        }
     }
 }

@@ -14,7 +14,7 @@ const BINARY: &str = "bootty";
 const DAEMON: &str = "bootty-daemon";
 
 pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
-    let zig_path = ensure_project_zig(layout.app_name)?;
+    let zig_path = ensure_project_zig(&layout.app_name)?;
     let host_daemon = build_daemon(layout)?;
     fs::create_dir_all(&layout.dist_dir)?;
     build_application(args, layout, &zig_path)?;
@@ -384,12 +384,12 @@ fn package_linux(layout: &Layout, host_daemon: &Path) -> Result<()> {
     fs::create_dir_all(&applications)?;
     filesystem::copy_executable(
         &layout.target_root.join(layout.profile).join(BINARY),
-        &bin.join(layout.cli_name),
+        &bin.join(&layout.cli_name),
     )?;
     filesystem::copy_executable(host_daemon, &bin.join(DAEMON))?;
     copy_bundled_daemons(layout, &root.join("share/bootty/daemons"))?;
     if layout.linkage == Linkage::Dynamic {
-        copy_dynamic_libraries(&bin.join(layout.cli_name), &root.join("lib"), layout)?;
+        copy_dynamic_libraries(&bin.join(&layout.cli_name), &root.join("lib"), layout)?;
     }
     filesystem::copy_file(
         Path::new("crates/bootty-app/assets/bootty-mascot.png"),
