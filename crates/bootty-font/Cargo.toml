@@ -6,6 +6,8 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+
+bootty-config = { path = "../bootty-config" }
 bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [dev-dependencies]

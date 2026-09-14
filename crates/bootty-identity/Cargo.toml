@@ -3,14 +3,16 @@ name = "bootty-identity"
 edition.workspace = true
 
 [features]
-bootty-dev = []
+
+bootty-dev = ["bootty-config/bootty-dev"]
 
 [lints]
 workspace = true
 
 [dependencies]
+
+bootty-config = { path = "../bootty-config" }
 bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
-thiserror.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

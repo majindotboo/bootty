@@ -2,12 +2,12 @@ use super::keybind_presets::{
     owned_keybinds, preset_global_keybinds, preset_layout_keybinds, preset_tmux_backend_keybinds,
     resolve_macos_option_alt_keybinds, sidebar_keybinds,
 };
-use crate::color::Color;
-use bootty_font::FontFeature;
-pub use bootty_mux_model::{
+pub use crate::binding::{
     MuxBackendKind as MultiplexerBackendConfig, MuxBindingConfig as MultiplexerConfig,
     SshTarget as SshRemoteConfig,
 };
+use crate::color::Color;
+use crate::font_feature::FontFeature;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, PartialEq)]

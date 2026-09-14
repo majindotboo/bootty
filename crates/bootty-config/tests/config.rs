@@ -4,7 +4,7 @@
 use assert_fs::prelude::*;
 use bootty_config::color::Color;
 use bootty_config::config::*;
-use bootty_font::FontFeature;
+use bootty_config::font_feature::FontFeature;
 use indoc::indoc;
 use pretty_assertions::{assert_eq, assert_ne};
 use rstest::rstest;

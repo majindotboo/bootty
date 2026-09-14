@@ -6,7 +6,7 @@ use super::model::{
     WindowFullscreen,
 };
 use super::theme_catalog::{DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, load_builtin_theme};
-use bootty_font::FontFeature;
+use crate::font_feature::FontFeature;
 use std::{
     collections::BTreeMap,
     env,
@@ -233,8 +233,8 @@ pub fn config_path_from_env(
     xdg_config_home: Option<impl AsRef<Path>>,
     home: Option<impl AsRef<Path>>,
 ) -> PathBuf {
-    bootty_identity::config_path_from_env(
-        bootty_identity::ApplicationIdentity::Production,
+    crate::identity::config_path_from_env(
+        crate::identity::ApplicationIdentity::Production,
         xdg_config_home,
         home,
     )

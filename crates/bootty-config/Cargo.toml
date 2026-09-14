@@ -6,16 +6,17 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-bootty-font = { path = "../bootty-font" }
-bootty-mux-model = { path = "../bootty-mux-model" }
 bootty-write = { path = "../bootty-write" }
 serde.workspace = true
 toml_edit.workspace = true
-bootty-identity = { path = "../bootty-identity" }
 thiserror.workspace = true
+strum.workspace = true
 
 [dev-dependencies]
 assert_fs.workspace = true
 indoc.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
+
+[features]
+bootty-dev = []

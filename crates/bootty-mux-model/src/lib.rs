@@ -1,3 +1,1 @@
-mod binding;
-
-pub use binding::*;
+pub use bootty_config::binding::*;

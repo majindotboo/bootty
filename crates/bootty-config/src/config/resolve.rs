@@ -11,7 +11,7 @@ use super::raw::{
     SessionPatch, SidebarPatch, WindowPatch,
 };
 use super::theme_catalog::{load_builtin_theme, parse_theme_source};
-use bootty_font::FontFeature;
+use crate::font_feature::FontFeature;
 use std::{
     fs,
     path::{Path, PathBuf},

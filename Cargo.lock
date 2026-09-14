@@ -797,14 +797,12 @@ name = "bootty-config"
 version = "0.0.0"
 dependencies = [
  "assert_fs",
- "bootty-font",
- "bootty-identity",
- "bootty-mux-model",
  "bootty-write",
  "indoc",
  "pretty_assertions",
  "rstest",
  "serde",
+ "strum",
  "thiserror 2.0.20",
  "toml_edit 0.25.13+spec-1.1.0",
 ]
@@ -876,6 +874,7 @@ dependencies = [
 name = "bootty-font"
 version = "0.0.0"
 dependencies = [
+ "bootty-config",
  "bootty-workspace-hack",
  "pretty_assertions",
  "proptest",
@@ -905,10 +904,10 @@ dependencies = [
 name = "bootty-identity"
 version = "0.0.0"
 dependencies = [
+ "bootty-config",
  "bootty-workspace-hack",
  "pretty_assertions",
  "rstest",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -948,15 +947,13 @@ dependencies = [
 name = "bootty-mux-model"
 version = "0.5.0"
 dependencies = [
+ "bootty-config",
  "bootty-workspace-hack",
  "pretty_assertions",
  "proptest",
  "proptest-derive",
  "rstest",
- "serde",
  "serde_json",
- "strum",
- "thiserror 2.0.20",
 ]
 
 [[package]]
