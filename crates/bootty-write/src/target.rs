@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs::{self, File},
     io::{self, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
 
@@ -21,6 +21,7 @@ pub enum ResolveTargetError {
 }
 
 impl ResolveTargetError {
+    #[must_use]
     pub fn into_io(self) -> io::Error {
         match self {
             Self::SymlinkCycle => {
@@ -43,6 +44,11 @@ pub struct WriteTarget {
 }
 
 impl WriteTarget {
+    /// Resolve aliases to the file that will be replaced.
+    ///
+    /// # Errors
+    /// Returns a symlink-cycle error or an I/O error when the target or its parent
+    /// cannot be resolved.
     pub fn resolve(requested_path: &Path) -> Result<Self, ResolveTargetError> {
         let mut current = normalize_absolute_path(requested_path)?;
         let mut visited = HashSet::new();
@@ -56,12 +62,9 @@ impl WriteTarget {
                     current = if link.is_absolute() {
                         link
                     } else {
-                        current
-                            .parent()
-                            .unwrap_or_else(|| Path::new("."))
-                            .join(link)
+                        let parent = current.parent().unwrap_or_else(|| Path::new("."));
+                        fs::canonicalize(parent)?.join(link)
                     };
-                    current = normalize_absolute_path(&current)?;
                 }
                 Ok(_) => {
                     return Ok(Self {
@@ -85,10 +88,16 @@ impl WriteTarget {
         }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Acquire the process and filesystem writer locks for this target.
+    ///
+    /// # Errors
+    /// Returns an error if the process lock is poisoned or the filesystem lock
+    /// cannot be created or acquired.
     pub fn lock(self) -> io::Result<LockedWriteTarget> {
         static PROCESS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -169,24 +178,14 @@ fn lock_file_name(path: &Path) -> String {
 }
 
 fn normalize_absolute_path(path: &Path) -> io::Result<PathBuf> {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
+    // Keep `..` components until the OS has resolved symlinks. Lexically folding them first can
+    // change the target: `/alias/../file` means the parent of `alias`'s target when `alias` is a
+    // symlink, not the parent of the directory containing `alias`.
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
     } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
+        Ok(std::env::current_dir()?.join(path))
     }
-    Ok(normalized)
 }
 
 pub struct LockedWriteTarget {
@@ -196,19 +195,28 @@ pub struct LockedWriteTarget {
 }
 
 impl LockedWriteTarget {
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Atomically replace the target while preserving existing permissions.
+    ///
+    /// # Errors
+    /// Returns the failed commit phase when preparation, writing, syncing, or
+    /// replacement fails. A directory-sync failure after replacement is reported
+    /// as a committed outcome with a durability warning.
     pub fn replace(
         &self,
         bytes: &[u8],
         new_file_mode: NewFileMode,
     ) -> Result<CommitOutcome, CommitError> {
-        let parent = self
-            .path
-            .parent()
-            .expect("resolved write target has a parent");
+        let parent = self.path.parent().ok_or_else(|| {
+            CommitError::new(
+                "prepare",
+                io::Error::new(io::ErrorKind::InvalidInput, "write target has no parent"),
+            )
+        })?;
         let existing = match fs::metadata(&self.path) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -263,14 +271,16 @@ pub struct CommitError {
 }
 
 impl CommitError {
-    fn new(phase: &'static str, source: io::Error) -> Self {
+    const fn new(phase: &'static str, source: io::Error) -> Self {
         Self { phase, source }
     }
 
+    #[must_use]
     pub const fn phase(&self) -> &'static str {
         self.phase
     }
 
+    #[must_use]
     pub fn into_io(self) -> io::Error {
         self.source
     }

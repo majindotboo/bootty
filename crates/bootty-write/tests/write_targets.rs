@@ -7,8 +7,6 @@ use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 use rstest::{fixture, rstest};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
-
 #[derive(Arbitrary, Debug)]
 struct PathCase {
     #[proptest(regex = "[a-z][a-z0-9-]{0,31}\\.bin")]
@@ -16,70 +14,157 @@ struct PathCase {
 }
 
 #[fixture]
-fn directory() -> TempDir {
-    TempDir::new().expect("temporary directory")
+fn directory() -> Result<TempDir, assert_fs::fixture::FixtureError> {
+    TempDir::new()
 }
 
 #[cfg(unix)]
 #[test]
-fn relative_symlink_alias_resolves_to_one_target_and_keeps_the_link() -> TestResult {
+fn relative_symlink_alias_resolves_to_one_target_and_keeps_the_link() {
     use std::os::unix::fs::symlink;
 
-    let directory = TempDir::new()?;
+    let directory = TempDir::new().expect("temporary directory");
     let target = directory.child("target.txt");
     let alias = directory.child("alias.txt");
-    target.write_binary(b"old")?;
-    symlink(Path::new("target.txt"), alias.path())?;
+    target.write_binary(b"old").expect("original target");
+    symlink(Path::new("target.txt"), alias.path()).expect("relative alias");
 
     let resolved = WriteTarget::resolve(alias.path()).expect("resolve alias");
-    assert_eq!(resolved.path(), fs::canonicalize(target.path())?);
+    assert_eq!(
+        resolved.path(),
+        fs::canonicalize(target.path()).expect("canonical target")
+    );
     resolved
-        .lock()?
+        .lock()
+        .expect("lock target")
         .replace(b"new", NewFileMode::Private)
         .expect("replace alias target");
 
-    assert!(fs::symlink_metadata(alias.path())?.file_type().is_symlink());
-    assert_eq!(fs::read(target.path())?, b"new");
-    Ok(())
+    assert!(
+        fs::symlink_metadata(alias.path())
+            .expect("alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(target.path()).expect("replacement contents"),
+        b"new"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn symlink_cycle_is_a_typed_resolution_error() -> TestResult {
+fn symlink_cycle_is_a_typed_resolution_error() {
     use std::os::unix::fs::symlink;
 
-    let directory = TempDir::new()?;
+    let directory = TempDir::new().expect("temporary directory");
+    directory
+        .child("nested")
+        .create_dir_all()
+        .expect("nested directory");
     let first = directory.child("first");
     let second = directory.child("second");
-    symlink(Path::new("second"), first.path())?;
-    symlink(Path::new("first"), second.path())?;
+    symlink(Path::new("nested/../second"), first.path()).expect("first link");
+    symlink(Path::new("nested/../first"), second.path()).expect("second link");
 
     assert!(matches!(
         WriteTarget::resolve(first.path()),
         Err(ResolveTargetError::SymlinkCycle)
     ));
-    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_components_after_symlinks_follow_os_target_resolution() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new().expect("temporary directory");
+    let real = directory.child("real");
+    real.create_dir_all().expect("real directory");
+    real.child("nested")
+        .create_dir_all()
+        .expect("nested directory");
+    let target = real.child("target.txt");
+    target.write_binary(b"old").expect("original target");
+    let alias = directory.child("alias");
+    symlink(Path::new("real/nested"), alias.path()).expect("directory alias");
+
+    let requested = alias.path().join("../target.txt");
+    let resolved = WriteTarget::resolve(&requested).expect("resolve target through symlink");
+    assert_eq!(
+        resolved.path(),
+        fs::canonicalize(target.path()).expect("canonical target")
+    );
+    resolved
+        .lock()
+        .expect("lock target")
+        .replace(b"new", NewFileMode::Private)
+        .expect("replace target through symlink");
+
+    assert_eq!(
+        fs::read(target.path()).expect("replacement contents"),
+        b"new"
+    );
+    assert!(!directory.child("target.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_symlink_keeps_its_link_and_creates_the_resolved_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new().expect("temporary directory");
+    let real = directory.child("real");
+    real.create_dir_all().expect("real directory");
+    let alias = directory.child("alias.txt");
+    symlink(Path::new("real/missing.txt"), alias.path()).expect("dangling alias");
+
+    let resolved = WriteTarget::resolve(alias.path()).expect("resolve dangling alias");
+    assert_eq!(
+        resolved.path(),
+        fs::canonicalize(real.path())
+            .expect("canonical directory")
+            .join("missing.txt")
+    );
+    resolved
+        .lock()
+        .expect("lock target")
+        .replace(b"new", NewFileMode::Private)
+        .expect("create target through dangling alias");
+
+    assert!(
+        fs::symlink_metadata(alias.path())
+            .expect("alias metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(real.child("missing.txt").path()).expect("created contents"),
+        b"new"
+    );
 }
 
 #[test]
-fn writes_remove_legacy_locks_and_leave_no_new_lock_beside_the_target() -> TestResult {
-    let directory = TempDir::new()?;
+fn writes_remove_legacy_locks_and_leave_no_new_lock_beside_the_target() {
+    let directory = TempDir::new().expect("temporary directory");
     let target = directory.child("hooks.json");
-    target.write_binary(b"{}")?;
+    target.write_binary(b"{}").expect("original target");
     let legacy = directory.child(".hooks.json.bootty-write.lock");
-    legacy.touch()?;
+    legacy.touch().expect("legacy lock");
 
     WriteTarget::resolve(target.path())
         .expect("resolve target")
-        .lock()?
+        .lock()
+        .expect("lock target")
         .replace(b"{\"a\":1}", NewFileMode::UmaskWritable)
         .expect("replace target");
 
-    let left_behind = fs::read_dir(directory.path())?
+    let left_behind = fs::read_dir(directory.path())
+        .expect("directory entries")
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<io::Result<Vec<_>>>()?;
+        .collect::<io::Result<Vec<_>>>()
+        .expect("entry names");
     assert_eq!(left_behind, ["hooks.json"]);
-    Ok(())
 }
 
 proptest! {
@@ -99,7 +184,22 @@ proptest! {
 }
 
 #[rstest]
-fn commits_exact_bytes(directory: TempDir) {
+fn a_filesystem_root_is_rejected_before_replacement() {
+    let current = std::env::current_dir().expect("current directory");
+    let root = current.ancestors().last().expect("filesystem root");
+    let target = WriteTarget::resolve(root).expect("resolve root");
+    let locked = target.lock().expect("lock root target");
+    let error = locked
+        .replace(b"must not be written", NewFileMode::Private)
+        .expect_err("a filesystem root cannot be replaced");
+    drop(locked);
+    assert_eq!(error.phase(), "prepare");
+    assert_eq!(error.into_io().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[rstest]
+fn commits_exact_bytes(directory: Result<TempDir, assert_fs::fixture::FixtureError>) {
+    let directory = directory.expect("temporary directory");
     let target = directory.child("state.bin");
     let locked = WriteTarget::resolve(target.path())
         .expect("resolve target")
@@ -117,6 +217,7 @@ fn commits_exact_bytes(directory: TempDir) {
     locked
         .replace(&second, NewFileMode::Private)
         .expect("replacement commit");
+    drop(locked);
     assert_eq!(
         fs::read(target.path()).expect("read replacement commit"),
         second
