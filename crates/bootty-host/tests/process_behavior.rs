@@ -12,6 +12,73 @@ use bootty_host::SystemCommandRunner;
 use bootty_host::{CancellableCommandRunner, CommandCancellation, CommandRunner};
 use pretty_assertions::assert_eq;
 
+#[cfg(unix)]
+#[rstest::rstest]
+fn command_input_is_streamed_without_changing_argv() {
+    let runner = CancellableCommandRunner::new(CommandCancellation::default());
+    let input = b"binary\0input\nwith '$shell' bytes".to_vec();
+    let output = runner.run_with_input("cat", &[], input.clone()).unwrap();
+    assert!(output.success);
+    assert_eq!(output.stdout.as_bytes(), input);
+    let cancellation = CommandCancellation::default();
+    cancellation.cancel();
+    let runner = CancellableCommandRunner::new(cancellation);
+    assert!(
+        runner
+            .run_with_input("nonexistent-cancelled-command", &[], input)
+            .unwrap_err()
+            .to_string()
+            .contains("canceled")
+    );
+
+    let checks = std::sync::atomic::AtomicUsize::new(0);
+    let runner = CancellableCommandRunner::with_deadline_and_cancellation_check(
+        CommandCancellation::default(),
+        std::time::Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("test deadline"),
+        move || checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0,
+    );
+    assert!(
+        runner
+            .run_with_input("cat", &[], vec![b'x'; 1024 * 1024])
+            .unwrap_err()
+            .to_string()
+            .contains("canceled")
+    );
+}
+
+#[cfg(unix)]
+#[rstest::rstest]
+#[case(false, false)]
+#[case(false, true)]
+#[case(true, false)]
+#[case(true, true)]
+fn captured_output_stops_at_its_bound(#[case] cancellable: bool, #[case] stderr: bool) {
+    let args = vec![
+        "-c".to_owned(),
+        format!("cat /dev/zero{}", if stderr { " >&2" } else { "" }),
+    ];
+    let error = if cancellable {
+        CancellableCommandRunner::with_deadline(
+            CommandCancellation::default(),
+            std::time::Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("test deadline"),
+        )
+        .run_bytes("/bin/sh", &args)
+        .unwrap_err()
+    } else {
+        bootty_host::SystemCommandRunner
+            .run_bytes("/bin/sh", &args)
+            .unwrap_err()
+    };
+    assert_eq!(
+        error.to_string(),
+        "command output exceeds the 16 MiB capture limit"
+    );
+}
+
 #[cfg(target_os = "macos")]
 const HELPER_ENV: &str = "BOOTTY_MUX_PROCESS_HELPER";
 
@@ -104,62 +171,78 @@ fn canceled_runner_does_not_start_a_command() {
 }
 
 #[cfg(unix)]
-fn marker_was_not_created(runner: &CancellableCommandRunner) -> bool {
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn stopped_runner_does_not_start_a_marker_command(#[case] expired: bool) {
     use std::os::unix::fs::PermissionsExt;
-
+    let cancellation = CommandCancellation::default();
+    let runner = if expired {
+        CancellableCommandRunner::with_deadline(cancellation, std::time::Instant::now())
+    } else {
+        cancellation.cancel();
+        CancellableCommandRunner::new(cancellation)
+    };
     let directory = UnixTempDir::new().expect("temporary process directory");
     let program = directory.child("marker-command");
     let marker = directory.child("started");
     program
         .write_str("#!/bin/sh\nprintf started > \"$1\"\n")
-        .expect("write marker command");
+        .expect("marker command");
     std::fs::set_permissions(program.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("make marker command executable");
-
+        .expect("executable marker command");
     let error = runner
         .run(
-            program.path().to_str().expect("UTF-8 marker command path"),
+            program.path().to_str().expect("marker command path"),
             &[marker.path().to_string_lossy().into_owned()],
         )
-        .expect_err("pre-cancelled command");
-    assert_eq!(error.to_string(), "command canceled");
-    !marker.exists()
+        .expect_err("stopped command");
+    assert_eq!(
+        (error.to_string(), marker.exists()),
+        ("command canceled".to_owned(), false)
+    );
 }
 
 #[cfg(unix)]
-#[test]
-fn pre_cancelled_runner_does_not_start_a_marker_command() {
-    let cancellation = CommandCancellation::default();
-    cancellation.cancel();
-
-    assert!(marker_was_not_created(&CancellableCommandRunner::new(
-        cancellation
-    )));
-}
-
-#[cfg(unix)]
-#[test]
-fn expired_runner_does_not_start_a_marker_command() {
-    let deadline = std::time::Instant::now();
-
-    assert!(marker_was_not_created(
-        &CancellableCommandRunner::with_deadline(CommandCancellation::default(), deadline,)
-    ));
-}
-
-#[cfg(unix)]
-#[test]
-fn cancellation_stops_a_running_command() {
-    let cancellation = CommandCancellation::default();
-    let runner = CancellableCommandRunner::new(cancellation.clone());
-    let worker = thread::spawn(move || runner.run("sh", &["-c".to_owned(), "sleep 10".to_owned()]));
-    thread::sleep(Duration::from_millis(50));
-
-    cancellation.cancel();
-    let error = worker
-        .join()
-        .expect("command worker")
-        .expect_err("canceled command");
-
-    assert_eq!(error.to_string(), "command canceled");
+#[rstest::rstest]
+#[case("wait")]
+#[case("exit 0")]
+fn cancellation_closes_pipes_inherited_by_descendants(#[case] leader: &str) {
+    let directory = UnixTempDir::new().unwrap();
+    let marker = directory.child("descendant");
+    let ready = marker.path().to_owned();
+    let runner = CancellableCommandRunner::with_deadline_and_cancellation_check(
+        CommandCancellation::default(),
+        std::time::Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("test deadline"),
+        move || std::fs::read_to_string(&ready).is_ok_and(|pid| !pid.trim().is_empty()),
+    );
+    let args = vec![
+        "-c".to_owned(),
+        format!("cat /dev/zero >/dev/null & printf '%s' $! > \"$1\"; {leader}"),
+        "bootty-cancellation-probe".to_owned(),
+        marker.path().to_string_lossy().into_owned(),
+    ];
+    let (completed, completion) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        completed.send(runner.run("/bin/sh", &args)).unwrap();
+    });
+    let result = completion.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        // Keep a failed cleanup regression from leaking the owned probe or hanging the suite.
+        if let Ok(pid) = std::fs::read_to_string(marker.path()) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid.trim()])
+                .status();
+        }
+    }
+    worker.join().unwrap();
+    assert_eq!(
+        result
+            .expect("cancellation must close descendant pipes")
+            .unwrap_err()
+            .to_string(),
+        "command canceled"
+    );
 }

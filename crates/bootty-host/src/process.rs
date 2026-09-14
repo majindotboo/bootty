@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
+use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     process::{Command, Output, Stdio},
     sync::{
         Arc,
@@ -26,9 +27,50 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandBytes {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+impl From<Output> for CommandBytes {
+    fn from(output: Output) -> Self {
+        Self {
+            success: output.status.success(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    }
+}
+
+// Captured control/Git commands are bounded. Larger results need the job or transfer stream.
+const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
+
 pub trait CommandRunner {
+    /// Capture non-UTF-8 command output without a lossy text conversion.
+    /// # Errors
+    /// Returns unsupported operation, process setup, execution, cancellation, or output limit errors.
+    fn run_bytes(&self, _program: &str, _args: &[String]) -> Result<CommandBytes> {
+        bail!("command runner does not support byte output")
+    }
+
+    /// # Errors
+    /// Returns process setup, execution, cancellation, or output decoding errors.
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput>;
 
+    /// # Errors
+    /// Returns process setup, input delivery, execution, cancellation, or output errors.
+    fn run_with_input(
+        &self,
+        _program: &str,
+        _args: &[String],
+        _input: Vec<u8>,
+    ) -> Result<CommandOutput> {
+        bail!("command runner does not support streamed input")
+    }
+
+    /// # Errors
+    /// Returns an error if detached execution is unsupported or the process cannot be started.
     fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         self.run(program, args)
     }
@@ -38,8 +80,43 @@ pub trait CommandRunner {
 pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
+    fn run_bytes(&self, program: &str, args: &[String]) -> Result<CommandBytes> {
+        cancellable_command_bytes(
+            program,
+            args,
+            &CommandCancellation::default(),
+            None,
+            None,
+            None,
+        )
+        .map(CommandBytes::from)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        command_output(program, Command::new(program).args(args).output())
+        cancellable_command_output(
+            program,
+            args,
+            &CommandCancellation::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn run_with_input(
+        &self,
+        program: &str,
+        args: &[String],
+        input: Vec<u8>,
+    ) -> Result<CommandOutput> {
+        cancellable_command_output(
+            program,
+            args,
+            &CommandCancellation::default(),
+            None,
+            None,
+            Some(input),
+        )
     }
 
     fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
@@ -74,6 +151,7 @@ impl std::fmt::Debug for CancellableCommandRunner {
 }
 
 impl CancellableCommandRunner {
+    #[must_use]
     pub fn new(cancellation: CommandCancellation) -> Self {
         Self {
             cancellation,
@@ -83,6 +161,7 @@ impl CancellableCommandRunner {
     }
 
     /// Run commands until `deadline`, terminating a child that outlives it.
+    #[must_use]
     pub fn with_deadline(cancellation: CommandCancellation, deadline: Instant) -> Self {
         Self {
             cancellation,
@@ -110,6 +189,18 @@ impl CancellableCommandRunner {
 }
 
 impl CommandRunner for CancellableCommandRunner {
+    fn run_bytes(&self, program: &str, args: &[String]) -> Result<CommandBytes> {
+        cancellable_command_bytes(
+            program,
+            args,
+            &self.cancellation,
+            self.deadline,
+            self.cancellation_check.as_deref(),
+            None,
+        )
+        .map(CommandBytes::from)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         cancellable_command_output(
             program,
@@ -117,6 +208,22 @@ impl CommandRunner for CancellableCommandRunner {
             &self.cancellation,
             self.deadline,
             self.cancellation_check.as_deref(),
+            None,
+        )
+    }
+    fn run_with_input(
+        &self,
+        program: &str,
+        args: &[String],
+        input: Vec<u8>,
+    ) -> Result<CommandOutput> {
+        cancellable_command_output(
+            program,
+            args,
+            &self.cancellation,
+            self.deadline,
+            self.cancellation_check.as_deref(),
+            Some(input),
         )
     }
 }
@@ -127,44 +234,116 @@ fn cancellable_command_output(
     cancellation: &CommandCancellation,
     deadline: Option<Instant>,
     cancellation_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    input: Option<Vec<u8>>,
 ) -> Result<CommandOutput> {
+    let output = cancellable_command_bytes(
+        program,
+        args,
+        cancellation,
+        deadline,
+        cancellation_check,
+        input,
+    )?;
+    command_output(program, Ok(output))
+}
+
+fn cancellable_command_bytes(
+    program: &str,
+    args: &[String],
+    cancellation: &CommandCancellation,
+    deadline: Option<Instant>,
+    cancellation_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    input: Option<Vec<u8>>,
+) -> Result<Output> {
     if is_cancelled(cancellation, deadline, cancellation_check) {
         bail!("command canceled")
     }
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run {program}"))?;
-    let stdout = read_pipe(child.stdout.take().context("capture stdout")?);
-    let stderr = read_pipe(child.stderr.take().context("capture stderr")?);
+        .stderr(Stdio::piped());
+    let mut child =
+        ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
+            .with_context(|| format!("run {program}"))?;
+    let waiter = thread::current();
+    let writer = input
+        .map(|input| -> Result<_> {
+            let mut stdin = child
+                .child_mut()
+                .stdin
+                .take()
+                .context("piped command input")?;
+            let waiter = waiter.clone();
+            Ok(thread::spawn(move || {
+                let result = stdin.write_all(&input);
+                drop(stdin);
+                waiter.unpark();
+                result
+            }))
+        })
+        .transpose()?;
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let stdout = read_pipe(
+        child.child_mut().stdout.take().context("capture stdout")?,
+        exceeded.clone(),
+        waiter.clone(),
+    );
+    let stderr = read_pipe(
+        child.child_mut().stderr.take().context("capture stderr")?,
+        exceeded.clone(),
+        waiter,
+    );
     let status = loop {
-        if is_cancelled(cancellation, deadline, cancellation_check) {
-            let _ = child.kill();
+        if exceeded.load(Ordering::Acquire)
+            || is_cancelled(cancellation, deadline, cancellation_check)
+        {
+            let _ = child.terminate();
             let _ = child.wait();
             for reader in [stdout, stderr] {
                 let _ = join_pipe(reader);
             }
+            if let Some(writer) = writer {
+                let _ = writer.join();
+            }
+            if exceeded.load(Ordering::Acquire) {
+                bail!("command output exceeds the 16 MiB capture limit")
+            }
             bail!("command canceled")
         }
-        if let Some(status) = child
-            .try_wait()
+        if child
+            .has_exited()
             .with_context(|| format!("wait for {program}"))?
+            && stdout.is_finished()
+            && stderr.is_finished()
+            && writer.as_ref().is_none_or(thread::JoinHandle::is_finished)
+            && !exceeded.load(Ordering::Acquire)
         {
-            break status;
+            // Keep the tree cancellable while descendants still own a captured pipe.
+            // Normal completion preserves deliberately detached backend processes.
+            break child.wait().with_context(|| format!("reap {program}"))?;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::park_timeout(Duration::from_millis(10));
     };
-    command_output(
-        program,
-        Ok(Output {
-            status,
-            stdout: join_pipe(stdout)?,
-            stderr: join_pipe(stderr)?,
-        }),
-    )
+    if let Some(writer) = writer {
+        let written = writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("command input writer stopped"))?;
+        // On remote rejection preserve its stderr instead of replacing it with a broken pipe.
+        if status.success() {
+            written.context("write command input")?;
+        }
+    }
+    Ok(Output {
+        status,
+        stdout: join_pipe(stdout)?,
+        stderr: join_pipe(stderr)?,
+    })
 }
 
 fn is_cancelled(
@@ -177,11 +356,19 @@ fn is_cancelled(
         || deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
-fn read_pipe(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+fn read_pipe(
+    pipe: impl Read + Send + 'static,
+    exceeded: Arc<AtomicBool>,
+    waiter: thread::Thread,
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        pipe.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        let result = pipe.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut bytes);
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CAPTURE_BYTES {
+            exceeded.store(true, Ordering::Release);
+        }
+        waiter.unpark();
+        result.map(|_| bytes)
     })
 }
 
@@ -237,6 +424,7 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
 }
 
 #[cfg(target_os = "macos")]
+#[must_use]
 pub fn macos_shell_environment_prelude() -> String {
     macos_shell_environment_prelude_from(env::vars_os())
 }
@@ -280,11 +468,12 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
+/// # Errors
+/// Returns launchctl execution, status parsing, or timeout errors.
 pub fn wait_for_launchd_exit(launchctl: &str, label: &str, timeout: Duration) -> Result<i32> {
     let start = Instant::now();
-    let deadline = start + timeout;
     let mut observed_pid = false;
-    while Instant::now() < deadline {
+    while start.elapsed() < timeout {
         let output = Command::new(launchctl).args(["list", label]).output()?;
         let text = String::from_utf8_lossy(&output.stdout);
         if text.contains("\"PID\"") {
@@ -324,6 +513,8 @@ fn command_status_output(status: i32) -> CommandOutput {
 }
 
 #[cfg(target_os = "macos")]
+/// # Errors
+/// Returns an error if the executable cannot be resolved on the host.
 pub fn resolve_program(program: &str) -> Result<String> {
     resolve_program_with_path(program, env::var_os("PATH").as_deref())
 }
@@ -361,6 +552,8 @@ fn command_output(program: &str, output: std::io::Result<Output>) -> Result<Comm
     })
 }
 
+/// # Errors
+/// Returns an error containing stderr when the command reports failure.
 pub fn require_success(_program: &str, _args: &[String], output: CommandOutput) -> Result<String> {
     if output.success {
         return Ok(output.stdout);

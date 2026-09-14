@@ -3,7 +3,6 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read as _, Write as _},
     path::PathBuf,
-    sync::Mutex,
 };
 
 use anyhow::{Context, Result, bail};
@@ -17,14 +16,14 @@ use crate::{shell_quote, ssh::SshRemote};
 
 const REPOSITORY_OWNER: &str = "majindotboo";
 const REPOSITORY_NAME: &str = "bootty";
+// Larger assets need streaming download/upload paths instead of whole daemon buffers.
+pub const MAX_DAEMON_BYTES: u64 = 256 * 1024 * 1024;
 fn remote_daemon_path() -> &'static str {
-    crate::exec::REMOTE_EXEC_PROGRAM
+    crate::exec::remote_exec_program()
         .strip_prefix("./")
-        .unwrap_or(crate::exec::REMOTE_EXEC_PROGRAM)
+        .unwrap_or_else(crate::exec::remote_exec_program)
 }
 const REMOTE_DAEMON_DIRECTORY: &str = ".bootty/bin";
-
-static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemoteTarget {
@@ -36,7 +35,7 @@ enum RemoteTarget {
 }
 
 impl RemoteTarget {
-    fn triple(self) -> &'static str {
+    const fn triple(self) -> &'static str {
         match self {
             Self::LinuxX64 => "x86_64-unknown-linux-gnu",
             Self::LinuxArm64 => "aarch64-unknown-linux-gnu",
@@ -144,8 +143,12 @@ fn verified_cached_daemon(path: &std::path::Path, expected: &str) -> Result<bool
     if !path.is_file() {
         return Ok(false);
     }
-    let cached = fs::read(path).context("read cached daemon")?;
-    if checksum(&cached) == expected {
+    let mut cached = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_DAEMON_BYTES + 1)
+        .read_to_end(&mut cached)
+        .context("read cached daemon")?;
+    if u64::try_from(cached.len())? <= MAX_DAEMON_BYTES && checksum(&cached) == expected {
         return Ok(true);
     }
     fs::remove_file(path).context("remove invalid cached daemon")?;
@@ -201,34 +204,34 @@ fn publish_cached_daemon(
     Ok(())
 }
 
-fn checksum(bytes: &[u8]) -> String {
+pub fn checksum(bytes: &[u8]) -> String {
     let mut checksum = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
-        write!(checksum, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(checksum, "{byte:02x}");
     }
     checksum
 }
 
 fn download(url: &str) -> Result<Vec<u8>> {
-    let mut response = ureq::get(url).call()?;
+    let mut response = ureq::get(url)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_mins(2)))
+        .build()
+        .call()?;
     let mut bytes = Vec::new();
     response
         .body_mut()
         .as_reader()
+        .take(MAX_DAEMON_BYTES + 1)
         .read_to_end(&mut bytes)
         .context("read download")?;
+    if u64::try_from(bytes.len())? > MAX_DAEMON_BYTES {
+        bail!("daemon download exceeds the 256 MiB limit");
+    }
     Ok(bytes)
 }
 
-pub(crate) fn ensure<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<()> {
-    let (program, args) = remote.ping_command();
-    if daemon_matches(&runner.run(&program, &args)?) {
-        return Ok(());
-    }
-
-    let _install = INSTALL_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("remote daemon installation lock is poisoned"))?;
+pub fn ensure<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<()> {
     let (program, args) = remote.ping_command();
     if daemon_matches(&runner.run(&program, &args)?) {
         return Ok(());
@@ -353,7 +356,7 @@ fn remove_remote_candidate<R: CommandRunner>(
     let _ = runner.run(&program, &args);
 }
 
-fn daemon_matches(output: &CommandOutput) -> bool {
+pub fn daemon_matches(output: &CommandOutput) -> bool {
     output.success
         && output.stdout.trim()
             == format!(
@@ -418,4 +421,12 @@ fn first_error(detail: &str) -> &str {
         .next()
         .filter(|line| !line.is_empty())
         .unwrap_or("command failed")
+}
+
+pub fn linux_daemon(architecture: &str) -> Result<PathBuf> {
+    release_daemon(match architecture.trim() {
+        "x86_64" => RemoteTarget::LinuxX64,
+        "aarch64" | "arm64" => RemoteTarget::LinuxArm64,
+        other => bail!("unsupported WSL Linux architecture: {other}"),
+    })
 }

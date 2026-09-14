@@ -5,39 +5,46 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_DAEMON_PROGRAM: &str = "bootty-daemon";
-pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "2";
-pub const REMOTE_EXEC_PROGRAM: &str = concat!(
-    "./.bootty/bin/bootty-daemon-",
-    "2",
-    "-",
-    env!("CARGO_PKG_VERSION"),
-    ".exe"
-);
+pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "10";
+pub fn remote_exec_program() -> &'static str {
+    static PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "./.bootty/bin/bootty-daemon-{REMOTE_DAEMON_PROTOCOL_VERSION}-{}.exe",
+            env!("CARGO_PKG_VERSION")
+        )
+    });
+    &PROGRAM
+}
 pub const REMOTE_EXEC_SUBCOMMAND: &str = "remote-exec";
 pub const REMOTE_PING_SUBCOMMAND: &str = "remote-ping";
 const MAX_REMOTE_COMMAND_PAYLOAD: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct RemoteCommand {
+pub struct RemoteCommand {
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
     pub(crate) terminal: bool,
 }
 
-pub(crate) fn proxy_command_line(program: &str, args: &[String], terminal: bool) -> Result<String> {
+pub fn proxy_command_line(program: &str, args: &[String], terminal: bool) -> Result<String> {
+    let args = proxy_command_args(program, args, terminal)?;
+    Ok(format!("{} {}", remote_exec_program(), args.join(" ")))
+}
+
+pub fn proxy_command_args(program: &str, args: &[String], terminal: bool) -> Result<Vec<String>> {
     let payload = serde_json::to_vec(&RemoteCommand {
         program: program.to_owned(),
         args: args.to_vec(),
         terminal,
     })
     .context("encode remote command")?;
-    Ok(format!(
-        "{REMOTE_EXEC_PROGRAM} {REMOTE_EXEC_SUBCOMMAND} {}",
-        URL_SAFE_NO_PAD.encode(payload)
-    ))
+    Ok(vec![
+        REMOTE_EXEC_SUBCOMMAND.to_owned(),
+        URL_SAFE_NO_PAD.encode(payload),
+    ])
 }
 
-pub(crate) fn decode_remote_command(payload: &str) -> Result<RemoteCommand> {
+pub fn decode_remote_command(payload: &str) -> Result<RemoteCommand> {
     if payload.len() > MAX_REMOTE_COMMAND_PAYLOAD {
         bail!("remote command payload is too large")
     }
@@ -52,6 +59,8 @@ pub(crate) fn decode_remote_command(payload: &str) -> Result<RemoteCommand> {
     Ok(command)
 }
 
+/// # Errors
+/// Returns invalid protocol payload, command setup, or execution errors.
 pub fn run_remote_command(payload: &str) -> Result<i32> {
     let command = decode_remote_command(payload)?;
     let program = if command.program == REMOTE_DAEMON_PROGRAM {

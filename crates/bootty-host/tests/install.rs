@@ -70,10 +70,17 @@ fn output(success: bool, message: &str) -> CommandOutput {
 }
 
 fn compatible_ping() -> CommandOutput {
-    output(true, &format!("2:{}", env!("CARGO_PKG_VERSION")))
+    output(
+        true,
+        &format!(
+            "{}:{}",
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
 }
 
-fn platform_probe() -> &'static str {
+const fn platform_probe() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     return "Darwin\narm64\n";
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -166,7 +173,10 @@ fn candidate_is_verified_before_publication() -> Result<()> {
     assert_eq!(observed, (false, false, true));
     assert_eq!(
         error.to_string(),
-        "uploaded Bootty daemon on devbox did not start with protocol 2: candidate is incompatible"
+        format!(
+            "uploaded Bootty daemon on devbox did not start with protocol {}: candidate is incompatible",
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION
+        )
     );
     Ok(())
 }

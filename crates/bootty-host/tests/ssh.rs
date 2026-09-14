@@ -126,12 +126,19 @@ fn cloned_remote_serializes_daemon_readiness() {
 
     impl CommandRunner for PingRunner {
         fn run(&self, _program: &str, args: &[String]) -> Result<CommandOutput> {
-            assert!(args.last().expect("ping").ends_with("remote-ping"));
+            anyhow::ensure!(
+                args.last().is_some_and(|arg| arg.ends_with("remote-ping")),
+                "expected daemon readiness ping"
+            );
             self.0.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(10));
             Ok(CommandOutput {
                 success: true,
-                stdout: format!("2:{}", env!("CARGO_PKG_VERSION")),
+                stdout: format!(
+                    "{}:{}",
+                    bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+                    env!("CARGO_PKG_VERSION")
+                ),
                 stderr: String::new(),
             })
         }
@@ -166,7 +173,11 @@ impl CommandRunner for RecordingRunner {
         Ok(CommandOutput {
             success: true,
             stdout: if args.last().is_some_and(|arg| arg.ends_with("remote-ping")) {
-                format!("2:{}", env!("CARGO_PKG_VERSION"))
+                format!(
+                    "{}:{}",
+                    bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+                    env!("CARGO_PKG_VERSION")
+                )
             } else {
                 String::new()
             },

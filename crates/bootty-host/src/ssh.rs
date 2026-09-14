@@ -13,11 +13,11 @@ use std::{collections::hash_map::DefaultHasher, hash::Hash as _, hash::Hasher as
 
 pub use crate::exec::run_remote_command;
 pub use crate::exec::{REMOTE_DAEMON_PROGRAM, REMOTE_DAEMON_PROTOCOL_VERSION};
-use crate::exec::{REMOTE_EXEC_PROGRAM, REMOTE_PING_SUBCOMMAND, proxy_command_line};
+use crate::exec::{REMOTE_PING_SUBCOMMAND, proxy_command_line, remote_exec_program};
 use anyhow::Result;
 use bootty_config::config::SshRemoteConfig as SshTarget;
 
-use crate::process::{CommandOutput, CommandRunner, SystemCommandRunner};
+use crate::process::{CommandRunner, SystemCommandRunner};
 
 use crate::shell_quote;
 
@@ -43,6 +43,7 @@ impl PartialEq for SshRemote {
 impl Eq for SshRemote {}
 
 impl SshRemote {
+    #[must_use]
     pub fn new(config: SshTarget) -> Self {
         Self {
             config,
@@ -50,27 +51,34 @@ impl SshRemote {
         }
     }
 
+    #[must_use]
     pub fn host(&self) -> &str {
         &self.config.host
     }
 
-    pub fn target(&self) -> &SshTarget {
+    #[must_use]
+    pub const fn target(&self) -> &SshTarget {
         &self.config
     }
 
     /// The SSH destination: `user@host` when the config names a user, and whatever `~/.ssh/config`
     /// resolves otherwise.
+    #[must_use]
     pub fn destination(&self) -> String {
-        match &self.config.user {
-            Some(user) => format!("{user}@{}", self.config.host),
-            None => self.config.host.clone(),
-        }
+        self.config.user.as_ref().map_or_else(
+            || self.config.host.clone(),
+            |user| format!("{user}@{}", self.config.host),
+        )
     }
 
+    /// # Errors
+    /// Returns daemon discovery, installation, or SSH execution errors.
     pub fn ensure_daemon(&self) -> Result<()> {
         self.ensure_daemon_with(&SystemCommandRunner)
     }
 
+    /// # Errors
+    /// Returns an error for an unavailable installer lock or failed remote daemon setup.
     pub fn ensure_daemon_with<R: CommandRunner>(&self, runner: &R) -> Result<()> {
         let mut ready = self
             .daemon_ready
@@ -81,12 +89,14 @@ impl SshRemote {
         }
         crate::install::ensure(self, runner)?;
         *ready = true;
+        drop(ready);
         Ok(())
     }
 
     /// argv for a direct remote-shell command. Bootty uses this only for target-specific bootstrap
     /// commands. Backend commands use [`Self::proxy_command`] so their arguments never depend on
     /// the remote login shell.
+    #[must_use]
     pub fn command(&self, program: &str, args: &[String]) -> (String, Vec<String>) {
         self.build_line(remote_command_line(program, args), &["-o", "BatchMode=yes"])
     }
@@ -94,6 +104,8 @@ impl SshRemote {
     /// Run one backend command through the remote Bootty daemon. The SSH shell sees one
     /// versioned daemon path plus a base64url payload, which is valid in POSIX shells,
     /// cmd.exe, and PowerShell.
+    /// # Errors
+    /// Returns an error if the daemon command payload cannot be encoded.
     pub fn proxy_command(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
         Ok(self.build_line(
             proxy_command_line(program, args, false)?,
@@ -102,6 +114,8 @@ impl SshRemote {
     }
 
     /// The proxied attach client owns a PTY and may prompt for credentials.
+    /// # Errors
+    /// Returns an error if the PTY command payload cannot be encoded.
     pub fn proxy_tty_command(
         &self,
         program: &str,
@@ -112,7 +126,7 @@ impl SshRemote {
 
     pub(crate) fn ping_command(&self) -> (String, Vec<String>) {
         self.build_line(
-            format!("{REMOTE_EXEC_PROGRAM} {REMOTE_PING_SUBCOMMAND}"),
+            format!("{} {REMOTE_PING_SUBCOMMAND}", remote_exec_program()),
             &["-o", "BatchMode=yes"],
         )
     }
@@ -145,7 +159,13 @@ impl SshRemote {
         (program.to_string_lossy().into_owned(), args)
     }
 
-    fn build_line(&self, remote_line: String, mode: &[&str]) -> (String, Vec<String>) {
+    pub(crate) fn build_line(&self, remote_line: String, mode: &[&str]) -> (String, Vec<String>) {
+        let (program, mut args) = self.connection_options(mode);
+        args.extend(["--".to_owned(), self.destination(), remote_line]);
+        (program, args)
+    }
+
+    pub(crate) fn connection_options(&self, mode: &[&str]) -> (String, Vec<String>) {
         let mut ssh_args = mode
             .iter()
             .map(|flag| (*flag).to_owned())
@@ -159,9 +179,6 @@ impl SshRemote {
         }
         ssh_args.extend(Self::keepalive_args());
         ssh_args.extend(self.multiplexing_args());
-        ssh_args.push("--".to_owned());
-        ssh_args.push(self.destination());
-        ssh_args.push(remote_line);
         (self.config.program.clone(), ssh_args)
     }
 
@@ -217,6 +234,7 @@ fn remote_command_line(program: &str, args: &[String]) -> String {
     line
 }
 
+#[must_use]
 pub fn remote_daemon_failure(host: &str, detail: &str) -> String {
     let detail = detail.trim();
     if detail.is_empty() {
@@ -227,34 +245,5 @@ pub fn remote_daemon_failure(host: &str, detail: &str) -> String {
         detail.lines().next().unwrap_or(detail)
     )
 }
-/// Runs every command through [`SshRemote`], for the backends whose own runner has nothing to keep
-/// open between invocations.
-#[derive(Clone, Debug)]
-pub struct SshCommandRunner<R> {
-    remote: SshRemote,
-    runner: R,
-}
-
-impl<R> SshCommandRunner<R> {
-    pub fn new(remote: SshRemote, runner: R) -> Self {
-        Self { remote, runner }
-    }
-
-    fn remote_argv(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
-        self.remote.proxy_command(program, args)
-    }
-}
-
-impl<R: CommandRunner> CommandRunner for SshCommandRunner<R> {
-    fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        self.remote.ensure_daemon_with(&self.runner)?;
-        let (program, args) = self.remote_argv(program, args)?;
-        self.runner.run(&program, &args)
-    }
-
-    fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        self.remote.ensure_daemon_with(&self.runner)?;
-        let (program, args) = self.remote_argv(program, args)?;
-        self.runner.run_disowned(&program, &args)
-    }
-}
+/// Compatibility name; command execution uses the shared host runner.
+pub use crate::remote::RemoteCommandRunner as SshCommandRunner;
