@@ -66,6 +66,7 @@ jobs:
         uses: jdx/mise-action@v4
 
       - name: Verify release tag
+        shell: bash
         run: mise run release:verify-tag -- "$RELEASE_TAG"
 
       - name: Install Linux build dependencies
