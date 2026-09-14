@@ -1,6 +1,6 @@
-use bootty_identity::ApplicationIdentity;
+use bootty_config::ApplicationIdentity;
 
-pub(crate) fn ensure_cli_link() -> std::io::Result<()> {
+pub fn ensure_cli_link() -> std::io::Result<()> {
     let executable = std::env::current_exe()?;
     if !executable.ends_with("Contents/MacOS/bootty") {
         return Ok(());

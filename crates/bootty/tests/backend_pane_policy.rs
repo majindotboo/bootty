@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use bootty_mux::{
     MuxBackendKind, MuxBindingConfig, SshTarget,
     provider::{
@@ -23,11 +25,11 @@ fn binding(backend: MuxBackendKind) -> MuxBindingConfig {
     MuxBackendKind::Herdr,
     MuxAppBackendPolicy {
         panes: PaneBehavior { topology: PaneTopology::Attach, cache_terminals: true, resize_cached_terminals: true },
-        progress: TerminalProgressPolicy::BackendSnapshot,
-        persisted_sessions: PersistedSessionPolicy::AfterEmptyInitialSnapshot,
+        progress: TerminalProgressPolicy::TerminalOsc,
+        persisted_sessions: PersistedSessionPolicy::Never,
         generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
         terminal_residency: TerminalResidency::BindingScoped,
-        selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
+        selection_publication: SelectionPublicationPolicy::Direct,
     },
 )]
 #[case::native(
@@ -68,7 +70,10 @@ fn each_backend_owns_its_application_behavior_policy(
     #[case] expected: MuxAppBackendPolicy,
 ) {
     let registry = support::backends();
-    let policy = registry.app_policy(&binding(backend));
+    let policy = registry
+        .app_provider(&binding(backend))
+        .expect("registered app backend")
+        .app_policy();
     let expected = if cfg!(windows) && backend == MuxBackendKind::Tmux {
         MuxAppBackendPolicy {
             panes: PaneBehavior {
@@ -93,15 +98,22 @@ fn each_backend_owns_its_application_behavior_policy(
 fn remote_tmux_keeps_attach_policy_on_every_host() {
     let registry = support::backends();
     let mut config = binding(MuxBackendKind::Tmux);
-    config.remote = Some(SshTarget::for_host("example.test"));
+    config.remote = Some(SshTarget::for_host("example.test").into());
 
-    let pane_policy = registry.build_pane_policy(&config);
-    let app_policy = registry.app_policy(&config);
+    let pane_policy = registry
+        .app_provider(&config)
+        .expect("registered app backend")
+        .build_pane_policy(&config);
+    let app_policy = registry
+        .app_provider(&config)
+        .expect("registered app backend")
+        .app_policy();
 
     assert_eq!(
         pane_policy
             .remote_target()
-            .map(|remote| remote.host.as_str()),
+            .as_ref()
+            .map(bootty_mux::RemoteTarget::host),
         Some("example.test")
     );
     assert_eq!(app_policy.panes.topology, PaneTopology::Attach);
@@ -111,15 +123,22 @@ fn remote_tmux_keeps_attach_policy_on_every_host() {
 fn remote_herdr_keeps_attach_policy_on_every_host() {
     let registry = support::backends();
     let mut config = binding(MuxBackendKind::Herdr);
-    config.remote = Some(SshTarget::for_host("example.test"));
+    config.remote = Some(SshTarget::for_host("example.test").into());
 
-    let pane_policy = registry.build_pane_policy(&config);
-    let app_policy = registry.app_policy(&config);
+    let pane_policy = registry
+        .app_provider(&config)
+        .expect("registered app backend")
+        .build_pane_policy(&config);
+    let app_policy = registry
+        .app_provider(&config)
+        .expect("registered app backend")
+        .app_policy();
 
     assert_eq!(
         pane_policy
             .remote_target()
-            .map(|remote| remote.host.as_str()),
+            .as_ref()
+            .map(bootty_mux::RemoteTarget::host),
         Some("example.test")
     );
     assert_eq!(app_policy.panes.topology, PaneTopology::Attach);

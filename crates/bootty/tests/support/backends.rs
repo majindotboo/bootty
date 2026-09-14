@@ -3,10 +3,5 @@ use std::sync::Arc;
 use bootty_mux::provider::MuxBackendRegistry;
 
 pub fn backends() -> Arc<MuxBackendRegistry> {
-    bootty_herdr::link();
-    bootty_native::link();
-    bootty_rmux::link();
-    bootty_tmux::link();
-
     Arc::new(MuxBackendRegistry::desktop().expect("complete executable backend registry"))
 }

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use bootty_mux::{
     MuxBackendKind, MuxBindingConfig, capability::BindingOperation, controller::SpaceId,
     provider::MuxCommandDispatch,
@@ -41,7 +43,7 @@ fn providers_publish_their_command_dispatch(
         ..Default::default()
     };
 
-    assert_eq!(registry.command_dispatch(&config), expected);
+    assert_eq!(registry.command_dispatch(&config), Some(expected));
 }
 
 #[cfg(windows)]
@@ -70,34 +72,48 @@ fn windows_keeps_remote_tmux_and_replaces_only_local_tmux() {
 fn built_backends_publish_the_exact_capability_matrix(#[case] backend: MuxBackendKind) {
     let registry = support::backends();
     let scope = SpaceId::from_persistence(1);
-    let mut expected = vec![
-        BindingOperation::ActivateWindow,
-        BindingOperation::CreateWindow,
-        BindingOperation::RenameWindow,
-        BindingOperation::NavigateWindow,
-        BindingOperation::MoveWindow,
-        BindingOperation::SplitPane,
-        BindingOperation::NavigatePane,
-        BindingOperation::ClosePane,
-        BindingOperation::CreateProjectSession,
-        BindingOperation::CreateWorktreeSession,
-        BindingOperation::RenameSession,
-        BindingOperation::DitchSession,
-        BindingOperation::StampSession,
-    ];
-    if matches!(
-        backend,
-        MuxBackendKind::Herdr | MuxBackendKind::Rmux | MuxBackendKind::Tmux
-    ) {
+    let mut expected = if backend == MuxBackendKind::Herdr {
+        Vec::new()
+    } else {
+        vec![
+            BindingOperation::ActivateWindow,
+            BindingOperation::CreateWindow,
+            BindingOperation::RenameWindow,
+            BindingOperation::NavigateWindow,
+            BindingOperation::MoveWindow,
+            BindingOperation::SplitPane,
+            BindingOperation::NavigatePane,
+            BindingOperation::ClosePane,
+            BindingOperation::CreateProjectSession,
+            BindingOperation::CreateWorktreeSession,
+            BindingOperation::RenameSession,
+            BindingOperation::DitchSession,
+            BindingOperation::StampSession,
+        ]
+    };
+    if matches!(backend, MuxBackendKind::Rmux | MuxBackendKind::Tmux) {
         expected.insert(8, BindingOperation::TogglePaneZoom);
     }
-    let descriptor = registry.capabilities(
-        &MuxBindingConfig {
-            backend,
-            ..Default::default()
-        },
-        scope,
-    );
+    if matches!(backend, MuxBackendKind::Native | MuxBackendKind::Tmux) {
+        expected.extend([
+            BindingOperation::SwapPanes,
+            BindingOperation::MovePane,
+            BindingOperation::ExtractPane,
+        ]);
+    }
+    if backend == MuxBackendKind::Native {
+        expected.push(BindingOperation::MergeWindows);
+    }
+    expected.sort();
+    let descriptor = registry
+        .capabilities(
+            &MuxBindingConfig {
+                backend,
+                ..Default::default()
+            },
+            scope,
+        )
+        .expect("registered backend capabilities");
 
     assert_eq!(descriptor.scope(), scope);
     assert_eq!(descriptor.operations().collect::<Vec<_>>(), expected);

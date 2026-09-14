@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use bootty_config::config::default_config_path;
-use bootty_identity::{
+use bootty_config::{
     ApplicationIdentity, legacy_config_path_from_env, unix_daemon_state_path,
     windows_daemon_state_path,
 };
-use bootty_rmux::{endpoint_path_for, socket_name};
+use bootty_mux::rmux::{endpoint_path_for, socket_name};
 use pretty_assertions::{assert_eq, assert_ne};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -14,13 +14,9 @@ use rstest::rstest;
 #[rstest]
 #[case(ApplicationIdentity::Production)]
 #[case(ApplicationIdentity::Development)]
-fn identity_metadata_drives_user_visible_names_and_updates(#[case] identity: ApplicationIdentity) {
+fn identity_metadata_drives_user_visible_names(#[case] identity: ApplicationIdentity) {
     let names = identity.names_for_workspace(Path::new("/worktrees/example"));
     assert_eq!(names.cli_name(), names.namespace());
-    assert_eq!(
-        identity.automatic_updates_enabled(),
-        identity == ApplicationIdentity::Production,
-    );
     match identity {
         ApplicationIdentity::Production => {
             assert_eq!(names.display_name(), "Bootty");

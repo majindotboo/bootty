@@ -1,12 +1,15 @@
+mod jobs;
+pub use jobs::run_job;
+
 use std::io::Read;
 
 use anyhow::{Context, Result};
-use bootty_cli::Cli;
-use bootty_command::{
+use bootty::cli::Cli;
+use bootty_control as control;
+use bootty_control::{
     Caller, CommandDescriptor, CommandInvocation, CommandOutcome, CommandTarget, MutationClass,
     ValueType,
 };
-use bootty_control as control;
 use thiserror::Error;
 
 const EXIT_USAGE: u8 = 2;
@@ -24,13 +27,13 @@ struct CliFailure {
     message: String,
 }
 
-pub(crate) fn exit_code(error: &anyhow::Error) -> u8 {
+pub fn exit_code(error: &anyhow::Error) -> u8 {
     error
         .downcast_ref::<CliFailure>()
         .map_or(1, |failure| failure.code)
 }
 
-pub(crate) fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
+pub fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
     let (path, raw_arguments) = raw.split_first().context("missing command path")?;
     let name = path
         .split('.')
@@ -50,7 +53,9 @@ pub(crate) fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
         .is_some_and(|error| error.code == -32602)
         && name.contains('.')
     {
-        let leaf = name.rsplit('.').next().expect("dotted command has leaf");
+        let leaf = name
+            .rsplit_once('.')
+            .map_or(name.as_str(), |(_, leaf)| leaf);
         described = control_instance_request(
             &instance,
             "command.describe",
@@ -89,7 +94,7 @@ pub(crate) fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
     }
 }
 
-pub(crate) fn invoke_control_command(
+pub fn invoke_control_command(
     cli: &Cli,
     invocation: CommandInvocation,
     confirm: bool,
@@ -141,7 +146,7 @@ fn control_instance_request(
     control::invoke_instance(descriptor, method, params).map_err(|error| transport_failure(&error))
 }
 
-pub(crate) fn control_request(
+pub fn control_request(
     start: bool,
     method: &str,
     params: serde_json::Value,
@@ -199,12 +204,7 @@ fn parse_dynamic_arguments(
                 });
             }
             "--stdin-json" => {
-                let mut json = String::new();
-                std::io::stdin().read_to_string(&mut json)?;
-                let values: Vec<serde_json::Value> = serde_json::from_str(&json)?;
-                for value in values {
-                    arguments.push(json_argument(value)?);
-                }
+                arguments.extend(read_stdin_arguments()?);
             }
             option if option.starts_with("--") => {
                 let expected = descriptor
@@ -227,15 +227,40 @@ fn parse_dynamic_arguments(
             value => arguments.push(value.to_owned()),
         }
     }
-    if arguments.len() != descriptor.arguments.arguments.len() {
+    let schema = &descriptor.arguments.arguments;
+    let required = schema
+        .iter()
+        .rposition(|argument| argument.required)
+        .map_or(0, |position| position.saturating_add(1));
+    if arguments.len() < required || arguments.len() > schema.len() {
         anyhow::bail!(
-            "command {} expects {} argument(s), got {}",
+            "command {} expects {required}..={} argument(s), got {}",
             descriptor.id,
-            descriptor.arguments.arguments.len(),
+            schema.len(),
             arguments.len()
         );
     }
     Ok((arguments, target, confirmed, detached))
+}
+
+pub fn read_stdin() -> Result<String> {
+    const INPUT_LIMIT: usize = 1024 * 1024;
+    let mut json = String::new();
+    let read_limit = u64::try_from(INPUT_LIMIT)
+        .context("stdin input limit does not fit the stream read size")?
+        .saturating_add(1);
+    std::io::stdin()
+        .take(read_limit)
+        .read_to_string(&mut json)?;
+    anyhow::ensure!(json.len() <= INPUT_LIMIT, "command stdin exceeds 1 MiB");
+    Ok(json)
+}
+
+pub fn read_stdin_arguments() -> Result<Vec<String>> {
+    serde_json::from_str::<Vec<serde_json::Value>>(&read_stdin()?)?
+        .into_iter()
+        .map(json_argument)
+        .collect()
 }
 
 fn json_argument(value: serde_json::Value) -> Result<String> {
@@ -274,18 +299,20 @@ fn print_dynamic_help(path: &str, descriptor: &CommandDescriptor) {
     println!("  --detach");
 }
 
-pub(crate) fn print_command_response(
-    response: control::RpcResponse,
-    json_output: bool,
-) -> Result<()> {
+pub fn print_command_response(response: control::RpcResponse, json_output: bool) -> Result<()> {
     let outcome = response
         .result
         .as_ref()
         .map(|value| serde_json::from_value::<CommandOutcome>(value.clone()))
         .transpose()?;
     print_control_response(response, json_output)?;
+    command_result(outcome).map(|_| ())
+}
+
+fn command_result(outcome: Option<CommandOutcome>) -> Result<Option<serde_json::Value>> {
     let (code, message) = match outcome {
-        None | Some(CommandOutcome::Success { .. }) => return Ok(()),
+        None => return Ok(None),
+        Some(CommandOutcome::Success { value, .. }) => return Ok(Some(value)),
         Some(CommandOutcome::Unsupported { message } | CommandOutcome::Unavailable { message }) => {
             (EXIT_UNAVAILABLE, message)
         }
@@ -300,10 +327,7 @@ pub(crate) fn print_command_response(
     Err(CliFailure { code, message }.into())
 }
 
-pub(crate) fn print_control_response(
-    response: control::RpcResponse,
-    json_output: bool,
-) -> Result<()> {
+pub fn print_control_response(response: control::RpcResponse, json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string(&response)?);
     }
@@ -327,6 +351,111 @@ pub(crate) fn print_control_response(
             serde_json::Value::Null => {}
             value => println!("{}", serde_json::to_string_pretty(&value)?),
         }
+    }
+    Ok(())
+}
+
+pub fn wait_for_snapshot(cli: &Cli, args: &bootty::cli::WaitArgs) -> Result<()> {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+    let instance =
+        control::select_or_start(cli.start()).map_err(|error| transport_failure(&error))?;
+    let mut invocation = CommandInvocation::new(&args.command, args.arguments.clone(), Caller::Cli);
+    invocation.target = args
+        .target
+        .as_ref()
+        .map(|target| serde_json::from_str(target))
+        .transpose()?;
+    let expected = serde_json::from_str(&args.equals)
+        .unwrap_or_else(|_| serde_json::Value::String(args.equals.clone()));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let signal = cancelled.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let args = args.clone();
+    let result = runtime.block_on(async move {
+        let handler = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                signal.store(true, Ordering::Relaxed);
+            }
+        });
+        let result = tokio::task::spawn_blocking(move || {
+            control::wait_for_command(
+                &instance,
+                control::WaitRequest {
+                    invocation,
+                    topics: args.topics.clone(),
+                    pointer: args.pointer.clone(),
+                    expected,
+                    deadline: Instant::now()
+                        .checked_add(Duration::from_secs(args.timeout))
+                        .context("timeout is too large")?,
+                },
+                &cancelled,
+            )
+        })
+        .await?;
+        handler.abort();
+        result
+    })?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    match result {
+        control::WaitOutcome::Matched { .. } => Ok(()),
+        control::WaitOutcome::TimedOut { .. } => Err(CliFailure {
+            code: 10,
+            message: "wait timed out".to_owned(),
+        }
+        .into()),
+        control::WaitOutcome::Cancelled { .. } => Err(CliFailure {
+            code: 130,
+            message: "wait cancelled".to_owned(),
+        }
+        .into()),
+    }
+}
+
+pub fn doctor(cli: &Cli) -> Result<()> {
+    let instance =
+        control::select_or_start(cli.start()).map_err(|error| transport_failure(&error))?;
+    let protocol = control_instance_request(&instance, "system.describe", serde_json::Value::Null)?;
+    if let Some(error) = protocol.error {
+        return Err(rpc_failure(&error));
+    }
+    let workspace = invoke_control_command_on_instance(
+        &instance,
+        CommandInvocation::from_action("doctor", Caller::Cli),
+        false,
+        false,
+    )?;
+    if let Some(error) = workspace.error {
+        return Err(rpc_failure(&error));
+    }
+    let outcome: CommandOutcome =
+        serde_json::from_value(workspace.result.context("doctor returned no result")?)?;
+    let CommandOutcome::Success { value, .. } = outcome else {
+        return command_result(Some(outcome)).map(|_| ());
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"instance":instance,"protocol":protocol.result,"workspace":value})
+        )?
+    );
+    if value
+        .get("healthy")
+        .is_some_and(|healthy| healthy.as_bool() == Some(false))
+    {
+        return Err(CliFailure {
+            code: EXIT_UNAVAILABLE,
+            message: "one or more backend bindings are unavailable".to_owned(),
+        }
+        .into());
     }
     Ok(())
 }

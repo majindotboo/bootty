@@ -1,12 +1,13 @@
+#![cfg(test)]
 #![cfg(unix)]
 
 use std::{env, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use assert_fs::{TempDir, prelude::*};
-use bootty_identity::ApplicationIdentity;
+use bootty_config::ApplicationIdentity;
+use bootty_host::ssh::SshRemote;
+use bootty_mux::tmux::TmuxControlRunner;
 use bootty_mux::{SshTarget, process::CommandRunner};
-use bootty_remote::ssh::SshRemote;
-use bootty_tmux::TmuxControlRunner;
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
@@ -96,7 +97,7 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
         program: argv_probe.to_string_lossy().into_owned(),
         args: Vec::new(),
     });
-    let remote = TmuxControlRunner::for_remote(remote)
+    let remote = TmuxControlRunner::for_remote(remote.into())
         .run("tmux", &command)
         .expect("remote tmux command");
     assert!(

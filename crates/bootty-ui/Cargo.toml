@@ -1,18 +1,161 @@
 [package]
 name = "bootty-ui"
+version.workspace = true
 edition.workspace = true
+autobenches = false
+
+[features]
+bootty-dev = ["bootty-config/bootty-dev", "bootty-control/bootty-dev"]
 
 [dependencies]
-eframe.workspace = true
-egui_code_editor.workspace = true
+futures = "0.3"
+gpui-kit.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+base64.workspace = true
+toml_edit.workspace = true
+fluent-bundle.workspace = true
+unic-langid.workspace = true
+notify-rust.workspace = true
+ab_glyph.workspace = true
+arboard.workspace = true
+async-channel.workspace = true
+bootty-agents = { path = "../bootty-agents" }
+bootty-control = { path = "../bootty-control" }
+bootty-config = { path = "../bootty-config" }
+bootty-git = { path = "../bootty-git" }
+bootty-host = { path = "../bootty-host" }
+bootty-mux = { path = "../bootty-mux" }
+bootty-write = { path = "../bootty-write" }
+anyhow.workspace = true
+num-traits.workspace = true
+url.workspace = true
+bootty-terminal = { path = "../bootty-terminal" }
 iconflow.workspace = true
-bootty-item = { path = "../bootty-item" }
-bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
+libghostty-vt.workspace = true
+keepawake.workspace = true
+fontdb.workspace = true
+font-kit.workspace = true
+png.workspace = true
+tempfile.workspace = true
+rustybuzz.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+starship-battery.workspace = true
+sysinfo.workspace = true
+chrono.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_DirectWrite", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
+windows-core = "0.62"
+windows-numerics = "0.3"
+sys-locale = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { workspace = true, features = ["wayland", "x11"] }
+ksni.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+cosmic-text = "0.19"
+swash = "0.2.6"
+sys-locale = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "21"
+core-foundation = "0.10"
+core-graphics = "0.24"
+pathfinder_geometry = "0.5"
+muda.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+# The facade exposes renderer benchmarks; enable their underlying implementation.
+gpui-pre = { version = "0.3.1", features = ["bench-support"] }
+gpui-pre-platform = { version = "0.3.1", features = ["bench-support"] }
+assert_fs.workspace = true
+criterion = "0.5"
 pretty_assertions.workspace = true
 proptest.workspace = true
+proptest-derive.workspace = true
+rmux-server.workspace = true
+rusqlite.workspace = true
 rstest.workspace = true
+static_assertions.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[[bench]]
+name = "pipeline_resources"
+harness = false
+
+[[bench]]
+name = "startup_config"
+harness = false
+
+[[bench]]
+name = "hostile_input"
+harness = false
+
+[[bench]]
+name = "panes_multiwindow"
+harness = false
+
+[[bench]]
+name = "parser_control"
+harness = false
+
+[[bench]]
+name = "render_pacing"
+harness = false
+
+[[bench]]
+name = "idle_overhead"
+harness = false
+
+[[bench]]
+name = "input_protocols"
+harness = false
+
+[[bench]]
+name = "graphics_protocols"
+harness = false
+
+[[bench]]
+name = "multiplexer"
+harness = false
+
+[[bench]]
+name = "remote_session"
+harness = false
+
+[[bench]]
+name = "real_app_replay"
+harness = false
+
+[[bench]]
+name = "resize_reflow"
+harness = false
+
+[[bench]]
+name = "scrollback"
+harness = false
+
+[[bench]]
+name = "power_thermal"
+harness = false
+
+[[bench]]
+name = "gpui_terminal_scene"
+harness = false
+
+[lints]
+workspace = true

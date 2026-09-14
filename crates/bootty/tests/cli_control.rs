@@ -1,20 +1,22 @@
+#![cfg(test)]
 #![cfg(unix)]
 
 use pretty_assertions::assert_eq;
 
 use std::{
+    io::Write as _,
     process::{Command, Stdio},
     sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
-use bootty_app::commands::CommandCatalog;
-use bootty_command::{
+use bootty_control::{
     AppCommandReceiver, AppCommandRequest, AppCommandSender, Caller, CommandOutcome,
     app_command_channel as command_channel,
 };
 use bootty_control::{ControlPlane, ControlServer};
+use bootty_ui::commands::CommandCatalog;
 
 const HELPER_ENV: &str = "BOOTTY_CLI_CONTROL_TEST_HELPER";
 
@@ -65,24 +67,71 @@ fn cli_control_helper() {
         .expect("complete CLI command");
     assert!(child.wait().expect("wait for CLI command").success());
 
-    let mut bare = Command::new(env!("CARGO_BIN_EXE_bootty"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    let mut stdin_event = Command::new(env!("CARGO_BIN_EXE_bootty"))
+        .args(["command", "agents.pi.ingest", "--stdin-json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .expect("start bare Bootty invocation");
-    let deadline = Instant::now() + CLI_BUDGET;
-    let status = loop {
-        if let Some(status) = bare.try_wait().expect("poll bare invocation") {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            bare.kill().expect("stop unexpected second GUI");
-            panic!("bare Bootty tried to open a second GUI");
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    assert!(status.success());
+        .expect("start stdin event ingestion");
+    let event = r#"{"type":"session_start"}"#;
+    stdin_event
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&[event, "%1"]).unwrap())
+        .unwrap();
+    let request = receive_request(&receiver);
+    assert_eq!(request.invocation.command, "agents.pi.ingest");
+    assert_eq!(request.invocation.arguments, vec![event, "%1"]);
+    request.response.send(CommandOutcome::success()).unwrap();
+    assert!(stdin_event.wait().unwrap().success());
+
+    let mut raw_event = Command::new(env!("CARGO_BIN_EXE_bootty"))
+        .args(["command", "agents.codex.ingest", "--stdin", "%1", ""])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload =
+        serde_json::json!({"hook_event_name":"PostToolUse", "result":"x".repeat(128 * 1024)})
+            .to_string();
+    raw_event
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let request = receive_request(&receiver);
+    assert_eq!(
+        request.invocation.arguments,
+        vec![payload, "%1".to_owned(), String::new()]
+    );
+    request.response.send(CommandOutcome::success()).unwrap();
+    assert!(raw_event.wait().unwrap().success());
+
+    for (arguments, expected) in [
+        (vec!["agents.pi.start"], vec![]),
+        (vec!["agents.pi.state"], vec![]),
+        (vec!["agents.pi.ingest", event, "%1"], vec![event, "%1"]),
+    ] {
+        let mut child = spawn_bootty(&arguments);
+        let request = receive_request(&receiver);
+        assert_eq!(request.invocation.command, arguments[0]);
+        assert_eq!(request.invocation.arguments, expected);
+        request.response.send(CommandOutcome::success()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    let update = spawn_bootty(&["update"]).wait_with_output().unwrap();
+    assert!(!update.status.success());
+    assert!(
+        String::from_utf8_lossy(&update.stderr)
+            .contains("install the complete Bootty release package")
+    );
+
+    assert_bare_invocation_uses_live_owner();
 
     drop(server);
 }
@@ -97,6 +146,29 @@ fn spawn_bootty(arguments: &[&str]) -> std::process::Child {
         .expect("start Bootty CLI")
 }
 
+fn assert_bare_invocation_uses_live_owner() {
+    let mut bare = Command::new(env!("CARGO_BIN_EXE_bootty"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start bare Bootty invocation");
+    let deadline = Instant::now()
+        .checked_add(CLI_BUDGET)
+        .expect("CLI deadline is representable");
+    let status = loop {
+        if let Some(status) = bare.try_wait().expect("poll bare invocation") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            bare.kill().expect("stop unexpected second GUI");
+            panic!("bare Bootty tried to open a second GUI");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success());
+}
+
 /// Wall-clock budget for a spawned CLI to reach the app command channel.
 ///
 /// A loaded parallel run can starve the child for seconds, so the budget only
@@ -104,7 +176,9 @@ fn spawn_bootty(arguments: &[&str]) -> std::process::Child {
 const CLI_BUDGET: Duration = Duration::from_secs(30);
 
 fn receive_request(receiver: &AppCommandReceiver) -> AppCommandRequest {
-    let deadline = Instant::now() + CLI_BUDGET;
+    let deadline = Instant::now()
+        .checked_add(CLI_BUDGET)
+        .expect("CLI deadline is representable");
     loop {
         if let Ok(request) = receiver.try_recv() {
             return request;
