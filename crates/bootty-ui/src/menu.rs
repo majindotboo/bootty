@@ -1,90 +1,125 @@
-//! Context menus described as a table of entries.
+//! Native application menu, built with `muda`.
 //!
-//! The caller owns the vocabulary: it hands over labels, enabled flags and its own action values,
-//! and gets back the one that was chosen. Nothing about what the entries *mean* lives here, which
-//! is what lets two different menus — and eventually an extension-contributed one — share this.
+//! The menu is installed as the macOS application menu (`NSApp.mainMenu`); its `Settings…`
+//! accelerator (cmd+,) is dispatched by `AppKit` and clicks arrive on `muda`'s global event channel,
+//! which the app drains each frame via [`settings_requested`]. The keybind path opens the same
+//! window, so the menu is an additional entry point rather than the only one.
+//!
+//! Other platforms fall back to the keybind only; their native menu integration is a follow-up.
 
-use eframe::egui;
+#[cfg(target_os = "macos")]
+mod platform_menu {
+    use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc::Receiver, mpsc::SyncSender};
 
-/// One line in a context menu.
-pub enum MenuEntry<'a, T> {
-    Item {
-        label: &'a str,
-        enabled: bool,
-        value: T,
-    },
-    Separator,
-    /// A nested menu. Its own entries are only built when the submenu opens.
-    Submenu {
-        label: &'a str,
-        entries: Vec<MenuEntry<'a, T>>,
-    },
-}
+    use muda::{
+        Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+        accelerator::{Accelerator, Code, Modifiers},
+    };
 
-impl<'a, T> MenuEntry<'a, T> {
-    /// An always-enabled item.
-    pub fn item(label: &'a str, value: T) -> Self {
-        Self::Item {
-            label,
-            enabled: true,
-            value,
-        }
+    const SETTINGS_ID: &str = "bootty.settings";
+
+    /// Holds the menu alive for the process lifetime; dropping it would tear down the menu.
+    pub struct AppMenu {
+        _menu: Menu,
     }
 
-    /// An item the caller may disable, keeping it visible so the menu shape stays stable.
-    pub fn enabled_item(enabled: bool, label: &'a str, value: T) -> Self {
-        Self::Item {
-            label,
-            enabled,
-            value,
-        }
+    type MenuEvents = (SyncSender<MenuEvent>, Mutex<Receiver<MenuEvent>>);
+    type MenuWake = dyn Fn() + Send + Sync;
+    type MenuWakes = Mutex<Vec<Weak<MenuWake>>>;
+    static EVENTS: OnceLock<MenuEvents> = OnceLock::new();
+    static WAKES: OnceLock<MenuWakes> = OnceLock::new();
+
+    fn events() -> &'static MenuEvents {
+        EVENTS.get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(16);
+            (sender, Mutex::new(receiver))
+        })
     }
 
-    pub fn submenu(label: &'a str, entries: Vec<MenuEntry<'a, T>>) -> Self {
-        Self::Submenu { label, entries }
+    fn wakes() -> &'static MenuWakes {
+        WAKES.get_or_init(|| Mutex::new(Vec::new()))
     }
-}
 
-/// Attach a context menu to `response` and return the chosen value.
-///
-/// The first click wins: once something is chosen the remaining entries stop accepting clicks and
-/// the menu closes, so one gesture cannot produce two actions.
-#[must_use]
-pub fn context_menu<T: Copy>(response: &egui::Response, entries: &[MenuEntry<'_, T>]) -> Option<T> {
-    let mut chosen = None;
-    response.context_menu(|ui| {
-        show_entries(ui, entries, &mut chosen);
-        if chosen.is_some() {
-            ui.close();
-        }
-    });
-    chosen
-}
-
-fn show_entries<T: Copy>(ui: &mut egui::Ui, entries: &[MenuEntry<'_, T>], chosen: &mut Option<T>) {
-    for entry in entries {
-        match entry {
-            MenuEntry::Separator => {
-                ui.separator();
+    #[must_use]
+    pub fn install(localizer: &crate::i18n::Localizer) -> Option<AppMenu> {
+        let sender = events().0.clone();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if crate::agent_tray::dispatch(&event.id.0) {
+                return;
             }
-            MenuEntry::Item {
-                label,
-                enabled,
-                value,
-            } => {
-                if chosen.is_none()
-                    && ui
-                        .add_enabled(*enabled, egui::Button::new(*label))
-                        .clicked()
-                {
-                    *chosen = Some(*value);
-                }
+            let _ = sender.try_send(event);
+            if let Ok(mut wakes) = wakes().lock() {
+                wakes.retain(|wake| {
+                    let Some(wake) = wake.upgrade() else {
+                        return false;
+                    };
+                    wake();
+                    true
+                });
             }
-            MenuEntry::Submenu { label, entries } => {
-                if chosen.is_none() {
-                    ui.menu_button(*label, |ui| show_entries(ui, entries, chosen));
-                }
-            }
+        }));
+        let menu = Menu::new();
+        let app_menu = Submenu::new("Bootty", true);
+        let settings = MenuItem::with_id(
+            SETTINGS_ID,
+            localizer.message("menu-settings", None),
+            true,
+            Some(Accelerator::new(Some(Modifiers::META), Code::Comma)),
+        );
+        app_menu
+            .append_items(&[
+                &PredefinedMenuItem::about(Some(&localizer.message("menu-about", None)), None),
+                &PredefinedMenuItem::separator(),
+                &settings,
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(Some(&localizer.message("menu-quit", None))),
+            ])
+            .ok()?;
+        menu.append(&app_menu).ok()?;
+        menu.init_for_nsapp();
+        Some(AppMenu { _menu: menu })
+    }
+
+    /// Register a GPUI wake edge so a native menu click is observed even while the app is idle.
+    pub fn set_wake(wake: &Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut wakes) = wakes().lock() {
+            wakes.push(Arc::downgrade(wake));
+            wakes.retain(|wake| wake.strong_count() > 0);
         }
     }
+
+    /// Drain pending menu events; returns `true` if the Settings item was activated.
+    #[must_use]
+    pub fn settings_requested(window_active: bool) -> bool {
+        if !window_active {
+            return false;
+        }
+        let mut requested = false;
+        let Ok(events) = events().1.lock() else {
+            return false;
+        };
+        while let Ok(event) = events.try_recv() {
+            if event.id == MenuId::new(SETTINGS_ID) {
+                requested = true;
+            }
+        }
+        requested
+    }
 }
+
+#[cfg(not(target_os = "macos"))]
+mod platform_menu {
+    pub struct AppMenu;
+
+    pub fn install(_: &crate::i18n::Localizer) -> Option<AppMenu> {
+        None
+    }
+
+    pub fn set_wake(_: &std::sync::Arc<dyn Fn() + Send + Sync>) {}
+
+    pub fn settings_requested(_: bool) -> bool {
+        false
+    }
+}
+
+pub use platform_menu::{AppMenu, install, set_wake, settings_requested};
