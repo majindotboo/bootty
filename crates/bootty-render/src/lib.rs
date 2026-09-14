@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod font_database;
 pub mod paint_plan;
 pub mod terminal_font_face;

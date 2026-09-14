@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use pretty_assertions::assert_eq;
 
 use bootty_render::{

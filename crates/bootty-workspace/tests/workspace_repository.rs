@@ -450,11 +450,11 @@ fn a_remote_backend_success_is_recovered_after_its_metadata_commit_fails(
             .expect("reconcile authoritative backend snapshot"),
     );
     assert_eq!(backend_names(&sessions), vec!["created-name"]);
-    assert!(
+    assert_eq!(
         repository
             .pending_binding_membership_mutations(scope)
-            .expect("read cleared mutations")
-            .is_empty()
+            .expect("read cleared mutations"),
+        Vec::<bootty_workspace::PendingBindingMembershipMutation>::new()
     );
     drop(repository);
 

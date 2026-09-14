@@ -164,7 +164,7 @@ fn invocation_context_distinguishes_an_explicit_target() {
         else {
             panic!("target probe failed");
         };
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, Vec::<bootty_command::CommandWarning>::new());
         assert_eq!(value["target_supplied"], supplied);
     }
 }
