@@ -1,0 +1,20 @@
+[package]
+name = "bootty-agents"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+bootty-control = { path = "../bootty-control" }
+bootty-write = { path = "../bootty-write" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+assert_fs.workspace = true
+pretty_assertions.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true

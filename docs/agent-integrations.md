@@ -19,13 +19,14 @@ Each adapter reads `${TMUX_PANE:-${BOOTTY_PANE:-}}` and passes it as the
 second argument of its `ingest` command. An event with no pane lands on no
 session row.
 
-Every module declares and owns its adapter through
-`bootty.integration.register`. Install or remove it from that module's entry in
-Settings. Bootty writes the adapter and updates the tool's configuration.
+The native provider owns its adapter and bounded protocol state. Install or
+remove it from the provider's entry in Settings. Bootty writes the adapter and
+updates the tool's configuration. Existing custom Lua/Luau files are preserved
+and reported as unsupported; they are never executed.
 
 ## Pi
 
-The built-in `agents/pi.luau` module starts Pi in the selected visible terminal:
+The native Pi provider starts Pi in the selected visible terminal:
 
 ```sh
 pi
@@ -63,7 +64,7 @@ It reports any dropped event count through `extension_error`.
 
 ## Codex
 
-The built-in `agents/codex.luau` module starts Codex in the selected visible
+The native Codex provider starts Codex in the selected visible
 terminal:
 
 ```sh
@@ -111,11 +112,66 @@ The hook reads one native hook JSON object from stdin and calls
 
 `Notification` is what tells Bootty that Claude Code is waiting on the person.
 
+## Resume, fork, and launch context
+
+All three providers expose `agents.<provider>.resume [session] [cwd] [program]
+[argv-json]` and `agents.<provider>.fork` with the same arguments. Pi uses
+`--session`/`--fork`, Codex uses its `resume`/`fork` subcommands, and Claude uses
+`--resume` with optional `--fork-session`. An omitted session ID is accepted only
+when the selected pane reported one. Resume and fork always create a new visible
+tab in the captured parent session and never type into the source agent.
+
+The optional argv value is a JSON string array, so arguments retain their exact
+boundaries. Launch values are bounded and reject controls and option-shaped
+session IDs. POSIX launches use single-quoted argv; local Windows launches use a
+UTF-16LE encoded PowerShell command. The adapter reports working directory,
+session identity and reusable launch options. Bootty retains only known model,
+profile, sandbox, approval and UI options; it drops prompts, arbitrary config,
+credentials and old session selectors. Sessions launched with a persistence-off
+flag cannot be resumed or forked from reported context. Explicit arguments can
+still choose a different executable or options.
+
+Start accepts the same optional argv JSON after cwd and program. The returned
+success includes the target and sanitized launch context and means that the
+command was submitted to its visible PTY; native events remain the authority for
+agent lifecycle state.
+
 ## Limits and cleanup
 
 Agent processes are owned by the visible mux pane that launched them. Closing
 that pane stops its agent process tree. Reloading an integration does not stop
 the interactive session.
 
-Agent-specific JSON schemas, lifecycle rules, and adapter source stay in the
-Luau modules.
+Agent-specific JSON schemas, lifecycle rules, and installed hook adapters are
+owned by the native `bootty-agents` crate. Existing custom Lua and Luau files
+are preserved but unsupported; Settings reports them.
+
+## Attention and navigation
+
+The Agents Dock panel lists reported sessions across live local, SSH and WSL
+bindings. Focus, resume, fork and mark-read actions use the same command path as
+`agents.list`, `agents.focus`, `agents.next` and `agents.<provider>.acknowledge`.
+Targets include a pane generation; closed or replaced panes fail as stale.
+Resume and fork first focus the captured host, then create the new tab there.
+
+Completion, input requests and errors receive monotonically increasing attention
+sequences. Acknowledging a displayed sequence cannot clear a newer event. A
+focused visible terminal acknowledges its own events; background panes retain an
+unread marker. `session.agent_notifications` controls desktop alerts (`never`,
+`unfocused`, or `always`). Duplicate status reports do not notify again.
+
+Codex hooks include permission requests, tool completion and interruption. A
+permission request reports an approval boundary; another hook may approve it
+without displaying a human prompt, so the state clears when execution resumes.
+See the [Codex hook contract](https://learn.chatgpt.com/docs/hooks).
+
+The application tray aggregates reported agents across open Bootty windows. Its
+unread count and menu update from the same projection as the Dock panel. A menu
+entry focuses its captured pane in its originating window; entries from an older
+menu revision are discarded. The native menu is capped at 128 agent rows, with
+links to each window's full Agents panel. Closing the last reporting window
+removes the tray; the tray never changes close or quit behavior.
+
+macOS and Windows use native status/tray icons. Linux uses StatusNotifierItem on
+a background service thread, with coalesced updates and shutdown when the owner
+drops. A desktop without a tray service retains all window controls.
