@@ -882,6 +882,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootty-git"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "assert_fs",
+ "bootty-host",
+ "bootty-workspace-hack",
+ "bootty-write",
+ "notify",
+ "pretty_assertions",
+ "rstest",
+ "serde",
+]
+
+[[package]]
 name = "bootty-herdr"
 version = "0.5.0"
 dependencies = [
