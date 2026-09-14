@@ -4,15 +4,15 @@ Bootty publishes static native bundles through GitHub Releases. Every release ha
 
 ## Updates
 
-Installed Bootty releases check for a newer GitHub Release before opening the app. If an update is available, Bootty installs it and restarts into the new version. Development binaries under a Cargo `target` directory never self-update.
+Install updates from the [latest GitHub Release](https://github.com/majindotboo/bootty/releases/latest) by replacing the complete application package. Bootty does not modify its installation at startup.
 
-Run an update explicitly with:
+The existing command reports this installation requirement:
 
 ```sh
 bootty update
 ```
 
-The updater verifies the release asset through GitHub's release checksum before replacing the installed binary. Automatic updates currently support Linux and macOS. Windows continues to use the published ZIP because its bundled runtime DLL prevents safe in-process replacement.
+The application, resources, and bundled daemons must stay at the same version. Replacing only the executable leaves old daemons that fail version negotiation; on macOS it also invalidates the app signature, and on Windows it leaves bundled runtime DLLs unchanged. In-place updates remain unavailable until Bootty can replace and roll back the complete installation.
 
 Remote Spaces first use a matching target daemon bundled with the installed
 app. Local macOS installs cross-build all supported targets so development

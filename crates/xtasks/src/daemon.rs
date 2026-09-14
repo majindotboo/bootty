@@ -38,6 +38,7 @@ pub enum DaemonTarget {
 }
 
 impl DaemonTarget {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Aarch64AppleDarwin => "aarch64-apple-darwin",
@@ -48,6 +49,7 @@ impl DaemonTarget {
         }
     }
 
+    #[must_use]
     pub const fn binary_name(self) -> &'static str {
         match self {
             Self::X86_64PcWindowsMsvc => "bootty-daemon.exe",
@@ -55,6 +57,7 @@ impl DaemonTarget {
         }
     }
 
+    #[must_use]
     pub fn artifact_name(self) -> String {
         format!("bootty-daemon-{self}")
     }
@@ -100,6 +103,8 @@ pub enum DaemonCommand {
     Size { artifact: PathBuf },
 }
 
+/// # Errors
+/// Returns build, staging, artifact validation, or matrix serialization errors.
 pub fn run(args: &DaemonArgs) -> Result<()> {
     match &args.command {
         DaemonCommand::BuildAll => build_all(),
@@ -114,6 +119,8 @@ pub fn run(args: &DaemonArgs) -> Result<()> {
     }
 }
 
+/// # Errors
+/// Returns target installation, build, staging, or artifact verification errors.
 pub fn build_all() -> Result<()> {
     if let Some(output_dir) = env::var_os("BOOTTY_DAEMON_OUTPUT_DIR") {
         if output_dir.is_empty() {
@@ -141,6 +148,8 @@ pub fn build_all() -> Result<()> {
 
 /// Build one daemon on its CI runner. The runner matrix guarantees that native
 /// Apple, Windows, and `x86_64` Linux builds do not need cross-build tooling.
+/// # Errors
+/// Returns target installation or daemon build errors.
 pub fn build_one(target: DaemonTarget) -> Result<()> {
     let mut rustup = Command::new("rustup");
     rustup.args(["target", "add", target.as_str()]);
@@ -154,6 +163,8 @@ pub fn build_one(target: DaemonTarget) -> Result<()> {
     cargo(program, target)
 }
 
+/// # Errors
+/// Returns an error if the built daemon cannot be read or copied.
 pub fn stage(target: DaemonTarget, output_dir: &Path) -> Result<()> {
     let source = target_root()
         .join(target.as_str())
@@ -162,6 +173,8 @@ pub fn stage(target: DaemonTarget, output_dir: &Path) -> Result<()> {
     copy_file(&source, &output_dir.join(target.artifact_name()))
 }
 
+/// # Errors
+/// Returns an error if a required daemon artifact is absent, empty, or not a file.
 pub fn verify(output_dir: &Path) -> Result<()> {
     for target in TARGETS {
         let artifact = output_dir.join(target.artifact_name());
@@ -174,6 +187,8 @@ pub fn verify(output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if the artifact is absent, empty, not a file, or exceeds the size budget.
 pub fn check_size(artifact: &Path) -> Result<()> {
     let metadata = fs::metadata(artifact)
         .with_context(|| format!("missing daemon artifact: {}", artifact.display()))?;
@@ -188,6 +203,8 @@ pub fn check_size(artifact: &Path) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error if the daemon target matrix cannot be serialized.
 pub fn matrix_json() -> Result<String> {
     #[derive(Serialize)]
     struct Entry {

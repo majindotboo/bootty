@@ -7,7 +7,6 @@ workspace = true
 
 [dependencies]
 tempfile.workspace = true
-bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [target.'cfg(windows)'.dependencies]
 winsafe.workspace = true

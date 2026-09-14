@@ -2,13 +2,12 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::{command, hakari};
+use crate::command;
 
+/// # Errors
+/// Returns an error if formatting or Clippy fails or cannot start.
 pub fn run() -> Result<()> {
     command::run(Command::new("cargo").args(["fmt", "--all", "--", "--check"]))?;
-    hakari::run(hakari::Args {
-        action: hakari::Action::Check,
-    })?;
     command::run(Command::new("cargo").args([
         "clippy",
         "--workspace",

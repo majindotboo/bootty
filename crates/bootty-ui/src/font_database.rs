@@ -413,4 +413,4 @@ fn load_macos_fonts(database: &mut fontdb::Database) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_macos_fonts(_database: &mut fontdb::Database) {}
+const fn load_macos_fonts(_database: &mut fontdb::Database) {}

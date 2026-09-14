@@ -632,7 +632,7 @@ fn cursor_up_rewrite_publishes_a_single_row() {
             shell: Some("/bin/sh".to_owned()),
             args: vec![
                 "-c".to_owned(),
-                "printf 'Thinking (1s)\\n'; sleep 0.05; printf '\\x1b[1A\\r\\x1b[2KThinking (2s)\\n'"
+                "printf 'Thinking (1s)\\n'; sleep 0.05; printf '\\033[1A\\r\\033[2KThinking (2s)\\n'"
                     .to_owned(),
             ],
             ..SessionLaunchConfig::default()
@@ -674,7 +674,7 @@ fn streaming_rewrites_publish_coherent_frames() {
             shell: Some("/bin/sh".to_owned()),
             args: vec![
                 "-c".to_owned(),
-                "i=1; while [ $i -le 40 ]; do printf '\\x1b[2;1HThinking (%s)\\x1b[K' \"$i\"; i=$((i + 1)); sleep 0.05; done".to_owned(),
+                "i=1; while [ $i -le 40 ]; do printf '\\033[2;1HThinking (%s)\\033[K' \"$i\"; i=$((i + 1)); sleep 0.05; done".to_owned(),
             ],
             ..SessionLaunchConfig::default()
         },

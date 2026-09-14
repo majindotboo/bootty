@@ -15,22 +15,22 @@ measurements and hillclimb findings are vault research artifacts.
   for normal shell output.
 - Idle frames should avoid terminal work unless terminal state, cursor blink, or
   chrome repaint state changed.
-- WGPU changes must preserve visual parity while separating CPU staging,
-  render-pass, and first-upload costs.
+- Rendering changes must preserve visual parity while separating CPU scene construction,
+  GPU submission, and presentation costs.
 - Startup, PTY, parser, renderer, input, image, and app-frame changes must keep
   benchmark targets compileable without making the default validation gate run
   measured Criterion suites.
 
 ## Routine validation policy
 
-Default local validation compiles only the core benchmark harness:
+Default local validation compiles only the core paint-planning benchmark harness:
 
 ```bash
-cargo test -p bootty-app --bench paint_plan --no-run
+cargo test -p bootty-ui --bench pipeline_resources --no-run
 ```
 
 CI keeps the blocking benchmark gate deliberately small: it validates benchmark
-metadata/dashboard helpers and compile-checks the core `paint_plan` harness.
+metadata/dashboard helpers and compile-checks the core `pipeline_resources` harness.
 Local repro:
 
 ```bash
@@ -49,35 +49,30 @@ Run task-specific compile-only checks when touching those surfaces. Keep measure
 Criterion suites out of the default local gate unless validation policy changes
 explicitly.
 
-Cross-rs CI covers portable crates on non-host targets. Full GUI/app coverage
-stays on native Linux, macOS, and Windows jobs because the released cross-rs
-images are older Linux bases and do not carry Bootty's current GTK/WebKit app
-stack.
+CI checks portable crates for Linux arm64 and Windows GNU using the Ubuntu
+runner's cross compilers and the project's Zig toolchain. Full GUI/app coverage
+runs on native Linux, macOS, and Windows runners with their platform libraries.
 
 | Surface | Compile-only check |
 | --- | --- |
-| Startup/config/session-order | `cargo test -p bootty-app --bench startup_config --no-run` |
-| Competitive startup milestones | `cargo test -p bootty-app --bench startup_milestones --no-run` |
-| WGPU staging/render pass | `cargo test -p bootty-app --bench paint_plan_wgpu --no-run` |
-| Kitty graphics | `cargo test -p bootty-app --bench kitty_image --no-run` |
-| Graphics protocols beyond Kitty | `cargo test -p bootty-app --bench graphics_protocols --no-run` |
-| App frame/chrome orchestration | `cargo test -p bootty-app --bench app_frame --no-run` |
-| Font shaping/text atlas | `cargo test -p bootty-app --bench text_atlas --no-run` |
-| PTY drain/backpressure | `cargo test -p bootty-runtime --bench pty_drain --no-run` |
-| Flood responsiveness | `cargo test -p bootty-runtime --bench flood_response --no-run` |
-| Resize/reflow | `cargo test -p bootty-app --bench resize_reflow --no-run` |
-| Scrollback memory/search/copy/clear | `cargo test -p bootty-app --bench scrollback --no-run` |
-| Parser/control sequences | `cargo test -p bootty-app --bench parser_control --no-run` |
-| Render throughput/frame pacing | `cargo test -p bootty-app --bench render_pacing --no-run` |
-| Input latency/responsiveness | `cargo test -p bootty-app --bench input_latency --no-run` |
-| Idle overhead/wakeups/memory/power | `cargo test -p bootty-app --bench idle_overhead --no-run` |
-| Power-sensitive render workload models | `cargo test -p bootty-app --bench power_thermal --no-run` |
-| Keyboard/mouse/paste/clipboard/IME protocols | `cargo test -p bootty-app --bench input_protocols --no-run` |
-| Hostile input/recovery | `cargo test -p bootty-app --bench hostile_input --no-run` |
-| Panes/tabs/multi-window | `cargo test -p bootty-app --bench panes_multiwindow --no-run` |
-| Multiplexer performance/passthrough | `cargo test -p bootty-app --bench multiplexer --no-run` |
-| Remote session replay | `cargo test -p bootty-app --bench remote_session --no-run` |
-| Real application replay | `cargo test -p bootty-app --bench real_app_replay --no-run` |
+| Startup/config/session-order | `cargo test -p bootty-ui --bench startup_config --no-run` |
+| Graphics protocols beyond Kitty | `cargo test -p bootty-ui --bench graphics_protocols --no-run` |
+| Paint planning and pipeline resources | `cargo test -p bootty-ui --bench pipeline_resources --no-run` |
+| PTY drain/backpressure | `cargo test -p bootty-terminal --bench pty_drain --no-run` |
+| Flood responsiveness | `cargo test -p bootty-terminal --bench flood_response --no-run` |
+| Resize/reflow | `cargo test -p bootty-ui --bench resize_reflow --no-run` |
+| Scrollback memory/search/copy/clear | `cargo test -p bootty-ui --bench scrollback --no-run` |
+| Parser/control sequences | `cargo test -p bootty-ui --bench parser_control --no-run` |
+| Render throughput/frame pacing | `cargo test -p bootty-ui --bench render_pacing --no-run` |
+| GPUI terminal scene preparation | `cargo test -p bootty-ui --bench gpui_terminal_scene --no-run` |
+| Idle overhead/wakeups/memory/power | `cargo test -p bootty-ui --bench idle_overhead --no-run` |
+| Power-sensitive render workload models | `cargo test -p bootty-ui --bench power_thermal --no-run` |
+| Keyboard/mouse/paste/clipboard/IME protocols | `cargo test -p bootty-ui --bench input_protocols --no-run` |
+| Hostile input/recovery | `cargo test -p bootty-ui --bench hostile_input --no-run` |
+| Panes/tabs/multi-window | `cargo test -p bootty-ui --bench panes_multiwindow --no-run` |
+| Multiplexer performance/passthrough | `cargo test -p bootty-ui --bench multiplexer --no-run` |
+| Remote session replay | `cargo test -p bootty-ui --bench remote_session --no-run` |
+| Real application replay | `cargo test -p bootty-ui --bench real_app_replay --no-run` |
 
 ## Measured runs
 
@@ -85,31 +80,29 @@ Use measured Criterion runs only while investigating or validating the relevant
 surface. For quick local comparisons, prefer short runs such as:
 
 ```bash
-cargo bench -p bootty-app --bench <target> -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1
+cargo bench -p bootty-ui --bench <target> -- --sample-size 10 --measurement-time 0.2 --warm-up-time 0.1
 ```
 
 Use longer runs, raw result exports, repeated randomized runs, and correctness
 status before making competitive claims.
 
+Set `BOOTTY_BENCH_FRAME_CAPTURE=/absolute/path/frame.png` when running
+`gpui_terminal_scene` to save its cached terminal frame for visual comparison.
+The capture runs outside the timed iterations.
+
 ## Benchmark target map
 
 | Target | Use when changing |
 | --- | --- |
-| `paint_plan` | render-frame extraction, paint planning, text grouping, sprite routing, input routing, keybinding lookup, egui chrome, and sidebar metadata slicing |
 | `startup_config` | config loading, theme resolution, keybind construction, font-size preference writes, and SQLite-backed session ordering |
-| `startup_milestones` | config cases, native option construction, app-state readiness, PTY first frame, sequential/concurrent window models, and startup resource snapshots |
-| `paint_plan_wgpu` | WGPU CPU staging, glyph/sprite/image upload preparation, render-pass encode/submit/wait, and first-frame upload paths |
-| `kitty_image` | Kitty graphics parsing, PNG decode, placement churn, storage cleanup, mixed text/image extraction, and image upload |
 | `graphics_protocols` | iTerm2 image OSC, Sixel, Unicode/block fallback, unsupported-feature accounting, and text/image render command preparation |
-| `app_frame` | app-state update, terminal/sidebar/status layout, frame orchestration, and sidebar/status refresh scheduling |
-| `text_atlas` | font fallback, shaping, glyph cache keys, emoji/symbol rasterization, atlas reuse/growth, ligatures, Unicode classes, and atlas upload preparation |
 | `pty_drain` | PTY reader queueing, bounded drain slices, burst/catch-up VT writes, backlog policy, and frame publication cadence |
 | `flood_response` | deterministic flood replays, visible Ctrl-C/input/scroll injection, and live PTY Ctrl-C-to-child-exit latency |
 | `resize_reflow` | fixed/random resize cycles, drag model, HiDPI/monitor moves, fullscreen toggles, main-screen reflow, alternate screen, scrollback, and image-adjacent content |
 | `scrollback` | append/memory snapshots, bounded/native scrollback budgets, search/copy, clear/reclaim, and reflow |
 | `parser_control` | direct parser/state update and full visible frame modes for ASCII, split UTF-8/CSI, SGR/truecolor, cursor motion, scroll margins, insert/delete, erase, OSC/DCS/query storms, and synchronized updates |
 | `render_pacing` | CPU-side pacing model for cursor-only, single-cell, statusline, row/column, random cells, full repaint, scroll, alternate screen, and target Hz budgets |
-| `input_latency` | internal encode-to-visible-frame contribution for shell/raw/readline/editor/tmux/SSH echo, repeat bursts, and redraw/flood contention |
+| `gpui_terminal_scene` | CPU-side terminal scene preparation and glyph-cache reuse for cold, warm rebuilt, and scrolling frames, plus full GPUI window draws for changing frames, cursor blinks, and unchanged cached-scene replay. The full draw reports terminal prepaint/paint CPU, glyph/image primitive counts, cache create/hit/retire counts, and GPUI dirty-to-platform-submit latency. On macOS the benchmark uses GPUI's Metal headless renderer; other platforms currently discard the scene at submission. None of these timings include display scanout. |
 | `idle_overhead` | idle tick/repaint models for prompts, tabs, panes, ligatures, IME preedit, shell integration, and notifications |
 | `power_thermal` | modeled idle/typing/editor/flood/animation render workloads for power-sensitive profiling; pair with external telemetry for real power or thermal claims |
 | `input_protocols` | keyboard protocols, modifiers, function/repeat/dead-key/AltGr cases, mouse tracking, paste, OSC 52, and IME text handling |
@@ -227,6 +220,74 @@ as process-level evidence, not full GPU/power accounting.
 
 ## Internal trace mode
 
+### Live tab, session, and Space switching
+
+`scripts/benchmark-switching.py` drives the running development app through its
+normal command owner and waits for the destination terminal's GPUI paint hook.
+Unlike the `panes_multiwindow` synthetic workloads, this includes control dispatch,
+backend activation, persistence, Dock reconciliation, terminal preparation, and CPU
+painting. It does **not** measure display scanout or OS keyboard-event delivery.
+`command_to_paint_ms` starts before CLI process launch; `command_ms` separately
+records command round-trip time. `owner_to_paint_ms` starts when the app owner
+receives the invocation, excluding CLI discovery/startup and transport overhead.
+Use the owner metric to optimize switching within the UI. A successful command
+alone is never a successful paint sample.
+
+Launch a development window with:
+
+```bash
+BOOTTY_SWITCH_BENCH_TRACE=/tmp/switch-paint.jsonl \
+BOOTTY_TRACE_LATENCY=/tmp/switch-phases.log mise run launch
+```
+
+Keep that window foreground, with terminal panels selected. Set up two destinations
+for each case, switch to each once, and use their `target` values from the paint
+trace. The trace contains identities, focus, and a nonblank-content flag, never
+terminal text. Use real shell content in both destinations. Example case file:
+
+```json
+{
+  "cases": [{
+    "name": "native_session_warm",
+    "setup": [["command", "select_space", "1"]],
+    "destinations": [
+      {"command": ["command", "select_session", "1"], "target": "EXACT_FIRST_TARGET"},
+      {"command": ["command", "select_session", "2"], "target": "EXACT_SECOND_TARGET"}
+    ]
+  }],
+  "restore": [["command", "select_space", "1"], ["command", "select_session", "1"]]
+}
+```
+
+Use `select_tab` and `select_space` for the other cases. Label backend, local/remote,
+terminal count, workload, and warm/cold policy in the case names and recipe. The
+runner measures **warm alternating switches**; cold startup/first attachment needs
+separate evidence. Existing development sessions are reused, never created or
+deleted. The optional `restore` sequence restores the initial selection.
+
+```bash
+python3 scripts/benchmark-switching.py \
+  --binary /absolute/path/to/development/bundle/Contents/MacOS/bootty \
+  --namespace bootty-dev-0123456789abcdef \
+  --trace /tmp/switch-paint.jsonl --cases /tmp/switch-cases.json \
+  --output artifacts/switching/baseline --samples 30 --warmups 3
+```
+
+Run cases serially, with builds and other benchmark workloads stopped. Each
+iteration measures both directions in seeded randomized order, after establishing
+the opposite destination and a 100ms settling interval outside the timed region.
+The runner requires the requested target to paint with keyboard focus and nonblank
+content. A timeout, command failure, or clock adjustment invalidates the run; no
+outliers are discarded. Results include raw samples, p50/p95/p99/max, variance,
+binary hash, recipe, and owner diagnostics. Keep failed rows as evidence.
+
+Tracing writes synchronously **after** taking the paint timestamp. Its overhead
+can affect subsequent frames; compare candidates with identical instrumentation.
+Scene paint is earlier than GPU submission, and nonblank content is not a pixel
+equivalence check. Confirm real window content and input routing independently.
+Opaque tmux/Herdr attachment keys may not distinguish inner tab changes: do not
+use identical keys as a tab benchmark or call those no-ops a fast result.
+
 Bootty can emit internal JSONL trace records for optimization-only runs. This is
 not apples-to-apples competitive evidence because competitors cannot expose the
 same internal milestones.
@@ -245,10 +306,17 @@ include `worker_start`, `worker_stop`, `input_commands`, `pty_read`,
 disabled the worker stores `None`; when enabled records are written
 synchronously so crash evidence can be recovered.
 
+The historical `frame_presented` event is emitted when the terminal worker
+publishes an immutable frame, before GPUI prepaint, paint, platform submission,
+or display scanout. Its `presenter` field is `published_frame`; do not treat it
+as a visual-present timestamp. The `gpui_terminal_scene` full-window case is the
+checked-in source for GPUI draw and platform-submit evidence.
+
 When `run-terminal-public-benchmarks.py --bootty-trace` is used for Bootty, the
-runner also imports trace-derived `bootty_trace` metrics. `visual_catch_up_time`
-is the time from the last `parse_done` event to the last `frame_presented` event
-in that Bootty trace. Treat it as Bootty-owned diagnostic evidence. For
+runner also imports trace-derived `bootty_trace` metrics. The legacy
+`visual_catch_up_time` field is the time from the last `parse_done` event to the
+last published-frame event despite its name. Treat it as Bootty-owned
+parse-to-publication diagnostic evidence, not visual evidence. For
 competitors, use the public runner's post-producer sentinel plus compositor,
 video, OCR, or frame-counter capture when a true visual-present timestamp is
 required.

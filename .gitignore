@@ -2,7 +2,6 @@ target/
 artifacts/
 node_modules/
 dist/
-pages-dist/
 gen/schemas/
 **/gen/schemas/
 *.log

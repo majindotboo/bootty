@@ -11,15 +11,9 @@ use crate::clock::{Timer, utc_datetime, utc_timestamp};
 use crate::command;
 
 const APP_BENCHMARKS: &[&str] = &[
-    "paint_plan",
     "pipeline_resources",
-    "paint_plan_wgpu",
     "startup_config",
-    "startup_milestones",
-    "kitty_image",
     "graphics_protocols",
-    "app_frame",
-    "text_atlas",
     "hostile_input",
     "panes_multiwindow",
     "multiplexer",
@@ -29,7 +23,7 @@ const APP_BENCHMARKS: &[&str] = &[
     "scrollback",
     "parser_control",
     "render_pacing",
-    "input_latency",
+    "gpui_terminal_scene",
     "idle_overhead",
     "power_thermal",
     "input_protocols",
@@ -100,6 +94,8 @@ impl PlannedCommand {
     }
 }
 
+/// # Errors
+/// Returns an error if a benchmark command fails or reproduction evidence cannot be written.
 pub fn run(args: Args) -> Result<()> {
     let output_dir = match args.output {
         Some(path) => path,
@@ -112,10 +108,10 @@ pub fn run(args: Args) -> Result<()> {
         .with_context(|| format!("failed to create {}", summary_path.display()))?;
     write_json_line(&mut summary, &metadata()?)?;
 
-    let mut failures = 0;
+    let mut failures = 0_usize;
     for planned in plan(args.ci_smoke, args.quick) {
         if !run_logged(&planned, &output_dir, &mut summary)? {
-            failures += 1;
+            failures = failures.saturating_add(1);
         }
     }
 
@@ -171,14 +167,14 @@ fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
 
     if ci_smoke {
         commands.push(PlannedCommand::new(
-            "compile_paint_plan",
+            "compile_pipeline_resources",
             "cargo",
             [
                 "test",
                 "-p",
-                "bootty-app",
+                "bootty-ui",
                 "--bench",
-                "paint_plan",
+                "pipeline_resources",
                 "--no-run",
             ],
         ));
@@ -189,14 +185,7 @@ fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
         commands.push(PlannedCommand::new(
             format!("compile_{benchmark}"),
             "cargo",
-            [
-                "test",
-                "-p",
-                "bootty-app",
-                "--bench",
-                *benchmark,
-                "--no-run",
-            ],
+            ["test", "-p", "bootty-ui", "--bench", *benchmark, "--no-run"],
         ));
     }
     commands.push(PlannedCommand::new(
@@ -205,7 +194,7 @@ fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
         [
             "test",
             "-p",
-            "bootty-runtime",
+            "bootty-terminal",
             "--bench",
             "pty_drain",
             "--no-run",
@@ -217,7 +206,7 @@ fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
         [
             "test",
             "-p",
-            "bootty-runtime",
+            "bootty-terminal",
             "--bench",
             "flood_response",
             "--no-run",
@@ -225,53 +214,52 @@ fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
     ));
 
     if quick {
-        commands.extend([
-            PlannedCommand::new(
-                "quick_paint_plan_smoke",
-                "cargo",
-                ["test", "-p", "bootty-app", "--bench", "paint_plan"],
-            ),
-            PlannedCommand::new(
-                "quick_input_protocols",
-                "cargo",
-                [
-                    "bench",
-                    "-p",
-                    "bootty-app",
-                    "--bench",
-                    "input_protocols",
-                    "input_protocol_keyboard_legacy_printable",
-                    "--",
-                    "--sample-size",
-                    "10",
-                    "--measurement-time",
-                    "0.2",
-                    "--warm-up-time",
-                    "0.1",
-                ],
-            ),
-            PlannedCommand::new(
-                "quick_power_thermal",
-                "cargo",
-                [
-                    "bench",
-                    "-p",
-                    "bootty-app",
-                    "--bench",
-                    "power_thermal",
-                    "power_thermal_idle_prompt_1s_render_model",
-                    "--",
-                    "--sample-size",
-                    "10",
-                    "--measurement-time",
-                    "0.2",
-                    "--warm-up-time",
-                    "0.1",
-                ],
-            ),
-        ]);
+        commands.extend(quick_measurements());
     }
     commands
+}
+
+fn quick_measurements() -> [PlannedCommand; 2] {
+    [
+        PlannedCommand::new(
+            "quick_input_protocols",
+            "cargo",
+            [
+                "bench",
+                "-p",
+                "bootty-ui",
+                "--bench",
+                "input_protocols",
+                "input_protocol_keyboard_legacy_printable",
+                "--",
+                "--sample-size",
+                "10",
+                "--measurement-time",
+                "0.2",
+                "--warm-up-time",
+                "0.1",
+            ],
+        ),
+        PlannedCommand::new(
+            "quick_power_thermal",
+            "cargo",
+            [
+                "bench",
+                "-p",
+                "bootty-ui",
+                "--bench",
+                "power_thermal",
+                "power_thermal_idle_prompt_1s_render_model",
+                "--",
+                "--sample-size",
+                "10",
+                "--measurement-time",
+                "0.2",
+                "--warm-up-time",
+                "0.1",
+            ],
+        ),
+    ]
 }
 
 fn run_logged(planned: &PlannedCommand, output_dir: &Path, summary: &mut File) -> Result<bool> {

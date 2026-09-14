@@ -14,7 +14,10 @@ impl Backend {
             .name("agent-tray".to_owned())
             .spawn(move || {
                 use ksni::blocking::TrayMethods as _;
-                let tray = Sni(state.lock().expect("tray snapshot").clone());
+                let tray = Sni(state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone());
                 let handle = match tray.spawn() {
                     Ok(handle) => handle,
                     Err(error) => {
@@ -23,7 +26,10 @@ impl Backend {
                     }
                 };
                 while updates.recv().is_ok() {
-                    let snapshot = state.lock().expect("tray snapshot").clone();
+                    let snapshot = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
                     handle.update(move |tray| tray.0 = snapshot);
                 }
                 handle.shutdown();
@@ -31,8 +37,11 @@ impl Backend {
             .map_err(|error| error.to_string())?;
         Ok(Self { latest, wake })
     }
-    pub(super) fn update(&mut self, snapshot: Snapshot) {
-        *self.latest.lock().expect("tray snapshot") = snapshot;
+    pub(super) fn update(&self, snapshot: Snapshot) {
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         let _ = self.wake.try_send(());
     }
 }

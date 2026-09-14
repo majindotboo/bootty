@@ -43,6 +43,8 @@ struct Probe<'a> {
     exit_code: i32,
 }
 
+/// # Errors
+/// Returns probe, subprocess, or result file errors; unavailable optional transports are recorded as skipped.
 pub fn run(args: Args) -> Result<()> {
     crate::cancellation::install()?;
     let output_file = match args.output_file {
@@ -88,36 +90,7 @@ pub fn run(args: Args) -> Result<()> {
         )?;
     }
 
-    match std::env::var("BOOTTY_LIVE_SSH_TARGET")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
-        Some(target) if program_exists("ssh") => {
-            run_probe(&mut output, &work, "lan_ssh", "lan", ssh(&target, 5))?;
-            for (name, profile, delay, loss) in [
-                ("wan_20ms_ssh", "wan_20ms", "20ms", "0%"),
-                ("wan_100ms_ssh", "wan_100ms", "100ms", "0.1%"),
-                ("wan_200ms_ssh", "wan_200ms", "200ms", "1%"),
-            ] {
-                with_netem(
-                    &mut output,
-                    &work,
-                    name,
-                    profile,
-                    delay,
-                    loss,
-                    ssh(&target, 5),
-                )?;
-            }
-        }
-        Some(_) => skip(&mut output, "lan_ssh", "lan", "ssh not found")?,
-        None => skip(
-            &mut output,
-            "lan_ssh",
-            "lan",
-            "BOOTTY_LIVE_SSH_TARGET is not set",
-        )?,
-    }
+    remote_ssh_probes(&mut output, &work)?;
 
     optional_probe(
         &mut output,
@@ -160,6 +133,33 @@ pub fn run(args: Args) -> Result<()> {
         "Wrote live remote benchmark results: {}",
         output_file.display()
     );
+    Ok(())
+}
+
+fn remote_ssh_probes(output: &mut File, work: &TempDir) -> Result<()> {
+    match std::env::var("BOOTTY_LIVE_SSH_TARGET")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(target) if program_exists("ssh") => {
+            run_probe(output, work, "lan_ssh", "lan", ssh(&target, 5))?;
+            for (name, profile, delay, loss) in [
+                ("wan_20ms_ssh", "wan_20ms", "20ms", "0%"),
+                ("wan_100ms_ssh", "wan_100ms", "100ms", "0.1%"),
+                ("wan_200ms_ssh", "wan_200ms", "200ms", "1%"),
+            ] {
+                with_netem(output, work, name, profile, delay, loss, ssh(&target, 5))?;
+            }
+        }
+        Some(_) => skip(output, "lan_ssh", "lan", "ssh not found")?,
+        None => skip(
+            output,
+            "lan_ssh",
+            "lan",
+            "BOOTTY_LIVE_SSH_TARGET is not set",
+        )?,
+    }
+
     Ok(())
 }
 

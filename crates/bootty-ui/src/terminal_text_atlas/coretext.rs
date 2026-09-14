@@ -159,7 +159,7 @@ pub(super) fn rasterize_symbol_cluster(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn rasterize_symbol_cluster(
+pub(super) const fn rasterize_symbol_cluster(
     _face: &ResolvedFontFace,
     _cluster: &ShapedCluster,
     _physical_font_size: f32,

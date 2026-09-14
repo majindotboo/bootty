@@ -9,12 +9,8 @@ description = "Build the bootty app with dynamic local linkage; pass --static fo
 run = "cargo run --quiet --locked -p xtasks -- build"
 
 [tasks.launch]
-description = "Build and launch this worktree's isolated BoottyDev app; args after -- are passed to Bootty"
+description = "Build and launch this worktree's isolated BoottyDev app (packaged on macOS); args after -- are passed to Bootty"
 run = "cargo run --quiet --locked -p xtasks -- launch"
-
-[tasks."site:build"]
-description = "Build the Cloudflare Pages site from Rust/WASM source"
-run = "cargo run --quiet --locked -p xtasks -- site"
 
 [tasks.test]
 description = "Run workspace tests with nextest"
@@ -23,14 +19,6 @@ run = "cargo nextest run"
 [tasks.fmt]
 description = "Check formatting"
 run = "cargo fmt --all -- --check"
-
-[tasks."hakari:generate"]
-description = "Regenerate the cargo-hakari workspace hack"
-run = "cargo run --quiet --locked -p xtasks -- hakari generate"
-
-[tasks."hakari:check"]
-description = "Check the cargo-hakari workspace hack is up to date"
-run = "cargo run --quiet --locked -p xtasks -- hakari check"
 
 [tasks.clippy]
 description = "Run clippy on the workspace"
@@ -107,6 +95,10 @@ run = "cargo run --quiet --locked -p xtasks -- package"
 [tasks.install]
 description = "Package and install Bootty with the host daemon; pass --fast for fast-release"
 run = "cargo run --quiet --locked -p xtasks -- install"
+
+[tasks."sign:setup"]
+description = "Create and trust the local macOS code-signing identity so permission grants survive reinstalls"
+run = "cargo run --quiet --locked -p xtasks -- sign-setup"
 
 [tasks."bench:record-replay"]
 description = "Record a terminal replay fixture"

@@ -1,10 +1,13 @@
+#[cfg(not(target_os = "macos"))]
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
-use bootty_identity::DEVELOPMENT_NAMESPACE_ENV;
+#[cfg(not(target_os = "macos"))]
+use anyhow::bail;
+use anyhow::{Context, Result};
+use bootty_config::DEVELOPMENT_NAMESPACE_ENV;
 use clap::Args as ClapArgs;
 
 #[derive(Clone, Debug, ClapArgs)]
@@ -15,12 +18,44 @@ pub struct Args {
     pub arguments: Vec<OsString>,
 }
 
+/// # Errors
+/// Returns workspace discovery, development packaging, or application launch errors.
 pub fn run(args: Args) -> Result<()> {
+    let binary = build_launch_binary()?;
+    let mut command = Command::new(&binary);
+    command.args(args.arguments).env(
+        DEVELOPMENT_NAMESPACE_ENV,
+        crate::development_names()?.namespace(),
+    );
+    // Cargo's test-only bundle lookup override must not replace the app's identity.
+    #[cfg(target_os = "macos")]
+    command.env_remove("CFProcessPath");
+    #[cfg(not(target_os = "macos"))]
+    configure_library_path(&mut command)?;
+    execute(command, &binary)
+}
+
+#[cfg(target_os = "macos")]
+fn build_launch_binary() -> Result<PathBuf> {
+    let args = crate::package::Args {
+        dev: true,
+        ..Default::default()
+    };
+    crate::package::run(args)?;
+    let layout = crate::package::Layout::from_args(args)?;
+    Ok(layout
+        .dist_dir
+        .join(format!("{}.app", layout.app_name))
+        .join("Contents/MacOS/bootty"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_launch_binary() -> Result<PathBuf> {
     let build = crate::build::BuildArgs {
         fast: false,
         static_linkage: false,
     };
-    crate::build::run_with_features(&build, cfg!(unix))?;
+    crate::build::run_with_features(&build, true)?;
 
     let target_root =
         env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
@@ -33,6 +68,14 @@ pub fn run(args: Args) -> Result<()> {
     if !binary.is_file() {
         bail!("built binary not found at {}", binary.display());
     }
+    Ok(binary)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_library_path(command: &mut Command) -> Result<()> {
+    let target_root =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from);
+    let profile = target_root.join("dynamic-release");
     let rust_libdir =
         crate::command::stdout(Command::new("rustc").args(["--print", "target-libdir"]))?;
     let mut library_dirs = vec![profile.join("deps"), PathBuf::from(rust_libdir.trim())];
@@ -46,13 +89,8 @@ pub fn run(args: Args) -> Result<()> {
     }
     let library_path = env::join_paths(library_dirs).context("failed to construct library path")?;
 
-    let mut command = Command::new(&binary);
-    let development_names = crate::development_names();
-    command
-        .args(args.arguments)
-        .env(DEVELOPMENT_NAMESPACE_ENV, development_names.namespace())
-        .env(library_path_variable(), library_path);
-    execute(command, &binary)
+    command.env(library_path_variable(), library_path);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -68,10 +106,9 @@ fn execute(mut command: Command, _binary: &std::path::Path) -> Result<()> {
     crate::command::run(&mut command)
 }
 
-fn library_path_variable() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "DYLD_LIBRARY_PATH"
-    } else if cfg!(windows) {
+#[cfg(not(target_os = "macos"))]
+const fn library_path_variable() -> &'static str {
+    if cfg!(windows) {
         "PATH"
     } else {
         "LD_LIBRARY_PATH"

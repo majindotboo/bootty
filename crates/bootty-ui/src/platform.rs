@@ -211,7 +211,8 @@ pub const fn new_tab_shortcut_trigger() -> &'static str {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn new_tab_shortcut_trigger() -> &'static str {
+#[must_use]
+pub const fn new_tab_shortcut_trigger() -> &'static str {
     "ctrl+shift+t"
 }
 

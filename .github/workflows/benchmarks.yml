@@ -45,6 +45,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libxrandr-dev \
             libxdo-dev \
             pkg-config

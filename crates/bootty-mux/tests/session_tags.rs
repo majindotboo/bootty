@@ -5,6 +5,7 @@ use bootty_host::{CommandOutput, CommandRunner};
 use bootty_mux::tmux::TmuxBackend;
 use bootty_mux::{command::MuxCommand, snapshot::MuxSessionTag};
 use pretty_assertions::assert_eq;
+use rstest::rstest;
 
 #[derive(Default)]
 struct RecordingRunner {
@@ -53,19 +54,30 @@ fn tag(space: Option<&str>) -> MuxSessionTag {
     }
 }
 
-#[test]
-fn a_snapshot_carries_the_bootty_tag_and_leaves_untagged_sessions_unclaimed() {
+#[rstest]
+#[case("\x1f")]
+#[case("\\037")]
+fn a_snapshot_carries_the_bootty_tag_and_leaves_untagged_sessions_unclaimed(
+    #[case] separator: &str,
+) {
     let listing = concat!(
         "s\x1f$0\x1fwork\x1f9f3a\x1fspace-7\x1f1\x1f2\x1f%1\x1f4242\x1f/repo\x1fzsh\n",
         "s\x1f$1\x1fscratch\x1f\x1f\x1f0\x1f1\x1f%2\x1f4243\x1f/tmp\x1fbash\n",
-    );
-    let snapshot = backend(listing)
+        "p\x1f$0\x1f@0\x1f0\x1feditor\x1f1\x1f1\x1f%1\x1f\x1f\x1f/repo\x1fzsh\n",
+    )
+    .replace('\x1f', separator);
+    let snapshot = backend(&listing)
         .snapshot()
         .expect("parse the session listing");
 
     assert_eq!(snapshot.sessions[0].tag, tag(Some("space-7")));
     assert!(snapshot.sessions[1].tag.is_empty());
     assert_eq!(snapshot.sessions[0].name, "work");
+    assert_eq!(snapshot.sessions[0].windows[0].id, "@0");
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].pane_id.as_deref(),
+        Some("%1")
+    );
     assert!(snapshot.sessions[0].active, "session_attached was 1");
     assert!(!snapshot.sessions[1].active);
     assert_eq!(snapshot.sessions[0].anchor.cwd.as_deref(), Some("/repo"));

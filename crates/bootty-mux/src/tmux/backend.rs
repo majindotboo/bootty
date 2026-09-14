@@ -864,7 +864,7 @@ fn clear_stale_local_socket() -> bool {
 }
 
 fn tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
-    if let Some(separator) = ["\x1f", "\t", "\\t"]
+    if let Some(separator) = ["\x1f", "\\037", "\t", "\\t"]
         .into_iter()
         .find(|separator| line.contains(separator))
     {
@@ -917,6 +917,8 @@ fn strip_snapshot_tag(line: &str, tag: char) -> Option<&str> {
         .into_iter()
         .find_map(|separator| tagged.strip_prefix(separator))
         .or_else(|| tagged.strip_prefix("\\t"))
+        // tmux 3.4 and 3.5 escape control bytes in formatted command output.
+        .or_else(|| tagged.strip_prefix("\\037"))
 }
 
 /// The `set-option` half of a chained tmux invocation, as separate argv entries.

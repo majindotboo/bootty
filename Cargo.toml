@@ -12,23 +12,33 @@ unused_must_use = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-
-large_types_passed_by_value = "allow"
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-module_name_repetitions = "allow"
-must_use_candidate = "allow"
-too_many_lines = "allow"
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
 
 [workspace.dependencies]
+gpui-kit = { version = "0.6", features = ["tree-sitter-lua", "tree-sitter-toml"] }
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+unicode-segmentation = "1.13.3"
+url = "2.5.8"
+chrono = "0.4.45"
 ab_glyph = "0.2"
 anyhow = "1"
 arboard = "3"
+async-channel = "2"
 assert_fs = "1.1.4"
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
@@ -37,17 +47,10 @@ derive_more = { version = "2.1.1", default-features = false, features = [
   "deref",
   "deref_mut",
 ] }
-eframe = { version = "0.36", default-features = false, features = [
-  "accesskit",
-  "default_fonts",
-  "inspection",
-  "links",
-  "wgpu_no_default_features",
-] }
-egui = "0.36"
-egui_code_editor = "0.4.1"
-fontdb = "0.24"
 getrandom = "0.4"
+fontdb = "0.24"
+font-kit = { package = "zed-font-kit", version = "=0.14.1-zed" }
+image = { version = "0.25", default-features = false }
 iconflow = { version = "1", features = [
   "pack-bootstrap",
   "pack-lucide",
@@ -61,31 +64,37 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "de
   "log",
 ] }
 memchr = "2.8"
+regex = "1"
 mslnk = "0.1.8"
 muda = "0.19"
+tray-icon = { version = "0.24", default-features = false }
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
+notify-rust = "4.18"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+num-traits = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",
   "NSCursor",
+  "NSGraphics",
   "NSScreen",
   "NSPasteboard",
   "NSPasteboardItem",
+  "NSResponder",
+  "NSView",
   "NSWindow",
+  "std",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
+  "NSDictionary",
   "NSString",
+  "NSValue",
   "NSURL",
   "NSGeometry",
   "objc2-core-foundation",
-] }
-pollster = "1.0"
-png = "0.18"
-process-wrap = { version = "9.1", default-features = false, features = [
-  "job-object",
-  "process-group",
   "std",
 ] }
+png = "0.18"
 portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "770d8e1a7519a9a698090cd7d717d0c64aa0a755" }
 pretty_assertions = "1.4.1"
 proptest = "1"
@@ -98,11 +107,10 @@ rmux-os = "0.10"
 rmux-proto = "0.10"
 rmux-server = { version = "0.10", default-features = false }
 rstest = "0.26"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
-sha2 = "0.11"
 rustybuzz = "0.20"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
-serde-wasm-bindgen = "0.6"
 serde_json = "1"
 signal-hook = "0.3"
 smallvec = "1"
@@ -111,32 +119,17 @@ static_assertions = "1.1.0"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-syntect = { version = "5.3", default-features = false, features = [
-  "default-fancy",
-] }
+plist = "1.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = "1.53.1"
 toml_edit = { version = "0.25", features = ["serde"] }
-ttf-parser = "0.25"
-tuirealm = { version = "4.1.0", default-features = false, features = [
-  "derive",
-] }
 unicode-width = "0.2"
 ureq = "3"
-wasm-bindgen = "0.2"
-wgpu = { version = "30", default-features = false, features = [
-  "parking_lot",
-  "std",
-  "wgsl",
-] }
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 embed-resource = "3.0.11"
-windows-sys = "0.61"
 winsafe = { version = "0.0.28", default-features = false, features = ["kernel"] }
 winreg = "0.55"
 zip = { version = "7", default-features = false, features = ["deflate"] }
-
 
 [profile.dev]
 debug = "limited"
@@ -159,6 +152,12 @@ strip = false
 lto = "fat"
 split-debuginfo = "off"
 
+# Rust 1.97's macOS 27 toolchain can produce unloadable stripped proc-macro dylibs and then
+# misreport them as missing crates (E0463). Build dependencies never ship in Bootty's bundle, so
+# keep their Mach-O metadata intact while retaining the release profile for product artifacts.
+[profile.release.build-override]
+strip = false
+
 [profile.daemon-release]
 inherits = "release"
 codegen-units = 1
@@ -178,3 +177,21 @@ codegen-units = 16
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+[profile.dev.package.gpui-kit-assets]
+debug-assertions = false
+
+[profile.dev.package.rust-embed]
+debug-assertions = false
+
+[profile.dev.package.gpui-pre-util]
+debug-assertions = false
+
+[profile.test.package.gpui-kit-assets]
+debug-assertions = false
+
+[profile.test.package.rust-embed]
+debug-assertions = false
+
+[profile.test.package.gpui-pre-util]
+debug-assertions = false

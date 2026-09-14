@@ -56,6 +56,8 @@ struct CommandRecord {
     stderr: String,
 }
 
+/// # Errors
+/// Returns invalid command, sampler, subprocess, or measurement output errors.
 pub fn run(args: &Args) -> Result<()> {
     crate::cancellation::install()?;
     if args.command.is_empty() {
@@ -110,9 +112,13 @@ pub fn run(args: &Args) -> Result<()> {
 
     let stdout_path = args.output_dir.join("command.stdout");
     let stderr_path = args.output_dir.join("command.stderr");
-    let mut command = Command::new(&args.command[0]);
+    let (executable, arguments) = args
+        .command
+        .split_first()
+        .context("power measurement requires a command")?;
+    let mut command = Command::new(executable);
     command
-        .args(&args.command[1..])
+        .args(arguments)
         .stdout(File::create(&stdout_path)?)
         .stderr(File::create(&stderr_path)?);
     let outcome = wait_for_command(&mut command)?;
@@ -160,7 +166,8 @@ fn exit_with(exit_code: i32) -> Result<()> {
 pub struct CommandFailure(i32);
 
 impl CommandFailure {
-    pub fn exit_code(&self) -> i32 {
+    #[must_use]
+    pub const fn exit_code(&self) -> i32 {
         self.0
     }
 }
@@ -277,7 +284,7 @@ fn start_sampler(
         child,
         tool,
         log,
-        deadline: nominal + Duration::from_secs(1),
+        deadline: nominal.saturating_add(Duration::from_secs(1)),
         timer: Timer::start(),
     }))
 }
@@ -332,7 +339,7 @@ fn shell_quote(value: &OsStr) -> String {
             quoted.push('\\');
             quoted.push(char::from(byte));
         } else {
-            write!(quoted, "$'\\x{byte:02x}'").expect("writing to a String cannot fail");
+            let _ = write!(quoted, "$'\\x{byte:02x}'");
         }
     }
     quoted

@@ -7,10 +7,11 @@ use gpui_kit::{
     Pixels, PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
     ShapedGlyph, ShapedRun, Size, TextRenderingMode, point, px, size,
 };
+use num_traits::ToPrimitive as _;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    ops::Range,
+    ops::{Add as _, Range},
     sync::{Arc, Mutex},
 };
 use swash::scale::{
@@ -124,7 +125,14 @@ impl Fonts {
                 .db()
                 .query(&fontdb::Query {
                     families: &[fontdb::Family::Name(family)],
-                    weight: fontdb::Weight(descriptor.weight.0.clamp(1.0, 1000.0) as u16),
+                    weight: fontdb::Weight(
+                        descriptor
+                            .weight
+                            .0
+                            .clamp(1.0, 1000.0)
+                            .to_u16()
+                            .context("Font weight is outside the supported range")?,
+                    ),
                     style: match descriptor.style {
                         gpui_kit::FontStyle::Normal => fontdb::Style::Normal,
                         gpui_kit::FontStyle::Italic => fontdb::Style::Italic,
@@ -177,7 +185,12 @@ impl Fonts {
         let id = FontId(self.faces.len());
         self.faces.push(Face {
             font,
-            family: info.families[0].0.clone(),
+            family: info
+                .families
+                .first()
+                .context("Font face has no family")?
+                .0
+                .clone(),
             weight: info.weight,
             style: info.style,
             stretch: info.stretch,
@@ -189,7 +202,9 @@ impl Fonts {
     }
 
     fn attributes(&self, id: FontId) -> Attrs<'_> {
-        let face = &self.faces[id.0];
+        let Some(face) = self.faces.get(id.0) else {
+            return Attrs::new().metadata(id.0);
+        };
         let mut features = cosmic_text::FontFeatures::default();
         for (tag, value) in face.features.tag_value_list() {
             if let Ok(tag) = <&[u8; 4]>::try_from(tag.as_bytes()) {
@@ -206,11 +221,14 @@ impl Fonts {
     }
 
     fn covers(&self, id: FontId, grapheme: &str) -> bool {
-        let map = self.faces[id.0].font.as_swash().charmap();
+        let Some(face) = self.faces.get(id.0) else {
+            return false;
+        };
+        let map = face.font.as_swash().charmap();
         grapheme
             .chars()
             .filter(|&ch| {
-                ch != '\u{200d}' && !matches!(ch as u32, 0xfe00..=0xfe0f | 0xe0100..=0xe01ef)
+                ch != '\u{200d}' && !matches!(u32::from(ch), 0xfe00..=0xfe0f | 0xe0100..=0xe01ef)
             })
             .all(|ch| map.map(ch) != 0)
     }
@@ -224,24 +242,32 @@ impl Fonts {
         let default = inputs.first().map_or(FontId(0), |(_, id)| *id);
         let mut attributes = AttrsList::new(&self.attributes(default));
         for (range, primary) in inputs {
-            if self.faces[primary.0].fallbacks.is_empty() {
+            let fallbacks = self
+                .faces
+                .get(primary.0)
+                .map_or(&[][..], |face| face.fallbacks.as_slice());
+            if fallbacks.is_empty() {
                 attributes.add_span(range.clone(), &self.attributes(*primary));
                 continue;
             }
             let mut span_start = range.start;
             let mut span_font = *primary;
-            for (offset, grapheme) in text[range.clone()].grapheme_indices(true) {
+            let Some(range_text) = text.get(range.clone()) else {
+                continue;
+            };
+            for (offset, grapheme) in range_text.grapheme_indices(true) {
                 let selected = if self.covers(*primary, grapheme) {
                     *primary
                 } else {
-                    self.faces[primary.0]
-                        .fallbacks
+                    fallbacks
                         .iter()
                         .copied()
                         .find(|&id| self.covers(id, grapheme))
                         .unwrap_or(*primary)
                 };
-                let start = range.start + offset;
+                let Some(start) = range.start.checked_add(offset) else {
+                    continue;
+                };
                 if selected != span_font {
                     if start > span_start {
                         attributes.add_span(span_start..start, &self.attributes(span_font));
@@ -271,7 +297,11 @@ impl Fonts {
             result.descent = result.descent.max(px(layout.max_descent));
             for glyph in layout.glyphs {
                 let requested = FontId(glyph.metadata);
-                let id = if self.faces[requested.0].font.id() == glyph.font_id {
+                let id = if self
+                    .faces
+                    .get(requested.0)
+                    .is_some_and(|face| face.font.id() == glyph.font_id)
+                {
                     requested
                 } else if let Some(id) = self.fallback_ids.get(&glyph.font_id) {
                     *id
@@ -286,11 +316,13 @@ impl Fonts {
                 let shaped = ShapedGlyph {
                     id: GlyphId(u32::from(glyph.glyph_id)),
                     position: point(
-                        result.width + px(glyph.x + glyph.x_offset * glyph.font_size),
-                        px(glyph.y + glyph.y_offset * glyph.font_size),
+                        result
+                            .width
+                            .add(px(glyph.x_offset.mul_add(glyph.font_size, glyph.x))),
+                        px(glyph.y_offset.mul_add(glyph.font_size, glyph.y)),
                     ),
                     index: glyph.start,
-                    is_emoji: self.faces[id.0].color,
+                    is_emoji: self.faces.get(id.0).is_some_and(|face| face.color),
                 };
                 if let Some(last) = result.runs.last_mut().filter(|run| run.font_id == id) {
                     last.glyphs.push(shaped);
@@ -301,13 +333,17 @@ impl Fonts {
                     });
                 }
             }
-            result.width += px(layout.w);
+            result.width = result.width.add(px(layout.w));
         }
         result
     }
 
     fn render(&mut self, params: &RenderGlyphParams) -> Result<Image> {
-        let font = self.faces[params.font_id.0].font.clone();
+        let font = self
+            .faces
+            .get(params.font_id.0)
+            .map(|face| face.font.clone())
+            .context("Font ID is not registered")?;
         let mut scaler = self
             .scaler
             .builder(font.as_swash())
@@ -351,6 +387,7 @@ impl PlatformTextSystem for CosmicFontSystem {
         for bytes in fonts {
             state.system.db_mut().load_font_data(bytes.into_owned());
         }
+        drop(state);
         Ok(())
     }
     fn all_font_names(&self) -> Vec<String> {
@@ -368,6 +405,7 @@ impl PlatformTextSystem for CosmicFontSystem {
             .collect::<Vec<_>>();
         names.sort_unstable();
         names.dedup();
+        drop(state);
         names
     }
     fn font_id(&self, descriptor: &Font) -> Result<FontId> {
@@ -385,7 +423,22 @@ impl PlatformTextSystem for CosmicFontSystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let m = state.faces[id.0].font.as_swash().metrics(&[]);
+        let Some(font) = state.faces.get(id.0).map(|face| face.font.clone()) else {
+            drop(state);
+            return FontMetrics {
+                units_per_em: 1,
+                ascent: 0.0,
+                descent: 0.0,
+                line_gap: 0.0,
+                underline_position: 0.0,
+                underline_thickness: 0.0,
+                cap_height: 0.0,
+                x_height: 0.0,
+                bounding_box: Bounds::new(point(0.0, 0.0), size(0.0, 0.0)),
+            };
+        };
+        drop(state);
+        let m = font.as_swash().metrics(&[]);
         FontMetrics {
             units_per_em: u32::from(m.units_per_em),
             ascent: m.ascent,
@@ -406,7 +459,12 @@ impl PlatformTextSystem for CosmicFontSystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let metrics = state.faces[id.0].font.as_swash().glyph_metrics(&[]);
+        let Some(font) = state.faces.get(id.0).map(|face| face.font.clone()) else {
+            drop(state);
+            return Err(anyhow::anyhow!("Font ID is not registered"));
+        };
+        drop(state);
+        let metrics = font.as_swash().glyph_metrics(&[]);
         let glyph = u16::try_from(glyph.0)?;
         Ok(size(
             metrics.advance_width(glyph),
@@ -418,19 +476,34 @@ impl PlatformTextSystem for CosmicFontSystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let glyph = state.faces[id.0].font.as_swash().charmap().map(ch);
+        let Some(font) = state.faces.get(id.0).map(|face| face.font.clone()) else {
+            drop(state);
+            return None;
+        };
+        drop(state);
+        let glyph = font.as_swash().charmap().map(ch);
         (glyph != 0).then_some(GlyphId(u32::from(glyph)))
     }
     fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        let image = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .render(params)?;
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let image = state.render(params)?;
         let bounds = Bounds::new(
             point(
                 DevicePixels(image.placement.left),
-                DevicePixels(-image.placement.top),
+                DevicePixels(
+                    image
+                        .placement
+                        .top
+                        .checked_neg()
+                        .context("Glyph vertical placement exceeds pixel bounds")?,
+                ),
             ),
             size(
                 DevicePixels(i32::try_from(image.placement.width)?),
@@ -438,6 +511,7 @@ impl PlatformTextSystem for CosmicFontSystem {
             ),
         );
         state.images.insert(params.clone(), image);
+        drop(state);
         Ok(bounds)
     }
     fn rasterize_glyph(
@@ -445,13 +519,19 @@ impl PlatformTextSystem for CosmicFontSystem {
         params: &RenderGlyphParams,
         bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let mut state = self
+        let cached = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut image = match state.images.remove(params) {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .images
+            .remove(params);
+        let mut image = match cached {
             Some(image) => image,
-            None => state.render(params)?,
+            None => self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .render(params)?,
         };
         if image.content == Content::Mask {
             if params.subpixel_rendering || params.is_emoji {
@@ -465,10 +545,6 @@ impl PlatformTextSystem for CosmicFontSystem {
         Ok((bounds.size, image.data))
     }
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut result = LineLayout {
             font_size,
             len: text.len(),
@@ -477,20 +553,33 @@ impl PlatformTextSystem for CosmicFontSystem {
         if runs.is_empty() {
             return result;
         }
-        let mut offset = 0;
-        let inputs = runs
-            .iter()
-            .map(|run| {
-                let start = offset;
-                offset += run.len;
-                (start..offset, run.font_id)
-            })
-            .collect::<Vec<_>>();
+        let mut offset = 0_usize;
+        let mut inputs = Vec::with_capacity(runs.len());
+        for run in runs {
+            let start = offset;
+            let Some(end) = offset.checked_add(run.len) else {
+                return result;
+            };
+            if text.get(start..end).is_none() {
+                return result;
+            }
+            inputs.push((start..end, run.font_id));
+            offset = end;
+        }
+        let face_count = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .faces
+            .len();
+        if inputs.iter().any(|(_, id)| id.0 >= face_count) {
+            return result;
+        }
         let mut start = 0;
         let boundaries = text
             .char_indices()
             .filter(|(_, ch)| matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}'))
-            .map(|(index, ch)| (index, index + ch.len_utf8()))
+            .filter_map(|(index, ch)| index.checked_add(ch.len_utf8()).map(|next| (index, next)))
             .chain(std::iter::once((text.len(), text.len())));
         for (end, next) in boundaries {
             if end > start {
@@ -499,18 +588,32 @@ impl PlatformTextSystem for CosmicFontSystem {
                     .filter_map(|(range, id)| {
                         let a = range.start.max(start);
                         let b = range.end.min(end);
-                        (a < b).then_some((a - start..b - start, *id))
+                        if a >= b {
+                            return None;
+                        }
+                        Some((a.checked_sub(start)?..b.checked_sub(start)?, *id))
                     })
                     .collect::<Vec<_>>();
-                let mut line = state.paragraph(&text[start..end], font_size, &selected);
+                let Some(line_text) = text.get(start..end) else {
+                    start = next;
+                    continue;
+                };
+                let mut line = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .paragraph(line_text, font_size, &selected);
                 for run in &mut line.runs {
                     for glyph in &mut run.glyphs {
-                        glyph.index += start;
-                        glyph.position.x += result.width;
+                        let Some(index) = glyph.index.checked_add(start) else {
+                            continue;
+                        };
+                        glyph.index = index;
+                        glyph.position.x = glyph.position.x.add(result.width);
                     }
                 }
                 result.runs.extend(line.runs);
-                result.width += line.width;
+                result.width = result.width.add(line.width);
                 result.ascent = result.ascent.max(line.ascent);
                 result.descent = result.descent.max(line.descent);
             }

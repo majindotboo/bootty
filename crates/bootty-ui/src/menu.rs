@@ -111,13 +111,15 @@ mod platform_menu {
 mod platform_menu {
     pub struct AppMenu;
 
-    pub fn install(_: &crate::i18n::Localizer) -> Option<AppMenu> {
+    #[must_use]
+    pub const fn install(_: &crate::i18n::Localizer) -> Option<AppMenu> {
         None
     }
 
     pub fn set_wake(_: &std::sync::Arc<dyn Fn() + Send + Sync>) {}
 
-    pub fn settings_requested(_: bool) -> bool {
+    #[must_use]
+    pub const fn settings_requested(_: bool) -> bool {
         false
     }
 }

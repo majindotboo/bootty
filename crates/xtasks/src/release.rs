@@ -74,6 +74,8 @@ pub enum Bump {
     Patch,
 }
 
+/// # Errors
+/// Returns errors from the selected release operation, including invalid notes or repository state.
 pub fn run(args: Args) -> Result<()> {
     match args.command {
         Command::Prepare(args) => prepare(&args),
@@ -131,7 +133,11 @@ fn prepare(args: &PrepareArgs) -> Result<()> {
     let mut document = manifest
         .parse::<DocumentMut>()
         .context("Cargo.toml is not valid TOML")?;
-    document["workspace"]["package"]["version"] = value(&next);
+    *document
+        .get_mut("workspace")
+        .and_then(|item| item.get_mut("package"))
+        .and_then(|item| item.get_mut("version"))
+        .context("Cargo.toml has no workspace.package.version")? = value(&next);
     fs::write("Cargo.toml", document.to_string()).context("failed to update Cargo.toml")?;
     command::run(
         ProcessCommand::new("cargo")
@@ -153,33 +159,35 @@ fn prepare(args: &PrepareArgs) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns an error unless the required sections occur in order and each contains a bullet.
 pub fn validate_notes(notes: &str) -> Result<()> {
     let expected = ["## Features", "## Fixes", "## Breaking Changes"];
-    let mut section = 0_usize;
+    let mut remaining = expected.into_iter();
+    let mut has_section = false;
     let mut has_bullet = false;
 
     for line in notes.lines() {
         if line.starts_with("## ") {
-            if section > 0 && !has_bullet {
+            if has_section && !has_bullet {
                 bail!(NOTES_ERROR);
             }
-            ensure!(
-                section < expected.len() && line == expected[section],
-                NOTES_ERROR
-            );
-            section += 1;
+            ensure!(remaining.next() == Some(line), NOTES_ERROR);
+            has_section = true;
             has_bullet = false;
-        } else if section == 0 {
+        } else if !has_section {
             ensure!(line.trim().is_empty(), NOTES_ERROR);
         } else if line.starts_with("- ") {
             has_bullet = true;
         }
     }
 
-    ensure!(section == expected.len() && has_bullet, NOTES_ERROR);
+    ensure!(remaining.next().is_none() && has_bullet, NOTES_ERROR);
     Ok(())
 }
 
+/// # Errors
+/// Returns an error for an invalid three-component version or numeric overflow.
 pub fn bumped_version(version: &str, bump: Bump) -> Result<String> {
     let mut components = version.split('.');
     let major = parse_component(components.next(), version)?;
@@ -236,8 +244,11 @@ fn workspace_version(manifest: &str) -> Result<String> {
     let document = manifest
         .parse::<DocumentMut>()
         .context("Cargo.toml is not valid TOML")?;
-    document["workspace"]["package"]["version"]
-        .as_str()
+    document
+        .get("workspace")
+        .and_then(|item| item.get("package"))
+        .and_then(|item| item.get("version"))
+        .and_then(toml_edit::Item::as_str)
         .context("Cargo.toml has no workspace.package.version")
         .map(ToOwned::to_owned)
 }

@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-bootty-identity = { path = "../bootty-identity" }
+bootty-config = { path = "../bootty-config" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -15,10 +15,9 @@ signal-hook.workspace = true
 tempfile.workspace = true
 time.workspace = true
 toml_edit.workspace = true
-zip.workspace = true
-bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [target.'cfg(windows)'.dependencies]
+zip.workspace = true
 mslnk.workspace = true
 winreg.workspace = true
 

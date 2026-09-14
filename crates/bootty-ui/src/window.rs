@@ -217,20 +217,9 @@ fn screen_display_id(screen: &NSScreen) -> Option<u32> {
     u32::try_from(number.unsignedIntegerValue()).ok()
 }
 
-/// Remove the 1px titlebar separator macOS draws under the transparent titlebar. In fullscreen it
-/// reads as a stray border across the top of the window; wezterm suppresses the same line.
-pub fn macos_disable_titlebar_separator() {
-    platform_disable_titlebar_separator();
-}
-
-/// Toggle a uniquely titled window's drop shadow. Disabled in fullscreen so the shadow rim doesn't read as a border
-/// around the screen-filling window (wezterm's `MACOS_FORCE_DISABLE_SHADOW`).
-pub fn macos_set_window_shadow(title: &str, enabled: bool) {
-    platform_set_window_shadow(title, enabled);
-}
-
+/// Toggle the drop shadow of the window with a unique title.
 #[cfg(target_os = "macos")]
-fn platform_set_window_shadow(title: &str, enabled: bool) {
+pub fn macos_set_window_shadow(title: &str, enabled: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -250,10 +239,11 @@ fn platform_set_window_shadow(title: &str, enabled: bool) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_set_window_shadow(_title: &str, _enabled: bool) {}
+pub const fn macos_set_window_shadow(_title: &str, _enabled: bool) {}
 
+/// Remove the separator under the transparent macOS titlebar.
 #[cfg(target_os = "macos")]
-fn platform_disable_titlebar_separator() {
+pub fn macos_disable_titlebar_separator() {
     with_active_window(|window| {
         if window.titlebarSeparatorStyle() != NSTitlebarSeparatorStyle::None {
             window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
@@ -262,7 +252,7 @@ fn platform_disable_titlebar_separator() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_disable_titlebar_separator() {}
+pub const fn macos_disable_titlebar_separator() {}
 
 // macOS automatic window tabbing claims Cmd+T (newWindowForTab:) at the OS level before it reaches
 // the app, which would shadow Bootty's new-tab shortcut. Opt out so the key reaches us. Must run
@@ -275,7 +265,7 @@ pub fn disable_automatic_window_tabbing() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn disable_automatic_window_tabbing() {}
+pub const fn disable_automatic_window_tabbing() {}
 
 /// Whether macOS starts non-native fullscreen windowed so GPUI can apply simple fullscreen after
 /// the concrete window exists.

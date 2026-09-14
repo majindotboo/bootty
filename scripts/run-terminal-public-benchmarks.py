@@ -1136,7 +1136,11 @@ def run_one(
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="artifacts/external-benchmarks/terminal-public.jsonl")
-    parser.add_argument("--terminal", action="append", choices=["bootty", "kitty", "alacritty", "wezterm", "ghostty"])
+    parser.add_argument(
+        "--terminal",
+        action="append",
+        choices=["bootty", "kitty", "alacritty", "wezterm", "ghostty"],
+    )
     parser.add_argument("--tool", action="append", choices=["vtebench", "termbench"])
     parser.add_argument("--fixture", action="append", help="limit public tools to a fixture directory name")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)

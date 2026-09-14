@@ -11,12 +11,12 @@ Four things shape almost every decision in this repo:
    table. When you are unsure where code goes, that table is the answer.
 2. **The terminal is not the multiplexer.** Bootty renders terminals; a mux
    backend owns processes and native topology. `native`, `rmux`, and `tmux` are
-   three interchangeable backends behind one contract.
-3. **Frames, not blocking.** The UI thread never waits on terminal, extension,
+   interchangeable backends behind one contract; Herdr uses opaque client attachment.
+3. **Frames, not blocking.** The UI thread never waits on terminal, Git,
    or agent work. Terminal state is published as immutable frames and painted
    from a plan.
 4. **One invocation path.** The palette, keybindings, CLI, local socket, and
-   Luau extensions all submit the same `CommandInvocation`. There is no second
+   native agent integrations all submit the same `CommandInvocation`. There is no second
    way to do a thing.
 
 ## A small glossary
@@ -26,21 +26,20 @@ Use this language when you write code and when you talk to us.
 - **you** - the agent doing the work. **we/us** - the maintainers. **user** -
   the person directing you.
 - **Space** - a persisted workspace with backend bindings. Lives in SQLite,
-  owned by `bootty-workspace`.
+  owned by `bootty-mux`.
 - **binding** - one Space's attachment to one mux backend, plus its pane layout,
   focus, and titles. `BindingRuntime` owns the live one.
 - **backend** / **provider** - `native`, `rmux`, or `tmux`. Owns real processes
   and native session/window/pane topology.
 - **pane** / **session** / **window** - backend-native topology. Bootty maps it;
   Bootty does not invent it.
-- **surface** - host-neutral terminal geometry (`bootty-surface`). Host
+- **surface** - host-neutral terminal geometry (`bootty-terminal`). Host
   coordinates convert at the adapter seam, not in the middle.
 - **frame** - an immutable published snapshot of VT state. Consumers read
   frames; they do not read the engine.
-- **module** - one bundled `.lua`/`.luau` source or one user file under
-  `<config>/extensions`. A user file with a bundled module's identity overrides
-  that built-in. **generation** - one complete published version of the
-  extension world.
+- **native integration** - a built-in agent provider with bounded protocol state
+  and explicit lifetime. Existing custom Lua and Luau files are preserved and
+  reported as unsupported; do not execute or delete them.
 - **identity** - Production (`bootty`) or Development (`bootty-dev`). Selects
   config tree, state tree, control endpoint, rmux endpoint, and tmux server.
 
@@ -54,10 +53,11 @@ their workspace SQLite, their control endpoint, their rmux endpoint, and their
 tmux server. A Production app launch exits when that identity already has a
 live owner. A Production command invocation instead targets that live owner and
 can mutate the user's real Spaces. Use `mise run launch` for normal development
-and UI acceptance; it runs this worktree's isolated development identity without
-installing anything. Use `mise run package:dev` only when you need a macOS app
-bundle; it writes this worktree's uniquely named `BoottyDev-<workspace-hash>.app`
-under `dist/<development-namespace>/`. There is intentionally no `install:dev`
+and UI acceptance. On macOS it packages and runs this worktree's uniquely named
+`BoottyDev-<workspace-hash>.app` under `dist/<development-namespace>/`, so native
+automation can address the app. Other platforms run the isolated development
+binary directly. Nothing is installed. Use `mise run package:dev` to package
+without launching. There is intentionally no `install:dev`
 task because installing per-worktree builds would litter `/Applications`.
 `launch` and `package:dev` enable the `bootty-dev` feature and keep Production
 state apart.
@@ -80,20 +80,22 @@ Ghostty internals the C API does not expose is unsupported. See
 
 Bootty fans out. Fixing one arm is not fixing the feature.
 
-- **Commands** reach the same `CommandInvocation` from seven callers
-  (`CommandPalette`, `Keybinding`, `BuiltinKeybinding`, `Cli`, `Socket`, `Luau`,
-  `Internal`). A command that only works from the palette is unfinished.
-- **Mux backends** are three, not one. A change to session, window, or pane
-  behavior has a `native`, an `rmux`, and a `tmux` answer - and each of those
-  has a local and a remote answer.
+- **Commands** reach the same `CommandInvocation` from the palette, keybindings,
+  CLI, socket, native integrations, and internal callers. A command that only
+  works from the palette is unfinished. Preserve wire caller values for existing clients.
+- **Mux backends** have explicit capabilities. A change to session, window, or
+  pane behavior needs a `native`, `rmux`, and `tmux` answer, locally and remotely.
+  Preserve Herdr's opaque attachment boundary rather than inventing inner topology.
 - **Config fields** are not one edit. A new field needs a typed config value, a
   default, and one `SettingSpec` whose path the loader reads and whose page owns
   its editor. Scalar specs render their own settings row; only non-scalar
   settings need a custom editor. Update `docs/sample-config.toml` and
   `docs/configuration.md`. Tests in `bootty-config` enforce this contract.
-- **Hosts** are three: the full app, `crates/bootty-app/examples/bare.rs`
-  (winit/WGPU, no egui), and `crates/bootty-app/examples/egui-tabs.rs`.
-  Renderer and input changes must survive all three.
+- **The GUI host is GPUI.** Renderer and input changes must work through the full
+  application and must be exercised in its real window.
+  GPUI Kit (`longbridge/gpui-kit`) supplies the styled `gpui-component` crate
+  and `gpui-base` behavior layer. Read the local `gpui` and `gpui-component`
+  skills before UI changes; verify APIs against the pinned checkout.
 - **Identities** are two. Anything touching paths, endpoints, or namespaces must
   keep Production and Development apart.
 - **Ownership moves belong in `docs/architecture.md`.** If your change moves a
@@ -121,11 +123,6 @@ mise run test
 mise run bench -- --ci-smoke
 ```
 
-CI also runs `mise run hakari:check`. Two things bite people there:
-
-- **Changed a dependency?** Run `mise run hakari:generate`. The workspace-hack
-  crate is generated, and a stale one fails CI with a diff that looks unrelated
-  to your change.
 - **Benchmarks are compile gates, not measurement gates.** `--ci-smoke` is
   enough for any non-performance change. Run measured Criterion suites only for
   rendering and performance work, or when asked. `docs/benchmarking.md` has the

@@ -7,6 +7,8 @@ use anyhow::{Result, bail};
 static INTERRUPTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// # Errors
+/// Returns an error if the operating system rejects interrupt handler registration.
 pub fn install() -> Result<()> {
     let flag = INTERRUPTED
         .get_or_init(|| Arc::new(AtomicBool::new(false)))
@@ -41,6 +43,7 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
+#[must_use]
 pub fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or_else(|| signal_exit_code(status))
 }
@@ -49,7 +52,9 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 fn signal_exit_code(status: ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
 
-    status.signal().map_or(1, |signal| 128 + signal)
+    status
+        .signal()
+        .map_or(1, |signal| 128_i32.saturating_add(signal))
 }
 
 #[cfg(not(unix))]

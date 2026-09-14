@@ -472,7 +472,7 @@ fn coretext_fallback_font_id(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn coretext_fallback_font_id(
+const fn coretext_fallback_font_id(
     _database: &fontdb::Database,
     _face: &ResolvedFontFace,
     _ch: char,

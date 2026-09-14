@@ -206,11 +206,6 @@ fn is_managed_launch_env(name: &str) -> bool {
     )
 }
 
-#[must_use]
-pub fn configured_user_shell() -> Option<String> {
-    configured_login_shell()
-}
-
 fn locale_env_entries() -> Vec<(String, String)> {
     let mut entries = Vec::new();
     for key in ["LANG", "LC_ALL", "LC_CTYPE"] {
@@ -252,7 +247,7 @@ fn is_macos_c_locale(value: &str) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn normalize_locale_entries(_entries: &mut Vec<(String, String)>) {}
+const fn normalize_locale_entries(_entries: &mut Vec<(String, String)>) {}
 
 fn shell_command_path(configured: Option<String>) -> String {
     [
@@ -276,7 +271,8 @@ fn normalize_shell_path(shell: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn configured_login_shell() -> Option<String> {
+#[must_use]
+pub fn configured_user_shell() -> Option<String> {
     [
         env::var("USER").ok(),
         env::var("LOGNAME").ok(),
@@ -319,7 +315,8 @@ fn read_login_shell_for_user(user: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configured_login_shell() -> Option<String> {
+#[must_use]
+pub const fn configured_user_shell() -> Option<String> {
     None
 }
 

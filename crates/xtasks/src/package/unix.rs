@@ -263,7 +263,7 @@ fn compile_macos_icon(contents: &Path, resources: &Path) -> Result<()> {
             "actool does not support Liquid Glass icon compilation; using legacy macOS .icns fallback"
         );
         return filesystem::copy_file(
-            Path::new("crates/bootty-app/assets/bootty-icon-macos-fallback.icns"),
+            Path::new("crates/bootty-ui/assets/bootty-icon-macos-fallback.icns"),
             &resources.join("bootty.icns"),
         );
     }
@@ -326,12 +326,18 @@ fn info_plist(layout: &Layout, version: &str) -> String {
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>CFBundleVersion</key><string>{version}</string>
+  <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLSchemes</key><array><string>{scheme}</string></array>
+  </dict></array>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 "#,
-        layout.app_name, layout.bundle_identifier, layout.app_name
+        layout.app_name,
+        layout.bundle_identifier,
+        layout.app_name,
+        scheme = layout.development_namespace.as_deref().unwrap_or("bootty"),
     )
 }
 
@@ -339,13 +345,14 @@ fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Pa
     if !executable_on_path("codesign") {
         return Ok(());
     }
+    let identity = crate::signing::identity();
     let frameworks = contents.join("Frameworks");
     if frameworks.is_dir() {
         for path in crate::filesystem::files_recursive(&frameworks)? {
             if path.extension() == Some(OsStr::new("dylib")) {
                 command::run(
                     Command::new("codesign")
-                        .args(["--force", "--sign", "-"])
+                        .args(["--force", "--sign", &identity])
                         .arg(path),
                 )?;
             }
@@ -353,18 +360,20 @@ fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Pa
     }
     command::run(
         Command::new("codesign")
-            .args(["--force", "--sign", "-"])
+            .args(["--force", "--sign", &identity])
             .arg(macos.join(DAEMON)),
     )?;
-    command::run(
-        Command::new("codesign")
-            .args(["--force", "--sign", "-", "--requirements"])
-            .arg(format!(
-                "=designated => identifier \"{}\"",
-                layout.bundle_identifier
-            ))
-            .arg(bundle),
-    )
+    let mut sign = Command::new("codesign");
+    sign.args(["--force", "--sign", &identity]);
+    // A certificate-backed signature gets codesign's default designated requirement, which
+    // pins identifier and certificate leaf. Ad-hoc has no leaf, so name the identifier only.
+    if crate::signing::is_adhoc(&identity) {
+        sign.arg("--requirements").arg(format!(
+            "=designated => identifier \"{}\"",
+            layout.bundle_identifier
+        ));
+    }
+    command::run(sign.arg(bundle))
 }
 
 fn executable_on_path(program: &str) -> bool {
@@ -391,14 +400,8 @@ fn package_linux(layout: &Layout, host_daemon: &Path) -> Result<()> {
     if layout.linkage == Linkage::Dynamic {
         copy_dynamic_libraries(&bin.join(&layout.cli_name), &root.join("lib"), layout)?;
     }
-    filesystem::copy_file(
-        Path::new("crates/bootty-app/assets/bootty-mascot.png"),
-        &png,
-    )?;
-    filesystem::copy_file(
-        Path::new("crates/bootty-app/assets/bootty-mascot.svg"),
-        &svg,
-    )?;
+    filesystem::copy_file(Path::new("crates/bootty-ui/assets/bootty-mascot.png"), &png)?;
+    filesystem::copy_file(Path::new("crates/bootty-ui/assets/bootty-mascot.svg"), &svg)?;
     fs::write(
         applications.join(format!("{}.desktop", layout.bundle_identifier)),
         desktop_entry(layout),

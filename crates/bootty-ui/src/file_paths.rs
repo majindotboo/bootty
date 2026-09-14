@@ -6,13 +6,9 @@ use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSString, NSURL, ns_string};
 
 /// Read file URLs from the native pasteboard.
+#[cfg(target_os = "macos")]
 #[must_use]
 pub fn read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
-    platform_read_clipboard_file_paths()
-}
-
-#[cfg(target_os = "macos")]
-fn platform_read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
     let pasteboard = NSPasteboard::generalPasteboard();
     let items = pasteboard.pasteboardItems()?;
     let mut paths = Vec::new();
@@ -37,7 +33,8 @@ fn path_from_file_url(url: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
+#[must_use]
+pub const fn read_clipboard_file_paths() -> Option<Vec<PathBuf>> {
     None
 }
 

@@ -29,6 +29,8 @@ struct Record<'a> {
     log: String,
 }
 
+/// # Errors
+/// Returns capture, fixture, subprocess, or output errors from the hostile terminal probes.
 pub fn run(args: Args) -> Result<()> {
     crate::cancellation::install()?;
     let output_dir = match args.output_dir {
@@ -76,7 +78,7 @@ fn run_case(
     command.args([
         "bench",
         "-p",
-        "bootty-app",
+        "bootty-ui",
         "--bench",
         "hostile_input",
         name,

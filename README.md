@@ -6,31 +6,30 @@ Bootty is a native GPU-rendered terminal and a set of reusable terminal crates.
 
 ```sh
 cargo run -p bootty --bin bootty
-cargo run -p bootty-app --example bare
-cargo run -p bootty-app --example egui-tabs
 ```
 
 The default app opens the full Bootty shell with terminal rendering, status
-metrics, and tmux session chrome. The `bare` example opens a minimal non-egui
-winit/WGPU terminal host. The `egui-tabs` example demonstrates tabs using the
-same renderer path as the main app.
+metrics, and tmux session chrome through GPUI.
 
 ## Workspace
 
 - `bootty` - executable startup, CLI dispatch, and native packaging.
-- `bootty-app` - desktop application library, examples, app behavior, and
-  integration tests.
-- `bootty-ui` - shared egui UI helpers.
-- `bootty-surface` - terminal geometry and surface math.
-- `bootty-terminal` - Ghostty-backed terminal state and render frames.
-- `bootty-runtime` - PTY sessions, shell selection, drain scheduling, and frame
-  publication.
-- `bootty-font` - OpenType feature values, parsing, and canonical formatting.
-- `bootty-herdr` - native Herdr workspace, tab, pane, layout, and terminal integration.
-- `bootty-mux` and `bootty-mux-model` - backend-neutral mux contracts and values.
-- `bootty-native`, `bootty-rmux`, and `bootty-tmux` - concrete mux backends.
-- `bootty-render` - paint plans, text shaping, sprites, and WGPU rendering.
-- `bootty-winit` - native winit/WGPU host adapters.
+- `bootty-ui` - GPUI application and windows, presentation and input adapters,
+  terminal paint plans, text policy, and sprites.
+- `bootty-terminal` - Ghostty-backed terminal state, input, geometry, PTY sessions,
+  shell selection, drain scheduling, and immutable frame publication.
+- `bootty-config` - product configuration, accepted keymaps, identity namespaces,
+  OpenType feature values, and safe configuration edits.
+- `bootty-host` - host process execution, SSH, remote daemon installation, and
+  command framing.
+- `bootty-git` - Git project, worktree, branch, favorite, and diff facts.
+- `bootty-mux` - backend contracts, native/rmux/tmux/Herdr providers, remote
+  Spaces and persistence, daemon catalog, and live binding orchestration.
+- `bootty-daemon` - installed headless catalog and remote command executable.
+- `bootty-control` - invocation envelopes, command transport, cancellation, and
+  owner-local tasks and subscriptions.
+- `bootty-agents` - native Pi, Codex, and Claude integrations and protocol state.
+- `bootty-write` - shared locked atomic replacement and durability outcomes.
 
 ## Native app bundles
 
@@ -47,6 +46,12 @@ mise run install --fast   # dynamic install using --profile fast-release
 ```
 
 CI and release packages contain the five daemon targets owned by `xtasks`.
+
+On macOS, local packages are signed with a self-signed `Bootty Dev` identity so
+Accessibility and Screen Recording grants survive reinstalls. `package` creates
+it on first use; macOS asks for your password once to trust it. Run
+`mise run sign:setup` to do that step explicitly. Without a keychain (CI) the
+bundle is signed ad-hoc.
 Local package and install tasks build only
 the host daemon unless `--all-daemons` is passed. On non-macOS hosts, Apple
 targets require an installed Apple SDK in `SDKROOT`. Windows packaging requires
@@ -57,14 +62,6 @@ The CI workflow runs full Rust validation on pull requests and pushes. Pushing
 a version tag matching `Cargo.toml` creates a GitHub Release with native macOS,
 Windows, and Linux bundles. Installed Bootty releases check for updates on
 startup; use `bootty update` to update explicitly. See `docs/releases.md`.
-
-## Website
-
-Cloudflare Pages deploys `bootty.org` and `www.bootty.org` from `main`.
-The Cloudflare project builds from the repository root and uploads root
-`pages-dist` from `sites/bootty-web`. GitHub Actions does not deploy the site.
-
-Run the same source build locally with `mise run site:build`.
 
 ## Validation
 
@@ -78,10 +75,20 @@ mise run bench -- --ci-smoke
 ## Docs
 
 - Architecture and crate boundaries: `docs/architecture.md`
+- [Automation](docs/automation.md) — command targets, event waits and condition snapshots.
+- [Transfers and forwards](docs/transfers.md) — streaming files and managed SSH listeners.
+- [Shell assistance](docs/shell-assistance.md) — optional multiline editing and host history.
 - Pi and Codex integration setup: `docs/agent-integrations.md`
 - Configuration path, schema, reload, and writeback: `docs/configuration.md`
+- Translation catalogs and locale behavior: `docs/localization.md`
 - Input encoder contracts: `docs/input-encoders.md`
 - Benchmark process and performance guardrails: `docs/benchmarking.md`
 - Built-in theme provenance: `docs/built-in-themes.md`
 - `libghostty-rs` dependency boundary: `docs/libghostty-rs.md`
 - Release publishing and verified updates: `docs/releases.md`
+
+- [Terminal image clipboard writes](docs/clipboard-writes.md)
+
+- [Previous-session output and agent recovery](docs/recovery.md)
+
+- [Git panel workflows](docs/git-workflows.md)

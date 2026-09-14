@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-use xtasks::{hakari, release, site};
+use xtasks::release;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -11,21 +11,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Hakari(hakari::Args),
     Release(release::Args),
-    Site(site::Args),
 }
 
 #[rstest]
 fn parses_task_commands() {
-    let cli = Cli::try_parse_from(["xtasks", "hakari", "check"]).unwrap();
-    assert!(matches!(
-        cli.command,
-        Command::Hakari(hakari::Args {
-            action: hakari::Action::Check
-        })
-    ));
-
     let cli = Cli::try_parse_from([
         "xtasks", "release", "prepare", "notes.md", "--bump", "patch",
     ])
@@ -42,6 +32,4 @@ fn parses_task_commands() {
     assert!(Cli::try_parse_from(["xtasks", "release", "verify-tag", "v1.2.3"]).is_ok());
     assert!(Cli::try_parse_from(["xtasks", "release", "tag-and-dispatch"]).is_ok());
     assert!(Cli::try_parse_from(["xtasks", "release", "publish", "v1.2.3", "release"]).is_ok());
-
-    assert!(Cli::try_parse_from(["xtasks", "site"]).is_ok());
 }

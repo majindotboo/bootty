@@ -55,7 +55,11 @@ fn editor_inputs_and_choices_emit_domain_intents(cx: &TestAppContext) {
     let (probe, mut cx) = rooted_probe(cx, snapshot());
 
     click(&mut cx, "space-editor-name");
-    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
     cx.simulate_input("Renamed");
     click(&mut cx, "space-backend-default");
     click(&mut cx, "space-tint-sidebar");

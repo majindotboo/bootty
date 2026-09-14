@@ -31,6 +31,8 @@ pub struct Args {
     command: Vec<OsString>,
 }
 
+/// # Errors
+/// Returns replay input, subprocess, checksum, or report output errors.
 pub fn run(args: Args) -> Result<()> {
     let Args {
         fixture_name,
@@ -110,7 +112,7 @@ fn write_metadata(path: &Path, fixture_name: &str, command_args: &[OsString]) ->
         "term",
         env::var_os("TERM")
             .as_deref()
-            .unwrap_or(OsStr::new("unknown")),
+            .unwrap_or_else(|| OsStr::new("unknown")),
     )?;
     write_env(&mut metadata, "command", OsStr::new(&command))?;
     writeln!(metadata)?;
@@ -124,7 +126,7 @@ fn write_metadata(path: &Path, fixture_name: &str, command_args: &[OsString]) ->
         "shell",
         env::var_os("SHELL")
             .as_deref()
-            .unwrap_or(OsStr::new("unknown")),
+            .unwrap_or_else(|| OsStr::new("unknown")),
     )?;
     for app in VERSIONED_APPS {
         if let Some(program) = find_program(app) {
@@ -251,7 +253,11 @@ fn write_checksums(output_dir: &Path) -> Result<()> {
             if count == 0 {
                 break;
             }
-            hasher.update(&buffer[..count]);
+            hasher.update(
+                buffer
+                    .get(..count)
+                    .context("capture read exceeded its buffer")?,
+            );
         }
         let digest = hasher.finalize();
         for byte in digest {

@@ -6,12 +6,12 @@ mod windows;
 use std::env;
 #[cfg(unix)]
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
-use bootty_identity::ApplicationIdentity;
+use bootty_config::ApplicationIdentity;
 use clap::Args as ClapArgs;
 #[cfg(unix)]
 use toml_edit::DocumentMut;
@@ -59,14 +59,17 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    pub(crate) fn from_args(args: Args) -> Self {
-        let names = if args.dev {
-            crate::development_names()
+    pub(crate) fn from_args(args: Args) -> Result<Self> {
+        let root = crate::workspace_root()?;
+        let identity = if args.dev {
+            ApplicationIdentity::Development
         } else {
-            ApplicationIdentity::Production.names_for_workspace(&crate::workspace_root())
+            ApplicationIdentity::Production
         };
+        let names = identity.names_for_workspace(&root);
         let development_namespace = args.dev.then(|| names.namespace().to_owned());
         let dist_root = absolute_workspace_path(
+            &root,
             env::var_os("BOOTTY_DIST_DIR").map_or_else(|| PathBuf::from("dist"), PathBuf::from),
         );
         let dist_dir = if let Some(namespace) = &development_namespace {
@@ -75,11 +78,12 @@ impl Layout {
             dist_root
         };
         let target_root = absolute_workspace_path(
+            &root,
             env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from),
         );
         let daemon_output_dir = env::var_os("BOOTTY_DAEMON_OUTPUT_DIR")
             .map_or_else(|| target_root.join("bootty-daemons"), PathBuf::from);
-        let daemon_output_dir = absolute_workspace_path(daemon_output_dir);
+        let daemon_output_dir = absolute_workspace_path(&root, daemon_output_dir);
         let linkage = if args.r#static {
             Linkage::Static
         } else {
@@ -92,8 +96,8 @@ impl Layout {
         } else {
             "release"
         };
-        Self {
-            development_namespace: development_namespace.clone(),
+        Ok(Self {
+            development_namespace,
             app_name: names.display_name().to_owned(),
             #[cfg(unix)]
             cli_name: names.cli_name().to_owned(),
@@ -112,7 +116,7 @@ impl Layout {
             daemon_output_dir,
             #[cfg(unix)]
             all_daemons: args.all_daemons || env::var_os("BOOTTY_DAEMON_OUTPUT_DIR").is_some(),
-        }
+        })
     }
 
     #[cfg(unix)]
@@ -132,16 +136,18 @@ impl Layout {
     }
 }
 
-fn absolute_workspace_path(path: PathBuf) -> PathBuf {
+fn absolute_workspace_path(root: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
     } else {
-        crate::workspace_root().join(path)
+        root.join(path)
     }
 }
 
+/// # Errors
+/// Returns workspace discovery, build, daemon staging, or platform packaging errors.
 pub fn run(args: Args) -> Result<()> {
-    let layout = Layout::from_args(args);
+    let layout = Layout::from_args(args)?;
     run_platform(args, &layout)
 }
 
@@ -169,8 +175,11 @@ pub(crate) fn workspace_version() -> Result<String> {
     let document = manifest
         .parse::<DocumentMut>()
         .context("failed to parse Cargo.toml")?;
-    document["workspace"]["package"]["version"]
-        .as_str()
+    document
+        .get("workspace")
+        .and_then(|item| item.get("package"))
+        .and_then(|item| item.get("version"))
+        .and_then(toml_edit::Item::as_str)
         .map(str::to_owned)
         .context("Cargo.toml has no workspace.package.version")
 }

@@ -1,9 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::{
-    benchmark, build, daemon, hakari, install, launch, package, pre_commit, release, site,
-};
+use crate::{benchmark, build, daemon, install, launch, package, pre_commit, release, signing};
 
 #[derive(Parser)]
 #[command(name = "xtasks")]
@@ -21,11 +19,13 @@ enum Command {
     Daemon(daemon::DaemonArgs),
     Release(release::Args),
     Benchmark(benchmark::Args),
-    Site(site::Args),
-    Hakari(hakari::Args),
     PreCommit,
+    /// Create and trust the local macOS code-signing identity.
+    SignSetup,
 }
 
+/// # Errors
+/// Returns the selected task's build, packaging, release, or benchmark error.
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Build(args) => build::run(&args),
@@ -35,8 +35,7 @@ pub fn run() -> Result<()> {
         Command::Daemon(args) => daemon::run(&args),
         Command::Release(args) => release::run(args),
         Command::Benchmark(args) => benchmark::run(args),
-        Command::Site(args) => site::run(args),
-        Command::Hakari(args) => hakari::run(args),
         Command::PreCommit => pre_commit::run(),
+        Command::SignSetup => signing::run(),
     }
 }

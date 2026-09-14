@@ -17,9 +17,11 @@ pub struct Args {
     pub package: PackageArgs,
 }
 
+/// # Errors
+/// Returns packaging, workspace discovery, or platform installation errors.
 pub fn run(args: &Args) -> Result<()> {
     package::run(args.package)?;
-    let layout = package::Layout::from_args(args.package);
+    let layout = package::Layout::from_args(args.package)?;
     install_platform(&layout)
 }
 
@@ -289,6 +291,7 @@ fn writable(path: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn remove_install_target(path: &Path) -> Result<()> {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return Ok(());

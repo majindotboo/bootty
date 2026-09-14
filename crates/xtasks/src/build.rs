@@ -16,10 +16,14 @@ pub struct BuildArgs {
     pub static_linkage: bool,
 }
 
+/// # Errors
+/// Returns an error if Cargo cannot start or the application build fails.
 pub fn run(args: &BuildArgs) -> Result<()> {
     run_with_features(args, cfg!(not(windows)))
 }
 
+/// # Errors
+/// Returns an error if Cargo cannot start or the selected application build fails.
 pub fn run_with_features(args: &BuildArgs, development: bool) -> Result<()> {
     let mut command = Command::new("cargo");
     command.arg("build");
@@ -41,7 +45,8 @@ pub fn run_with_features(args: &BuildArgs, development: bool) -> Result<()> {
     run_command(&mut command)
 }
 
-pub fn profile(args: &BuildArgs) -> &'static str {
+#[must_use]
+pub const fn profile(args: &BuildArgs) -> &'static str {
     if args.fast {
         "fast-release"
     } else if args.static_linkage {
@@ -51,6 +56,7 @@ pub fn profile(args: &BuildArgs) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn profile_args(args: &BuildArgs) -> Vec<&'static str> {
     if profile(args) == "release" {
         vec!["--release"]

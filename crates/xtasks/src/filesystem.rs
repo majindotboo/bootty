@@ -3,6 +3,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+/// # Errors
+/// Returns an error if the working directory cannot be resolved.
+pub fn development_names() -> Result<bootty_config::ApplicationNames> {
+    Ok(bootty_config::development_names_for_workspace(
+        &workspace_root()?,
+    ))
+}
+
+/// # Errors
+/// Returns an error if the working directory cannot be read or canonicalized.
+pub fn workspace_root() -> Result<PathBuf> {
+    let current = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .context("resolve the xtasks working directory")?;
+    Ok(current
+        .ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+        .map_or_else(|| current.clone(), Path::to_path_buf))
+}
+
 pub fn recreate_dir(path: &Path) -> Result<()> {
     if path.exists() {
         refuse_broad_removal(path)?;
@@ -50,6 +70,7 @@ pub fn copy_executable(source: &Path, destination: &Path) -> Result<()> {
     set_executable(destination)
 }
 
+#[cfg(any(target_os = "macos", windows))]
 pub fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("failed to create {}", destination.display()))?;

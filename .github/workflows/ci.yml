@@ -31,24 +31,6 @@ jobs:
       - name: Check formatting
         run: mise run fmt
 
-  rust-hakari:
-    name: Rust workspace-hack
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up mise toolchain
-        uses: jdx/mise-action@v4
-
-      - name: Install cargo-hakari
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-hakari
-
-      - name: Check workspace-hack
-        run: mise run hakari:check
-
   rust-validation:
     name: Rust validation
     runs-on: ubuntu-24.04
@@ -77,6 +59,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libxrandr-dev \
             libxdo-dev \
             pkg-config
@@ -104,7 +87,7 @@ jobs:
         run: mise run clippy
 
       - name: Run tests with nextest
-        run: mise run test
+        run: mise run test -- --no-fail-fast
 
       - name: Build size-optimized daemon
         if: github.event_name == 'pull_request'
@@ -139,10 +122,12 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@v4
 
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+      - name: Install target toolchains
+        run: |
+          rustup target add "${{ matrix.target }}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross gcc-mingw-w64-x86-64
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -152,10 +137,10 @@ jobs:
 
       - name: Cross-compile portable crates and daemon
         run: >
-          cross check
+          cargo check
           -p bootty-daemon
-          -p bootty-surface
-          -p bootty-ui
+          -p bootty-terminal
+          -p bootty-agents
           --target ${{ matrix.target }}
 
   daemon-artifacts:
@@ -205,6 +190,7 @@ jobs:
             libxi-dev \
             libxinerama-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libxrandr-dev \
             pkg-config
 
