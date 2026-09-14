@@ -2,6 +2,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use bootty_command::{CommandCancellation, CommandInvocation, CommandOutcome};
+use bootty_control::ControlEventSender;
 use serde_json::Value;
 
 use crate::{ExtensionUiAction, ModuleIdentity};
@@ -158,8 +159,14 @@ pub struct ExtensionEventRequest {
 }
 
 #[derive(Clone)]
+enum ExtensionEventSenderInner {
+    Local(mpsc::SyncSender<ExtensionEventRequest>),
+    Control(ControlEventSender),
+}
+
+#[derive(Clone)]
 pub struct ExtensionEventSender {
-    sender: mpsc::SyncSender<ExtensionEventRequest>,
+    sender: ExtensionEventSenderInner,
 }
 
 pub struct ExtensionEventReceiver {
@@ -169,12 +176,20 @@ pub struct ExtensionEventReceiver {
 pub fn event_queue() -> (ExtensionEventSender, ExtensionEventReceiver) {
     let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_LIMIT);
     (
-        ExtensionEventSender { sender },
+        ExtensionEventSender {
+            sender: ExtensionEventSenderInner::Local(sender),
+        },
         ExtensionEventReceiver { receiver },
     )
 }
 
 impl ExtensionEventSender {
+    pub fn from_control(sender: ControlEventSender) -> Self {
+        Self {
+            sender: ExtensionEventSenderInner::Control(sender),
+        }
+    }
+
     pub fn publish(
         &self,
         identity: ModuleIdentity,
@@ -184,6 +199,16 @@ impl ExtensionEventSender {
         deadline: Instant,
         cancellation: &CommandCancellation,
     ) -> Result<(), String> {
+        if let ExtensionEventSenderInner::Control(sender) = &self.sender {
+            return sender.publish(
+                identity.as_str().to_owned(),
+                generation,
+                topic,
+                payload,
+                deadline,
+                cancellation,
+            );
+        }
         if cancellation.is_cancelled() {
             return Err("extension event was cancelled".to_owned());
         }
@@ -197,7 +222,10 @@ impl ExtensionEventSender {
             cancellation: cancellation.clone(),
             response,
         };
-        match self.sender.try_send(request) {
+        let ExtensionEventSenderInner::Local(sender) = &self.sender else {
+            unreachable!("control event sender returned before local queue path")
+        };
+        match sender.try_send(request) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(request)) => {
                 let _ = request

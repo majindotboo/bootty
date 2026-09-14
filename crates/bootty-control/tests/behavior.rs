@@ -1,15 +1,9 @@
 #![cfg(unix)]
 use assert_fs::{TempDir, prelude::*};
-use bootty_command::{
-    AppCommandReceiver, AppCommandRequest, Caller, CommandCancellation, CommandDescriptor,
-    CommandOutcome, app_command_channel,
-};
 use bootty_control::{
-    ControlCatalog, ControlPlane, ControlServer, InstanceDescriptor, RpcResponse, invoke_instance,
-    running_instance,
-};
-use bootty_extension::{
-    ExtensionCatalog, ExtensionGenerationCandidate, ExtensionGenerationToken, ModuleIdentity,
+    AppCommandReceiver, AppCommandRequest, Caller, CommandCancellation, CommandDescriptor,
+    CommandOutcome, ControlCatalog, ControlPlane, ControlServer, InstanceDescriptor, RpcResponse,
+    app_command_channel, invoke_instance, running_instance,
 };
 use bootty_identity::ApplicationIdentity;
 use pretty_assertions::{assert_eq, assert_ne};
@@ -18,12 +12,58 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
-    sync::{Arc, Barrier, mpsc},
+    sync::{Arc, Barrier, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
 const HELPER: &str = "BOOTTY_CONTROL_TEST_HELPER";
+
+#[derive(Default)]
+struct TestCatalog {
+    active: Mutex<Option<(String, u64)>>,
+}
+
+impl TestCatalog {
+    fn activate(&self, module: &str, generation: u64) {
+        *self.active.lock().unwrap() = Some((module.to_owned(), generation));
+    }
+}
+
+impl bootty_control::CommandCatalogSource for TestCatalog {
+    fn list(&self) -> Vec<CommandDescriptor> {
+        Vec::new()
+    }
+
+    fn describe(&self, _id: &str) -> Option<CommandDescriptor> {
+        None
+    }
+
+    fn topics(&self) -> std::collections::BTreeSet<String> {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|_| std::iter::once("test.changed".to_owned()).collect())
+            .unwrap_or_default()
+    }
+
+    fn with_active_topic(
+        &self,
+        module: &str,
+        generation: u64,
+        topic: &str,
+        publish: &mut dyn FnMut(),
+    ) -> Result<(), String> {
+        let active = self.active.lock().unwrap();
+        if active.as_ref() == Some(&(module.to_owned(), generation)) && topic == "test.changed" {
+            publish();
+            Ok(())
+        } else {
+            Err("control event topic is not active".to_owned())
+        }
+    }
+}
 
 fn isolated(kind: &str) {
     let dir = TempDir::new().unwrap();
@@ -63,7 +103,7 @@ fn isolated_helper() {
 
 struct S {
     host: ControlServer,
-    catalog: Arc<ControlCatalog>,
+    source: Arc<TestCatalog>,
     plane: ControlPlane,
     rx: AppCommandReceiver,
     instance: InstanceDescriptor,
@@ -74,10 +114,8 @@ impl S {
         let command: CommandDescriptor = serde_json::from_value(json!({
             "id":"control.read", "title":"control.read", "description":"", "mutation":"read", "arguments":{}
         })).unwrap();
-        let catalog = Arc::new(ControlCatalog::new(
-            vec![command],
-            Arc::new(ExtensionCatalog::default()),
-        ));
+        let source = Arc::new(TestCatalog::default());
+        let catalog = Arc::new(ControlCatalog::new(vec![command], source.clone()));
         let plane = ControlPlane::default();
         let (tx, rx) = app_command_channel(4, Arc::new(|| {}));
         let host = ControlServer::spawn(
@@ -89,7 +127,7 @@ impl S {
         .unwrap();
         Self {
             host,
-            catalog,
+            source,
             plane,
             rx,
             instance: running_instance().unwrap().unwrap(),
@@ -194,27 +232,15 @@ fn rpc_and_events(n: usize) {
     );
     assert_eq!(events["events"][0]["topic"], "command.completed");
 
-    let module = ModuleIdentity::parse("test.luau").unwrap();
-    let token = ExtensionGenerationToken::new();
-    let generation = |generation, token| ExtensionGenerationCandidate {
-        identity: module.clone(),
-        generation,
-        token,
-        commands: Vec::new(),
-        topics: vec!["test.changed".into()],
-        surfaces: Vec::new(),
-    };
-    s.catalog
-        .extensions()
-        .publish_generation(generation(1, token.clone()))
-        .unwrap();
+    let module = "test.luau";
+    s.source.activate(module, 1);
     let subscription = s.subscribe("test.changed");
-    let sender = s.plane.extension_event_sender();
+    let sender = s.plane.event_sender();
     let cancellation = CommandCancellation::new();
     for sequence in 0..n {
         sender
             .publish(
-                module.clone(),
+                module.to_owned(),
                 1,
                 "test.changed".into(),
                 json!(sequence),
@@ -223,15 +249,11 @@ fn rpc_and_events(n: usize) {
             )
             .unwrap();
     }
-    s.catalog
-        .extensions()
-        .publish_generation(generation(2, ExtensionGenerationToken::new()))
-        .unwrap();
-    assert!(!token.is_active());
+    s.source.activate(module, 2);
     assert!(
         sender
             .publish(
-                module,
+                module.to_owned(),
                 1,
                 "test.changed".into(),
                 Value::Null,
@@ -266,7 +288,7 @@ fn singleton() -> anyhow::Result<ControlServer> {
         tx.for_caller(Caller::Socket),
         Arc::new(ControlCatalog::new(
             Vec::new(),
-            Arc::new(ExtensionCatalog::default()),
+            Arc::new(TestCatalog::default()),
         )),
         &ControlPlane::default(),
     )
@@ -315,7 +337,7 @@ fn singleton_behaviors() {
     );
     drop(recovered);
     let other = if ApplicationIdentity::current().cli_name() == "bootty" {
-        "bootty-dev"
+        ApplicationIdentity::Development.cli_name()
     } else {
         "bootty"
     };

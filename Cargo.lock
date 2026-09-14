@@ -784,6 +784,7 @@ dependencies = [
 name = "bootty-command"
 version = "0.5.0"
 dependencies = [
+ "bootty-control",
  "bootty-workspace-hack",
  "pretty_assertions",
  "proptest",
@@ -813,12 +814,12 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_fs",
- "bootty-command",
- "bootty-extension",
  "bootty-identity",
  "bootty-workspace-hack",
  "getrandom 0.4.3",
  "pretty_assertions",
+ "proptest",
+ "proptest-derive",
  "rmux-ipc",
  "rmux-os",
  "serde",
@@ -854,6 +855,7 @@ dependencies = [
  "assert_fs",
  "bootty-command",
  "bootty-config",
+ "bootty-control",
  "bootty-item",
  "bootty-workspace-hack",
  "bootty-write",
@@ -1244,7 +1246,6 @@ dependencies = [
  "clap_builder",
  "core-foundation-sys",
  "crossbeam-utils",
- "dispatch2",
  "ecolor",
  "egui",
  "either",
@@ -1277,6 +1278,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "once_cell",
  "parking_lot",
  "percent-encoding",

@@ -8,8 +8,6 @@ bootty-dev = ["bootty-identity/bootty-dev"]
 
 [dependencies]
 anyhow.workspace = true
-bootty-command = { path = "../bootty-command" }
-bootty-extension = { path = "../bootty-extension" }
 bootty-identity = { path = "../bootty-identity" }
 getrandom.workspace = true
 rmux-ipc.workspace = true
@@ -23,6 +21,8 @@ bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 [dev-dependencies]
 assert_fs.workspace = true
 pretty_assertions.workspace = true
+proptest.workspace = true
+proptest-derive.workspace = true
 
 [lints]
 workspace = true

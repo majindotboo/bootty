@@ -7,7 +7,8 @@ use bootty_command::{BoundAppCommandSender, Caller};
 use bootty_config::config::{AppearanceVariant, BoottyConfig};
 use bootty_control::ControlPlane;
 use bootty_extension::{
-    ExtensionHost, ExtensionUiAction, ModuleItem, PublishedSurfaceSnapshot, SurfacePlacement,
+    ExtensionEventSender, ExtensionHost, ExtensionUiAction, ModuleItem, PublishedSurfaceSnapshot,
+    SurfacePlacement,
 };
 use bootty_winit::direct_input::{
     DirectKeyInput, ModifierSideState, suppress_egui_events_for_direct_input,
@@ -90,7 +91,7 @@ impl BoottyApp {
             &extension_root,
             state.command_catalog().extensions_arc(),
             state.app_command_sender(Caller::Luau),
-            control_plane.extension_event_sender(),
+            ExtensionEventSender::from_control(control_plane.event_sender()),
             extension_theme.clone(),
             bootty_config::config::default_working_directory(),
         );

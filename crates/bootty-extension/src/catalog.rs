@@ -440,3 +440,27 @@ pub fn is_namespaced(id: &str, package: &str) -> bool {
     };
     !local.is_empty() && local.split('.').all(|part| !part.is_empty())
 }
+
+impl bootty_control::CommandCatalogSource for ExtensionCatalog {
+    fn list(&self) -> Vec<bootty_control::CommandDescriptor> {
+        ExtensionCatalog::list(self)
+    }
+
+    fn describe(&self, id: &str) -> Option<bootty_control::CommandDescriptor> {
+        ExtensionCatalog::describe(self, id)
+    }
+
+    fn topics(&self) -> std::collections::BTreeSet<String> {
+        ExtensionCatalog::topics(self)
+    }
+
+    fn with_active_topic(
+        &self,
+        module: &str,
+        generation: u64,
+        topic: &str,
+        publish: &mut dyn FnMut(),
+    ) -> Result<(), String> {
+        ExtensionCatalog::with_active_topic(self, module, generation, topic, publish)
+    }
+}

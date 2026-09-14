@@ -7,15 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use bootty_command::{
-    AppCommandSendError, BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation,
-};
 use rmux_ipc::{LocalEndpoint, LocalListener};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    ControlCatalog,
+    AppCommandSendError, BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation,
+    CommandOutcome, ControlCatalog,
     lease::{ControlInstanceLease, InstanceDescriptor, same_user, set_owner_only_file},
     plane::ControlPlane,
     protocol::{
@@ -82,7 +80,7 @@ impl ControlServer {
                         tokio::select! {
                             _ = &mut shutdown_rx => break,
                             () = tokio::time::sleep(Duration::from_millis(5)) => {
-                                server_plane.process_extension_events(catalog.extensions());
+                                server_plane.process_events(catalog.source());
                             },
                             accepted = listener.accept() => {
                                 let Ok((stream, peer)) = accepted else { continue };
@@ -386,7 +384,7 @@ fn enqueue_command(
     invocation: CommandInvocation,
     commands: &BoundAppCommandSender,
     cancellation: CommandCancellation,
-) -> Result<mpsc::Receiver<bootty_command::CommandOutcome>, RpcError> {
+) -> Result<mpsc::Receiver<CommandOutcome>, RpcError> {
     commands
         .submit(invocation, Instant::now() + COMMAND_TIMEOUT, cancellation)
         .map_err(command_send_error)
@@ -409,7 +407,7 @@ async fn await_command(
 }
 
 fn wait_for_task(
-    response_rx: &mpsc::Receiver<bootty_command::CommandOutcome>,
+    response_rx: &mpsc::Receiver<CommandOutcome>,
     cancellation: &CommandCancellation,
 ) -> Value {
     let deadline = Instant::now() + COMMAND_TIMEOUT;
@@ -442,7 +440,7 @@ fn wait_for_task(
     }
 }
 
-fn task_outcome(outcome: bootty_command::CommandOutcome) -> Value {
+fn task_outcome(outcome: CommandOutcome) -> Value {
     serde_json::to_value(outcome).unwrap_or_else(|error| internal_outcome(&error))
 }
 
@@ -488,7 +486,7 @@ fn subscribe_events(
             .ok_or_else(|| RpcError::new(-32602, "missing subscription cursor"))?;
         return lock_control_state(state).poll_subscription(subscription, cursor);
     }
-    let extension_topics = catalog.extensions().topics();
+    let extension_topics = catalog.source().topics();
     let mut state = lock_control_state(state);
     let topics = event_topics(params, &state, &extension_topics)?;
     let scope = event_scope(params, descriptor)?;
@@ -562,7 +560,7 @@ fn available_event_topics(
         .topics
         .iter()
         .cloned()
-        .chain(catalog.extensions().topics())
+        .chain(catalog.source().topics())
         .collect()
 }
 

@@ -1,30 +1,46 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use bootty_command::CommandDescriptor;
-use bootty_extension::ExtensionCatalog;
+use crate::CommandDescriptor;
+
+/// Read-only command and event metadata supplied by a feature owner.
+pub trait CommandCatalogSource: Send + Sync {
+    fn list(&self) -> Vec<CommandDescriptor>;
+
+    fn describe(&self, id: &str) -> Option<CommandDescriptor>;
+
+    fn topics(&self) -> BTreeSet<String>;
+
+    fn with_active_topic(
+        &self,
+        module: &str,
+        generation: u64,
+        topic: &str,
+        publish: &mut dyn FnMut(),
+    ) -> Result<(), String>;
+}
 
 /// Read-only command metadata for the local control protocol.
 #[derive(Clone)]
 pub struct ControlCatalog {
     core: Arc<[CommandDescriptor]>,
-    extensions: Arc<ExtensionCatalog>,
+    source: Arc<dyn CommandCatalogSource>,
 }
 
 impl ControlCatalog {
-    pub fn new(core: Vec<CommandDescriptor>, extensions: Arc<ExtensionCatalog>) -> Self {
+    pub fn new(core: Vec<CommandDescriptor>, source: Arc<dyn CommandCatalogSource>) -> Self {
         Self {
             core: Arc::from(core),
-            extensions,
+            source,
         }
     }
 
     pub fn list(&self) -> Vec<CommandDescriptor> {
         let mut commands = self.core.iter().cloned().collect::<Vec<_>>();
         commands.extend(
-            self.extensions
+            self.source
                 .list()
                 .into_iter()
-                .filter(|extension| !self.core.iter().any(|core| core.id == extension.id)),
+                .filter(|candidate| !self.core.iter().any(|core| core.id == candidate.id)),
         );
         commands.sort_by(|left, right| left.id.cmp(&right.id));
         commands
@@ -35,10 +51,10 @@ impl ControlCatalog {
             .iter()
             .find(|command| command.id == id)
             .cloned()
-            .or_else(|| self.extensions.describe(id))
+            .or_else(|| self.source.describe(id))
     }
 
-    pub fn extensions(&self) -> &ExtensionCatalog {
-        &self.extensions
+    pub fn source(&self) -> &dyn CommandCatalogSource {
+        &*self.source
     }
 }

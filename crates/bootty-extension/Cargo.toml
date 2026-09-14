@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bootty-command = { path = "../bootty-command" }
+bootty-control = { path = "../bootty-control" }
 bootty-config = { path = "../bootty-config" }
 bootty-item = { path = "../bootty-item" }
 bootty-write = { path = "../bootty-write" }

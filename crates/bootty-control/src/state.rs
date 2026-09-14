@@ -3,7 +3,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bootty_command::{CommandCancellation, CommandInvocation};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -11,6 +10,7 @@ use crate::protocol::{
     COMMAND_COMPLETED_TOPIC, EVENT_QUEUE_LIMIT, MAX_SUBSCRIPTIONS, MAX_TASKS, REQUEST_LIMIT,
     RpcError, internal_error,
 };
+use crate::{CommandCancellation, CommandInvocation};
 
 pub(crate) type SharedControlState = Arc<Mutex<ControlState>>;
 

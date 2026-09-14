@@ -3,23 +3,23 @@ use std::{
     time::Instant,
 };
 
-use bootty_extension::{
-    ExtensionCatalog, ExtensionEventReceiver, ExtensionEventSender, event_queue,
-};
 use serde_json::{Value, json};
 
-use crate::state::{SharedControlState, lock_control_state};
+use crate::{
+    CommandCatalogSource, ControlEventReceiver, ControlEventSender, event_queue,
+    state::{SharedControlState, lock_control_state},
+};
 
 #[derive(Clone)]
 pub struct ControlPlane {
     pub(crate) state: SharedControlState,
     pub(crate) instance_scope: Arc<Mutex<Option<String>>>,
-    extension_events: Arc<ExtensionEventBus>,
+    events: Arc<ControlEventBus>,
 }
 
-struct ExtensionEventBus {
-    sender: ExtensionEventSender,
-    receiver: Mutex<ExtensionEventReceiver>,
+struct ControlEventBus {
+    sender: ControlEventSender,
+    receiver: Mutex<ControlEventReceiver>,
 }
 
 impl Default for ControlPlane {
@@ -28,7 +28,7 @@ impl Default for ControlPlane {
         Self {
             state: SharedControlState::default(),
             instance_scope: Arc::new(Mutex::new(None)),
-            extension_events: Arc::new(ExtensionEventBus {
+            events: Arc::new(ControlEventBus {
                 sender,
                 receiver: Mutex::new(receiver),
             }),
@@ -37,12 +37,12 @@ impl Default for ControlPlane {
 }
 
 impl ControlPlane {
-    pub fn extension_event_sender(&self) -> ExtensionEventSender {
-        self.extension_events.sender.clone()
+    pub fn event_sender(&self) -> ControlEventSender {
+        self.events.sender.clone()
     }
 
-    pub(crate) fn process_extension_events(&self, catalog: &ExtensionCatalog) {
-        let Ok(receiver) = self.extension_events.receiver.lock() else {
+    pub(crate) fn process_events(&self, catalog: &dyn CommandCatalogSource) {
+        let Ok(receiver) = self.events.receiver.lock() else {
             return;
         };
         for _ in 0..32 {
@@ -50,9 +50,9 @@ impl ControlPlane {
                 break;
             };
             let result = if request.cancellation.is_cancelled() {
-                Err("extension event was cancelled".to_owned())
+                Err("control event was cancelled".to_owned())
             } else if Instant::now() >= request.deadline {
-                Err("extension event deadline expired".to_owned())
+                Err("control event deadline expired".to_owned())
             } else {
                 self.publish_scoped(
                     catalog,
@@ -68,7 +68,7 @@ impl ControlPlane {
 
     fn publish_scoped(
         &self,
-        catalog: &ExtensionCatalog,
+        catalog: &dyn CommandCatalogSource,
         module: &str,
         generation: u64,
         topic: &str,
@@ -80,7 +80,7 @@ impl ControlPlane {
             .map_err(|_| "control plane scope is unavailable".to_owned())?
             .clone()
             .ok_or_else(|| "control plane is not bound to an instance".to_owned())?;
-        catalog.with_active_topic(module, generation, topic, || {
+        let mut publish = || {
             lock_control_state(&self.state).publish_event(
                 &scope,
                 topic,
@@ -88,6 +88,7 @@ impl ControlPlane {
                 &Value::Null,
                 payload,
             );
-        })
+        };
+        catalog.with_active_topic(module, generation, topic, &mut publish)
     }
 }

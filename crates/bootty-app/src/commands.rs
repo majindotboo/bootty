@@ -329,7 +329,7 @@ impl Default for CommandCatalog {
             core,
             control: Arc::new(ControlCatalog::new(
                 core.list().cloned().collect(),
-                Arc::clone(&extensions),
+                extensions.clone(),
             )),
             extensions,
         }
