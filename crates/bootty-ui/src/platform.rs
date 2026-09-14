@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use bootty_config::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig};
+use bootty_config::config::{BoottyConfig, MacosTitlebarStyle, WindowConfig, WindowDecoration};
 
 pub(crate) enum ClipboardContent {
     Text(String),
@@ -146,9 +146,7 @@ pub fn native_options_for_config(
     config: &BoottyConfig,
     cx: &gpui_kit::App,
 ) -> gpui_kit::WindowOptions {
-    use gpui_kit::{
-        Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px, size,
-    };
+    use gpui_kit::{Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
     let bounds = Bounds::centered(
         None,
@@ -196,12 +194,44 @@ pub fn native_options_for_config(
                 .bundle_identifier()
                 .to_owned(),
         ),
-        // GPUI uses client-side decorations to expose a borderless surface on Linux. On macOS
-        // and Windows the titlebar option above is authoritative.
-        window_decorations: (!config.window.decorations_enabled())
-            .then_some(WindowDecorations::Client),
+        window_decorations: Some(window_decorations(&config.window)),
         ..Default::default()
     }
+}
+
+/// Linux decoration preference; the compositor may require client decorations as a fallback.
+#[must_use]
+pub(crate) fn window_decorations(config: &WindowConfig) -> gpui_kit::WindowDecorations {
+    if !config.decorations_enabled() || config.window_decoration == WindowDecoration::Client {
+        gpui_kit::WindowDecorations::Client
+    } else {
+        gpui_kit::WindowDecorations::Server
+    }
+}
+
+/// A compositor without server decorations still needs a title bar above the whole window.
+pub(crate) fn client_title_bar(
+    title: impl Into<gpui_kit::SharedString>,
+    window: &gpui_kit::Window,
+) -> Option<gpui_kit::component::TitleBar> {
+    use gpui_kit::{ParentElement as _, Styled as _, div};
+
+    (cfg!(target_os = "linux")
+        && !window.is_fullscreen()
+        && matches!(
+            window.window_decorations(),
+            gpui_kit::Decorations::Client { .. }
+        ))
+    .then(|| {
+        gpui_kit::component::TitleBar::new().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .truncate()
+                .child(title.into()),
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]

@@ -2,6 +2,26 @@
 
 use pretty_assertions::assert_eq;
 
+#[gpui_kit::test]
+fn window_options_preserve_decoration_ownership(cx: &gpui_kit::TestAppContext) {
+    use bootty_config::config::{BoottyConfig, WindowDecoration};
+    use gpui_kit::WindowDecorations;
+
+    for (preference, expected) in [
+        (WindowDecoration::Auto, WindowDecorations::Server),
+        (WindowDecoration::Server, WindowDecorations::Server),
+        (WindowDecoration::Client, WindowDecorations::Client),
+        (WindowDecoration::None, WindowDecorations::Client),
+    ] {
+        let mut config = BoottyConfig::default();
+        config.window.window_decoration = preference;
+        let options = cx.update(|cx| bootty_ui::platform::native_options_for_config(&config, cx));
+        assert_eq!(options.window_decorations, Some(expected), "{preference:?}");
+        assert!(options.is_resizable);
+        assert!(options.is_movable);
+    }
+}
+
 #[test]
 fn an_unknown_target_display_never_falls_back_to_the_active_screen() {
     assert_eq!(

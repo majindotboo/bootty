@@ -16,7 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, IntoElement, ParentElement,
-    PromptLevel, Render, SharedString, Styled, Subscription, WeakEntity, Window, div, prelude::*,
+    Render, SharedString, Styled, Subscription, WeakEntity, Window, div, prelude::*,
 };
 use std::{
     path::Path,
@@ -464,14 +464,14 @@ impl DocumentPanel {
             return;
         }
         self.close_prompt = true;
-        let answer = window.prompt(
-            PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             crate::i18n::t(cx, "document-discard-reload").as_str(),
             Some(&self.path),
             &[
                 gpui_kit::PromptButton::Other(crate::i18n::t(cx, "common-reload").into()),
                 gpui_kit::PromptButton::Cancel(crate::i18n::t(cx, "common-cancel").into()),
             ],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |weak, cx| {
@@ -499,8 +499,7 @@ impl DocumentPanel {
             return;
         }
         self.close_prompt = true;
-        let answer = window.prompt(
-            PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             crate::i18n::t(cx, "document-save-before-close").as_str(),
             Some(&self.path),
             &[
@@ -508,6 +507,7 @@ impl DocumentPanel {
                 gpui_kit::PromptButton::Other(crate::i18n::t(cx, "common-discard").into()),
                 gpui_kit::PromptButton::Cancel(crate::i18n::t(cx, "common-cancel").into()),
             ],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |weak, cx| {

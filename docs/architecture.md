@@ -349,6 +349,8 @@ contents, or transcripts.
   and input blocking derive from the live dialog, not a second mutable focus flag.
   GPUI-component's dialog trap and Root own widget focus confinement and restoration;
   Bootty retains only the underlying terminal, sidebar, or find-input route.
+  Save, discard, reload, and Git confirmations use the shared themed alert dialog in
+  `gpui/dialogs.rs`; their callers retain ownership of the confirmed operation.
 - `gpui/terminal.rs`, `paint_plan.rs`, `terminal_render.rs`, text-atlas, and
   sprite modules own terminal paint planning, shaping/raster caches, clipping,
   and direct GPUI scene lowering. They consume `bootty-terminal` frames. Text atlas
@@ -401,6 +403,10 @@ keeps the remaining controls and mux tabs. Closed docks expose their toggle in t
 center titlebar. Dock edges use an inset grab area and Base's clamped dock geometry; the workspace skin applies the first
 motion and final drop and saves the completed resize. Terminal dividers also commit
 the drop position, including when one motion starts and ends the drag.
+Bottom status segments, including mux tabs, occupy the center dock's footer; side
+docks keep their full height. On Linux, the window-level title bar and resize frame
+sit outside this dock layout, with Bootty controls whenever client decorations are
+selected or required by the compositor.
 Dock toggles, panel opening, and tab visibility use registered `CommandInvocation`s.
 Context menus supply the live destination node ID as an optional argument. The
 window completes these requests after applying them, or reports a stale group;

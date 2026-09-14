@@ -14,9 +14,77 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
-    Keystroke, MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window, div,
-    prelude::*, rems,
+    Keystroke, MouseButton, ParentElement, PromptButton, Render, SharedString, Styled,
+    Subscription, Window, div, prelude::*, px, rems,
 };
+use std::{cell::RefCell, rc::Rc};
+
+/// A themed confirmation. Answers retain their caller order; dismissing cancels the receiver.
+pub fn prompt(
+    message: &str,
+    detail: Option<&str>,
+    answers: &[PromptButton],
+    window: &mut Window,
+    cx: &mut App,
+) -> futures::channel::oneshot::Receiver<usize> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let sender = Rc::new(RefCell::new(Some(sender)));
+    let message = SharedString::from(message.to_owned());
+    let detail = detail.map(|detail| SharedString::from(detail.to_owned()));
+    let answers = answers.to_vec();
+    window.open_alert_dialog(cx, move |dialog, window, cx| {
+        let confirm_sender = sender.clone();
+        let close_sender = sender.clone();
+        let font = super::setup_ui_font(window, cx);
+        let rem = f32::from(window.rem_size());
+        let width = (-2.0f32)
+            .mul_add(rem, f32::from(window.viewport_size().width))
+            .max(0.0)
+            .min(28.0 * rem);
+        dialog
+            .width(px(width))
+            .title(div().font(font.clone()).child(message.clone()))
+            .when_some(detail.clone(), |dialog, detail| {
+                dialog.description(div().font(font).child(detail))
+            })
+            .on_ok(move |_, _, _| {
+                if let Some(sender) = confirm_sender.borrow_mut().take() {
+                    _ = sender.send(0);
+                }
+                true
+            })
+            .on_close(move |_, _, _| {
+                close_sender.borrow_mut().take();
+            })
+            .footer(
+                gpui_kit::component::dialog::DialogFooter::new()
+                    .flex_wrap()
+                    .children(answers.iter().enumerate().rev().map(|(index, answer)| {
+                        let sender = sender.clone();
+                        let label = answer.label().clone();
+                        let selector = format!("prompt-answer-{label}");
+                        let respond = move |window: &mut Window, cx: &mut App| {
+                            if let Some(sender) = sender.borrow_mut().take() {
+                                _ = sender.send(index);
+                            }
+                            window.close_dialog(cx);
+                        };
+                        let confirm = respond.clone();
+                        Button::new(label.clone())
+                            .label(label)
+                            .debug_selector(move || selector)
+                            .when(index == 0, Button::primary)
+                            .on_click(move |_, window, cx| respond(window, cx))
+                            // Enter on a focused answer must not invoke the dialog's default.
+                            .on_action(move |_: &gpui_kit::base::actions::Confirm, window, cx| {
+                                confirm(window, cx);
+                                cx.stop_propagation();
+                            })
+                    })),
+            )
+    });
+    receiver
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DialogId(pub String);

@@ -44,6 +44,15 @@ impl WorkspaceDockSkin {
         always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
         cx: &mut Context<DockArea>,
     ) -> Rc<Self> {
+        let mut bottom_height = chrome.read(cx).dock_bottom_height();
+        cx.observe(&chrome, move |_, chrome, cx| {
+            let height = chrome.read(cx).dock_bottom_height();
+            if height != bottom_height {
+                bottom_height = height;
+                cx.notify();
+            }
+        })
+        .detach();
         Rc::new(Self {
             kit: DockSkin::new(cx),
             area: cx.weak_entity(),
@@ -80,6 +89,14 @@ impl DockAreaRenderer for WorkspaceDockSkin {
     fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         self.kit
             .center_frame(window, cx)
+            .relative()
+            // Bottom segments belong below the terminals, within the side docks.
+            .pb(self.chrome.read(cx).dock_bottom_height())
+            .child(
+                self.chrome
+                    .clone()
+                    .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
+            )
             .when_some(self.owner.upgrade(), |frame, owner| {
                 frame.child(owner.read(cx).titlebar.clone())
             })

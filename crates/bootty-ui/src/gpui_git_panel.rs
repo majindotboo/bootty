@@ -790,14 +790,14 @@ impl GitChangesPanel {
             return;
         }
         let directory = self.context.directory.clone();
-        let answer = window.prompt(
-            gpui_kit::PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             crate::i18n::t(cx, "git-amend-confirm").as_str(),
             Some(crate::i18n::t(cx, "git-amend-detail").as_str()),
             &[
                 gpui_kit::PromptButton::Other(crate::i18n::t(cx, "git-amend-action").into()),
                 gpui_kit::PromptButton::Cancel(crate::i18n::t(cx, "common-cancel").into()),
             ],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |weak, cx| {
@@ -823,14 +823,14 @@ impl GitChangesPanel {
         cx: &mut Context<Self>,
     ) {
         let directory = self.context.directory.clone();
-        let answer = window.prompt(
-            gpui_kit::PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             &format!("Drop {reference}?"),
             Some("The saved changes will be removed from your stash list."),
             &[
                 gpui_kit::PromptButton::Other("Drop stash".into()),
                 gpui_kit::PromptButton::Cancel("Cancel".into()),
             ],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |weak, cx| {

@@ -1,6 +1,7 @@
 //! Project Bootty's palette and font configuration into GPUI Kit.
 
 use super::{UiPalette, UiTheme, chrome::Rgba, settings::ToggleFocusNav};
+use gpui_kit::component::Colorize as _;
 use gpui_kit::{
     App, Font, FontFeatures, Global, Hsla, KeyBinding, Pixels, SharedString, Window, px,
 };
@@ -128,6 +129,12 @@ fn project_component_colors(palette: UiPalette, colors: &mut gpui_kit::component
     colors.button_active = color(palette.element_active);
     colors.primary = color(palette.primary);
     colors.primary_foreground = color(palette.base);
+    colors.primary_hover = colors.primary.mix_oklab(colors.foreground, 0.1);
+    colors.primary_active = colors.primary.mix_oklab(colors.background, 0.1);
+    colors.button_primary = colors.primary;
+    colors.button_primary_foreground = colors.primary_foreground;
+    colors.button_primary_hover = colors.primary_hover;
+    colors.button_primary_active = colors.primary_active;
     // Ghost controls, including gpui-component's notification close button, use the
     // secondary foreground token. Keep it readable when Bootty starts in dark mode: the
     // component theme is initialized from its light defaults before this palette is applied.

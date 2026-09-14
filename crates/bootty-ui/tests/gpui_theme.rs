@@ -95,6 +95,8 @@ fn custom_theme_switch_resets_editor_and_component_surfaces(cx: &TestAppContext)
         assert_component_color(component.colors.sidebar, light.pane);
         assert_component_color(component.colors.foreground, light.text);
         assert_component_color(component.colors.button_secondary_foreground, light.text);
+        assert_component_color(component.colors.button_primary, light.primary);
+        assert_component_color(component.colors.button_primary_foreground, light.base);
         assert_component_color(component.colors.group_box, light.surface);
         assert_eq!(
             component.colors.skeleton,
@@ -126,6 +128,16 @@ fn component_chrome_colors_and_tokens_follow_the_bootty_palette(cx: &TestAppCont
         assert_component_color(theme.colors.status_bar, palette.mantle);
         assert_component_color(theme.colors.scrollbar_thumb, palette.border);
         assert_component_color(theme.colors.secondary_foreground, palette.text);
+        assert_component_color(theme.tokens.button_primary.color, palette.primary);
+        assert_component_color(theme.colors.button_primary_foreground, palette.base);
+        assert_eq!(
+            theme.colors.button_primary_hover,
+            theme.colors.primary_hover
+        );
+        assert_eq!(
+            theme.colors.button_primary_active,
+            theme.colors.primary_active
+        );
         assert_component_color(theme.colors.slider_bar, palette.muted);
         assert_component_color(theme.colors.slider_thumb, palette.text);
         assert_eq!(

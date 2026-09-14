@@ -25,15 +25,15 @@ use bootty_mux::provider::MuxBackendRegistry;
 use bootty_terminal::frame_source::TerminalFrameSource;
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface};
 use gpui_kit::component::{
-    Disableable as _, IconName, Root, Sizable as _, Size, WindowExt as _,
+    Disableable as _, ElementExt as _, IconName, Root, Sizable as _, Size, WindowExt as _,
     button::{Button, ButtonVariants as _},
     notification::Notification,
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
     AnyElement, App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
-    Hsla, IntoElement, MouseButton, ParentElement, Pixels, PromptLevel, Render, Styled,
-    Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
+    Hsla, IntoElement, MouseButton, ParentElement, Pixels, Render, Styled, Subscription,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
     WindowOptions, div, point, prelude::*, px, size,
 };
 use num_traits::ToPrimitive as _;
@@ -616,11 +616,11 @@ impl GpuiSettingsWindow {
             .path
             .file_name()
             .map_or_else(|| "file".to_owned(), |name| name.to_string_lossy().into());
-        let answer = window.prompt(
-            PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             &format!("Save changes to {title}?"),
             Some(&detail),
-            &["Save", "Discard", "Cancel"],
+            &["Save".into(), "Discard".into(), "Cancel".into()],
+            window,
             cx,
         );
         let editor = tab.editor.clone();
@@ -825,6 +825,11 @@ impl Render for GpuiSettingsWindow {
             (SettingsWindowTab::Keymap, _) => self.keymap.clone().into_any_element(),
             _ => self.settings.clone().into_any_element(),
         };
+        let title_bar = crate::platform::client_title_bar("Bootty — Settings", window).map(|bar| {
+            bar.on_close_window(cx.listener(|this, _, window, cx| {
+                this.request_close(window, cx);
+            }))
+        });
         div()
             .relative()
             .size_full()
@@ -837,6 +842,7 @@ impl Render for GpuiSettingsWindow {
                     crate::gpui_actions::cycle_application_window(window, cx);
                 },
             ))
+            .children(title_bar)
             .child(tab_strip)
             .child(div().flex_1().min_h_0().child(body))
             .children(sheet_layer)
@@ -845,7 +851,10 @@ impl Render for GpuiSettingsWindow {
     }
 }
 
-fn settings_window_options(cx: &gpui_kit::App) -> WindowOptions {
+fn settings_window_options(
+    decorations: bootty_config::config::WindowDecoration,
+    cx: &gpui_kit::App,
+) -> WindowOptions {
     let minimum_width = px(f32::from(crate::gpui::ui_rem_size(cx))
         * (crate::gpui::SETTINGS_SIDEBAR_WIDTH_REMS + SETTINGS_CONTENT_MIN_WIDTH_REMS));
     WindowOptions {
@@ -857,6 +866,15 @@ fn settings_window_options(cx: &gpui_kit::App) -> WindowOptions {
         focus: true,
         show: true,
         is_movable: true,
+        app_owns_titlebar_drag: cfg!(target_os = "linux"),
+        // Auxiliary windows stay decorated even when the workspace is borderless or fullscreen.
+        window_decorations: Some(
+            if decorations == bootty_config::config::WindowDecoration::Client {
+                WindowDecorations::Client
+            } else {
+                WindowDecorations::Server
+            },
+        ),
         kind: WindowKind::Normal,
         app_id: Some(
             bootty_config::ApplicationIdentity::current()
@@ -906,7 +924,7 @@ fn terminal_area(chrome: &ChromeSnapshot, docked: bool) -> SurfaceRect {
     };
     let min_y = titlebar_height + chrome.layout.top_inset + if docked { 0.0 } else { top_status };
     let width = (chrome.layout.width - sidebar_width).max(1.0);
-    let height = (chrome.layout.height - min_y - bottom_status).max(1.0);
+    let height = (chrome.layout.height - min_y - if docked { 0.0 } else { bottom_status }).max(1.0);
     SurfaceRect {
         min_x,
         min_y,
@@ -984,6 +1002,7 @@ struct WorkspaceInitialization {
 )]
 pub struct GpuiWorkspace {
     state: AppState,
+    workspace_bounds: Bounds<Pixels>,
     tools: Option<Entity<crate::gpui_dock::WorkspaceDock>>,
     tools_scope: Option<bootty_mux::controller::SpaceId>,
     document_close_prompt: bool,
@@ -1080,6 +1099,8 @@ impl GpuiWorkspace {
         cx: &mut App,
     ) -> Result<gpui_kit::WindowHandle<Root>> {
         let options = crate::platform::native_options_for_config(&config, cx);
+        let bordered =
+            config.window.window_decoration != bootty_config::config::WindowDecoration::None;
         // Prepare fallible state before GPUI's infallible entity constructor publishes a view.
         // The bounded wake channel retains work that arrives before the window subscribes.
         let (repaint_tx, repaint_rx) = async_channel::bounded(1);
@@ -1107,7 +1128,7 @@ impl GpuiWorkspace {
                     cx,
                 )
             });
-            cx.new(|cx| Root::new(workspace, window, cx).bordered(false))
+            cx.new(|cx| Root::new(workspace, window, cx).bordered(bordered))
         })
     }
 
@@ -1130,6 +1151,7 @@ impl GpuiWorkspace {
             cx,
         );
         Self {
+            workspace_bounds: Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()),
             display_id: initial.display_id,
             tools: None,
             tools_scope: None,
@@ -1645,8 +1667,9 @@ impl GpuiWorkspace {
         let keymap = self.keymap_editor.clone();
         let workspace = cx.weak_entity();
         let workspace_owner = self.workspace.clone();
+        let decorations = self.state.config().window.window_decoration;
         cx.defer(move |cx| {
-            let options = settings_window_options(cx);
+            let options = settings_window_options(decorations, cx);
             let window = cx.open_window(options, move |window, cx| {
                 let view = cx.new(|cx| {
                     GpuiSettingsWindow::new(
@@ -1898,7 +1921,7 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewport = window.viewport_size();
+        let viewport = self.workspace_bounds.size;
         let cell = self.terminal_cell;
         let effects = self.state.update_frame(crate::gpui_input::frame_inputs(
             input,
@@ -1962,7 +1985,7 @@ impl GpuiWorkspace {
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| tools.remember_focus(window, cx));
         }
-        let viewport = window.viewport_size();
+        let viewport = self.workspace_bounds.size;
         let mut effects = Vec::new();
         let _ = self.state.dispatch_command(
             invocation,
@@ -2166,11 +2189,15 @@ impl GpuiWorkspace {
             .map(|document| document.read(cx).path())
             .collect::<Vec<_>>()
             .join("\n");
-        let answer = window.prompt(
-            PromptLevel::Warning,
+        let answer = crate::gpui::prompt(
             "Unsaved documents",
             Some(&detail),
-            &["Save all and keep open", "Discard and close", "Cancel"],
+            &[
+                "Save all and keep open".into(),
+                "Discard and close".into(),
+                "Cancel".into(),
+            ],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |weak, cx| {
@@ -2364,7 +2391,7 @@ impl GpuiWorkspace {
                     }
                 }
                 AppEffect::SetDecorations(decorated) => window.request_decorations(if decorated {
-                    WindowDecorations::Server
+                    crate::platform::window_decorations(&self.state.config().window)
                 } else {
                     WindowDecorations::Client
                 }),
@@ -2645,7 +2672,7 @@ impl GpuiWorkspace {
 
     fn advance_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.frame_update_pending = false;
-        let viewport = window.viewport_size();
+        let viewport = self.workspace_bounds.size;
         let cell = self.terminal_cell;
         let frame_inputs = crate::gpui_input::drain_frame_inputs(
             &mut self.input,
@@ -2680,7 +2707,7 @@ impl GpuiWorkspace {
             true,
             window.is_window_active(),
         );
-        let viewport = window.viewport_size();
+        let viewport = self.workspace_bounds.size;
         chrome_frame::snapshot(
             &self.state,
             &self.launch.native_chrome.borrow(),
@@ -4481,7 +4508,7 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (ChromeSnapshot, f32) {
-        let viewport = window.viewport_size();
+        let viewport = self.workspace_bounds.size;
         let viewport_height: f32 = viewport.height.into();
         let usage_visible = self.tools.as_ref().is_some_and(|tools| {
             tools
@@ -4633,6 +4660,56 @@ impl GpuiWorkspace {
         cx.stop_propagation();
     }
 
+    fn window_frame(
+        &self,
+        workspace: impl IntoElement,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        // The Root border and Linux title bar consume space outside the workspace. Use
+        // the laid-out body bounds for terminal/chrome geometry, including after resize.
+        let previous_bounds = self.workspace_bounds;
+        let owner = cx.weak_entity();
+        let title_bar = self
+            .state
+            .config()
+            .window
+            .decorations_enabled()
+            .then(|| {
+                crate::platform::client_title_bar(self.state.config().window.title.clone(), window)
+            })
+            .flatten()
+            .map(|bar| {
+                bar.on_close_window(cx.listener(|this, _, window, cx| {
+                    this.request_document_exit(false, window, cx);
+                }))
+            });
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(title_bar)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .on_prepaint(move |bounds, window, cx| {
+                        if bounds != previous_bounds {
+                            window.defer(cx, move |_, cx| {
+                                _ = owner.update(cx, |this, cx| {
+                                    this.workspace_bounds = bounds;
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    })
+                    .child(workspace),
+            )
+    }
+
     fn workspace_frame(
         &self,
         terminal_surface: AnyElement,
@@ -4644,6 +4721,7 @@ impl GpuiWorkspace {
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let tools_visible = self.tools_visible && self.tools.is_none();
         let ui_font = setup_ui_font(window, cx);
+        let workspace_origin = self.workspace_bounds.origin;
         div()
             .id("bootty-workspace")
             .relative()
@@ -4656,8 +4734,8 @@ impl GpuiWorkspace {
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui_kit::MouseMoveEvent, _, cx| {
                     let point = bootty_terminal::geometry::SurfacePoint {
-                        x: event.position.x.into(),
-                        y: event.position.y.into(),
+                        x: f32::from(event.position.x) - f32::from(workspace_origin.x),
+                        y: f32::from(event.position.y) - f32::from(workspace_origin.y),
                     };
                     if this.terminal_mouse_buttons.is_empty() || terminal_area.contains(point) {
                         return;
@@ -4684,11 +4762,13 @@ impl GpuiWorkspace {
             .font(ui_font)
             .text_color(colors.text)
             .child(terminal_surface)
-            .child(
-                self.chrome_view
-                    .clone()
-                    .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
-            )
+            .when(self.tools.is_none(), |workspace| {
+                workspace.child(
+                    self.chrome_view
+                        .clone()
+                        .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
+                )
+            })
             .when(tools_visible, |workspace| {
                 workspace.children(self.tools.clone().map(|tools| {
                     div()
@@ -4743,23 +4823,23 @@ impl Render for GpuiWorkspace {
             cx,
         );
 
-        workspace
-            .when(
-                self.visual_bell_until
-                    .is_some_and(|until| until > Instant::now()),
-                |workspace| {
-                    workspace.child(
-                        div()
-                            .absolute()
-                            .left(px(terminal_area.min_x))
-                            .top(px(terminal_area.min_y))
-                            .w(px(terminal_area.width()))
-                            .h(px(terminal_area.height()))
-                            .border_2()
-                            .border_color(colors.accent),
-                    )
-                },
-            )
+        let workspace = workspace.when(
+            self.visual_bell_until
+                .is_some_and(|until| until > Instant::now()),
+            |workspace| {
+                workspace.child(
+                    div()
+                        .absolute()
+                        .left(px(terminal_area.min_x))
+                        .top(px(terminal_area.min_y))
+                        .w(px(terminal_area.width()))
+                        .h(px(terminal_area.height()))
+                        .border_2()
+                        .border_color(colors.accent),
+                )
+            },
+        );
+        self.window_frame(workspace, window, cx)
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)

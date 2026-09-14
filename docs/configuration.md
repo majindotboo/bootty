@@ -472,6 +472,14 @@ window, or restart Bootty, for those settings to take effect.
 buttons for new windows. `window-decoration = "none"` disables native window
 decorations.
 
+On Linux, `window-decoration = "client"` requests Bootty's title bar, window controls,
+and resize borders. `"server"` requests the window manager's decorations; `"auto"`
+uses that same platform preference. When the compositor cannot draw decorations
+(for example, GNOME on Wayland), Bootty supplies them. X11 environments without
+client-decoration support use system decorations. Settings windows follow the
+decoration preference and keep their own controls even when the workspace is
+borderless or fullscreen. Decoration changes apply to newly opened windows.
+
 `[window].fullscreen` accepts `false`, `true`/`"native"`, `"non-native"`,
 `"non-native-visible-menu"`, or `"non-native-padded-notch"` and records the
 style to use. `[window].fullscreen-enabled` is the launch preference for that

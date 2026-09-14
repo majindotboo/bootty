@@ -171,6 +171,12 @@ impl GpuiChrome {
         ))
     }
 
+    pub(crate) fn dock_bottom_height(&self) -> gpui_kit::Pixels {
+        px(self.snapshot.bottom_status.as_ref().map_or(0.0, |status| {
+            status.rows.max(1).to_f32().unwrap_or(f32::MAX) * self.snapshot.layout.status_height
+        }))
+    }
+
     pub(crate) fn dock_sidebar(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let snapshot = self.snapshot.sidebar.clone()?;
         Some(sidebar::render(
@@ -642,8 +648,13 @@ impl Render for GpuiChrome {
                     },
                 ))
             })
-            .w(px(layout.width))
-            .h(px(layout.height))
+            .map(|element| {
+                if self.docked_status {
+                    element.size_full()
+                } else {
+                    element.w(px(layout.width)).h(px(layout.height))
+                }
+            })
             .flex()
             .flex_col()
             .overflow_hidden()

@@ -49,7 +49,7 @@ height = 760
 # The style is retained when fullscreen is toggled off so the next toggle/restart restores it.
 fullscreen = "native"
 fullscreen-enabled = false
-window-decoration = "auto"
+window-decoration = "auto" # Linux: client = Bootty controls, server/auto = system, none = borderless.
 macos-titlebar-style = "transparent"
 # Top offset reserved when the window covers a notched screen in fullscreen, so the sidebar and
 # terminal clear the notch. Omitted (the default) auto-detects the notch height from the display's
