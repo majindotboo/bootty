@@ -9,12 +9,16 @@ use crate::terminal_engine::write_ingress::{find_osc_terminator, split_osc_paylo
 pub enum TerminalSideEffect {
     Bell,
     ClipboardWrite(String),
+    ClipboardPacket(Vec<u8>),
+    ClipboardReset,
     ClipboardQuery { selection: String },
     WindowTitle(String),
     WindowIcon(String),
     DesktopNotification { title: String, body: String },
     MouseShape(String),
     SemanticPrompt(String),
+    ShellLifecycle(crate::shell_lifecycle::ShellEvent),
+    ShellPrompt(crate::shell_prompt::PromptReport),
     KittyTextSizing(String),
     ConEmuControl(String),
     ConEmuProgress { state: String, value: Option<u8> },
@@ -33,10 +37,13 @@ impl TerminalSideEffect {
     /// the user already saw, or answer a query the child no longer expects.
     /// State-restoring effects (title, icon, mouse shape) are not repeats: a
     /// recovery keyframe carries them so the host can catch up.
-    pub(crate) fn repeats_on_replay(&self) -> bool {
+    pub(crate) const fn repeats_on_replay(&self) -> bool {
         matches!(
             self,
             Self::Bell
+                | Self::ShellLifecycle(_)
+                | Self::ShellPrompt(_)
+                | Self::ClipboardPacket(_)
                 | Self::ClipboardWrite(_)
                 | Self::ClipboardQuery { .. }
                 | Self::DesktopNotification { .. }
@@ -62,13 +69,18 @@ fn keep_restored_state(effects: &mut Vec<TerminalSideEffect>, from: usize) {
 pub struct TerminalSideEffectEvent {
     pub source_pane_id: Option<String>,
     pub effect: TerminalSideEffect,
+    /// Live delivery time prevents a delayed GUI frame from collapsing a command's duration.
+    /// Synthetic events can omit it and use their caller's injected frame time.
+    pub observed_at: Option<std::time::Instant>,
 }
 
 impl TerminalSideEffectEvent {
-    pub fn new(source_pane_id: Option<String>, effect: TerminalSideEffect) -> Self {
+    #[must_use]
+    pub const fn new(source_pane_id: Option<String>, effect: TerminalSideEffect) -> Self {
         Self {
             source_pane_id,
             effect,
+            observed_at: None,
         }
     }
 }
@@ -82,7 +94,10 @@ pub fn deliver_terminal_side_effects(
         return;
     };
     for effect in effects {
-        let event = TerminalSideEffectEvent::new(source_pane_id.clone(), effect);
+        let mut event = TerminalSideEffectEvent::new(source_pane_id.clone(), effect);
+        if matches!(event.effect, TerminalSideEffect::ShellLifecycle(_)) {
+            event.observed_at = Some(std::time::Instant::now());
+        }
         if active_sender.send(event).is_err() {
             *sender = None;
             return;
@@ -96,6 +111,8 @@ pub(crate) enum TerminalHostAction {
 
 pub(crate) struct TerminalSideEffectCollector {
     osc_pending: Vec<u8>,
+    clipboard_discard: bool,
+    clipboard_seen: bool,
     effects: Vec<TerminalSideEffect>,
     callback_effects: Rc<RefCell<Vec<TerminalSideEffect>>>,
     iterm_copy_capture: Option<ItermCopyCapture>,
@@ -122,6 +139,8 @@ impl TerminalSideEffectCollector {
     pub(crate) fn new() -> Self {
         Self {
             osc_pending: Vec::new(),
+            clipboard_discard: false,
+            clipboard_seen: false,
             effects: Vec::new(),
             callback_effects: Rc::new(RefCell::new(Vec::new())),
             iterm_copy_capture: None,
@@ -132,39 +151,55 @@ impl TerminalSideEffectCollector {
         self.callback_effects.clone()
     }
 
-    pub(crate) fn needs_input(&self) -> bool {
-        !self.osc_pending.is_empty() || self.iterm_copy_capture.is_some()
+    pub(crate) const fn needs_input(&self) -> bool {
+        self.clipboard_discard || !self.osc_pending.is_empty() || self.iterm_copy_capture.is_some()
     }
 
     pub(crate) fn collect(&mut self, data: &[u8]) -> Vec<TerminalHostAction> {
         let mut actions = Vec::new();
-        let mut bytes = Vec::with_capacity(self.osc_pending.len() + data.len());
+        let mut bytes = Vec::with_capacity(self.osc_pending.len().saturating_add(data.len()));
         bytes.extend_from_slice(&self.osc_pending);
         bytes.extend_from_slice(data);
         self.osc_pending.clear();
 
-        let mut search_start = 0;
-        while let Some(relative_start) = find(&bytes[search_start..], b"\x1b]") {
-            let start = search_start + relative_start;
-            if start > search_start {
-                self.append_iterm_copy_text(&bytes[search_start..start]);
-            }
-            let payload_start = start + 2;
-            match find_osc_terminator(&bytes[payload_start..]) {
-                Some((payload_len, terminator_len)) => {
-                    let payload = &bytes[payload_start..payload_start + payload_len];
-                    self.push_osc_side_effect(payload, &mut actions);
-                    search_start = payload_start + payload_len + terminator_len;
+        let mut remaining = bytes.as_slice();
+        if self.clipboard_discard {
+            let Some((end, len)) = find_osc_terminator(remaining) else {
+                if remaining.last() == Some(&0x1b) {
+                    self.osc_pending.push(0x1b);
                 }
-                None => {
-                    self.osc_pending.extend_from_slice(&bytes[start..]);
-                    return actions;
+                return actions;
+            };
+            remaining = remaining.get(end.saturating_add(len)..).unwrap_or_default();
+            self.clipboard_discard = false;
+        }
+        while let Some(start) = find(remaining, b"\x1b]") {
+            let (text, packet) = remaining.split_at(start.min(remaining.len()));
+            self.append_iterm_copy_text(text);
+            let Some(payload) = packet.strip_prefix(b"\x1b]") else {
+                break;
+            };
+            if let Some((payload_len, terminator_len)) = find_osc_terminator(payload) {
+                let (payload, tail) = payload.split_at(payload_len.min(payload.len()));
+                self.push_osc_side_effect(payload, &mut actions);
+                remaining = tail.get(terminator_len..).unwrap_or_default();
+            } else {
+                if payload.starts_with(b"5522;")
+                    && payload.len() > crate::clipboard_write::MAX_PACKET
+                {
+                    self.clipboard_discard = true;
+                    self.effects
+                        .push(TerminalSideEffect::ClipboardPacket(Vec::new()));
+                    if packet.last() == Some(&0x1b) {
+                        self.osc_pending.push(0x1b);
+                    }
+                } else {
+                    self.osc_pending.extend_from_slice(packet);
                 }
+                return actions;
             }
         }
-        if search_start < bytes.len() {
-            self.append_iterm_copy_text(&bytes[search_start..]);
-        }
+        self.append_iterm_copy_text(remaining);
         actions
     }
 
@@ -178,11 +213,18 @@ impl TerminalSideEffectCollector {
     pub(crate) fn clear_pending(&mut self) {
         self.osc_pending.clear();
         self.iterm_copy_capture = None;
+        self.clipboard_discard = false;
     }
 
     pub(crate) fn drop_replayed(&mut self, (effects, callback_effects): (usize, usize)) {
         keep_restored_state(&mut self.effects, effects);
         keep_restored_state(&mut self.callback_effects.borrow_mut(), callback_effects);
+    }
+
+    pub(crate) fn reset_clipboard_epoch(&mut self) {
+        if std::mem::take(&mut self.clipboard_seen) {
+            self.effects.push(TerminalSideEffect::ClipboardReset);
+        }
     }
 
     pub(crate) fn drain(&mut self) -> Vec<TerminalSideEffect> {
@@ -209,8 +251,29 @@ impl TerminalSideEffectCollector {
                 }
             }
             b"22" => self.push_utf8_effect(rest, TerminalSideEffect::MouseShape),
+            b"5522" => {
+                self.clipboard_seen = true;
+                self.effects.push(TerminalSideEffect::ClipboardPacket(
+                    if rest.len() <= crate::clipboard_write::MAX_PACKET {
+                        rest.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                ));
+            }
             b"52" => self.effects.extend(osc52_side_effect(rest)),
-            b"133" => self.push_utf8_effect(rest, TerminalSideEffect::SemanticPrompt),
+            b"133" => {
+                if let Ok(value) = std::str::from_utf8(rest)
+                    && let Some(event) = crate::shell_lifecycle::ShellEvent::parse_osc133(value)
+                {
+                    self.effects.push(TerminalSideEffect::ShellLifecycle(event));
+                }
+                if let Ok(value) = std::str::from_utf8(rest)
+                    && let Some(report) = crate::shell_prompt::PromptReport::parse(value)
+                {
+                    self.effects.push(TerminalSideEffect::ShellPrompt(report));
+                }
+            }
             b"66" => self.push_utf8_effect(rest, TerminalSideEffect::KittyTextSizing),
             b"777" => self.push_osc777_side_effect(rest),
             b"1337" => {
@@ -310,7 +373,6 @@ impl TerminalSideEffectCollector {
             return;
         };
         match key {
-            "CurrentDir" => self.push_iterm2_control(data),
             "CursorShape" => {
                 if let Some(sequence) = iterm_cursor_shape_sequence(value) {
                     actions.push(TerminalHostAction::WriteVt(sequence));
@@ -372,8 +434,9 @@ impl TerminalSideEffectCollector {
 
 fn osc52_side_effect(payload: &[u8]) -> Option<TerminalSideEffect> {
     let separator = payload.iter().position(|byte| *byte == b';')?;
-    let selection = String::from_utf8_lossy(&payload[..separator]).into_owned();
-    let encoded = &payload[separator + 1..];
+    let (selection, encoded) = payload.split_at_checked(separator)?;
+    let selection = String::from_utf8_lossy(selection).into_owned();
+    let encoded = encoded.strip_prefix(b";")?;
     if encoded == b"?" {
         return Some(TerminalSideEffect::ClipboardQuery { selection });
     }

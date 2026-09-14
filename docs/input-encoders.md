@@ -1,9 +1,13 @@
 # Terminal input encoders
 
-Bootty keeps egui input capture separate from terminal encoding. `input.rs`
-converts egui events and `TerminalSurface` geometry into UI-free
-`TerminalInputCommand` values. `TerminalEngine` turns those commands into bytes
-using Ghostty-compatible encoders or direct UTF-8 writes.
+Bootty keeps GPUI input capture separate from terminal encoding. Each pane's focused
+`GpuiTerminalView` owns keyboard and IME delivery and immediately publishes a host-neutral
+`InputAccumulator` snapshot. `bootty-ui/src/state/input.rs` converts those events and
+`TerminalSurface` geometry into UI-free `TerminalInputCommand` values. `TerminalEngine` turns
+those commands into bytes using Ghostty-compatible encoders or direct UTF-8 writes.
+
+Configured application shortcuts do not pass through terminal input. `gpui_actions.rs` translates
+them into typed GPUI actions that submit the same `CommandInvocation` used by every other caller.
 
 ## Command boundary
 
@@ -25,7 +29,7 @@ hardcoded escape sequences. Before encoding, `TerminalEngine` calls
 `set_options_from_terminal(&terminal)` so terminal modes such as application
 cursor/keypad and Kitty keyboard protocol can affect emitted bytes.
 
-The complete key mapping lives in `input.rs::terminal_key`; tests are the
+The complete key mapping lives in `state/input.rs::terminal_key`; tests are the
 canonical coverage record. Do not maintain a second exhaustive key list in this
 document.
 

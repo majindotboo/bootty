@@ -1,7 +1,7 @@
 use super::{super::*, terminal_engine::test_terminal_engine};
 use pretty_assertions::assert_eq;
 
-fn terminal_key_input(
+const fn terminal_key_input(
     key: TerminalKey,
     mods: KeyMods,
     utf8: Option<&'static str>,
@@ -49,7 +49,7 @@ struct KeyEncodeCase<'a> {
 }
 
 impl<'a> KeyEncodeCase<'a> {
-    fn press(key: key::Key, expected: &'a [u8]) -> Self {
+    const fn press(key: key::Key, expected: &'a [u8]) -> Self {
         Self {
             action: key::Action::Press,
             key,
@@ -62,32 +62,32 @@ impl<'a> KeyEncodeCase<'a> {
         }
     }
 
-    fn mods(mut self, mods: key::Mods) -> Self {
+    const fn mods(mut self, mods: key::Mods) -> Self {
         self.mods = mods;
         self
     }
 
-    fn consumed_mods(mut self, consumed_mods: key::Mods) -> Self {
+    const fn consumed_mods(mut self, consumed_mods: key::Mods) -> Self {
         self.consumed_mods = consumed_mods;
         self
     }
 
-    fn action(mut self, action: key::Action) -> Self {
+    const fn action(mut self, action: key::Action) -> Self {
         self.action = action;
         self
     }
 
-    fn composing(mut self) -> Self {
+    const fn composing(mut self) -> Self {
         self.composing = true;
         self
     }
 
-    fn utf8(mut self, utf8: &'a str) -> Self {
+    const fn utf8(mut self, utf8: &'a str) -> Self {
         self.utf8 = Some(utf8);
         self
     }
 
-    fn unshifted(mut self, unshifted: char) -> Self {
+    const fn unshifted(mut self, unshifted: char) -> Self {
         self.unshifted = Some(unshifted);
         self
     }
@@ -134,8 +134,8 @@ fn encode_legacy_case(case: KeyEncodeCase<'_>) -> Result<Vec<u8>> {
 }
 
 #[test]
-fn key_encoder_supports_legacy_core_cases() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn key_encoder_supports_legacy_core_cases() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
 
     for (key, mods, utf8, unshifted, expected) in [
@@ -201,7 +201,8 @@ fn key_encoder_supports_legacy_core_cases() -> Result<()> {
             &mut out,
             terminal_key_input(key, mods, utf8, unshifted),
             expected,
-        )?;
+        )
+        .expect("test operation succeeds");
     }
 
     engine.write_vt(b"\x1b[?67h");
@@ -233,13 +234,13 @@ fn key_encoder_supports_legacy_core_cases() -> Result<()> {
             &mut out,
             terminal_key_input(key, mods, None, None),
             expected,
-        )?;
+        )
+        .expect("test operation succeeds");
     }
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_kitty_protocol_compatibility_batch() -> Result<()> {
+fn key_encoder_ports_kitty_protocol_compatibility_batch() {
     let disambiguate = key::KittyKeyFlags::DISAMBIGUATE;
     let report_alternates =
         key::KittyKeyFlags::DISAMBIGUATE | key::KittyKeyFlags::REPORT_ALTERNATES;
@@ -262,7 +263,10 @@ fn key_encoder_ports_kitty_protocol_compatibility_batch() -> Result<()> {
             .composing(),
         KeyEncodeCase::press(key::Key::ArrowUp, b"\x1b[A").utf8("\u{1e}"),
     ] {
-        assert_eq!(encode_with_kitty_flags(case, disambiguate)?, case.expected);
+        assert_eq!(
+            encode_with_kitty_flags(case, disambiguate).expect("test operation succeeds"),
+            case.expected
+        );
     }
 
     let shift_a_alternate = KeyEncodeCase::press(key::Key::A, b"\x1b[97:65;2u")
@@ -270,7 +274,8 @@ fn key_encoder_ports_kitty_protocol_compatibility_batch() -> Result<()> {
         .utf8("A")
         .unshifted('a');
     assert_eq!(
-        encode_with_kitty_flags(shift_a_alternate, report_alternates)?,
+        encode_with_kitty_flags(shift_a_alternate, report_alternates)
+            .expect("test operation succeeds"),
         shift_a_alternate.expected
     );
 
@@ -297,10 +302,10 @@ fn key_encoder_ports_kitty_protocol_compatibility_batch() -> Result<()> {
             .mods(key::Mods::SHIFT)
             .utf8(":")
             .unshifted(';'),
-        KeyEncodeCase::press(key::Key::Semicolon, "\x1b[1095::59;;1095u".as_bytes())
+        KeyEncodeCase::press(key::Key::Semicolon, b"\x1b[1095::59;;1095u")
             .utf8("ч")
             .unshifted('ч'),
-        KeyEncodeCase::press(key::Key::Semicolon, "\x1b[1095:1063:59;2;1063u".as_bytes())
+        KeyEncodeCase::press(key::Key::Semicolon, b"\x1b[1095:1063:59;2;1063u")
             .mods(key::Mods::SHIFT)
             .utf8("Ч")
             .unshifted('ч'),
@@ -325,23 +330,26 @@ fn key_encoder_ports_kitty_protocol_compatibility_batch() -> Result<()> {
             .utf8("A")
             .unshifted('\r'),
     ] {
-        assert_eq!(encode_with_kitty_flags(case, all)?, case.expected);
+        assert_eq!(
+            encode_with_kitty_flags(case, all).expect("test operation succeeds"),
+            case.expected
+        );
     }
-
-    Ok(())
 }
 
 #[test]
-fn pi_kitty_negotiation_reports_command_alt_key() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn pi_kitty_negotiation_reports_command_alt_key() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let response = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let capture = response.clone();
-    engine.on_pty_write(move |_terminal, bytes| {
-        capture
-            .lock()
-            .expect("pty response lock")
-            .extend_from_slice(bytes);
-    })?;
+    engine
+        .on_pty_write(move |_terminal, bytes| {
+            capture
+                .lock()
+                .expect("pty response lock")
+                .extend_from_slice(bytes);
+        })
+        .expect("test operation succeeds");
     let mut out = Vec::new();
 
     engine.write_vt(b"\x1b[>7u\x1b[?u\x1b[c");
@@ -349,26 +357,27 @@ fn pi_kitty_negotiation_reports_command_alt_key() -> Result<()> {
         *response.lock().expect("pty response lock"),
         b"\x1b[?7u\x1b[?62;22;52c"
     );
-    engine.encode_key_to_vec(
-        terminal_key_input(
-            TerminalKey::B,
-            KeyMods {
-                alt: true,
-                command: true,
-                ..Default::default()
-            },
-            Some("b"),
-            Some('b'),
-        ),
-        &mut out,
-    )?;
+    engine
+        .encode_key_to_vec(
+            terminal_key_input(
+                TerminalKey::B,
+                KeyMods {
+                    alt: true,
+                    command: true,
+                    ..Default::default()
+                },
+                Some("b"),
+                Some('b'),
+            ),
+            &mut out,
+        )
+        .expect("test operation succeeds");
 
     assert_eq!(out, b"\x1b[98;11u");
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
+fn key_encoder_ports_kitty_alternate_and_associated_text_batch() {
     let report_alternates =
         key::KittyKeyFlags::DISAMBIGUATE | key::KittyKeyFlags::REPORT_ALTERNATES;
     let all = key::KittyKeyFlags::ALL;
@@ -378,7 +387,8 @@ fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
         .utf8("A")
         .unshifted('A');
     assert_eq!(
-        encode_with_kitty_flags(matching_unshifted, report_alternates)?,
+        encode_with_kitty_flags(matching_unshifted, report_alternates)
+            .expect("test operation succeeds"),
         matching_unshifted.expected
     );
 
@@ -387,22 +397,25 @@ fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
             .mods(key::Mods::CAPS_LOCK)
             .utf8("J")
             .unshifted('j'),
-        KeyEncodeCase::press(key::Key::Semicolon, "\x1b[1095::59;65;1063u".as_bytes())
+        KeyEncodeCase::press(key::Key::Semicolon, b"\x1b[1095::59;65;1063u")
             .mods(key::Mods::CAPS_LOCK)
             .utf8("Ч")
             .unshifted('ч'),
-        KeyEncodeCase::press(key::Key::BracketLeft, "\x1b[337::91;5:3u".as_bytes())
+        KeyEncodeCase::press(key::Key::BracketLeft, b"\x1b[337::91;5:3u")
             .mods(key::Mods::CTRL)
             .action(key::Action::Release)
             .utf8("")
             .unshifted('ő'),
     ] {
-        assert_eq!(encode_with_kitty_flags(case, all)?, case.expected);
+        assert_eq!(
+            encode_with_kitty_flags(case, all).expect("test operation succeeds"),
+            case.expected
+        );
     }
 
     #[cfg(target_os = "macos")]
     {
-        let option_text = KeyEncodeCase::press(key::Key::W, "\x1b[119;3;8721u".as_bytes())
+        let option_text = KeyEncodeCase::press(key::Key::W, b"\x1b[119;3;8721u")
             .mods(key::Mods::ALT)
             .utf8("∑")
             .unshifted('w');
@@ -411,7 +424,8 @@ fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
                 encoder
                     .set_kitty_flags(all)
                     .set_macos_option_as_alt(key::OptionAsAlt::False);
-            })?,
+            })
+            .expect("test operation succeeds"),
             option_text.expected
         );
 
@@ -424,11 +438,12 @@ fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
                 encoder
                     .set_kitty_flags(all)
                     .set_macos_option_as_alt(key::OptionAsAlt::True);
-            })?,
+            })
+            .expect("test operation succeeds"),
             alt_text.expected
         );
 
-        let text_without_alt = KeyEncodeCase::press(key::Key::W, "\x1b[119;;8721u".as_bytes())
+        let text_without_alt = KeyEncodeCase::press(key::Key::W, b"\x1b[119;;8721u")
             .utf8("∑")
             .unshifted('w');
         assert_eq!(
@@ -436,16 +451,15 @@ fn key_encoder_ports_kitty_alternate_and_associated_text_batch() -> Result<()> {
                 encoder
                     .set_kitty_flags(all)
                     .set_macos_option_as_alt(key::OptionAsAlt::True);
-            })?,
+            })
+            .expect("test operation succeeds"),
             text_without_alt.expected
         );
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_kitty_sequence_formatting_edges() -> Result<()> {
+fn key_encoder_ports_kitty_sequence_formatting_edges() {
     let all = key::KittyKeyFlags::ALL;
 
     for case in [
@@ -471,19 +485,20 @@ fn key_encoder_ports_kitty_sequence_formatting_edges() -> Result<()> {
             .utf8("J")
             .unshifted('j'),
     ] {
-        assert_eq!(encode_with_kitty_flags(case, all)?, case.expected);
+        assert_eq!(
+            encode_with_kitty_flags(case, all).expect("test operation succeeds"),
+            case.expected
+        );
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_kitty_keypad_and_backspace_mode_cases() -> Result<()> {
+fn key_encoder_ports_kitty_keypad_and_backspace_mode_cases() {
     let all = key::KittyKeyFlags::ALL;
 
     let keypad_one = KeyEncodeCase::press(key::Key::Numpad1, b"\x1b[57400;;49u").utf8("1");
     assert_eq!(
-        encode_with_kitty_flags(keypad_one, all)?,
+        encode_with_kitty_flags(keypad_one, all).expect("test operation succeeds"),
         keypad_one.expected
     );
 
@@ -494,16 +509,15 @@ fn key_encoder_ports_kitty_keypad_and_backspace_mode_cases() -> Result<()> {
                 encoder
                     .set_kitty_flags(all)
                     .set_backarrow_key_mode(backarrow_key_mode);
-            })?,
+            })
+            .expect("test operation succeeds"),
             backspace.expected
         );
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_legacy_extended_compatibility_batch() -> Result<()> {
+fn key_encoder_ports_legacy_extended_compatibility_batch() {
     for case in [
         KeyEncodeCase::press(key::Key::Enter, b"A")
             .utf8("A")
@@ -540,7 +554,7 @@ fn key_encoder_ports_legacy_extended_compatibility_batch() -> Result<()> {
         KeyEncodeCase::press(key::Key::ArrowUp, b"\x1b[1;2A")
             .mods(key::Mods::SHIFT)
             .consumed_mods(key::Mods::SHIFT),
-        KeyEncodeCase::press(key::Key::BracketLeft, "\x1b[337;5u".as_bytes())
+        KeyEncodeCase::press(key::Key::BracketLeft, b"\x1b[337;5u")
             .mods(key::Mods::CTRL)
             .utf8("ő")
             .unshifted('ő'),
@@ -550,14 +564,15 @@ fn key_encoder_ports_legacy_extended_compatibility_batch() -> Result<()> {
         KeyEncodeCase::press(key::Key::Tab, b"\x1b[Z")
             .mods(key::Mods::SHIFT | key::Mods::SHIFT_SIDE),
     ] {
-        assert_eq!(encode_legacy_case(case)?, case.expected);
+        assert_eq!(
+            encode_legacy_case(case).expect("test operation succeeds"),
+            case.expected
+        );
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_control_sequence_mapping() -> Result<()> {
+fn key_encoder_ports_control_sequence_mapping() {
     for case in [
         KeyEncodeCase::press(key::Key::Unidentified, b"\x03")
             .mods(key::Mods::CTRL)
@@ -599,14 +614,15 @@ fn key_encoder_ports_control_sequence_mapping() -> Result<()> {
             .utf8("с")
             .unshifted('c'),
     ] {
-        assert_eq!(encode_legacy_case(case)?, case.expected);
+        assert_eq!(
+            encode_legacy_case(case).expect("test operation succeeds"),
+            case.expected
+        );
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_platform_modifier_and_backspace_text_cases() -> Result<()> {
+fn key_encoder_ports_platform_modifier_and_backspace_text_cases() {
     #[cfg(target_os = "macos")]
     {
         for case in [
@@ -625,7 +641,10 @@ fn key_encoder_ports_platform_modifier_and_backspace_text_cases() -> Result<()> 
                 .mods(key::Mods::SUPER | key::Mods::SHIFT)
                 .utf8("B"),
         ] {
-            assert_eq!(encode_legacy_case(case)?, case.expected);
+            assert_eq!(
+                encode_legacy_case(case).expect("test operation succeeds"),
+                case.expected
+            );
         }
     }
 
@@ -635,7 +654,8 @@ fn key_encoder_ports_platform_modifier_and_backspace_text_cases() -> Result<()> 
     assert_eq!(
         encode_key_case(del_backspace, |encoder| {
             encoder.set_backarrow_key_mode(false);
-        })?,
+        })
+        .expect("test operation succeeds"),
         del_backspace.expected
     );
 
@@ -645,16 +665,15 @@ fn key_encoder_ports_platform_modifier_and_backspace_text_cases() -> Result<()> 
     assert_eq!(
         encode_key_case(decbkm_backspace, |encoder| {
             encoder.set_backarrow_key_mode(true);
-        })?,
+        })
+        .expect("test operation succeeds"),
         decbkm_backspace.expected
     );
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_function_sequences() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn key_encoder_ports_function_sequences() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
     for (terminal_key, plain, ctrl) in [
         (
@@ -723,7 +742,8 @@ fn key_encoder_ports_function_sequences() -> Result<()> {
             &mut out,
             terminal_key_input(terminal_key, KeyMods::default(), None, None),
             plain,
-        )?;
+        )
+        .expect("test operation succeeds");
         assert_engine_key(
             &mut engine,
             &mut out,
@@ -737,15 +757,14 @@ fn key_encoder_ports_function_sequences() -> Result<()> {
                 None,
             ),
             ctrl,
-        )?;
+        )
+        .expect("test operation succeeds");
     }
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_keypad_identity_and_application_sequences() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn key_encoder_ports_keypad_identity_and_application_sequences() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
 
     assert_engine_key(
@@ -753,7 +772,8 @@ fn key_encoder_ports_keypad_identity_and_application_sequences() -> Result<()> {
         &mut out,
         terminal_key_input(TerminalKey::NumpadEnter, KeyMods::default(), None, None),
         b"\r",
-    )?;
+    )
+    .expect("test operation succeeds");
 
     assert_engine_key(
         &mut engine,
@@ -765,7 +785,8 @@ fn key_encoder_ports_keypad_identity_and_application_sequences() -> Result<()> {
             Some('1'),
         ),
         b"1",
-    )?;
+    )
+    .expect("test operation succeeds");
 
     for (key, utf8, expected) in [
         (key::Key::Numpad1, Some("1"), b"\x1bOq".as_slice()),
@@ -778,7 +799,8 @@ fn key_encoder_ports_keypad_identity_and_application_sequences() -> Result<()> {
         }
         let encoded = encode_key_case(case, |encoder| {
             encoder.set_keypad_key_application(true);
-        })?;
+        })
+        .expect("test operation succeeds");
         assert_eq!(encoded, expected);
     }
 
@@ -791,15 +813,14 @@ fn key_encoder_ports_keypad_identity_and_application_sequences() -> Result<()> {
                 .set_keypad_key_application(true)
                 .set_ignore_keypad_with_numlock(true);
         },
-    )?;
+    )
+    .expect("test operation succeeds");
     assert_eq!(numlock_ignored, b"1");
-
-    Ok(())
 }
 
 #[test]
-fn key_encoder_ports_modify_other_keys_terminal_state() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn key_encoder_ports_modify_other_keys_terminal_state() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
 
     engine.write_vt(b"\x1b[>4;2m");
@@ -817,7 +838,8 @@ fn key_encoder_ports_modify_other_keys_terminal_state() -> Result<()> {
             Some('h'),
         ),
         b"\x1b[27;6;72~",
-    )?;
+    )
+    .expect("test operation succeeds");
 
     assert_engine_key(
         &mut engine,
@@ -832,17 +854,18 @@ fn key_encoder_ports_modify_other_keys_terminal_state() -> Result<()> {
             Some('8'),
         ),
         b"\x1b[27;3;56~",
-    )?;
-
-    Ok(())
+    )
+    .expect("test operation succeeds");
 }
 
 #[test]
-fn key_encoder_adapter_ports_options_and_kitty_ctrl_release() -> Result<()> {
-    let mut terminal = Terminal::new(80, 24)?;
-    terminal.set_scrollback_max_bytes(Some(0))?;
-    let mut encoder = key::Encoder::new()?;
-    let mut event = key::Event::new()?;
+fn key_encoder_adapter_ports_options_and_kitty_ctrl_release() {
+    let mut terminal = Terminal::new(80, 24).expect("test operation succeeds");
+    terminal
+        .set_scrollback_max_bytes(Some(0))
+        .expect("test operation succeeds");
+    let mut encoder = key::Encoder::new().expect("test operation succeeds");
+    let mut event = key::Event::new().expect("test operation succeeds");
 
     encoder
         .set_cursor_key_application(true)
@@ -861,7 +884,8 @@ fn key_encoder_adapter_ports_options_and_kitty_ctrl_release() -> Result<()> {
         .set_macos_option_as_alt(key::OptionAsAlt::True);
 
     let mut out = Vec::new();
-    encoder.encode_to_vec(&event, &mut out)?;
+    encoder
+        .encode_to_vec(&event, &mut out)
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[57442;5:3u");
-    Ok(())
 }

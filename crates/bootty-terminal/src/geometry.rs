@@ -1,3 +1,5 @@
+use num_traits::ToPrimitive as _;
+
 pub const COMPARISON_GHOSTTY_FONT_POINTS_MACOS: f32 = 11.75;
 pub const DEFAULT_FONT_DPI: f32 = 96.0;
 pub const DEFAULT_FONT_SIZE: f32 = COMPARISON_GHOSTTY_FONT_POINTS_MACOS * DEFAULT_FONT_DPI / 72.0;
@@ -16,14 +18,24 @@ pub struct TerminalGeometry {
 }
 
 impl TerminalGeometry {
-    pub fn pixel_width(self) -> u16 {
-        self.cols
-            .saturating_mul(self.cell_width.min(u32::from(u16::MAX)) as u16)
+    #[must_use]
+    pub fn cell_metrics(self) -> CellMetrics {
+        CellMetrics::new(
+            self.cell_width.to_f32().unwrap_or(f32::MAX),
+            self.cell_height.to_f32().unwrap_or(f32::MAX),
+        )
     }
 
+    #[must_use]
+    pub fn pixel_width(self) -> u16 {
+        self.cols
+            .saturating_mul(u16::try_from(self.cell_width).unwrap_or(u16::MAX))
+    }
+
+    #[must_use]
     pub fn pixel_height(self) -> u16 {
         self.rows
-            .saturating_mul(self.cell_height.min(u32::from(u16::MAX)) as u16)
+            .saturating_mul(u16::try_from(self.cell_height).unwrap_or(u16::MAX))
     }
 }
 
@@ -34,20 +46,23 @@ pub struct CellMetrics {
 }
 
 impl CellMetrics {
-    pub fn new(width: f32, height: f32) -> Self {
+    #[must_use]
+    pub const fn new(width: f32, height: f32) -> Self {
         Self {
             width: width.max(1.0),
             height: height.max(1.0),
         }
     }
 
+    #[must_use]
     pub fn rounded_size(self) -> (u32, u32) {
         (
-            self.width.ceil().max(1.0) as u32,
-            self.height.ceil().max(1.0) as u32,
+            pixel_count(self.width.ceil().max(1.0)),
+            pixel_count(self.height.ceil().max(1.0)),
         )
     }
 
+    #[must_use]
     pub fn physical_size(self, display_scale: f32) -> (u32, u32) {
         let display_scale = if display_scale.is_finite() && display_scale > 0.0 {
             display_scale
@@ -55,8 +70,8 @@ impl CellMetrics {
             1.0
         };
         (
-            (self.width * display_scale).round().max(1.0) as u32,
-            (self.height * display_scale).round().max(1.0) as u32,
+            pixel_count((self.width * display_scale).round().max(1.0)),
+            pixel_count((self.height * display_scale).round().max(1.0)),
         )
     }
 }
@@ -76,7 +91,8 @@ pub struct TerminalPadding {
 }
 
 impl TerminalPadding {
-    pub fn uniform(value: f32) -> Self {
+    #[must_use]
+    pub const fn uniform(value: f32) -> Self {
         let value = value.max(0.0);
         Self {
             top: value,
@@ -86,20 +102,23 @@ impl TerminalPadding {
         }
     }
 
+    #[must_use]
     pub fn horizontal(self) -> f32 {
         self.left + self.right
     }
 
+    #[must_use]
     pub fn vertical(self) -> f32 {
         self.top + self.bottom
     }
 
+    #[must_use]
     pub fn rounded(self) -> RoundedPadding {
         RoundedPadding {
-            top: self.top.round().max(0.0) as u32,
-            right: self.right.round().max(0.0) as u32,
-            bottom: self.bottom.round().max(0.0) as u32,
-            left: self.left.round().max(0.0) as u32,
+            top: pixel_count(self.top.round().max(0.0)),
+            right: pixel_count(self.right.round().max(0.0)),
+            bottom: pixel_count(self.bottom.round().max(0.0)),
+            left: pixel_count(self.left.round().max(0.0)),
         }
     }
 }
@@ -119,6 +138,7 @@ pub struct RoundedPadding {
 }
 
 impl RoundedPadding {
+    #[must_use]
     pub fn balanced(
         width: u32,
         height: u32,
@@ -152,13 +172,17 @@ pub struct GridDimensions {
 }
 
 impl GridDimensions {
+    #[must_use]
     pub fn for_pixels(width: u32, height: u32, cell: RoundedCellMetrics) -> Self {
         Self {
-            cols: ((width / cell.width.max(1)).max(1)).min(u32::from(u16::MAX)) as u16,
-            rows: ((height / cell.height.max(1)).max(1)).min(u32::from(u16::MAX)) as u16,
+            cols: u16::try_from(width.checked_div(cell.width).unwrap_or(width).max(1))
+                .unwrap_or(u16::MAX),
+            rows: u16::try_from(height.checked_div(cell.height).unwrap_or(height).max(1))
+                .unwrap_or(u16::MAX),
         }
     }
 
+    #[must_use]
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             cols: cols.max(1),
@@ -179,7 +203,7 @@ pub struct SurfacePoint {
     pub y: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridPoint {
     pub x: u16,
     pub y: u16,
@@ -194,6 +218,7 @@ pub struct SurfaceRect {
 }
 
 impl SurfaceRect {
+    #[must_use]
     pub fn from_min_size(min_x: f32, min_y: f32, width: f32, height: f32) -> Self {
         Self {
             min_x,
@@ -203,14 +228,17 @@ impl SurfaceRect {
         }
     }
 
+    #[must_use]
     pub fn width(self) -> f32 {
         self.max_x - self.min_x
     }
 
+    #[must_use]
     pub fn height(self) -> f32 {
         self.max_y - self.min_y
     }
 
+    #[must_use]
     pub fn contains(self, point: SurfacePoint) -> bool {
         point.x >= self.min_x
             && point.x <= self.max_x
@@ -220,6 +248,7 @@ impl SurfaceRect {
 }
 
 /// Render-level magnification for pinch-to-zoom; scales geometry without reflowing the grid.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewTransform {
     pub zoom: f32,
@@ -240,18 +269,21 @@ impl ViewTransform {
         pan_y: 0.0,
     };
     pub const MAX_ZOOM: f32 = 5.0;
-    pub const MAX_SUPERSAMPLE: f32 = 3.0;
+    pub const MAX_SUPERSAMPLE: f32 = Self::MAX_ZOOM;
 
+    #[must_use]
     pub fn is_zoomed(self) -> bool {
         self.zoom > 1.0 + f32::EPSILON
     }
 
     // Quantized to whole steps so the glyph atlas re-rasterizes only at integer zoom crossings,
     // not every frame of a pinch.
-    pub fn raster_supersample(self) -> f32 {
+    #[must_use]
+    pub const fn raster_supersample(self) -> f32 {
         self.zoom.ceil().clamp(1.0, Self::MAX_SUPERSAMPLE)
     }
 
+    #[must_use]
     pub fn applied_to(self, surface: SurfaceRect) -> SurfaceRect {
         if !self.is_zoomed() && self.pan_x == 0.0 && self.pan_y == 0.0 {
             return surface;
@@ -267,14 +299,14 @@ impl ViewTransform {
 
     pub fn pinched(self, factor: f32, focal: SurfacePoint, surface: SurfaceRect) -> Self {
         let new_zoom = (self.zoom * factor).clamp(1.0, Self::MAX_ZOOM);
-        if new_zoom == self.zoom {
+        if new_zoom.to_bits() == self.zoom.to_bits() {
             return self;
         }
         let ratio = new_zoom / self.zoom;
         Self {
             zoom: new_zoom,
-            pan_x: focal.x - (focal.x - self.pan_x) * ratio,
-            pan_y: focal.y - (focal.y - self.pan_y) * ratio,
+            pan_x: (focal.x - self.pan_x).mul_add(-ratio, focal.x),
+            pan_y: (focal.y - self.pan_y).mul_add(-ratio, focal.y),
         }
         .clamped(surface)
     }
@@ -288,6 +320,7 @@ impl ViewTransform {
         .clamped(surface)
     }
 
+    #[must_use]
     pub fn inverse_point(self, point: SurfacePoint) -> SurfacePoint {
         SurfacePoint {
             x: (point.x - self.pan_x) / self.zoom,
@@ -307,7 +340,7 @@ impl ViewTransform {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MouseSurfaceMetrics {
     pub screen_width: u32,
     pub screen_height: u32,
@@ -324,18 +357,21 @@ pub struct TerminalSurface {
 }
 
 impl TerminalSurface {
-    pub fn new(rect: SurfaceRect, cell: CellMetrics, padding: TerminalPadding) -> Self {
+    #[must_use]
+    pub const fn new(rect: SurfaceRect, cell: CellMetrics, padding: TerminalPadding) -> Self {
         Self {
             rect,
-            cell,
             padding,
+            cell,
         }
     }
 
+    #[must_use]
     pub fn for_rect(rect: SurfaceRect, cell: CellMetrics) -> Self {
         Self::new(rect, cell, TerminalPadding::default())
     }
 
+    #[must_use]
     pub fn for_logical_size(
         width: f32,
         height: f32,
@@ -349,6 +385,7 @@ impl TerminalSurface {
         )
     }
 
+    #[must_use]
     pub fn geometry(self) -> TerminalGeometry {
         geometry_for_pixels(
             self.rect.width(),
@@ -358,15 +395,18 @@ impl TerminalSurface {
         )
     }
 
+    #[must_use]
     pub fn cell_size(self) -> (u32, u32) {
         self.cell.rounded_size()
     }
 
+    #[must_use]
     pub fn rounded_cell(self) -> RoundedCellMetrics {
         let (width, height) = self.cell_size();
         RoundedCellMetrics { width, height }
     }
 
+    #[must_use]
     pub fn content_origin(self) -> SurfacePoint {
         SurfacePoint {
             x: self.rect.min_x + self.padding.left,
@@ -374,10 +414,12 @@ impl TerminalSurface {
         }
     }
 
-    pub fn surface_rect(self) -> SurfaceRect {
+    #[must_use]
+    pub const fn surface_rect(self) -> SurfaceRect {
         self.rect
     }
 
+    #[must_use]
     pub fn grid_rect(self, cols: u16, rows: u16) -> SurfaceRect {
         let origin = self.content_origin();
         SurfaceRect::from_min_size(
@@ -388,18 +430,20 @@ impl TerminalSurface {
         )
     }
 
+    #[must_use]
     pub fn raw_grid_size(self) -> GridDimensions {
         let geometry = self.geometry();
         GridDimensions::new(geometry.cols, geometry.rows)
     }
 
+    #[must_use]
     pub fn balanced_padding(
         self,
         explicit: TerminalPadding,
         mode: PaddingBalance,
     ) -> RoundedPadding {
-        let width = self.rect.width().max(0.0).round() as u32;
-        let height = self.rect.height().max(0.0).round() as u32;
+        let width = pixel_count(self.rect.width().max(0.0).round());
+        let height = pixel_count(self.rect.height().max(0.0).round());
         let cell = self.rounded_cell();
         let explicit = explicit.rounded();
         let explicit_horizontal = explicit.left.saturating_add(explicit.right);
@@ -414,44 +458,48 @@ impl TerminalSurface {
         if mode == PaddingBalance::CappedTop {
             let max_top = explicit_horizontal.saturating_add(cell.width) / 2;
             let shift = padding.top.saturating_sub(max_top);
-            padding.top -= shift;
-            padding.bottom += shift;
+            padding.top = padding.top.saturating_sub(shift);
+            padding.bottom = padding.bottom.saturating_add(shift);
         }
 
         padding
     }
 
+    #[must_use]
     pub fn surface_to_grid(self, point: SurfacePoint) -> GridPoint {
         let origin = self.content_origin();
         let grid = self.raw_grid_size();
         let x = ((point.x - origin.x).max(0.0) / self.cell.width).floor();
         let y = ((point.y - origin.y).max(0.0) / self.cell.height).floor();
         GridPoint {
-            x: (x as u16).min(grid.cols.saturating_sub(1)),
-            y: (y as u16).min(grid.rows.saturating_sub(1)),
+            x: cell_count(x).min(grid.cols.saturating_sub(1)),
+            y: cell_count(y).min(grid.rows.saturating_sub(1)),
         }
     }
 
+    #[must_use]
     pub fn cell_rect(self, col: u16, row: u16) -> SurfaceRect {
         let origin = self.content_origin();
         SurfaceRect::from_min_size(
-            origin.x + f32::from(col) * self.cell.width,
-            origin.y + f32::from(row) * self.cell.height,
+            f32::mul_add(f32::from(col), self.cell.width, origin.x),
+            f32::mul_add(f32::from(row), self.cell.height, origin.y),
             self.cell.width,
             self.cell.height,
         )
     }
 
+    #[must_use]
     pub fn run_rect(self, start_col: u16, row: u16, cells: u16) -> SurfaceRect {
         let origin = self.content_origin();
         SurfaceRect::from_min_size(
-            origin.x + f32::from(start_col) * self.cell.width,
-            origin.y + f32::from(row) * self.cell.height,
+            f32::mul_add(f32::from(start_col), self.cell.width, origin.x),
+            f32::mul_add(f32::from(row), self.cell.height, origin.y),
             f32::from(cells) * self.cell.width,
             self.cell.height,
         )
     }
 
+    #[must_use]
     pub fn relative_position(self, pos: SurfacePoint) -> Option<SurfacePoint> {
         if !self.rect.contains(pos) {
             return None;
@@ -463,6 +511,7 @@ impl TerminalSurface {
         })
     }
 
+    #[must_use]
     pub fn mouse_position(self, pos: SurfacePoint) -> Option<SurfacePoint> {
         let position = self.relative_position(pos)?;
         let rounded_cell = self.rounded_cell();
@@ -485,6 +534,7 @@ impl TerminalSurface {
         })
     }
 
+    #[must_use]
     pub fn mouse_metrics(self) -> MouseSurfaceMetrics {
         let geometry = self.geometry();
         let padding = self.padding.rounded();
@@ -511,7 +561,7 @@ fn mouse_axis_position(
     rendered_cell: f32,
     rounded_cell: u32,
 ) -> f32 {
-    let rounded_padding = rounded_padding as f32;
+    let rounded_padding = rounded_padding.to_f32().unwrap_or(f32::MAX);
     let content = position - rendered_padding;
     if content <= 0.0 {
         return if rendered_padding > 0.0 {
@@ -521,21 +571,29 @@ fn mouse_axis_position(
         };
     }
 
-    rounded_padding + content * (rounded_cell as f32 / rendered_cell.max(1.0))
+    content.mul_add(
+        rounded_cell.to_f32().unwrap_or(f32::MAX) / rendered_cell.max(1.0),
+        rounded_padding,
+    )
 }
 
+#[must_use]
 pub fn geometry_for_pixels(
     width: f32,
     height: f32,
     cell: CellMetrics,
     padding: TerminalPadding,
 ) -> TerminalGeometry {
-    let cols = ((width - padding.horizontal()) / cell.width)
-        .floor()
-        .max(f32::from(MIN_COLS)) as u16;
-    let rows = ((height - padding.vertical()) / cell.height)
-        .floor()
-        .max(f32::from(MIN_ROWS)) as u16;
+    let cols = cell_count(
+        ((width - padding.horizontal()) / cell.width)
+            .floor()
+            .max(f32::from(MIN_COLS)),
+    );
+    let rows = cell_count(
+        ((height - padding.vertical()) / cell.height)
+            .floor()
+            .max(f32::from(MIN_ROWS)),
+    );
     let (cell_width, cell_height) = cell.rounded_size();
 
     TerminalGeometry {
@@ -546,6 +604,7 @@ pub fn geometry_for_pixels(
     }
 }
 
+#[must_use]
 pub fn fit_cell_height_to_available_space(
     height: f32,
     cell: CellMetrics,
@@ -562,7 +621,9 @@ pub fn fit_cell_height_to_available_space(
 
 /// Stretch the cell width so the whole-number column count exactly fills the available width,
 /// distributing the trailing remainder across columns instead of leaving a dead strip on the right.
+///
 /// This matters most with split panes, where arbitrary widths rarely divide evenly.
+#[must_use]
 pub fn fit_cell_width_to_available_space(
     width: f32,
     cell: CellMetrics,
@@ -575,4 +636,14 @@ pub fn fit_cell_width_to_available_space(
 
     let cols = f32::from(geometry_for_pixels(width, 0.0, cell, padding).cols);
     CellMetrics::new(available_width / cols, cell.height)
+}
+
+// Host geometry may exceed terminal protocol dimensions. Clamp at that boundary;
+// negative and non-number coordinates represent zero, matching the surface origin.
+fn pixel_count(value: f32) -> u32 {
+    value.max(0.0).to_u32().unwrap_or(u32::MAX)
+}
+
+fn cell_count(value: f32) -> u16 {
+    value.max(0.0).to_u16().unwrap_or(u16::MAX)
 }

@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::Result;
 use assert_fs::TempDir;
-use bootty_runtime::terminfo::{XTERM_BOOTTY, ensure_xterm_bootty_terminfo_in};
+use bootty_terminal::terminfo::{XTERM_BOOTTY, ensure_xterm_bootty_terminfo_in};
 
 fn compiled_entry(extra: bool) -> Result<String> {
     let state = TempDir::new()?;
@@ -17,7 +17,7 @@ fn compiled_entry(extra: bool) -> Result<String> {
         .env("TERMINFO", database)
         .arg(XTERM_BOOTTY)
         .output()?;
-    assert!(
+    anyhow::ensure!(
         output.status.success(),
         "infocmp failed: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -26,17 +26,16 @@ fn compiled_entry(extra: bool) -> Result<String> {
 }
 
 #[test]
-fn vendored_entry_resolves_with_bootty_identity() -> Result<()> {
-    let entry = compiled_entry(false)?;
+fn vendored_entry_resolves_with_bootty_identity() {
+    let entry = compiled_entry(false).expect("test operation succeeds");
 
     assert!(entry.contains("xterm-bootty|bootty|Bootty"));
     assert!(!entry.contains("ghostty"));
-    Ok(())
 }
 
 #[test]
-fn vendored_extended_entry_matches_supported_capabilities() -> Result<()> {
-    let entry = compiled_entry(true)?;
+fn vendored_extended_entry_matches_supported_capabilities() {
+    let entry = compiled_entry(true).expect("test operation succeeds");
     let missing = [
         "BSU=\\E[?2026h",
         "ESU=\\E[?2026l",
@@ -57,5 +56,4 @@ fn vendored_extended_entry_matches_supported_capabilities() -> Result<()> {
             "unsupported kf{key} is advertised"
         );
     }
-    Ok(())
 }

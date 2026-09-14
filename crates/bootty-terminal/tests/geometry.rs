@@ -1,17 +1,18 @@
-use bootty_surface::geometry::*;
+use bootty_terminal::geometry::*;
+use num_traits::ToPrimitive as _;
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
 
-fn point(x: f32, y: f32) -> SurfacePoint {
+const fn point(x: f32, y: f32) -> SurfacePoint {
     SurfacePoint { x, y }
 }
 
-fn rounded_cell(width: u32, height: u32) -> RoundedCellMetrics {
+const fn rounded_cell(width: u32, height: u32) -> RoundedCellMetrics {
     RoundedCellMetrics { width, height }
 }
 
-fn view(zoom: f32) -> ViewTransform {
+const fn view(zoom: f32) -> ViewTransform {
     ViewTransform {
         zoom,
         pan_x: 0.0,
@@ -63,7 +64,7 @@ fn relative_position_is_rect_local() {
 }
 
 #[test]
-fn surface_rect_contains_every_edge_like_egui_rect() {
+fn surface_rect_contains_every_edge_with_inclusive_maximums() {
     let rect = SurfaceRect::from_min_size(20.0, 40.0, 200.0, 100.0);
 
     assert!(rect.contains(point(20.0, 40.0)));
@@ -100,9 +101,9 @@ fn fitted_cell_dimensions_distribute_remainders_without_changing_the_grid() {
 
     assert_eq!(base_geometry.rows, 52);
     assert_eq!(fitted_geometry.rows, 52);
-    assert_eq!(fitted_height.width, 10.0);
+    assert_eq!(fitted_height.width.to_bits(), base_cell.width.to_bits());
     assert!((fitted_height.height - 22.288_462).abs() < 0.001);
-    assert!((fitted_height.height * 52.0 - 1159.0).abs() < 0.001);
+    assert!(fitted_height.height.mul_add(52.0, -1159.0).abs() < 0.001);
 
     let fitted_width =
         fit_cell_width_to_available_space(1007.0, base_cell, TerminalPadding::default());
@@ -114,9 +115,9 @@ fn fitted_cell_dimensions_distribute_remainders_without_changing_the_grid() {
     // Column count is preserved; the width stretches to fill the leftover 7px with no gap.
     assert_eq!(base_geometry.cols, 100);
     assert_eq!(fitted_geometry.cols, 100);
-    assert_eq!(fitted_width.height, 22.0);
+    assert_eq!(fitted_width.height.to_bits(), base_cell.height.to_bits());
     assert!((fitted_width.width - 10.07).abs() < 0.001);
-    assert!((fitted_width.width * 100.0 - 1007.0).abs() < 0.001);
+    assert!(fitted_width.width.mul_add(100.0, -1007.0).abs() < 0.001);
 }
 
 #[test]
@@ -231,10 +232,10 @@ proptest! {
         padding in 0_u32..80,
     ) {
         let surface = TerminalSurface::for_logical_size(
-            width as f32,
-            height as f32,
-            CellMetrics::new(cell_width as f32, cell_height as f32),
-            TerminalPadding::uniform(padding as f32),
+            width.to_f32().unwrap(),
+            height.to_f32().unwrap(),
+            CellMetrics::new(cell_width.to_f32().unwrap(), cell_height.to_f32().unwrap()),
+            TerminalPadding::uniform(padding.to_f32().unwrap()),
         );
         let geometry = surface.geometry();
 
@@ -273,8 +274,8 @@ fn pinch_keeps_the_surface_point_under_the_cursor_anchored() {
     let under_cursor = before.inverse_point(focal);
     let after = before.pinched(2.0, focal, surface);
     let redisplayed = point(
-        under_cursor.x * after.zoom + after.pan_x,
-        under_cursor.y * after.zoom + after.pan_y,
+        under_cursor.x.mul_add(after.zoom, after.pan_x),
+        under_cursor.y.mul_add(after.zoom, after.pan_y),
     );
     assert!((redisplayed.x - focal.x).abs() < 1e-3);
     assert!((redisplayed.y - focal.y).abs() < 1e-3);
@@ -290,23 +291,24 @@ fn pan_clamps_so_magnified_content_keeps_covering_the_viewport() {
     assert_eq!((backward.pan_x, backward.pan_y), (-800.0, -600.0));
 }
 
-#[test]
-fn raster_supersample_is_quantized_and_capped() {
-    assert_eq!(ViewTransform::IDENTITY.raster_supersample(), 1.0);
-    let zoomed = view(1.2);
-    assert_eq!(zoomed.raster_supersample(), 2.0);
-    let extreme = view(5.0);
-    assert_eq!(extreme.raster_supersample(), ViewTransform::MAX_SUPERSAMPLE);
+proptest! {
+    #[test]
+    fn zoom_raster_resolution_never_requires_upscaling(zoom in 1.0_f32..=ViewTransform::MAX_ZOOM) {
+        let scale = view(zoom).raster_supersample();
+        prop_assert!(scale >= zoom);
+        prop_assert!(scale <= ViewTransform::MAX_SUPERSAMPLE);
+        assert_eq!(scale.fract().to_bits(), 0.0_f32.to_bits());
+    }
 }
 
 #[test]
 fn pinching_back_to_1x_recenters_the_view() {
     let surface = SurfaceRect::from_min_size(0.0, 0.0, 800.0, 600.0);
     let maximum = ViewTransform::IDENTITY.pinched(100.0, point(400.0, 300.0), surface);
-    assert_eq!(maximum.zoom, ViewTransform::MAX_ZOOM);
+    assert_eq!(maximum.zoom.to_bits(), ViewTransform::MAX_ZOOM.to_bits());
     let zoomed = ViewTransform::IDENTITY.pinched(3.0, point(600.0, 400.0), surface);
     assert!(zoomed.is_zoomed());
     let reset = zoomed.pinched(0.01, point(600.0, 400.0), surface);
-    assert_eq!(reset.zoom, 1.0);
+    assert_eq!(reset.zoom.to_bits(), 1.0_f32.to_bits());
     assert_eq!((reset.pan_x, reset.pan_y), (0.0, 0.0));
 }

@@ -22,6 +22,9 @@ pub fn vendored_terminfo_dir() -> Option<&'static Path> {
     .as_deref()
 }
 
+///
+/// # Errors
+/// Returns an error if the state directory or vendored terminfo files cannot be written.
 pub fn ensure_xterm_bootty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
     let db_dir = state_dir.join("terminfo");
     let source_path = state_dir.join("xterm-bootty.terminfo");

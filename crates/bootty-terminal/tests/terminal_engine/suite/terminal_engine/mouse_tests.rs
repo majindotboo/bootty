@@ -3,7 +3,7 @@ use super::support::*;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-fn test_mouse_size() -> MouseEncoderSize {
+const fn test_mouse_size() -> MouseEncoderSize {
     MouseEncoderSize {
         screen_width: 800,
         screen_height: 480,
@@ -16,7 +16,7 @@ fn test_mouse_size() -> MouseEncoderSize {
     }
 }
 
-fn unit_mouse_size() -> MouseEncoderSize {
+const fn unit_mouse_size() -> MouseEncoderSize {
     MouseEncoderSize {
         screen_width: 1_000,
         screen_height: 1_000,
@@ -29,7 +29,7 @@ fn unit_mouse_size() -> MouseEncoderSize {
     }
 }
 
-fn boundary_mouse_size() -> MouseEncoderSize {
+const fn boundary_mouse_size() -> MouseEncoderSize {
     MouseEncoderSize {
         screen_width: 10,
         screen_height: 10,
@@ -61,7 +61,7 @@ fn mouse_input(
     }
 }
 
-fn mouse_input_with_mods(
+const fn mouse_input_with_mods(
     size: MouseEncoderSize,
     action: MouseAction,
     button: Option<MouseButton>,
@@ -116,7 +116,7 @@ fn assert_mouse_silent(
     input: MouseInput,
 ) -> Result<()> {
     engine.encode_mouse_to_vec(input, out)?;
-    assert!(out.is_empty());
+    assert_eq!(out.as_slice(), []);
     Ok(())
 }
 
@@ -124,89 +124,97 @@ fn assert_mouse_silent(
 #[case::disabled(b"", false)]
 #[case::normal_tracking(b"\x1b[?1000h", true)]
 #[case::tracking_disabled_again(b"\x1b[?1003h\x1b[?1003l", false)]
-fn render_frame_reports_mouse_tracking(
-    #[case] sequence: &[u8],
-    #[case] expected: bool,
-) -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn render_frame_reports_mouse_tracking(#[case] sequence: &[u8], #[case] expected: bool) {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(sequence);
 
-    assert_eq!(engine.extract_frame()?.mouse_tracking, expected);
-    Ok(())
+    assert_eq!(
+        engine
+            .extract_frame()
+            .expect("test operation succeeds")
+            .mouse_tracking,
+        expected
+    );
 }
 
 #[test]
-fn mouse_encoder_inherits_sgr_press_release_and_motion_policy() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn mouse_encoder_inherits_sgr_press_release_and_motion_policy() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
     let size = test_mouse_size();
 
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Press,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 0.0,
-            y: 0.0,
-            pixel_x: 0.0,
-            pixel_y: 0.0,
-            size,
-        },
-        &mut out,
-    )?;
-    assert!(out.is_empty());
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Press,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 0.0,
+                y: 0.0,
+                pixel_x: 0.0,
+                pixel_y: 0.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
+    assert_eq!(out, Vec::<u8>::new());
 
     engine.write_vt(b"\x1b[?1000h\x1b[?1006h");
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Press,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 0.0,
-            y: 0.0,
-            pixel_x: 0.0,
-            pixel_y: 0.0,
-            size,
-        },
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Press,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 0.0,
+                y: 0.0,
+                pixel_x: 0.0,
+                pixel_y: 0.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<0;1;1M");
 
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Release,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 0.0,
-            y: 0.0,
-            pixel_x: 0.0,
-            pixel_y: 0.0,
-            size,
-        },
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Release,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 0.0,
+                y: 0.0,
+                pixel_x: 0.0,
+                pixel_y: 0.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<0;1;1m");
 
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Motion,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 10.0,
-            y: 20.0,
-            pixel_x: 10.0,
-            pixel_y: 20.0,
-            size,
-        },
-        &mut out,
-    )?;
-    assert!(out.is_empty());
-
-    Ok(())
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Motion,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 10.0,
+                y: 20.0,
+                pixel_x: 10.0,
+                pixel_y: 20.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
+    assert_eq!(out, Vec::<u8>::new());
 }
 
 #[test]
-fn mouse_encoder_supports_format_and_wheel_cases() -> Result<()> {
+fn mouse_encoder_supports_format_and_wheel_cases() {
     let mut out = Vec::new();
 
     for (mode, input, expected) in [
@@ -263,15 +271,15 @@ fn mouse_encoder_supports_format_and_wheel_cases() -> Result<()> {
             b"\x1b[<2;10;20m".as_slice(),
         ),
     ] {
-        let mut engine = test_terminal_engine()?;
+        let mut engine = test_terminal_engine().expect("test operation succeeds");
         engine.write_vt(mode);
-        assert_mouse_encode(&mut engine, &mut out, input, expected)?;
+        assert_mouse_encode(&mut engine, &mut out, input, expected)
+            .expect("test operation succeeds");
     }
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_rejects_unsupported_format_inputs() -> Result<()> {
+fn mouse_encoder_rejects_unsupported_format_inputs() {
     let mut out = Vec::new();
 
     for (mode, input) in [
@@ -284,18 +292,17 @@ fn mouse_encoder_rejects_unsupported_format_inputs() -> Result<()> {
             test_mouse_input(MouseAction::Press, Some(MouseButton::Ten), 1.0, 1.0),
         ),
     ] {
-        let mut engine = test_terminal_engine()?;
+        let mut engine = test_terminal_engine().expect("test operation succeeds");
         engine.write_vt(mode);
-        assert_mouse_silent(&mut engine, &mut out, input)?;
+        assert_mouse_silent(&mut engine, &mut out, input).expect("test operation succeeds");
     }
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_reports_motion_after_initial_press_and_clamps_negative_cells() -> Result<()> {
+fn mouse_encoder_reports_motion_after_initial_press_and_clamps_negative_cells() {
     let size = test_mouse_size();
     let mut out = Vec::new();
-    let mut engine = test_terminal_engine()?;
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[?1003h\x1b[?1006h");
     assert_mouse_encode(
@@ -309,7 +316,8 @@ fn mouse_encoder_reports_motion_after_initial_press_and_clamps_negative_cells() 
             20.0,
         ),
         b"\x1b[<0;2;2M",
-    )?;
+    )
+    .expect("test operation succeeds");
     assert_mouse_encode(
         &mut engine,
         &mut out,
@@ -322,10 +330,11 @@ fn mouse_encoder_reports_motion_after_initial_press_and_clamps_negative_cells() 
         ),
         b"\x1b[<32;1;1M",
     )
+    .expect("terminal behavior matches cases");
 }
 
 #[test]
-fn mouse_encoder_supports_reporting_mode_cases() -> Result<()> {
+fn mouse_encoder_supports_reporting_mode_cases() {
     let mut out = Vec::new();
 
     for (mode, input, expected) in [
@@ -365,15 +374,15 @@ fn mouse_encoder_supports_reporting_mode_cases() -> Result<()> {
             b"\x1b[<35;2;3M".as_slice(),
         ),
     ] {
-        let mut engine = test_terminal_engine()?;
+        let mut engine = test_terminal_engine().expect("test operation succeeds");
         engine.write_vt(mode);
-        assert_mouse_encode(&mut engine, &mut out, input, expected)?;
+        assert_mouse_encode(&mut engine, &mut out, input, expected)
+            .expect("test operation succeeds");
     }
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_suppresses_unreported_events() -> Result<()> {
+fn mouse_encoder_suppresses_unreported_events() {
     let mut out = Vec::new();
 
     for (mode, input) in [
@@ -414,72 +423,75 @@ fn mouse_encoder_suppresses_unreported_events() -> Result<()> {
             mouse_input(unit_mouse_size(), MouseAction::Motion, None, 1.0, 2.0),
         ),
     ] {
-        let mut engine = test_terminal_engine()?;
+        let mut engine = test_terminal_engine().expect("test operation succeeds");
         engine.write_vt(mode);
-        assert_mouse_silent(&mut engine, &mut out, input)?;
+        assert_mouse_silent(&mut engine, &mut out, input).expect("test operation succeeds");
     }
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_inherits_cell_motion_dedup_except_sgr_pixels() -> Result<()> {
+fn mouse_encoder_inherits_cell_motion_dedup_except_sgr_pixels() {
     let size = test_mouse_size();
-    let mut engine = test_terminal_engine()?;
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
 
     engine.write_vt(b"\x1b[?1003h\x1b[?1006h");
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Motion,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 50.0,
-            y: 120.0,
-            pixel_x: 50.0,
-            pixel_y: 120.0,
-            size,
-        },
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Motion,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 50.0,
+                y: 120.0,
+                pixel_x: 50.0,
+                pixel_y: 120.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<32;6;7M");
 
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Motion,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 50.0,
-            y: 120.0,
-            pixel_x: 50.0,
-            pixel_y: 120.0,
-            size,
-        },
-        &mut out,
-    )?;
-    assert!(out.is_empty());
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Motion,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 50.0,
+                y: 120.0,
+                pixel_x: 50.0,
+                pixel_y: 120.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
+    assert_eq!(out, Vec::<u8>::new());
 
     engine.write_vt(b"\x1b[?1016h");
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Motion,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 50.0,
-            y: 120.0,
-            pixel_x: 50.0,
-            pixel_y: 120.0,
-            size,
-        },
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Motion,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 50.0,
+                y: 120.0,
+                pixel_x: 50.0,
+                pixel_y: 120.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<32;50;120M");
-
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_scales_pixel_mouse_to_physical_surface_pixels() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn mouse_encoder_scales_pixel_mouse_to_physical_surface_pixels() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     let mut out = Vec::new();
     engine.set_display_scale(2.0);
 
@@ -489,55 +501,58 @@ fn mouse_encoder_scales_pixel_mouse_to_physical_surface_pixels() -> Result<()> {
         &mut out,
         test_mouse_input(MouseAction::Press, Some(MouseButton::Left), 10.0, 20.0),
         b"\x1b[<0;2;2M",
-    )?;
+    )
+    .expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[?1016h");
-    engine.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Release,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 10.0,
-            y: 20.0,
-            pixel_x: 8.0,
-            pixel_y: 17.0,
-            size: test_mouse_size(),
-        },
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Release,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 10.0,
+                y: 20.0,
+                pixel_x: 8.0,
+                pixel_y: 17.0,
+                size: test_mouse_size(),
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<0;16;34m");
-
-    Ok(())
 }
 
 #[test]
-fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() -> Result<()> {
+fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() {
     let size = unit_mouse_size();
     let mut out = Vec::new();
 
-    let mut urxvt = test_terminal_engine()?;
+    let mut urxvt = test_terminal_engine().expect("test operation succeeds");
     urxvt.write_vt(b"\x1b[?1003h\x1b[?1015h");
-    urxvt.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Press,
-            button: Some(MouseButton::Left),
-            mods: KeyMods {
-                shift: true,
-                alt: true,
-                ctrl: true,
-                ..Default::default()
+    urxvt
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Press,
+                button: Some(MouseButton::Left),
+                mods: KeyMods {
+                    shift: true,
+                    alt: true,
+                    ctrl: true,
+                    ..Default::default()
+                },
+                x: 2.0,
+                y: 3.0,
+                pixel_x: 2.0,
+                pixel_y: 3.0,
+                size,
             },
-            x: 2.0,
-            y: 3.0,
-            pixel_x: 2.0,
-            pixel_y: 3.0,
-            size,
-        },
-        &mut out,
-    )?;
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[60;3;4M");
 
-    let mut utf8 = test_terminal_engine()?;
+    let mut utf8 = test_terminal_engine().expect("test operation succeeds");
     utf8.write_vt(b"\x1b[?1003h\x1b[?1005h");
     utf8.encode_mouse_to_vec(
         MouseInput {
@@ -551,7 +566,8 @@ fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() -> Result<()> {
             size,
         },
         &mut out,
-    )?;
+    )
+    .expect("test operation succeeds");
     let mut expected = vec![0x1b, b'[', b'M', 32];
     let mut encoded = [0; 4];
     expected.extend_from_slice(
@@ -568,7 +584,7 @@ fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() -> Result<()> {
     );
     assert_eq!(out, expected);
 
-    let mut x10 = test_terminal_engine()?;
+    let mut x10 = test_terminal_engine().expect("test operation succeeds");
     x10.write_vt(b"\x1b[?9h");
     x10.encode_mouse_to_vec(
         MouseInput {
@@ -582,18 +598,17 @@ fn mouse_encoder_supports_urxvt_utf8_and_x10_limit_cases() -> Result<()> {
             size,
         },
         &mut out,
-    )?;
-    assert!(out.is_empty());
-
-    Ok(())
+    )
+    .expect("test operation succeeds");
+    assert_eq!(out, Vec::<u8>::new());
 }
 
 #[test]
-fn mouse_encoder_ports_release_identity_and_boundary_cases() -> Result<()> {
+fn mouse_encoder_ports_release_identity_and_boundary_cases() {
     let size = unit_mouse_size();
     let mut out = Vec::new();
 
-    let mut sgr = test_terminal_engine()?;
+    let mut sgr = test_terminal_engine().expect("test operation succeeds");
     sgr.write_vt(b"\x1b[?1003h\x1b[?1006h");
     sgr.encode_mouse_to_vec(
         MouseInput {
@@ -607,76 +622,81 @@ fn mouse_encoder_ports_release_identity_and_boundary_cases() -> Result<()> {
             size,
         },
         &mut out,
-    )?;
+    )
+    .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<2;5;6m");
 
-    let mut urxvt = test_terminal_engine()?;
+    let mut urxvt = test_terminal_engine().expect("test operation succeeds");
     urxvt.write_vt(b"\x1b[?1003h\x1b[?1015h");
-    urxvt.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Release,
-            button: Some(MouseButton::Right),
-            mods: KeyMods::default(),
-            x: 2.0,
-            y: 3.0,
-            pixel_x: 2.0,
-            pixel_y: 3.0,
-            size,
-        },
-        &mut out,
-    )?;
+    urxvt
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Release,
+                button: Some(MouseButton::Right),
+                mods: KeyMods::default(),
+                x: 2.0,
+                y: 3.0,
+                pixel_x: 2.0,
+                pixel_y: 3.0,
+                size,
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[35;3;4M");
 
-    let mut boundary = test_terminal_engine()?;
+    let mut boundary = test_terminal_engine().expect("test operation succeeds");
     boundary.write_vt(b"\x1b[?1003h\x1b[?1006h");
-    boundary.encode_mouse_to_vec(
-        MouseInput {
-            action: MouseAction::Press,
-            button: Some(MouseButton::Left),
-            mods: KeyMods::default(),
-            x: 10.0,
-            y: 10.0,
-            pixel_x: 10.0,
-            pixel_y: 10.0,
-            size: boundary_mouse_size(),
-        },
-        &mut out,
-    )?;
+    boundary
+        .encode_mouse_to_vec(
+            MouseInput {
+                action: MouseAction::Press,
+                button: Some(MouseButton::Left),
+                mods: KeyMods::default(),
+                x: 10.0,
+                y: 10.0,
+                pixel_x: 10.0,
+                pixel_y: 10.0,
+                size: boundary_mouse_size(),
+            },
+            &mut out,
+        )
+        .expect("test operation succeeds");
     assert_eq!(out, b"\x1b[<0;5;5M");
-
-    Ok(())
 }
 
 #[test]
-fn wheel_reports_one_button_press_per_scrolled_row() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn wheel_reports_one_button_press_per_scrolled_row() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[?1000h\x1b[?1006h");
     let mut out = Vec::new();
 
-    engine.encode_mouse_wheel_to_vec(
-        test_mouse_input(MouseAction::Press, Some(MouseButton::Four), 0.0, 0.0),
-        3,
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_wheel_to_vec(
+            test_mouse_input(MouseAction::Press, Some(MouseButton::Four), 0.0, 0.0),
+            3,
+            &mut out,
+        )
+        .expect("test operation succeeds");
 
     assert_eq!(out, b"\x1b[<64;1;1M\x1b[<64;1;1M\x1b[<64;1;1M");
-    Ok(())
 }
 
 /// The row count is a saturating cast of an OS float delta, so `isize::MAX` is representable. The
 /// buffer must stay bounded rather than spinning out a report per notch.
 #[test]
-fn an_absurd_wheel_row_count_stays_bounded() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn an_absurd_wheel_row_count_stays_bounded() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[?1000h\x1b[?1006h");
     let mut out = Vec::new();
 
-    engine.encode_mouse_wheel_to_vec(
-        test_mouse_input(MouseAction::Press, Some(MouseButton::Four), 0.0, 0.0),
-        usize::MAX,
-        &mut out,
-    )?;
+    engine
+        .encode_mouse_wheel_to_vec(
+            test_mouse_input(MouseAction::Press, Some(MouseButton::Four), 0.0, 0.0),
+            usize::MAX,
+            &mut out,
+        )
+        .expect("test operation succeeds");
 
     assert_eq!(out.len(), b"\x1b[<64;1;1M".len() * 1024);
-    Ok(())
 }

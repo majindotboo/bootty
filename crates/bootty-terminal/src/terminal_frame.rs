@@ -4,6 +4,30 @@ use libghostty_vt::{
 };
 
 use crate::terminal_image::KittyImageFrame;
+use std::sync::Arc;
+
+/// Identifies the snapshot that a frame's row damage is relative to.
+/// Publications may be skipped by consumers, including across terminal switches.
+#[derive(Clone, Debug, Default)]
+pub struct FrameLineage {
+    current: Arc<()>,
+    previous: Option<Arc<()>>,
+}
+
+impl FrameLineage {
+    pub(crate) fn advance(&mut self) {
+        self.previous = Some(std::mem::replace(&mut self.current, Arc::new(())));
+    }
+
+    #[must_use]
+    pub fn follows(&self, cached: &Self) -> bool {
+        Arc::ptr_eq(&self.current, &cached.current)
+            || self
+                .previous
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, &cached.current))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCopyMode {
@@ -13,6 +37,7 @@ pub struct FrameCopyMode {
 
 #[derive(Clone, Debug)]
 pub struct RenderFrame {
+    pub lineage: FrameLineage,
     pub cols: u16,
     pub rows: u16,
     pub dirty: Dirty,
@@ -22,6 +47,7 @@ pub struct RenderFrame {
     pub row_wraps: Vec<bool>,
     pub search_matches: Vec<FrameSelection>,
     pub active_search_match: Option<FrameSelection>,
+    pub active_search_segments: Vec<FrameSelection>,
     pub active_search_match_index: Option<usize>,
     pub search_match_count: usize,
     pub search_pulse: u64,
@@ -38,6 +64,7 @@ pub struct RenderFrame {
 impl Default for RenderFrame {
     fn default() -> Self {
         Self {
+            lineage: FrameLineage::default(),
             cols: 0,
             rows: 0,
             dirty: Dirty::Full,
@@ -47,6 +74,7 @@ impl Default for RenderFrame {
             row_wraps: Vec::new(),
             search_matches: Vec::new(),
             active_search_match: None,
+            active_search_segments: Vec::new(),
             active_search_match_index: None,
             search_match_count: 0,
             search_pulse: 0,
@@ -63,10 +91,14 @@ impl Default for RenderFrame {
 }
 
 impl RenderFrame {
+    #[must_use]
     pub fn cell_text(&self, cell: &RenderCell) -> &[char] {
-        &self.text[cell.text_start..cell.text_start + cell.text_len]
+        self.text
+            .get(cell.text_start..cell.text_start.saturating_add(cell.text_len))
+            .unwrap_or_default()
     }
 
+    #[must_use]
     pub fn text_rows(&self) -> Vec<String> {
         let mut rows =
             vec![vec![String::from(" "); usize::from(self.cols)]; usize::from(self.rows)];
@@ -121,7 +153,7 @@ pub struct FrameColors {
     pub selection_foreground: Option<RgbColor>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(
     dead_code,
     reason = "renderer snapshot preserves Ghostty cursor metadata for upcoming renderer work"
@@ -151,6 +183,10 @@ pub struct RenderCell {
 #[allow(
     dead_code,
     reason = "renderer snapshot preserves full style flags for upcoming renderer work"
+)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "VT rendition attributes are independent bits."
 )]
 pub struct CellStyle {
     pub bold: bool,

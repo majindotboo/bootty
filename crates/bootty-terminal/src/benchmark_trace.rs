@@ -35,6 +35,9 @@ pub enum TraceValue<'a> {
 }
 
 impl BenchmarkTrace {
+    ///
+    /// # Errors
+    /// Returns an I/O error if the configured trace file cannot be created.
     pub fn from_env() -> io::Result<Option<Self>> {
         let Ok(path) = env::var(BOOTTY_BENCH_TRACE_ENV) else {
             return Ok(None);
@@ -51,6 +54,9 @@ impl BenchmarkTrace {
         Self::create(path, sample_every).map(Some)
     }
 
+    ///
+    /// # Errors
+    /// Returns an I/O error if the trace file cannot be created.
     pub fn create(path: impl AsRef<Path>, sample_every: usize) -> io::Result<Self> {
         let file = File::create(path)?;
         Ok(Self {
@@ -107,11 +113,11 @@ fn write_json_string(writer: &mut impl Write, value: &str) -> io::Result<()> {
     for ch in value.chars() {
         match ch {
             '"' => writer.write_all(br#"\""#)?,
-            '\\' => writer.write_all(br#"\\"#)?,
-            '\n' => writer.write_all(br#"\n"#)?,
-            '\r' => writer.write_all(br#"\r"#)?,
-            '\t' => writer.write_all(br#"\t"#)?,
-            ch if ch.is_control() => write!(writer, "\\u{:04x}", ch as u32)?,
+            '\\' => writer.write_all(br"\\")?,
+            '\n' => writer.write_all(br"\n")?,
+            '\r' => writer.write_all(br"\r")?,
+            '\t' => writer.write_all(br"\t")?,
+            ch if ch.is_control() => write!(writer, "\\u{:04x}", u32::from(ch))?,
             ch => write!(writer, "{ch}")?,
         }
     }

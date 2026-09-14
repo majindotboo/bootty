@@ -9,7 +9,7 @@ pub(super) fn row_text(frame: &RenderFrame, row: u16) -> String {
         .collect()
 }
 
-pub(crate) fn test_terminal_engine() -> Result<TerminalEngine> {
+pub fn test_terminal_engine() -> Result<TerminalEngine> {
     TerminalEngine::new(TerminalGeometry {
         cols: 80,
         rows: 24,
@@ -25,12 +25,16 @@ pub(super) fn captured_pty_engine() -> Result<(TerminalEngine, Arc<Mutex<Vec<u8>
     engine.on_pty_write(move |_terminal, bytes| {
         capture
             .lock()
-            .expect("pty output lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend_from_slice(bytes);
     })?;
     Ok((engine, output))
 }
 
 pub(super) fn take_pty_output(output: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    std::mem::take(&mut *output.lock().expect("pty output lock"))
+    std::mem::take(
+        &mut *output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }

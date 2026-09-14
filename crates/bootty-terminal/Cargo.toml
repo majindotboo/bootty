@@ -1,16 +1,28 @@
 [package]
 name = "bootty-terminal"
 edition.workspace = true
+autobenches = false
 
 [dependencies]
-portable-pty.workspace = true
+num-traits.workspace = true
+serde.workspace = true
+tempfile.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 libghostty-vt.workspace = true
 memchr.workspace = true
+regex.workspace = true
+unicode-segmentation.workspace = true
 png.workspace = true
+portable-pty.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# portable-pty uses these APIs but omits their winapi features in its pinned manifest.
+winapi = { version = "0.3", features = ["processthreadsapi", "winbase"] }
 
 [dev-dependencies]
+assert_fs.workspace = true
+criterion.workspace = true
 libc = "0.2"
 pretty_assertions.workspace = true
 proptest.workspace = true
@@ -21,3 +33,14 @@ unicode-width.workspace = true
 [[test]]
 name = "terminal_engine"
 path = "tests/terminal_engine/main.rs"
+
+[[bench]]
+name = "pty_drain"
+harness = false
+
+[[bench]]
+name = "flood_response"
+harness = false
+
+[lints]
+workspace = true

@@ -14,12 +14,15 @@ pub use libghostty_vt::{
 };
 pub use std::sync::{Arc, Mutex};
 
+#[must_use]
 pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
 }
 
+/// # Errors
+/// Returns an error if the terminal fixture cannot be initialized.
 pub fn terminal_engine_with_colors(
     geometry: TerminalGeometry,
     colors: TerminalColorConfig,

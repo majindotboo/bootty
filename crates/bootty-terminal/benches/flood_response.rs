@@ -5,12 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_runtime::{
+use anyhow::Result;
+use bootty_terminal::terminal_engine::TerminalEngine;
+use bootty_terminal::{
     PtyBacklog, TerminalSession, TerminalSessionConfig, drain_pty_backlog,
     geometry::TerminalGeometry, terminal_session::SessionLaunchConfig,
 };
-use bootty_terminal::terminal_engine::TerminalEngine;
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion};
 
 const CTRL_C: &[u8] = b"\x03";
 const LIVE_FLOOD_WARMUP: Duration = Duration::from_millis(15);
@@ -44,7 +45,7 @@ struct LiveCtrlCStats {
     exited: bool,
 }
 
-fn geometry(cols: u16, rows: u16) -> TerminalGeometry {
+const fn geometry(cols: u16, rows: u16) -> TerminalGeometry {
     TerminalGeometry {
         cols,
         rows,
@@ -53,8 +54,8 @@ fn geometry(cols: u16, rows: u16) -> TerminalGeometry {
     }
 }
 
-fn terminal_engine() -> TerminalEngine {
-    TerminalEngine::new(geometry(160, 48)).expect("terminal engine")
+fn terminal_engine() -> Result<TerminalEngine> {
+    TerminalEngine::new(geometry(160, 48))
 }
 
 fn push_line(payload: &mut Vec<u8>, line: impl AsRef<str>) {
@@ -63,7 +64,7 @@ fn push_line(payload: &mut Vec<u8>, line: impl AsRef<str>) {
 }
 
 fn repeated_lines(lines: usize, mut line: impl FnMut(usize) -> String) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(lines * 96);
+    let mut payload = Vec::with_capacity(lines.saturating_mul(96));
     for index in 0..lines {
         push_line(&mut payload, line(index));
     }
@@ -91,42 +92,17 @@ fn flood_fixtures() -> Vec<FloodFixture> {
         },
         FloodFixture {
             name: "flood_journalctl_replay",
-            payload: repeated_lines(8_192, |index| {
-                format!(
-                    "Jun 15 12:{:02}:{:02} host bootty[{index}]: level={} unit=bootty.service message='{}'",
-                    index % 60,
-                    (index * 7) % 60,
-                    ["INFO", "DEBUG", "WARN", "ERR"][index % 4],
-                    "event replay ".repeat(4)
-                )
-            }),
+            payload: repeated_lines(8_192, journalctl_line),
             chunk_size: 16 * 1024,
         },
         FloodFixture {
             name: "flood_docker_logs_replay",
-            payload: repeated_lines(8_192, |index| {
-                format!(
-                    "container=api-{index:04} stream=stdout json={{\"level\":\"{}\",\"request\":{},\"payload\":\"{}\"}}",
-                    ["info", "debug", "warn", "error"][index % 4],
-                    index * 17,
-                    "x".repeat(48)
-                )
-            }),
+            payload: repeated_lines(8_192, docker_logs_line),
             chunk_size: 16 * 1024,
         },
         FloodFixture {
             name: "flood_kubectl_logs_replay",
-            payload: repeated_lines(8_192, |index| {
-                format!(
-                    "2026-06-15T12:{:02}:{:02}.{:03}Z pod/api-{index:04} ns=prod level={} trace={} {}",
-                    index % 60,
-                    (index * 11) % 60,
-                    (index * 37) % 1000,
-                    ["INFO", "DEBUG", "WARN", "ERROR"][index % 4],
-                    index * 23,
-                    "field=value ".repeat(8)
-                )
-            }),
+            payload: repeated_lines(8_192, kubectl_logs_line),
             chunk_size: 16 * 1024,
         },
         FloodFixture {
@@ -134,9 +110,12 @@ fn flood_fixtures() -> Vec<FloodFixture> {
             payload: repeated_lines(10_000, |index| {
                 format!(
                     "\x1b[38;5;{}m{:06}: colored log row {}\x1b[0m {}",
-                    16 + index % 200,
+                    16usize.saturating_add(index % 200),
                     index,
-                    ["ok", "warn", "error", "trace"][index % 4],
+                    ["ok", "warn", "error", "trace"]
+                        .get(index % 4)
+                        .copied()
+                        .unwrap_or("ok"),
                     "payload ".repeat(10)
                 )
             }),
@@ -177,7 +156,7 @@ fn flood_fixtures() -> Vec<FloodFixture> {
             payload: repeated_lines(8_192, |index| {
                 format!(
                     "npm http fetch GET 200 https://registry.npmjs.org/pkg-{index:04} {}ms {}",
-                    10 + index % 400,
+                    10usize.saturating_add(index % 400),
                     "dep ".repeat(12)
                 )
             }),
@@ -194,8 +173,8 @@ fn backlog_from_payload(payload: &[u8], chunk_size: usize) -> PtyBacklog {
     backlog
 }
 
-fn run_flood_replay(fixture: &FloodFixture) -> FloodReplayStats {
-    let mut engine = terminal_engine();
+fn run_flood_replay(fixture: &FloodFixture) -> Result<FloodReplayStats> {
+    let mut engine = terminal_engine()?;
     let mut backlog = backlog_from_payload(&fixture.payload, fixture.chunk_size);
     let mut stats = FloodReplayStats::default();
     let mut injected_ctrl_c = false;
@@ -205,9 +184,9 @@ fn run_flood_replay(fixture: &FloodFixture) -> FloodReplayStats {
     while !backlog.is_empty() {
         stats.high_water = stats.high_water.max(backlog.len());
         let drain = drain_pty_backlog(&mut backlog, |bytes| engine.write_vt(bytes));
-        stats.frames += 1;
-        stats.bytes += drain.bytes;
-        stats.drain_us += drain.elapsed_us;
+        stats.frames = stats.frames.saturating_add(1);
+        stats.bytes = stats.bytes.saturating_add(drain.bytes);
+        stats.drain_us = stats.drain_us.saturating_add(drain.elapsed_us);
 
         if !injected_ctrl_c && stats.bytes >= fixture.payload.len() / 4 {
             engine.write_vt(b"^C\r\n");
@@ -219,16 +198,16 @@ fn run_flood_replay(fixture: &FloodFixture) -> FloodReplayStats {
             stats.input_visible_frame = stats.frames;
             injected_input = true;
         }
-        if !injected_scroll && stats.bytes >= fixture.payload.len() * 3 / 4 {
+        if !injected_scroll && stats.bytes >= fixture.payload.len().saturating_mul(3) / 4 {
             engine.scroll_viewport_delta(-12);
             stats.scroll_frame = stats.frames;
             injected_scroll = true;
         }
     }
 
-    let frame = engine.extract_frame().expect("final flood frame");
+    let frame = engine.extract_frame()?;
     stats.final_text_len = frame.text.len();
-    stats
+    Ok(stats)
 }
 
 #[cfg(windows)]
@@ -254,36 +233,37 @@ fn shell_launch_config(command: String) -> SessionLaunchConfig {
     }
 }
 
-fn live_ctrl_c_under_flood() -> LiveCtrlCStats {
+fn live_ctrl_c_under_flood() -> Result<LiveCtrlCStats> {
     let config = TerminalSessionConfig {
         launch: shell_launch_config(flood_command()),
         ..TerminalSessionConfig::default()
     };
-    let mut terminal = TerminalSession::new_with_config(geometry(120, 40), config, Arc::new(|| {}))
-        .expect("spawn flood command");
+    let mut terminal =
+        TerminalSession::new_with_config(geometry(120, 40), config, Arc::new(|| {}))?;
     let warmup_started = Instant::now();
     let mut stats = LiveCtrlCStats::default();
 
     while warmup_started.elapsed() < LIVE_FLOOD_WARMUP {
         let drain = terminal.drain_pty();
-        stats.bytes += drain.bytes;
+        stats.bytes = stats.bytes.saturating_add(drain.bytes);
         stats.high_water = stats.high_water.max(terminal.pending_pty_len());
         thread::sleep(Duration::from_millis(1));
     }
 
     let interrupt_started = Instant::now();
-    terminal.write_input(CTRL_C).expect("send ctrl-c");
+    terminal.write_input(CTRL_C)?;
     loop {
         let drain = terminal.drain_pty();
-        stats.polls += 1;
-        stats.bytes += drain.bytes;
+        stats.polls = stats.polls.saturating_add(1);
+        stats.bytes = stats.bytes.saturating_add(drain.bytes);
         stats.high_water = stats.high_water.max(terminal.pending_pty_len());
-        if terminal.child_exited().unwrap_or(false) {
-            stats.latency_us = interrupt_started.elapsed().as_micros() as u64;
+        if terminal.child_exited()? {
+            stats.latency_us =
+                u64::try_from(interrupt_started.elapsed().as_micros()).unwrap_or(u64::MAX);
             stats.exited = true;
-            return stats;
+            return Ok(stats);
         }
-        assert!(
+        anyhow::ensure!(
             interrupt_started.elapsed() < LIVE_FLOOD_TIMEOUT,
             "flood command did not exit after Ctrl-C"
         );
@@ -291,27 +271,78 @@ fn live_ctrl_c_under_flood() -> LiveCtrlCStats {
     }
 }
 
-fn bench_flood_replays(c: &mut Criterion) {
+fn bench_flood_replays(c: &mut Criterion) -> Result<()> {
+    let mut failure = None;
     for fixture in flood_fixtures() {
         c.bench_function(fixture.name, |b| {
             b.iter_batched(
                 || fixture.clone(),
-                |fixture| black_box(run_flood_replay(&fixture)),
+                |fixture| {
+                    black_box(run_flood_replay(&fixture).map_err(|error| failure = Some(error)))
+                },
                 BatchSize::SmallInput,
-            )
+            );
         });
     }
+    failure.map_or(Ok(()), Err)
 }
 
-fn bench_live_ctrl_c(c: &mut Criterion) {
+fn bench_live_ctrl_c(c: &mut Criterion) -> Result<()> {
+    let mut failure = None;
     c.bench_function("flood_live_ctrl_c_to_child_exit", |b| {
-        b.iter(|| black_box(live_ctrl_c_under_flood()))
+        b.iter(|| black_box(live_ctrl_c_under_flood().map_err(|error| failure = Some(error))));
     });
+    failure.map_or(Ok(()), Err)
 }
 
-criterion_group!(
-    name = benches;
-    config = Criterion::default().noise_threshold(0.20).sample_size(10);
-    targets = bench_flood_replays, bench_live_ctrl_c,
-);
-criterion_main!(benches);
+fn main() -> Result<()> {
+    let mut criterion = Criterion::default()
+        .noise_threshold(0.20)
+        .sample_size(10)
+        .configure_from_args();
+    bench_flood_replays(&mut criterion)?;
+    bench_live_ctrl_c(&mut criterion)?;
+    criterion.final_summary();
+    drop(criterion);
+    Ok(())
+}
+
+fn journalctl_line(index: usize) -> String {
+    format!(
+        "Jun 15 12:{:02}:{:02} host bootty[{index}]: level={} unit=bootty.service message='{}'",
+        index % 60,
+        (index.saturating_mul(7)) % 60,
+        ["INFO", "DEBUG", "WARN", "ERR"]
+            .get(index % 4)
+            .copied()
+            .unwrap_or("INFO"),
+        "event replay ".repeat(4)
+    )
+}
+
+fn docker_logs_line(index: usize) -> String {
+    format!(
+        "container=api-{index:04} stream=stdout json={{\"level\":\"{}\",\"request\":{},\"payload\":\"{}\"}}",
+        ["info", "debug", "warn", "error"]
+            .get(index % 4)
+            .copied()
+            .unwrap_or("info"),
+        index.saturating_mul(17),
+        "x".repeat(48)
+    )
+}
+
+fn kubectl_logs_line(index: usize) -> String {
+    format!(
+        "2026-06-15T12:{:02}:{:02}.{:03}Z pod/api-{index:04} ns=prod level={} trace={} {}",
+        index % 60,
+        (index.saturating_mul(11)) % 60,
+        (index.saturating_mul(37)) % 1000,
+        ["INFO", "DEBUG", "WARN", "ERROR"]
+            .get(index % 4)
+            .copied()
+            .unwrap_or("INFO"),
+        index.saturating_mul(23),
+        "field=value ".repeat(8)
+    )
+}

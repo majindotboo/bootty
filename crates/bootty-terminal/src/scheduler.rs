@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 const INPUT_REFRESH_INTERVAL: Duration = Duration::ZERO;
-const BUSY_REFRESH_INTERVAL: Duration = Duration::ZERO;
-/// Cadence of the cursor's fade animation, and with it the app's idle frame rate: a repaint
-/// rebuilds the whole window, so this constant sets what an idle focused window costs. 20 Hz keeps
-/// the fade smooth at half the frames 30 Hz asked for; `cursor.blink = false` opts out entirely.
+// A busy terminal needs another frame soon, but a zero-delay recommendation turns a persistent
+// backend backlog into an uncapped GPUI render loop. Backend publication already wakes the host;
+// this interval only drains work that remains after that frame.
+const BUSY_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
+/// Cadence for animations that need intermediate frames, such as indeterminate progress.
 pub const CURSOR_BLINK_REFRESH_INTERVAL: Duration = Duration::from_millis(50);
 const CHROME_REFRESH_INTERVAL: Duration = Duration::from_millis(900);
 
@@ -19,48 +20,49 @@ pub struct RepaintSignal {
 }
 
 impl RepaintSignal {
-    fn has_input(self) -> bool {
+    const fn has_input(self) -> bool {
         self.input_commands > 0
     }
 
-    fn has_backlog_or_expensive_drain(self) -> bool {
+    const fn has_backlog_or_expensive_drain(self) -> bool {
         self.pending_bytes > 0 || self.drain_elapsed_us >= 1_000
     }
 
-    fn has_blinking_cursor(self) -> bool {
+    const fn has_blinking_cursor(self) -> bool {
         self.cursor_blinking
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepaintScheduler {
-    input_after: Duration,
-    busy_after: Duration,
-    chrome_after: Duration,
+    input: Duration,
+    busy: Duration,
+    chrome: Duration,
 }
 
 impl Default for RepaintScheduler {
     fn default() -> Self {
         Self {
-            input_after: INPUT_REFRESH_INTERVAL,
-            busy_after: BUSY_REFRESH_INTERVAL,
-            // Terminal output publishes wake egui directly. Periodic repainting
+            input: INPUT_REFRESH_INTERVAL,
+            busy: BUSY_REFRESH_INTERVAL,
+            // Terminal output publishes a wake directly. Periodic repainting
             // is only a chrome/session-refresh safety net while idle.
-            chrome_after: CHROME_REFRESH_INTERVAL,
+            chrome: CHROME_REFRESH_INTERVAL,
         }
     }
 }
 
 impl RepaintScheduler {
-    pub fn recommend(self, signal: RepaintSignal) -> Duration {
+    #[must_use]
+    pub const fn recommend(self, signal: RepaintSignal) -> Duration {
         if signal.has_input() {
-            self.input_after
+            self.input
         } else if signal.has_backlog_or_expensive_drain() {
-            self.busy_after
+            self.busy
         } else if signal.has_blinking_cursor() {
             CURSOR_BLINK_REFRESH_INTERVAL
         } else {
-            self.chrome_after
+            self.chrome
         }
     }
 }

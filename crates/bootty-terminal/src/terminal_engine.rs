@@ -1,3 +1,5 @@
+use crate::terminal_search::{SearchPattern, TerminalSearchOptions};
+use num_traits::ToPrimitive as _;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
@@ -6,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use memchr::memmem::find;
+use memchr::{memchr, memmem::find};
 
 use crate::{
     geometry::{
@@ -19,6 +21,7 @@ use crate::{
     terminal_png_decoder::BoottyPngDecoder,
 };
 
+mod capture;
 mod copy_mode;
 mod logical_search;
 pub(crate) mod write_ingress;
@@ -29,7 +32,7 @@ pub use copy_mode::{
 };
 use logical_search::frame_search_matches;
 use write_ingress::{
-    CURSOR_HOME, SanitizedKittyGraphics, SgrOptimizer, complete_streaming_control_prefix_len,
+    CURSOR_HOME, SanitizedKittyGraphics, complete_streaming_control_prefix_len,
     contains_tracked_streaming_control, find_osc_terminator, repeated_cursor_home_prefix_len,
     sanitize_kitty_graphics_commands, split_osc_payload, terminal_write_features,
     unwrap_tmux_passthrough_commands,
@@ -45,7 +48,7 @@ use crate::terminal_input_model::{
 use crate::terminal_palette::generate_256_palette;
 use crate::terminal_side_effect::{TerminalHostAction, TerminalSideEffectCollector};
 pub use crate::terminal_side_effect::{TerminalSideEffect, TerminalSideEffectEvent};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use base64::{Engine as _, engine::general_purpose};
 use libghostty_vt::{
     Terminal,
@@ -136,7 +139,7 @@ pub enum TerminalCursorStyle {
 }
 
 impl TerminalCursorStyle {
-    fn into_ghostty(self) -> CursorStyle {
+    const fn into_ghostty(self) -> CursorStyle {
         match self {
             Self::Bar => CursorStyle::Bar,
             Self::Block => CursorStyle::Block,
@@ -184,8 +187,8 @@ impl TerminalSelectionEvent {
         let y = ((self.position.y - self.surface.padding.top).max(0.0) / self.surface.cell.height)
             .floor();
         GridPoint {
-            x: x as u16,
-            y: y as u16,
+            x: x.max(0.0).to_u16().unwrap_or(u16::MAX),
+            y: y.max(0.0).to_u16().unwrap_or(u16::MAX),
         }
     }
 }
@@ -198,7 +201,7 @@ pub enum TerminalSelectionFormat {
 }
 
 impl TerminalSelectionFormat {
-    fn emit_format(self) -> Format {
+    const fn emit_format(self) -> Format {
         match self {
             Self::PlainText => Format::Plain,
             Self::Vt => Format::Vt,
@@ -291,7 +294,11 @@ fn scaled_mouse_encoder_size(size: MouseEncoderSize, display_scale: f32) -> Mous
 }
 
 fn scaled_mouse_extent(value: u32, display_scale: f32) -> u32 {
-    ((value as f32) * display_scale).round() as u32
+    (value.to_f32().unwrap_or(f32::MAX) * display_scale)
+        .round()
+        .max(0.0)
+        .to_u32()
+        .unwrap_or(u32::MAX)
 }
 
 fn extract_render_row(
@@ -334,7 +341,7 @@ fn extract_render_row(
             out.virtual_cells.push(KittyVirtualCell {
                 x: col_index,
                 y: row_index,
-                grapheme: grapheme_scratch[..grapheme_len].to_vec(),
+                grapheme: grapheme_scratch.clone(),
                 foreground: style.map_or(StyleColor::None, |style| style.fg_color),
                 underline_color: style.map_or(StyleColor::None, |style| style.underline_color),
             });
@@ -344,8 +351,7 @@ fn extract_render_row(
         let text_len = if is_virtual_placeholder {
             0
         } else {
-            out.text
-                .extend_from_slice(&grapheme_scratch[..grapheme_len]);
+            out.text.extend_from_slice(grapheme_scratch);
             grapheme_len
         };
 
@@ -379,7 +385,9 @@ fn extract_render_row(
             hyperlink,
         });
 
-        col_index += 1;
+        col_index = col_index
+            .checked_add(1)
+            .context("terminal row exceeds column limit")?;
     }
 
     Ok(())
@@ -419,6 +427,10 @@ impl XtermColorOverrides {
         self.slot(code).and_then(Option::take).is_some()
     }
 }
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "VT protocol modes and cache invalidation flags vary independently."
+)]
 pub struct TerminalEngine {
     terminal: Terminal<'static, 'static>,
     base_color_palette: crate::terminal_palette::Palette,
@@ -451,7 +463,6 @@ pub struct TerminalEngine {
     synchronized_output_prefix_len: usize,
     synchronized_output_observed: bool,
     cursor_home_pending_len: usize,
-    sgr_optimizer: SgrOptimizer,
     pty_write_callback: PtyWriteCallback,
     pty_write_suppressed: Rc<Cell<bool>>,
     current_working_directory: String,
@@ -459,6 +470,9 @@ pub struct TerminalEngine {
     xterm_color_overrides: XtermColorOverrides,
     color_scheme: Rc<Cell<ColorScheme>>,
     search_query: String,
+    search_options: TerminalSearchOptions,
+    search_pattern: Option<SearchPattern>,
+    search_groups: Vec<Vec<FrameSelection>>,
     search_active_index: usize,
     search_pulse: u64,
     copy_mode: Option<copy_mode::CopyModeState>,
@@ -477,9 +491,9 @@ fn configure_default_colors(
 ) -> Result<()> {
     let mut palette = *base_color_palette;
     let mut explicit = [false; 256];
-    for (index, color) in config.palette.iter().take(256).copied().enumerate() {
-        palette[index] = color;
-        explicit[index] = true;
+    for ((entry, explicit), color) in palette.iter_mut().zip(&mut explicit).zip(&config.palette) {
+        *entry = *color;
+        *explicit = true;
     }
     if config.palette_generate {
         palette = generate_256_palette(
@@ -542,37 +556,39 @@ fn install_libghostty_logger() {
 fn libghostty_log_enabled(level: libghostty_vt::log::Level) -> bool {
     let minimum = std::env::var("BOOTTY_LIBGHOSTTY_LOG")
         .ok()
-        .and_then(|value| parse_libghostty_log_level(&value))
-        .unwrap_or(Some(libghostty_vt::log::Level::Warning));
+        .map_or(Some(libghostty_vt::log::Level::Warning), |value| {
+            parse_libghostty_log_level(&value)
+        });
     minimum.is_some_and(|minimum| log_level_rank(level) <= log_level_rank(minimum))
 }
 
-fn parse_libghostty_log_level(value: &str) -> Option<Option<libghostty_vt::log::Level>> {
+fn parse_libghostty_log_level(value: &str) -> Option<libghostty_vt::log::Level> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "false" | "0" => Some(None),
-        "error" => Some(Some(libghostty_vt::log::Level::Error)),
-        "warn" | "warning" | "true" | "1" => Some(Some(libghostty_vt::log::Level::Warning)),
-        "info" => Some(Some(libghostty_vt::log::Level::Info)),
-        "debug" | "trace" | "all" => Some(Some(libghostty_vt::log::Level::Debug)),
-        _ => None,
+        "off" | "false" | "0" => None,
+        "error" => Some(libghostty_vt::log::Level::Error),
+        "info" => Some(libghostty_vt::log::Level::Info),
+        "debug" | "trace" | "all" => Some(libghostty_vt::log::Level::Debug),
+        _ => Some(libghostty_vt::log::Level::Warning),
     }
 }
 
-fn log_level_rank(level: libghostty_vt::log::Level) -> u8 {
+const fn log_level_rank(level: libghostty_vt::log::Level) -> u8 {
     match level {
         libghostty_vt::log::Level::Error => 0,
         libghostty_vt::log::Level::Warning => 1,
         libghostty_vt::log::Level::Info => 2,
-        libghostty_vt::log::Level::Debug => 3,
         _ => 3,
     }
 }
 
-fn rgb((r, g, b): (u8, u8, u8)) -> RgbColor {
+const fn rgb((r, g, b): (u8, u8, u8)) -> RgbColor {
     RgbColor { r, g, b }
 }
 fn color_scheme_for_background(color: RgbColor) -> ColorScheme {
-    let luma = u32::from(color.r) * 299 + u32::from(color.g) * 587 + u32::from(color.b) * 114;
+    let luma = u32::from(color.r)
+        .saturating_mul(299)
+        .saturating_add(u32::from(color.g).saturating_mul(587))
+        .saturating_add(u32::from(color.b).saturating_mul(114));
     if luma < 128_000 {
         ColorScheme::Dark
     } else {
@@ -584,7 +600,7 @@ fn default_palette16() -> [RgbColor; 16] {
     crate::terminal_palette::default_base16()
 }
 
-fn default_device_attributes() -> DeviceAttributes {
+const fn default_device_attributes() -> DeviceAttributes {
     DeviceAttributes {
         primary: PrimaryDeviceAttributes::new(
             ConformanceLevel::VT220,
@@ -610,9 +626,9 @@ fn parse_osc_number(bytes: &[u8]) -> Option<u16> {
 fn parse_color_channel(s: &str) -> Option<u8> {
     let value = u16::from_str_radix(s, 16).ok()?;
     Some(match s.len() {
-        1 => (value as u8) * 0x11,
-        2 => value as u8,
-        _ => (value >> 8) as u8,
+        1 => u8::try_from(value).ok()?.checked_mul(0x11)?,
+        2 => u8::try_from(value).ok()?,
+        _ => u8::try_from(value >> 8).ok()?,
     })
 }
 
@@ -636,12 +652,12 @@ fn parse_rgb_color_spec(bytes: &[u8]) -> Option<RgbColor> {
     if !(1..=4).contains(&channel_len) {
         return None;
     }
-    let channel =
-        |index: usize| parse_color_channel(&hex[index * channel_len..(index + 1) * channel_len]);
+    let (red, remaining) = hex.split_at_checked(channel_len)?;
+    let (green, blue) = remaining.split_at_checked(channel_len)?;
     Some(RgbColor {
-        r: channel(0)?,
-        g: channel(1)?,
-        b: channel(2)?,
+        r: parse_color_channel(red)?,
+        g: parse_color_channel(green)?,
+        b: parse_color_channel(blue)?,
     })
 }
 
@@ -652,6 +668,7 @@ fn rgb_spec(color: RgbColor) -> String {
     )
 }
 
+#[must_use]
 pub fn encode_iterm2_report_cell_size(cell_width: f32, cell_height: f32, scale: f32) -> Vec<u8> {
     format!(
         "\x1b]1337;ReportCellSize={:.4};{:.4};{:.4}\x1b\\",
@@ -662,6 +679,7 @@ pub fn encode_iterm2_report_cell_size(cell_width: f32, cell_height: f32, scale: 
     .into_bytes()
 }
 
+#[must_use]
 pub fn encode_iterm2_report_variable(value: &str) -> Vec<u8> {
     format!(
         "\x1b]1337;ReportVariable={}\x1b\\",
@@ -670,6 +688,7 @@ pub fn encode_iterm2_report_variable(value: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+#[must_use]
 pub fn encode_osc52_response(selection: &str, text: &str) -> Vec<u8> {
     format!(
         "\x1b]52;{};{}\x1b\\",
@@ -692,7 +711,7 @@ fn hyperlink_uri_at(
     loop {
         match grid_ref.hyperlink_uri(scratch) {
             Ok(0) => return None,
-            Ok(len) => return String::from_utf8(scratch[..len].to_vec()).ok(),
+            Ok(len) => return String::from_utf8(scratch.get(..len)?.to_vec()).ok(),
             Err(libghostty_vt::Error::OutOfSpace { required }) => scratch.resize(required, 0),
             Err(_) => return None,
         }
@@ -710,7 +729,7 @@ fn placement_rows_overlap_content(
     let min_x = placement.destination.min_x - origin.x;
     let max_x = placement.destination.max_x - origin.x;
     if max_y <= 0.0
-        || min_y >= rows.len() as f32 * surface.cell.height
+        || min_y >= rows.len().to_f32().unwrap_or(f32::MAX) * surface.cell.height
         || max_x <= 0.0
         || surface.cell.width <= 0.0
         || surface.cell.height <= 0.0
@@ -718,11 +737,28 @@ fn placement_rows_overlap_content(
         return false;
     }
 
-    let start = (min_y.max(0.0) / surface.cell.height).floor() as usize;
-    let end = (max_y.max(0.0) / surface.cell.height).ceil() as usize;
+    let start = (min_y.max(0.0) / surface.cell.height)
+        .floor()
+        .max(0.0)
+        .to_usize()
+        .unwrap_or(usize::MAX);
+    let end = (max_y.max(0.0) / surface.cell.height)
+        .ceil()
+        .max(0.0)
+        .to_usize()
+        .unwrap_or(usize::MAX);
     let end = end.saturating_sub(1).min(rows.len().saturating_sub(1));
-    let start_col = (min_x.max(0.0) / surface.cell.width).floor() as u16;
-    let end_col = (max_x.max(0.0) / surface.cell.width).ceil().max(1.0) as u16;
+    let start_col = (min_x.max(0.0) / surface.cell.width)
+        .floor()
+        .max(0.0)
+        .to_u16()
+        .unwrap_or(u16::MAX);
+    let end_col = (max_x.max(0.0) / surface.cell.width)
+        .ceil()
+        .max(1.0)
+        .max(0.0)
+        .to_u16()
+        .unwrap_or(u16::MAX);
     let end_col = end_col.saturating_sub(1);
     (start..=end).any(|index| {
         rows.get(index).is_some_and(|row| {
@@ -731,7 +767,7 @@ fn placement_rows_overlap_content(
                     && cell.x <= end_col
                     && row
                         .text
-                        .get(cell.text_start..cell.text_start + cell.text_len)
+                        .get(cell.text_start..cell.text_start.saturating_add(cell.text_len))
                         .is_some_and(|text| text.iter().any(|ch| !ch.is_whitespace()))
             })
         })
@@ -739,6 +775,9 @@ fn placement_rows_overlap_content(
 }
 
 impl TerminalEngine {
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot create or configure the terminal and its input or rendering state.
     pub fn new(geometry: TerminalGeometry) -> Result<Self> {
         Self::new_with_scrollback(
             geometry,
@@ -747,6 +786,9 @@ impl TerminalEngine {
         )
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot create or configure the terminal and its input or rendering state.
     pub fn new_with_terminal_options(
         geometry: TerminalGeometry,
         colors: TerminalColorConfig,
@@ -765,6 +807,9 @@ impl TerminalEngine {
         )
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot create or configure the terminal and its input or rendering state.
     pub fn new_with_scrollback(
         geometry: TerminalGeometry,
         colors: TerminalColorConfig,
@@ -803,51 +848,16 @@ impl TerminalEngine {
         let size_report_state = Rc::new(Cell::new(SizeReportState {
             geometry,
             display_scale: 1.0,
-            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
+            render_cell: CellMetrics::new(
+                geometry.cell_width.to_f32().unwrap_or(f32::MAX),
+                geometry.cell_height.to_f32().unwrap_or(f32::MAX),
+            ),
         }));
-        let report_state = size_report_state.clone();
-        terminal.on_size(move |_terminal| Some(report_state.get().size()))?;
-        terminal.on_device_attributes(|_terminal| Some(default_device_attributes()))?;
         let color_scheme = Rc::new(Cell::new(color_scheme_for_background(colors.background)));
-        let report_color_scheme = color_scheme.clone();
-        terminal.on_color_scheme(move |_terminal| Some(report_color_scheme.get()))?;
-        terminal.on_xtversion(|_terminal| Some(TERMINAL_XTVERSION))?;
         let side_effects = TerminalSideEffectCollector::new();
-        let callback_side_effects = side_effects.callback_effects();
-        let title_side_effects = callback_side_effects.clone();
-        terminal.on_title_changed(move |terminal| {
-            if let Ok(title) = terminal.title() {
-                title_side_effects
-                    .borrow_mut()
-                    .push(TerminalSideEffect::WindowTitle(title.to_owned()));
-            }
-        })?;
         let pwd_state = Rc::new(RefCell::new(String::new()));
-        let callback_pwd_state = pwd_state.clone();
-        terminal.on_pwd_changed(move |terminal| {
-            if let Ok(pwd) = terminal.pwd() {
-                let mut current = callback_pwd_state.borrow_mut();
-                current.replace_range(.., pwd);
-            }
-        })?;
-        let bell_side_effects = callback_side_effects.clone();
-        terminal.on_bell(move |_terminal| {
-            bell_side_effects
-                .borrow_mut()
-                .push(TerminalSideEffect::Bell);
-        })?;
         let pty_write_callback: PtyWriteCallback = Rc::new(RefCell::new(None));
-        let terminal_pty_write_callback = pty_write_callback.clone();
         let pty_write_suppressed = Rc::new(Cell::new(false));
-        let terminal_pty_write_suppressed = pty_write_suppressed.clone();
-        terminal.on_pty_write(move |terminal, bytes| {
-            if terminal_pty_write_suppressed.get() {
-                return;
-            }
-            if let Some(callback) = terminal_pty_write_callback.borrow_mut().as_deref_mut() {
-                callback(terminal, bytes);
-            }
-        })?;
         terminal.resize(
             geometry.cols,
             geometry.rows,
@@ -897,7 +907,6 @@ impl TerminalEngine {
             synchronized_output_prefix_len: 0,
             synchronized_output_observed: false,
             cursor_home_pending_len: 0,
-            sgr_optimizer: SgrOptimizer::default(),
             pty_write_callback,
             pty_write_suppressed,
             current_working_directory: String::new(),
@@ -906,6 +915,9 @@ impl TerminalEngine {
             colors,
             xterm_color_overrides: XtermColorOverrides::default(),
             search_query: String::new(),
+            search_options: TerminalSearchOptions::default(),
+            search_pattern: None,
+            search_groups: Vec::new(),
             search_active_index: 0,
             search_pulse: 0,
             copy_mode: None,
@@ -913,25 +925,87 @@ impl TerminalEngine {
             extracted_content_epoch: u64::MAX,
             kitty_graphics_touched: false,
             display_scale: 1.0,
-            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
+            render_cell: CellMetrics::new(
+                geometry.cell_width.to_f32().unwrap_or(f32::MAX),
+                geometry.cell_height.to_f32().unwrap_or(f32::MAX),
+            ),
             render_cell_explicit: false,
         };
+        engine.register_terminal_callbacks()?;
         engine.set_kitty_image_storage_limit(64 * 1024 * 1024)?;
         Ok(engine)
     }
 
-    fn mark_content_changed(&mut self) {
+    fn register_terminal_callbacks(&mut self) -> Result<()> {
+        let report_state = self.size_report_state.clone();
+        self.terminal
+            .on_size(move |_terminal| Some(report_state.get().size()))?;
+        self.terminal
+            .on_device_attributes(|_terminal| Some(default_device_attributes()))?;
+        let report_color_scheme = self.color_scheme.clone();
+        self.terminal
+            .on_color_scheme(move |_terminal| Some(report_color_scheme.get()))?;
+        self.terminal
+            .on_xtversion(|_terminal| Some(TERMINAL_XTVERSION))?;
+        let callback_side_effects = self.side_effects.callback_effects();
+        let title_side_effects = callback_side_effects.clone();
+        self.terminal.on_title_changed(move |terminal| {
+            if let Ok(title) = terminal.title() {
+                title_side_effects
+                    .borrow_mut()
+                    .push(TerminalSideEffect::WindowTitle(title.to_owned()));
+            }
+        })?;
+        let callback_pwd_state = self.current_working_directory_state.clone();
+        self.terminal.on_pwd_changed(move |terminal| {
+            if let Ok(pwd) = terminal.pwd() {
+                let mut current = callback_pwd_state.borrow_mut();
+                current.replace_range(.., pwd);
+            }
+        })?;
+        let bell_side_effects = callback_side_effects;
+        self.terminal.on_bell(move |_terminal| {
+            bell_side_effects
+                .borrow_mut()
+                .push(TerminalSideEffect::Bell);
+        })?;
+        let terminal_pty_write_callback = self.pty_write_callback.clone();
+        let terminal_pty_write_suppressed = self.pty_write_suppressed.clone();
+        self.terminal.on_pty_write(move |terminal, bytes| {
+            if terminal_pty_write_suppressed.get() {
+                return;
+            }
+            if let Some(callback) = terminal_pty_write_callback.borrow_mut().as_deref_mut() {
+                callback(terminal, bytes);
+            }
+        })?;
+        Ok(())
+    }
+
+    const fn mark_content_changed(&mut self) {
         self.content_epoch = self.content_epoch.wrapping_add(1);
     }
 
     fn observe_synchronized_output_start(&mut self, bytes: &[u8]) {
-        const START: &[u8] = b"\x1b[?2026h";
-        for byte in bytes {
+        const START: &[u8; 8] = b"\x1b[?2026h";
+        let mut remaining = bytes;
+        while let Some((&byte, rest)) = remaining.split_first() {
+            if self.synchronized_output_prefix_len == 0 {
+                let Some(escape) = memchr(START[0], remaining) else {
+                    break;
+                };
+                self.synchronized_output_prefix_len = 1;
+                remaining = remaining
+                    .split_at(escape.saturating_add(1).min(remaining.len()))
+                    .1;
+                continue;
+            }
+            remaining = rest;
             self.synchronized_output_prefix_len =
-                if *byte == START[self.synchronized_output_prefix_len] {
-                    self.synchronized_output_prefix_len + 1
+                if Some(&byte) == START.get(self.synchronized_output_prefix_len) {
+                    self.synchronized_output_prefix_len.saturating_add(1)
                 } else {
-                    usize::from(*byte == START[0])
+                    usize::from(byte == START[0])
                 };
             if self.synchronized_output_prefix_len == START.len() {
                 self.synchronized_output_observed = true;
@@ -944,6 +1018,9 @@ impl TerminalEngine {
         std::mem::take(&mut self.synchronized_output_observed)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot apply the selection gesture or read its terminal position.
     pub fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
         let Some(point) = selection_point(event, self.geometry) else {
             self.clear_selection()?;
@@ -969,6 +1046,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot apply the selection gesture or read its terminal position.
     pub fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
         let Some(point) = selection_point(event, self.geometry) else {
             return Ok(());
@@ -992,6 +1072,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot apply the selection gesture or read its terminal position.
     pub fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()> {
         let was_dragged = self
             .selection_gesture
@@ -1015,6 +1098,30 @@ impl TerminalEngine {
         if !was_dragged && behavior == gesture::Behavior::Cell {
             self.terminal.set_selection(None)?;
         }
+        if !was_dragged
+            && behavior == gesture::Behavior::Word
+            && let Some(point) = point
+        {
+            let range = crate::terminal_links::semantic_selection_at(
+                self.extract_frame()?,
+                GridPoint {
+                    x: point.x,
+                    y: u16::try_from(point.y).unwrap_or(u16::MAX),
+                },
+            );
+            if let Some(range) = range {
+                let start = self.terminal.grid_ref(Point::Viewport(PointCoordinate {
+                    x: range.anchor.x,
+                    y: u32::from(range.anchor.y),
+                }))?;
+                let end = self.terminal.grid_ref(Point::Viewport(PointCoordinate {
+                    x: range.focus.x,
+                    y: u32::from(range.focus.y),
+                }))?;
+                let selection = libghostty_vt::selection::Selection::new(start, end, false);
+                self.terminal.set_selection(Some(&selection))?;
+            }
+        }
         self.mark_content_changed();
         Ok(())
     }
@@ -1026,6 +1133,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot read or format the active selection.
     pub fn format_selection(&self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         let options = SelectionFormatOptions::new()
             .with_emit_format(format.emit_format())
@@ -1049,6 +1159,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty rejects a color, cursor, or feature update.
     pub fn apply_live_config(&mut self, config: TerminalLiveConfig) -> Result<()> {
         self.set_colors(config.colors)?;
         self.set_cursor_config(config.cursor)?;
@@ -1061,6 +1174,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the PTY callback cannot be registered.
     pub fn on_pty_write(
         &mut self,
         f: impl libghostty_vt::terminal::PtyWriteFn<'static, 'static>,
@@ -1079,50 +1195,49 @@ impl TerminalEngine {
     }
 
     fn write_vt_with_ordered_osc_color_state(&mut self, data: &[u8]) {
-        let mut search_start = 0;
-        while let Some(relative_start) = find(&data[search_start..], b"\x1b]") {
-            let start = search_start + relative_start;
-            let payload_start = start + 2;
-            let (payload_len, terminator_len) = match find_osc_terminator(&data[payload_start..]) {
-                Some(found) => found,
-                None => {
-                    self.terminal.vt_write(&data[search_start..]);
-                    return;
-                }
+        let mut remaining = data;
+        while let Some(start) = find(remaining, b"\x1b]") {
+            let Some((prefix, packet)) = remaining.split_at_checked(start) else {
+                break;
             };
-            let payload_end = payload_start + payload_len;
-            let terminator_end = payload_end + terminator_len;
-
-            let standard_query_response = self.standard_color_query_response(
-                &data[payload_start..payload_end],
-                &data[payload_end..terminator_end],
-            );
-            if standard_query_response.is_some() {
-                self.terminal.vt_write(&data[search_start..start]);
-            } else {
-                self.terminal.vt_write(&data[search_start..terminator_end]);
+            let Some(payload) = packet.strip_prefix(b"\x1b]") else {
+                break;
+            };
+            let Some((payload_len, terminator_len)) = find_osc_terminator(payload) else {
+                break;
+            };
+            let Some((payload, terminated)) = payload.split_at_checked(payload_len) else {
+                break;
+            };
+            let Some((terminator, rest)) = terminated.split_at_checked(terminator_len) else {
+                break;
+            };
+            let standard_query_response = self.standard_color_query_response(payload, terminator);
+            self.terminal.vt_write(prefix);
+            if standard_query_response.is_none() {
+                let consumed = packet.len().saturating_sub(rest.len());
+                let (packet, _) = packet.split_at(consumed);
+                self.terminal.vt_write(packet);
             }
-            self.apply_osc_color_state(&data[payload_start..payload_end]);
-            if let Some(response) = standard_query_response.or_else(|| {
-                self.extended_color_query_response(
-                    &data[payload_start..payload_end],
-                    &data[payload_end..terminator_end],
-                )
-            }) {
+            self.apply_osc_color_state(payload);
+            if let Some(response) = standard_query_response
+                .or_else(|| self.extended_color_query_response(payload, terminator))
+            {
                 self.write_pty_response(&response);
             }
-            search_start = terminator_end;
+            remaining = rest;
         }
-        if search_start < data.len() {
-            self.terminal.vt_write(&data[search_start..]);
-        }
+        self.terminal.vt_write(remaining);
     }
 
     fn apply_osc_color_state(&mut self, payload: &[u8]) {
         let Some((command, rest)) = split_osc_payload(payload) else {
             if let Some(reset_code) = parse_osc_number(payload)
                 && (113..=119).contains(&reset_code)
-                && self.xterm_color_overrides.reset((reset_code - 100) as u8)
+                && let Some(code) = reset_code
+                    .checked_sub(100)
+                    .and_then(|code| u8::try_from(code).ok())
+                && self.xterm_color_overrides.reset(code)
             {
                 self.mark_content_changed();
             }
@@ -1135,13 +1250,14 @@ impl TerminalEngine {
             return;
         }
         let mut changed = false;
-        for (offset, spec) in rest.split(|byte| *byte == b';').enumerate() {
-            let code = start_code + offset as u16;
-            if code > 19 || spec == b"?" {
+        for (code, spec) in (start_code..=19).zip(rest.split(|byte| *byte == b';')) {
+            if spec == b"?" {
                 break;
             }
             if let Some(color) = parse_rgb_color_spec(spec) {
-                changed |= self.xterm_color_overrides.set(code as u8, color);
+                changed |= self
+                    .xterm_color_overrides
+                    .set(u8::try_from(code).unwrap_or(u8::MAX), color);
             }
         }
         if changed {
@@ -1198,9 +1314,9 @@ impl TerminalEngine {
         let mut response = Vec::new();
         match command {
             b"10" | b"11" | b"12" => {
-                let start_code = parse_osc_number(command)? as u8;
+                let start_code = u8::try_from(parse_osc_number(command)?).ok()?;
                 for (offset, operation) in rest.split(|byte| *byte == b';').enumerate() {
-                    let code = start_code.checked_add(offset as u8)?;
+                    let code = start_code.checked_add(u8::try_from(offset).ok()?)?;
                     if code > 12 || operation != b"?" {
                         return None;
                     }
@@ -1208,7 +1324,7 @@ impl TerminalEngine {
                         10 => self.terminal.fg_color().ok()?,
                         11 => self.terminal.bg_color().ok()?,
                         12 => self.terminal.cursor_color().ok()?,
-                        _ => unreachable!(),
+                        _ => return None,
                     }?;
                     response
                         .extend_from_slice(format!("\x1b]{code};{}", rgb_spec(color)).as_bytes());
@@ -1224,7 +1340,7 @@ impl TerminalEngine {
                         return None;
                     }
                     let index = parse_osc_number(index)?;
-                    let color = *palette.0.get(index as usize)?;
+                    let color = *palette.0.get(usize::from(index))?;
                     response.extend_from_slice(
                         format!("\x1b]4;{index};{}", rgb_spec(color)).as_bytes(),
                     );
@@ -1238,7 +1354,7 @@ impl TerminalEngine {
 
     fn extended_color_query_response(&self, payload: &[u8], terminator: &[u8]) -> Option<Vec<u8>> {
         let (command, rest) = split_osc_payload(payload)?;
-        let start_code = parse_osc_number(command)? as u8;
+        let start_code = u8::try_from(parse_osc_number(command)?).ok()?;
         if !(13..=19).contains(&start_code) {
             return None;
         }
@@ -1254,11 +1370,13 @@ impl TerminalEngine {
         (!response.is_empty()).then_some(response)
     }
 
-    pub fn grid_size(&self) -> (u16, u16) {
+    #[must_use]
+    pub const fn grid_size(&self) -> (u16, u16) {
         (self.geometry.cols, self.geometry.rows)
     }
 
-    pub fn geometry(&self) -> TerminalGeometry {
+    #[must_use]
+    pub const fn geometry(&self) -> TerminalGeometry {
         self.geometry
     }
 
@@ -1271,6 +1389,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty rejects the new terminal dimensions.
     pub fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
         if geometry == self.geometry {
             return Ok(());
@@ -1281,8 +1402,10 @@ impl TerminalEngine {
         let mut report_state = self.size_report_state.get();
         report_state.geometry = geometry;
         if !self.render_cell_explicit {
-            self.render_cell =
-                CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32);
+            self.render_cell = CellMetrics::new(
+                geometry.cell_width.to_f32().unwrap_or(f32::MAX),
+                geometry.cell_height.to_f32().unwrap_or(f32::MAX),
+            );
             report_state.render_cell = self.render_cell;
         }
         self.size_report_state.set(report_state);
@@ -1320,8 +1443,14 @@ impl TerminalEngine {
     }
 
     pub fn set_render_cell_metrics(&mut self, cell: CellMetrics) {
-        let width = positive_or(cell.width, self.geometry.cell_width as f32);
-        let height = positive_or(cell.height, self.geometry.cell_height as f32);
+        let width = positive_or(
+            cell.width,
+            self.geometry.cell_width.to_f32().unwrap_or(f32::MAX),
+        );
+        let height = positive_or(
+            cell.height,
+            self.geometry.cell_height.to_f32().unwrap_or(f32::MAX),
+        );
         let cell = CellMetrics::new(width, height);
         if self.render_cell != cell {
             self.render_cell = cell;
@@ -1341,21 +1470,23 @@ impl TerminalEngine {
             if complete_len == bytes.len() {
                 return Cow::Borrowed(bytes);
             }
-            self.terminal_write_pending
-                .extend_from_slice(&bytes[complete_len..]);
-            return Cow::Borrowed(&bytes[..complete_len]);
+            let (complete, pending) = bytes.split_at(complete_len.min(bytes.len()));
+            self.terminal_write_pending.extend_from_slice(pending);
+            return Cow::Borrowed(complete);
         }
 
-        let mut joined = Vec::with_capacity(self.terminal_write_pending.len() + bytes.len());
+        let mut joined = Vec::with_capacity(
+            self.terminal_write_pending
+                .len()
+                .saturating_add(bytes.len()),
+        );
         joined.extend_from_slice(&self.terminal_write_pending);
         joined.extend_from_slice(bytes);
         self.terminal_write_pending.clear();
 
         let complete_len = complete_streaming_control_prefix_len(&joined);
         if complete_len < joined.len() {
-            self.terminal_write_pending
-                .extend_from_slice(&joined[complete_len..]);
-            joined.truncate(complete_len);
+            self.terminal_write_pending = joined.split_off(complete_len);
         }
         Cow::Owned(joined)
     }
@@ -1365,8 +1496,11 @@ impl TerminalEngine {
             repeated_cursor_home_prefix_len(bytes, self.cursor_home_pending_len)
         else {
             if self.cursor_home_pending_len > 0 {
-                self.terminal
-                    .vt_write(&CURSOR_HOME[..self.cursor_home_pending_len]);
+                self.terminal.vt_write(
+                    CURSOR_HOME
+                        .split_at(self.cursor_home_pending_len.min(CURSOR_HOME.len()))
+                        .0,
+                );
                 self.cursor_home_pending_len = 0;
             }
             return false;
@@ -1392,14 +1526,16 @@ impl TerminalEngine {
         }
 
         if self.cursor_home_pending_len > 0 {
-            self.terminal
-                .vt_write(&CURSOR_HOME[..self.cursor_home_pending_len]);
+            self.terminal.vt_write(
+                CURSOR_HOME
+                    .split_at(self.cursor_home_pending_len.min(CURSOR_HOME.len()))
+                    .0,
+            );
             self.cursor_home_pending_len = 0;
         }
 
         if can_fast_write {
-            let optimized = self.sgr_optimizer.optimize(bytes);
-            self.terminal.vt_write(optimized);
+            self.terminal.vt_write(bytes);
             self.sync_current_working_directory();
             self.mouse_encoder_options_dirty = true;
             self.mark_content_changed();
@@ -1416,7 +1552,6 @@ impl TerminalEngine {
             features.osc_side_effect = true;
         }
         if !features.needs_sanitizing() {
-            self.sgr_optimizer.reset();
             self.terminal.vt_write(write_bytes.as_ref());
             self.sync_current_working_directory();
             self.mouse_encoder_options_dirty = true;
@@ -1446,7 +1581,6 @@ impl TerminalEngine {
         if sanitized.touched {
             self.kitty_graphics_touched = true;
         }
-        self.sgr_optimizer.reset();
         if features.osc_color {
             self.write_vt_with_ordered_osc_color_state(sanitized.bytes.as_ref());
         } else {
@@ -1482,6 +1616,7 @@ impl TerminalEngine {
         self.pty_write_suppressed.set(previously_suppressed);
         self.side_effects.drop_replayed(side_effects);
         self.clear_streaming_writes();
+        self.side_effects.reset_clipboard_epoch();
     }
 
     fn clear_streaming_writes(&mut self) {
@@ -1497,6 +1632,7 @@ impl TerminalEngine {
         }
     }
 
+    #[must_use]
     pub fn current_working_directory(&self) -> &str {
         &self.current_working_directory
     }
@@ -1505,6 +1641,20 @@ impl TerminalEngine {
         self.side_effects.drain()
     }
 
+    #[must_use]
+    pub fn allows_prompt_editing(&self) -> bool {
+        self.copy_mode.is_none()
+            && self.search_query.is_empty()
+            && self
+                .terminal
+                .active_screen()
+                .is_ok_and(|screen| screen == libghostty_vt::screen::Screen::Primary)
+            && self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
+    }
+
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot configure or encode this input event.
     pub fn encode_paste_to_vec(&mut self, text: &str, out: &mut Vec<u8>) -> Result<()> {
         out.clear();
         let bracketed = self.terminal.mode(Mode::BRACKETED_PASTE)?;
@@ -1526,6 +1676,9 @@ impl TerminalEngine {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot configure or encode this input event.
     pub fn encode_key_to_vec(&mut self, input: KeyInput, out: &mut Vec<u8>) -> Result<()> {
         out.clear();
         self.key_encoder
@@ -1547,6 +1700,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot configure or encode this input event.
     pub fn encode_focus_to_vec(&mut self, gained: bool, out: &mut Vec<u8>) -> Result<()> {
         out.clear();
         if !self.terminal.mode(Mode::FOCUS_EVENT)? {
@@ -1564,6 +1720,9 @@ impl TerminalEngine {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot configure or encode this input event.
     pub fn encode_mouse_to_vec(&mut self, input: MouseInput, out: &mut Vec<u8>) -> Result<()> {
         out.clear();
         if !self.terminal.is_mouse_tracking()? {
@@ -1599,13 +1758,13 @@ impl TerminalEngine {
                 y: position.1 * display_scale,
             });
         if out.capacity() < 64 {
-            out.reserve(64 - out.capacity());
+            out.reserve(64_usize.saturating_sub(out.capacity()));
         }
         if let Err(error) = self.mouse_encoder.encode_to_vec(&self.mouse_event, out) {
             match error {
                 libghostty_vt::Error::OutOfSpace { required } if required > out.capacity() => {
                     out.clear();
-                    out.reserve(required - out.capacity());
+                    out.reserve(required.saturating_sub(out.capacity()));
                     self.mouse_encoder.encode_to_vec(&self.mouse_event, out)?;
                 }
                 error => return Err(error.into()),
@@ -1624,6 +1783,9 @@ impl TerminalEngine {
     /// Encode a wheel scroll of `notches` rows for a mouse-tracking application, which expects one
     /// button report per row. A wheel event carries however many rows the scroll accumulator
     /// resolved, so reporting it once makes fast scrolling crawl a line at a time.
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot configure or encode this input event.
     pub fn encode_mouse_wheel_to_vec(
         &mut self,
         input: MouseInput,
@@ -1639,7 +1801,7 @@ impl TerminalEngine {
         // non-finite delta arrives as `isize::MAX`. Nothing observed produces one, but the cost of
         // being wrong is an unbounded write to the PTY, and no real scroll exceeds a screenful.
         let notches = notches.min(MAX_WHEEL_REPORTS);
-        out.reserve(notch * notches.saturating_sub(1));
+        out.reserve(notch.saturating_mul(notches.saturating_sub(1)));
         for _ in 1..notches {
             out.extend_from_within(..notch);
         }
@@ -1651,29 +1813,58 @@ impl TerminalEngine {
         self.mark_content_changed();
     }
 
+    /// Scroll to an absolute row offset from the top of the scrollback.
+    pub fn scroll_viewport_to(&mut self, offset: usize) {
+        self.terminal.scroll_viewport(ScrollViewport::Row(offset));
+        self.mark_content_changed();
+    }
+
     pub fn scroll_viewport_bottom(&mut self) {
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
         self.mark_content_changed();
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an invalid search pattern or a failure to read or move the terminal viewport.
     pub fn search_viewport(
         &mut self,
         query: &str,
         direction: TerminalSearchDirection,
     ) -> Result<bool> {
-        let query = query.trim();
-        if query.is_empty() {
-            self.search_query.clear();
+        self.search_viewport_with_options(query, direction, TerminalSearchOptions::default())
+    }
+
+    fn set_search_query(&mut self, query: &str, options: TerminalSearchOptions) -> Result<()> {
+        if self.search_query != query || self.search_options != options {
+            // Validate before replacing the last successful search or moving the viewport.
+            let pattern = if query.is_empty() {
+                None
+            } else {
+                Some(SearchPattern::new(query, options)?)
+            };
+            query.clone_into(&mut self.search_query);
+            self.search_options = options;
+            self.search_pattern = pattern;
             self.search_active_index = 0;
             self.mark_content_changed();
+        }
+        Ok(())
+    }
+
+    ///
+    /// # Errors
+    /// Returns an error for an invalid search pattern or a failure to read or move the terminal viewport.
+    pub fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
+        self.set_search_query(query, options)?;
+        if query.is_empty() {
             let _ = self.extract_frame()?;
             return Ok(false);
-        }
-
-        if self.search_query != query {
-            self.search_query = query.to_owned();
-            self.search_active_index = 0;
-            self.mark_content_changed();
         }
 
         let frame = self.extract_frame()?;
@@ -1682,11 +1873,15 @@ impl TerminalEngine {
         if visible_count > 0 {
             match direction {
                 TerminalSearchDirection::Current => return Ok(true),
-                TerminalSearchDirection::Next if self.search_active_index + 1 < visible_count => {
-                    return self.select_search_match(self.search_active_index + 1, true);
+                TerminalSearchDirection::Next
+                    if self.search_active_index.saturating_add(1) < visible_count =>
+                {
+                    return self
+                        .select_search_match(self.search_active_index.saturating_add(1), true);
                 }
                 TerminalSearchDirection::Previous if self.search_active_index > 0 => {
-                    return self.select_search_match(self.search_active_index - 1, true);
+                    return self
+                        .select_search_match(self.search_active_index.saturating_sub(1), true);
                 }
                 TerminalSearchDirection::Next | TerminalSearchDirection::Previous => {}
             }
@@ -1694,9 +1889,13 @@ impl TerminalEngine {
 
         let delta = match direction {
             TerminalSearchDirection::Current | TerminalSearchDirection::Previous => {
-                -(self.geometry.rows.max(1) as isize)
+                isize::try_from(self.geometry.rows.max(1))
+                    .unwrap_or(isize::MAX)
+                    .saturating_neg()
             }
-            TerminalSearchDirection::Next => self.geometry.rows.max(1) as isize,
+            TerminalSearchDirection::Next => {
+                isize::try_from(self.geometry.rows.max(1)).unwrap_or(isize::MAX)
+            }
         };
 
         let mut current_offset = initial_offset;
@@ -1711,7 +1910,7 @@ impl TerminalEngine {
             let found_count = frame.search_match_count;
             if found_count > 0 {
                 let index = match direction {
-                    TerminalSearchDirection::Previous => found_count - 1,
+                    TerminalSearchDirection::Previous => found_count.saturating_sub(1),
                     TerminalSearchDirection::Current | TerminalSearchDirection::Next => 0,
                 };
                 return self
@@ -1719,18 +1918,22 @@ impl TerminalEngine {
             }
         }
 
-        let restore_delta = initial_offset as i128 - current_offset as i128;
+        let restore_delta = i128::from(initial_offset).saturating_sub(i128::from(current_offset));
         let found = if restore_delta == 0 {
             visible_count
         } else {
-            self.scroll_viewport_delta(
-                restore_delta.clamp(isize::MIN as i128, isize::MAX as i128) as isize
-            );
+            self.scroll_viewport_delta(isize::try_from(restore_delta).unwrap_or(
+                if restore_delta < 0 {
+                    isize::MIN
+                } else {
+                    isize::MAX
+                },
+            ));
             self.extract_frame()?.search_match_count
         };
         if found > 0 {
             return self.select_search_match(
-                self.search_active_index.min(found - 1),
+                self.search_active_index.min(found.saturating_sub(1)),
                 direction != TerminalSearchDirection::Current,
             );
         }
@@ -1746,15 +1949,21 @@ impl TerminalEngine {
         Ok(true)
     }
 
-    fn bump_search_pulse(&mut self) {
+    const fn bump_search_pulse(&mut self) {
         self.search_pulse = self.search_pulse.wrapping_add(1);
         self.mark_content_changed();
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot read the terminal mode.
     pub fn is_mouse_tracking(&self) -> Result<bool> {
         self.terminal.is_mouse_tracking().map_err(Into::into)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if Ghostty cannot read the terminal mode.
     pub fn is_synchronized_output(&self) -> Result<bool> {
         self.terminal.mode(Mode::SYNC_OUTPUT).map_err(Into::into)
     }
@@ -1773,6 +1982,7 @@ impl TerminalEngine {
         self.frame.selections.clear();
         self.frame.search_matches.clear();
         self.frame.active_search_match = None;
+        self.frame.active_search_segments.clear();
         self.frame.active_search_match_index = None;
         self.frame.search_match_count = 0;
         self.frame.search_pulse = self.search_pulse;
@@ -1791,28 +2001,30 @@ impl TerminalEngine {
             virtual_cells.extend(row.virtual_cells.iter().cloned());
             let text_offset = self.frame.text.len();
             self.frame.text.extend_from_slice(&row.text);
-            self.frame.stats.chars += row.text.len();
-            self.frame.stats.cells += row.cells.len();
+            self.frame.stats.chars = self.frame.stats.chars.saturating_add(row.text.len());
+            self.frame.stats.cells = self.frame.stats.cells.saturating_add(row.cells.len());
             self.frame
                 .cells
                 .extend(row.cells.iter().cloned().map(|mut cell| {
-                    cell.text_start += text_offset;
+                    cell.text_start = cell.text_start.saturating_add(text_offset);
                     cell
                 }));
         }
-        if !self.search_query.is_empty() {
-            self.frame.search_matches = frame_search_matches(&self.frame, &self.search_query);
-            self.frame.search_match_count = self.frame.search_matches.len();
+        self.search_groups.clear();
+        if let Some(pattern) = &self.search_pattern {
+            self.search_groups = frame_search_matches(&self.frame, pattern);
+            self.frame.search_matches = self.search_groups.iter().flatten().copied().collect();
+            self.frame.search_match_count = self.search_groups.len();
             if self.frame.search_match_count > 0 {
                 self.search_active_index = self
                     .search_active_index
-                    .min(self.frame.search_match_count - 1);
-                self.frame.active_search_match_index = Some(self.search_active_index + 1);
-                self.frame.active_search_match = self
-                    .frame
-                    .search_matches
-                    .get(self.search_active_index)
-                    .copied();
+                    .min(self.frame.search_match_count.saturating_sub(1));
+                self.frame.active_search_match_index =
+                    Some(self.search_active_index.saturating_add(1));
+                if let Some(group) = self.search_groups.get(self.search_active_index) {
+                    self.frame.active_search_segments.clone_from(group);
+                    self.frame.active_search_match = group.first().copied();
+                }
             }
         }
         self.frame.stats.dirty_rows = self.frame.row_dirty.iter().filter(|dirty| **dirty).count();
@@ -1848,33 +2060,58 @@ impl TerminalEngine {
         }
 
         self.apply_copy_mode_frame(self.viewport_top_screen_row()?);
-        self.frame.stats.extraction_us = extract_start.elapsed().as_micros() as u64;
+        self.frame.stats.extraction_us =
+            u64::try_from(extract_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         self.extracted_content_epoch = self.content_epoch;
         Ok(&self.frame)
     }
 
     fn apply_copy_mode_frame(&mut self, viewport_top: u32) {
-        self.frame.copy_mode = Self::copy_mode_frame_state(self.copy_mode.as_ref());
+        self.frame.copy_mode = self.copy_mode.as_ref().map(Self::copy_mode_frame_state);
         Self::apply_copy_mode_frame_cursor(&mut self.frame, self.copy_mode.as_ref(), viewport_top);
     }
 
+    fn reuse_clean_frame(
+        &mut self,
+        viewport_top: u32,
+        extract_start: Instant,
+        render_state_update_us: u64,
+    ) {
+        self.apply_copy_mode_frame(viewport_top);
+        self.frame.row_dirty.clear();
+        self.frame
+            .row_dirty
+            .resize(usize::from(self.frame.rows), false);
+        self.frame.stats = FrameStats {
+            render_state_update_us,
+            extraction_us: u64::try_from(extract_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+            cells: self.frame.cells.len(),
+            chars: self.frame.text.len(),
+            dirty_rows: 0,
+        };
+    }
+
+    ///
+    /// # Errors
+    /// Returns an error if terminal state cannot be read or its row and grapheme bounds are inconsistent.
     pub fn extract_frame(&mut self) -> Result<&RenderFrame> {
         let extract_start = Instant::now();
         let update_start = Instant::now();
         let snapshot = self.render_state.update(&self.terminal)?;
-        let render_state_update_us = update_start.elapsed().as_micros() as u64;
+        let render_state_update_us =
+            u64::try_from(update_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
         let dirty = snapshot.dirty()?;
-        let can_reuse_clean_frame = self.content_epoch == self.extracted_content_epoch
-            && self.frame.cols == cols
-            && self.frame.rows == rows
-            && !self.frame.cells.is_empty();
         let cache_matches_frame = self.frame.cols == cols
             && self.frame.rows == rows
             && self.row_cache.len() == usize::from(rows);
+        let can_reuse_clean_frame = self.content_epoch == self.extracted_content_epoch
+            && cache_matches_frame
+            && !self.frame.cells.is_empty();
 
+        self.frame.lineage.advance();
         self.frame.cols = cols;
         self.frame.rows = rows;
         self.frame.dirty = if can_reuse_clean_frame {
@@ -1882,22 +2119,8 @@ impl TerminalEngine {
         } else {
             dirty
         };
-        self.frame.colors = FrameColors {
-            background: colors.background,
-            foreground: colors.foreground,
-            cursor: colors.cursor,
-            cursor_text: self.colors.cursor_text,
-            selection_background: self
-                .xterm_color_overrides
-                .get(17)
-                .or(self.colors.highlight_background)
-                .or(self.colors.selection_background),
-            selection_foreground: self
-                .xterm_color_overrides
-                .get(19)
-                .or(self.colors.highlight_foreground)
-                .or(self.colors.selection_foreground),
-        };
+        self.frame.colors =
+            resolve_frame_colors(&colors, &self.colors, &self.xterm_color_overrides);
         self.frame.cursor = if snapshot.cursor_visible()? {
             snapshot.cursor_viewport()?.map(|cursor| CursorSnapshot {
                 x: cursor.x,
@@ -1919,18 +2142,11 @@ impl TerminalEngine {
             len: scrollbar.len,
         });
         if can_reuse_clean_frame {
-            self.apply_copy_mode_frame(scrollbar.offset as u32);
-            self.frame.row_dirty.clear();
-            self.frame
-                .row_dirty
-                .resize(usize::from(self.frame.rows), false);
-            self.frame.stats = FrameStats {
+            self.reuse_clean_frame(
+                u32::try_from(scrollbar.offset).unwrap_or(u32::MAX),
+                extract_start,
                 render_state_update_us,
-                extraction_us: extract_start.elapsed().as_micros() as u64,
-                cells: self.frame.cells.len(),
-                chars: self.frame.text.len(),
-                dirty_rows: 0,
-            };
+            );
             return Ok(&self.frame);
         }
 
@@ -1967,15 +2183,40 @@ impl TerminalEngine {
                     &mut hyperlink_scratch,
                     row,
                     row_index,
-                    &mut self.row_cache[index],
+                    self.row_cache
+                        .get_mut(index)
+                        .context("render row exceeds frame geometry")?,
                 )?;
             }
             // Clear the render-state row dirty flag so the next update reports only
             // newly-changed rows. libghostty's update does not unset dirty state.
             row.set_dirty(false)?;
-            row_index += 1;
+            row_index = row_index
+                .checked_add(1)
+                .context("render row exceeds terminal limit")?;
         }
         snapshot.set_dirty(Dirty::Clean)?;
         self.assemble_cached_frame(extract_start, render_state_update_us, row_dirty)
+    }
+}
+
+fn resolve_frame_colors(
+    colors: &libghostty_vt::render::Colors,
+    configured: &TerminalColorConfig,
+    overrides: &XtermColorOverrides,
+) -> FrameColors {
+    FrameColors {
+        background: colors.background,
+        foreground: colors.foreground,
+        cursor: colors.cursor,
+        cursor_text: configured.cursor_text,
+        selection_background: overrides
+            .get(17)
+            .or(configured.highlight_background)
+            .or(configured.selection_background),
+        selection_foreground: overrides
+            .get(19)
+            .or(configured.highlight_foreground)
+            .or(configured.selection_foreground),
     }
 }

@@ -54,7 +54,7 @@ proptest! {
 
         prop_assert!(out.starts_with(b"\x1b[200~"));
         prop_assert!(out.ends_with(b"\x1b[201~"));
-        let payload = &out[b"\x1b[200~".len()..out.len() - b"\x1b[201~".len()];
+        let payload = &out[b"\x1b[200~".len()..out.len().checked_sub(b"\x1b[201~".len()).expect("paste terminator")];
         prop_assert_eq!(payload, sanitized_paste(&input));
     }
 }

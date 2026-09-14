@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive as _;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -70,11 +71,12 @@ pub enum KittyImageLayer {
 }
 
 impl KittyImageLayer {
-    pub fn ordered() -> [Self; 3] {
+    #[must_use]
+    pub const fn ordered() -> [Self; 3] {
         [Self::BelowBackground, Self::BelowText, Self::AboveText]
     }
 
-    fn to_ghostty(self) -> Layer {
+    const fn to_ghostty(self) -> Layer {
         match self {
             Self::BelowBackground => Layer::BelowBg,
             Self::BelowText => Layer::BelowText,
@@ -82,7 +84,7 @@ impl KittyImageLayer {
         }
     }
 
-    fn from_z(z: i32) -> Self {
+    const fn from_z(z: i32) -> Self {
         if z < i32::MIN / 2 {
             Self::BelowBackground
         } else if z < 0 {
@@ -93,6 +95,9 @@ impl KittyImageLayer {
     }
 }
 
+///
+/// # Errors
+/// Returns an error if Ghostty cannot read the image storage or placement data.
 pub fn collect_kitty_image_frame(
     terminal: &Terminal<'_, '_>,
     surface: TerminalSurface,
@@ -207,6 +212,7 @@ impl KittyImageDataCache {
     }
 }
 
+#[must_use]
 pub fn placement_destination(
     surface: TerminalSurface,
     info: PlacementRenderInfo,
@@ -223,23 +229,28 @@ pub fn placement_destination(
         1.0
     };
     let width = if columns > 0 {
-        columns as f32 * surface.cell.width
+        columns.to_f32().unwrap_or(0.0) * surface.cell.width
     } else {
-        info.pixel_width as f32 / display_scale
+        info.pixel_width.to_f32().unwrap_or(0.0) / display_scale
     };
     let height = if rows > 0 {
-        rows as f32 * surface.cell.height
+        rows.to_f32().unwrap_or(0.0) * surface.cell.height
     } else {
-        info.pixel_height as f32 / display_scale
+        info.pixel_height.to_f32().unwrap_or(0.0) / display_scale
     };
     SurfaceRect::from_min_size(
-        origin.x + info.viewport_col as f32 * surface.cell.width + x_offset as f32 / display_scale,
-        origin.y + info.viewport_row as f32 * surface.cell.height + y_offset as f32 / display_scale,
+        (info.viewport_col.to_f32().unwrap_or(0.0)).mul_add(surface.cell.width, origin.x)
+            + x_offset.to_f32().unwrap_or(0.0) / display_scale,
+        (info.viewport_row.to_f32().unwrap_or(0.0)).mul_add(surface.cell.height, origin.y)
+            + y_offset.to_f32().unwrap_or(0.0) / display_scale,
         width,
         height,
     )
 }
 
+///
+/// # Errors
+/// Returns an error if image data cannot be read or merged source coordinates overflow.
 pub fn append_virtual_image_placements(
     terminal: &Terminal<'_, '_>,
     surface: TerminalSurface,

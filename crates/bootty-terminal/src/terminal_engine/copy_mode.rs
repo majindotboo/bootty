@@ -1,16 +1,15 @@
-use anyhow::Result;
+use crate::terminal_search::TerminalSearchOptions;
+use anyhow::{Context as _, Result};
 use libghostty_vt::{
     render::CursorVisualStyle,
+    screen::CellWide,
     selection::Selection,
     terminal::{Point, PointCoordinate},
 };
 
 use crate::terminal_frame::{CursorSnapshot, FrameCopyMode, RenderFrame};
 
-use super::logical_search::{
-    CopyModeSearchMatch, copy_mode_logical_search_matches, normalize_search_char,
-    normalized_search_query,
-};
+use super::logical_search::{CopyModeSearchMatch, copy_mode_logical_search_matches};
 use super::{TerminalEngine, TerminalSelectionFormat};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +34,11 @@ pub enum TerminalCopyModeAction {
     Search {
         query: String,
         direction: TerminalSearchDirection,
+    },
+    SearchWithOptions {
+        query: String,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
     },
     SearchWord(TerminalSearchDirection),
     Move(TerminalCopyModeMotion),
@@ -88,12 +92,15 @@ pub(super) struct CopyModeState {
 }
 
 impl CopyModeState {
-    fn selecting(&self) -> bool {
+    const fn selecting(&self) -> bool {
         self.anchor.is_some()
     }
 }
 
 impl TerminalEngine {
+    ///
+    /// # Errors
+    /// Returns an error if the terminal cursor, viewport, or selection cannot be read or updated.
     pub fn enter_copy_mode(&mut self) -> Result<()> {
         let cursor = self.copy_mode_entry_point()?;
         self.copy_mode = Some(CopyModeState {
@@ -109,10 +116,14 @@ impl TerminalEngine {
         Ok(())
     }
 
-    pub fn copy_mode_active(&self) -> bool {
+    #[must_use]
+    pub const fn copy_mode_active(&self) -> bool {
         self.copy_mode.is_some()
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an invalid search pattern or a failed terminal selection, search, or cursor operation.
     pub fn handle_copy_mode_action(
         &mut self,
         action: TerminalCopyModeAction,
@@ -143,12 +154,28 @@ impl TerminalEngine {
             TerminalCopyModeAction::ToggleSelectionEnd => self.toggle_copy_mode_selection_end()?,
             TerminalCopyModeAction::ToggleRectangle => self.toggle_copy_mode_rectangle()?,
             TerminalCopyModeAction::Search { query, direction } => {
-                let found = self.search_copy_mode_query(&query, direction)?;
+                let found = self.search_copy_mode_query(
+                    &query,
+                    direction,
+                    TerminalSearchOptions::default(),
+                )?;
+                search = Some(TerminalCopyModeSearchOutcome { query, found });
+            }
+            TerminalCopyModeAction::SearchWithOptions {
+                query,
+                direction,
+                options,
+            } => {
+                let found = self.search_copy_mode_query(&query, direction, options)?;
                 search = Some(TerminalCopyModeSearchOutcome { query, found });
             }
             TerminalCopyModeAction::SearchWord(direction) => {
                 if let Some(query) = self.copy_mode_word_under_cursor()? {
-                    let found = self.search_copy_mode_query(&query, direction)?;
+                    let found = self.search_copy_mode_query(
+                        &query,
+                        direction,
+                        TerminalSearchOptions::default(),
+                    )?;
                     search = Some(TerminalCopyModeSearchOutcome { query, found });
                 }
             }
@@ -178,7 +205,9 @@ impl TerminalEngine {
 
     fn copy_mode_entry_point(&mut self) -> Result<PointCoordinate> {
         let viewport_top = self.viewport_top_screen_row()?;
-        let max_y = (self.terminal.total_rows()?.max(1) as u32).saturating_sub(1);
+        let max_y = (u32::try_from(self.terminal.total_rows()?.max(1))
+            .context("terminal history exceeds screen row coordinates")?)
+        .saturating_sub(1);
         let max_x = self.geometry.cols.saturating_sub(1);
         let last_row = u32::from(self.geometry.rows.max(1).saturating_sub(1));
         let cursor = self.extract_frame()?.cursor;
@@ -323,7 +352,8 @@ impl TerminalEngine {
         desired_col: u16,
         motion: TerminalCopyModeMotion,
     ) -> Result<(PointCoordinate, bool)> {
-        let total_rows = self.terminal.total_rows()?.max(1) as u32;
+        let total_rows = u32::try_from(self.terminal.total_rows()?.max(1))
+            .context("terminal history exceeds screen row coordinates")?;
         let max_y = total_rows.saturating_sub(1);
         let max_x = self.geometry.cols.saturating_sub(1);
         let page = u32::from(self.geometry.rows.max(1));
@@ -334,17 +364,17 @@ impl TerminalEngine {
         match motion {
             TerminalCopyModeMotion::Left => {
                 if next.x > 0 {
-                    next.x -= 1;
+                    next.x = next.x.saturating_sub(1);
                 } else if next.y > 0 {
-                    next.y -= 1;
+                    next.y = next.y.saturating_sub(1);
                     next.x = self.screen_row_end_col(next.y)?;
                 }
             }
             TerminalCopyModeMotion::Right => {
                 if next.x < max_x {
-                    next.x += 1;
+                    next.x = next.x.saturating_add(1);
                 } else if next.y < max_y {
-                    next.y += 1;
+                    next.y = next.y.saturating_add(1);
                     next.x = 0;
                 }
             }
@@ -420,8 +450,13 @@ impl TerminalEngine {
         Ok((next, update_desired_col))
     }
     fn shifted_screen_row(row: u32, before_top: u32, after_top: u32, max_y: u32) -> u32 {
-        let delta = i128::from(after_top) - i128::from(before_top);
-        (i128::from(row) + delta).clamp(0, i128::from(max_y)) as u32
+        if after_top >= before_top {
+            row.saturating_add(after_top.saturating_sub(before_top))
+                .min(max_y)
+        } else {
+            row.saturating_sub(before_top.saturating_sub(after_top))
+                .min(max_y)
+        }
     }
 
     fn set_copy_mode_cursor(
@@ -445,21 +480,17 @@ impl TerminalEngine {
         &mut self,
         query: &str,
         direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
     ) -> Result<bool> {
-        let query = query.trim();
+        self.set_search_query(query, options)?;
         if query.is_empty() {
             return Ok(false);
-        }
-        if self.search_query != query {
-            self.search_query = query.to_owned();
-            self.search_active_index = 0;
-            self.mark_content_changed();
         }
 
         let Some(cursor) = self.copy_mode_screen_point() else {
             return Ok(false);
         };
-        let matches = self.copy_mode_search_matches(query)?;
+        let matches = self.copy_mode_search_matches()?;
         let Some(found) = Self::copy_mode_search_target(&matches, cursor, direction) else {
             self.bump_search_pulse();
             let _ = self.extract_frame()?;
@@ -485,44 +516,91 @@ impl TerminalEngine {
         }
 
         let mut start = usize::from(point.x);
-        while start > 0 && !chars[start - 1].is_whitespace() {
-            start -= 1;
+        while start > 0
+            && chars
+                .get(start.saturating_sub(1))
+                .is_some_and(|ch| !ch.is_whitespace())
+        {
+            start = start.saturating_sub(1);
         }
         let mut end = usize::from(point.x);
-        while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
-            end += 1;
+        while chars
+            .get(end.saturating_add(1))
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            end = end.saturating_add(1);
         }
 
-        let word: String = chars[start..=end].iter().collect();
+        let word: String = chars
+            .get(start..=end)
+            .context("copy mode word lies outside its row")?
+            .iter()
+            .collect();
         Ok((!word.is_empty()).then_some(word))
     }
 
-    fn copy_mode_search_matches(&self, query: &str) -> Result<Vec<CopyModeSearchMatch>> {
-        let query = normalized_search_query(query);
-        if query.is_empty() {
+    fn copy_mode_search_matches(&self) -> Result<Vec<CopyModeSearchMatch>> {
+        let Some(query) = &self.search_pattern else {
             return Ok(Vec::new());
-        }
+        };
 
-        let total_rows = self.terminal.total_rows()?.max(1) as u32;
+        let total_rows = u32::try_from(self.terminal.total_rows()?.max(1))
+            .context("terminal history exceeds screen row coordinates")?;
         let mut matches = Vec::new();
         let mut logical = Vec::new();
         let mut positions = Vec::new();
+        let mut chars = vec!['\0'; 8];
         for y in 0..total_rows {
             for x in 0..self.geometry.cols {
                 let point = PointCoordinate { x, y };
-                logical.push(normalize_search_char(self.screen_char(point)?));
-                positions.push(point);
+                let grid = self.terminal.grid_ref(Point::Screen(point))?;
+                let cell = grid.cell()?;
+                let wide = cell.wide()?;
+                if matches!(wide, CellWide::SpacerHead | CellWide::SpacerTail) {
+                    continue;
+                }
+                let count = match grid.graphemes(&mut chars) {
+                    Err(libghostty_vt::Error::OutOfSpace { required }) => {
+                        chars.resize(required, '\0');
+                        grid.graphemes(&mut chars)?
+                    }
+                    result => result?,
+                };
+                if count == 0
+                    && let Some(first) = chars.first_mut()
+                {
+                    *first = ' ';
+                }
+                let end = PointCoordinate {
+                    x: if wide == CellWide::Wide {
+                        x.saturating_add(1)
+                    } else {
+                        x
+                    },
+                    y,
+                };
+                for &ch in chars
+                    .get(..count.max(1))
+                    .context("terminal grapheme count exceeds its buffer")?
+                {
+                    logical.push(ch);
+                    positions.push((point, end));
+                }
             }
             if !self.screen_row_wrapped(y)? {
+                while logical.last() == Some(&' ') {
+                    logical.pop();
+                    positions.pop();
+                }
                 matches.extend(copy_mode_logical_search_matches(
-                    &logical, &positions, &query,
+                    &logical, &positions, query,
                 ));
                 logical.clear();
                 positions.clear();
             }
         }
         matches.extend(copy_mode_logical_search_matches(
-            &logical, &positions, &query,
+            &logical, &positions, query,
         ));
         Ok(matches)
     }
@@ -586,11 +664,13 @@ impl TerminalEngine {
             return Ok(());
         };
         let index = {
-            let frame = self.extract_frame()?;
-            frame.search_matches.iter().position(|selection| {
-                selection.row == row
-                    && selection.start_col <= point.x
-                    && point.x <= selection.end_col
+            let _ = self.extract_frame()?;
+            self.search_groups.iter().position(|group| {
+                group.iter().any(|selection| {
+                    selection.row == row
+                        && selection.start_col <= point.x
+                        && point.x <= selection.end_col
+                })
             })
         };
         if let Some(index) = index {
@@ -616,7 +696,7 @@ impl TerminalEngine {
         (point.y, point.x) > (cursor.y, cursor.x)
     }
 
-    fn sync_copy_mode_selection(&mut self) -> Result<()> {
+    fn sync_copy_mode_selection(&self) -> Result<()> {
         let Some(state) = &self.copy_mode else {
             self.terminal.set_selection(None)?;
             return Ok(());
@@ -652,20 +732,25 @@ impl TerminalEngine {
         let top = self.viewport_top_screen_row()?;
         let bottom = top.saturating_add(u32::from(self.geometry.rows.max(1)).saturating_sub(1));
         let delta = if point.y < top {
-            i128::from(point.y) - i128::from(top)
+            i64::from(point.y).saturating_sub(i64::from(top))
         } else if point.y > bottom {
-            i128::from(point.y) - i128::from(bottom)
+            i64::from(point.y).saturating_sub(i64::from(bottom))
         } else {
             0
         };
         if delta != 0 {
-            self.scroll_viewport_delta(delta.clamp(isize::MIN as i128, isize::MAX as i128) as isize);
+            self.scroll_viewport_delta(isize::try_from(delta).unwrap_or(if delta < 0 {
+                isize::MIN
+            } else {
+                isize::MAX
+            }));
         }
         Ok(())
     }
 
     pub(super) fn viewport_top_screen_row(&self) -> Result<u32> {
-        Ok(self.terminal.scrollbar()?.offset as u32)
+        u32::try_from(self.terminal.scrollbar()?.offset)
+            .context("terminal viewport exceeds screen row coordinates")
     }
 
     fn screen_row_chars(&self, row: u32) -> Result<Vec<char>> {
@@ -716,33 +801,37 @@ impl TerminalEngine {
             .unwrap_or(false))
     }
 
-    fn next_screen_point(&self, point: PointCoordinate, max_y: u32) -> Option<PointCoordinate> {
+    const fn next_screen_point(
+        &self,
+        point: PointCoordinate,
+        max_y: u32,
+    ) -> Option<PointCoordinate> {
         let max_x = self.geometry.cols.saturating_sub(1);
         if point.x < max_x {
             Some(PointCoordinate {
-                x: point.x + 1,
+                x: point.x.saturating_add(1),
                 y: point.y,
             })
         } else if point.y < max_y {
             Some(PointCoordinate {
                 x: 0,
-                y: point.y + 1,
+                y: point.y.saturating_add(1),
             })
         } else {
             None
         }
     }
 
-    fn previous_screen_point(&self, point: PointCoordinate) -> Option<PointCoordinate> {
+    const fn previous_screen_point(&self, point: PointCoordinate) -> Option<PointCoordinate> {
         if point.x > 0 {
             Some(PointCoordinate {
-                x: point.x - 1,
+                x: point.x.saturating_sub(1),
                 y: point.y,
             })
         } else if point.y > 0 {
             Some(PointCoordinate {
                 x: self.geometry.cols.saturating_sub(1),
-                y: point.y - 1,
+                y: point.y.saturating_sub(1),
             })
         } else {
             None
@@ -752,7 +841,9 @@ impl TerminalEngine {
     fn next_word_start(&self, point: PointCoordinate) -> Result<PointCoordinate> {
         let mut current = point;
         let mut left_word = self.screen_char(current)?.is_whitespace();
-        let max_y = (self.terminal.total_rows()?.max(1) as u32).saturating_sub(1);
+        let max_y = (u32::try_from(self.terminal.total_rows()?.max(1))
+            .context("terminal history exceeds screen row coordinates")?)
+        .saturating_sub(1);
         while let Some(next) = self.next_screen_point(current, max_y) {
             current = next;
             let is_word = !self.screen_char(current)?.is_whitespace();
@@ -785,7 +876,9 @@ impl TerminalEngine {
 
     fn next_word_end(&self, point: PointCoordinate) -> Result<PointCoordinate> {
         let mut current = point;
-        let max_y = (self.terminal.total_rows()?.max(1) as u32).saturating_sub(1);
+        let max_y = (u32::try_from(self.terminal.total_rows()?.max(1))
+            .context("terminal history exceeds screen row coordinates")?)
+        .saturating_sub(1);
         while let Some(next) = self.next_screen_point(current, max_y) {
             current = next;
             if !self.screen_char(current)?.is_whitespace() {
@@ -800,13 +893,11 @@ impl TerminalEngine {
         }
         Ok(current)
     }
-    pub(super) fn copy_mode_frame_state(
-        copy_mode: Option<&CopyModeState>,
-    ) -> Option<FrameCopyMode> {
-        copy_mode.map(|state| FrameCopyMode {
+    pub(super) const fn copy_mode_frame_state(state: &CopyModeState) -> FrameCopyMode {
+        FrameCopyMode {
             selecting: state.selecting(),
             rectangle: state.rectangle,
-        })
+        }
     }
 
     pub(super) fn apply_copy_mode_frame_cursor(

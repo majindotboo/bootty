@@ -1,6 +1,7 @@
+use num_traits::ToPrimitive as _;
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use libghostty_vt::{Terminal, kitty::graphics::SourceRect, style::StyleColor};
 
 use super::{
@@ -126,7 +127,11 @@ pub(super) fn append_virtual_image_placements(
                 && let Some(previous) = frame.placements.last_mut()
                 && can_merge_virtual_image_rows(previous, &next)
             {
-                previous.source.height += next.source.height;
+                previous.source.height = previous
+                    .source
+                    .height
+                    .checked_add(next.source.height)
+                    .context("virtual image source height exceeds its coordinate range")?;
                 previous.destination.max_y = next.destination.max_y;
             } else {
                 frame.placements.push(next);
@@ -149,8 +154,9 @@ pub(super) fn append_virtual_image_placements(
             if previous.append(&current) {
                 continue;
             }
-            let done = run.take().expect("run exists");
-            finish_run(done)?;
+            if let Some(done) = run.take() {
+                finish_run(done)?;
+            }
         }
         run = Some(current.with_default_origin());
     }
@@ -194,7 +200,7 @@ fn render_run(
     let image_height = image.height()?;
     let image_format = image.format()?;
     let image_generation = image.generation()?;
-    let grid = placement.grid(
+    let grid = CellPlacement::grid(
         storage_placement,
         image_width,
         image_height,
@@ -236,7 +242,7 @@ fn can_merge_virtual_image_rows(
         && Arc::ptr_eq(&previous.data, &next.data)
         && previous.source.x == next.source.x
         && previous.source.width == next.source.width
-        && previous.source.y + previous.source.height == next.source.y
+        && previous.source.y.checked_add(previous.source.height) == Some(next.source.y)
         && rect_edges_equal(previous.destination.min_x, next.destination.min_x)
         && rect_edges_touch_or_overlap(previous.destination.max_y, next.destination.min_y)
 }
@@ -251,7 +257,7 @@ fn rect_edges_touch_or_overlap(previous_max: f32, next_min: f32) -> bool {
 
 fn find_storage_placement(
     storage: &HashMap<(u32, u32), KittyVirtualPlacement>,
-    placement: &Placement,
+    placement: &CellPlacement,
 ) -> Option<KittyVirtualPlacement> {
     if placement.placement_id > 0 {
         return storage
@@ -303,12 +309,12 @@ impl IncompletePlacement {
             .get(3)
             .and_then(|ch| diacritic_index(*ch))
             .and_then(|value| u8::try_from(value).ok());
-        let placement_id = color_to_id(cell.underline_color).filter(|id| *id != 0);
+        let placement_id = Some(color_to_id(cell.underline_color)).filter(|id| *id != 0);
 
         Some(Self {
             x: cell.x,
             y: cell.y,
-            image_id_low: color_to_id(cell.foreground).unwrap_or(0),
+            image_id_low: color_to_id(cell.foreground),
             image_id_high,
             placement_id,
             row,
@@ -328,21 +334,24 @@ impl IncompletePlacement {
             || self.image_id_low != other.image_id_low
             || self.placement_id != other.placement_id
             || other.row.is_some_and(|row| Some(row) != self.row)
-            || other
-                .col
-                .is_some_and(|col| Some(col) != self.col.map(|start| start + self.width))
+            || other.col.is_some_and(|col| {
+                Some(col) != self.col.and_then(|start| start.checked_add(self.width))
+            })
             || other
                 .image_id_high
                 .is_some_and(|high| Some(high) != self.image_id_high)
         {
             return false;
         }
-        self.width += 1;
+        let Some(width) = self.width.checked_add(1) else {
+            return false;
+        };
+        self.width = width;
         true
     }
 
-    fn complete(self) -> Placement {
-        Placement {
+    fn complete(self) -> CellPlacement {
+        CellPlacement {
             x: self.x,
             y: self.y,
             image_id: self.image_id_low | (u32::from(self.image_id_high.unwrap_or(0)) << 24),
@@ -355,7 +364,7 @@ impl IncompletePlacement {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Placement {
+struct CellPlacement {
     x: u16,
     y: u16,
     image_id: u32,
@@ -365,9 +374,8 @@ struct Placement {
     width: u32,
 }
 
-impl Placement {
+impl CellPlacement {
     fn grid(
-        self,
         storage: KittyVirtualPlacement,
         image_width: u32,
         image_height: u32,
@@ -430,18 +438,18 @@ impl Placement {
 
         let origin = surface.content_origin();
         let x = if uses_full_image_width {
-            i32::from(self.x) - self.col as i32
+            i64::from(self.x).checked_sub(i64::from(self.col))?
         } else {
-            i32::from(self.x)
+            i64::from(self.x)
         };
         let width = if uses_full_image_width {
-            grid.columns as f32
+            grid.columns.to_f32()?
         } else {
-            self.width as f32
+            self.width.to_f32()?
         };
-        let full_grid_width = grid.columns as f32 * surface.cell.width;
-        let full_grid_height = grid.rows as f32 * surface.cell.height;
-        let source_aspect = image_width as f32 / image_height.max(1.0) as f32;
+        let full_grid_width = grid.columns.to_f32()? * surface.cell.width;
+        let full_grid_height = grid.rows.to_f32()? * surface.cell.height;
+        let source_aspect = image_width.to_f32()? / image_height.max(1.0).to_f32()?;
         let grid_aspect = full_grid_width / full_grid_height.max(1.0);
         let preserve_full_grid_aspect = uses_full_image_width
             && grid.columns > 1
@@ -453,22 +461,22 @@ impl Placement {
             && (source_aspect - 1.0).abs() <= 0.01;
         let preserve_source_aspect = preserve_full_grid_aspect || preserve_single_row_square_icon;
         let row_height = if preserve_source_aspect {
-            (width * surface.cell.width) * (source.height as f32 / image_width as f32)
+            (width * surface.cell.width) * (source.height.to_f32()? / image_width.to_f32()?)
         } else {
             surface.cell.height
         };
         let y = if preserve_single_row_square_icon {
-            f32::from(self.y) * surface.cell.height + (surface.cell.height - row_height) * 0.5
+            (surface.cell.height - row_height).mul_add(0.5, f32::from(self.y) * surface.cell.height)
         } else if preserve_full_grid_aspect {
-            let top = f32::from(self.y) - self.row as f32;
-            top * surface.cell.height + self.row as f32 * row_height
+            let top = f32::from(self.y) - self.row.to_f32()?;
+            (self.row.to_f32()?).mul_add(row_height, top * surface.cell.height)
         } else {
             f32::from(self.y) * surface.cell.height
         };
         Some(RenderedPlacement {
             source: source_rect_from_float(source)?,
             destination: SurfaceRect::from_min_size(
-                origin.x + x as f32 * surface.cell.width,
+                (x.to_f32()?).mul_add(surface.cell.width, origin.x),
                 origin.y + y,
                 width * surface.cell.width,
                 row_height,
@@ -478,16 +486,18 @@ impl Placement {
 }
 
 fn logical_pixel_cells(pixels: u32, display_scale: f32, cell_size: f32) -> u32 {
-    ((pixels as f32 / display_scale) / cell_size)
+    ((pixels.to_f32().unwrap_or(0.0) / display_scale) / cell_size)
         .ceil()
-        .max(1.0) as u32
+        .max(1.0)
+        .to_u32()
+        .unwrap_or(u32::MAX)
 }
 
 fn source_rect_from_float(source: FloatRect) -> Option<SourceRect> {
-    let x = source.x.round() as u32;
-    let y = source.y.round() as u32;
-    let max_x = (source.x + source.width).round() as u32;
-    let max_y = (source.y + source.height).round() as u32;
+    let x = source.x.round().to_u32()?;
+    let y = source.y.round().to_u32()?;
+    let max_x = (source.x + source.width).round().to_u32()?;
+    let max_y = (source.y + source.height).round().to_u32()?;
     Some(SourceRect {
         x,
         y,
@@ -515,12 +525,12 @@ struct RenderedPlacement {
     destination: SurfaceRect,
 }
 
-fn color_to_id(color: StyleColor) -> Option<u32> {
+fn color_to_id(color: StyleColor) -> u32 {
     match color {
-        StyleColor::None => Some(0),
-        StyleColor::Palette(index) => Some(u32::from(index.0)),
+        StyleColor::None => 0,
+        StyleColor::Palette(index) => u32::from(index.0),
         StyleColor::Rgb(rgb) => {
-            Some((u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b))
+            (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)
         }
     }
 }
@@ -528,7 +538,8 @@ fn color_to_id(color: StyleColor) -> Option<u32> {
 fn diacritic_index(ch: char) -> Option<u32> {
     let index = DIACRITIC_RANGES.partition_point(|(_, end, _)| *end < ch);
     let &(start, end, base) = DIACRITIC_RANGES.get(index)?;
-    (start..=end)
-        .contains(&ch)
-        .then_some(base + u32::from(ch) - u32::from(start))
+    if !(start..=end).contains(&ch) {
+        return None;
+    }
+    base.checked_add(u32::from(ch).checked_sub(u32::from(start))?)
 }

@@ -11,12 +11,12 @@ struct PaletteCase {
     harmonious: bool,
 }
 
-fn rgb(r: u8, g: u8, b: u8) -> RgbColor {
+const fn rgb(r: u8, g: u8, b: u8) -> RgbColor {
     RgbColor { r, g, b }
 }
 fn base() -> Palette {
     let mut value = [rgb(0, 0, 0); 256];
-    for (index, color) in [
+    for (slot, color) in value.iter_mut().zip([
         rgb(0x45, 0x45, 0x5a),
         rgb(0xf3, 0x8b, 0xa8),
         rgb(0xa6, 0xe3, 0xa1),
@@ -33,11 +33,8 @@ fn base() -> Palette {
         rgb(0xf5, 0xc2, 0xe7),
         rgb(0x94, 0xe2, 0xd5),
         rgb(0xa6, 0xad, 0xcb),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        value[index] = color;
+    ]) {
+        *slot = color;
     }
     value
 }

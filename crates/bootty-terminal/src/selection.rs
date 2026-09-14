@@ -5,6 +5,7 @@ pub struct SelectionPoint {
 }
 
 impl SelectionPoint {
+    #[must_use]
     pub const fn new(x: u16, y: u16) -> Self {
         Self { x, y }
     }
@@ -17,11 +18,13 @@ pub struct TerminalSelection {
 }
 
 impl TerminalSelection {
+    #[must_use]
     pub const fn new(anchor: SelectionPoint, focus: SelectionPoint) -> Self {
         Self { anchor, focus }
     }
 
-    pub fn ordered(self) -> (SelectionPoint, SelectionPoint) {
+    #[must_use]
+    pub const fn ordered(self) -> (SelectionPoint, SelectionPoint) {
         if self.anchor.y < self.focus.y
             || (self.anchor.y == self.focus.y && self.anchor.x <= self.focus.x)
         {
@@ -31,11 +34,13 @@ impl TerminalSelection {
         }
     }
 
+    #[must_use]
     pub fn is_collapsed(self) -> bool {
         self.anchor == self.focus
     }
 
-    pub fn row_ranges(self, rows: u16, cols: u16) -> SelectionRowRanges {
+    #[must_use]
+    pub const fn row_ranges(self, rows: u16, cols: u16) -> SelectionRowRanges {
         let (start, end) = self.ordered();
         SelectionRowRanges {
             start,
@@ -54,17 +59,17 @@ pub struct TerminalSelectionState {
 }
 
 impl TerminalSelectionState {
-    pub fn begin(&mut self, point: SelectionPoint) {
+    pub const fn begin(&mut self, point: SelectionPoint) {
         self.selection = Some(TerminalSelection::new(point, point));
         self.dragging = true;
     }
 
-    pub fn select_range(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+    pub const fn select_range(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
         self.selection = Some(TerminalSelection::new(anchor, focus));
         self.dragging = false;
     }
 
-    pub fn drag_to(&mut self, point: SelectionPoint) {
+    pub const fn drag_to(&mut self, point: SelectionPoint) {
         if let Some(selection) = &mut self.selection {
             selection.focus = point;
         }
@@ -81,15 +86,17 @@ impl TerminalSelectionState {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.selection = None;
         self.dragging = false;
     }
 
+    #[must_use]
     pub const fn selection(&self) -> Option<TerminalSelection> {
         self.selection
     }
 
+    #[must_use]
     pub const fn is_dragging(&self) -> bool {
         self.dragging
     }

@@ -2,23 +2,30 @@ use std::borrow::Cow;
 
 use memchr::{memchr, memchr_iter, memchr2_iter, memchr3_iter, memmem::find};
 
-pub(crate) fn find_osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
+pub fn find_osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
     for index in memchr2_iter(0x07, 0x1b, bytes) {
-        match bytes[index] {
-            0x07 => return Some((index, 1)),
-            0x1b if bytes.get(index + 1) == Some(&b'\\') => return Some((index, 2)),
+        match bytes.get(index) {
+            Some(0x07) => return Some((index, 1)),
+            Some(0x1b) if bytes.get(index.saturating_add(1)) == Some(&b'\\') => {
+                return Some((index, 2));
+            }
             _ => {}
         }
     }
     None
 }
 
-pub(crate) fn split_osc_payload(payload: &[u8]) -> Option<(&[u8], &[u8])> {
+pub fn split_osc_payload(payload: &[u8]) -> Option<(&[u8], &[u8])> {
     let separator = memchr(b';', payload)?;
-    Some((&payload[..separator], &payload[separator + 1..]))
+    let (kind, rest) = payload.split_at_checked(separator)?;
+    Some((kind, rest.strip_prefix(b";")?))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent protocol recognizers may be enabled together."
+)]
 pub(super) struct TerminalWriteFeatures {
     pub(super) tmux_passthrough: bool,
     pub(super) kitty_graphics: bool,
@@ -27,136 +34,9 @@ pub(super) struct TerminalWriteFeatures {
 }
 
 impl TerminalWriteFeatures {
-    pub(super) fn needs_sanitizing(self) -> bool {
+    pub(super) const fn needs_sanitizing(self) -> bool {
         self.tmux_passthrough || self.kitty_graphics || self.osc_side_effect || self.osc_color
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct SgrOptimizer {
-    styles: u8,
-    scratch: Vec<u8>,
-}
-
-impl SgrOptimizer {
-    pub(super) fn reset(&mut self) {
-        self.styles = 0;
-        self.scratch.clear();
-    }
-
-    pub(super) fn optimize<'a>(&'a mut self, data: &'a [u8]) -> &'a [u8] {
-        let mut cursor = 0;
-        let mut changed = false;
-        self.scratch.clear();
-
-        while let Some(relative_start) = find(&data[cursor..], b"\x1b[") {
-            let start = cursor + relative_start;
-            let params_start = start + 2;
-            let Some(relative_end) = memchr(b'm', &data[params_start..]) else {
-                break;
-            };
-            let end = params_start + relative_end;
-            let Some(optimized) = self.optimize_sgr_params(&data[params_start..end]) else {
-                cursor = end + 1;
-                continue;
-            };
-            if changed {
-                self.scratch.extend_from_slice(&data[cursor..start]);
-            } else {
-                self.scratch.extend_from_slice(&data[..start]);
-                changed = true;
-            }
-            if !optimized.is_empty() {
-                self.scratch.extend_from_slice(b"\x1b[");
-                self.scratch.extend_from_slice(optimized);
-                self.scratch.push(b'm');
-            }
-            cursor = end + 1;
-        }
-
-        if changed {
-            self.scratch.extend_from_slice(&data[cursor..]);
-            &self.scratch
-        } else {
-            data
-        }
-    }
-
-    fn optimize_sgr_params<'a>(&mut self, params: &'a [u8]) -> Option<&'a [u8]> {
-        let optimized = (self.styles == 0b111)
-            .then_some(params)
-            .and_then(redundant_style_suffix_prefix);
-        self.update_state(params);
-        optimized
-    }
-
-    fn update_state(&mut self, params: &[u8]) {
-        if params.is_empty() || params == b"0" {
-            self.reset();
-            return;
-        }
-        for param in params.split(|byte| *byte == b';') {
-            match param {
-                b"0" => self.reset(),
-                b"1" => self.styles |= 0b001,
-                b"3" => self.styles |= 0b010,
-                b"4" => self.styles |= 0b100,
-                b"22" => self.styles &= !0b001,
-                b"23" => self.styles &= !0b010,
-                b"24" => self.styles &= !0b100,
-                _ => {}
-            }
-        }
-    }
-}
-
-fn redundant_style_suffix_prefix(params: &[u8]) -> Option<&[u8]> {
-    if params == b"1;3;4" {
-        return Some(&[]);
-    }
-    let prefix_len = params.strip_suffix(b";1;3;4")?.len();
-    let prefix = &params[..prefix_len];
-    color_only_sgr_params(prefix).then_some(prefix)
-}
-
-fn color_only_sgr_params(params: &[u8]) -> bool {
-    if params.is_empty() {
-        return false;
-    }
-    let mut parts = params.split(|byte| *byte == b';').peekable();
-    while let Some(part) = parts.next() {
-        match part {
-            b"38" | b"48" => match parts.next() {
-                Some(b"5") => {
-                    if !parts.next().is_some_and(decimal_param) {
-                        return false;
-                    }
-                }
-                Some(b"2") => {
-                    for _ in 0..3 {
-                        if !parts.next().is_some_and(decimal_param) {
-                            return false;
-                        }
-                    }
-                }
-                _ => return false,
-            },
-            part if basic_color_sgr_param(part) => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-fn basic_color_sgr_param(param: &[u8]) -> bool {
-    matches!(
-        param,
-        [b'3' | b'4' | b'9', b'0'..=b'7'] | [b'3' | b'4', b'9'] | [b'1', b'0', b'0'..=b'7']
-    )
-}
-
-fn decimal_param(param: &[u8]) -> bool {
-    !param.is_empty() && param.iter().all(u8::is_ascii_digit)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +59,7 @@ const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
     b"\x1b]9;",
     b"\x1b]22;",
     b"\x1b]52;",
+    b"\x1b]5522;",
     b"\x1b]66;",
     b"\x1b]133;",
     b"\x1b]777;",
@@ -186,7 +67,7 @@ const STREAMING_CONTROL_PREFIXES: &[&[u8]] = &[
 ];
 
 const SIDE_EFFECT_OSC_PREFIXES: &[&[u8]] = &[
-    b"1;", b"9;", b"22;", b"52;", b"66;", b"133;", b"777;", b"1337;",
+    b"1;", b"9;", b"22;", b"52;", b"5522;", b"66;", b"133;", b"777;", b"1337;",
 ];
 
 const COLOR_OSC_PREFIXES: &[&[u8]] = &[
@@ -195,13 +76,26 @@ const COLOR_OSC_PREFIXES: &[&[u8]] = &[
 ];
 
 pub(super) fn complete_streaming_control_prefix_len(data: &[u8]) -> usize {
-    let mut index = 0;
-    while let Some(relative_start) = data[index..].iter().position(|byte| *byte == 0x1b) {
-        let start = index + relative_start;
-        match streaming_control_state(&data[start..]) {
-            StreamingControlState::Complete(len) => index = start + len,
-            StreamingControlState::Incomplete => return start,
-            StreamingControlState::Unrecognized => index = start + 1,
+    let mut index = 0_usize;
+    while let Some(rest) = data.get(index..)
+        && let Some(relative_start) = memchr(0x1b, rest)
+    {
+        let start = index.saturating_add(relative_start);
+        let Some(control) = rest.get(relative_start..) else {
+            break;
+        };
+        match streaming_control_state(control) {
+            StreamingControlState::Complete(len) => index = start.saturating_add(len),
+            StreamingControlState::Incomplete => {
+                // Let the collector discard oversized clipboard packets without retaining them.
+                if control.starts_with(b"\x1b]5522;")
+                    && control.len() > crate::clipboard_write::MAX_PACKET + 7
+                {
+                    return data.len();
+                }
+                return start;
+            }
+            StreamingControlState::Unrecognized => index = start.saturating_add(1),
         }
     }
     data.len()
@@ -213,16 +107,24 @@ pub(super) fn contains_tracked_streaming_control(data: &[u8]) -> bool {
     }
 
     for marker in memchr3_iter(b']', b'_', b'P', data) {
-        if marker == 0 || data[marker - 1] != 0x1b {
+        if marker.checked_sub(1).and_then(|index| data.get(index)) != Some(&0x1b) {
             continue;
         }
 
-        match data[marker] {
-            b']' => return true,
-            b'_' if data.get(marker + 1).is_none_or(|byte| *byte == b'G') => return true,
-            b'P' => {
-                let start = marker - 1;
-                if b"\x1bPtmux;".starts_with(&data[start..data.len().min(start + 7)]) {
+        match data.get(marker) {
+            Some(b']') => return true,
+            Some(b'_')
+                if data
+                    .get(marker.saturating_add(1))
+                    .is_none_or(|byte| *byte == b'G') =>
+            {
+                return true;
+            }
+            Some(b'P') => {
+                let Some(rest) = data.get(marker.saturating_sub(1)..) else {
+                    continue;
+                };
+                if b"\x1bPtmux;".starts_with(rest.get(..7).unwrap_or(rest)) {
                     return true;
                 }
             }
@@ -240,14 +142,14 @@ pub(super) fn repeated_cursor_home_prefix_len(
     pending_len: usize,
 ) -> Option<(usize, usize)> {
     let mut state = pending_len;
-    let mut complete = 0;
+    let mut complete = 0_usize;
     for byte in data {
-        if *byte != CURSOR_HOME[state] {
+        if Some(byte) != CURSOR_HOME.get(state) {
             return None;
         }
-        state += 1;
+        state = state.checked_add(1)?;
         if state == CURSOR_HOME.len() {
-            complete += 1;
+            complete = complete.checked_add(1)?;
             state = 0;
         }
     }
@@ -264,23 +166,30 @@ fn streaming_control_state(data: &[u8]) -> StreamingControlState {
 
     if data.starts_with(b"\x1bPtmux;") {
         return find_tmux_passthrough(data)
-            .map(|(len, _)| StreamingControlState::Complete(len))
-            .unwrap_or(StreamingControlState::Incomplete);
+            .map_or(StreamingControlState::Incomplete, |(len, _)| {
+                StreamingControlState::Complete(len)
+            });
     }
-    if data.starts_with(b"\x1b_G") {
-        return find_osc_terminator(&data[3..])
-            .map(|(payload_len, terminator_len)| {
-                StreamingControlState::Complete(3 + payload_len + terminator_len)
-            })
-            .unwrap_or(StreamingControlState::Incomplete);
+    if let Some(payload) = data.strip_prefix(b"\x1b_G") {
+        return find_osc_terminator(payload).map_or(
+            StreamingControlState::Incomplete,
+            |(payload_len, terminator_len)| {
+                StreamingControlState::Complete(
+                    payload_len.saturating_add(3).saturating_add(terminator_len),
+                )
+            },
+        );
     }
-    if data.starts_with(b"\x1b]") {
-        return match osc_streaming_prefix_state(&data[2..]) {
-            StreamingControlState::Complete(_) => find_osc_terminator(&data[2..])
-                .map(|(payload_len, terminator_len)| {
-                    StreamingControlState::Complete(2 + payload_len + terminator_len)
-                })
-                .unwrap_or(StreamingControlState::Incomplete),
+    if let Some(payload) = data.strip_prefix(b"\x1b]") {
+        return match osc_streaming_prefix_state(payload) {
+            StreamingControlState::Complete(_) => find_osc_terminator(payload).map_or(
+                StreamingControlState::Incomplete,
+                |(payload_len, terminator_len)| {
+                    StreamingControlState::Complete(
+                        payload_len.saturating_add(2).saturating_add(terminator_len),
+                    )
+                },
+            ),
             state => state,
         };
     }
@@ -309,17 +218,17 @@ fn osc_streaming_prefix_state(data: &[u8]) -> StreamingControlState {
 }
 
 fn find_tmux_passthrough(data: &[u8]) -> Option<(usize, bool)> {
-    let mut cursor = 7;
+    let mut cursor = 7_usize;
     let mut has_escaped_escape = false;
-    while let Some(relative_escape) = memchr(0x1b, &data[cursor..]) {
-        cursor += relative_escape;
-        match data.get(cursor + 1) {
+    while let Some(relative_escape) = memchr(0x1b, data.get(cursor..)?) {
+        cursor = cursor.checked_add(relative_escape)?;
+        match data.get(cursor.checked_add(1)?) {
             Some(&0x1b) => {
                 has_escaped_escape = true;
-                cursor += 2;
+                cursor = cursor.checked_add(2)?;
             }
-            Some(&b'\\') => return Some((cursor + 2, has_escaped_escape)),
-            _ => cursor += 1,
+            Some(&b'\\') => return Some((cursor.checked_add(2)?, has_escaped_escape)),
+            _ => cursor = cursor.checked_add(1)?,
         }
     }
     None
@@ -328,15 +237,17 @@ fn find_tmux_passthrough(data: &[u8]) -> Option<(usize, bool)> {
 pub(super) fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
     let mut features = TerminalWriteFeatures::default();
     for start in memchr_iter(0x1b, data) {
-        match data.get(start + 1).copied() {
-            Some(b'P') if data.get(start + 2..start + 7) == Some(b"tmux;") => {
+        match data.get(start.saturating_add(1)).copied() {
+            Some(b'P')
+                if data.get(start.saturating_add(2)..start.saturating_add(7)) == Some(b"tmux;") =>
+            {
                 features.tmux_passthrough = true;
             }
-            Some(b'_') if data.get(start + 2) == Some(&b'G') => {
+            Some(b'_') if data.get(start.saturating_add(2)) == Some(&b'G') => {
                 features.kitty_graphics = true;
             }
             Some(b']') => {
-                let osc = data.get(start + 2..).unwrap_or_default();
+                let osc = data.get(start.saturating_add(2)..).unwrap_or_default();
                 if has_osc_prefix(osc, COLOR_OSC_PREFIXES) {
                     features.osc_color = true;
                 } else if has_osc_prefix(osc, SIDE_EFFECT_OSC_PREFIXES) {
@@ -358,42 +269,48 @@ pub(super) fn terminal_write_features(data: &[u8]) -> TerminalWriteFeatures {
 
 pub(super) fn unwrap_tmux_passthrough_commands(data: &[u8]) -> Cow<'_, [u8]> {
     let mut out: Option<Vec<u8>> = None;
-    let mut read_start = 0;
-    while let Some(relative_start) = find(&data[read_start..], b"\x1bPtmux;") {
-        let start = read_start + relative_start;
-        let payload_start = start + 7;
-        let Some((control_len, has_escaped_escape)) = find_tmux_passthrough(&data[start..]) else {
-            read_start = payload_start;
-            continue;
+    let mut pending = data;
+    let mut remaining = data;
+    while let Some(start) = find(remaining, b"\x1bPtmux;") {
+        let Some(packet) = remaining.get(start..) else {
+            break;
         };
-        let payload_end = start + control_len - 2;
-
-        let out = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
-        out.extend_from_slice(&data[read_start..start]);
-        if has_escaped_escape {
-            let mut cursor = payload_start;
-            while cursor < payload_end {
-                if data[cursor] == 0x1b && data.get(cursor + 1) == Some(&0x1b) {
-                    out.push(0x1b);
-                    cursor += 2;
-                } else {
-                    out.push(data[cursor]);
-                    cursor += 1;
+        let Some((control_len, escaped)) = find_tmux_passthrough(packet) else {
+            break;
+        };
+        let Some((control, rest)) = packet.split_at_checked(control_len) else {
+            break;
+        };
+        let Some(payload) = control
+            .strip_prefix(b"\x1bPtmux;")
+            .and_then(|p| p.strip_suffix(b"\x1b\\"))
+        else {
+            break;
+        };
+        let prefix_len = pending.len().saturating_sub(packet.len());
+        let Some(prefix) = pending.get(..prefix_len) else {
+            break;
+        };
+        let output = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
+        output.extend_from_slice(prefix);
+        if escaped {
+            let mut bytes = payload.iter().copied().peekable();
+            while let Some(byte) = bytes.next() {
+                output.push(byte);
+                if byte == 0x1b && bytes.peek() == Some(&0x1b) {
+                    bytes.next();
                 }
             }
         } else {
-            out.extend_from_slice(&data[payload_start..payload_end]);
+            output.extend_from_slice(payload);
         }
-        read_start = payload_end + 2;
+        pending = rest;
+        remaining = rest;
     }
-
-    match out {
-        Some(mut out) => {
-            out.extend_from_slice(&data[read_start..]);
-            Cow::Owned(out)
-        }
-        None => Cow::Borrowed(data),
-    }
+    out.map_or(Cow::Borrowed(data), |mut output| {
+        output.extend_from_slice(pending);
+        Cow::Owned(output)
+    })
 }
 
 pub(super) struct SanitizedKittyGraphics<'a> {
@@ -403,46 +320,52 @@ pub(super) struct SanitizedKittyGraphics<'a> {
 
 pub(super) fn sanitize_kitty_graphics_commands(data: &[u8]) -> SanitizedKittyGraphics<'_> {
     let mut out: Option<Vec<u8>> = None;
-    let mut read_start = 0;
+    let mut pending = data;
+    let mut remaining = data;
     let mut touched = false;
-    while let Some(relative_start) = find(&data[read_start..], b"\x1b_G") {
+    while let Some(start) = find(remaining, b"\x1b_G") {
         touched = true;
-        let start = read_start + relative_start;
-        let payload_start = start + 3;
-        let Some((payload_len, terminator_len)) = find_osc_terminator(&data[payload_start..])
-        else {
-            read_start = payload_start;
-            continue;
+        let Some(packet) = remaining.get(start..) else {
+            break;
         };
-        let payload_end = payload_start + payload_len;
-        let payload = &data[payload_start..payload_end];
+        let Some(payload) = packet.strip_prefix(b"\x1b_G") else {
+            break;
+        };
+        let Some((payload_len, terminator_len)) = find_osc_terminator(payload) else {
+            break;
+        };
+        let Some((payload, terminated)) = payload.split_at_checked(payload_len) else {
+            break;
+        };
+        let Some((terminator, rest)) = terminated.split_at_checked(terminator_len) else {
+            break;
+        };
+        remaining = rest;
         let control_end = memchr(b';', payload).unwrap_or(payload.len());
-        let control = &payload[..control_end];
-        let Some(sanitized_control) = sanitize_kitty_graphics_control(control) else {
-            read_start = payload_end + terminator_len;
+        let Some((control, body)) = payload.split_at_checked(control_end) else {
+            break;
+        };
+        let Some(sanitized) = sanitize_kitty_graphics_control(control) else {
             continue;
         };
-
-        let out = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
-        out.extend_from_slice(&data[read_start..payload_start]);
-        out.extend_from_slice(&sanitized_control);
-        out.extend_from_slice(&payload[control_end..payload.len()]);
-        out.extend_from_slice(&data[payload_end..payload_end + terminator_len]);
-        read_start = payload_end + terminator_len;
+        let prefix_len = pending.len().saturating_sub(packet.len());
+        let Some(prefix) = pending.get(..prefix_len) else {
+            break;
+        };
+        let output = out.get_or_insert_with(|| Vec::with_capacity(data.len()));
+        output.extend_from_slice(prefix);
+        output.extend_from_slice(b"\x1b_G");
+        output.extend_from_slice(&sanitized);
+        output.extend_from_slice(body);
+        output.extend_from_slice(terminator);
+        pending = rest;
     }
-
-    match out {
-        Some(mut out) => {
-            out.extend_from_slice(&data[read_start..]);
-            SanitizedKittyGraphics {
-                bytes: Cow::Owned(out),
-                touched,
-            }
-        }
-        None => SanitizedKittyGraphics {
-            bytes: Cow::Borrowed(data),
-            touched,
-        },
+    SanitizedKittyGraphics {
+        bytes: out.map_or(Cow::Borrowed(data), |mut output| {
+            output.extend_from_slice(pending);
+            Cow::Owned(output)
+        }),
+        touched,
     }
 }
 
@@ -469,7 +392,9 @@ fn sanitize_kitty_graphics_control(control: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn valid_kitty_graphics_field(field: &[u8]) -> bool {
-    memchr(b'=', field).is_none_or(|separator| separator == 1 && field.len() - separator - 1 <= 11)
+    memchr(b'=', field).is_none_or(|separator| {
+        separator == 1 && field.len().saturating_sub(separator).saturating_sub(1) <= 11
+    })
 }
 
 fn has_osc_prefix(data: &[u8], prefixes: &[&[u8]]) -> bool {

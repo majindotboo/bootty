@@ -4,10 +4,10 @@ use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 
 #[test]
-fn terminal_engine_extracts_color_and_flag_style_state() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn terminal_engine_extracts_color_and_flag_style_state() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[38;5;42;48;2;255;128;64;1;4:3mX");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
     let cell = frame
         .cells
         .iter()
@@ -25,18 +25,16 @@ fn terminal_engine_extracts_color_and_flag_style_state() -> Result<()> {
     );
     assert!(cell.style.bold);
     assert_eq!(cell.style.underline, Underline::Curly);
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_extracts_a_background_only_cell_that_carries_no_styling() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn terminal_engine_extracts_a_background_only_cell_that_carries_no_styling() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     // Blanks painted with only a background: the color lives in the cell's own content, and the
     // cell reports no styling at all. Extraction that reads a background only from styled cells
     // loses every colored blank — most of a TUI's status line, tables and dashboards.
     engine.write_vt(b"\x1b[48;2;10;20;30m \x1b[0mZ");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
     let at = |x: u16| {
         frame
             .cells
@@ -63,9 +61,9 @@ fn terminal_engine_extracts_a_background_only_cell_that_carries_no_styling() -> 
 
     // Erasing with a background set is the other way a cell ends up holding a color and nothing
     // else: the region has no text to style, so the color is all there is to lose.
-    let mut engine = test_terminal_engine()?;
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[2;1H\x1b[48;2;10;20;30m\x1b[K");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
     let erased = frame
         .cells
         .iter()
@@ -74,13 +72,11 @@ fn terminal_engine_extracts_a_background_only_cell_that_carries_no_styling() -> 
 
     assert_eq!(erased.bg, Some(painted));
     assert_eq!(erased.fg, None);
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_extracts_sgr_attribute_variants() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn terminal_engine_extracts_sgr_attribute_variants() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(
         b"\x1b[1mB\x1b[22m\
           \x1b[2mF\x1b[22m\
@@ -93,7 +89,7 @@ fn terminal_engine_extracts_sgr_attribute_variants() -> Result<()> {
           \x1b[4:3mU\x1b[24m\
           \x1b[38:2::1:2:3;48:5:4mC",
     );
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
 
     let styled = |marker| {
         frame
@@ -114,36 +110,38 @@ fn terminal_engine_extracts_sgr_attribute_variants() -> Result<()> {
     assert_eq!(styled('U').style.underline, Underline::Curly);
     assert_eq!(styled('C').fg, Some(RgbColor { r: 1, g: 2, b: 3 }));
     assert!(styled('C').bg.is_some());
-
-    Ok(())
 }
 
 #[test]
-fn extract_frame_repacking_preserves_clean_row_text_after_earlier_row_length_change() -> Result<()>
-{
-    let mut engine = test_terminal_engine()?;
+fn extract_frame_repacking_preserves_clean_row_text_after_earlier_row_length_change() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[1;1Habcdefgh\x1b[2;1Hrow-two");
-    let first = engine.extract_frame()?.clone();
+    let first = engine
+        .extract_frame()
+        .expect("test operation succeeds")
+        .clone();
     assert_eq!(row_text(&first, 1), "row-two");
 
     engine.write_vt(b"\x1b[1;1HZ\x1b[K");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
 
     assert_eq!(row_text(frame, 0), "Z");
     assert_eq!(row_text(frame, 1), "row-two");
     assert_eq!(frame.row_dirty.len(), usize::from(frame.rows));
     assert_eq!(frame.cells.len(), frame.stats.cells);
     assert_eq!(frame.text.len(), frame.stats.chars);
-    Ok(())
 }
 
 #[test]
-fn clean_extract_frame_reuses_retained_cells_without_stale_dirty_rows() -> Result<()> {
-    let mut engine = test_terminal_engine()?;
+fn clean_extract_frame_reuses_retained_cells_without_stale_dirty_rows() {
+    let mut engine = test_terminal_engine().expect("test operation succeeds");
     engine.write_vt(b"\x1b[1;1Hcached frame\x1b[2;1Hrow two");
-    let first = engine.extract_frame()?.clone();
+    let first = engine
+        .extract_frame()
+        .expect("test operation succeeds")
+        .clone();
 
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
 
     assert_eq!(frame.dirty, libghostty_vt::render::Dirty::Clean);
     assert_eq!(row_text(frame, 0), row_text(&first, 0));
@@ -154,27 +152,26 @@ fn clean_extract_frame_reuses_retained_cells_without_stale_dirty_rows() -> Resul
     assert_eq!(frame.stats.dirty_rows, 0);
     assert_eq!(frame.stats.cells, frame.cells.len());
     assert_eq!(frame.stats.chars, frame.text.len());
-    Ok(())
 }
 
 #[test]
-fn hidden_hardware_cursor_is_not_extracted() -> Result<()> {
+fn hidden_hardware_cursor_is_not_extracted() {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 10,
         rows: 4,
         cell_width: 8,
         cell_height: 16,
-    })?;
+    })
+    .expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[?25l");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
 
     assert!(frame.cursor.is_none());
-    Ok(())
 }
 
 #[test]
-fn native_terminal_scrollback_retains_more_than_old_ten_thousand_row_cap() -> Result<()> {
+fn native_terminal_scrollback_retains_more_than_old_ten_thousand_row_cap() {
     let geometry = TerminalGeometry {
         cols: 16,
         rows: 4,
@@ -185,20 +182,20 @@ fn native_terminal_scrollback_retains_more_than_old_ten_thousand_row_cap() -> Re
         geometry,
         TerminalColorConfig::default(),
         NATIVE_MAX_SCROLLBACK,
-    )?;
+    )
+    .expect("test operation succeeds");
 
     for row in 0..20_000 {
         engine.write_vt(format!("row-{row:05}\r\n").as_bytes());
     }
 
     engine.scroll_viewport_delta(-1_000_000);
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
 
     assert_eq!(row_text(frame, 0), "row-00000");
-    Ok(())
 }
 #[test]
-fn terminal_frame_exposes_scrollbar_state_for_native_scrollbar_ui() -> Result<()> {
+fn terminal_frame_exposes_scrollbar_state_for_native_scrollbar_ui() {
     let mut engine = TerminalEngine::new_with_scrollback(
         TerminalGeometry {
             cols: 8,
@@ -208,19 +205,19 @@ fn terminal_frame_exposes_scrollbar_state_for_native_scrollbar_ui() -> Result<()
         },
         TerminalColorConfig::default(),
         NATIVE_MAX_SCROLLBACK,
-    )?;
+    )
+    .expect("test operation succeeds");
 
     engine.write_vt(b"one\r\ntwo\r\nthree\r\nfour");
-    let frame = engine.extract_frame()?;
+    let frame = engine.extract_frame().expect("test operation succeeds");
     let scrollbar = frame.scrollbar.expect("scrollbar state");
 
     assert!(scrollbar.total > scrollbar.len);
     assert_eq!(scrollbar.len, 2);
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_scroll_viewport_bottom_returns_to_cursor() -> Result<()> {
+fn terminal_engine_scroll_viewport_bottom_returns_to_cursor() {
     let mut engine = TerminalEngine::new_with_scrollback(
         TerminalGeometry {
             cols: 8,
@@ -230,19 +227,25 @@ fn terminal_engine_scroll_viewport_bottom_returns_to_cursor() -> Result<()> {
         },
         TerminalColorConfig::default(),
         NATIVE_MAX_SCROLLBACK,
-    )?;
+    )
+    .expect("test operation succeeds");
 
     engine.write_vt(b"one\r\ntwo\r\nthree\r\nfour");
     engine.scroll_viewport_delta(-2);
-    assert_eq!(row_text(engine.extract_frame()?, 0), "one");
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "one"
+    );
 
     engine.scroll_viewport_bottom();
-    assert_eq!(row_text(engine.extract_frame()?, 0), "three");
-    Ok(())
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "three"
+    );
 }
 
 #[test]
-fn native_terminal_scrolls_viewport_through_owned_scrollback() -> Result<()> {
+fn terminal_engine_scroll_viewport_to_uses_absolute_scrollback_offsets() {
     let mut engine = TerminalEngine::new_with_scrollback(
         TerminalGeometry {
             cols: 8,
@@ -252,21 +255,90 @@ fn native_terminal_scrolls_viewport_through_owned_scrollback() -> Result<()> {
         },
         TerminalColorConfig::default(),
         NATIVE_MAX_SCROLLBACK,
-    )?;
+    )
+    .expect("test operation succeeds");
+
+    engine
+        .write_vt(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight\r\nnine");
+    let max_offset = engine
+        .extract_frame()
+        .expect("test operation succeeds")
+        .scrollbar
+        .expect("scrollbar")
+        .offset;
+    assert!(max_offset > 4);
+
+    // Each request is an absolute target. In particular, the second request does not depend on
+    // the frame produced by the first one.
+    engine.scroll_viewport_to(4);
+    assert_eq!(
+        engine
+            .extract_frame()
+            .expect("test operation succeeds")
+            .scrollbar
+            .expect("scrollbar")
+            .offset,
+        4
+    );
+    engine.scroll_viewport_to(1);
+    assert_eq!(
+        engine
+            .extract_frame()
+            .expect("test operation succeeds")
+            .scrollbar
+            .expect("scrollbar")
+            .offset,
+        1
+    );
+
+    // Ghostty clamps targets past the end of the live scrollback.
+    engine.scroll_viewport_to(usize::MAX);
+    assert_eq!(
+        engine
+            .extract_frame()
+            .expect("test operation succeeds")
+            .scrollbar
+            .expect("scrollbar")
+            .offset,
+        max_offset
+    );
+}
+
+#[test]
+fn native_terminal_scrolls_viewport_through_owned_scrollback() {
+    let mut engine = TerminalEngine::new_with_scrollback(
+        TerminalGeometry {
+            cols: 8,
+            rows: 2,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        TerminalColorConfig::default(),
+        NATIVE_MAX_SCROLLBACK,
+    )
+    .expect("test operation succeeds");
 
     engine.write_vt(b"one\r\ntwo\r\nthree\r\nfour");
-    assert_eq!(row_text(engine.extract_frame()?, 0), "three");
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "three"
+    );
 
     engine.scroll_viewport_delta(-2);
-    assert_eq!(row_text(engine.extract_frame()?, 0), "one");
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "one"
+    );
 
     engine.scroll_viewport_delta(2);
-    assert_eq!(row_text(engine.extract_frame()?, 0), "three");
-    Ok(())
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "three"
+    );
 }
 
 #[test]
-fn terminal_engine_selection_survives_downward_viewport_scroll() -> Result<()> {
+fn terminal_engine_selection_survives_downward_viewport_scroll() {
     let mut engine = TerminalEngine::new_with_scrollback(
         TerminalGeometry {
             cols: 8,
@@ -276,7 +348,8 @@ fn terminal_engine_selection_survives_downward_viewport_scroll() -> Result<()> {
         },
         TerminalColorConfig::default(),
         NATIVE_MAX_SCROLLBACK,
-    )?;
+    )
+    .expect("test operation succeeds");
     let surface = TerminalSurface::for_logical_size(
         80.0,
         40.0,
@@ -291,32 +364,45 @@ fn terminal_engine_selection_survives_downward_viewport_scroll() -> Result<()> {
 
     engine.write_vt(b"one11111\r\ntwo22222\r\nthree333\r\nfour4444");
     engine.scroll_viewport_delta(-2);
-    assert_eq!(row_text(engine.extract_frame()?, 0), "one11111");
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "one11111"
+    );
 
-    engine.begin_selection(event(0.0, 10.0))?;
-    engine.update_selection(event(70.0, 30.0))?;
+    engine
+        .begin_selection(event(0.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .update_selection(event(70.0, 30.0))
+        .expect("test operation succeeds");
     engine.scroll_viewport_delta(1);
-    engine.update_selection(event(70.0, 30.0))?;
+    engine
+        .update_selection(event(70.0, 30.0))
+        .expect("test operation succeeds");
 
-    assert_eq!(row_text(engine.extract_frame()?, 0), "two22222");
+    assert_eq!(
+        row_text(engine.extract_frame().expect("test operation succeeds"), 0),
+        "two22222"
+    );
     let text = engine
-        .format_selection(TerminalSelectionFormat::PlainText)?
+        .format_selection(TerminalSelectionFormat::PlainText)
+        .expect("test operation succeeds")
         .expect("active selection");
     assert!(
         String::from_utf8_lossy(&text).contains("three"),
         "selection after downward scroll was {text:?}"
     );
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_projects_active_selection_into_render_frame() -> Result<()> {
+fn terminal_engine_projects_active_selection_into_render_frame() {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 8,
         rows: 2,
         cell_width: 10,
         cell_height: 20,
-    })?;
+    })
+    .expect("test operation succeeds");
     let surface = TerminalSurface::for_logical_size(
         80.0,
         40.0,
@@ -330,29 +416,38 @@ fn terminal_engine_projects_active_selection_into_render_frame() -> Result<()> {
     };
 
     engine.write_vt(b"abcdefgh");
-    engine.begin_selection(event(15.0, 10.0))?;
-    engine.update_selection(event(45.0, 10.0))?;
-    engine.end_selection(Some(event(45.0, 10.0)))?;
+    engine
+        .begin_selection(event(15.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .update_selection(event(45.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .end_selection(Some(event(45.0, 10.0)))
+        .expect("test operation succeeds");
 
     assert_eq!(
-        engine.extract_frame()?.selections,
+        engine
+            .extract_frame()
+            .expect("test operation succeeds")
+            .selections,
         vec![FrameSelection {
             row: 0,
             start_col: 1,
             end_col: 3,
         }]
     );
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_formats_active_selection_as_plain_text() -> Result<()> {
+fn terminal_engine_formats_active_selection_as_plain_text() {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 8,
         rows: 2,
         cell_width: 10,
         cell_height: 20,
-    })?;
+    })
+    .expect("test operation succeeds");
     let surface = TerminalSurface::for_logical_size(
         80.0,
         40.0,
@@ -366,25 +461,32 @@ fn terminal_engine_formats_active_selection_as_plain_text() -> Result<()> {
     };
 
     engine.write_vt(b"abcdefgh");
-    engine.begin_selection(event(15.0, 10.0))?;
-    engine.update_selection(event(45.0, 10.0))?;
-    engine.end_selection(Some(event(45.0, 10.0)))?;
+    engine
+        .begin_selection(event(15.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .update_selection(event(45.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .end_selection(Some(event(45.0, 10.0)))
+        .expect("test operation succeeds");
 
     let text = engine
-        .format_selection(TerminalSelectionFormat::PlainText)?
+        .format_selection(TerminalSelectionFormat::PlainText)
+        .expect("test operation succeeds")
         .expect("active selection");
     assert_eq!(String::from_utf8_lossy(&text), "bcd");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_double_click_selects_word() -> Result<()> {
+fn terminal_engine_double_click_selects_word() {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 12,
         rows: 2,
         cell_width: 10,
         cell_height: 20,
-    })?;
+    })
+    .expect("test operation succeeds");
     let surface = TerminalSurface::for_logical_size(
         120.0,
         40.0,
@@ -398,26 +500,35 @@ fn terminal_engine_double_click_selects_word() -> Result<()> {
     };
 
     engine.write_vt(b"abc def");
-    engine.begin_selection(event(15.0, 10.0))?;
-    engine.end_selection(Some(event(15.0, 10.0)))?;
-    engine.begin_selection(event(15.0, 10.0))?;
-    engine.end_selection(Some(event(15.0, 10.0)))?;
+    engine
+        .begin_selection(event(15.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .end_selection(Some(event(15.0, 10.0)))
+        .expect("test operation succeeds");
+    engine
+        .begin_selection(event(15.0, 10.0))
+        .expect("test operation succeeds");
+    engine
+        .end_selection(Some(event(15.0, 10.0)))
+        .expect("test operation succeeds");
 
     let text = engine
-        .format_selection(TerminalSelectionFormat::PlainText)?
+        .format_selection(TerminalSelectionFormat::PlainText)
+        .expect("test operation succeeds")
         .expect("active selection");
     assert_eq!(String::from_utf8_lossy(&text), "abc");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_triple_click_selects_line() -> Result<()> {
+fn terminal_engine_triple_click_selects_line() {
     let mut engine = TerminalEngine::new(TerminalGeometry {
         cols: 12,
         rows: 2,
         cell_width: 10,
         cell_height: 20,
-    })?;
+    })
+    .expect("test operation succeeds");
     let surface = TerminalSurface::for_logical_size(
         120.0,
         40.0,
@@ -432,19 +543,23 @@ fn terminal_engine_triple_click_selects_line() -> Result<()> {
 
     engine.write_vt(b"abc def");
     for _ in 0..3 {
-        engine.begin_selection(event(15.0, 10.0))?;
-        engine.end_selection(Some(event(15.0, 10.0)))?;
+        engine
+            .begin_selection(event(15.0, 10.0))
+            .expect("test operation succeeds");
+        engine
+            .end_selection(Some(event(15.0, 10.0)))
+            .expect("test operation succeeds");
     }
 
     let text = engine
-        .format_selection(TerminalSelectionFormat::PlainText)?
+        .format_selection(TerminalSelectionFormat::PlainText)
+        .expect("test operation succeeds")
         .expect("active selection");
     assert_eq!(String::from_utf8_lossy(&text), "abc def");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_applies_configured_default_cursor_style_and_blink() -> Result<()> {
+fn terminal_engine_applies_configured_default_cursor_style_and_blink() {
     let mut engine = TerminalEngine::new_with_terminal_options(
         TerminalGeometry {
             cols: 8,
@@ -460,14 +575,18 @@ fn terminal_engine_applies_configured_default_cursor_style_and_blink() -> Result
         TerminalFeatureConfig::default(),
         DEFAULT_MAX_SCROLLBACK,
         MacosOptionAsAlt::default(),
-    )?;
+    )
+    .expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[0 q");
-    let cursor = engine.extract_frame()?.cursor.expect("visible cursor");
+    let cursor = engine
+        .extract_frame()
+        .expect("test operation succeeds")
+        .cursor
+        .expect("visible cursor");
 
     assert_eq!(cursor.style, CursorVisualStyle::Underline);
     assert!(cursor.blinking);
-    Ok(())
 }
 
 proptest! {

@@ -4,7 +4,7 @@ use libghostty_vt::{
 };
 
 #[derive(Default)]
-pub(crate) struct BoottyPngDecoder;
+pub struct BoottyPngDecoder;
 
 impl DecodePng for BoottyPngDecoder {
     fn decode_png<'alloc>(
@@ -17,18 +17,14 @@ impl DecodePng for BoottyPngDecoder {
         let mut reader = decoder.read_info().ok()?;
         let mut buffer = vec![0; reader.output_buffer_size()?];
         let info = reader.next_frame(&mut buffer).ok()?;
-        let decoded = &buffer[..info.buffer_size()];
+        let pixels = buffer.get(..info.buffer_size())?;
         let rgba = if matches!(
             (info.color_type, info.bit_depth),
             (png::ColorType::Rgba, png::BitDepth::Eight)
         ) {
-            std::borrow::Cow::Borrowed(decoded)
+            std::borrow::Cow::Borrowed(pixels)
         } else {
-            std::borrow::Cow::Owned(png_frame_to_rgba8(
-                decoded,
-                info.color_type,
-                info.bit_depth,
-            )?)
+            std::borrow::Cow::Owned(png_frame_to_rgba8(pixels, info.color_type, info.bit_depth)?)
         };
         let mut bytes = Bytes::new_with_alloc(alloc, rgba.len()).ok()?;
         bytes.copy_from_slice(&rgba);
@@ -40,7 +36,7 @@ impl DecodePng for BoottyPngDecoder {
     }
 }
 
-pub(crate) fn png_frame_to_rgba8(
+pub fn png_frame_to_rgba8(
     data: &[u8],
     color_type: png::ColorType,
     bit_depth: png::BitDepth,
@@ -55,21 +51,21 @@ pub(crate) fn png_frame_to_rgba8(
             Some(rgba)
         }
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            let mut rgba = Vec::with_capacity(data.len() / 3 * 4);
+            let mut rgba = Vec::with_capacity((data.len() / 3).checked_mul(4)?);
             for rgb in data.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
             Some(rgba)
         }
         (png::ColorType::Rgb, png::BitDepth::Sixteen) => {
-            let mut rgba = Vec::with_capacity(data.len() / 6 * 4);
+            let mut rgba = Vec::with_capacity((data.len() / 6).checked_mul(4)?);
             for rgb in data.as_chunks::<6>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[2], rgb[4], 255]);
             }
             Some(rgba)
         }
         (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => {
-            let mut rgba = Vec::with_capacity(data.len() / 2 * 4);
+            let mut rgba = Vec::with_capacity((data.len() / 2).checked_mul(4)?);
             for gray_alpha in data.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[
                     gray_alpha[0],
@@ -81,7 +77,7 @@ pub(crate) fn png_frame_to_rgba8(
             Some(rgba)
         }
         (png::ColorType::GrayscaleAlpha, png::BitDepth::Sixteen) => {
-            let mut rgba = Vec::with_capacity(data.len() / 4 * 4);
+            let mut rgba = Vec::with_capacity((data.len() / 4).checked_mul(4)?);
             for gray_alpha in data.as_chunks::<4>().0 {
                 rgba.extend_from_slice(&[
                     gray_alpha[0],
@@ -93,14 +89,14 @@ pub(crate) fn png_frame_to_rgba8(
             Some(rgba)
         }
         (png::ColorType::Grayscale, png::BitDepth::Eight) => {
-            let mut rgba = Vec::with_capacity(data.len() * 4);
+            let mut rgba = Vec::with_capacity(data.len().checked_mul(4)?);
             for gray in data {
                 rgba.extend_from_slice(&[*gray, *gray, *gray, 255]);
             }
             Some(rgba)
         }
         (png::ColorType::Grayscale, png::BitDepth::Sixteen) => {
-            let mut rgba = Vec::with_capacity(data.len() / 2 * 4);
+            let mut rgba = Vec::with_capacity((data.len() / 2).checked_mul(4)?);
             for gray in data.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[gray[0], gray[0], gray[0], 255]);
             }

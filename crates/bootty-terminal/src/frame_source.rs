@@ -6,10 +6,24 @@ use anyhow::Result;
 
 use crate::terminal_session::TerminalSession;
 
+/// Nonblocking host updates over immutable published snapshots. A queued resize
+/// may leave the previous grid visible until the worker publishes its replacement.
 pub trait TerminalFrameSource {
+    ///
+    /// # Errors
+    /// Returns an error if the host cannot accept the scale update.
     fn set_display_scale(&mut self, display_scale: f32) -> Result<()>;
+    ///
+    /// # Errors
+    /// Returns an error if the host cannot accept the cell metrics.
     fn set_render_cell_metrics(&mut self, cell: CellMetrics) -> Result<()>;
+    ///
+    /// # Errors
+    /// Returns an error for invalid geometry or a host that cannot accept the resize.
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()>;
+    ///
+    /// # Errors
+    /// Returns an error if the published frame is unavailable or the terminal worker failed.
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>>;
 }
 
@@ -23,9 +37,7 @@ impl TerminalFrameSource for TerminalSession {
     }
 
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
-        // A frame source must not return a frame with the old grid after its surface changed.
-        // Keep queue_resize for callers that can tolerate eventual publication.
-        Self::resize(self, geometry)
+        Self::queue_resize(self, geometry)
     }
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {

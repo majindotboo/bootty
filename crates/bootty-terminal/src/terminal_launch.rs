@@ -35,17 +35,26 @@ impl SpawnedTerminal {
     }
 }
 
-pub(crate) struct OwnedChild(Option<Box<dyn Child + Send + Sync>>);
+pub(crate) struct OwnedChild {
+    child: Option<Box<dyn Child + Send + Sync>>,
+    integration: Option<crate::shell_integration::ShellIntegration>,
+}
 
 impl OwnedChild {
-    fn new(child: Box<dyn Child + Send + Sync>) -> Self {
-        Self(Some(child))
+    fn new(
+        child: Box<dyn Child + Send + Sync>,
+        integration: Option<crate::shell_integration::ShellIntegration>,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            integration,
+        }
     }
 
     pub(crate) fn exited(&mut self) -> Result<bool> {
-        self.0
+        self.child
             .as_mut()
-            .expect("owned child must exist")
+            .context("shell child has already been released")?
             .try_wait()
             .map(|status| status.is_some())
             .context("poll shell child process")
@@ -54,12 +63,14 @@ impl OwnedChild {
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        let Some(mut child) = self.0.take() else {
+        let Some(mut child) = self.child.take() else {
             return;
         };
         let _ = child.kill();
+        let integration = self.integration.take();
         thread::spawn(move || {
             let _ = child.wait();
+            drop(integration);
         });
     }
 }
@@ -70,8 +81,31 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
 
     let shell = shell_command_path(config.shell.clone());
     let launch_env = resolve_launch_environment(config, crate::terminfo::vendored_terminfo_dir());
+    let original_zdotdir = launch_env
+        .env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "ZDOTDIR")
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var("ZDOTDIR").ok())
+        .filter(|_| !config.env_remove.iter().any(|name| name == "ZDOTDIR"));
+    let integration = if config.shell_integration {
+        crate::shell_integration::ShellIntegration::prepare(
+            &shell,
+            &config.args,
+            original_zdotdir.as_deref(),
+        )?
+    } else {
+        None
+    };
     let mut command = CommandBuilder::new(shell);
-    command.args(&config.args);
+    command.args(
+        integration
+            .as_ref()
+            .map_or(config.args.as_slice(), |integration| {
+                integration.args.as_slice()
+            }),
+    );
     for (name, value) in locale_env_entries() {
         command.env(name, value);
     }
@@ -100,6 +134,12 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
     if let Some(cwd) = &config.working_directory {
         command.cwd(cwd);
     }
+    if let Some(integration) = &integration {
+        command.env_remove("BOOTTY_ORIGINAL_ZDOTDIR");
+        for (name, value) in &integration.env {
+            command.env(name, value);
+        }
+    }
 
     #[cfg(unix)]
     let tty_name = pair
@@ -116,7 +156,7 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
 
     Ok(SpawnedTerminal {
         master: pair.master,
-        child: OwnedChild::new(child),
+        child: OwnedChild::new(child, integration),
         tty_name,
     })
 }
@@ -133,10 +173,10 @@ fn resolve_launch_environment(
     bootty_terminfo_dir: Option<&Path>,
 ) -> ResolvedLaunchEnvironment {
     let (term, terminfo) = if config.term == crate::terminfo::XTERM_BOOTTY {
-        match bootty_terminfo_dir {
-            Some(dir) => (config.term.clone(), Some(dir.to_path_buf())),
-            None => ("xterm-256color".to_owned(), None),
-        }
+        bootty_terminfo_dir.map_or_else(
+            || ("xterm-256color".to_owned(), None),
+            |dir| (config.term.clone(), Some(dir.to_path_buf())),
+        )
     } else {
         (config.term.clone(), None)
     };
@@ -166,6 +206,7 @@ fn is_managed_launch_env(name: &str) -> bool {
     )
 }
 
+#[must_use]
 pub fn configured_user_shell() -> Option<String> {
     configured_login_shell()
 }
@@ -195,7 +236,7 @@ fn locale_env_entries() -> Vec<(String, String)> {
 fn normalize_locale_entries(entries: &mut Vec<(String, String)>) {
     for (_, value) in entries.iter_mut() {
         if is_macos_c_locale(value) {
-            *value = "en_US.UTF-8".to_owned();
+            "en_US.UTF-8".clone_into(value);
         }
     }
     for missing in ["LANG", "LC_CTYPE"] {
@@ -222,11 +263,11 @@ fn shell_command_path(configured: Option<String>) -> String {
     ]
     .into_iter()
     .flatten()
-    .find_map(normalize_shell_path)
+    .find_map(|shell| normalize_shell_path(&shell))
     .unwrap_or_else(|| DEFAULT_SHELL.to_string())
 }
 
-fn normalize_shell_path(shell: String) -> Option<String> {
+fn normalize_shell_path(shell: &str) -> Option<String> {
     let shell = shell.trim();
     if shell.is_empty() || !Path::new(shell).is_absolute() {
         return None;
@@ -243,12 +284,12 @@ fn configured_login_shell() -> Option<String> {
     ]
     .into_iter()
     .flatten()
-    .find_map(normalize_username)
+    .find_map(|user| normalize_username(&user))
     .and_then(|user| read_login_shell_for_user(&user))
 }
 
 #[cfg(target_os = "macos")]
-fn normalize_username(user: String) -> Option<String> {
+fn normalize_username(user: &str) -> Option<String> {
     let user = user.trim();
     if user.is_empty() || user.contains('/') {
         return None;
@@ -263,7 +304,7 @@ fn current_username() -> Option<String> {
         .output()
         .ok()
         .filter(|output| output.status.success())?;
-    normalize_username(String::from_utf8_lossy(&output.stdout).to_string())
+    normalize_username(&String::from_utf8_lossy(&output.stdout))
 }
 
 #[cfg(target_os = "macos")]
@@ -286,6 +327,6 @@ fn configured_login_shell() -> Option<String> {
 fn parse_user_shell_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let (_, shell) = line.split_once(':')?;
-        normalize_shell_path(shell.to_string())
+        normalize_shell_path(shell)
     })
 }

@@ -5,8 +5,8 @@ use super::support::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn terminal_engine_answers_size_queries_from_current_geometry() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_size_queries_from_current_geometry() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     for (query, expected) in [
         (b"\x1b[14t".as_slice(), b"\x1b[4;480;800t".as_slice()),
@@ -16,12 +16,11 @@ fn terminal_engine_answers_size_queries_from_current_geometry() -> Result<()> {
         engine.write_vt(query);
         assert_eq!(take_pty_output(&output), expected);
     }
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_orders_osc_color_query_responses_before_later_da1() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_orders_osc_color_query_responses_before_later_da1() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[?u\x1b]11;?\x1b\\\x1b[c");
 
@@ -29,66 +28,67 @@ fn terminal_engine_orders_osc_color_query_responses_before_later_da1() -> Result
         take_pty_output(&output),
         b"\x1b[?0u\x1b]11;rgb:1a1a/1b1b/2525\x1b\\\x1b[?62;22;52c"
     );
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_does_not_answer_queries_replayed_from_a_rebase() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_does_not_answer_queries_replayed_from_a_rebase() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt_without_pty_responses(b"\x1b[?u");
-    assert!(take_pty_output(&output).is_empty());
+    assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b[c");
     assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_does_not_repeat_side_effects_replayed_from_a_rebase() -> Result<()> {
-    let (mut engine, _output) = captured_pty_engine()?;
+fn terminal_engine_does_not_repeat_side_effects_replayed_from_a_rebase() {
+    let (mut engine, _output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt_without_pty_responses(b"\x1b]1337;ReportCellSize\x1b\\");
-    assert!(engine.drain_side_effects().is_empty());
+    assert_eq!(
+        engine.drain_side_effects(),
+        Vec::<bootty_terminal::terminal_engine::TerminalSideEffect>::new()
+    );
 
     engine.write_vt(b"\x1b]1337;ReportCellSize\x1b\\");
     assert_eq!(engine.drain_side_effects().len(), 1);
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_does_not_carry_a_truncated_rebase_into_the_next_write() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_does_not_carry_a_truncated_rebase_into_the_next_write() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     // The keyframe ends mid-OSC, so the streaming buffer holds the tail back.
     engine.write_vt_without_pty_responses(b"\x1b]1337;ReportCellSize");
-    assert!(take_pty_output(&output).is_empty());
+    assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b\\\x1b[c");
     assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
-    assert!(engine.drain_side_effects().is_empty());
-    Ok(())
+    assert_eq!(
+        engine.drain_side_effects(),
+        Vec::<bootty_terminal::terminal_engine::TerminalSideEffect>::new()
+    );
 }
 
 #[test]
-fn terminal_engine_does_not_splice_a_pending_write_onto_a_rebase() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_does_not_splice_a_pending_write_onto_a_rebase() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     // The live stream is cut mid-sequence, then recovery replays a keyframe.
     engine.write_vt(b"\x1b]1337;Repor");
     engine.write_vt_without_pty_responses(b"\x1b[c");
     // The keyframe stands on its own: the stale prefix neither joins it nor
     // swallows it as OSC payload.
-    assert!(take_pty_output(&output).is_empty());
+    assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b[c");
     assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_keeps_state_restored_by_a_rebase() -> Result<()> {
-    let (mut engine, _output) = captured_pty_engine()?;
+fn terminal_engine_keeps_state_restored_by_a_rebase() {
+    let (mut engine, _output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt_without_pty_responses(b"\x1b]2;restored\x1b\\");
 
@@ -97,12 +97,11 @@ fn terminal_engine_keeps_state_restored_by_a_rebase() -> Result<()> {
         bootty_terminal::terminal_side_effect::TerminalSideEffect::WindowTitle(title)
             if title == "restored"
     )));
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_kitty_graphics_probes() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_kitty_graphics_probes() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\");
     assert_eq!(
@@ -112,35 +111,33 @@ fn terminal_engine_answers_kitty_graphics_probes() -> Result<()> {
 
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     assert_eq!(take_pty_output(&output), b"\x1b_Gi=31;OK\x1b\\");
-    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn terminal_engine_answers_valid_tuie_shared_memory_kitty_probe() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_valid_tuie_shared_memory_kitty_probe() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
     let fixture = match SharedMemoryFixture::write(&[0, 0, 0]) {
         Ok(fixture) => fixture,
-        Err(err) if is_shared_memory_unavailable(&err) => return Ok(()),
-        Err(err) => return Err(err),
+        Err(err) if is_shared_memory_unavailable(&err) => return,
+        Err(err) => panic!("shared memory fixture failed: {err}"),
     };
-    let payload = fixture.payload()?;
+    let payload = fixture.payload().expect("test operation succeeds");
 
     engine.write_vt(format!("\x1b_Gi=32,s=1,v=1,a=q,t=s,f=24;{payload}\x1b\\").as_bytes());
 
     assert_eq!(take_pty_output(&output), b"\x1b_Gi=32;OK\x1b\\");
-    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
     let (kitty_query, _fixture) = match SharedMemoryFixture::write(&[0, 0, 0]) {
         Ok(fixture) => (
             format!(
                 "\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;{}\x1b\\",
-                fixture.payload()?
+                fixture.payload().expect("test operation succeeds")
             ),
             Some(fixture),
         ),
@@ -148,7 +145,7 @@ fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -
             "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\".to_owned(),
             None,
         ),
-        Err(err) => return Err(err),
+        Err(err) => panic!("shared memory fixture failed: {err}"),
     };
     let query = [
         b"\x1b[22;2t".as_slice(),
@@ -182,19 +179,20 @@ fn terminal_engine_answers_tuie_startup_capability_batch_before_da1_sentinel() -
         background < da1,
         "background color response must arrive before DA1"
     );
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_reports_resizes_when_window_ops_are_enabled() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_reports_resizes_when_window_ops_are_enabled() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
-    engine.resize(TerminalGeometry {
-        cols: 80,
-        rows: 24,
-        cell_width: 9,
-        cell_height: 18,
-    })?;
+    engine
+        .resize(TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 9,
+            cell_height: 18,
+        })
+        .expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[14t\x1b[16t\x1b[18t");
     assert_eq!(
@@ -203,30 +201,29 @@ fn terminal_engine_reports_resizes_when_window_ops_are_enabled() -> Result<()> {
     );
 
     engine.write_vt(b"\x1b[?2048h");
-    engine.resize(TerminalGeometry {
-        cols: 100,
-        rows: 40,
-        cell_width: 9,
-        cell_height: 18,
-    })?;
+    engine
+        .resize(TerminalGeometry {
+            cols: 100,
+            rows: 40,
+            cell_width: 9,
+            cell_height: 18,
+        })
+        .expect("test operation succeeds");
     assert_eq!(take_pty_output(&output), b"\x1b[48;40;100;720;900t");
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_reports_clipboard_in_production_primary_device_attributes() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_reports_clipboard_in_production_primary_device_attributes() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[c");
 
     assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_reports_mode_query_status() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_reports_mode_query_status() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     for (input, expected) in [
         (b"\x1b[?7$p".as_slice(), b"\x1b[?7;1$y".as_slice()),
@@ -245,12 +242,11 @@ fn terminal_engine_reports_mode_query_status() -> Result<()> {
         engine.write_vt(input);
         assert_eq!(take_pty_output(&output), expected);
     }
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_status_queries() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_status_queries() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     for (input, expected) in [
         (b"\x1b[5n".as_slice(), b"\x1b[0n".as_slice()),
@@ -264,12 +260,11 @@ fn terminal_engine_answers_status_queries() -> Result<()> {
         engine.write_vt(input);
         assert_eq!(take_pty_output(&output), expected);
     }
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_color_queries_from_active_palette() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_color_queries_from_active_palette() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b]10;?\x1b\\");
     assert_eq!(
@@ -329,12 +324,10 @@ fn terminal_engine_answers_color_queries_from_active_palette() -> Result<()> {
         take_pty_output(&output),
         b"\x1b]4;1;rgb:f7f7/7676/8e8e\x1b\\"
     );
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_color_queries_with_generated_palette() -> Result<()> {
+fn terminal_engine_answers_color_queries_with_generated_palette() {
     let colors = TerminalColorConfig {
         background: RgbColor {
             r: 0x1a,
@@ -379,15 +372,18 @@ fn terminal_engine_answers_color_queries_with_generated_palette() -> Result<()> 
             cell_height: 20,
         },
         colors,
-    )?;
+    )
+    .expect("test operation succeeds");
     let output = Arc::new(Mutex::new(Vec::new()));
     let capture = output.clone();
-    engine.on_pty_write(move |_terminal, bytes| {
-        capture
-            .lock()
-            .expect("pty output lock")
-            .extend_from_slice(bytes);
-    })?;
+    engine
+        .on_pty_write(move |_terminal, bytes| {
+            capture
+                .lock()
+                .expect("pty output lock")
+                .extend_from_slice(bytes);
+        })
+        .expect("test operation succeeds");
 
     engine.write_vt(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]4;16;?\x1b\\\x1b]4;231;?\x1b\\\x1b[c");
     let output = take_pty_output(&output);
@@ -396,12 +392,11 @@ fn terminal_engine_answers_color_queries_with_generated_palette() -> Result<()> 
     assert!(find_subslice(&output, b"\x1b]4;16;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b]4;231;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b[?").is_some());
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_color_queries_while_side_effect_input_is_pending() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_color_queries_while_side_effect_input_is_pending() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b]1337;CopyToClipboard=1\x1b\\");
     engine.write_vt(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]4;16;?\x1b\\\x1b]4;231;?\x1b\\\x1b[c");
@@ -411,12 +406,11 @@ fn terminal_engine_answers_color_queries_while_side_effect_input_is_pending() ->
     assert!(find_subslice(&output, b"\x1b]4;16;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b]4;231;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b[?").is_some());
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_split_color_queries_before_da1() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_answers_split_color_queries_before_da1() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
     let query = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b]4;16;?\x1b\\\x1b]4;231;?\x1b\\\x1b[c";
 
     for byte in query {
@@ -429,11 +423,10 @@ fn terminal_engine_answers_split_color_queries_before_da1() -> Result<()> {
     assert!(find_subslice(&output, b"\x1b]4;16;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b]4;231;rgb:").is_some());
     assert!(find_subslice(&output, b"\x1b[?").is_some());
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_answers_xterm_dynamic_color_queries_from_config() -> Result<()> {
+fn terminal_engine_answers_xterm_dynamic_color_queries_from_config() {
     let colors = TerminalColorConfig {
         background: RgbColor { r: 1, g: 2, b: 3 },
         foreground: RgbColor { r: 4, g: 5, b: 6 },
@@ -483,15 +476,18 @@ fn terminal_engine_answers_xterm_dynamic_color_queries_from_config() -> Result<(
             cell_height: 20,
         },
         colors,
-    )?;
+    )
+    .expect("test operation succeeds");
     let output = Arc::new(Mutex::new(Vec::new()));
     let capture = output.clone();
-    engine.on_pty_write(move |_terminal, bytes| {
-        capture
-            .lock()
-            .expect("pty output lock")
-            .extend_from_slice(bytes);
-    })?;
+    engine
+        .on_pty_write(move |_terminal, bytes| {
+            capture
+                .lock()
+                .expect("pty output lock")
+                .extend_from_slice(bytes);
+        })
+        .expect("test operation succeeds");
 
     for (code, expected) in [
         (10, b"\x1b]10;rgb:0404/0505/0606\x1b\\".as_slice()),
@@ -508,13 +504,11 @@ fn terminal_engine_answers_xterm_dynamic_color_queries_from_config() -> Result<(
         engine.write_vt(format!("\x1b]{code};?\x1b\\").as_bytes());
         assert_eq!(take_pty_output(&output), expected, "OSC {code} reply");
     }
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_tracks_non_rendered_xterm_dynamic_color_overrides() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_tracks_non_rendered_xterm_dynamic_color_overrides() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b]13;rgb:01/02/03;rgb:04/05/06;rgb:07/08/09;rgb:0a/0b/0c;rgb:0d/0e/0f;rgb:10/11/12;rgb:13/14/15\x1b\\");
 
@@ -546,13 +540,11 @@ fn terminal_engine_tracks_non_rendered_xterm_dynamic_color_overrides() -> Result
         take_pty_output(&output),
         b"\x1b]19;rgb:1a1a/1b1b/2525\x1b\\"
     );
-
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_reports_production_color_scheme_from_active_background() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_reports_production_color_scheme_from_active_background() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[?2031h\x1b[?996n");
     assert_eq!(take_pty_output(&output), b"\x1b[?997;1n");
@@ -565,18 +557,19 @@ fn terminal_engine_reports_production_color_scheme_from_active_background() -> R
         },
         ..Default::default()
     };
-    engine.apply_live_config(TerminalLiveConfig {
-        colors: light_colors,
-        ..Default::default()
-    })?;
+    engine
+        .apply_live_config(TerminalLiveConfig {
+            colors: light_colors,
+            ..Default::default()
+        })
+        .expect("test operation succeeds");
     engine.write_vt(b"\x1b[?996n");
     assert_eq!(take_pty_output(&output), b"\x1b[?997;2n");
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_reports_production_xtversion() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_reports_production_xtversion() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b[>q");
 
@@ -588,16 +581,14 @@ fn terminal_engine_reports_production_xtversion() -> Result<()> {
         )
         .as_bytes()
     );
-    Ok(())
 }
 
 #[test]
-fn terminal_engine_emits_bell_side_effect_for_bel() -> Result<()> {
-    let (mut engine, output) = captured_pty_engine()?;
+fn terminal_engine_emits_bell_side_effect_for_bel() {
+    let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x07");
 
     assert_eq!(take_pty_output(&output), b"");
     assert_eq!(engine.drain_side_effects(), vec![TerminalSideEffect::Bell]);
-    Ok(())
 }

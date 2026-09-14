@@ -1,41 +1,28 @@
-mod ghostty_ffi_compat;
+mod pty_backlog;
 mod terminal_png_decoder;
-
-pub mod terminal_engine;
-pub mod terminal_frame;
-pub mod terminal_image;
-pub mod terminal_input_model;
-pub mod terminal_palette;
-pub mod terminal_side_effect;
-
-pub mod geometry;
-
-pub mod selection;
-
-pub mod terminal {
-    pub use crate::terminal_engine::{
-        TERMINAL_BACKGROUND, TERMINAL_FOREGROUND, TerminalCursorConfig, TerminalCursorStyle,
-        TerminalEngine, TerminalLiveConfig, TerminalSearchDirection, TerminalSelectionFormat,
-    };
-    pub use crate::terminal_frame::{
-        CellStyle, CursorSnapshot, FrameColors, FrameScrollbar, FrameSelection, FrameStats,
-        RenderCell, RenderFrame,
-    };
-    pub use crate::terminal_input_model::{
-        KeyInput, KeyMods, MacosOptionAsAlt, MouseAction, MouseButton, MouseEncoderSize,
-        MouseInput, TerminalKey,
-    };
-    pub use crate::terminal_session::{DrainStats, TerminalSession};
-}
 
 pub mod benchmark_trace;
 pub mod frame_source;
+pub mod geometry;
 pub mod latency;
 pub mod perf;
-mod pty_backlog;
 pub mod scheduler;
+pub mod selection;
+pub mod shell_integration;
+pub mod shell_lifecycle;
+pub mod terminal;
+pub mod terminal_capture;
+pub mod terminal_engine;
+pub mod terminal_frame;
+pub mod terminal_image;
+pub mod terminal_input;
+pub mod terminal_input_model;
 pub mod terminal_launch;
+pub mod terminal_links;
+pub mod terminal_palette;
+pub mod terminal_search;
 pub mod terminal_session;
+pub mod terminal_side_effect;
 pub mod terminfo;
 
 pub use benchmark_trace::{BenchmarkTrace, TraceValue};
@@ -46,3 +33,10 @@ pub use pty_backlog::{
 pub use terminal_session::{
     DrainStats, SessionLaunchConfig, TerminalSession, TerminalSessionConfig,
 };
+
+pub use libghostty_vt::style::RgbColor;
+pub use terminal_input::TerminalInputCommand;
+
+pub mod shell_prompt;
+
+pub mod clipboard_write;

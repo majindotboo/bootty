@@ -1,9 +1,9 @@
-use bootty_surface::selection::{SelectionPoint, TerminalSelection, TerminalSelectionState};
+use bootty_terminal::selection::{SelectionPoint, TerminalSelection, TerminalSelectionState};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
 
-fn point(x: u16, y: u16) -> SelectionPoint {
+const fn point(x: u16, y: u16) -> SelectionPoint {
     SelectionPoint::new(x, y)
 }
 
