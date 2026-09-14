@@ -10,19 +10,18 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 bootty-config = { path = "../bootty-config" }
+bootty-git = { path = "../bootty-git" }
+bootty-host = { path = "../bootty-host" }
 bootty-mux = { path = "../bootty-mux", default-features = false }
-bootty-remote = { path = "../bootty-remote", default-features = false }
-bootty-rmux = { path = "../bootty-rmux", default-features = false }
-bootty-tmux = { path = "../bootty-tmux", default-features = false }
-bootty-identity = { path = "../bootty-identity" }
 rusqlite.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+rstest.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true
-rmux-server.workspace = true
+rmux-sdk.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 
 [lints]

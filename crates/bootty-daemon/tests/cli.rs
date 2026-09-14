@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::process::Command;
 
 use assert_fs::prelude::*;
@@ -5,7 +7,7 @@ use pretty_assertions::assert_eq;
 use rusqlite::{Connection, params};
 
 fn development_namespace() -> &'static str {
-    bootty_identity::ApplicationIdentity::Development.namespace()
+    bootty_config::ApplicationIdentity::Development.namespace()
 }
 
 fn create_fixture_dir(
@@ -31,7 +33,7 @@ fn run_daemon(
     let mut command = Command::new(daemon);
     command
         .env_remove("BOOTTY_DAEMON_STATE")
-        .env_remove(bootty_identity::APPLICATION_IDENTITY_ENV)
+        .env_remove(bootty_config::APPLICATION_IDENTITY_ENV)
         .env("XDG_CONFIG_HOME", config_root)
         .env("XDG_STATE_HOME", state_root)
         .env("HOME", config_root)
@@ -149,7 +151,7 @@ fn ping_reports_the_compatible_protocol_and_release() {
         String::from_utf8(output.stdout).expect("UTF-8"),
         format!(
             "{}:{}\n",
-            bootty_remote::REMOTE_DAEMON_PROTOCOL_VERSION,
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -308,9 +310,9 @@ fn inherited_local_identity_does_not_change_a_remote_command() {
 
     let created = Command::new(daemon)
         .env_remove("BOOTTY_DAEMON_STATE")
-        .env(bootty_identity::APPLICATION_IDENTITY_ENV, "bootty-dev")
+        .env(bootty_config::APPLICATION_IDENTITY_ENV, "bootty-dev")
         .env(
-            bootty_identity::DEVELOPMENT_NAMESPACE_ENV,
+            bootty_config::DEVELOPMENT_NAMESPACE_ENV,
             inherited_namespace,
         )
         .env("XDG_CONFIG_HOME", &config)
@@ -345,7 +347,7 @@ fn explicit_development_identity_uses_the_inherited_worktree_namespace() {
 
     let created = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
         .env_remove("BOOTTY_DAEMON_STATE")
-        .env(bootty_identity::DEVELOPMENT_NAMESPACE_ENV, namespace)
+        .env(bootty_config::DEVELOPMENT_NAMESPACE_ENV, namespace)
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
         .args([
@@ -755,7 +757,7 @@ fn daemon_discovers_remote_projects_with_the_shared_heuristics() {
         .expect("list remote projects");
 
     assert_success(&output);
-    let projects: Vec<bootty_mux::project::ProjectPickerEntry> =
+    let projects: Vec<bootty_git::ProjectPickerEntry> =
         serde_json::from_slice(&output.stdout).expect("project JSON");
     assert!(
         projects
@@ -790,7 +792,7 @@ fn daemon_marks_canonical_worktree_aliases_as_occupied() {
         .expect("list remote worktrees");
 
     assert_success(&output);
-    let worktrees: Vec<bootty_mux::project::WorktreePickerEntry> =
+    let worktrees: Vec<bootty_git::WorktreePickerEntry> =
         serde_json::from_slice(&output.stdout).expect("worktree JSON");
     assert!(worktrees[0].occupied);
 }
@@ -835,7 +837,10 @@ fn seed_folded_catalog(
             .execute(
                 "INSERT INTO workspace_sessions (identity, space_id, backend_name, position)
                  VALUES ('id-' || ?1, 1, ?2, ?1)",
-                params![position as i64, session_name],
+                params![
+                    i64::try_from(position).expect("fixture position fits in i64"),
+                    session_name
+                ],
             )
             .expect("folded session");
     }
@@ -877,5 +882,69 @@ fn a_folded_workspace_imports_its_spaces_and_sessions() {
     assert_eq!(
         destination_sessions(&state.join("bootty/daemon.sqlite"), space_id),
         ["work", "review"]
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn remote_worktree_create_resolves_options_on_the_daemon_host(#[case] request_json: bool) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let project = directory.child("repo");
+    project.create_dir_all().unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        vec!["tag", "starting-tag"],
+    ] {
+        assert_success(
+            &Command::new("git")
+                .arg("-C")
+                .arg(project.path())
+                .args(args)
+                .output()
+                .unwrap(),
+        );
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"));
+    command
+        .args(["remote-worktree", "create", "--project"])
+        .arg(project.path());
+    if request_json {
+        command.args([
+            "--request",
+            r#"{"branch":"feature/new","name":"my checkout","start_ref":"starting-tag"}"#,
+        ]);
+    } else {
+        command.args(["--branch", "feature/new"]);
+    }
+    let output = command.output().unwrap();
+    assert_success(&output);
+    let path: String = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        std::path::Path::new(&path).file_name().unwrap(),
+        if request_json {
+            "my checkout"
+        } else {
+            "repo-feature-new"
+        }
+    );
+    let branch = Command::new("git")
+        .args(["-C", &path, "branch", "--show-current"])
+        .output()
+        .unwrap();
+    assert_success(&branch);
+    assert_eq!(
+        String::from_utf8(branch.stdout).unwrap().trim(),
+        "feature/new"
     );
 }
