@@ -1,28 +1,144 @@
+use super::RemoteConfig;
 use super::keybind_presets::{
     owned_keybinds, preset_global_keybinds, preset_layout_keybinds, preset_tmux_backend_keybinds,
     resolve_macos_option_alt_keybinds, sidebar_keybinds,
 };
-pub use crate::binding::{
-    MuxBackendKind as MultiplexerBackendConfig, MuxBindingConfig as MultiplexerConfig,
-    SshTarget as SshRemoteConfig,
-};
+use crate::FontFeature;
 use crate::color::Color;
-use crate::font_feature::FontFeature;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
+use strum::{Display, EnumIter};
+use thiserror::Error;
+
+/// A backend that Bootty can drive for one terminal binding.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Display, EnumIter, Hash, Serialize, PartialEq, Eq,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum MultiplexerBackendConfig {
+    Herdr,
+    Rmux,
+    #[default]
+    Native,
+    Tmux,
+}
+
+impl MultiplexerBackendConfig {
+    /// Returns whether the backend has a client that can run on another host.
+    #[must_use]
+    pub const fn supports_remote(self) -> bool {
+        matches!(self, Self::Herdr | Self::Rmux | Self::Tmux)
+    }
+}
+
+/// One resolved SSH process target.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SshRemoteConfig {
+    /// SSH config alias, hostname, or address of the host running the multiplexer.
+    pub host: String,
+    /// Login user, when it is neither the local user nor covered by `~/.ssh/config`.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// SSH port, when it is neither 22 nor covered by `~/.ssh/config`.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The SSH client to run.
+    #[serde(default = "default_ssh_program")]
+    pub program: String,
+    /// Extra flags handed to the SSH client before the destination.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+fn default_ssh_program() -> String {
+    "ssh".to_owned()
+}
+
+impl SshRemoteConfig {
+    /// Create a target that relies on the host's SSH configuration and defaults.
+    pub fn for_host(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            user: None,
+            port: None,
+            program: default_ssh_program(),
+            args: Vec::new(),
+        }
+    }
+}
+
+/// The operational configuration for one multiplexer binding.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MultiplexerConfig {
+    pub backend: MultiplexerBackendConfig,
+    /// Hide tmux's own status bar in Bootty's client.
+    pub hide_tmux_status: bool,
+    /// Reach the multiplexer through SSH or a WSL distribution.
+    pub remote: Option<RemoteConfig>,
+    /// The remote-owned Space selected through a named SSH profile.
+    pub remote_space_id: Option<String>,
+}
+
+/// Validation failure for an operational multiplexer binding.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum MultiplexerConfigError {
+    #[error("multiplexer.remote.host must name a host")]
+    EmptyRemoteHost,
+    #[error("WSL supports rmux and tmux bindings; Herdr requires an SSH public-client connection")]
+    UnsupportedWslBackend,
+    #[error("multiplexer.remote needs a backend with a client to run there, got {backend:?}")]
+    UnsupportedRemoteBackend { backend: MultiplexerBackendConfig },
+}
+
+impl MultiplexerConfig {
+    /// Validate remote placement without changing the configuration.
+    ///
+    /// # Errors
+    /// Rejects an empty remote host or a backend that cannot use the selected transport.
+    pub fn validate_remote(&self) -> Result<(), MultiplexerConfigError> {
+        let Some(remote) = &self.remote else {
+            return Ok(());
+        };
+        if remote.host().trim().is_empty() {
+            return Err(MultiplexerConfigError::EmptyRemoteHost);
+        }
+        if matches!(remote, RemoteConfig::Wsl(_)) && self.backend == MultiplexerBackendConfig::Herdr
+        {
+            return Err(MultiplexerConfigError::UnsupportedWslBackend);
+        }
+        if matches!(
+            self.backend,
+            MultiplexerBackendConfig::Herdr
+                | MultiplexerBackendConfig::Rmux
+                | MultiplexerBackendConfig::Tmux
+        ) {
+            return Ok(());
+        }
+        Err(MultiplexerConfigError::UnsupportedRemoteBackend {
+            backend: self.backend,
+        })
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoottyConfig {
+    pub locale: String,
     pub version: u32,
+    pub restore_on_startup: RestoreOnStartup,
+    pub cli_default_open_behavior: OpenBehavior,
+    pub default_open_behavior: OpenBehavior,
+    pub when_closing_with_no_tabs: WhenClosingWithNoTabs,
+    pub on_last_window_closed: OnLastWindowClosed,
     pub appearance: AppearanceConfig,
     pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
+    pub panels: BTreeMap<PanelKind, PanelConfig>,
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    /// Settings extensions declared for themselves, keyed by module stem then setting key. The
-    /// loader accepts any of the three value shapes; what a key *means* is the declaring module's
-    /// business, and a module may only ever read or write its own table.
+    /// Raw extension settings retained for compatibility and unsupported-source display, keyed by
+    /// module stem then setting key. The native host does not interpret or execute this table.
     pub extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub input: InputConfig,
     pub session: SessionConfig,
@@ -32,7 +148,60 @@ pub struct BoottyConfig {
     pub compatibility_warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum RestoreOnStartup {
+    #[default]
+    LastSession,
+    LastWorkspace,
+    None,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OnLastWindowClosed {
+    #[default]
+    PlatformDefault,
+    QuitApp,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OpenBehavior {
+    #[default]
+    ExistingWindow,
+    NewWindow,
+}
+
+impl OpenBehavior {
+    #[must_use]
+    pub fn opens_new_window(self) -> bool {
+        self == Self::NewWindow
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum WhenClosingWithNoTabs {
+    #[default]
+    PlatformDefault,
+    CloseWindow,
+    KeepWindowOpen,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ThemeInfo {
     pub name: String,
     pub source: String,
@@ -40,9 +209,19 @@ pub struct ThemeInfo {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowConfig {
+    pub background_opacity: f32,
+    pub background_image: Option<PathBuf>,
+    pub background_image_opacity: f32,
+    pub background_gradient_start: Option<Color>,
+    pub background_gradient_end: Option<Color>,
+    pub background_gradient_angle: f32,
+    pub background_material: BackgroundMaterial,
     pub title: String,
     pub width: f32,
     pub height: f32,
+    /// Whether the preferred fullscreen mode is currently active. Kept separate from `fullscreen`
+    /// so leaving fullscreen does not forget which native/borderless style to restore.
+    pub fullscreen_enabled: bool,
     pub fullscreen: WindowFullscreen,
     /// Top offset reserved when the window covers a notched screen in fullscreen. `None` uses the
     /// calibrated auto-detected notch offset; `Some` overrides it exactly.
@@ -54,7 +233,21 @@ pub struct WindowConfig {
     pub macos_titlebar_style: MacosTitlebarStyle,
 }
 
-/// A value an extension stores in its own settings table.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum BackgroundMaterial {
+    #[default]
+    Opaque,
+    Transparent,
+    Blurred,
+    Mica,
+    MicaAlt,
+}
+
+/// A raw value retained in an extension's settings table.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ExtensionSettingValue {
@@ -63,15 +256,9 @@ pub enum ExtensionSettingValue {
     Text(String),
 }
 
-/// Where an extension's setting lives in the config: `extensions.<module>.<key>`. The module part
-/// is supplied by the host from the module's own identity, never by the module itself.
-#[must_use]
-pub fn extension_setting_path(module: &str, key: &str) -> [String; 3] {
-    ["extensions".to_owned(), module.to_owned(), key.to_owned()]
-}
-
-/// The TOML token for a config enum value, taken from its own `Serialize` derive so a writer can
-/// never disagree with the parser about spelling. The loader normalizes `-` to `_` and lowercases
+/// The TOML token for a config enum value, taken from its own `Serialize` derive.
+///
+/// The loader normalizes `-` to `_` and lowercases
 /// before matching, so a kebab token and the historic snake token both load to the same variant.
 ///
 /// Only unit variants have a token; anything else returns `None`.
@@ -83,19 +270,21 @@ pub fn config_token<T: Serialize>(value: &T) -> Option<String> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum WindowFullscreen {
-    #[default]
     Disabled,
+    #[default]
     Native,
     NonNative,
     NonNativeVisibleMenu,
     NonNativePaddedNotch,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum WindowDecoration {
     None,
     #[default]
@@ -104,8 +293,9 @@ pub enum WindowDecoration {
     Server,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, strum::IntoStaticStr)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum MacosTitlebarStyle {
     Native,
     #[default]
@@ -116,7 +306,12 @@ pub enum MacosTitlebarStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontConfig {
     pub family: Vec<String>,
+    pub style_bold: crate::FontStyleAssignment,
+    pub style_italic: crate::FontStyleAssignment,
+    pub style_bold_italic: crate::FontStyleAssignment,
     pub ui_family: Vec<String>,
+    pub ui_weights: crate::FontWeightAssignments,
+    pub ui_size: f32,
     pub ui_use_terminal_family: bool,
     pub features: Vec<FontFeature>,
     pub size: f32,
@@ -128,9 +323,84 @@ pub struct FontConfig {
     pub underline_position: f32,
     pub underline_thickness: f32,
 }
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PanelTabStyle {
+    #[default]
+    Icons,
+    IconsAndText,
+    Text,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PanelTabs {
+    #[default]
+    Automatic,
+    Always,
+    Never,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum TabAppearance {
+    #[default]
+    Classic,
+    Underline,
+    Pill,
+    Outline,
+    Segmented,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum TabClosePosition {
+    Left,
+    #[default]
+    Right,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum TabCloseButton {
+    Always,
+    #[default]
+    Hover,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabConfig {
+    pub appearance: TabAppearance,
+    pub close_position: TabClosePosition,
+    pub close_button: TabCloseButton,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ChromeConfig {
+    pub left_dock_toggle: bool,
+    pub right_dock_toggle: bool,
+    pub panel_tab_style: PanelTabStyle,
+    pub panel_tabs: PanelTabs,
+    pub dock_tabs: TabConfig,
+    pub terminal_tabs: TabConfig,
+
     pub sidebar: bool,
     /// Whether to show the module bar above the terminal.
     pub top_bar: bool,
@@ -143,8 +413,7 @@ pub struct ChromeConfig {
     /// Visual width (px) of the gap/divider between native split panes. The grab area is widened
     /// past this so thin dividers stay draggable.
     pub pane_divider_width: f32,
-    /// Divider color; falls back to the window background (the sidebar's default background) so the
-    /// gap reads as a cohesive backdrop behind the rounded panes.
+    /// Divider color; falls back to the window border color for a neutral one-pixel split.
     pub pane_divider_color: Option<Color>,
     /// In dark appearance on a notched fullscreen display, paint the notch-integrated chrome
     /// (sidebar, status bar, and pane dividers) solid black.
@@ -256,11 +525,8 @@ pub struct SshProfileConfig {
     pub args: Vec<String>,
 }
 
-fn default_ssh_program() -> String {
-    "ssh".to_owned()
-}
-
 impl SshProfileConfig {
+    #[must_use]
     pub fn to_remote(&self) -> SshRemoteConfig {
         let mut args = Vec::new();
         if let Some(proxy_jump) = nonempty_owned(self.proxy_jump.as_deref()) {
@@ -342,7 +608,8 @@ pub enum KeybindPreset {
 impl KeybindPreset {
     pub const ALL: [Self; 3] = [Self::Ghostty, Self::Bootty, Self::Tmux];
 
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Bootty => "bootty",
             Self::Ghostty => "ghostty",
@@ -350,7 +617,8 @@ impl KeybindPreset {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Bootty => "Bootty",
             Self::Ghostty => "Ghostty",
@@ -358,11 +626,12 @@ impl KeybindPreset {
         }
     }
 
-    pub fn default_prefix(self) -> Option<&'static str> {
+    #[must_use]
+    pub const fn default_prefix(self) -> Option<&'static str> {
         match self {
-            Self::Bootty => Some("ctrl+space"),
+            Self::Bootty => Some(super::keybind_presets::BOOTTY_DEFAULT_PREFIX),
             Self::Ghostty => None,
-            Self::Tmux => Some("ctrl+b"),
+            Self::Tmux => Some(super::keybind_presets::TMUX_DEFAULT_PREFIX),
         }
     }
 }
@@ -387,15 +656,83 @@ pub struct BackendKeybindConfig {
     pub tmux: Vec<String>,
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum TerminalScrollbar {
+    #[default]
+    Auto,
+    Hover,
+    Always,
+    Never,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionConfig {
+    pub output_archives: bool,
+    pub clipboard_write_hosts: String,
+    pub bell: BellMode,
+    pub command_notifications: NotificationPolicy,
+    pub agent_notifications: NotificationPolicy,
+    pub command_notification_min_seconds: u32,
+    pub shell_integration: bool,
     pub shell: Option<String>,
     pub working_directory: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     pub term: String,
     pub colorterm: String,
     pub max_scrollback: usize,
+    pub scrollbar: TerminalScrollbar,
     pub glyph_protocol: bool,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum BellMode {
+    Off,
+    #[default]
+    Visual,
+    Audio,
+    Both,
+}
+
+impl BellMode {
+    #[must_use]
+    pub const fn visual(self) -> bool {
+        matches!(self, Self::Visual | Self::Both)
+    }
+    #[must_use]
+    pub const fn audio(self) -> bool {
+        matches!(self, Self::Audio | Self::Both)
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum NotificationPolicy {
+    Never,
+    #[default]
+    Unfocused,
+    Always,
+}
+
+impl NotificationPolicy {
+    #[must_use]
+    pub const fn allows(self, focused: bool) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Unfocused => !focused,
+            Self::Always => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -403,27 +740,41 @@ pub struct DiagnosticsConfig {
     pub stability_trace: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ColorConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor_text: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pointer_foreground: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pointer_background: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tektronix_foreground: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tektronix_background: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight_background: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tektronix_cursor: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub highlight_foreground: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_background: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_foreground: Option<Color>,
     pub palette: Vec<Color>,
     pub palette_generate: bool,
     pub palette_harmonious: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedTheme {
     pub info: ThemeInfo,
     pub colors: ColorConfig,
@@ -454,6 +805,8 @@ pub struct AppearanceConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppearanceBranchConfig {
     pub theme: Option<String>,
+    /// Selected theme before explicit overrides; the reset baseline for color editors.
+    pub theme_colors: ColorConfig,
     pub colors: ColorConfig,
 }
 
@@ -467,7 +820,7 @@ pub struct CursorConfig {
 impl Default for CursorConfig {
     fn default() -> Self {
         Self {
-            style: None,
+            style: Some(CursorStyleConfig::Block),
             blink: None,
             dim_inactive_pane: true,
         }
@@ -484,6 +837,7 @@ pub enum CursorStyleConfig {
 }
 
 impl FontConfig {
+    #[must_use]
     pub fn ui_families(&self) -> &[String] {
         if self.ui_use_terminal_family {
             &self.family
@@ -494,7 +848,8 @@ impl FontConfig {
 }
 
 impl AppearanceMode {
-    pub fn variant(self, system: AppearanceVariant) -> AppearanceVariant {
+    #[must_use]
+    pub const fn variant(self, system: AppearanceVariant) -> AppearanceVariant {
         match self {
             Self::System => system,
             Self::Light => AppearanceVariant::Light,
@@ -504,13 +859,15 @@ impl AppearanceMode {
 }
 
 impl BoottyConfig {
-    pub fn colors_for_appearance(&self, variant: AppearanceVariant) -> &ColorConfig {
+    #[must_use]
+    pub const fn colors_for_appearance(&self, variant: AppearanceVariant) -> &ColorConfig {
         match variant {
             AppearanceVariant::Light => &self.appearance.light.colors,
             AppearanceVariant::Dark => &self.appearance.dark.colors,
         }
     }
 
+    #[must_use]
     pub fn theme_for_appearance(&self, variant: AppearanceVariant) -> Option<&str> {
         match variant {
             AppearanceVariant::Light => self.appearance.light.theme.as_deref(),
@@ -519,6 +876,7 @@ impl BoottyConfig {
     }
 }
 impl InputConfig {
+    #[must_use]
     pub fn keybinds_for_backend(&self, backend: MultiplexerBackendConfig) -> Vec<String> {
         let mut keybinds = self.keybind.clone();
         let backend_keybinds = match backend {
@@ -533,6 +891,7 @@ impl InputConfig {
 
     /// The leader trigger prefixed chords are recorded and built with; `None` when the active
     /// preset has no prefix concept.
+    #[must_use]
     pub fn effective_prefix(&self) -> Option<String> {
         let default = self.preset.default_prefix()?;
         Some(
@@ -549,7 +908,8 @@ impl InputConfig {
         self.keybind = preset_global_keybinds(self.preset);
         self.sidebar_keybind = owned_keybinds(sidebar_keybinds());
         self.backend_keybinds = BackendKeybindConfig {
-            herdr: preset_layout_keybinds(self.preset, prefix.as_deref()),
+            // Herdr owns its complete client UI and keymap inside Bootty's terminal surface.
+            herdr: Vec::new(),
             native: preset_layout_keybinds(self.preset, prefix.as_deref()),
             rmux: preset_layout_keybinds(self.preset, prefix.as_deref()),
             tmux: preset_tmux_backend_keybinds(self.preset, prefix.as_deref()),
@@ -558,11 +918,8 @@ impl InputConfig {
 }
 
 impl WindowConfig {
-    pub fn native_fullscreen_enabled(&self) -> bool {
-        self.fullscreen == WindowFullscreen::Native
-    }
-
-    pub fn non_native_fullscreen_enabled(&self) -> bool {
+    #[must_use]
+    pub const fn uses_non_native_fullscreen_style(&self) -> bool {
         matches!(
             self.fullscreen,
             WindowFullscreen::NonNative
@@ -571,26 +928,110 @@ impl WindowConfig {
         )
     }
 
-    pub fn hides_macos_menu_bar_in_non_native_fullscreen(&self) -> bool {
+    #[must_use]
+    pub fn native_fullscreen_enabled(&self) -> bool {
+        self.fullscreen_enabled && self.fullscreen == WindowFullscreen::Native
+    }
+
+    #[must_use]
+    pub const fn non_native_fullscreen_enabled(&self) -> bool {
+        self.fullscreen_enabled && self.uses_non_native_fullscreen_style()
+    }
+
+    #[must_use]
+    pub const fn hides_macos_menu_bar_in_non_native_fullscreen(&self) -> bool {
         matches!(
             self.fullscreen,
             WindowFullscreen::NonNative | WindowFullscreen::NonNativePaddedNotch
         )
     }
 
+    #[must_use]
     pub fn decorations_enabled(&self) -> bool {
         self.window_decoration != WindowDecoration::None
             && self.macos_titlebar_style != MacosTitlebarStyle::Hidden
             && !self.non_native_fullscreen_enabled()
     }
 
+    #[must_use]
     pub fn custom_chrome_title_visible(&self) -> bool {
         self.macos_titlebar_style != MacosTitlebarStyle::Hidden
     }
 
+    #[must_use]
     pub fn reserves_macos_titlebar_button_area(&self) -> bool {
         cfg!(target_os = "macos")
             && self.decorations_enabled()
             && self.macos_titlebar_style == MacosTitlebarStyle::Transparent
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanelKind {
+    Sessions,
+    Files,
+    Changes,
+    Diff,
+    Agents,
+}
+impl PanelKind {
+    pub const ALL: [Self; 5] = [
+        Self::Sessions,
+        Self::Files,
+        Self::Changes,
+        Self::Diff,
+        Self::Agents,
+    ];
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sessions => "sessions",
+            Self::Files => "files",
+            Self::Changes => "changes",
+            Self::Diff => "diff",
+            Self::Agents => "agents",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PanelDock {
+    Left,
+    Right,
+    Bottom,
+}
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PanelButton {
+    #[default]
+    None,
+    Top,
+    Bottom,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
+pub struct PanelConfig {
+    pub dock: Option<PanelDock>,
+    pub button: PanelButton,
+}
+impl PanelConfig {
+    #[must_use]
+    pub fn dock(self, kind: PanelKind) -> PanelDock {
+        self.dock.unwrap_or(if kind == PanelKind::Sessions {
+            PanelDock::Left
+        } else {
+            PanelDock::Right
+        })
+    }
+}
+impl BoottyConfig {
+    #[must_use]
+    pub fn panel(&self, kind: PanelKind) -> PanelConfig {
+        self.panels.get(&kind).copied().unwrap_or_default()
     }
 }

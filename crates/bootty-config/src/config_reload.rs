@@ -17,6 +17,7 @@ pub struct ConfigHotReload {
 }
 
 impl ConfigHotReload {
+    #[must_use]
     pub fn new(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
@@ -38,6 +39,9 @@ impl ConfigHotReload {
         true
     }
 
+    ///
+    /// # Errors
+    /// Returns a file, include, TOML, or value-validation error from the new configuration.
     pub fn reload_config(&mut self) -> ConfigResult<BoottyConfig> {
         let attempt = load_config_attempt(&self.path);
         self.snapshot = attempt.snapshot;

@@ -1,53 +1,61 @@
 use super::model::{
     AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
-    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, SidebarPosition,
-    SshProfileConfig, SshRemoteConfig, StatusSegment, WindowDecoration, WindowFullscreen,
+    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
+    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SshProfileConfig,
+    StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct RawConfig {
-    #[serde(default)]
+    pub(super) locale: Option<String>,
     pub(super) version: Option<u32>,
-    #[serde(default)]
+    #[serde(rename = "restore_on_startup")]
+    pub(super) restore_on_startup: Option<RestoreOnStartup>,
+    #[serde(rename = "cli_default_open_behavior")]
+    pub(super) cli_default_open_behavior: Option<OpenBehavior>,
+    #[serde(rename = "default_open_behavior")]
+    pub(super) default_open_behavior: Option<OpenBehavior>,
+    #[serde(rename = "when_closing_with_no_tabs")]
+    pub(super) when_closing_with_no_tabs: Option<WhenClosingWithNoTabs>,
+    #[serde(rename = "on_last_window_closed")]
+    pub(super) on_last_window_closed: Option<OnLastWindowClosed>,
+    #[serde(rename = "auto_update")]
+    pub(super) _auto_update: Option<bool>,
     pub(super) theme: Option<String>,
-    #[serde(default)]
     pub(super) colors: ColorPatch,
-    #[serde(default)]
     pub(super) appearance: AppearancePatch,
-    #[serde(default)]
     pub(super) cursor: CursorPatch,
-    #[serde(default)]
     pub(super) font: FontPatch,
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_panels")]
+    pub(super) panels: BTreeMap<super::model::PanelKind, super::model::PanelConfig>,
     pub(super) font_feature: Vec<String>,
-    #[serde(default)]
     pub(super) chrome: ChromePatch,
-    #[serde(default)]
     pub(super) sidebar: SidebarPatch,
-    #[serde(default)]
     pub(super) multiplexer: MultiplexerPatch,
-    #[serde(default)]
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    #[serde(default)]
     pub(super) extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
-    #[serde(default)]
     pub(super) input: InputPatch,
-    #[serde(default)]
     pub(super) session: SessionPatch,
-    #[serde(default)]
     pub(super) diagnostics: DiagnosticsPatch,
-    #[serde(default)]
     pub(super) window: WindowPatch,
 }
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct WindowPatch {
+    pub(super) background_opacity: Option<f32>,
+    pub(super) background_image: Option<PathBuf>,
+    pub(super) background_image_opacity: Option<f32>,
+    pub(super) background_gradient_start: Option<Color>,
+    pub(super) background_gradient_end: Option<Color>,
+    pub(super) background_gradient_angle: Option<f32>,
+    pub(super) background_material: Option<super::model::BackgroundMaterial>,
     pub(super) title: Option<String>,
     pub(super) width: Option<f32>,
     pub(super) height: Option<f32>,
+    pub(super) fullscreen_enabled: Option<bool>,
     pub(super) fullscreen: Option<WindowFullscreen>,
     pub(super) fullscreen_top_offset: Option<f32>,
     pub(super) fullscreen_tabs_in_notch: Option<bool>,
@@ -58,7 +66,12 @@ pub(super) struct WindowPatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct FontPatch {
     pub(super) family: Option<Vec<String>>,
+    pub(super) style_bold: Option<crate::FontStyleAssignment>,
+    pub(super) style_italic: Option<crate::FontStyleAssignment>,
+    pub(super) style_bold_italic: Option<crate::FontStyleAssignment>,
     pub(super) ui_family: Option<Vec<String>>,
+    pub(super) ui_weights: Option<crate::FontWeightAssignments>,
+    pub(super) ui_size: Option<f32>,
     pub(super) ui_use_terminal_family: Option<bool>,
     pub(super) features: Option<Vec<String>>,
     pub(super) size: Option<f32>,
@@ -72,7 +85,21 @@ pub(super) struct FontPatch {
 }
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct TabPatch {
+    pub(super) appearance: Option<super::model::TabAppearance>,
+    pub(super) close_position: Option<super::model::TabClosePosition>,
+    pub(super) close_button: Option<super::model::TabCloseButton>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct ChromePatch {
+    pub(super) left_dock_toggle: Option<bool>,
+    pub(super) right_dock_toggle: Option<bool>,
+    pub(super) panel_tab_style: Option<PanelTabStyle>,
+    pub(super) panel_tabs: Option<PanelTabs>,
+    pub(super) dock_tabs: Option<TabPatch>,
+    pub(super) terminal_tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
     #[serde(alias = "status-bar")]
     pub(super) top_bar: Option<bool>,
@@ -117,9 +144,11 @@ pub(super) struct SidebarPatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct MultiplexerPatch {
     pub(super) backend: Option<MultiplexerBackendConfig>,
-    pub(super) herdr_session: Option<String>,
+    // Older builds exposed this unused setting. Herdr attaches the selected backend session.
+    #[serde(rename = "herdr-session")]
+    pub(super) _herdr_session: Option<String>,
     pub(super) hide_tmux_status: Option<bool>,
-    pub(super) remote: Option<SshRemoteConfig>,
+    pub(super) remote: Option<super::RemoteConfig>,
 }
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -146,12 +175,20 @@ pub(super) struct BackendKeybindPatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct SessionPatch {
+    pub(super) output_archives: Option<bool>,
+    pub(super) clipboard_write_hosts: Option<String>,
+    pub(super) bell: Option<super::model::BellMode>,
+    pub(super) command_notifications: Option<super::model::NotificationPolicy>,
+    pub(super) agent_notifications: Option<super::model::NotificationPolicy>,
+    pub(super) command_notification_min_seconds: Option<u32>,
+    pub(super) shell_integration: Option<bool>,
     pub(super) shell: Option<String>,
     pub(super) working_directory: Option<PathBuf>,
     pub(super) env: Option<Vec<EnvConfigEntry>>,
     pub(super) term: Option<String>,
     pub(super) colorterm: Option<String>,
     pub(super) max_scrollback: Option<usize>,
+    pub(super) scrollbar: Option<super::model::TerminalScrollbar>,
     pub(super) glyph_protocol: Option<bool>,
 }
 
@@ -295,4 +332,19 @@ fn parse_macos_titlebar_style(input: &str) -> Option<MacosTitlebarStyle> {
 
 fn normalize_config_value(input: &str) -> String {
     input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn deserialize_panels<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<super::model::PanelKind, super::model::PanelConfig>, D::Error> {
+    use serde::de::IntoDeserializer as _;
+    let panels = BTreeMap::<String, super::model::PanelConfig>::deserialize(deserializer)?;
+    panels
+        .into_iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "jobs" | "transfers" | "recovery" | "shell"))
+        .map(|(name, value)| {
+            let kind = super::model::PanelKind::deserialize(name.into_deserializer())?;
+            Ok((kind, value))
+        })
+        .collect()
 }

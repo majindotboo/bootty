@@ -24,6 +24,7 @@ pub struct AcceptedConfigDocument {
 }
 
 impl ConfigWriteOutcome {
+    #[must_use]
     pub fn durability_warning(&self) -> Option<&str> {
         match self {
             Self::Confirmed => None,
@@ -33,22 +34,37 @@ impl ConfigWriteOutcome {
 }
 
 impl ConfigDocument {
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_f32(&mut self, path: &[&str], value: f32) -> ConfigResult<()> {
         self.set_item(path, toml_edit::value(f64::from(value)))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_bool(&mut self, path: &[&str], value: bool) -> ConfigResult<()> {
         self.set_item(path, toml_edit::value(value))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_str(&mut self, path: &[&str], value: &str) -> ConfigResult<()> {
         self.set_item(path, toml_edit::value(value))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_i64(&mut self, path: &[&str], value: i64) -> ConfigResult<()> {
         self.set_item(path, toml_edit::value(value))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_strings(&mut self, path: &[&str], values: &[String]) -> ConfigResult<()> {
         let mut array = Array::new();
         for value in values {
@@ -57,6 +73,9 @@ impl ConfigDocument {
         self.set_item(path, toml_edit::value(array))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error for an empty path or a non-table parent.
     pub fn set_env(&mut self, path: &[&str], entries: &[(String, String)]) -> ConfigResult<()> {
         let mut array = Array::new();
         for (name, value) in entries {
@@ -68,11 +87,17 @@ impl ConfigDocument {
         self.set_item(path, toml_edit::value(array))
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the chrome parent is not a table.
     pub fn set_top_bar_enabled(&mut self, enabled: bool) -> ConfigResult<()> {
         self.remove(&["chrome", "status-bar"])?;
         self.set_bool(&["chrome", "top-bar"], enabled)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the chrome parent is not a table.
     pub fn set_top_status_segments(&mut self, segments: &[StatusSegment]) -> ConfigResult<()> {
         self.remove(&["chrome", "status-segment"])?;
         self.set_item(
@@ -81,6 +106,9 @@ impl ConfigDocument {
         )
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the chrome parent is not a table.
     pub fn set_bottom_status_segments(&mut self, segments: &[StatusSegment]) -> ConfigResult<()> {
         self.set_item(
             &["chrome", "bottom-segment"],
@@ -88,6 +116,9 @@ impl ConfigDocument {
         )
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the profile cannot be serialized or its parent is not a table.
     pub fn set_ssh_profile(&mut self, id: &str, profile: &SshProfileConfig) -> ConfigResult<()> {
         self.remove_ssh_profile(id)?;
         let mut serialized = toml_edit::ser::to_document(profile).map_err(|error| {
@@ -102,10 +133,16 @@ impl ConfigDocument {
         )
     }
 
+    ///
+    /// # Errors
+    /// Propagates any key-path error from [`Self::remove`].
     pub fn remove_ssh_profile(&mut self, id: &str) -> ConfigResult<()> {
         self.remove(&["ssh-profiles", id])
     }
 
+    ///
+    /// # Errors
+    /// Returns an error if the remote cannot be serialized or its parent is not a table.
     pub fn set_multiplexer_remote(&mut self, remote: &SshRemoteConfig) -> ConfigResult<()> {
         let serialized = toml_edit::ser::to_document(remote).map_err(|error| {
             ConfigLoadError::new(format!("failed to serialize default remote: {error}"))
@@ -116,6 +153,9 @@ impl ConfigDocument {
         )
     }
 
+    ///
+    /// # Errors
+    /// Propagates any key-path error from [`Self::remove`].
     pub fn remove_multiplexer_remote(&mut self) -> ConfigResult<()> {
         self.remove(&["multiplexer", "remote"])
     }
@@ -155,6 +195,9 @@ fn serialize_status_segments(segments: &[StatusSegment]) -> Array {
     array
 }
 
+///
+/// # Errors
+/// Returns an error if loading, mutation, locking, or atomic replacement fails.
 pub fn update_config_document(
     path: impl AsRef<Path>,
     mutate: impl FnOnce(&mut ConfigDocument) -> ConfigResult<()>,
@@ -178,6 +221,10 @@ pub fn update_config_document(
 /// Resolution, including includes and referenced themes, and the caller's application-specific
 /// validation finish before the first byte is replaced. On failure both the caller's accepted
 /// config and the file remain unchanged. The validator may return prepared publication state.
+///
+/// # Errors
+/// Returns an error if configuration resolution, caller validation, locking,
+/// or atomic replacement fails.
 pub fn commit_config_document<T>(
     path: impl AsRef<Path>,
     document: ConfigDocument,
@@ -244,6 +291,9 @@ fn replace_locked_document(
     Ok((document, write_outcome))
 }
 
+///
+/// # Errors
+/// Returns an error if the config cannot be loaded, edited, locked, or replaced.
 pub fn write_font_size_preference(
     path: impl AsRef<Path>,
     size: f32,

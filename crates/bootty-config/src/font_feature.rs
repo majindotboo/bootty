@@ -7,19 +7,23 @@ pub struct FontFeature {
 }
 
 impl FontFeature {
+    #[must_use]
     pub const fn new(tag: [u8; 4], value: u32) -> Self {
         Self { tag, value }
     }
 
+    #[must_use]
     pub fn parse(setting: &str) -> Option<Self> {
         let setting = setting.split_once(',').map_or(setting, |(head, _)| head);
         parse_font_feature_setting(setting)
     }
 
+    #[must_use]
     pub const fn tag(self) -> [u8; 4] {
         self.tag
     }
 
+    #[must_use]
     pub const fn value(self) -> u32 {
         self.value
     }
@@ -48,47 +52,34 @@ pub fn parse_font_features(settings: &str) -> Vec<FontFeature> {
 }
 
 fn parse_font_feature_setting(setting: &str) -> Option<FontFeature> {
-    let bytes = setting.as_bytes();
-    let mut index = skip_space(bytes, 0);
-    let mut prefixed_value = None;
-    match bytes.get(index).copied() {
-        Some(b'+') => {
-            prefixed_value = Some(1);
-            index += 1;
-        }
-        Some(b'-') => {
-            prefixed_value = Some(0);
-            index += 1;
-        }
-        _ => {}
-    }
-
+    let mut input = setting.trim_start_matches([' ', '\t']).as_bytes();
+    let prefixed_value = if let Some(rest) = input.strip_prefix(b"+") {
+        input = rest;
+        Some(1)
+    } else if let Some(rest) = input.strip_prefix(b"-") {
+        input = rest;
+        Some(0)
+    } else {
+        None
+    };
     let mut tag = [0_u8; 4];
-    let mut len = 0_usize;
-    while let Some(byte) = bytes.get(index).copied() {
-        if byte == b'\'' || byte == b'"' {
-            index += 1;
-            continue;
-        }
-        if len == 4 || byte == b' ' || byte == b'\t' || byte == b'=' || byte == b',' {
+    for slot in &mut tag {
+        loop {
+            let (&byte, rest) = input.split_first()?;
+            input = rest;
+            if matches!(byte, b'\'' | b'"') {
+                continue;
+            }
+            if matches!(byte, b' ' | b'\t' | b'=' | b',') {
+                return None;
+            }
+            *slot = byte;
             break;
         }
-        tag[len] = byte;
-        len += 1;
-        index += 1;
     }
-    if len != 4 {
-        return None;
-    }
-
-    let mut rest = &setting[index..];
-    loop {
-        let trimmed = rest.trim_start_matches([' ', '\t', '\'', '"']);
-        if trimmed.len() == rest.len() {
-            break;
-        }
-        rest = trimmed;
-    }
+    let rest = std::str::from_utf8(input)
+        .ok()?
+        .trim_start_matches([' ', '\t', '\'', '"']);
 
     let value = if let Some(value) = prefixed_value {
         if rest.trim_matches([' ', '\t']).is_empty() {
@@ -114,11 +105,4 @@ fn parse_font_feature_value(value: &str) -> Option<u32> {
         _ if value.bytes().all(|byte| byte.is_ascii_digit()) => value.parse().ok(),
         _ => None,
     }
-}
-
-fn skip_space(bytes: &[u8], mut index: usize) -> usize {
-    while matches!(bytes.get(index), Some(b' ' | b'\t')) {
-        index += 1;
-    }
-    index
 }

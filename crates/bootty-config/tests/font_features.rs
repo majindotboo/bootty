@@ -1,4 +1,4 @@
-use bootty_font::{FontFeature, parse_font_features};
+use bootty_config::{FontFeature, parse_font_features};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -31,6 +31,15 @@ fn rejects_malformed_or_overflowing_values(#[case] source: &str) {
 }
 
 proptest! {
+    /// Any valid Unicode setting is either parsed or rejected without panicking on a byte boundary.
+    #[test]
+    fn unicode_settings_are_total(
+        setting in prop::collection::vec(any::<char>(), 0..32)
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+    ) {
+        let _ = FontFeature::parse(&setting);
+    }
+
     /// A canonical numeric feature is a lossless representation of its tag and value.
     #[test]
     fn canonical_numeric_form_round_trips(

@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use bootty_identity::{
+use bootty_config::{
     ApplicationIdentity, DEVELOPMENT_NAMESPACE_ENV, development_names_for_workspace,
-    development_namespace_for_workspace,
+    development_namespace_for_workspace, keymap_path_from_env,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -16,7 +16,14 @@ fn development_names_are_stable_and_safe(#[case] root: &str) {
 
     assert_eq!(first, second);
     assert!(first.namespace().starts_with("bootty-dev-"));
-    assert_eq!(first.namespace().len(), "bootty-dev-".len() + 16);
+    assert_eq!(
+        first
+            .namespace()
+            .strip_prefix("bootty-dev-")
+            .expect("development prefix")
+            .len(),
+        16
+    );
     assert_eq!(first.cli_name(), first.namespace());
     assert!(first.display_name().starts_with("BoottyDev-"));
     assert!(
@@ -58,5 +65,27 @@ fn development_child_environment_carries_the_resolved_namespace() {
             DEVELOPMENT_NAMESPACE_ENV,
             ApplicationIdentity::Development.namespace()
         ))
+    );
+}
+
+#[rstest]
+fn keymap_path_uses_the_identity_config_tree() {
+    assert_eq!(
+        keymap_path_from_env(
+            ApplicationIdentity::Production,
+            Some(Path::new("/tmp/config")),
+            None::<&Path>,
+        ),
+        Path::new("/tmp/config/bootty/keymap.json")
+    );
+    assert_eq!(
+        keymap_path_from_env(
+            ApplicationIdentity::Development,
+            Some(Path::new("/tmp/config")),
+            None::<&Path>,
+        ),
+        Path::new("/tmp/config")
+            .join(ApplicationIdentity::Development.namespace())
+            .join("keymap.json")
     );
 }

@@ -1,10 +1,15 @@
 //! The built-in settings, as data.
 //!
 //! Adding a setting here is one entry. Its TOML path appears once, its fallback is read off the
-//! default config rather than copied, and its choice tokens come from the config enum's own
-//! `Serialize` impl, so a spec cannot drift from the parser.
+//! default config rather than copied, and choice tokens use infallible enum conversions.
+//! The schema round-trip tests verify that every choice agrees with the config loader.
 
-use crate::config::{MacosTitlebarStyle, SidebarPosition, WindowDecoration, WindowFullscreen};
+use num_traits::ToPrimitive as _;
+
+use crate::config::{
+    MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, RestoreOnStartup, WhenClosingWithNoTabs,
+    WindowDecoration, WindowFullscreen,
+};
 
 use super::{
     NumberControl, SettingDefault, SettingEditor, SettingKind, SettingOption, SettingSpec,
@@ -41,7 +46,7 @@ fn number(
     SettingKind::Number {
         range,
         control,
-        precision: 1,
+        precision: 2,
         suffix: suffix.into(),
         display_scale: 1.0,
     }
@@ -59,7 +64,7 @@ fn fraction(control: NumberControl) -> SettingKind {
     SettingKind::Number {
         range: 0.0..=1.0,
         control,
-        precision: 1,
+        precision: 2,
         suffix: "%".into(),
         display_scale: 100.0,
     }
@@ -84,19 +89,494 @@ fn custom(
 }
 
 /// Every accepted compatibility spelling that is not itself a settings-surface control.
-pub(super) fn compatibility_paths() -> &'static [&'static [&'static str]] {
+pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] {
     &[
+        // Retired panel preferences remain loadable but have no UI or runtime effect.
+        &["panels", "jobs", "dock"],
+        &["panels", "jobs", "button"],
+        &["panels", "transfers", "dock"],
+        &["panels", "transfers", "button"],
+        &["panels", "recovery", "dock"],
+        &["panels", "recovery", "button"],
+        &["panels", "shell", "dock"],
+        &["panels", "shell", "button"],
         &["font-feature"],
         &["chrome", "status-bar"],
         &["chrome", "status-segment"],
         &["chrome", "window-tabs"],
+        &["chrome", "sidebar"],
+        &["chrome", "sidebar-width"],
+        &["sidebar", "position"],
         &["sidebar", "fullscreen-background"],
         &["sidebar", "fullscreen-hover"],
+        &["multiplexer", "herdr-session"],
+        &["auto_update"],
     ]
 }
 
 pub(super) fn specs() -> Vec<SettingSpec> {
-    vec![
+    let mut specs = Vec::new();
+    specs.extend(dock_header_specs());
+    specs.extend(dock_tabs_specs());
+    specs.extend(terminal_tabs_specs());
+    specs.extend(interface_preferences_specs());
+    specs.extend(application_lifecycle_specs());
+    specs.extend(open_behavior_specs());
+    specs.extend(window_chrome_specs());
+    specs.extend(fullscreen_specs());
+    specs.extend(background_image_specs());
+    specs.extend(background_effects_specs());
+    specs.extend(window_size_specs());
+    specs.extend(pane_appearance_specs());
+    specs.extend(font_metrics_specs());
+    specs.extend(terminal_integration_specs());
+    specs.extend(notifications_specs());
+    specs.extend(terminal_environment_specs());
+    specs.extend(status_bar_specs());
+    specs.extend(diagnostics_specs());
+    specs.extend(themes_specs());
+    specs.extend(cursor_specs());
+    specs.extend(font_styles_specs());
+    specs.extend(custom_chrome_specs());
+    specs.extend(sidebar_specs());
+    specs.extend(backend_specs());
+    specs.extend(ssh_profiles_specs());
+    specs.extend(input_specs());
+    specs.extend(custom_runtime_specs());
+    specs.extend(font_weight_specs());
+    specs.extend(panel_specs());
+    specs
+}
+
+fn token<T: Copy + Into<&'static str>>(value: &T) -> String {
+    let token: &'static str = (*value).into();
+    token.to_owned()
+}
+
+fn font_weight_specs() -> impl Iterator<Item = SettingSpec> {
+    crate::FontWeightRole::ALL.into_iter().map(|role| SettingSpec {
+            path: vec!["font".into(), "ui-weights".into(), token(&role).into()],
+            label: format!("{} style", role.label()).into(),
+            help: "Automatic keeps this interface weight relative to the base font. A named style overrides it.".into(),
+            page: "text".into(),
+            section: "FONT".into(),
+            kind: SettingKind::FontStyle,
+            supersedes: Vec::new(),
+            default: SettingDefault::UiFontWeight(role),
+    })
+}
+
+fn panel_specs() -> Vec<SettingSpec> {
+    let mut specs = Vec::new();
+    macro_rules! panel {
+        ($kind:ident, $name:literal, $label:literal) => {
+            specs.push(spec(
+                &["panels", $name, "dock"],
+                "Dock",
+                "Where this panel opens.",
+                "panels",
+                $label,
+                SettingKind::Choice {
+                    options: [
+                        (&crate::config::PanelDock::Left, "Left"),
+                        (&crate::config::PanelDock::Right, "Right"),
+                        (&crate::config::PanelDock::Bottom, "Bottom"),
+                    ]
+                    .into_iter()
+                    .map(|(value, label)| SettingOption::of(value, label))
+                    .collect(),
+                },
+                SettingDefault::Field(|config| {
+                    SettingValue::Token(token(
+                        &config
+                            .panel(crate::config::PanelKind::$kind)
+                            .dock(crate::config::PanelKind::$kind),
+                    ))
+                }),
+            ));
+            specs.push(spec(
+                &["panels", $name, "button"],
+                "Status bar button",
+                "Show a button that toggles this panel.",
+                "panels",
+                $label,
+                SettingKind::Choice {
+                    options: [
+                        (&crate::config::PanelButton::None, "None"),
+                        (&crate::config::PanelButton::Top, "Top bar"),
+                        (&crate::config::PanelButton::Bottom, "Bottom bar"),
+                    ]
+                    .into_iter()
+                    .map(|(value, label)| SettingOption::of(value, label))
+                    .collect(),
+                },
+                SettingDefault::Field(|config| {
+                    SettingValue::Token(token(
+                        &config.panel(crate::config::PanelKind::$kind).button,
+                    ))
+                }),
+            ));
+        };
+    }
+    panel!(Sessions, "sessions", "Sessions");
+    panel!(Files, "files", "Files");
+    panel!(Changes, "changes", "Changes");
+    panel!(Diff, "diff", "Diff");
+    panel!(Agents, "agents", "Agents");
+    specs
+}
+
+fn dock_header_specs() -> [SettingSpec; 4] {
+    [
+        spec(
+            &["chrome", "left-dock-toggle"],
+            "Show left dock button",
+            "Hide the header button while keeping the dock command available.",
+            "appearance",
+            "DOCKS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.left_dock_toggle)),
+        ),
+        spec(
+            &["chrome", "right-dock-toggle"],
+            "Show right dock button",
+            "Hide the header button while keeping the dock command available.",
+            "appearance",
+            "DOCKS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.right_dock_toggle)),
+        ),
+        spec(
+            &["chrome", "panel-tab-style"],
+            "Fixed dock tab labels",
+            "Label style for tabs in the narrow left and right docks. Main Dock tabs use icons and text.",
+            "appearance",
+            "DOCKS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::described(
+                        &crate::config::PanelTabStyle::Icons,
+                        "Icons only",
+                        "Show icons; hover for panel names.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::PanelTabStyle::IconsAndText,
+                        "Icons and text",
+                        "Show each panel’s icon and name.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::PanelTabStyle::Text,
+                        "Text only",
+                        "Show panel names without icons.",
+                    ),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.panel_tab_style))
+            }),
+        ),
+        spec(
+            &["chrome", "panel-tabs"],
+            "Fixed dock tabs",
+            "Tab visibility for the fixed left and right docks. Main and bottom Dock tabs stay visible unless hidden for that group.",
+            "appearance",
+            "DOCKS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::described(
+                        &crate::config::PanelTabs::Automatic,
+                        "Hide for a single panel",
+                        "Show tabs only when a group has multiple panels.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::PanelTabs::Always,
+                        "Always show",
+                        "Keep tabs visible even for a single panel.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::PanelTabs::Never,
+                        "Always hide",
+                        "Hide tabs and switch panels with commands.",
+                    ),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.chrome.panel_tabs))),
+        ),
+    ]
+}
+
+fn dock_tabs_specs() -> [SettingSpec; 3] {
+    [
+        spec(
+            &["chrome", "dock-tabs", "appearance"],
+            "Tab style",
+            "Choose the appearance of dock tabs.",
+            "panels",
+            "DOCK TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
+                    SettingOption::of(&crate::config::TabAppearance::Underline, "Underline"),
+                    SettingOption::of(&crate::config::TabAppearance::Pill, "Pill"),
+                    SettingOption::of(&crate::config::TabAppearance::Outline, "Outline"),
+                    SettingOption::of(&crate::config::TabAppearance::Segmented, "Segmented"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.dock_tabs.appearance))
+            }),
+        ),
+        spec(
+            &["chrome", "dock-tabs", "close-position"],
+            "Close button side",
+            "Place the close button on the left or right side of each tab.",
+            "panels",
+            "DOCK TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
+                    SettingOption::of(&crate::config::TabClosePosition::Right, "Right"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.dock_tabs.close_position))
+            }),
+        ),
+        spec(
+            &["chrome", "dock-tabs", "close-button"],
+            "Show close button",
+            "Show close buttons always, on hover, or never.",
+            "panels",
+            "DOCK TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
+                    SettingOption::of(&crate::config::TabCloseButton::Hover, "On hover"),
+                    SettingOption::of(&crate::config::TabCloseButton::Hidden, "Hidden"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.dock_tabs.close_button))
+            }),
+        ),
+    ]
+}
+
+fn terminal_tabs_specs() -> [SettingSpec; 3] {
+    [
+        spec(
+            &["chrome", "terminal-tabs", "appearance"],
+            "Tab style",
+            "Choose the appearance of terminal tabs.",
+            "panels",
+            "TERMINAL TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
+                    SettingOption::of(&crate::config::TabAppearance::Underline, "Underline"),
+                    SettingOption::of(&crate::config::TabAppearance::Pill, "Pill"),
+                    SettingOption::of(&crate::config::TabAppearance::Outline, "Outline"),
+                    SettingOption::of(&crate::config::TabAppearance::Segmented, "Segmented"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.terminal_tabs.appearance))
+            }),
+        ),
+        spec(
+            &["chrome", "terminal-tabs", "close-position"],
+            "Close button side",
+            "Place the close button on the left or right side of each tab.",
+            "panels",
+            "TERMINAL TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
+                    SettingOption::of(&crate::config::TabClosePosition::Right, "Right"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.terminal_tabs.close_position))
+            }),
+        ),
+        spec(
+            &["chrome", "terminal-tabs", "close-button"],
+            "Show close button",
+            "Show close buttons always, on hover, or never.",
+            "panels",
+            "TERMINAL TABS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
+                    SettingOption::of(&crate::config::TabCloseButton::Hover, "On hover"),
+                    SettingOption::of(&crate::config::TabCloseButton::Hidden, "Hidden"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.chrome.terminal_tabs.close_button))
+            }),
+        ),
+    ]
+}
+
+fn interface_preferences_specs() -> [SettingSpec; 2] {
+    [
+        spec(
+            &["locale"],
+            "Language",
+            "Interface language tag. English (en) is the fallback; en-XA previews longer translated labels. Restart to update native menus.",
+            "general",
+            "LANGUAGE",
+            text("en", false),
+            SettingDefault::Field(|config| SettingValue::Text(config.locale.clone())),
+        ),
+        spec(
+            &["session", "scrollbar"],
+            "Show scrollbar",
+            "Show the terminal scrollbar while scrolling, on hover, always, or never.",
+            "shell",
+            "SCROLLBACK",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::described(
+                        &crate::config::TerminalScrollbar::Auto,
+                        "Auto",
+                        "Show while scrolling and hide when idle.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::TerminalScrollbar::Hover,
+                        "On hover",
+                        "Show when the pointer is over the scrollbar edge.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::TerminalScrollbar::Always,
+                        "Always",
+                        "Show whenever scrollback is available.",
+                    ),
+                    SettingOption::described(
+                        &crate::config::TerminalScrollbar::Never,
+                        "Never",
+                        "Hide the scrollbar; wheel and keyboard scrolling still work.",
+                    ),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.session.scrollbar))),
+        ),
+    ]
+}
+
+fn application_lifecycle_specs() -> [SettingSpec; 2] {
+    [
+        spec(
+            &["restore_on_startup"],
+            "Restore on startup",
+            "Choose which persisted Space selection Bootty restores when it starts.",
+            "general",
+            "STARTUP",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::described(
+                        &RestoreOnStartup::LastSession,
+                        "Last session",
+                        "Restore the Space selected for this application window.",
+                    ),
+                    SettingOption::described(
+                        &RestoreOnStartup::LastWorkspace,
+                        "Last workspace",
+                        "Restore the Space selected in the primary Bootty window.",
+                    ),
+                    SettingOption::described(
+                        &RestoreOnStartup::None,
+                        "None",
+                        "Open the first persisted Space instead of restoring a selection.",
+                    ),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.restore_on_startup))),
+        ),
+        spec(
+            &["on_last_window_closed"],
+            "On last window closed",
+            "Choose whether closing the last Bootty window also quits the application.",
+            "general",
+            "WINDOWS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::described(
+                        &OnLastWindowClosed::PlatformDefault,
+                        "Platform default",
+                        "Follow the operating system convention.",
+                    ),
+                    SettingOption::described(
+                        &OnLastWindowClosed::QuitApp,
+                        "Quit application",
+                        "Quit Bootty after its last window closes.",
+                    ),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.on_last_window_closed))
+            }),
+        ),
+    ]
+}
+
+fn open_behavior_specs() -> [SettingSpec; 3] {
+    [
+        spec(
+            &["cli_default_open_behavior"],
+            "CLI open behavior",
+            "Choose whether a second Bootty CLI launch reuses the running window or opens another one.",
+            "general",
+            "WINDOWS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&OpenBehavior::ExistingWindow, "Existing window"),
+                    SettingOption::of(&OpenBehavior::NewWindow, "New window"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.cli_default_open_behavior))
+            }),
+        ),
+        spec(
+            &["default_open_behavior"],
+            "Space open behavior",
+            "Choose whether opening a Space from the UI reuses this window or opens another one.",
+            "general",
+            "WINDOWS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&OpenBehavior::ExistingWindow, "Existing window"),
+                    SettingOption::of(&OpenBehavior::NewWindow, "New window"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.default_open_behavior))
+            }),
+        ),
+        spec(
+            &["when_closing_with_no_tabs"],
+            "When closing with no tabs",
+            "Choose what close active item does when the terminal has no remaining tab to close.",
+            "general",
+            "WINDOWS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&WhenClosingWithNoTabs::PlatformDefault, "Platform default"),
+                    SettingOption::of(&WhenClosingWithNoTabs::CloseWindow, "Close window"),
+                    SettingOption::of(&WhenClosingWithNoTabs::KeepWindowOpen, "Keep window open"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.when_closing_with_no_tabs))
+            }),
+        ),
+    ]
+}
+
+fn window_chrome_specs() -> [SettingSpec; 3] {
+    [
         spec(
             &["window", "title"],
             "Title",
@@ -157,19 +637,28 @@ pub(super) fn specs() -> Vec<SettingSpec> {
                 SettingValue::Token(token(&config.window.window_decoration))
             }),
         ),
+    ]
+}
+
+fn fullscreen_specs() -> [SettingSpec; 2] {
+    [
+        spec(
+            &["window", "fullscreen-enabled"],
+            "Fullscreen on launch",
+            "Start Bootty in the selected fullscreen style.",
+            "window",
+            "WINDOW",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.window.fullscreen_enabled)),
+        ),
         spec(
             &["window", "fullscreen"],
-            "Fullscreen mode",
-            "Controls native fullscreen and notch-aware non-native modes.",
+            "Fullscreen style",
+            "Selects native fullscreen or a notch-aware borderless mode.",
             "window",
             "WINDOW",
             SettingKind::Choice {
                 options: vec![
-                    SettingOption::described(
-                        &WindowFullscreen::Disabled,
-                        "Disabled",
-                        "Never enter fullscreen.",
-                    ),
                     SettingOption::described(
                         &WindowFullscreen::Native,
                         "Native",
@@ -194,6 +683,139 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             },
             SettingDefault::Field(|config| SettingValue::Token(token(&config.window.fullscreen))),
         ),
+    ]
+}
+
+fn background_image_specs() -> [SettingSpec; 3] {
+    [
+        spec(
+            &["window", "background-opacity"],
+            "Terminal background opacity",
+            "Text and explicit application colors remain opaque.",
+            "appearance",
+            "BACKGROUND",
+            fraction(NumberControl::Slider),
+            SettingDefault::Field(|config| SettingValue::Number(config.window.background_opacity)),
+        ),
+        spec(
+            &["window", "background-image"],
+            "Background image",
+            "Local path, relative to the configuration directory. Lower terminal background opacity to reveal it.",
+            "appearance",
+            "BACKGROUND",
+            text("Local image path", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(
+                    config
+                        .window
+                        .background_image
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            }),
+        ),
+        spec(
+            &["window", "background-image-opacity"],
+            "Image opacity",
+            "Blend the image over the gradient or desktop.",
+            "appearance",
+            "BACKGROUND",
+            fraction(NumberControl::Slider),
+            SettingDefault::Field(|config| {
+                SettingValue::Number(config.window.background_image_opacity)
+            }),
+        ),
+    ]
+}
+
+fn background_effects_specs() -> [SettingSpec; 4] {
+    [
+        spec(
+            &["window", "background-gradient-start"],
+            "Gradient start",
+            "Optional #RRGGBB or #RRGGBBAA. Both ends enable the gradient.",
+            "appearance",
+            "BACKGROUND",
+            text("#RRGGBBAA", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(
+                    config
+                        .window
+                        .background_gradient_start
+                        .map(|color| {
+                            format!(
+                                "#{:02X}{:02X}{:02X}{:02X}",
+                                color.r, color.g, color.b, color.a
+                            )
+                        })
+                        .unwrap_or_default(),
+                )
+            }),
+        ),
+        spec(
+            &["window", "background-gradient-end"],
+            "Gradient end",
+            "Optional #RRGGBB or #RRGGBBAA. Both ends enable the gradient.",
+            "appearance",
+            "BACKGROUND",
+            text("#RRGGBBAA", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(
+                    config
+                        .window
+                        .background_gradient_end
+                        .map(|color| {
+                            format!(
+                                "#{:02X}{:02X}{:02X}{:02X}",
+                                color.r, color.g, color.b, color.a
+                            )
+                        })
+                        .unwrap_or_default(),
+                )
+            }),
+        ),
+        spec(
+            &["window", "background-gradient-angle"],
+            "Gradient angle",
+            "Clockwise degrees, from 0 to 360.",
+            "appearance",
+            "BACKGROUND",
+            number(0.0..=360.0, NumberControl::Edit, "°"),
+            SettingDefault::Field(|config| {
+                SettingValue::Number(config.window.background_gradient_angle)
+            }),
+        ),
+        spec(
+            &["window", "background-material"],
+            "Window material",
+            "Blur depends on the compositor; Mica requires Windows 11. Other platforms fall back to transparency.",
+            "appearance",
+            "BACKGROUND",
+            SettingKind::Choice {
+                options: [
+                    (crate::config::BackgroundMaterial::Opaque, "Opaque"),
+                    (
+                        crate::config::BackgroundMaterial::Transparent,
+                        "Transparent",
+                    ),
+                    (crate::config::BackgroundMaterial::Blurred, "Blurred"),
+                    (crate::config::BackgroundMaterial::Mica, "Mica"),
+                    (crate::config::BackgroundMaterial::MicaAlt, "Mica Alt"),
+                ]
+                .into_iter()
+                .map(|(value, label)| SettingOption::of(&value, label))
+                .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.window.background_material))
+            }),
+        ),
+    ]
+}
+
+fn window_size_specs() -> [SettingSpec; 3] {
+    [
         spec(
             &["window", "width"],
             "Width",
@@ -223,6 +845,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
                 SettingValue::Bool(config.window.fullscreen_tabs_in_notch)
             }),
         ),
+    ]
+}
+
+fn pane_appearance_specs() -> [SettingSpec; 6] {
+    [
         spec(
             &["chrome", "gap"],
             "Chrome gap",
@@ -246,7 +873,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
         spec(
             &["chrome", "unfocused-terminal-dim"],
             "Inactive terminal dim",
-            "Opacity reduction when the window is not focused.",
+            "Dark overlay applied to unfocused split panes.",
             "window",
             "CHROME",
             fraction(NumberControl::Slider),
@@ -283,6 +910,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             number(0.0..=40.0, NumberControl::Slider, " px"),
             SettingDefault::Field(|config| SettingValue::Number(config.chrome.pane_corner_radius)),
         ),
+    ]
+}
+
+fn font_metrics_specs() -> [SettingSpec; 7] {
+    [
         spec(
             &["font", "size"],
             "Font size",
@@ -291,6 +923,15 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "TERMINAL METRICS",
             number(6.0..=48.0, NumberControl::Slider, "pt"),
             SettingDefault::Field(|config| SettingValue::Number(config.font.size)),
+        ),
+        spec(
+            &["font", "ui-size"],
+            "UI font size",
+            "Text size for Bootty chrome, extensions, the sidebar, and the status bar.",
+            "text",
+            "FONT",
+            number(6.0..=48.0, NumberControl::Slider, "px"),
+            SettingDefault::Field(|config| SettingValue::Number(config.font.ui_size)),
         ),
         spec(
             &["font", "fit-cell-height"],
@@ -313,7 +954,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
         spec(
             &["font", "baseline-adjustment"],
             "Baseline adjustment",
-            "Move glyphs up or down inside each cell.",
+            "Move glyphs up or down in logical pixels; positive values move them up.",
             "text",
             "GLYPH BEHAVIOR",
             number(-12.0..=12.0, NumberControl::Slider, "px"),
@@ -337,6 +978,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             number(0.0..=8.0, NumberControl::Slider, "px"),
             SettingDefault::Field(|config| SettingValue::Number(config.font.underline_thickness)),
         ),
+    ]
+}
+
+fn terminal_integration_specs() -> [SettingSpec; 4] {
+    [
         spec(
             &["session", "shell"],
             "Shell",
@@ -348,6 +994,124 @@ pub(super) fn specs() -> Vec<SettingSpec> {
                 SettingValue::Text(config.session.shell.clone().unwrap_or_default())
             }),
         ),
+        spec(
+            &["session", "shell-integration"],
+            "Shell integration",
+            "Add command lifecycle and directory hooks to new supported shells. Does not change shell editing or rc files.",
+            "shell",
+            "SHELL",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.session.shell_integration)),
+        ),
+        spec(
+            &["session", "output-archives"],
+            "Save terminal output",
+            "Checkpoint attached panes every 30 seconds for previous-session browsing. May retain sensitive output. Keeps 32 archives per window.",
+            "shell",
+            "RECOVERY",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.session.output_archives)),
+        ),
+        spec(
+            &["session", "clipboard-write-hosts"],
+            "Image clipboard hosts",
+            "Space-separated host keys allowed to replace the clipboard: local, ssh:user@host:port, wsl:distribution. Empty denies all.",
+            "shell",
+            "CLIPBOARD",
+            text("", false),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(config.session.clipboard_write_hosts.clone())
+            }),
+        ),
+    ]
+}
+
+fn notifications_specs() -> [SettingSpec; 4] {
+    [
+        spec(
+            &["session", "bell"],
+            "Terminal bell",
+            "Choose visual, system audio, both, or no bell.",
+            "shell",
+            "NOTIFICATIONS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::BellMode::Off, "Off"),
+                    SettingOption::of(&crate::config::BellMode::Visual, "Visual"),
+                    SettingOption::of(&crate::config::BellMode::Audio, "Audio"),
+                    SettingOption::of(&crate::config::BellMode::Both, "Both"),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.session.bell))),
+        ),
+        spec(
+            &["session", "agent-notifications"],
+            "Agent attention",
+            "Notify when an agent completes, needs input or reports an error.",
+            "general",
+            "NOTIFICATIONS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::NotificationPolicy::Never, "Never"),
+                    SettingOption::of(
+                        &crate::config::NotificationPolicy::Unfocused,
+                        "When unfocused",
+                    ),
+                    SettingOption::of(&crate::config::NotificationPolicy::Always, "Always"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.session.agent_notifications))
+            }),
+        ),
+        spec(
+            &["session", "command-notifications"],
+            "Command finished",
+            "Notify when a shell-reported command finishes. Unfocused includes another pane or Space.",
+            "shell",
+            "NOTIFICATIONS",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&crate::config::NotificationPolicy::Never, "Never"),
+                    SettingOption::of(
+                        &crate::config::NotificationPolicy::Unfocused,
+                        "When unfocused",
+                    ),
+                    SettingOption::of(&crate::config::NotificationPolicy::Always, "Always"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.session.command_notifications))
+            }),
+        ),
+        spec(
+            &["session", "command-notification-min-seconds"],
+            "Minimum command duration",
+            "Only notify for commands lasting at least this many seconds.",
+            "shell",
+            "NOTIFICATIONS",
+            SettingKind::Number {
+                range: 0.0..=86400.0,
+                control: NumberControl::Edit,
+                precision: 0,
+                suffix: "s".into(),
+                display_scale: 1.0,
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Number(
+                    config
+                        .session
+                        .command_notification_min_seconds
+                        .to_f32()
+                        .unwrap_or(f32::MAX),
+                )
+            }),
+        ),
+    ]
+}
+
+fn terminal_environment_specs() -> [SettingSpec; 4] {
+    [
         spec(
             &["session", "working-directory"],
             "Working directory",
@@ -393,29 +1157,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.session.glyph_protocol)),
         ),
-        spec(
-            &["sidebar", "position"],
-            "Position",
-            "Dock the sidebar on the left or right edge.",
-            "sidebar",
-            "NAVIGATION",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&SidebarPosition::Left, "left"),
-                    SettingOption::of(&SidebarPosition::Right, "right"),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.sidebar.position))),
-        ),
-        spec(
-            &["chrome", "sidebar-width"],
-            "Width",
-            "Width of the session sidebar.",
-            "sidebar",
-            "NAVIGATION",
-            number(120.0..=600.0, NumberControl::Slider, " px"),
-            SettingDefault::Field(|config| SettingValue::Number(config.chrome.sidebar_width)),
-        ),
+    ]
+}
+
+fn status_bar_specs() -> [SettingSpec; 3] {
+    [
         spec(
             &["chrome", "bottom-bar"],
             "Bottom bar",
@@ -435,17 +1181,6 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             SettingDefault::Field(|config| SettingValue::Number(config.chrome.status_height)),
         ),
         spec(
-            &["multiplexer", "herdr-session"],
-            "Herdr session",
-            "Named Herdr server session whose workspaces and panes Bootty renders.",
-            "general",
-            "MULTIPLEXER",
-            text("default", false),
-            SettingDefault::Field(|config| {
-                SettingValue::Text(config.multiplexer.herdr_session.clone())
-            }),
-        ),
-        spec(
             &["multiplexer", "hide-tmux-status"],
             "Hide tmux's own bar",
             "Avoid duplicate status bars when the tmux backend is active.",
@@ -454,24 +1189,32 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.multiplexer.hide_tmux_status)),
         ),
-        spec(
-            &["diagnostics", "stability-trace"],
-            "Stability trace",
-            "Writes frame-timing diagnostics to this file. Leave empty to disable.",
-            "diagnostics",
-            "TRACE",
-            text("path to trace log", true),
-            SettingDefault::Field(|config| {
-                SettingValue::Text(
-                    config
-                        .diagnostics
-                        .stability_trace
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default(),
-                )
-            }),
-        ),
+    ]
+}
+
+fn diagnostics_specs() -> [SettingSpec; 1] {
+    [spec(
+        &["diagnostics", "stability-trace"],
+        "Stability trace",
+        "Writes frame-timing diagnostics to this file. Leave empty to disable.",
+        "diagnostics",
+        "TRACE",
+        text("path to trace log", true),
+        SettingDefault::Field(|config| {
+            SettingValue::Text(
+                config
+                    .diagnostics
+                    .stability_trace
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            )
+        }),
+    )]
+}
+
+fn themes_specs() -> [SettingSpec; 7] {
+    [
         custom(&["theme"], "colors", "THEME", SettingEditor::Colors),
         custom(&["colors", "*"], "colors", "COLORS", SettingEditor::Colors),
         custom(
@@ -504,17 +1247,27 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "COLORS",
             SettingEditor::Colors,
         ),
+    ]
+}
+
+fn cursor_specs() -> [SettingSpec; 3] {
+    [
         custom(
             &["cursor", "style"],
             "appearance",
             "CURSOR",
             SettingEditor::Appearance,
         ),
-        custom(
+        spec(
             &["cursor", "blink"],
+            "Blink cursor",
+            "Make the default cursor blink.",
             "appearance",
             "CURSOR",
-            SettingEditor::Appearance,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.cursor.blink.unwrap_or(false))
+            }),
         ),
         spec(
             &["cursor", "dim-inactive-pane"],
@@ -525,7 +1278,39 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.cursor.dim_inactive_pane)),
         ),
+    ]
+}
+
+fn font_styles_specs() -> [SettingSpec; 9] {
+    [
         custom(&["font", "family"], "text", "FONT", SettingEditor::Text),
+        spec(
+            &["font", "style-bold"],
+            "Bold style",
+            "Automatic follows the base weight. Choose a named font style to override bold text.",
+            "text",
+            "FONT",
+            SettingKind::FontStyle,
+            SettingDefault::Field(|config| (&config.font.style_bold).into()),
+        ),
+        spec(
+            &["font", "style-italic"],
+            "Italic style",
+            "Automatic keeps the base weight and selects its italic style.",
+            "text",
+            "FONT",
+            SettingKind::FontStyle,
+            SettingDefault::Field(|config| (&config.font.style_italic).into()),
+        ),
+        spec(
+            &["font", "style-bold-italic"],
+            "Bold italic style",
+            "Automatic follows the base weight and selects an italic style for bold italic text.",
+            "text",
+            "FONT",
+            SettingKind::FontStyle,
+            SettingDefault::Field(|config| (&config.font.style_bold_italic).into()),
+        ),
         custom(&["font", "ui-family"], "text", "FONT", SettingEditor::Text),
         custom(
             &["font", "ui-use-terminal-family"],
@@ -551,12 +1336,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "TERMINAL METRICS",
             SettingEditor::Text,
         ),
-        custom(
-            &["chrome", "sidebar"],
-            "general",
-            "CHROME",
-            SettingEditor::General,
-        ),
+    ]
+}
+
+fn custom_chrome_specs() -> [SettingSpec; 7] {
+    [
         custom(
             &["chrome", "top-bar"],
             "status",
@@ -599,6 +1383,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "SEGMENTS",
             SettingEditor::Status,
         ),
+    ]
+}
+
+fn sidebar_specs() -> [SettingSpec; 7] {
+    [
         custom(
             &["sidebar", "background"],
             "colors",
@@ -641,11 +1430,22 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "MODULES",
             SettingEditor::Sidebar,
         ),
+    ]
+}
+
+fn backend_specs() -> [SettingSpec; 7] {
+    [
         custom(
             &["multiplexer", "backend"],
             "general",
             "MULTIPLEXER",
             SettingEditor::General,
+        ),
+        custom(
+            &["multiplexer", "remote", "distribution"],
+            "remotes",
+            "DEFAULT REMOTE",
+            SettingEditor::Remotes,
         ),
         custom(
             &["multiplexer", "remote", "host"],
@@ -677,6 +1477,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "DEFAULT REMOTE",
             SettingEditor::Remotes,
         ),
+    ]
+}
+
+fn ssh_profiles_specs() -> [SettingSpec; 10] {
+    [
         custom(
             &["ssh-profiles", "*", "name"],
             "remotes",
@@ -737,6 +1542,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "SSH PROFILES",
             SettingEditor::Remotes,
         ),
+    ]
+}
+
+fn input_specs() -> [SettingSpec; 12] {
+    [
         custom(
             &["input", "modifier-remap"],
             "keys",
@@ -809,6 +1619,11 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             "KEYBINDS",
             SettingEditor::Keys,
         ),
+    ]
+}
+
+fn custom_runtime_specs() -> [SettingSpec; 4] {
+    [
         custom(
             &["session", "env"],
             "shell",
@@ -834,8 +1649,4 @@ pub(super) fn specs() -> Vec<SettingSpec> {
             SettingEditor::Extensions,
         ),
     ]
-}
-
-fn token<T: serde::Serialize>(value: &T) -> String {
-    crate::config::config_token(value).expect("config enum token")
 }

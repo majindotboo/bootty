@@ -9,8 +9,13 @@ pub struct Color {
 }
 
 impl Color {
+    /// Parse an RGB or RGBA hexadecimal color.
+    ///
+    /// # Errors
+    /// Returns an error for a value other than six or eight hexadecimal digits.
     pub fn from_hex(input: &str) -> Result<Self, String> {
-        let hex = input.trim().strip_prefix('#').unwrap_or(input.trim());
+        let input = input.trim();
+        let hex = input.strip_prefix('#').unwrap_or(input);
         if !matches!(hex.len(), 6 | 8) {
             return Err(format!(
                 "expected #RRGGBB or #RRGGBBAA color, got {input:?}"
@@ -18,17 +23,13 @@ impl Color {
         }
         let value = u32::from_str_radix(hex, 16)
             .map_err(|_| format!("expected #RRGGBB or #RRGGBBAA color, got {input:?}"))?;
-        let (rgb, a) = if hex.len() == 8 {
-            (value >> 8, (value & 0xff) as u8)
+        let [first, second, third, fourth] = value.to_be_bytes();
+        let [r, g, b, a] = if hex.len() == 8 {
+            [first, second, third, fourth]
         } else {
-            (value, 0xff)
+            [second, third, fourth, 0xff]
         };
-        Ok(Self {
-            r: ((rgb >> 16) & 0xff) as u8,
-            g: ((rgb >> 8) & 0xff) as u8,
-            b: (rgb & 0xff) as u8,
-            a,
-        })
+        Ok(Self { r, g, b, a })
     }
 }
 
@@ -39,5 +40,16 @@ impl<'de> Deserialize<'de> for Color {
     {
         let value = String::deserialize(deserializer)?;
         Self::from_hex(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = if self.a == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
+        };
+        serializer.serialize_str(&value)
     }
 }

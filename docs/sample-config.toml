@@ -6,6 +6,14 @@
 # by executable Bootty behavior.
 
 version = 1
+locale = "en"
+
+# Application lifecycle. These names and defaults follow Zed; the restored unit is a Bootty Space.
+restore_on_startup = "last_session" # last_session, last_workspace, none
+cli_default_open_behavior = "existing_window" # existing_window, new_window
+default_open_behavior = "existing_window" # existing_window, new_window
+when_closing_with_no_tabs = "platform_default" # platform_default, close_window, keep_window_open
+on_last_window_closed = "platform_default" # platform_default, quit_app
 
 # Includes are applied after this file, so local overrides can replace values
 # below. The leading ? makes this include optional.
@@ -15,22 +23,32 @@ include = [
 ]
 
 # Built-ins today:
-#   Catppuccin Mocha
-#   Catppuccin Latte
+#   One Dark
+#   One Light
 #   TokyoNight Night
 #   Gruvbox Dark
 #
 # User themes are loaded from themes/<name>.toml or themes/<name>/theme.toml
 # next to this config file before falling back to the built-in catalog.
-theme = "Catppuccin Mocha"
+theme = "One Dark"
 
 [window]
+background-opacity = 1.0
+background-image-opacity = 1.0
+background-gradient-angle = 180.0
+background-material = "opaque" # opaque, transparent, blurred, mica, mica-alt
+# Lower background-opacity to reveal the image, gradient or desktop.
+# background-image = "wallpaper.png" # relative to this configuration directory
+# background-gradient-start = "#101828FF"
+# background-gradient-end = "#304868FF"
 # Title/fullscreen/decorations are live-reloaded where supported.
 # Width/height and macOS titlebar style are startup/new-window settings.
 title = "Bootty"
 width = 1220
 height = 760
-fullscreen = false
+# The style is retained when fullscreen is toggled off so the next toggle/restart restores it.
+fullscreen = "native"
+fullscreen-enabled = false
 window-decoration = "auto"
 macos-titlebar-style = "transparent"
 # Top offset reserved when the window covers a notched screen in fullscreen, so the sidebar and
@@ -44,37 +62,59 @@ fullscreen-tabs-in-notch = true
 
 [font]
 # Live-reloaded terminal text metrics.
-family = ["monospace"]
+family = [".ZedMono"] # Bundled Lilex, matching Zed's virtual font name.
 size = 15
+baseline-adjustment = 0 # Optional vertical text offset in logical pixels.
+ui-family = [".ZedSans"] # Bundled IBM Plex Sans for all non-terminal UI.
+ui-size = 16
+# Named styles advertised by the terminal family, "auto" for relative weights,
+# or false to use the base style. Missing named styles also use the base.
+style-bold = "auto"
+style-italic = "auto"
+style-bold-italic = "auto"
 # Optional fixed cell metric overrides; omit to derive from font size.
 # cell-width = 10
 # cell-height = 22
 # Enabled by default: stretch row spacing slightly so the terminal grid fills the available height.
 fit-cell-height = true
 
+# Assign an available named style to each UI weight role. Automatic preserves
+# the offset from the selected UI base style; false uses the base style.
+[font.ui-weights]
+thin = "auto"
+extra-light = "auto"
+light = "auto"
+normal = "auto"
+medium = "auto"
+semibold = "auto"
+bold = "auto"
+extra-bold = "auto"
+black = "auto"
+
 [chrome]
+left-dock-toggle = true
+right-dock-toggle = true
+panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text
+# Controls single-panel tabs only in the fixed left/right docks. Main and bottom tabs stay visible.
+panel-tabs = "automatic" # automatic, always, never
 # Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
 # independently when its configured modules should be visible.
-sidebar = true
 top-bar = true
 bottom-bar = false
-sidebar-width = 286
 status-height = 30
 # status-background = "#11131a"
 # In dark mode on notched fullscreen displays, use solid black for sidebar,
 # top/bottom bars, and split dividers so the notch band blends into the screen.
 notched-fullscreen-black-chrome = true
-gap = 1
+gap = 0
 # Dim inactive panes by overlay opacity in the 0.0-1.0 range.
 unfocused-sidebar-dim = 0.16
-unfocused-terminal-dim = 0.08
+unfocused-terminal-dim = 0.0
 
-# Top- and bottom-bar segments are each composed left/center/right. Each segment names a Luau
-# module: a built-in (session, windows, clock, sysinfo) or a *.luau file stem under
-# ~/.config/bootty/status/. Built-ins are overridable by a same-named file. Only referenced modules
-# in visible bars run. Items carry an optional lucide icon slug (rendered as an SVG via the sidebar
-# icon set, not a glyph font) and fg/bg fills the module leaves unset. The session/windows built-ins
-# tint with the session's sidebar color via bootty.session_color(); see docs/status/.
+# Top- and bottom-bar segments are composed left/center/right. Each segment names
+# a native module: session, windows, clock, or sysinfo. Session and window tabs
+# use the session's sidebar color. Custom Lua/Luau modules are unsupported;
+# existing files and configuration remain intact and Settings reports them.
 [[chrome.top-segment]]
 align = "left"
 module = "session"
@@ -96,11 +136,19 @@ module = "clock"
 # align = "right"
 # module = "clock"
 
+[chrome.dock-tabs]
+appearance = "segmented" # classic, underline, pill, outline, segmented
+close-position = "right" # left, right
+close-button = "hover" # always, hover, hidden
+
+[chrome.terminal-tabs]
+appearance = "classic"
+close-position = "right"
+close-button = "always"
+
 [sidebar]
-# Sidebar placement and color overrides. Drag the sidebar's inner edge to resize
-# (writes back to chrome.sidebar-width). Colors layer on top of the active theme;
-# any unset slot falls back to the theme-derived value.
-position = "left" # or "right"
+# Sessions colors layer on top of the active theme.
+# Any unset slot falls back to the theme-derived value.
 # background = "#11131a"
 # foreground = "#cdd6f4"
 # selected = "#2a2f3d" # active session row tint
@@ -112,10 +160,9 @@ position = "left" # or "right"
 
 [multiplexer]
 # native keeps mux state and terminals inside Bootty. rmux renders through
-# rmux-sdk. herdr and tmux attach through their own backend UIs.
+# rmux-sdk. herdr 0.8+ and tmux attach through their own backend UIs. Herdr keeps
+# every inner workspace, tab, pane, process, and agent fact inside Herdr.
 backend = "native"
-# Herdr backend only: select the named Herdr server used by its stock client.
-herdr-session = "default"
 # tmux backend only: hide tmux's own status bar inside Bootty's client by
 # toggling the attached session's status option off (restored on detach), so
 # Bootty's native status bar is the only one shown. Session-scoped and
@@ -128,18 +175,39 @@ hide-tmux-status = false
 # Herdr must already be installed there. Bootty automatically installs its
 # small headless daemon when remote Space catalog operations need it. The full
 # Bootty app is not required on the remote host.
+# On Windows, a WSL target replaces the entire SSH table below:
+# [multiplexer.remote]
+# distribution = "Ubuntu" # requires backend = "rmux" or "tmux"
+# Do not combine distribution with SSH fields.
 # [multiplexer.remote]
 # host = "devbox"       # ~/.ssh/config alias, hostname, or address
 # user = "dev"         # when ~/.ssh/config does not name one
+# Herdr remote UI reads advanced connection settings from ~/.ssh/config. Its
+# backend rejects port, program, and args here because Herdr cannot represent them.
 # port = 2222           # when ~/.ssh/config does not name one
 # program = "ssh"       # the SSH client to run
 # args = ["-i", "~/.ssh/devbox"] # extra flags, passed before the destination
 
 [input]
-# Active keybinds must use executable Bootty actions. Unsupported actions are
-# rejected during startup/reload instead of being silently accepted.
+# Preferred user overrides live in the identity-scoped keymap.json beside this
+# file. It is a JSONC array of { context, use_key_equivalents,
+# use_builtin_defaults, unbind, bindings } sections; comments and trailing
+# commas are allowed. For example, keymap.json may contain:
+#   [
+#     {
+#       "context": "Terminal",
+#       "use_builtin_defaults": false,
+#       "bindings": { "ctrl-k": "new_tab" }
+#     },
+#   ]
+# Bootty resolves the preset and compatibility arrays below first, then applies
+# keymap.json last. Existing TOML arrays remain supported and live-reloaded; new
+# edits should use the Keymap editor or keymap.json.
 #
-# Trigger syntax:
+# Active keybinds in either layer must use executable Bootty actions. Unsupported
+# actions are diagnosed instead of being silently accepted.
+#
+# Compatibility TOML trigger syntax:
 #   modifiers: shift, ctrl/control, alt/opt/option, cmd/command/super
 #   examples: cmd+shift+,, ctrl+c, alt+ArrowUp, shift+Tab
 #   supported physical names today: KeyA, KeyB, KeyC, Digit0, ArrowUp,
@@ -167,6 +235,7 @@ keybind = [
   "cmd+n=new_mux_session",
   "cmd+p=session_picker",
   "cmd+o=toggle_sidebar_focus",
+  "cmd+shift+j=focus_terminal",
   "cmd+shift+e=toggle_sidebar_visibility",
   "ctrl+tab=last_session",
   "ctrl+shift+Tab=last_session",
@@ -191,6 +260,7 @@ keybind = [
 # Sidebar-local keybinds apply only while the sidebar owns keyboard focus.
 # Enter activates the hovered session and returns focus to the terminal.
 sidebar-keybind = [
+  "Escape=focus_terminal",
   "Enter=activate_session",
   "j=next_session",
   "ArrowDown=next_session",
@@ -210,7 +280,7 @@ copy-on-select = false
 macos-option-as-alt = "both"
 
 # Optional backend-specific shards are appended only for the selected backend.
-# Modifier remaps are live-reloaded and apply to egui and direct input paths.
+# Modifier remaps are live-reloaded and apply to GPUI and direct input paths.
 # Supported sides include left/right shift, alt, ctrl, and command.
 modifier-remap = [
   "right_alt=left_ctrl",
@@ -218,9 +288,8 @@ modifier-remap = [
 ]
 
 [input.backend-keybind]
-# Herdr defaults to the same native layout commands as the native and rmux
-# backends. This shard can replace or extend them for one installation.
-# herdr = ["cmd+d=split_right", "cmd+shift+d=split_down"]
+# Empty by default so Herdr receives its own complete keymap, including Ctrl-B.
+herdr = []
 
 tmux = [
   # Custom CSI relays registered as tmux user-keys in ~/.tmux.conf.
@@ -289,6 +358,15 @@ native = [
 
 
 [session]
+# Agent completion, approval and error alerts: never, unfocused, always.
+agent-notifications = "unfocused"
+
+bell = "visual" # off | visual | audio | both
+command-notifications = "unfocused" # never | unfocused | always
+command-notification-min-seconds = 10
+shell-integration = false # optional hooks for new bash, zsh and fish PTYs
+output-archives = false # private bounded previous-session snapshots
+clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 # Session settings apply to newly-created sessions; reload will not restart the
 # current shell. Leave these unset unless you intentionally want Bootty to
 # override the account login shell, inherited working directory, or environment.
@@ -302,6 +380,7 @@ native = [
 # Ghostty Glyph Protocol APC handling. Enabled by default; disable if an app's
 # custom glyph sequences cause compatibility issues.
 glyph-protocol = true
+scrollbar = "auto" # auto | hover | always | never
 
 [cursor]
 # Live-reloaded default used when applications reset the cursor style (CSI 0 q).
@@ -355,3 +434,25 @@ palette = [
   # "#f5e0dc",
   # "#cba6f7",
 ]
+
+# Tool panel defaults. Dock: left/right/bottom. Button: none/top/bottom.
+
+[panels.sessions]
+dock = "left"
+button = "none"
+
+[panels.files]
+dock = "right"
+button = "none"
+
+[panels.changes]
+dock = "right"
+button = "none"
+
+[panels.diff]
+dock = "right"
+button = "none"
+
+[panels.agents]
+dock = "right"
+button = "none"

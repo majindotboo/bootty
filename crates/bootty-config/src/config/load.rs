@@ -2,6 +2,7 @@ use super::model::BoottyConfig;
 use super::raw::RawConfig;
 use super::resolve::ConfigResolver;
 use crate::settings_schema::SettingsSchema;
+use num_traits::ToPrimitive as _;
 use std::{
     collections::HashSet,
     fs, io,
@@ -80,33 +81,38 @@ impl ConfigDocument {
                 "config writeback path cannot be empty",
             ));
         };
-        let mut table = self.document.as_table_mut();
+        let mut table: &mut dyn TableLike = self.document.as_table_mut();
         for key in parents {
-            let entry = &mut table[*key];
-            if entry.is_none() {
-                *entry = Item::Table(Table::new());
+            if table.get(key).is_none_or(Item::is_none) {
+                table.insert(key, Item::Table(Table::new()));
             }
-            table = entry.as_table_mut().ok_or_else(|| {
-                ConfigLoadError::new(format!(
-                    "config writeback path {} is not a table",
-                    parents.join(".")
-                ))
-            })?;
+            table = table
+                .get_mut(key)
+                .and_then(Item::as_table_like_mut)
+                .ok_or_else(|| {
+                    ConfigLoadError::new(format!(
+                        "config writeback path {} is not a table",
+                        parents.join(".")
+                    ))
+                })?;
         }
-        table[*leaf] = item;
+        table.insert(leaf, item);
         Ok(())
     }
 
     /// Remove a key, restoring its built-in default on the next load. Missing keys are a no-op.
+    ///
+    /// # Errors
+    /// Returns an error when the key path is empty.
     pub fn remove(&mut self, path: &[&str]) -> ConfigResult<()> {
         let Some((leaf, parents)) = path.split_last() else {
             return Err(ConfigLoadError::new(
                 "config writeback path cannot be empty",
             ));
         };
-        let mut table = self.document.as_table_mut();
+        let mut table: &mut dyn TableLike = self.document.as_table_mut();
         for key in parents {
-            match table.get_mut(key).and_then(Item::as_table_mut) {
+            match table.get_mut(key).and_then(Item::as_table_like_mut) {
                 Some(child) => table = child,
                 None => return Ok(()),
             }
@@ -125,6 +131,7 @@ impl ConfigDocument {
         table.get(leaf)
     }
 
+    #[must_use]
     pub fn contains(&self, path: &[&str]) -> bool {
         self.item_at(path).is_some()
     }
@@ -141,7 +148,7 @@ impl ConfigDocument {
     pub fn f64_at(&self, path: &[&str]) -> Option<f64> {
         let item = self.item_at(path)?;
         item.as_float()
-            .or_else(|| item.as_integer().map(|value| value as f64))
+            .or_else(|| item.as_integer().and_then(|value| value.to_f64()))
     }
 
     #[must_use]
@@ -154,6 +161,7 @@ impl ConfigDocument {
         self.item_at(path)?.as_str()
     }
 
+    #[must_use]
     pub fn string_array(&self, path: &[&str]) -> Option<Vec<String>> {
         self.item_at(path)?.as_array().map(|array| {
             array
@@ -165,6 +173,10 @@ impl ConfigDocument {
     }
 }
 
+///
+/// # Errors
+/// Returns an error for unreadable files, invalid includes, malformed TOML,
+/// or invalid configuration values.
 pub fn load_config_from_path(path: impl AsRef<Path>) -> ConfigResult<BoottyConfig> {
     let path = path.as_ref();
     load_config_attempt(path).config
@@ -179,12 +191,12 @@ pub(super) fn validate_config_document(
     resolve_loaded_document(&mut document, path)
 }
 
-pub(crate) struct ConfigLoadAttempt {
+pub struct ConfigLoadAttempt {
     pub(crate) config: ConfigResult<BoottyConfig>,
     pub(crate) snapshot: ConfigFileSnapshot,
 }
 
-pub(crate) fn load_config_attempt(path: &Path) -> ConfigLoadAttempt {
+pub fn load_config_attempt(path: &Path) -> ConfigLoadAttempt {
     if !path.exists() {
         let config = BoottyConfig {
             config_path: path.to_path_buf(),
@@ -201,6 +213,9 @@ pub(crate) fn load_config_attempt(path: &Path) -> ConfigLoadAttempt {
     ConfigLoadAttempt { config, snapshot }
 }
 
+///
+/// # Errors
+/// Returns an error if the configuration or its include graph cannot be loaded.
 pub fn config_file_snapshot(path: impl AsRef<Path>) -> ConfigResult<ConfigFileSnapshot> {
     let path = path.as_ref();
     if !path.exists() {
@@ -211,10 +226,14 @@ pub fn config_file_snapshot(path: impl AsRef<Path>) -> ConfigResult<ConfigFileSn
     Ok(snapshot)
 }
 
-pub(crate) fn config_dependency_snapshot(path: &Path) -> ConfigFileSnapshot {
+pub fn config_dependency_snapshot(path: &Path) -> ConfigFileSnapshot {
     load_config_graph(path).snapshot
 }
 
+///
+/// # Errors
+/// Returns an error for unreadable files or malformed TOML. A missing file
+/// is returned as `None`.
 pub fn load_config_document(path: impl AsRef<Path>) -> ConfigResult<Option<ConfigDocument>> {
     let path = path.as_ref();
     match fs::read_to_string(path) {
@@ -235,6 +254,9 @@ pub fn load_config_document(path: impl AsRef<Path>) -> ConfigResult<Option<Confi
     }
 }
 
+///
+/// # Errors
+/// Returns an error for an unreadable existing file or malformed TOML.
 pub fn load_or_create_config_document(path: impl AsRef<Path>) -> ConfigResult<ConfigDocument> {
     let path = path.as_ref();
     load_config_document(path).map(|document| {

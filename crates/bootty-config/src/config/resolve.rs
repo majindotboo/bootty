@@ -11,7 +11,7 @@ use super::raw::{
     SessionPatch, SidebarPatch, WindowPatch,
 };
 use super::theme_catalog::{load_builtin_theme, parse_theme_source};
-use crate::font_feature::FontFeature;
+use crate::FontFeature;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -24,12 +24,12 @@ impl SshProfileConfig {
                 "SSH profiles need a stable id, display name, and host",
             ));
         }
-        if self.authentication != SshAuthenticationConfig::Auto && self.identity_file.is_none() {
-            let mode = match self.authentication {
-                SshAuthenticationConfig::Agent => "agent",
-                SshAuthenticationConfig::KeyFile => "key-file",
-                SshAuthenticationConfig::Auto => unreachable!(),
-            };
+        let mode = match self.authentication {
+            SshAuthenticationConfig::Auto => return Ok(()),
+            SshAuthenticationConfig::Agent => "agent",
+            SshAuthenticationConfig::KeyFile => "key-file",
+        };
+        if self.identity_file.is_none() {
             return Err(ConfigLoadError::new(format!(
                 "ssh-profiles.{id}.identity-file is required for {mode} authentication"
             )));
@@ -37,16 +37,17 @@ impl SshProfileConfig {
         Ok(())
     }
 }
-fn apply_value<T>(target: &mut T, value: Option<T>) {
+// Both required and optional config values preserve the default when absent.
+fn apply_value<T>(target: &mut T, value: Option<impl Into<T>>) {
     if let Some(value) = value {
-        *target = value;
+        *target = value.into();
     }
 }
 
-fn apply_present<T>(target: &mut Option<T>, value: Option<T>) {
-    if let Some(value) = value {
-        *target = Some(value);
-    }
+macro_rules! apply_fields {
+    ($target:ident, $patch:ident; $($field:ident),+ $(,)?) => {
+        $(apply_value(&mut $target.$field, $patch.$field);)+
+    };
 }
 
 pub(super) struct ConfigResolver<'a> {
@@ -60,7 +61,15 @@ impl ConfigResolver<'_> {
             config_path: self.path.clone(),
             ..BoottyConfig::default()
         };
-        apply_value(&mut config.version, raw.version);
+        apply_fields!(config, raw;
+            version,
+            restore_on_startup,
+            cli_default_open_behavior,
+            default_open_behavior,
+            when_closing_with_no_tabs,
+            on_last_window_closed,
+            locale,
+        );
         config.appearance = resolve_appearance(
             raw.appearance,
             raw.theme.as_deref(),
@@ -71,6 +80,7 @@ impl ConfigResolver<'_> {
         apply_partial_font(&mut config.font, raw.font)?;
         apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
+        config.panels = raw.panels;
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
@@ -82,45 +92,84 @@ impl ConfigResolver<'_> {
         apply_partial_session(&mut config.session, raw.session);
         apply_partial_diagnostics(&mut config.diagnostics, raw.diagnostics);
         apply_partial_window(&mut config.window, raw.window);
+        for (name, value, max) in [
+            ("background-opacity", config.window.background_opacity, 1.0),
+            (
+                "background-image-opacity",
+                config.window.background_image_opacity,
+                1.0,
+            ),
+            (
+                "background-gradient-angle",
+                config.window.background_gradient_angle,
+                360.0,
+            ),
+        ] {
+            if !value.is_finite() || !(0.0..=max).contains(&value) {
+                return Err(ConfigLoadError::new(format!(
+                    "window.{name} must be between 0 and {max}"
+                )));
+            }
+        }
         Ok(config)
     }
 }
 
 fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
-    apply_value(&mut window.title, partial.title);
-    apply_value(&mut window.width, partial.width);
-    apply_value(&mut window.height, partial.height);
-    apply_value(&mut window.fullscreen, partial.fullscreen);
-    apply_present(
-        &mut window.fullscreen_top_offset,
-        partial.fullscreen_top_offset,
+    apply_fields!(window, partial;
+        background_opacity,
+        background_image,
+        background_image_opacity,
+        background_gradient_start,
+        background_gradient_end,
+        background_gradient_angle,
+        background_material,
+        title,
+        width,
+        height,
     );
-    apply_value(
-        &mut window.fullscreen_tabs_in_notch,
-        partial.fullscreen_tabs_in_notch,
-    );
-    apply_value(&mut window.window_decoration, partial.window_decoration);
-    apply_value(
-        &mut window.macos_titlebar_style,
-        partial.macos_titlebar_style,
+    // `fullscreen = false` is the legacy spelling for inactive native fullscreen. Normalize it
+    // to the valid restore style now that active state is persisted separately.
+    let fullscreen = partial.fullscreen.map(|mode| match mode {
+        super::model::WindowFullscreen::Disabled => super::model::WindowFullscreen::Native,
+        mode => mode,
+    });
+    let fullscreen_enabled = partial.fullscreen_enabled.or_else(|| {
+        partial
+            .fullscreen
+            .map(|mode| mode != super::model::WindowFullscreen::Disabled)
+    });
+    apply_value(&mut window.fullscreen, fullscreen);
+    apply_value(&mut window.fullscreen_enabled, fullscreen_enabled);
+    apply_fields!(window, partial;
+        fullscreen_top_offset,
+        fullscreen_tabs_in_notch,
+        window_decoration,
+        macos_titlebar_style,
     );
 }
 
 fn apply_partial_font(font: &mut FontConfig, partial: FontPatch) -> ConfigResult<()> {
-    apply_value(&mut font.family, partial.family);
-    apply_value(&mut font.ui_family, partial.ui_family);
-    apply_value(
-        &mut font.ui_use_terminal_family,
-        partial.ui_use_terminal_family,
+    apply_fields!(font, partial;
+        family,
+        style_bold,
+        style_italic,
+        style_bold_italic,
+        ui_family,
+        ui_size,
+        ui_use_terminal_family,
+        size,
+        cell_width,
+        cell_height,
+        fit_cell_height,
+        fit_cell_width,
+        baseline_adjustment,
+        underline_position,
+        underline_thickness,
     );
-    apply_value(&mut font.size, partial.size);
-    apply_present(&mut font.cell_width, partial.cell_width);
-    apply_present(&mut font.cell_height, partial.cell_height);
-    apply_value(&mut font.fit_cell_height, partial.fit_cell_height);
-    apply_value(&mut font.fit_cell_width, partial.fit_cell_width);
-    apply_value(&mut font.baseline_adjustment, partial.baseline_adjustment);
-    apply_value(&mut font.underline_position, partial.underline_position);
-    apply_value(&mut font.underline_thickness, partial.underline_thickness);
+    if let Some(weights) = partial.ui_weights {
+        font.ui_weights.extend(weights);
+    }
     if let Some(features) = partial.features {
         apply_font_features(font, features)?;
     }
@@ -137,35 +186,41 @@ fn apply_font_features(font: &mut FontConfig, features: Vec<String>) -> ConfigRe
 }
 
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
-    apply_value(&mut chrome.sidebar, partial.sidebar);
-    apply_value(&mut chrome.top_bar, partial.top_bar);
-    apply_value(&mut chrome.bottom_bar, partial.bottom_bar);
-    apply_value(&mut chrome.sidebar_width, partial.sidebar_width);
-    apply_value(&mut chrome.status_height, partial.status_height);
-    apply_present(&mut chrome.status_background, partial.status_background);
-    apply_value(&mut chrome.gap, partial.gap);
-    apply_value(&mut chrome.pane_divider_width, partial.pane_divider_width);
-    apply_present(&mut chrome.pane_divider_color, partial.pane_divider_color);
-    apply_value(
-        &mut chrome.notched_fullscreen_black_chrome,
-        partial.notched_fullscreen_black_chrome,
+    apply_fields!(chrome, partial;
+        left_dock_toggle,
+        right_dock_toggle,
+        panel_tab_style,
+        panel_tabs,
     );
-    apply_value(
-        &mut chrome.pane_focus_border_width,
-        partial.pane_focus_border_width,
-    );
-    apply_present(
-        &mut chrome.pane_focus_border_color,
-        partial.pane_focus_border_color,
-    );
-    apply_value(&mut chrome.pane_corner_radius, partial.pane_corner_radius);
-    apply_value(
-        &mut chrome.unfocused_sidebar_dim,
-        partial.unfocused_sidebar_dim,
-    );
-    apply_value(
-        &mut chrome.unfocused_terminal_dim,
-        partial.unfocused_terminal_dim,
+    for (tabs, patch) in [
+        (&mut chrome.dock_tabs, partial.dock_tabs),
+        (&mut chrome.terminal_tabs, partial.terminal_tabs),
+    ] {
+        if let Some(patch) = patch {
+            apply_fields!(tabs, patch;
+                appearance,
+                close_position,
+                close_button,
+            );
+        }
+    }
+
+    apply_fields!(chrome, partial;
+        sidebar,
+        top_bar,
+        bottom_bar,
+        sidebar_width,
+        status_height,
+        status_background,
+        gap,
+        pane_divider_width,
+        pane_divider_color,
+        notched_fullscreen_black_chrome,
+        pane_focus_border_width,
+        pane_focus_border_color,
+        pane_corner_radius,
+        unfocused_sidebar_dim,
+        unfocused_terminal_dim,
     );
     if let Some(segments) = partial.top_segment {
         chrome.top_segments = segments;
@@ -176,12 +231,14 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 }
 
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
-    apply_value(&mut sidebar.position, partial.position);
-    apply_present(&mut sidebar.background, partial.background);
-    apply_present(&mut sidebar.foreground, partial.foreground);
-    apply_present(&mut sidebar.selected, partial.selected);
-    apply_present(&mut sidebar.hover, partial.hover);
-    apply_present(&mut sidebar.border, partial.border);
+    apply_fields!(sidebar, partial;
+        position,
+        background,
+        foreground,
+        selected,
+        hover,
+        border,
+    );
     // An empty module list keeps the defaults. A sidebar with no modules has no session list at
     // all, and a session list with no components is a row of bare names — neither is a state anyone
     // configures on purpose, and the editor refuses to write one. Reaching it means a file was
@@ -204,25 +261,25 @@ fn apply_partial_multiplexer(
     multiplexer: &mut MultiplexerConfig,
     partial: MultiplexerPatch,
 ) -> ConfigResult<()> {
-    apply_value(&mut multiplexer.backend, partial.backend);
-    apply_value(&mut multiplexer.herdr_session, partial.herdr_session);
-    apply_value(&mut multiplexer.hide_tmux_status, partial.hide_tmux_status);
-    apply_present(&mut multiplexer.remote, partial.remote);
+    apply_fields!(multiplexer, partial;
+        backend,
+        hide_tmux_status,
+        remote,
+    );
     multiplexer
         .validate_remote()
         .map_err(|error| ConfigLoadError::new(error.to_string()))
 }
 
 fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
-    apply_value(&mut input.modifier_remap, partial.modifier_remap);
-    apply_value(&mut input.macos_option_as_alt, partial.macos_option_as_alt);
-    apply_value(
-        &mut input.hide_mouse_pointer_while_typing,
-        partial.hide_mouse_pointer_while_typing,
+    apply_fields!(input, partial;
+        modifier_remap,
+        macos_option_as_alt,
+        hide_mouse_pointer_while_typing,
+        copy_on_select,
+        preset,
+        prefix,
     );
-    apply_value(&mut input.copy_on_select, partial.copy_on_select);
-    apply_value(&mut input.preset, partial.preset);
-    apply_present(&mut input.prefix, partial.prefix);
     // Preset and prefix select which built-in default arrays the user's keybind rows layer
     // onto, so the defaults must be rebuilt before the merges below.
     input.reset_default_keybinds();
@@ -257,8 +314,8 @@ fn apply_partial_backend_keybind(
 
 // User keybinds layer on top of the defaults so new default bindings reach existing configs;
 // later entries override earlier ones for the same trigger. A "clear" entry opts out of the
-// defaults entirely, keeping only the user's bindings (and individual defaults can be dropped with
-// an `=unbind` action).
+// defaults entirely, keeping only the user's bindings. Use keymap.json's named unbinds to suppress
+// individual defaults.
 fn merge_keybind_entries(defaults: &[String], entries: Vec<String>) -> Vec<String> {
     if entries.iter().any(|entry| entry == "clear") {
         return entries
@@ -272,65 +329,63 @@ fn merge_keybind_entries(defaults: &[String], entries: Vec<String>) -> Vec<Strin
 }
 
 fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
-    apply_present(&mut session.shell, partial.shell);
-    apply_present(&mut session.working_directory, partial.working_directory);
+    apply_fields!(session, partial;
+        output_archives,
+        clipboard_write_hosts,
+        bell,
+        agent_notifications,
+        command_notifications,
+        command_notification_min_seconds,
+        shell_integration,
+        shell,
+        working_directory,
+    );
     if let Some(value) = partial.env {
         session.env = value
             .into_iter()
             .map(|entry| (entry.name, entry.value))
             .collect();
     }
-    apply_value(&mut session.term, partial.term);
-    apply_value(&mut session.colorterm, partial.colorterm);
-    apply_value(&mut session.max_scrollback, partial.max_scrollback);
-    apply_value(&mut session.glyph_protocol, partial.glyph_protocol);
+    apply_fields!(session, partial;
+        term,
+        colorterm,
+        max_scrollback,
+        scrollbar,
+        glyph_protocol,
+    );
 }
 
 fn apply_partial_diagnostics(diagnostics: &mut DiagnosticsConfig, partial: DiagnosticsPatch) {
-    apply_present(&mut diagnostics.stability_trace, partial.stability_trace);
+    apply_value(&mut diagnostics.stability_trace, partial.stability_trace);
 }
 
 pub(super) fn apply_partial_colors(colors: &mut ColorConfig, partial: ColorPatch) {
-    apply_present(&mut colors.background, partial.background);
-    apply_present(&mut colors.foreground, partial.foreground);
-    apply_present(&mut colors.cursor, partial.cursor);
-    apply_present(&mut colors.cursor_text, partial.cursor_text);
-    apply_present(&mut colors.pointer_foreground, partial.pointer_foreground);
-    apply_present(&mut colors.pointer_background, partial.pointer_background);
-    apply_present(
-        &mut colors.tektronix_foreground,
-        partial.tektronix_foreground,
+    apply_fields!(colors, partial;
+        background,
+        foreground,
+        cursor,
+        cursor_text,
+        pointer_foreground,
+        pointer_background,
+        tektronix_foreground,
+        tektronix_background,
+        highlight_background,
+        tektronix_cursor,
+        highlight_foreground,
+        selection_background,
+        selection_foreground,
+        palette,
+        palette_generate,
+        palette_harmonious,
     );
-    apply_present(
-        &mut colors.tektronix_background,
-        partial.tektronix_background,
-    );
-    apply_present(
-        &mut colors.highlight_background,
-        partial.highlight_background,
-    );
-    apply_present(&mut colors.tektronix_cursor, partial.tektronix_cursor);
-    apply_present(
-        &mut colors.highlight_foreground,
-        partial.highlight_foreground,
-    );
-    apply_present(
-        &mut colors.selection_background,
-        partial.selection_background,
-    );
-    apply_present(
-        &mut colors.selection_foreground,
-        partial.selection_foreground,
-    );
-    apply_value(&mut colors.palette, partial.palette);
-    apply_value(&mut colors.palette_generate, partial.palette_generate);
-    apply_value(&mut colors.palette_harmonious, partial.palette_harmonious);
 }
 
 fn apply_partial_cursor(cursor: &mut CursorConfig, partial: CursorPatch) {
-    apply_present(&mut cursor.style, partial.style);
-    apply_present(&mut cursor.blink, partial.blink);
-    apply_value(&mut cursor.dim_inactive_pane, partial.dim_inactive_pane);
+    apply_fields!(cursor, partial;
+        style,
+        blink,
+        dim_inactive_pane,
+    );
 }
 
 fn resolve_appearance(
@@ -358,6 +413,7 @@ fn apply_appearance_branch(
 ) -> ConfigResult<()> {
     if let Some(theme) = partial.theme {
         branch.colors = resolve_theme_colors(&theme, config_dir)?;
+        branch.theme_colors = branch.colors.clone();
         branch.theme = Some(theme);
     }
     apply_partial_colors(&mut branch.colors, partial.colors);
@@ -367,6 +423,9 @@ fn apply_appearance_branch(
 impl AppearanceConfig {
     /// Apply one process-wide override to both appearance branches. The theme resolves first so
     /// explicit color overrides take precedence, matching legacy top-level config semantics.
+    ///
+    /// # Errors
+    /// Returns a theme loading or parsing error before either appearance branch changes.
     pub fn apply_global_override(
         &mut self,
         theme: Option<&str>,
@@ -377,6 +436,7 @@ impl AppearanceConfig {
         if let Some(theme) = theme {
             branch.theme = Some(theme.to_owned());
             branch.colors = resolve_theme_colors(theme, config_dir)?;
+            branch.theme_colors = branch.colors.clone();
         }
         override_colors(&mut branch.colors);
         self.light = branch.clone();
@@ -389,6 +449,9 @@ fn resolve_theme_colors(theme: &str, config_dir: &Path) -> ConfigResult<ColorCon
     resolve_theme(theme, config_dir).map(|theme| theme.colors)
 }
 
+///
+/// # Errors
+/// Returns an error when the theme cannot be found, read, or parsed.
 pub fn resolve_theme(theme: &str, config_dir: &Path) -> ConfigResult<ResolvedTheme> {
     if let Some(theme) = load_user_theme(theme, config_dir)? {
         return Ok(theme);
@@ -417,8 +480,9 @@ fn load_user_theme(theme: &str, config_dir: &Path) -> ConfigResult<Option<Resolv
     Ok(None)
 }
 
-/// Every theme a user can select: the built-in catalog plus `themes/*.toml` beside the config
-/// file. Ordered case-insensitively with case-duplicates collapsed, so a user copy of a
+/// Every selectable theme from the built-in catalog and `themes/*.toml` beside the config.
+///
+/// Ordered case-insensitively with case-duplicates collapsed, so a user copy of a
 /// built-in theme replaces it in the list instead of appearing twice.
 pub fn available_theme_names(config_path: &Path) -> Vec<String> {
     let mut names: Vec<String> = super::theme_catalog::builtin_theme_names()

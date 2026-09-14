@@ -2,9 +2,9 @@
 #![allow(clippy::float_cmp)]
 
 use assert_fs::prelude::*;
+use bootty_config::FontFeature;
 use bootty_config::color::Color;
 use bootty_config::config::*;
-use bootty_config::font_feature::FontFeature;
 use indoc::indoc;
 use pretty_assertions::{assert_eq, assert_ne};
 use rstest::rstest;
@@ -15,25 +15,27 @@ struct ConfigSandbox {
     path: PathBuf,
 }
 
+type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+
 impl ConfigSandbox {
-    fn new() -> Self {
-        let dir = assert_fs::TempDir::new().unwrap();
+    fn new() -> FixtureResult<Self> {
+        let dir = assert_fs::TempDir::new()?;
         let path = dir.path().join("config.toml");
-        Self { dir, path }
+        Ok(Self { dir, path })
     }
 
-    fn with_config(source: &str) -> Self {
-        let sandbox = Self::new();
-        sandbox.write("config.toml", source);
-        sandbox
+    fn with_config(source: &str) -> FixtureResult<Self> {
+        let sandbox = Self::new()?;
+        sandbox.write("config.toml", source)?;
+        Ok(sandbox)
     }
 
-    fn write(&self, relative_path: &str, source: &str) {
+    fn write(&self, relative_path: &str, source: &str) -> FixtureResult<()> {
         let path = self.dir.child(relative_path);
-        assert_fs::fixture::ChildPath::new(path.path().parent().expect("config fixture parent"))
-            .create_dir_all()
-            .expect("create config fixture parent");
-        path.write_str(source).expect("write config fixture");
+        assert_fs::fixture::ChildPath::new(path.path().parent().ok_or("config fixture parent")?)
+            .create_dir_all()?;
+        path.write_str(source)?;
+        Ok(())
     }
 
     fn load(&self) -> Result<BoottyConfig, ConfigLoadError> {
@@ -41,8 +43,112 @@ impl ConfigSandbox {
     }
 }
 
-fn load_config_source(source: &str) -> BoottyConfig {
-    ConfigSandbox::with_config(source).load().unwrap()
+fn load_config_source(source: &str) -> FixtureResult<BoottyConfig> {
+    Ok(ConfigSandbox::with_config(source)?.load()?)
+}
+
+#[rstest]
+fn default_font_keeps_the_established_terminal_baseline() {
+    assert_eq!(
+        load_config_source("")
+            .expect("valid config")
+            .font
+            .baseline_adjustment,
+        0.0
+    );
+}
+
+#[rstest]
+fn default_fonts_match_zed() {
+    let config = load_config_source("").expect("valid config");
+    let font = config.font;
+
+    assert_eq!(font.family, [".ZedMono"]);
+    assert_eq!(font.size, 15.0);
+    assert_eq!(font.ui_family, [".ZedSans"]);
+    assert_eq!(font.ui_size, 16.0);
+    assert_eq!(font.features, Vec::<FontFeature>::new());
+    assert_eq!(config.cursor.style, Some(CursorStyleConfig::Block));
+    assert_eq!(config.cursor.blink, None);
+}
+
+#[rstest]
+fn ui_font_size_is_typed_and_loadable() {
+    assert_eq!(
+        load_config_source("[font]\nui-size = 18\n")
+            .expect("valid config")
+            .font
+            .ui_size,
+        18.0
+    );
+}
+
+#[rstest]
+fn zed_shaped_general_lifecycle_defaults_match_bootty_behavior() {
+    let config = load_config_source("").expect("valid config");
+
+    assert_eq!(config.restore_on_startup, RestoreOnStartup::LastSession);
+    assert_eq!(
+        config.cli_default_open_behavior,
+        OpenBehavior::ExistingWindow
+    );
+    assert_eq!(config.default_open_behavior, OpenBehavior::ExistingWindow);
+    assert_eq!(
+        config.when_closing_with_no_tabs,
+        WhenClosingWithNoTabs::PlatformDefault
+    );
+    assert_eq!(
+        config.on_last_window_closed,
+        OnLastWindowClosed::PlatformDefault
+    );
+}
+
+#[rstest]
+fn zed_shaped_general_lifecycle_settings_are_typed_and_loadable() {
+    let config = load_config_source(indoc! {r#"
+        restore_on_startup = "none"
+        cli_default_open_behavior = "new_window"
+        default_open_behavior = "new_window"
+        when_closing_with_no_tabs = "keep_window_open"
+        on_last_window_closed = "quit_app"
+    "#})
+    .expect("valid config");
+
+    assert_eq!(config.restore_on_startup, RestoreOnStartup::None);
+    assert_eq!(config.cli_default_open_behavior, OpenBehavior::NewWindow);
+    assert_eq!(config.default_open_behavior, OpenBehavior::NewWindow);
+    assert_eq!(
+        config.when_closing_with_no_tabs,
+        WhenClosingWithNoTabs::KeepWindowOpen
+    );
+    assert_eq!(config.on_last_window_closed, OnLastWindowClosed::QuitApp);
+}
+
+#[rstest]
+#[case::legacy_mode_enables("fullscreen = \"non-native-padded-notch\"", true)]
+#[case::explicit_state_wins(
+    "fullscreen = \"non-native-padded-notch\"\nfullscreen-enabled = false",
+    false
+)]
+fn fullscreen_active_state_is_separate_from_its_restore_style(
+    #[case] window: &str,
+    #[case] expected_enabled: bool,
+) {
+    let config = load_config_source(&format!("[window]\n{window}\n")).expect("valid config");
+
+    assert_eq!(
+        config.window.fullscreen,
+        WindowFullscreen::NonNativePaddedNotch
+    );
+    assert_eq!(config.window.fullscreen_enabled, expected_enabled);
+}
+
+#[test]
+fn legacy_disabled_fullscreen_keeps_native_as_the_next_restore_style() {
+    let config = load_config_source("[window]\nfullscreen = false\n").expect("valid config");
+
+    assert!(!config.window.fullscreen_enabled);
+    assert_eq!(config.window.fullscreen, WindowFullscreen::Native);
 }
 
 #[rstest]
@@ -53,7 +159,10 @@ fn inactive_pane_cursor_dimming_has_an_explicit_default(
     #[case] expected: bool,
 ) {
     assert_eq!(
-        load_config_source(source).cursor.dim_inactive_pane,
+        load_config_source(source)
+            .expect("valid config")
+            .cursor
+            .dim_inactive_pane,
         expected
     );
 }
@@ -117,24 +226,18 @@ fn windows_default_working_directory_uses_home_drive_and_path_without_userprofil
 
 #[test]
 fn missing_config_file_loads_with_selected_path() {
-    let sandbox = ConfigSandbox::new();
+    let sandbox = ConfigSandbox::new().expect("config fixture");
 
     let config = sandbox.load().unwrap();
 
     assert_eq!(config.config_path, sandbox.path);
-    assert_eq!(
-        config.appearance.light.theme.as_deref(),
-        Some("Catppuccin Latte")
-    );
-    assert_eq!(
-        config.appearance.dark.theme.as_deref(),
-        Some("Catppuccin Mocha")
-    );
+    assert_eq!(config.appearance.light.theme.as_deref(), Some("One Light"));
+    assert_eq!(config.appearance.dark.theme.as_deref(), Some("One Dark"));
 }
 
 #[test]
 fn defaults_put_current_status_modules_in_visible_top_bar() {
-    let config = load_config_source("");
+    let config = load_config_source("").expect("valid config");
     let modules = config
         .chrome
         .top_segments
@@ -158,7 +261,7 @@ fn defaults_put_current_status_modules_in_visible_top_bar() {
 
 #[test]
 fn sidebar_modules_default_and_override_in_order() {
-    let defaults = load_config_source("");
+    let defaults = load_config_source("").expect("valid config");
     assert_eq!(defaults.sidebar.modules, ["sessions", "codexbar"]);
     assert_eq!(
         defaults.sidebar.session_modules,
@@ -177,7 +280,8 @@ fn sidebar_modules_default_and_override_in_order() {
         [sidebar]
         modules = ["custom", "sessions"]
         session-modules = ["directory", "progress"]
-    "#});
+    "#})
+    .expect("valid config");
     assert_eq!(configured.sidebar.modules, ["custom", "sessions"]);
     assert!(configured.sidebar.session_modules_configured);
     assert_eq!(
@@ -191,7 +295,8 @@ fn sidebar_modules_default_and_override_in_order() {
         [sidebar]
         modules = []
         session-modules = []
-    "#});
+    "#})
+    .expect("valid config");
     assert_eq!(emptied.sidebar.modules, defaults.sidebar.modules);
     assert_eq!(
         emptied.sidebar.session_modules,
@@ -212,7 +317,8 @@ fn chrome_bars_configure_visibility_and_modules_independently() {
 
         [[chrome.bottom-segment]]
         module = "sysinfo"
-    "#});
+    "#})
+    .expect("valid config");
 
     assert!(!config.chrome.top_bar);
     assert!(config.chrome.bottom_bar);
@@ -228,7 +334,8 @@ fn legacy_status_bar_config_maps_to_the_top_bar() {
 
         [[chrome.status-segment]]
         module = "clock"
-    "#});
+    "#})
+    .expect("valid config");
 
     assert!(!config.chrome.top_bar);
     assert_eq!(config.chrome.top_segments[0].module, "clock");
@@ -242,15 +349,18 @@ fn included_file_overrides_containing_file_without_dropping_base_keys() {
         [window]
         title = "base"
         width = 1000
-    "#});
-    sandbox.write(
-        "local.toml",
-        indoc! {r#"
+    "#})
+    .expect("config fixture");
+    sandbox
+        .write(
+            "local.toml",
+            indoc! {r#"
             [window]
             title = "local"
             height = 640
         "#},
-    );
+        )
+        .expect("write config");
 
     let config = sandbox.load().unwrap();
 
@@ -263,24 +373,29 @@ fn included_file_overrides_containing_file_without_dropping_base_keys() {
 fn config_file_snapshot_changes_when_included_file_changes() {
     let sandbox = ConfigSandbox::with_config(indoc! {r#"
         include = ["local.toml"]
-    "#});
-    sandbox.write(
-        "local.toml",
-        indoc! {r#"
+    "#})
+    .expect("config fixture");
+    sandbox
+        .write(
+            "local.toml",
+            indoc! {r#"
             [window]
             title = "before"
         "#},
-    );
+        )
+        .expect("write config");
 
     let before = config_file_snapshot(&sandbox.path).unwrap();
-    sandbox.write(
-        "local.toml",
-        indoc! {r#"
+    sandbox
+        .write(
+            "local.toml",
+            indoc! {r#"
             [window]
             title = "after"
             width = 900
         "#},
-    );
+        )
+        .expect("write config");
     let after = before.refresh_known_paths();
 
     assert_ne!(before, after);
@@ -316,7 +431,7 @@ fn config_resolves_theme_and_color_overrides(
     #[case] foreground: Option<Color>,
     #[case] palette_len: usize,
 ) {
-    let config = load_config_source(source);
+    let config = load_config_source(source).expect("valid config");
 
     for variant in [AppearanceVariant::Light, AppearanceVariant::Dark] {
         let colors = config.colors_for_appearance(variant);
@@ -334,20 +449,18 @@ fn appearance_branches_resolve_separate_themes_and_overrides() {
         mode = "light"
 
         [appearance.light]
-        theme = "Atom One Light"
+        theme = "One Light"
 
         [appearance.light.colors]
         background = "#fefefe"
 
         [appearance.dark]
         theme = "Dracula"
-    "##});
+    "##})
+    .expect("valid config");
 
     assert_eq!(config.appearance.mode, AppearanceMode::Light);
-    assert_eq!(
-        config.appearance.light.theme.as_deref(),
-        Some("Atom One Light")
-    );
+    assert_eq!(config.appearance.light.theme.as_deref(), Some("One Light"));
     assert_eq!(
         config.appearance.light.colors.background,
         Some(Color::from_hex("#fefefe").unwrap())
@@ -366,7 +479,8 @@ fn legacy_theme_and_colors_seed_appearance_branches() {
 
         [colors]
         background = "#101112"
-    "##});
+    "##})
+    .expect("valid config");
 
     for branch in [&config.appearance.light, &config.appearance.dark] {
         assert_eq!(branch.theme.as_deref(), Some("Catppuccin Mocha"));
@@ -376,11 +490,12 @@ fn legacy_theme_and_colors_seed_appearance_branches() {
         );
     }
 
-    let colors_only = load_config_source("[colors]\nbackground = \"#101112\"\n");
+    let colors_only =
+        load_config_source("[colors]\nbackground = \"#101112\"\n").expect("valid config");
     assert_eq!(colors_only.appearance.light, colors_only.appearance.dark);
     assert_eq!(
         colors_only.appearance.dark.theme.as_deref(),
-        Some("Catppuccin Mocha")
+        Some("One Dark")
     );
 }
 
@@ -399,7 +514,8 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
         selected = "#2a2f3d"
         hover = "#1e222c"
         border = "#313244"
-    "##});
+    "##})
+    .expect("valid config");
 
     assert_eq!(config.sidebar.position, SidebarPosition::Right);
     assert_eq!(
@@ -439,7 +555,8 @@ fn legacy_sidebar_fullscreen_colors_are_accepted_but_ignored() {
         [sidebar]
         fullscreen-background = "#000000"
         fullscreen-hover = "#111111"
-    "##});
+    "##})
+    .expect("valid config");
 
     assert_eq!(config.sidebar.background, None);
     assert_eq!(config.sidebar.hover, None);
@@ -452,14 +569,14 @@ fn config_resolves_font_features_in_product_order() {
 
         [font]
         features = ["cv33", "-calt"]
-    "#});
+    "#})
+    .expect("valid config");
 
     let features = config.font.features;
 
     assert_eq!(
         features,
         vec![
-            FontFeature::new(*b"liga", 1),
             FontFeature::new(*b"cv33", 1),
             FontFeature::new(*b"calt", 0),
             FontFeature::new(*b"cv01", 1),
@@ -474,6 +591,7 @@ fn config_rejects_invalid_font_features() {
         [font]
         features = ["toolong"]
     "#})
+    .expect("config fixture")
     .load()
     .unwrap_err();
 
@@ -491,7 +609,8 @@ fn config_accepts_xterm_dynamic_color_slots() {
         highlight-background = "#0d0e0f"
         tektronix-cursor = "#101112"
         highlight-foreground = "#131415"
-    "##});
+    "##})
+    .expect("valid config");
 
     for variant in [AppearanceVariant::Light, AppearanceVariant::Dark] {
         let colors = config.colors_for_appearance(variant);
@@ -538,7 +657,8 @@ fn named_ssh_profile_parses_structured_connection_fields() {
         authentication = "key-file"
         identity-file = "/tmp/local-mac-key"
         proxy-jump = "gateway"
-    "#});
+    "#})
+    .expect("valid config");
 
     let profile = &config.ssh_profiles["local-mac"];
     assert_eq!(profile.name, "Local Mac");
@@ -572,7 +692,8 @@ fn ssh_agent_profile_selects_one_agent_identity_without_password_fallbacks() {
         host = "example.test"
         authentication = "agent"
         identity-file = "/tmp/agent-key.pub"
-    "#});
+    "#})
+    .expect("valid config");
 
     assert_eq!(
         config.ssh_profiles["agent"].to_remote().args,
@@ -601,6 +722,7 @@ fn ssh_agent_profile_requires_an_identity_reference() {
         host = "example.test"
         authentication = "agent"
     "#})
+    .expect("config fixture")
     .load()
     .unwrap_err();
 
@@ -619,6 +741,7 @@ fn key_file_profile_requires_an_identity_file() {
         host = "example.test"
         authentication = "key-file"
     "#})
+    .expect("config fixture")
     .load()
     .unwrap_err();
 
@@ -630,14 +753,15 @@ fn key_file_profile_requires_an_identity_file() {
 }
 
 #[test]
-fn extension_settings_load_into_their_own_module_table() {
-    // Before this table existed, deny_unknown_fields made any extension key fail the whole config.
+fn raw_extension_settings_are_preserved_in_their_module_table() {
+    // The retired native script host leaves this user data available for display and migration.
     let sandbox = ConfigSandbox::with_config(indoc! {r#"
         [extensions.greeter]
         greeting = "hello"
         loud = true
         repeats = 3
-    "#});
+    "#})
+    .expect("config fixture");
 
     let config = sandbox
         .load()
@@ -661,10 +785,16 @@ fn extension_settings_load_into_their_own_module_table() {
 
 #[test]
 fn theme_catalog_combines_builtin_and_user_themes() {
-    let sandbox = ConfigSandbox::new();
-    sandbox.write("themes/My Theme.toml", "");
-    sandbox.write("themes/ignored.txt", "");
-    sandbox.write("themes/catppuccin mocha.toml", "");
+    let sandbox = ConfigSandbox::new().expect("config fixture");
+    sandbox
+        .write("themes/My Theme.toml", "")
+        .expect("write config");
+    sandbox
+        .write("themes/ignored.txt", "")
+        .expect("write config");
+    sandbox
+        .write("themes/catppuccin mocha.toml", "")
+        .expect("write config");
 
     let names = available_theme_names(&sandbox.path);
 
@@ -685,10 +815,12 @@ fn theme_catalog_combines_builtin_and_user_themes() {
 fn user_theme_shadows_builtin_theme_name() {
     let sandbox = ConfigSandbox::with_config(indoc! {r#"
         theme = "Catppuccin Mocha"
-    "#});
-    sandbox.write(
-        "themes/Catppuccin Mocha.toml",
-        indoc! {r##"
+    "#})
+    .expect("config fixture");
+    sandbox
+        .write(
+            "themes/Catppuccin Mocha.toml",
+            indoc! {r##"
             [metadata]
             name = "Catppuccin Mocha"
             source = "test sandbox"
@@ -698,7 +830,8 @@ fn user_theme_shadows_builtin_theme_name() {
             background = "#000102"
             foreground = "#030405"
         "##},
-    );
+        )
+        .expect("write config");
 
     let config = sandbox.load().unwrap();
 
@@ -715,6 +848,7 @@ fn missing_theme_reports_user_and_builtin_locations() {
     let error = ConfigSandbox::with_config(indoc! {r#"
         theme = "No Such Theme"
     "#})
+    .expect("config fixture")
     .load()
     .unwrap_err();
 
@@ -738,7 +872,8 @@ fn missing_include_behavior_depends_on_optional_marker(
             title = "ok"
         "#},
         include = include
-    ));
+    ))
+    .expect("config fixture");
 
     match sandbox.load() {
         Ok(config) if should_load => assert_eq!(config.window.title, "ok"),
@@ -754,11 +889,15 @@ fn documented_sample_config_loads() {
     let config = load_config_from_path(&path).unwrap();
 
     for variant in [AppearanceVariant::Light, AppearanceVariant::Dark] {
-        assert_eq!(
-            config.theme_for_appearance(variant),
-            Some("Catppuccin Mocha")
-        );
+        assert_eq!(config.theme_for_appearance(variant), Some("One Dark"));
     }
+}
+
+#[rstest]
+fn chrome_regions_are_flush_and_terminal_surfaces_match_by_default() {
+    let chrome = BoottyConfig::default().chrome;
+    assert_eq!(chrome.gap, 0.0);
+    assert_eq!(chrome.unfocused_terminal_dim, 0.0);
 }
 
 #[test]
@@ -766,9 +905,23 @@ fn obsolete_chrome_window_tabs_key_is_ignored() {
     let config = load_config_source(indoc! {r#"
         [chrome]
         window-tabs = true
-    "#});
+    "#})
+    .expect("valid config");
     assert_eq!(config.chrome, BoottyConfig::default().chrome);
 }
+
+#[rstest]
+#[case("")]
+#[case("previously-selected")]
+fn obsolete_herdr_session_key_does_not_block_loading(#[case] session: &str) {
+    let config = load_config_source(&format!(
+        "[multiplexer]\nbackend = 'herdr'\nherdr-session = '{session}'\n"
+    ))
+    .expect("valid config");
+
+    assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Herdr);
+}
+
 #[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
@@ -776,7 +929,8 @@ fn keybind_clear_directive_replaces_existing_bindings() {
 
         [input]
         keybind = ["clear", "cmd+b=esc:090;8~"]
-    "#});
+    "#})
+    .expect("valid config");
 
     assert_eq!(config.input.keybind, vec!["cmd+b=esc:090;8~"]);
 }
@@ -806,7 +960,8 @@ fn keybind_entries_without_clear_layer_on_defaults() {
         [input]
         preset = "bootty"
         keybind = ["cmd+b=esc:090;8~"]
-    "#});
+    "#})
+    .expect("valid config");
 
     assert!(
         config.input.keybind.iter().any(|k| k == "cmd+b=esc:090;8~"),
@@ -831,7 +986,8 @@ fn macos_option_as_alt_expands_unsided_alt_keybinds_to_configured_sides() {
         [input]
         macos-option-as-alt = "right"
         keybind = ["clear", "alt+n=next_tab", "left_alt+p=previous_tab"]
-    "#});
+    "#})
+    .expect("valid config");
 
     let keybinds = config
         .input
@@ -855,7 +1011,8 @@ fn macos_option_as_alt_preserves_command_alt_app_keybinds() {
         [input]
         macos-option-as-alt = "none"
         keybind = ["clear", "cmd+alt+n=new_window", "cmd+alt+r=rename_session"]
-    "#});
+    "#})
+    .expect("valid config");
 
     let keybinds = config
         .input
@@ -878,7 +1035,8 @@ fn macos_option_as_alt_expands_non_command_steps_in_chains() {
         [input]
         macos-option-as-alt = "right"
         keybind = ["clear", "cmd+k>alt+n=next_tab", "cmd+alt+p=previous_tab"]
-    "#});
+    "#})
+    .expect("valid config");
 
     let keybinds = config
         .input
@@ -903,7 +1061,8 @@ fn sidebar_keybind_clear_directive_replaces_existing_bindings() {
 
         [input]
         sidebar-keybind = ["clear", "space=activate_session"]
-    "#});
+    "#})
+    .expect("valid config");
 
     assert_eq!(config.input.sidebar_keybind, vec!["space=activate_session"]);
 }
@@ -916,10 +1075,11 @@ fn ssh_remote_defaults_and_all_fields_are_preserved() {
 
         [multiplexer.remote]
         host = "devbox"
-    "#});
+    "#})
+    .expect("valid config");
     assert_eq!(
         defaults.multiplexer.remote,
-        Some(SshRemoteConfig::for_host("devbox"))
+        Some(SshRemoteConfig::for_host("devbox").into())
     );
 
     let explicit = load_config_source(indoc! {r#"
@@ -932,16 +1092,20 @@ fn ssh_remote_defaults_and_all_fields_are_preserved() {
         port = 2222
         program = "ssh-custom"
         args = ["-i", "key"]
-    "#});
+    "#})
+    .expect("valid config");
     assert_eq!(
         explicit.multiplexer.remote,
-        Some(SshRemoteConfig {
-            host: "10.0.0.4".to_owned(),
-            user: Some("dev".to_owned()),
-            port: Some(2222),
-            program: "ssh-custom".to_owned(),
-            args: vec!["-i".to_owned(), "key".to_owned()],
-        })
+        Some(
+            SshRemoteConfig {
+                host: "10.0.0.4".to_owned(),
+                user: Some("dev".to_owned()),
+                port: Some(2222),
+                program: "ssh-custom".to_owned(),
+                args: vec!["-i".to_owned(), "key".to_owned()],
+            }
+            .into()
+        )
     );
 }
 
@@ -959,6 +1123,7 @@ fn multiplexer_remote_is_refused_for_backends_with_no_remote_client() {
         let loaded = ConfigSandbox::with_config(&format!(
             "[multiplexer]\nbackend = \"{backend}\"\n\n[multiplexer.remote]\nhost = \"devbox\"\n"
         ))
+        .expect("config fixture")
         .load();
 
         assert_eq!(loaded.is_ok(), accepted, "backend {backend}");
@@ -966,13 +1131,16 @@ fn multiplexer_remote_is_refused_for_backends_with_no_remote_client() {
 }
 
 #[test]
-fn herdr_uses_native_layout_keybinds_by_default() {
+fn herdr_has_no_backend_keybinds_by_default() {
     let input = &BoottyConfig::default().input;
 
-    assert_eq!(input.backend_keybinds.herdr, input.backend_keybinds.native);
-    let keybinds = input.keybinds_for_backend(MultiplexerBackendConfig::Herdr);
-    assert!(keybinds.iter().any(|entry| entry.contains("split_right")));
-    assert!(keybinds.iter().any(|entry| entry.contains("split_down")));
+    assert_eq!(input.backend_keybinds.herdr, Vec::<String>::new());
+    assert!(
+        input
+            .keybinds_for_backend(MultiplexerBackendConfig::Herdr)
+            .iter()
+            .all(|entry| !entry.contains("split_right") && !entry.contains("split_down"))
+    );
 }
 
 #[test]
@@ -980,6 +1148,7 @@ fn multiplexer_remote_validation_errors_keep_their_exact_text() {
     let empty_host = ConfigSandbox::with_config(
         "[multiplexer]\nbackend = \"tmux\"\n\n[multiplexer.remote]\nhost = \"  \"\n",
     )
+    .expect("config fixture")
     .load()
     .unwrap_err();
     assert_eq!(
@@ -990,6 +1159,7 @@ fn multiplexer_remote_validation_errors_keep_their_exact_text() {
     let unsupported = ConfigSandbox::with_config(
         "[multiplexer]\nbackend = \"native\"\n\n[multiplexer.remote]\nhost = \"devbox\"\n",
     )
+    .expect("config fixture")
     .load()
     .unwrap_err();
     assert_eq!(
@@ -1007,7 +1177,8 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
 
         [input]
         preset = "bootty"
-    "#});
+    "#})
+    .expect("valid config");
     let keybinds = config
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Rmux);
@@ -1042,7 +1213,8 @@ fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
         [input]
         preset = "tmux"
         keybind = ["cmd+g=new_tab"]
-    "#});
+    "#})
+    .expect("valid config");
 
     let keybinds = config
         .input
@@ -1074,7 +1246,8 @@ fn bootty_preset_tab_navigation_defaults_use_left_alt_shift() {
 
         [input]
         preset = "bootty"
-    "#});
+    "#})
+    .expect("valid config");
 
     assert!(
         config
@@ -1127,7 +1300,8 @@ fn bootty_preset_move_tab_defaults_bind_both_option_sides() {
 
         [input]
         preset = "bootty"
-    "#});
+    "#})
+    .expect("valid config");
 
     for entry in [
         "left_alt+shift+,=move_tab:-1",
@@ -1166,7 +1340,8 @@ fn bootty_preset_move_tab_defaults_bind_both_option_sides() {
 #[case("bootty")]
 #[case("tmux")]
 fn prefixed_presets_use_alt_shift_for_direct_pane_bindings(#[case] preset: &str) {
-    let config = load_config_source(&format!("[input]\npreset = \"{preset}\"\n"));
+    let config =
+        load_config_source(&format!("[input]\npreset = \"{preset}\"\n")).expect("valid config");
 
     for entry in [
         "alt+shift+h=select_pane:left",
@@ -1210,7 +1385,8 @@ fn prefix_override_rebuilds_prefixed_chords() {
         [input]
         preset = "bootty"
         prefix = "ctrl+a"
-    "#});
+    "#})
+    .expect("valid config");
 
     let keybinds = config
         .input
@@ -1246,14 +1422,21 @@ fn ghostty_preset_ignores_prefix_and_ships_direct_combos() {
         [input]
         preset = "ghostty"
         prefix = "ctrl+a"
-    "#});
+    "#})
+    .expect("valid config");
 
     assert_eq!(config.input.effective_prefix(), None);
     let keybinds = config
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Native);
     assert!(keybinds.iter().all(|entry| !entry.contains('>')));
-    assert_eq!(config.input.backend_keybinds.tmux, Vec::<String>::new());
+    assert_eq!(
+        config
+            .input
+            .keybinds_for_backend(MultiplexerBackendConfig::Tmux),
+        keybinds,
+        "the Ghostty preset keeps its direct layout shortcuts on tmux"
+    );
 }
 
 // An empty prefix (recorder cleared) must fall back to the preset default instead of producing
@@ -1266,10 +1449,46 @@ fn empty_prefix_falls_back_to_preset_default() {
         [input]
         preset = "bootty"
         prefix = ""
-    "#});
+    "#})
+    .expect("valid config");
 
     assert_eq!(
         config.input.effective_prefix().as_deref(),
         Some("ctrl+space")
+    );
+}
+
+#[rstest]
+fn wsl_remote_loads_through_the_toml_configuration_boundary() {
+    let config = load_config_source(
+        "[multiplexer]\nbackend = \"rmux\"\n[multiplexer.remote]\ndistribution = \"Ubuntu 開発\"\n",
+    )
+    .expect("valid config");
+    let Some(RemoteConfig::Wsl(remote)) = config.multiplexer.remote else {
+        panic!("WSL host");
+    };
+    assert_eq!(remote.distribution.as_str(), "Ubuntu 開発");
+}
+
+#[rstest::rstest]
+#[case("jobs")]
+#[case("transfers")]
+#[case("recovery")]
+#[case("shell")]
+fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
+    let dir = assert_fs::TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!("[panels.{panel}]\ndock = \"right\"\n[panels.files]\ndock = \"left\"\n"),
+    )
+    .unwrap();
+    let config = bootty_config::config::load_config_from_path(&path).unwrap();
+    assert_eq!(config.panels.len(), 1);
+    assert_eq!(
+        config
+            .panel(bootty_config::config::PanelKind::Files)
+            .dock(bootty_config::config::PanelKind::Files),
+        bootty_config::config::PanelDock::Left
     );
 }

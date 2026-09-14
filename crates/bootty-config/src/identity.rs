@@ -16,6 +16,7 @@ const PRODUCTION_NAMESPACE: &str = "bootty";
 const DEVELOPMENT_NAMESPACE_PREFIX: &str = "bootty-dev-";
 const PRODUCTION_BUNDLE_IDENTIFIER: &str = "dev.bootty.desktop";
 const DEVELOPMENT_BUNDLE_IDENTIFIER_PREFIX: &str = "dev.bootty.desktop.dev.";
+pub const KEYMAP_FILE_NAME: &str = "keymap.json";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationNames {
@@ -62,6 +63,7 @@ pub struct ApplicationIdentityConflict {
 }
 
 impl ApplicationIdentity {
+    #[must_use]
     pub const fn current() -> Self {
         if cfg!(any(debug_assertions, feature = "bootty-dev")) {
             Self::Development
@@ -74,6 +76,9 @@ impl ApplicationIdentity {
         PROCESS_IDENTITY.get().copied().unwrap_or(Self::Production)
     }
 
+    ///
+    /// # Errors
+    /// Returns a conflict if the process was already initialized with another identity.
     pub fn initialize_process(self) -> Result<(), ApplicationIdentityConflict> {
         if PROCESS_IDENTITY.set(self).is_err() && Self::for_process() != self {
             return Err(ApplicationIdentityConflict {
@@ -84,22 +89,27 @@ impl ApplicationIdentity {
         Ok(())
     }
 
+    #[must_use]
     pub fn display_name(self) -> &'static str {
         self.names().display_name()
     }
 
+    #[must_use]
     pub fn namespace(self) -> &'static str {
         self.names().namespace()
     }
 
+    #[must_use]
     pub fn cli_name(self) -> &'static str {
         self.namespace()
     }
 
+    #[must_use]
     pub fn bundle_identifier(self) -> &'static str {
         self.names().bundle_identifier()
     }
 
+    #[must_use]
     pub fn names_for_workspace(self, workspace_root: &Path) -> ApplicationNames {
         match self {
             Self::Production => production_names(),
@@ -107,10 +117,12 @@ impl ApplicationIdentity {
         }
     }
 
+    #[must_use]
     pub fn development_namespace_environment(self) -> Option<(&'static str, &'static str)> {
         matches!(self, Self::Development).then(|| (DEVELOPMENT_NAMESPACE_ENV, self.namespace()))
     }
 
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "bootty" => Some(Self::Production),
@@ -119,6 +131,7 @@ impl ApplicationIdentity {
         }
     }
 
+    #[must_use]
     pub fn default_config_path(self) -> PathBuf {
         config_path_from_env(
             self,
@@ -127,8 +140,9 @@ impl ApplicationIdentity {
         )
     }
 
-    pub const fn automatic_updates_enabled(self) -> bool {
-        matches!(self, Self::Production)
+    #[must_use]
+    pub fn default_keymap_path(self) -> PathBuf {
+        keymap_path_for_config(&self.default_config_path())
     }
 
     fn names(self) -> &'static ApplicationNames {
@@ -136,10 +150,10 @@ impl ApplicationIdentity {
         match self {
             Self::Production => PRODUCTION_NAMES.get_or_init(production_names),
             Self::Development => DEVELOPMENT_NAMES.get_or_init(|| {
-                development_names_from_namespace(
+                development_names_from_inherited_discriminator(
                     std::env::var_os(DEVELOPMENT_NAMESPACE_ENV)
                         .as_deref()
-                        .and_then(valid_development_namespace),
+                        .and_then(valid_development_discriminator),
                 )
             }),
         }
@@ -168,15 +182,10 @@ fn production_names() -> ApplicationNames {
     }
 }
 
-fn development_names_from_namespace(inherited: Option<&str>) -> ApplicationNames {
+fn development_names_from_inherited_discriminator(inherited: Option<&str>) -> ApplicationNames {
     inherited.map_or_else(
         || development_names_for_workspace(compiled_workspace_root()),
-        |namespace| {
-            let discriminator = namespace
-                .strip_prefix(DEVELOPMENT_NAMESPACE_PREFIX)
-                .expect("validated development namespace has its prefix");
-            names_from_discriminator(discriminator)
-        },
+        names_from_discriminator,
     )
 }
 
@@ -188,21 +197,19 @@ fn names_from_discriminator(discriminator: &str) -> ApplicationNames {
     }
 }
 
-fn valid_development_namespace(value: &OsStr) -> Option<&str> {
+fn valid_development_discriminator(value: &OsStr) -> Option<&str> {
     let value = value.to_str()?;
     let discriminator = value.strip_prefix(DEVELOPMENT_NAMESPACE_PREFIX)?;
     (discriminator.len() == 16
         && discriminator
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then_some(value)
+    .then_some(discriminator)
 }
 
 fn compiled_workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("bootty-identity lives under <workspace>/crates")
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.ancestors().nth(2).unwrap_or(manifest_dir)
 }
 
 fn stable_path_discriminator(path: &Path) -> String {
@@ -234,6 +241,19 @@ pub fn config_path_from_env(
     PathBuf::from(identity.namespace()).join("config.toml")
 }
 
+#[must_use]
+pub fn keymap_path_for_config(config_path: &Path) -> PathBuf {
+    config_path.with_file_name(KEYMAP_FILE_NAME)
+}
+
+pub fn keymap_path_from_env(
+    identity: ApplicationIdentity,
+    xdg_config_home: Option<impl AsRef<Path>>,
+    home: Option<impl AsRef<Path>>,
+) -> PathBuf {
+    keymap_path_for_config(&config_path_from_env(identity, xdg_config_home, home))
+}
+
 pub fn legacy_config_path_from_env(
     identity: ApplicationIdentity,
     xdg_config_home: Option<&Path>,
@@ -260,6 +280,7 @@ pub fn unix_daemon_state_path(
         .map(|root| root.join(identity.namespace()).join("daemon.sqlite"))
 }
 
+#[must_use]
 pub fn windows_daemon_state_path(
     identity: ApplicationIdentity,
     explicit: Option<&Path>,

@@ -8,10 +8,43 @@ use std::{
 
 use bootty_config::color::Color;
 use bootty_config::config::{
-    SegmentAlign, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig, StatusSegment,
-    commit_config_document, load_config_document, load_config_from_path, update_config_document,
+    ExtensionSettingValue, SegmentAlign, SshAuthenticationConfig, SshHostKeyPolicyConfig,
+    SshProfileConfig, StatusSegment, commit_config_document, load_config_document,
+    load_config_from_path, update_config_document,
 };
 use pretty_assertions::assert_eq;
+use rstest::rstest;
+
+#[rstest]
+#[case::inline("chrome = { sidebar = false, dock-tabs = { appearance = 'pill' } }\n")]
+#[case::section("[chrome]\nsidebar = false\n[chrome.dock-tabs]\nappearance = 'pill'\n")]
+fn writeback_updates_and_removes_values_in_either_table_form(#[case] source: &str) {
+    let directory = assert_fs::TempDir::new().expect("temporary config directory");
+    let path = directory.path().join("config.toml");
+    fs::write(&path, source).expect("write config");
+
+    update_config_document(&path, |document| {
+        document.set_str(&["chrome", "dock-tabs", "appearance"], "classic")?;
+        document.set_str(&["chrome", "terminal-tabs", "appearance"], "pill")?;
+        document.remove(&["chrome", "sidebar"])
+    })
+    .expect("edit nested config tables");
+
+    let document = load_config_document(&path)
+        .expect("reload document")
+        .expect("existing config");
+    assert_eq!(
+        document.str_at(&["chrome", "dock-tabs", "appearance"]),
+        Some("classic")
+    );
+    assert_eq!(
+        document.str_at(&["chrome", "terminal-tabs", "appearance"]),
+        Some("pill")
+    );
+    assert!(!document.contains(&["chrome", "sidebar"]));
+    let config = load_config_from_path(&path).expect("reload written config");
+    assert!(config.chrome.sidebar);
+}
 
 #[test]
 fn document_readers_answer_what_the_document_holds() {
@@ -86,6 +119,36 @@ fn atomic_writeback_preserves_structure_and_unix_mode() {
             0o640
         );
     }
+}
+
+#[test]
+fn writeback_preserves_raw_extension_settings() {
+    let directory = assert_fs::TempDir::new().expect("temporary config directory");
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "[extensions.greeter]\ngreeting = \"hello\"\nloud = true\nrepeats = 3\n\n[window]\ntitle = \"Before\"\n",
+    )
+    .expect("write initial config");
+
+    update_config_document(&path, |document| {
+        document.set_str(&["window", "title"], "After")
+    })
+    .expect("write known setting");
+
+    let written = fs::read_to_string(&path).expect("read replaced config");
+    assert!(written.contains("[extensions.greeter]"));
+    assert!(written.contains("greeting = \"hello\""));
+    assert!(written.contains("loud = true"));
+    assert!(written.contains("repeats = 3"));
+    assert_eq!(
+        load_config_from_path(&path)
+            .expect("reload config")
+            .extensions
+            .get("greeter")
+            .and_then(|values| values.get("greeting")),
+        Some(&ExtensionSettingValue::Text("hello".to_owned()))
+    );
 }
 
 #[test]
@@ -341,7 +404,7 @@ fn status_bar_writeback_preserves_segments_legacy_cleanup_comments_and_order() {
     assert!(written.find("[window]").unwrap() < written.find("[chrome]").unwrap());
 
     let config = load_config_from_path(&path).expect("load status segments");
-    let mut expected_top_segments = top_segments.clone();
+    let mut expected_top_segments = top_segments;
     expected_top_segments[0].icon = None;
     assert_eq!(config.chrome.top_segments, expected_top_segments);
     assert_eq!(config.chrome.bottom_segments, bottom_segments);
@@ -427,10 +490,12 @@ fn bootty_processes_serialize_config_updates() {
     let executable = std::env::current_exe().expect("current test executable");
 
     let mut first =
-        config_writer_process(&executable, &path, "first", &entered, &resume, &finished);
+        config_writer_process(&executable, &path, "first", &entered, &resume, &finished)
+            .expect("start config writer process");
     wait_for_path(&entered);
     let mut second =
-        config_writer_process(&executable, &path, "second", &entered, &resume, &finished);
+        config_writer_process(&executable, &path, "second", &entered, &resume, &finished)
+            .expect("start config writer process");
 
     thread::sleep(Duration::from_millis(50));
     assert!(!finished.exists());
@@ -481,7 +546,7 @@ fn config_writer_process(
     entered: &Path,
     resume: &Path,
     finished: &Path,
-) -> std::process::Child {
+) -> std::io::Result<std::process::Child> {
     Command::new(executable)
         .args(["--exact", "config_writer_process_helper"])
         .env("BOOTTY_TEST_CONFIG_WRITE_PATH", config)
@@ -492,14 +557,13 @@ fn config_writer_process(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("start config writer process")
 }
 
 fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let started = Instant::now();
     while !path.exists() {
         assert!(
-            Instant::now() < deadline,
+            started.elapsed() < Duration::from_secs(2),
             "timed out waiting for {}",
             path.display()
         );

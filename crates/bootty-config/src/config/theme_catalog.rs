@@ -26,10 +26,15 @@ pub(super) fn load_builtin_theme(theme: &str) -> Option<ResolvedTheme> {
     BUILTIN_THEMES
         .iter()
         .find(|builtin| theme_name_matches(builtin.name, theme))
-        .map(|builtin| {
-            parse_theme_source(builtin.source, &format!("built-in theme {}", builtin.name))
-                .expect("built-in themes must parse")
-        })
+        .map(|builtin| builtin.resolve())
+}
+
+pub(super) fn default_light_colors() -> ColorConfig {
+    (ZED_ONE_LIGHT_THEME.colors)()
+}
+
+pub(super) fn default_dark_colors() -> ColorConfig {
+    (ZED_ONE_DARK_THEME.colors)()
 }
 
 fn theme_name_matches(candidate: &str, requested: &str) -> bool {
@@ -43,7 +48,10 @@ pub fn builtin_theme_names() -> impl Iterator<Item = &'static str> {
     BUILTIN_THEMES.iter().map(|theme| theme.name)
 }
 
-pub(super) fn parse_theme_source(source: &str, label: &str) -> ConfigResult<ResolvedTheme> {
+///
+/// # Errors
+/// Returns an error for malformed TOML or invalid theme fields and colors.
+pub fn parse_theme_source(source: &str, label: &str) -> ConfigResult<ResolvedTheme> {
     let raw: RawTheme = toml_edit::de::from_str(source)
         .map_err(|error| ConfigLoadError::new(format!("failed to parse theme {label}: {error}")))?;
     let mut colors = ColorConfig::default();
@@ -60,669 +68,1182 @@ pub(super) fn parse_theme_source(source: &str, label: &str) -> ConfigResult<Reso
 
 struct BuiltinTheme {
     name: &'static str,
+    metadata_name: &'static str,
     source: &'static str,
+    license: &'static str,
+    colors: fn() -> ColorConfig,
 }
 
-pub const DEFAULT_LIGHT_THEME: &str = "Catppuccin Latte";
-pub const DEFAULT_DARK_THEME: &str = "Catppuccin Mocha";
+impl BuiltinTheme {
+    fn resolve(&self) -> ResolvedTheme {
+        ResolvedTheme {
+            info: ThemeInfo {
+                name: self.metadata_name.to_owned(),
+                source: self.source.to_owned(),
+                license: self.license.to_owned(),
+            },
+            colors: (self.colors)(),
+        }
+    }
+}
 
-const BUILTIN_THEMES: &[BuiltinTheme] = &[
-    BuiltinTheme {
-        name: "Catppuccin Mocha",
-        source: CATPPUCCIN_MOCHA_THEME,
-    },
-    BuiltinTheme {
-        name: "Catppuccin Latte",
-        source: CATPPUCCIN_LATTE_THEME,
-    },
-    BuiltinTheme {
-        name: "Catppuccin Frappe",
-        source: CATPPUCCIN_FRAPPE_THEME,
-    },
-    BuiltinTheme {
-        name: "Catppuccin Macchiato",
-        source: CATPPUCCIN_MACCHIATO_THEME,
-    },
-    BuiltinTheme {
-        name: "Atom One Dark",
-        source: ATOM_ONE_DARK_THEME,
-    },
-    BuiltinTheme {
-        name: "Atom One Light",
-        source: ATOM_ONE_LIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "Ayu",
-        source: AYU_THEME,
-    },
-    BuiltinTheme {
-        name: "Ayu Light",
-        source: AYU_LIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "Ayu Mirage",
-        source: AYU_MIRAGE_THEME,
-    },
-    BuiltinTheme {
-        name: "Dracula",
-        source: DRACULA_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Dark Hard",
-        source: EVERFOREST_DARK_HARD_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Dark Med",
-        source: EVERFOREST_DARK_MED_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Dark Soft",
-        source: EVERFOREST_DARK_SOFT_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Light Hard",
-        source: EVERFOREST_LIGHT_HARD_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Light Med",
-        source: EVERFOREST_LIGHT_MED_THEME,
-    },
-    BuiltinTheme {
-        name: "Everforest Light Soft",
-        source: EVERFOREST_LIGHT_SOFT_THEME,
-    },
-    BuiltinTheme {
-        name: "Flexoki Dark",
-        source: FLEXOKI_DARK_THEME,
-    },
-    BuiltinTheme {
-        name: "Flexoki Light",
-        source: FLEXOKI_LIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "Kanagawa Dragon",
-        source: KANAGAWA_DRAGON_THEME,
-    },
-    BuiltinTheme {
-        name: "Kanagawa Lotus",
-        source: KANAGAWA_LOTUS_THEME,
-    },
-    BuiltinTheme {
-        name: "Kanagawa Wave",
-        source: KANAGAWA_WAVE_THEME,
-    },
-    BuiltinTheme {
-        name: "Rose Pine",
-        source: ROSE_PINE_THEME,
-    },
-    BuiltinTheme {
-        name: "Rose Pine Dawn",
-        source: ROSE_PINE_DAWN_THEME,
-    },
-    BuiltinTheme {
-        name: "Rose Pine Moon",
-        source: ROSE_PINE_MOON_THEME,
-    },
-    BuiltinTheme {
-        name: "TokyoNight Night",
-        source: TOKYONIGHT_NIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "TokyoNight Day",
-        source: TOKYONIGHT_DAY_THEME,
-    },
-    BuiltinTheme {
-        name: "TokyoNight Moon",
-        source: TOKYONIGHT_MOON_THEME,
-    },
-    BuiltinTheme {
-        name: "TokyoNight Storm",
-        source: TOKYONIGHT_STORM_THEME,
-    },
-    BuiltinTheme {
-        name: "Solarized Dark",
-        source: ITERM2_SOLARIZED_DARK_THEME,
-    },
-    BuiltinTheme {
-        name: "Solarized Light",
-        source: ITERM2_SOLARIZED_LIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "Xcode Dark",
-        source: XCODE_DARK_THEME,
-    },
-    BuiltinTheme {
-        name: "Xcode Light",
-        source: XCODE_LIGHT_THEME,
-    },
-    BuiltinTheme {
-        name: "Gruvbox Dark",
-        source: GRUVBOX_DARK_THEME,
-    },
+const fn rgba(value: u32) -> crate::color::Color {
+    let [r, g, b, a] = value.to_be_bytes();
+    crate::color::Color { r, g, b, a }
+}
+
+pub const DEFAULT_LIGHT_THEME: &str = ZED_ONE_LIGHT_THEME.name;
+pub const DEFAULT_DARK_THEME: &str = ZED_ONE_DARK_THEME.name;
+const BUILTIN_THEMES: &[&BuiltinTheme] = &[
+    &CATPPUCCIN_MOCHA_THEME,
+    &CATPPUCCIN_LATTE_THEME,
+    &CATPPUCCIN_FRAPPE_THEME,
+    &CATPPUCCIN_MACCHIATO_THEME,
+    &ZED_ONE_DARK_THEME,
+    &ZED_ONE_LIGHT_THEME,
+    &AYU_THEME,
+    &AYU_LIGHT_THEME,
+    &AYU_MIRAGE_THEME,
+    &DRACULA_THEME,
+    &EVERFOREST_DARK_HARD_THEME,
+    &EVERFOREST_DARK_MED_THEME,
+    &EVERFOREST_DARK_SOFT_THEME,
+    &EVERFOREST_LIGHT_HARD_THEME,
+    &EVERFOREST_LIGHT_MED_THEME,
+    &EVERFOREST_LIGHT_SOFT_THEME,
+    &FLEXOKI_DARK_THEME,
+    &FLEXOKI_LIGHT_THEME,
+    &KANAGAWA_DRAGON_THEME,
+    &KANAGAWA_LOTUS_THEME,
+    &KANAGAWA_WAVE_THEME,
+    &ROSE_PINE_THEME,
+    &ROSE_PINE_DAWN_THEME,
+    &ROSE_PINE_MOON_THEME,
+    &TOKYONIGHT_NIGHT_THEME,
+    &TOKYONIGHT_DAY_THEME,
+    &TOKYONIGHT_MOON_THEME,
+    &TOKYONIGHT_STORM_THEME,
+    &ITERM2_SOLARIZED_DARK_THEME,
+    &ITERM2_SOLARIZED_LIGHT_THEME,
+    &XCODE_DARK_THEME,
+    &XCODE_LIGHT_THEME,
+    &GRUVBOX_DARK_THEME,
 ];
 
-const FLEXOKI_DARK_THEME: &str = r##"
-[metadata]
-name = "Flexoki Dark"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Flexoki Dark"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#100f0f", "#d14d41", "#879a39", "#d0a215", "#4385be", "#ce5d97", "#3aa99f", "#878580", "#575653", "#af3029", "#66800b", "#ad8301", "#205ea6", "#a02f6f", "#24837b", "#cecdc3"]
-background = "#100f0f"
-foreground = "#cecdc3"
-cursor = "#cecdc3"
-cursor-text = "#100f0f"
-selection-background = "#403e3c"
-selection-foreground = "#cecdc3"
-"##;
-
-const FLEXOKI_LIGHT_THEME: &str = r##"
-[metadata]
-name = "Flexoki Light"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Flexoki Light"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#100f0f", "#af3029", "#66800b", "#ad8301", "#205ea6", "#a02f6f", "#24837b", "#6f6e69", "#b7b5ac", "#d14d41", "#879a39", "#d0a215", "#4385be", "#ce5d97", "#3aa99f", "#cecdc3"]
-background = "#fffcf0"
-foreground = "#100f0f"
-cursor = "#100f0f"
-cursor-text = "#fffcf0"
-selection-background = "#cecdc3"
-selection-foreground = "#100f0f"
-"##;
-
-const EVERFOREST_DARK_HARD_THEME: &str = r##"
-[metadata]
-name = "Everforest Dark Hard"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Hard"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#f2efdf", "#a6b0a0", "#f85552", "#8da101", "#dfa000", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#1e2326"
-foreground = "#d3c6aa"
-cursor = "#e69875"
-cursor-text = "#4c3743"
-selection-background = "#4c3743"
-selection-foreground = "#d3c6aa"
-"##;
-
-const EVERFOREST_DARK_MED_THEME: &str = r##"
-[metadata]
-name = "Everforest Dark Med"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Med"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#f2efdf", "#a6b0a0", "#f85552", "#8da101", "#dfa000", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#232a2e"
-foreground = "#d3c6aa"
-cursor = "#e69875"
-cursor-text = "#543a48"
-selection-background = "#543a48"
-selection-foreground = "#d3c6aa"
-"##;
-
-const EVERFOREST_DARK_SOFT_THEME: &str = r##"
-[metadata]
-name = "Everforest Dark Soft"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Soft"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#f2efdf", "#a6b0a0", "#f85552", "#8da101", "#dfa000", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#293136"
-foreground = "#d3c6aa"
-cursor = "#e69875"
-cursor-text = "#5c3f4f"
-selection-background = "#5c3f4f"
-selection-foreground = "#d3c6aa"
-"##;
-
-const EVERFOREST_LIGHT_HARD_THEME: &str = r##"
-[metadata]
-name = "Everforest Light Hard"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Hard"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#9ab373", "#ceaf72", "#7fbbb3", "#d699b6", "#83c092", "#b2af9f", "#a6b0a0", "#f85552", "#8da101", "#dfa000", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#f2efdf"
-foreground = "#5c6a72"
-cursor = "#f57d26"
-cursor-text = "#f0f2d4"
-selection-background = "#f0f2d4"
-selection-foreground = "#5c6a72"
-"##;
-
-const EVERFOREST_LIGHT_MED_THEME: &str = r##"
-[metadata]
-name = "Everforest Light Med"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Med"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#9ab373", "#c1a266", "#7fbbb3", "#d699b6", "#83c092", "#b2af9f", "#a6b0a0", "#f85552", "#8da101", "#dfa000", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#efebd4"
-foreground = "#5c6a72"
-cursor = "#f57d26"
-cursor-text = "#eaedc8"
-selection-background = "#eaedc8"
-selection-foreground = "#5c6a72"
-"##;
-
-const EVERFOREST_LIGHT_SOFT_THEME: &str = r##"
-[metadata]
-name = "Everforest Light Soft"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Soft"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#7a8478", "#e67e80", "#8da666", "#c1a266", "#72aea6", "#c98ca9", "#76b385", "#a5a292", "#99a393", "#f85552", "#8da101", "#d29300", "#3a94c5", "#df69ba", "#35a77c", "#fffbef"]
-background = "#e5dfc5"
-foreground = "#5c6a72"
-cursor = "#f57d26"
-cursor-text = "#e1e4bd"
-selection-background = "#e1e4bd"
-selection-foreground = "#5c6a72"
-"##;
-
-const KANAGAWA_DRAGON_THEME: &str = r##"
-[metadata]
-name = "Kanagawa Dragon"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Dragon"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#0d0c0c", "#c4746e", "#8a9a7b", "#c4b28a", "#8ba4b0", "#a292a3", "#8ea4a2", "#c8c093", "#a6a69c", "#e46876", "#87a987", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#c5c9c5"]
-background = "#181616"
-foreground = "#c5c9c5"
-cursor = "#c8c093"
-cursor-text = "#181616"
-selection-background = "#c5c9c5"
-selection-foreground = "#181616"
-"##;
-
-const KANAGAWA_LOTUS_THEME: &str = r##"
-[metadata]
-name = "Kanagawa Lotus"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Lotus"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#1f1f28", "#c84053", "#6f894e", "#77713f", "#4d699b", "#b35b79", "#597b75", "#545464", "#8a8980", "#d7474b", "#6e915f", "#836f4a", "#6693bf", "#624c83", "#5e857a", "#43436c"]
-background = "#f2ecbc"
-foreground = "#545464"
-cursor = "#43436c"
-cursor-text = "#f2ecbc"
-selection-background = "#545464"
-selection-foreground = "#f2ecbc"
-"##;
-
-const KANAGAWA_WAVE_THEME: &str = r##"
-[metadata]
-name = "Kanagawa Wave"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Wave"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093", "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"]
-background = "#1f1f28"
-foreground = "#dcd7ba"
-cursor = "#dcd7ba"
-cursor-text = "#1f1f28"
-selection-background = "#dcd7ba"
-selection-foreground = "#1f1f28"
-"##;
-
-const ROSE_PINE_THEME: &str = r##"
-[metadata]
-name = "Rose Pine"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4", "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4"]
-background = "#191724"
-foreground = "#e0def4"
-cursor = "#e0def4"
-cursor-text = "#191724"
-selection-background = "#403d52"
-selection-foreground = "#e0def4"
-"##;
-
-const ROSE_PINE_DAWN_THEME: &str = r##"
-[metadata]
-name = "Rose Pine Dawn"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine Dawn"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279", "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279"]
-background = "#faf4ed"
-foreground = "#575279"
-cursor = "#575279"
-cursor-text = "#faf4ed"
-selection-background = "#dfdad9"
-selection-foreground = "#575279"
-"##;
-
-const ROSE_PINE_MOON_THEME: &str = r##"
-[metadata]
-name = "Rose Pine Moon"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine Moon"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#393552", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4", "#6e6a86", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4"]
-background = "#232136"
-foreground = "#e0def4"
-cursor = "#e0def4"
-cursor-text = "#232136"
-selection-background = "#44415a"
-selection-foreground = "#e0def4"
-"##;
-
-const CATPPUCCIN_MOCHA_THEME: &str = r##"
-[metadata]
-name = "Catppuccin Mocha"
-source = "catppuccin/ghostty and mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Mocha"
-license = "MIT"
-
-[colors]
-palette = ["#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8", "#585b70", "#f37799", "#89d88b", "#ebd391", "#74a8fc", "#f2aede", "#6bd7ca", "#bac2de"]
-background = "#1e1e2e"
-foreground = "#cdd6f4"
-cursor = "#f5e0dc"
-cursor-text = "#1e1e2e"
-selection-background = "#585b70"
-selection-foreground = "#cdd6f4"
-"##;
-
-const CATPPUCCIN_LATTE_THEME: &str = r##"
-[metadata]
-name = "Catppuccin Latte"
-source = "catppuccin/ghostty and mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Latte"
-license = "MIT"
-
-[colors]
-palette = ["#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be", "#6c6f85", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#bcc0cc"]
-background = "#eff1f5"
-foreground = "#4c4f69"
-cursor = "#dc8a78"
-cursor-text = "#eff1f5"
-selection-background = "#acb0be"
-selection-foreground = "#4c4f69"
-"##;
-
-const CATPPUCCIN_FRAPPE_THEME: &str = r##"
-[metadata]
-name = "Catppuccin Frappe"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Frappe"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#b5bfe2", "#626880", "#eda0a2", "#b9dba2", "#ecd7ae", "#adc2f3", "#f38ed8", "#98d2ca", "#a5adce"]
-background = "#303446"
-foreground = "#c6d0f5"
-cursor = "#f2d5cf"
-cursor-text = "#303446"
-selection-background = "#f2d5cf"
-selection-foreground = "#303446"
-"##;
-
-const CATPPUCCIN_MACCHIATO_THEME: &str = r##"
-[metadata]
-name = "Catppuccin Macchiato"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Macchiato"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#494d64", "#ed8796", "#a6da95", "#eed49f", "#8aadf4", "#f5bde6", "#8bd5ca", "#b8c0e0", "#5b6078", "#f2a7b2", "#bde3b0", "#f4e3c1", "#adc5f7", "#f493da", "#a5ded6", "#a5adcb"]
-background = "#24273a"
-foreground = "#cad3f5"
-cursor = "#f4dbd6"
-cursor-text = "#24273a"
-selection-background = "#f4dbd6"
-selection-foreground = "#24273a"
-"##;
-
-const ATOM_ONE_DARK_THEME: &str = r##"
-[metadata]
-name = "Atom One Dark"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Atom One Dark"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#21252b", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf", "#767676", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf"]
-background = "#21252b"
-foreground = "#abb2bf"
-cursor = "#abb2bf"
-cursor-text = "#21252b"
-selection-background = "#323844"
-selection-foreground = "#abb2bf"
-"##;
-
-const ATOM_ONE_LIGHT_THEME: &str = r##"
-[metadata]
-name = "Atom One Light"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Atom One Light"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#950095", "#3f953a", "#bbbbbb", "#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#a00095", "#3f953a", "#ffffff"]
-background = "#f9f9f9"
-foreground = "#2a2c33"
-cursor = "#bbbbbb"
-cursor-text = "#ffffff"
-selection-background = "#ededed"
-selection-foreground = "#2a2c33"
-"##;
-
-const AYU_THEME: &str = r##"
-[metadata]
-name = "Ayu"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Ayu"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#11151c", "#ea6c73", "#7fd962", "#f9af4f", "#53bdfa", "#cda1fa", "#90e1c6", "#c7c7c7", "#686868", "#f07178", "#aad94c", "#ffb454", "#59c2ff", "#d2a6ff", "#95e6cb", "#ffffff"]
-background = "#0b0e14"
-foreground = "#bfbdb6"
-cursor = "#e6b450"
-cursor-text = "#0b0e14"
-selection-background = "#409fff"
-selection-foreground = "#0b0e14"
-"##;
-
-const AYU_LIGHT_THEME: &str = r##"
-[metadata]
-name = "Ayu Light"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Ayu Light"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#000000", "#ea6c6d", "#6cbf43", "#eca944", "#3199e1", "#9e75c7", "#46ba94", "#bababa", "#686868", "#f07171", "#86b300", "#f2ae49", "#399ee6", "#a37acc", "#4cbf99", "#d1d1d1"]
-background = "#f8f9fa"
-foreground = "#5c6166"
-cursor = "#ffaa33"
-cursor-text = "#f8f9fa"
-selection-background = "#035bd6"
-selection-foreground = "#f8f9fa"
-"##;
-
-const AYU_MIRAGE_THEME: &str = r##"
-[metadata]
-name = "Ayu Mirage"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Ayu Mirage"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#171b24", "#ed8274", "#87d96c", "#facc6e", "#6dcbfa", "#dabafa", "#90e1c6", "#c7c7c7", "#686868", "#f28779", "#d5ff80", "#ffd173", "#73d0ff", "#dfbfff", "#95e6cb", "#ffffff"]
-background = "#1f2430"
-foreground = "#cccac2"
-cursor = "#ffcc66"
-cursor-text = "#1f2430"
-selection-background = "#409fff"
-selection-foreground = "#1f2430"
-"##;
-
-const DRACULA_THEME: &str = r##"
-[metadata]
-name = "Dracula"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Dracula"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2", "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff"]
-background = "#282a36"
-foreground = "#f8f8f2"
-cursor = "#f8f8f2"
-cursor-text = "#282a36"
-selection-background = "#44475a"
-selection-foreground = "#ffffff"
-"##;
-
-const TOKYONIGHT_NIGHT_THEME: &str = r##"
-[metadata]
-name = "TokyoNight Night"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Night"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6", "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5"]
-background = "#1a1b26"
-foreground = "#c0caf5"
-cursor = "#c0caf5"
-selection-background = "#33467c"
-selection-foreground = "#c0caf5"
-"##;
-
-const TOKYONIGHT_DAY_THEME: &str = r##"
-[metadata]
-name = "TokyoNight Day"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Day"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#e9e9ed", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197", "#6172b0", "#a1a6c5", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197", "#3760bf"]
-background = "#e1e2e7"
-foreground = "#3760bf"
-cursor = "#3760bf"
-cursor-text = "#e1e2e7"
-selection-background = "#99a7df"
-selection-foreground = "#3760bf"
-"##;
-
-const TOKYONIGHT_MOON_THEME: &str = r##"
-[metadata]
-name = "TokyoNight Moon"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Moon"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#1b1d2b", "#ff757f", "#c3e88d", "#ffc777", "#82aaff", "#c099ff", "#86e1fc", "#828bb8", "#444a73", "#ff757f", "#c3e88d", "#ffc777", "#82aaff", "#c099ff", "#86e1fc", "#c8d3f5"]
-background = "#222436"
-foreground = "#c8d3f5"
-cursor = "#c8d3f5"
-cursor-text = "#222436"
-selection-background = "#2d3f76"
-selection-foreground = "#c8d3f5"
-"##;
-
-const TOKYONIGHT_STORM_THEME: &str = r##"
-[metadata]
-name = "TokyoNight Storm"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Storm"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#1d202f", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6", "#4e5575", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5"]
-background = "#24283b"
-foreground = "#c0caf5"
-cursor = "#c0caf5"
-cursor-text = "#1d202f"
-selection-background = "#364a82"
-selection-foreground = "#c0caf5"
-"##;
-
-const ITERM2_SOLARIZED_DARK_THEME: &str = r##"
-[metadata]
-name = "iTerm2 Solarized Dark"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/iTerm2 Solarized Dark"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5", "#335e69", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3"]
-background = "#002b36"
-foreground = "#839496"
-cursor = "#839496"
-cursor-text = "#073642"
-selection-background = "#073642"
-selection-foreground = "#93a1a1"
-"##;
-
-const ITERM2_SOLARIZED_LIGHT_THEME: &str = r##"
-[metadata]
-name = "iTerm2 Solarized Light"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/iTerm2 Solarized Light"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#bbb5a2", "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3"]
-background = "#fdf6e3"
-foreground = "#657b83"
-cursor = "#657b83"
-cursor-text = "#eee8d5"
-selection-background = "#eee8d5"
-selection-foreground = "#586e75"
-"##;
-
-const XCODE_DARK_THEME: &str = r##"
-[metadata]
-name = "Xcode Dark"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Xcode Dark"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#414453", "#ff8170", "#78c2b3", "#d9c97c", "#4eb0cc", "#ff7ab2", "#b281eb", "#dfdfe0", "#7f8c98", "#ff8170", "#acf2e4", "#ffa14f", "#6bdfff", "#ff7ab2", "#dabaff", "#dfdfe0"]
-background = "#292a30"
-foreground = "#dfdfe0"
-cursor = "#dfdfe0"
-cursor-text = "#292a30"
-selection-background = "#414453"
-selection-foreground = "#dfdfe0"
-"##;
-
-const XCODE_LIGHT_THEME: &str = r##"
-[metadata]
-name = "Xcode Light"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Xcode Light"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#b4d8fd", "#d12f1b", "#3e8087", "#78492a", "#0f68a0", "#ad3da4", "#804fb8", "#262626", "#8a99a6", "#d12f1b", "#23575c", "#78492a", "#0b4f79", "#ad3da4", "#4b21b0", "#262626"]
-background = "#ffffff"
-foreground = "#262626"
-cursor = "#262626"
-cursor-text = "#ffffff"
-selection-background = "#b4d8fd"
-selection-foreground = "#262626"
-"##;
-
-const GRUVBOX_DARK_THEME: &str = r##"
-[metadata]
-name = "Gruvbox Dark"
-source = "mbadolato/iTerm2-Color-Schemes ghostty/Gruvbox Dark"
-license = "MIT collection; individual theme provenance applies"
-
-[colors]
-palette = ["#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984", "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2"]
-background = "#282828"
-foreground = "#ebdbb2"
-cursor = "#ebdbb2"
-selection-background = "#504945"
-selection-foreground = "#ebdbb2"
-"##;
+const CATPPUCCIN_MOCHA_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Catppuccin Mocha",
+    metadata_name: "Catppuccin Mocha",
+    source: "catppuccin/ghostty and mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Mocha",
+    license: "MIT",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x45_47_5a_ff),
+            rgba(0xf3_8b_a8_ff),
+            rgba(0xa6_e3_a1_ff),
+            rgba(0xf9_e2_af_ff),
+            rgba(0x89_b4_fa_ff),
+            rgba(0xf5_c2_e7_ff),
+            rgba(0x94_e2_d5_ff),
+            rgba(0xa6_ad_c8_ff),
+            rgba(0x58_5b_70_ff),
+            rgba(0xf3_77_99_ff),
+            rgba(0x89_d8_8b_ff),
+            rgba(0xeb_d3_91_ff),
+            rgba(0x74_a8_fc_ff),
+            rgba(0xf2_ae_de_ff),
+            rgba(0x6b_d7_ca_ff),
+            rgba(0xba_c2_de_ff),
+        ],
+        background: Some(rgba(0x1e_1e_2e_ff)),
+        foreground: Some(rgba(0xcd_d6_f4_ff)),
+        cursor: Some(rgba(0xf5_e0_dc_ff)),
+        cursor_text: Some(rgba(0x1e_1e_2e_ff)),
+        selection_background: Some(rgba(0x58_5b_70_ff)),
+        selection_foreground: Some(rgba(0xcd_d6_f4_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const CATPPUCCIN_LATTE_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Catppuccin Latte",
+    metadata_name: "Catppuccin Latte",
+    source: "catppuccin/ghostty and mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Latte",
+    license: "MIT",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x5c_5f_77_ff),
+            rgba(0xd2_0f_39_ff),
+            rgba(0x40_a0_2b_ff),
+            rgba(0xdf_8e_1d_ff),
+            rgba(0x1e_66_f5_ff),
+            rgba(0xea_76_cb_ff),
+            rgba(0x17_92_99_ff),
+            rgba(0xac_b0_be_ff),
+            rgba(0x6c_6f_85_ff),
+            rgba(0xd2_0f_39_ff),
+            rgba(0x40_a0_2b_ff),
+            rgba(0xdf_8e_1d_ff),
+            rgba(0x1e_66_f5_ff),
+            rgba(0xea_76_cb_ff),
+            rgba(0x17_92_99_ff),
+            rgba(0xbc_c0_cc_ff),
+        ],
+        background: Some(rgba(0xef_f1_f5_ff)),
+        foreground: Some(rgba(0x4c_4f_69_ff)),
+        cursor: Some(rgba(0xdc_8a_78_ff)),
+        cursor_text: Some(rgba(0xef_f1_f5_ff)),
+        selection_background: Some(rgba(0xac_b0_be_ff)),
+        selection_foreground: Some(rgba(0x4c_4f_69_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const CATPPUCCIN_FRAPPE_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Catppuccin Frappe",
+    metadata_name: "Catppuccin Frappe",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Frappe",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x51_57_6d_ff),
+            rgba(0xe7_82_84_ff),
+            rgba(0xa6_d1_89_ff),
+            rgba(0xe5_c8_90_ff),
+            rgba(0x8c_aa_ee_ff),
+            rgba(0xf4_b8_e4_ff),
+            rgba(0x81_c8_be_ff),
+            rgba(0xb5_bf_e2_ff),
+            rgba(0x62_68_80_ff),
+            rgba(0xed_a0_a2_ff),
+            rgba(0xb9_db_a2_ff),
+            rgba(0xec_d7_ae_ff),
+            rgba(0xad_c2_f3_ff),
+            rgba(0xf3_8e_d8_ff),
+            rgba(0x98_d2_ca_ff),
+            rgba(0xa5_ad_ce_ff),
+        ],
+        background: Some(rgba(0x30_34_46_ff)),
+        foreground: Some(rgba(0xc6_d0_f5_ff)),
+        cursor: Some(rgba(0xf2_d5_cf_ff)),
+        cursor_text: Some(rgba(0x30_34_46_ff)),
+        selection_background: Some(rgba(0xf2_d5_cf_ff)),
+        selection_foreground: Some(rgba(0x30_34_46_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const CATPPUCCIN_MACCHIATO_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Catppuccin Macchiato",
+    metadata_name: "Catppuccin Macchiato",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Catppuccin Macchiato",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x49_4d_64_ff),
+            rgba(0xed_87_96_ff),
+            rgba(0xa6_da_95_ff),
+            rgba(0xee_d4_9f_ff),
+            rgba(0x8a_ad_f4_ff),
+            rgba(0xf5_bd_e6_ff),
+            rgba(0x8b_d5_ca_ff),
+            rgba(0xb8_c0_e0_ff),
+            rgba(0x5b_60_78_ff),
+            rgba(0xf2_a7_b2_ff),
+            rgba(0xbd_e3_b0_ff),
+            rgba(0xf4_e3_c1_ff),
+            rgba(0xad_c5_f7_ff),
+            rgba(0xf4_93_da_ff),
+            rgba(0xa5_de_d6_ff),
+            rgba(0xa5_ad_cb_ff),
+        ],
+        background: Some(rgba(0x24_27_3a_ff)),
+        foreground: Some(rgba(0xca_d3_f5_ff)),
+        cursor: Some(rgba(0xf4_db_d6_ff)),
+        cursor_text: Some(rgba(0x24_27_3a_ff)),
+        selection_background: Some(rgba(0xf4_db_d6_ff)),
+        selection_foreground: Some(rgba(0x24_27_3a_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ZED_ONE_DARK_THEME: BuiltinTheme = BuiltinTheme {
+    name: "One Dark",
+    metadata_name: "One Dark",
+    source: "zed-industries/zed assets/themes/one/one.json",
+    license: "GPL-3.0-or-later",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x28_2c_34_ff),
+            rgba(0xe0_6c_75_ff),
+            rgba(0x98_c3_79_ff),
+            rgba(0xe5_c0_7b_ff),
+            rgba(0x61_af_ef_ff),
+            rgba(0xc6_78_dd_ff),
+            rgba(0x56_b6_c2_ff),
+            rgba(0xab_b2_bf_ff),
+            rgba(0x63_6d_83_ff),
+            rgba(0xea_85_8b_ff),
+            rgba(0xaa_d5_81_ff),
+            rgba(0xff_d8_85_ff),
+            rgba(0x85_c1_ff_ff),
+            rgba(0xd3_98_eb_ff),
+            rgba(0x6e_d5_de_ff),
+            rgba(0xfa_fa_fa_ff),
+        ],
+        background: Some(rgba(0x28_2c_34_ff)),
+        foreground: Some(rgba(0xab_b2_bf_ff)),
+        cursor: Some(rgba(0x74_ad_e8_ff)),
+        cursor_text: Some(rgba(0x11_11_10_ff)),
+        selection_background: Some(rgba(0x74_ad_e8_3d)),
+        ..ColorConfig::default()
+    },
+};
+
+const ZED_ONE_LIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "One Light",
+    metadata_name: "One Light",
+    source: "zed-industries/zed assets/themes/one/one.json",
+    license: "GPL-3.0-or-later",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x00_00_00_ff),
+            rgba(0xde_3e_35_ff),
+            rgba(0x3f_95_3a_ff),
+            rgba(0xd2_b6_7c_ff),
+            rgba(0x2f_5a_f3_ff),
+            rgba(0x95_00_95_ff),
+            rgba(0x09_97_b3_ff),
+            rgba(0xbb_bb_bb_ff),
+            rgba(0x00_00_00_ff),
+            rgba(0xde_3e_35_ff),
+            rgba(0x3f_95_3a_ff),
+            rgba(0xd2_b6_7c_ff),
+            rgba(0x2f_5a_f3_ff),
+            rgba(0xa0_00_95_ff),
+            rgba(0x0b_bc_d6_ff),
+            rgba(0xff_ff_ff_ff),
+        ],
+        background: Some(rgba(0xfa_fa_fa_ff)),
+        foreground: Some(rgba(0x2a_2c_33_ff)),
+        cursor: Some(rgba(0x5c_78_e2_ff)),
+        cursor_text: Some(rgba(0xfd_fd_fc_ff)),
+        selection_background: Some(rgba(0x5c_78_e2_3d)),
+        ..ColorConfig::default()
+    },
+};
+
+const AYU_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Ayu",
+    metadata_name: "Ayu",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Ayu",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x11_15_1c_ff),
+            rgba(0xea_6c_73_ff),
+            rgba(0x7f_d9_62_ff),
+            rgba(0xf9_af_4f_ff),
+            rgba(0x53_bd_fa_ff),
+            rgba(0xcd_a1_fa_ff),
+            rgba(0x90_e1_c6_ff),
+            rgba(0xc7_c7_c7_ff),
+            rgba(0x68_68_68_ff),
+            rgba(0xf0_71_78_ff),
+            rgba(0xaa_d9_4c_ff),
+            rgba(0xff_b4_54_ff),
+            rgba(0x59_c2_ff_ff),
+            rgba(0xd2_a6_ff_ff),
+            rgba(0x95_e6_cb_ff),
+            rgba(0xff_ff_ff_ff),
+        ],
+        background: Some(rgba(0x0b_0e_14_ff)),
+        foreground: Some(rgba(0xbf_bd_b6_ff)),
+        cursor: Some(rgba(0xe6_b4_50_ff)),
+        cursor_text: Some(rgba(0x0b_0e_14_ff)),
+        selection_background: Some(rgba(0x40_9f_ff_ff)),
+        selection_foreground: Some(rgba(0x0b_0e_14_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const AYU_LIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Ayu Light",
+    metadata_name: "Ayu Light",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Ayu Light",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x00_00_00_ff),
+            rgba(0xea_6c_6d_ff),
+            rgba(0x6c_bf_43_ff),
+            rgba(0xec_a9_44_ff),
+            rgba(0x31_99_e1_ff),
+            rgba(0x9e_75_c7_ff),
+            rgba(0x46_ba_94_ff),
+            rgba(0xba_ba_ba_ff),
+            rgba(0x68_68_68_ff),
+            rgba(0xf0_71_71_ff),
+            rgba(0x86_b3_00_ff),
+            rgba(0xf2_ae_49_ff),
+            rgba(0x39_9e_e6_ff),
+            rgba(0xa3_7a_cc_ff),
+            rgba(0x4c_bf_99_ff),
+            rgba(0xd1_d1_d1_ff),
+        ],
+        background: Some(rgba(0xf8_f9_fa_ff)),
+        foreground: Some(rgba(0x5c_61_66_ff)),
+        cursor: Some(rgba(0xff_aa_33_ff)),
+        cursor_text: Some(rgba(0xf8_f9_fa_ff)),
+        selection_background: Some(rgba(0x03_5b_d6_ff)),
+        selection_foreground: Some(rgba(0xf8_f9_fa_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const AYU_MIRAGE_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Ayu Mirage",
+    metadata_name: "Ayu Mirage",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Ayu Mirage",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x17_1b_24_ff),
+            rgba(0xed_82_74_ff),
+            rgba(0x87_d9_6c_ff),
+            rgba(0xfa_cc_6e_ff),
+            rgba(0x6d_cb_fa_ff),
+            rgba(0xda_ba_fa_ff),
+            rgba(0x90_e1_c6_ff),
+            rgba(0xc7_c7_c7_ff),
+            rgba(0x68_68_68_ff),
+            rgba(0xf2_87_79_ff),
+            rgba(0xd5_ff_80_ff),
+            rgba(0xff_d1_73_ff),
+            rgba(0x73_d0_ff_ff),
+            rgba(0xdf_bf_ff_ff),
+            rgba(0x95_e6_cb_ff),
+            rgba(0xff_ff_ff_ff),
+        ],
+        background: Some(rgba(0x1f_24_30_ff)),
+        foreground: Some(rgba(0xcc_ca_c2_ff)),
+        cursor: Some(rgba(0xff_cc_66_ff)),
+        cursor_text: Some(rgba(0x1f_24_30_ff)),
+        selection_background: Some(rgba(0x40_9f_ff_ff)),
+        selection_foreground: Some(rgba(0x1f_24_30_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const DRACULA_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Dracula",
+    metadata_name: "Dracula",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Dracula",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x21_22_2c_ff),
+            rgba(0xff_55_55_ff),
+            rgba(0x50_fa_7b_ff),
+            rgba(0xf1_fa_8c_ff),
+            rgba(0xbd_93_f9_ff),
+            rgba(0xff_79_c6_ff),
+            rgba(0x8b_e9_fd_ff),
+            rgba(0xf8_f8_f2_ff),
+            rgba(0x62_72_a4_ff),
+            rgba(0xff_6e_6e_ff),
+            rgba(0x69_ff_94_ff),
+            rgba(0xff_ff_a5_ff),
+            rgba(0xd6_ac_ff_ff),
+            rgba(0xff_92_df_ff),
+            rgba(0xa4_ff_ff_ff),
+            rgba(0xff_ff_ff_ff),
+        ],
+        background: Some(rgba(0x28_2a_36_ff)),
+        foreground: Some(rgba(0xf8_f8_f2_ff)),
+        cursor: Some(rgba(0xf8_f8_f2_ff)),
+        cursor_text: Some(rgba(0x28_2a_36_ff)),
+        selection_background: Some(rgba(0x44_47_5a_ff)),
+        selection_foreground: Some(rgba(0xff_ff_ff_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_DARK_HARD_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Dark Hard",
+    metadata_name: "Everforest Dark Hard",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Hard",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0xa7_c0_80_ff),
+            rgba(0xdb_bc_7f_ff),
+            rgba(0x7f_bb_b3_ff),
+            rgba(0xd6_99_b6_ff),
+            rgba(0x83_c0_92_ff),
+            rgba(0xf2_ef_df_ff),
+            rgba(0xa6_b0_a0_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xdf_a0_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0x1e_23_26_ff)),
+        foreground: Some(rgba(0xd3_c6_aa_ff)),
+        cursor: Some(rgba(0xe6_98_75_ff)),
+        cursor_text: Some(rgba(0x4c_37_43_ff)),
+        selection_background: Some(rgba(0x4c_37_43_ff)),
+        selection_foreground: Some(rgba(0xd3_c6_aa_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_DARK_MED_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Dark Med",
+    metadata_name: "Everforest Dark Med",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Med",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0xa7_c0_80_ff),
+            rgba(0xdb_bc_7f_ff),
+            rgba(0x7f_bb_b3_ff),
+            rgba(0xd6_99_b6_ff),
+            rgba(0x83_c0_92_ff),
+            rgba(0xf2_ef_df_ff),
+            rgba(0xa6_b0_a0_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xdf_a0_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0x23_2a_2e_ff)),
+        foreground: Some(rgba(0xd3_c6_aa_ff)),
+        cursor: Some(rgba(0xe6_98_75_ff)),
+        cursor_text: Some(rgba(0x54_3a_48_ff)),
+        selection_background: Some(rgba(0x54_3a_48_ff)),
+        selection_foreground: Some(rgba(0xd3_c6_aa_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_DARK_SOFT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Dark Soft",
+    metadata_name: "Everforest Dark Soft",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Dark Soft",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0xa7_c0_80_ff),
+            rgba(0xdb_bc_7f_ff),
+            rgba(0x7f_bb_b3_ff),
+            rgba(0xd6_99_b6_ff),
+            rgba(0x83_c0_92_ff),
+            rgba(0xf2_ef_df_ff),
+            rgba(0xa6_b0_a0_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xdf_a0_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0x29_31_36_ff)),
+        foreground: Some(rgba(0xd3_c6_aa_ff)),
+        cursor: Some(rgba(0xe6_98_75_ff)),
+        cursor_text: Some(rgba(0x5c_3f_4f_ff)),
+        selection_background: Some(rgba(0x5c_3f_4f_ff)),
+        selection_foreground: Some(rgba(0xd3_c6_aa_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_LIGHT_HARD_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Light Hard",
+    metadata_name: "Everforest Light Hard",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Hard",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0x9a_b3_73_ff),
+            rgba(0xce_af_72_ff),
+            rgba(0x7f_bb_b3_ff),
+            rgba(0xd6_99_b6_ff),
+            rgba(0x83_c0_92_ff),
+            rgba(0xb2_af_9f_ff),
+            rgba(0xa6_b0_a0_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xdf_a0_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0xf2_ef_df_ff)),
+        foreground: Some(rgba(0x5c_6a_72_ff)),
+        cursor: Some(rgba(0xf5_7d_26_ff)),
+        cursor_text: Some(rgba(0xf0_f2_d4_ff)),
+        selection_background: Some(rgba(0xf0_f2_d4_ff)),
+        selection_foreground: Some(rgba(0x5c_6a_72_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_LIGHT_MED_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Light Med",
+    metadata_name: "Everforest Light Med",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Med",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0x9a_b3_73_ff),
+            rgba(0xc1_a2_66_ff),
+            rgba(0x7f_bb_b3_ff),
+            rgba(0xd6_99_b6_ff),
+            rgba(0x83_c0_92_ff),
+            rgba(0xb2_af_9f_ff),
+            rgba(0xa6_b0_a0_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xdf_a0_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0xef_eb_d4_ff)),
+        foreground: Some(rgba(0x5c_6a_72_ff)),
+        cursor: Some(rgba(0xf5_7d_26_ff)),
+        cursor_text: Some(rgba(0xea_ed_c8_ff)),
+        selection_background: Some(rgba(0xea_ed_c8_ff)),
+        selection_foreground: Some(rgba(0x5c_6a_72_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const EVERFOREST_LIGHT_SOFT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Everforest Light Soft",
+    metadata_name: "Everforest Light Soft",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Everforest Light Soft",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x7a_84_78_ff),
+            rgba(0xe6_7e_80_ff),
+            rgba(0x8d_a6_66_ff),
+            rgba(0xc1_a2_66_ff),
+            rgba(0x72_ae_a6_ff),
+            rgba(0xc9_8c_a9_ff),
+            rgba(0x76_b3_85_ff),
+            rgba(0xa5_a2_92_ff),
+            rgba(0x99_a3_93_ff),
+            rgba(0xf8_55_52_ff),
+            rgba(0x8d_a1_01_ff),
+            rgba(0xd2_93_00_ff),
+            rgba(0x3a_94_c5_ff),
+            rgba(0xdf_69_ba_ff),
+            rgba(0x35_a7_7c_ff),
+            rgba(0xff_fb_ef_ff),
+        ],
+        background: Some(rgba(0xe5_df_c5_ff)),
+        foreground: Some(rgba(0x5c_6a_72_ff)),
+        cursor: Some(rgba(0xf5_7d_26_ff)),
+        cursor_text: Some(rgba(0xe1_e4_bd_ff)),
+        selection_background: Some(rgba(0xe1_e4_bd_ff)),
+        selection_foreground: Some(rgba(0x5c_6a_72_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const FLEXOKI_DARK_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Flexoki Dark",
+    metadata_name: "Flexoki Dark",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Flexoki Dark",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x10_0f_0f_ff),
+            rgba(0xd1_4d_41_ff),
+            rgba(0x87_9a_39_ff),
+            rgba(0xd0_a2_15_ff),
+            rgba(0x43_85_be_ff),
+            rgba(0xce_5d_97_ff),
+            rgba(0x3a_a9_9f_ff),
+            rgba(0x87_85_80_ff),
+            rgba(0x57_56_53_ff),
+            rgba(0xaf_30_29_ff),
+            rgba(0x66_80_0b_ff),
+            rgba(0xad_83_01_ff),
+            rgba(0x20_5e_a6_ff),
+            rgba(0xa0_2f_6f_ff),
+            rgba(0x24_83_7b_ff),
+            rgba(0xce_cd_c3_ff),
+        ],
+        background: Some(rgba(0x10_0f_0f_ff)),
+        foreground: Some(rgba(0xce_cd_c3_ff)),
+        cursor: Some(rgba(0xce_cd_c3_ff)),
+        cursor_text: Some(rgba(0x10_0f_0f_ff)),
+        selection_background: Some(rgba(0x40_3e_3c_ff)),
+        selection_foreground: Some(rgba(0xce_cd_c3_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const FLEXOKI_LIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Flexoki Light",
+    metadata_name: "Flexoki Light",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Flexoki Light",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x10_0f_0f_ff),
+            rgba(0xaf_30_29_ff),
+            rgba(0x66_80_0b_ff),
+            rgba(0xad_83_01_ff),
+            rgba(0x20_5e_a6_ff),
+            rgba(0xa0_2f_6f_ff),
+            rgba(0x24_83_7b_ff),
+            rgba(0x6f_6e_69_ff),
+            rgba(0xb7_b5_ac_ff),
+            rgba(0xd1_4d_41_ff),
+            rgba(0x87_9a_39_ff),
+            rgba(0xd0_a2_15_ff),
+            rgba(0x43_85_be_ff),
+            rgba(0xce_5d_97_ff),
+            rgba(0x3a_a9_9f_ff),
+            rgba(0xce_cd_c3_ff),
+        ],
+        background: Some(rgba(0xff_fc_f0_ff)),
+        foreground: Some(rgba(0x10_0f_0f_ff)),
+        cursor: Some(rgba(0x10_0f_0f_ff)),
+        cursor_text: Some(rgba(0xff_fc_f0_ff)),
+        selection_background: Some(rgba(0xce_cd_c3_ff)),
+        selection_foreground: Some(rgba(0x10_0f_0f_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const KANAGAWA_DRAGON_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Kanagawa Dragon",
+    metadata_name: "Kanagawa Dragon",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Dragon",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x0d_0c_0c_ff),
+            rgba(0xc4_74_6e_ff),
+            rgba(0x8a_9a_7b_ff),
+            rgba(0xc4_b2_8a_ff),
+            rgba(0x8b_a4_b0_ff),
+            rgba(0xa2_92_a3_ff),
+            rgba(0x8e_a4_a2_ff),
+            rgba(0xc8_c0_93_ff),
+            rgba(0xa6_a6_9c_ff),
+            rgba(0xe4_68_76_ff),
+            rgba(0x87_a9_87_ff),
+            rgba(0xe6_c3_84_ff),
+            rgba(0x7f_b4_ca_ff),
+            rgba(0x93_8a_a9_ff),
+            rgba(0x7a_a8_9f_ff),
+            rgba(0xc5_c9_c5_ff),
+        ],
+        background: Some(rgba(0x18_16_16_ff)),
+        foreground: Some(rgba(0xc5_c9_c5_ff)),
+        cursor: Some(rgba(0xc8_c0_93_ff)),
+        cursor_text: Some(rgba(0x18_16_16_ff)),
+        selection_background: Some(rgba(0xc5_c9_c5_ff)),
+        selection_foreground: Some(rgba(0x18_16_16_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const KANAGAWA_LOTUS_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Kanagawa Lotus",
+    metadata_name: "Kanagawa Lotus",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Lotus",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x1f_1f_28_ff),
+            rgba(0xc8_40_53_ff),
+            rgba(0x6f_89_4e_ff),
+            rgba(0x77_71_3f_ff),
+            rgba(0x4d_69_9b_ff),
+            rgba(0xb3_5b_79_ff),
+            rgba(0x59_7b_75_ff),
+            rgba(0x54_54_64_ff),
+            rgba(0x8a_89_80_ff),
+            rgba(0xd7_47_4b_ff),
+            rgba(0x6e_91_5f_ff),
+            rgba(0x83_6f_4a_ff),
+            rgba(0x66_93_bf_ff),
+            rgba(0x62_4c_83_ff),
+            rgba(0x5e_85_7a_ff),
+            rgba(0x43_43_6c_ff),
+        ],
+        background: Some(rgba(0xf2_ec_bc_ff)),
+        foreground: Some(rgba(0x54_54_64_ff)),
+        cursor: Some(rgba(0x43_43_6c_ff)),
+        cursor_text: Some(rgba(0xf2_ec_bc_ff)),
+        selection_background: Some(rgba(0x54_54_64_ff)),
+        selection_foreground: Some(rgba(0xf2_ec_bc_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const KANAGAWA_WAVE_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Kanagawa Wave",
+    metadata_name: "Kanagawa Wave",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Kanagawa Wave",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x09_06_18_ff),
+            rgba(0xc3_40_43_ff),
+            rgba(0x76_94_6a_ff),
+            rgba(0xc0_a3_6e_ff),
+            rgba(0x7e_9c_d8_ff),
+            rgba(0x95_7f_b8_ff),
+            rgba(0x6a_95_89_ff),
+            rgba(0xc8_c0_93_ff),
+            rgba(0x72_71_69_ff),
+            rgba(0xe8_24_24_ff),
+            rgba(0x98_bb_6c_ff),
+            rgba(0xe6_c3_84_ff),
+            rgba(0x7f_b4_ca_ff),
+            rgba(0x93_8a_a9_ff),
+            rgba(0x7a_a8_9f_ff),
+            rgba(0xdc_d7_ba_ff),
+        ],
+        background: Some(rgba(0x1f_1f_28_ff)),
+        foreground: Some(rgba(0xdc_d7_ba_ff)),
+        cursor: Some(rgba(0xdc_d7_ba_ff)),
+        cursor_text: Some(rgba(0x1f_1f_28_ff)),
+        selection_background: Some(rgba(0xdc_d7_ba_ff)),
+        selection_foreground: Some(rgba(0x1f_1f_28_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ROSE_PINE_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Rose Pine",
+    metadata_name: "Rose Pine",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x26_23_3a_ff),
+            rgba(0xeb_6f_92_ff),
+            rgba(0x31_74_8f_ff),
+            rgba(0xf6_c1_77_ff),
+            rgba(0x9c_cf_d8_ff),
+            rgba(0xc4_a7_e7_ff),
+            rgba(0xeb_bc_ba_ff),
+            rgba(0xe0_de_f4_ff),
+            rgba(0x6e_6a_86_ff),
+            rgba(0xeb_6f_92_ff),
+            rgba(0x31_74_8f_ff),
+            rgba(0xf6_c1_77_ff),
+            rgba(0x9c_cf_d8_ff),
+            rgba(0xc4_a7_e7_ff),
+            rgba(0xeb_bc_ba_ff),
+            rgba(0xe0_de_f4_ff),
+        ],
+        background: Some(rgba(0x19_17_24_ff)),
+        foreground: Some(rgba(0xe0_de_f4_ff)),
+        cursor: Some(rgba(0xe0_de_f4_ff)),
+        cursor_text: Some(rgba(0x19_17_24_ff)),
+        selection_background: Some(rgba(0x40_3d_52_ff)),
+        selection_foreground: Some(rgba(0xe0_de_f4_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ROSE_PINE_DAWN_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Rose Pine Dawn",
+    metadata_name: "Rose Pine Dawn",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine Dawn",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0xf2_e9_e1_ff),
+            rgba(0xb4_63_7a_ff),
+            rgba(0x28_69_83_ff),
+            rgba(0xea_9d_34_ff),
+            rgba(0x56_94_9f_ff),
+            rgba(0x90_7a_a9_ff),
+            rgba(0xd7_82_7e_ff),
+            rgba(0x57_52_79_ff),
+            rgba(0x98_93_a5_ff),
+            rgba(0xb4_63_7a_ff),
+            rgba(0x28_69_83_ff),
+            rgba(0xea_9d_34_ff),
+            rgba(0x56_94_9f_ff),
+            rgba(0x90_7a_a9_ff),
+            rgba(0xd7_82_7e_ff),
+            rgba(0x57_52_79_ff),
+        ],
+        background: Some(rgba(0xfa_f4_ed_ff)),
+        foreground: Some(rgba(0x57_52_79_ff)),
+        cursor: Some(rgba(0x57_52_79_ff)),
+        cursor_text: Some(rgba(0xfa_f4_ed_ff)),
+        selection_background: Some(rgba(0xdf_da_d9_ff)),
+        selection_foreground: Some(rgba(0x57_52_79_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ROSE_PINE_MOON_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Rose Pine Moon",
+    metadata_name: "Rose Pine Moon",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Rose Pine Moon",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x39_35_52_ff),
+            rgba(0xeb_6f_92_ff),
+            rgba(0x3e_8f_b0_ff),
+            rgba(0xf6_c1_77_ff),
+            rgba(0x9c_cf_d8_ff),
+            rgba(0xc4_a7_e7_ff),
+            rgba(0xea_9a_97_ff),
+            rgba(0xe0_de_f4_ff),
+            rgba(0x6e_6a_86_ff),
+            rgba(0xeb_6f_92_ff),
+            rgba(0x3e_8f_b0_ff),
+            rgba(0xf6_c1_77_ff),
+            rgba(0x9c_cf_d8_ff),
+            rgba(0xc4_a7_e7_ff),
+            rgba(0xea_9a_97_ff),
+            rgba(0xe0_de_f4_ff),
+        ],
+        background: Some(rgba(0x23_21_36_ff)),
+        foreground: Some(rgba(0xe0_de_f4_ff)),
+        cursor: Some(rgba(0xe0_de_f4_ff)),
+        cursor_text: Some(rgba(0x23_21_36_ff)),
+        selection_background: Some(rgba(0x44_41_5a_ff)),
+        selection_foreground: Some(rgba(0xe0_de_f4_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const TOKYONIGHT_NIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "TokyoNight Night",
+    metadata_name: "TokyoNight Night",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Night",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x15_16_1e_ff),
+            rgba(0xf7_76_8e_ff),
+            rgba(0x9e_ce_6a_ff),
+            rgba(0xe0_af_68_ff),
+            rgba(0x7a_a2_f7_ff),
+            rgba(0xbb_9a_f7_ff),
+            rgba(0x7d_cf_ff_ff),
+            rgba(0xa9_b1_d6_ff),
+            rgba(0x41_48_68_ff),
+            rgba(0xf7_76_8e_ff),
+            rgba(0x9e_ce_6a_ff),
+            rgba(0xe0_af_68_ff),
+            rgba(0x7a_a2_f7_ff),
+            rgba(0xbb_9a_f7_ff),
+            rgba(0x7d_cf_ff_ff),
+            rgba(0xc0_ca_f5_ff),
+        ],
+        background: Some(rgba(0x1a_1b_26_ff)),
+        foreground: Some(rgba(0xc0_ca_f5_ff)),
+        cursor: Some(rgba(0xc0_ca_f5_ff)),
+        selection_background: Some(rgba(0x33_46_7c_ff)),
+        selection_foreground: Some(rgba(0xc0_ca_f5_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const TOKYONIGHT_DAY_THEME: BuiltinTheme = BuiltinTheme {
+    name: "TokyoNight Day",
+    metadata_name: "TokyoNight Day",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Day",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0xe9_e9_ed_ff),
+            rgba(0xf5_2a_65_ff),
+            rgba(0x58_75_39_ff),
+            rgba(0x8c_6c_3e_ff),
+            rgba(0x2e_7d_e9_ff),
+            rgba(0x98_54_f1_ff),
+            rgba(0x00_71_97_ff),
+            rgba(0x61_72_b0_ff),
+            rgba(0xa1_a6_c5_ff),
+            rgba(0xf5_2a_65_ff),
+            rgba(0x58_75_39_ff),
+            rgba(0x8c_6c_3e_ff),
+            rgba(0x2e_7d_e9_ff),
+            rgba(0x98_54_f1_ff),
+            rgba(0x00_71_97_ff),
+            rgba(0x37_60_bf_ff),
+        ],
+        background: Some(rgba(0xe1_e2_e7_ff)),
+        foreground: Some(rgba(0x37_60_bf_ff)),
+        cursor: Some(rgba(0x37_60_bf_ff)),
+        cursor_text: Some(rgba(0xe1_e2_e7_ff)),
+        selection_background: Some(rgba(0x99_a7_df_ff)),
+        selection_foreground: Some(rgba(0x37_60_bf_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const TOKYONIGHT_MOON_THEME: BuiltinTheme = BuiltinTheme {
+    name: "TokyoNight Moon",
+    metadata_name: "TokyoNight Moon",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Moon",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x1b_1d_2b_ff),
+            rgba(0xff_75_7f_ff),
+            rgba(0xc3_e8_8d_ff),
+            rgba(0xff_c7_77_ff),
+            rgba(0x82_aa_ff_ff),
+            rgba(0xc0_99_ff_ff),
+            rgba(0x86_e1_fc_ff),
+            rgba(0x82_8b_b8_ff),
+            rgba(0x44_4a_73_ff),
+            rgba(0xff_75_7f_ff),
+            rgba(0xc3_e8_8d_ff),
+            rgba(0xff_c7_77_ff),
+            rgba(0x82_aa_ff_ff),
+            rgba(0xc0_99_ff_ff),
+            rgba(0x86_e1_fc_ff),
+            rgba(0xc8_d3_f5_ff),
+        ],
+        background: Some(rgba(0x22_24_36_ff)),
+        foreground: Some(rgba(0xc8_d3_f5_ff)),
+        cursor: Some(rgba(0xc8_d3_f5_ff)),
+        cursor_text: Some(rgba(0x22_24_36_ff)),
+        selection_background: Some(rgba(0x2d_3f_76_ff)),
+        selection_foreground: Some(rgba(0xc8_d3_f5_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const TOKYONIGHT_STORM_THEME: BuiltinTheme = BuiltinTheme {
+    name: "TokyoNight Storm",
+    metadata_name: "TokyoNight Storm",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/TokyoNight Storm",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x1d_20_2f_ff),
+            rgba(0xf7_76_8e_ff),
+            rgba(0x9e_ce_6a_ff),
+            rgba(0xe0_af_68_ff),
+            rgba(0x7a_a2_f7_ff),
+            rgba(0xbb_9a_f7_ff),
+            rgba(0x7d_cf_ff_ff),
+            rgba(0xa9_b1_d6_ff),
+            rgba(0x4e_55_75_ff),
+            rgba(0xf7_76_8e_ff),
+            rgba(0x9e_ce_6a_ff),
+            rgba(0xe0_af_68_ff),
+            rgba(0x7a_a2_f7_ff),
+            rgba(0xbb_9a_f7_ff),
+            rgba(0x7d_cf_ff_ff),
+            rgba(0xc0_ca_f5_ff),
+        ],
+        background: Some(rgba(0x24_28_3b_ff)),
+        foreground: Some(rgba(0xc0_ca_f5_ff)),
+        cursor: Some(rgba(0xc0_ca_f5_ff)),
+        cursor_text: Some(rgba(0x1d_20_2f_ff)),
+        selection_background: Some(rgba(0x36_4a_82_ff)),
+        selection_foreground: Some(rgba(0xc0_ca_f5_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ITERM2_SOLARIZED_DARK_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Solarized Dark",
+    metadata_name: "iTerm2 Solarized Dark",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/iTerm2 Solarized Dark",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x07_36_42_ff),
+            rgba(0xdc_32_2f_ff),
+            rgba(0x85_99_00_ff),
+            rgba(0xb5_89_00_ff),
+            rgba(0x26_8b_d2_ff),
+            rgba(0xd3_36_82_ff),
+            rgba(0x2a_a1_98_ff),
+            rgba(0xee_e8_d5_ff),
+            rgba(0x33_5e_69_ff),
+            rgba(0xcb_4b_16_ff),
+            rgba(0x58_6e_75_ff),
+            rgba(0x65_7b_83_ff),
+            rgba(0x83_94_96_ff),
+            rgba(0x6c_71_c4_ff),
+            rgba(0x93_a1_a1_ff),
+            rgba(0xfd_f6_e3_ff),
+        ],
+        background: Some(rgba(0x00_2b_36_ff)),
+        foreground: Some(rgba(0x83_94_96_ff)),
+        cursor: Some(rgba(0x83_94_96_ff)),
+        cursor_text: Some(rgba(0x07_36_42_ff)),
+        selection_background: Some(rgba(0x07_36_42_ff)),
+        selection_foreground: Some(rgba(0x93_a1_a1_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const ITERM2_SOLARIZED_LIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Solarized Light",
+    metadata_name: "iTerm2 Solarized Light",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/iTerm2 Solarized Light",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x07_36_42_ff),
+            rgba(0xdc_32_2f_ff),
+            rgba(0x85_99_00_ff),
+            rgba(0xb5_89_00_ff),
+            rgba(0x26_8b_d2_ff),
+            rgba(0xd3_36_82_ff),
+            rgba(0x2a_a1_98_ff),
+            rgba(0xbb_b5_a2_ff),
+            rgba(0x00_2b_36_ff),
+            rgba(0xcb_4b_16_ff),
+            rgba(0x58_6e_75_ff),
+            rgba(0x65_7b_83_ff),
+            rgba(0x83_94_96_ff),
+            rgba(0x6c_71_c4_ff),
+            rgba(0x93_a1_a1_ff),
+            rgba(0xfd_f6_e3_ff),
+        ],
+        background: Some(rgba(0xfd_f6_e3_ff)),
+        foreground: Some(rgba(0x65_7b_83_ff)),
+        cursor: Some(rgba(0x65_7b_83_ff)),
+        cursor_text: Some(rgba(0xee_e8_d5_ff)),
+        selection_background: Some(rgba(0xee_e8_d5_ff)),
+        selection_foreground: Some(rgba(0x58_6e_75_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const XCODE_DARK_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Xcode Dark",
+    metadata_name: "Xcode Dark",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Xcode Dark",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x41_44_53_ff),
+            rgba(0xff_81_70_ff),
+            rgba(0x78_c2_b3_ff),
+            rgba(0xd9_c9_7c_ff),
+            rgba(0x4e_b0_cc_ff),
+            rgba(0xff_7a_b2_ff),
+            rgba(0xb2_81_eb_ff),
+            rgba(0xdf_df_e0_ff),
+            rgba(0x7f_8c_98_ff),
+            rgba(0xff_81_70_ff),
+            rgba(0xac_f2_e4_ff),
+            rgba(0xff_a1_4f_ff),
+            rgba(0x6b_df_ff_ff),
+            rgba(0xff_7a_b2_ff),
+            rgba(0xda_ba_ff_ff),
+            rgba(0xdf_df_e0_ff),
+        ],
+        background: Some(rgba(0x29_2a_30_ff)),
+        foreground: Some(rgba(0xdf_df_e0_ff)),
+        cursor: Some(rgba(0xdf_df_e0_ff)),
+        cursor_text: Some(rgba(0x29_2a_30_ff)),
+        selection_background: Some(rgba(0x41_44_53_ff)),
+        selection_foreground: Some(rgba(0xdf_df_e0_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const XCODE_LIGHT_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Xcode Light",
+    metadata_name: "Xcode Light",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Xcode Light",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0xb4_d8_fd_ff),
+            rgba(0xd1_2f_1b_ff),
+            rgba(0x3e_80_87_ff),
+            rgba(0x78_49_2a_ff),
+            rgba(0x0f_68_a0_ff),
+            rgba(0xad_3d_a4_ff),
+            rgba(0x80_4f_b8_ff),
+            rgba(0x26_26_26_ff),
+            rgba(0x8a_99_a6_ff),
+            rgba(0xd1_2f_1b_ff),
+            rgba(0x23_57_5c_ff),
+            rgba(0x78_49_2a_ff),
+            rgba(0x0b_4f_79_ff),
+            rgba(0xad_3d_a4_ff),
+            rgba(0x4b_21_b0_ff),
+            rgba(0x26_26_26_ff),
+        ],
+        background: Some(rgba(0xff_ff_ff_ff)),
+        foreground: Some(rgba(0x26_26_26_ff)),
+        cursor: Some(rgba(0x26_26_26_ff)),
+        cursor_text: Some(rgba(0xff_ff_ff_ff)),
+        selection_background: Some(rgba(0xb4_d8_fd_ff)),
+        selection_foreground: Some(rgba(0x26_26_26_ff)),
+        ..ColorConfig::default()
+    },
+};
+
+const GRUVBOX_DARK_THEME: BuiltinTheme = BuiltinTheme {
+    name: "Gruvbox Dark",
+    metadata_name: "Gruvbox Dark",
+    source: "mbadolato/iTerm2-Color-Schemes ghostty/Gruvbox Dark",
+    license: "MIT collection; individual theme provenance applies",
+    colors: || ColorConfig {
+        palette: vec![
+            rgba(0x28_28_28_ff),
+            rgba(0xcc_24_1d_ff),
+            rgba(0x98_97_1a_ff),
+            rgba(0xd7_99_21_ff),
+            rgba(0x45_85_88_ff),
+            rgba(0xb1_62_86_ff),
+            rgba(0x68_9d_6a_ff),
+            rgba(0xa8_99_84_ff),
+            rgba(0x92_83_74_ff),
+            rgba(0xfb_49_34_ff),
+            rgba(0xb8_bb_26_ff),
+            rgba(0xfa_bd_2f_ff),
+            rgba(0x83_a5_98_ff),
+            rgba(0xd3_86_9b_ff),
+            rgba(0x8e_c0_7c_ff),
+            rgba(0xeb_db_b2_ff),
+        ],
+        background: Some(rgba(0x28_28_28_ff)),
+        foreground: Some(rgba(0xeb_db_b2_ff)),
+        cursor: Some(rgba(0xeb_db_b2_ff)),
+        selection_background: Some(rgba(0x50_49_45_ff)),
+        selection_foreground: Some(rgba(0xeb_db_b2_ff)),
+        ..ColorConfig::default()
+    },
+};

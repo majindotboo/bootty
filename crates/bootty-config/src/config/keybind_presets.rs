@@ -1,5 +1,8 @@
 use super::model::{KeybindPreset, MacosOptionAsAltConfig};
 
+pub(super) const BOOTTY_DEFAULT_PREFIX: &str = "ctrl+space";
+pub(super) const TMUX_DEFAULT_PREFIX: &str = "ctrl+b";
+
 pub(super) fn resolve_macos_option_alt_keybinds(
     keybinds: Vec<String>,
     macos_option_as_alt: MacosOptionAsAltConfig,
@@ -35,16 +38,15 @@ fn expand_macos_option_alt_keybind(
         .collect()
 }
 
+#[must_use]
 pub fn split_keybind_entry(entry: &str) -> Option<(&str, &str)> {
-    let bytes = entry.as_bytes();
-    let mut offset = 0;
-    while let Some(rel) = entry[offset..].find('=') {
-        let index = offset + rel;
-        if index + 1 < entry.len() && matches!(bytes[index + 1], b'+' | b'=') {
-            offset = index + 1;
+    for (index, _) in entry.match_indices('=') {
+        let (trigger, rest) = entry.split_at_checked(index)?;
+        let action = rest.strip_prefix('=')?;
+        if action.starts_with(['+', '=']) {
             continue;
         }
-        return Some((&entry[..index], &entry[index + 1..]));
+        return Some((trigger, action));
     }
     None
 }
@@ -100,7 +102,7 @@ fn is_command_modifier_token(token: &str) -> bool {
     )
 }
 
-fn common_keybinds() -> &'static [&'static str] {
+const fn common_keybinds() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         common_keybinds_macos()
     } else if cfg!(windows) {
@@ -111,7 +113,7 @@ fn common_keybinds() -> &'static [&'static str] {
 }
 
 // macOS uses the Command key (winit reports it as Super) for app/session shortcuts.
-pub(super) fn common_keybinds_macos() -> &'static [&'static str] {
+pub(super) const fn common_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+shift+r=reload_config",
         "cmd+-=decrease_font_size:1",
@@ -132,7 +134,8 @@ pub(super) fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+p=command_palette",
         "cmd+shift+o=session_picker",
         "cmd+o=toggle_sidebar_focus",
-        "cmd+shift+e=toggle_sidebar_visibility",
+        "cmd+shift+j=focus_terminal",
+        "cmd+shift+e=toggle_left_dock",
         "cmd+n=new_mux_session",
         "cmd+alt+r=rename_session",
         "cmd+t=new_tab",
@@ -161,7 +164,7 @@ pub(super) fn common_keybinds_macos() -> &'static [&'static str] {
 // desktop environment and never reaches the app. Hand-authored (not a cmd->ctrl+shift swap):
 // where macOS pairs a bare-cmd and a cmd+shift binding (w, n, p), the variants are reassigned to
 // keep every Ctrl+Shift trigger unique.
-pub(super) fn common_keybinds_other() -> &'static [&'static str] {
+pub(super) const fn common_keybinds_other() -> &'static [&'static str] {
     &[
         "ctrl+shift+r=reload_config",
         "ctrl+-=decrease_font_size:1",
@@ -181,7 +184,8 @@ pub(super) fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+p=command_palette",
         "ctrl+shift+alt+o=session_picker",
         "ctrl+shift+o=toggle_sidebar_focus",
-        "ctrl+shift+e=toggle_sidebar_visibility",
+        "ctrl+shift+j=focus_terminal",
+        "ctrl+shift+e=toggle_left_dock",
         "ctrl+shift+n=new_mux_session",
         "ctrl+shift+alt+r=rename_session",
         "ctrl+shift+t=new_tab",
@@ -205,7 +209,7 @@ pub(super) fn common_keybinds_other() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn common_keybinds_windows() -> &'static [&'static str] {
+pub(super) const fn common_keybinds_windows() -> &'static [&'static str] {
     &[
         "ctrl+shift+r=reload_config",
         "ctrl+-=decrease_font_size:1",
@@ -227,7 +231,8 @@ pub(super) fn common_keybinds_windows() -> &'static [&'static str] {
         "ctrl+shift+f=start_search",
         "ctrl+shift+alt+o=session_picker",
         "ctrl+shift+o=toggle_sidebar_focus",
-        "ctrl+shift+e=toggle_sidebar_visibility",
+        "ctrl+shift+j=focus_terminal",
+        "ctrl+shift+e=toggle_left_dock",
         "ctrl+shift+n=new_mux_session",
         "ctrl+shift+alt+r=rename_session",
         "ctrl+shift+t=new_tab",
@@ -251,8 +256,9 @@ pub(super) fn common_keybinds_windows() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn sidebar_keybinds() -> &'static [&'static str] {
+pub(super) const fn sidebar_keybinds() -> &'static [&'static str] {
     &[
+        "Escape=focus_terminal",
         "Enter=activate_session",
         "j=next_session",
         "ArrowDown=next_session",
@@ -357,7 +363,7 @@ pub(super) fn prefixed_keybinds(prefix: &str, entries: &[(&str, &str)]) -> Vec<S
 // Tab and pane navigation, handled directly by bootty's mux layer on every backend (tmux included,
 // now that the tmux backend implements every command). Shared so the bindings don't depend on a
 // per-backend relay to an external config.
-pub(super) fn navigation_keybinds() -> &'static [&'static str] {
+pub(super) const fn navigation_keybinds() -> &'static [&'static str] {
     &[
         "left_alt+shift+n=next_tab",
         "left_alt+shift+p=previous_tab",
@@ -389,7 +395,7 @@ pub(super) fn navigation_keybinds() -> &'static [&'static str] {
 
 // Scroll shortcuts differ per OS: macOS scrolls with Command, Linux/Windows follow the WezTerm
 // convention of Shift+PageUp/PageDown (page) and Ctrl+Shift+Arrows (line).
-fn native_scroll_keybinds() -> &'static [&'static str] {
+const fn native_scroll_keybinds() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         native_scroll_keybinds_macos()
     } else {
@@ -397,7 +403,7 @@ fn native_scroll_keybinds() -> &'static [&'static str] {
     }
 }
 
-pub(super) fn native_scroll_keybinds_macos() -> &'static [&'static str] {
+pub(super) const fn native_scroll_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+y=copy_mode",
         "cmd+shift+y=scroll_page_down",
@@ -406,7 +412,7 @@ pub(super) fn native_scroll_keybinds_macos() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn native_scroll_keybinds_other() -> &'static [&'static str] {
+pub(super) const fn native_scroll_keybinds_other() -> &'static [&'static str] {
     &[
         "shift+PageUp=scroll_page_up",
         "shift+PageDown=scroll_page_down",
@@ -418,7 +424,7 @@ pub(super) fn native_scroll_keybinds_other() -> &'static [&'static str] {
 // Ghostty preset: Ghostty's upstream defaults with cmux's chrome layer on top (cmux vendors
 // Ghostty for terminal-level actions; where the two disagree the cmux layer wins). Direct combos
 // only — this preset has no prefix concept.
-fn ghostty_common_keybinds() -> &'static [&'static str] {
+const fn ghostty_common_keybinds() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         ghostty_common_keybinds_macos()
     } else {
@@ -426,7 +432,7 @@ fn ghostty_common_keybinds() -> &'static [&'static str] {
     }
 }
 
-pub(super) fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
+pub(super) const fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+shift+,=reload_config",
         "cmd+,=open_settings",
@@ -447,8 +453,9 @@ pub(super) fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
         "cmd+w=close_surface",
         "cmd+shift+n=new_window",
         "ctrl+cmd+f=toggle_fullscreen",
-        "cmd+b=toggle_sidebar_visibility",
+        "cmd+b=toggle_left_dock",
         "cmd+shift+e=toggle_sidebar_focus",
+        "cmd+shift+j=focus_terminal",
         "cmd+o=new_mux_session",
         "cmd+Home=scroll_to_top",
         "cmd+End=scroll_to_bottom",
@@ -460,8 +467,9 @@ pub(super) fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
 
 // Ghostty's Linux defaults; cmux is macOS-only, so its chrome actions (sessions, sidebar,
 // renames) stay unbound here and remain reachable through the command palette.
-pub(super) fn ghostty_common_keybinds_other() -> &'static [&'static str] {
+pub(super) const fn ghostty_common_keybinds_other() -> &'static [&'static str] {
     &[
+        "ctrl+shift+j=focus_terminal",
         "ctrl+shift+,=reload_config",
         "ctrl+,=open_settings",
         "ctrl+shift+f=start_search",
@@ -487,7 +495,7 @@ pub(super) fn ghostty_common_keybinds_other() -> &'static [&'static str] {
     ]
 }
 
-fn ghostty_layout_keybinds() -> &'static [&'static str] {
+const fn ghostty_layout_keybinds() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         ghostty_layout_keybinds_macos()
     } else {
@@ -497,7 +505,7 @@ fn ghostty_layout_keybinds() -> &'static [&'static str] {
 
 // cmux's Cmd+1-9 = workspace (bootty session) wins over Ghostty's Cmd+1-8 = goto_tab. Ctrl+1-9
 // are global space selection defaults. Cmd+[/] follow Ghostty's goto_split previous/next.
-pub(super) fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
+pub(super) const fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
     &[
         "cmd+n=new_mux_session",
         "cmd+t=new_tab",
@@ -531,7 +539,7 @@ pub(super) fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
+pub(super) const fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
     &[
         "ctrl+shift+t=new_tab",
         "ctrl+shift+o=split_right",
@@ -559,7 +567,7 @@ pub(super) fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
     ]
 }
 
-pub(super) fn tmux_keybinds() -> &'static [&'static str] {
+pub(super) const fn tmux_keybinds() -> &'static [&'static str] {
     &[
         "cmd+;=csi:61~",
         "cmd+ctrl+n=csi:68~",
@@ -605,7 +613,7 @@ fn prefix_control_byte(prefix: &str) -> Option<u8> {
     let [letter] = key.as_bytes() else {
         return None;
     };
-    letter.is_ascii_lowercase().then(|| letter - b'a' + 1)
+    letter.is_ascii_lowercase().then_some(letter & 0x1f)
 }
 
 // The external tmux must receive its prefix as the raw control byte even when bootty's own
@@ -636,6 +644,11 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
         }
         KeybindPreset::Ghostty => owned_keybinds(ghostty_common_keybinds()),
     };
+    keybinds.push(if cfg!(target_os = "macos") {
+        "cmd+alt+b=toggle_right_dock".to_owned()
+    } else {
+        "ctrl+alt+b=toggle_right_dock".to_owned()
+    });
     if cfg!(target_os = "macos") {
         keybinds.extend((1..=9).map(|index| format!("ctrl+{index}=select_space:{index}")));
     }
@@ -643,15 +656,12 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
 }
 
 pub(super) fn preset_layout_keybinds(preset: KeybindPreset, prefix: Option<&str>) -> Vec<String> {
-    let table = match preset {
+    let (table, default_prefix) = match preset {
         KeybindPreset::Ghostty => return owned_keybinds(ghostty_layout_keybinds()),
-        KeybindPreset::Bootty => BOOTTY_PREFIX_KEYBINDS,
-        KeybindPreset::Tmux => TMUX_PREFIX_KEYBINDS,
+        KeybindPreset::Bootty => (BOOTTY_PREFIX_KEYBINDS, BOOTTY_DEFAULT_PREFIX),
+        KeybindPreset::Tmux => (TMUX_PREFIX_KEYBINDS, TMUX_DEFAULT_PREFIX),
     };
-    // effective_prefix is always Some for prefixed presets; the fallback keeps this total.
-    let prefix = prefix
-        .or(preset.default_prefix())
-        .expect("prefixed presets define a default prefix");
+    let prefix = prefix.unwrap_or(default_prefix);
     let mut keybinds = prefixed_keybinds(prefix, table);
     if preset == KeybindPreset::Tmux {
         keybinds.extend(send_prefix_keybind(prefix));
@@ -670,8 +680,8 @@ pub(super) fn preset_tmux_backend_keybinds(
             keybinds.extend(prefix.and_then(prefix_passthrough_keybind));
             keybinds
         }
-        // No relay layer. For the Tmux preset the emptiness is load-bearing: an unbound prefix
-        // passes through as raw input, so the external tmux handles its own prefix natively.
-        KeybindPreset::Ghostty | KeybindPreset::Tmux => Vec::new(),
+        KeybindPreset::Ghostty => owned_keybinds(ghostty_layout_keybinds()),
+        // An unbound prefix reaches the external tmux's own key table.
+        KeybindPreset::Tmux => Vec::new(),
     }
 }

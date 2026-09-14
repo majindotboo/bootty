@@ -2,8 +2,8 @@
 //!
 //! A [`SettingSpec`] names one config key once: its TOML path, the value it holds, how it is
 //! labelled, and what it falls back to. The settings UI renders specs instead of hand-writing a
-//! read/widget/write block per key, which is what lets an extension contribute a setting through
-//! the same path a built-in uses.
+//! read/widget/write block per key. The native registry contains built-in settings; raw extension
+//! tables remain a compatibility path and are not interpreted as executable declarations.
 //!
 //! This lives in `bootty-config`, not `bootty-ui`: a spec names [`BoottyConfig`] and config paths,
 //! both product types. `bootty-ui` stays a widget library.
@@ -13,9 +13,7 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
-use serde::Serialize;
-
-use crate::config::{BoottyConfig, config_token};
+use crate::config::BoottyConfig;
 
 mod builtin;
 
@@ -42,7 +40,7 @@ pub struct SettingSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingDeclaration {
     /// TOML path. A `*` segment matches one dynamic table key; a trailing `*` matches the rest of
-    /// a path, which is used for extension-owned settings.
+    /// a path, which is used for compatibility tables such as raw extension settings.
     pub path: Vec<Cow<'static, str>>,
     /// Settings page that owns the editor for this value.
     pub page: Cow<'static, str>,
@@ -94,15 +92,20 @@ impl SettingSpec {
         self.path.iter().map(Cow::as_ref).collect()
     }
 
-    /// The value shown when the document says nothing about this key.
+    /// The scalar value shown when the document omits this key. Custom editors
+    /// own their defaults and return `None` here.
     #[must_use]
-    pub fn default_value(&self, defaults: &BoottyConfig) -> SettingValue {
+    pub fn default_value(&self, defaults: &BoottyConfig) -> Option<SettingValue> {
         match &self.default {
-            SettingDefault::Field(read) => read(defaults),
-            SettingDefault::Literal(value) => value.clone(),
-            SettingDefault::Unused => {
-                panic!("custom setting {} has no schema default", self.id())
-            }
+            SettingDefault::Field(read) => Some(read(defaults)),
+            SettingDefault::UiFontWeight(role) => Some(SettingValue::from(
+                defaults
+                    .font
+                    .ui_weights
+                    .get(role)
+                    .unwrap_or(&crate::FontStyleAssignment::Automatic),
+            )),
+            SettingDefault::Unused => None,
         }
     }
 
@@ -123,8 +126,7 @@ pub enum SettingDefault {
     /// Built-in: read the field off the default config, so the fallback is never a literal copied
     /// out of `defaults.rs`, and a renamed field is a compile error at the spec.
     Field(fn(&BoottyConfig) -> SettingValue),
-    /// Extension-declared: no typed field exists, so the declaration carries the value.
-    Literal(SettingValue),
+    UiFontWeight(crate::FontWeightRole),
     /// A hand-written editor owns the value and reads its typed config field directly.
     Unused,
 }
@@ -133,6 +135,8 @@ pub enum SettingDefault {
 #[derive(Clone, Debug)]
 pub enum SettingKind {
     Bool,
+    /// An advertised font style name, `auto`, or false to use the base style.
+    FontStyle,
     Text {
         placeholder: Cow<'static, str>,
         /// An empty value removes the key instead of writing an empty string.
@@ -213,28 +217,19 @@ pub struct SettingOption {
 }
 
 impl SettingOption {
-    /// Take the token from the variant's own `Serialize` impl — the same machinery that reads it
-    /// back — so an option can never disagree with the parser. Only the label is authored.
-    ///
-    /// # Panics
-    /// If `value` is not a unit variant, which cannot be a config token.
+    /// Build an option from an enum with an infallible static token conversion.
     #[must_use]
-    pub fn of<T: Serialize>(value: &T, label: &'static str) -> Self {
+    pub fn of<T: Copy + Into<&'static str>>(value: &T, label: &'static str) -> Self {
         Self {
-            token: config_token(value)
-                .expect("a setting option must be a unit variant")
-                .into(),
+            token: (*value).into().into(),
             label: label.into(),
             description: None,
         }
     }
 
-    /// An option that explains itself.
-    ///
-    /// # Panics
-    /// If `value` is not a unit variant, which cannot be a config token.
+    /// Build an enum option with an explanation of its behavior.
     #[must_use]
-    pub fn described<T: Serialize>(
+    pub fn described<T: Copy + Into<&'static str>>(
         value: &T,
         label: &'static str,
         description: &'static str,
@@ -255,9 +250,19 @@ pub enum SettingValue {
     Token(String),
 }
 
+impl From<&crate::FontStyleAssignment> for SettingValue {
+    fn from(style: &crate::FontStyleAssignment) -> Self {
+        match style {
+            crate::FontStyleAssignment::Automatic => Self::Token("auto".to_owned()),
+            crate::FontStyleAssignment::Disabled => Self::Bool(false),
+            crate::FontStyleAssignment::Named(name) => Self::Text(name.clone()),
+        }
+    }
+}
+
 impl SettingValue {
     #[must_use]
-    pub fn as_bool(&self) -> Option<bool> {
+    pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
             _ => None,
@@ -265,7 +270,7 @@ impl SettingValue {
     }
 
     #[must_use]
-    pub fn as_number(&self) -> Option<f32> {
+    pub const fn as_number(&self) -> Option<f32> {
         match self {
             Self::Number(value) => Some(*value),
             _ => None,
@@ -281,71 +286,7 @@ impl SettingValue {
     }
 }
 
-/// One setting an extension declared for itself, as the schema needs it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ExtensionSetting {
-    /// The declaring module's namespace, supplied by the extension host.
-    pub module: String,
-    pub key: String,
-    pub label: String,
-    pub help: String,
-    pub default: crate::config::ExtensionSettingValue,
-}
-
-impl ExtensionSetting {
-    /// The page every extension setting appears on.
-    pub const PAGE: &'static str = "extensions";
-
-    fn to_spec(&self) -> SettingSpec {
-        use crate::config::ExtensionSettingValue as Value;
-        let (kind, default) = match &self.default {
-            Value::Bool(value) => (SettingKind::Bool, SettingValue::Bool(*value)),
-            Value::Number(value) => (
-                SettingKind::Number {
-                    // An extension declares no range. Bound it to what a setting plausibly holds
-                    // so the field sizes to its own contents rather than to f32's extremes.
-                    range: -1_000_000.0..=1_000_000.0,
-                    control: NumberControl::Edit,
-                    // Keep a whole number whole; only show a decimal if the default has one.
-                    precision: usize::from(value.fract() != 0.0),
-                    suffix: String::new().into(),
-                    display_scale: 1.0,
-                },
-                SettingValue::Number(*value as f32),
-            ),
-            Value::Text(value) => (
-                SettingKind::Text {
-                    placeholder: String::new().into(),
-                    optional: true,
-                },
-                SettingValue::Text(value.clone()),
-            ),
-        };
-        SettingSpec {
-            path: crate::config::extension_setting_path(&self.module, &self.key)
-                .into_iter()
-                .map(Cow::Owned)
-                .collect(),
-            label: if self.label.is_empty() {
-                self.key.clone().into()
-            } else {
-                self.label.clone().into()
-            },
-            help: self.help.clone().into(),
-            page: Self::PAGE.into(),
-            section: self
-                .module
-                .replace(['-', '_', '.'], " ")
-                .to_uppercase()
-                .into(),
-            kind,
-            supersedes: Vec::new(),
-            default: SettingDefault::Literal(default),
-        }
-    }
-}
-
-/// Every setting the UI can render: the built-ins, plus whatever extensions contributed.
+/// The settings the UI can render from the built-in registry.
 #[derive(Debug, Default)]
 pub struct SettingsSchema {
     specs: Vec<SettingSpec>,
@@ -373,17 +314,6 @@ impl SettingsSchema {
             declarations,
             by_id,
         }
-    }
-
-    /// The built-ins plus one spec per extension-declared setting. Extension settings all land on
-    /// the Extensions page, sectioned by module, and write under `extensions.<module>.<key>` —
-    /// a path the caller derives from the module's identity, never from the module's own input.
-    #[must_use]
-    pub fn with_extensions(declarations: &[ExtensionSetting]) -> Self {
-        let mut specs = builtin::specs();
-        let extension_specs = declarations.iter().map(ExtensionSetting::to_spec);
-        specs.extend(extension_specs);
-        Self::new(specs)
     }
 
     /// The built-in settings. Shared, because they never change within a run.
@@ -440,7 +370,7 @@ impl SettingsSchema {
 
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&SettingSpec> {
-        self.by_id.get(id).map(|index| &self.specs[*index])
+        self.by_id.get(id).and_then(|index| self.specs.get(*index))
     }
 }
 
