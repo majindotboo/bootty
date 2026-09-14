@@ -4,10 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_git::facts::{COLD_REFRESH_SPACING, FOCUSED_FACT_INTERVAL};
+use bootty_git::facts::{BACKGROUND_FACT_INTERVAL, COLD_REFRESH_SPACING, FOCUSED_FACT_INTERVAL};
 use bootty_git::{
     CommandOutput, CommandRunner, Git, GitFactsCache, GitSessionFactsInput, WorktreeRevisionCache,
 };
+use pretty_assertions::assert_eq;
 
 type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
@@ -17,10 +18,19 @@ struct RecordingRunner {
 }
 
 impl RecordingRunner {
+    fn branch_calls(&self) -> usize {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, args)| args.iter().any(|arg| arg == "symbolic-ref"))
+            .count()
+    }
+
     fn diff_calls(&self) -> usize {
         self.calls
             .lock()
-            .expect("recording runner lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, args)| args.iter().any(|arg| arg == "diff"))
             .count()
@@ -37,11 +47,59 @@ impl RecordingRunner {
     }
 }
 
+#[rstest::rstest]
+#[case(true, FOCUSED_FACT_INTERVAL)]
+#[case(false, BACKGROUND_FACT_INTERVAL)]
+fn unchanged_branch_checks_follow_focus_cadence(
+    #[case] selected: bool,
+    #[case] interval: Duration,
+) {
+    let runner = RecordingRunner::default();
+    let cache = GitFactsCache::with_remote_runner(runner.clone());
+    let start = Instant::now();
+    cache.refresh("session", "/remote/repo", selected, start);
+    // Reading the published branch also establishes that the worker has cleared live_running.
+    for _ in 0..10_000 {
+        if cache.get("session", start).unwrap().branch.is_some() {
+            break;
+        }
+        thread::yield_now();
+    }
+    assert!(cache.get("session", start).unwrap().branch.is_some());
+    assert_eq!(runner.branch_calls(), 1);
+
+    for millis in (250..u64::try_from(interval.as_millis()).unwrap()).step_by(250) {
+        cache.refresh(
+            "session",
+            "/remote/repo",
+            selected,
+            start
+                .checked_add(Duration::from_millis(millis))
+                .expect("test timestamp"),
+        );
+    }
+    assert_eq!(runner.branch_calls(), 1);
+
+    cache.refresh(
+        "session",
+        "/remote/repo",
+        selected,
+        start.checked_add(interval).expect("test interval"),
+    );
+    for _ in 0..10_000 {
+        if runner.branch_calls() == 2 {
+            break;
+        }
+        thread::yield_now();
+    }
+    assert_eq!(runner.branch_calls(), 2);
+}
+
 impl CommandRunner for RecordingRunner {
     fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
         self.calls
             .lock()
-            .expect("recording runner lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((program.to_owned(), args.to_vec()));
         Ok(CommandOutput {
             success: true,
@@ -60,7 +118,10 @@ fn injected_runner_keeps_git_paths_on_the_target_host() {
         git.worktree_root("/remote/repo"),
         Some("/remote/repo".to_owned())
     );
-    let calls = runner.calls.lock().expect("recording runner lock");
+    let calls = runner
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(calls[0].0, "git");
     assert_eq!(calls[0].1.first().map(String::as_str), Some("-C"));
     assert_eq!(calls[0].1.get(1).map(String::as_str), Some("/remote/repo"));
@@ -103,7 +164,10 @@ fn completed_deep_refreshes_are_spaced_across_sessions() {
 
     cache.refresh("first", "/remote/first", true, start);
     runner.wait_for_diff_calls(1);
-    let second_cold = start + COLD_REFRESH_SPACING + Duration::from_nanos(1);
+    let second_cold = start
+        .checked_add(COLD_REFRESH_SPACING)
+        .and_then(|time| time.checked_add(Duration::from_nanos(1)))
+        .expect("cold refresh timestamp");
     cache.refresh("second", "/remote/second", true, second_cold);
     runner.wait_for_diff_calls(2);
 
@@ -142,7 +206,7 @@ fn empty_session_does_not_start_git_or_reuse_old_facts() {
         runner
             .calls
             .lock()
-            .expect("recording runner lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
     );
 }

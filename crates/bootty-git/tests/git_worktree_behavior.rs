@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use std::{fs, path::Path, process::Command};
 
 use assert_fs::{TempDir, prelude::*};
@@ -8,29 +9,20 @@ use bootty_git::project::{
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
-fn git_ok(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
+fn git_ok(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
+    anyhow::ensure!(
         output.status.success(),
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
 }
 
-fn git_read(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+fn git_read(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
+    anyhow::ensure!(output.status.success());
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 struct Repository {
@@ -40,18 +32,18 @@ struct Repository {
 }
 
 #[fixture]
-fn repository() -> Repository {
-    let root = TempDir::new().expect("temporary repository root");
+fn repository() -> anyhow::Result<Repository> {
+    let root = TempDir::new()?;
     let main = root.path().join("main");
-    root.child("main")
-        .create_dir_all()
-        .expect("create main worktree");
-    git_ok(&main, &["init", "-q", "-b", "main"]);
-    git_ok(&main, &["config", "user.email", "test@bootty.dev"]);
-    git_ok(&main, &["config", "user.name", "Bootty Test"]);
-    fs::write(main.join("README"), "hello").expect("write initial file");
-    git_ok(&main, &["add", "."]);
-    git_ok(&main, &["commit", "-q", "-m", "init"]);
+    root.child("main").create_dir_all()?;
+    git_ok(&main, &["init", "-q", "-b", "main"])?;
+    git_ok(&main, &["config", "user.email", "test@bootty.dev"])?;
+    git_ok(&main, &["config", "user.name", "Bootty Test"])?;
+    git_ok(&main, &["config", "commit.gpgsign", "false"])?;
+    git_ok(&main, &["config", "core.hooksPath", "/dev/null"])?;
+    fs::write(main.join("README"), "hello")?;
+    git_ok(&main, &["add", "."])?;
+    git_ok(&main, &["commit", "-q", "-m", "init"])?;
     let worktree = root.path().join("wt");
     git_ok(
         &main,
@@ -61,14 +53,14 @@ fn repository() -> Repository {
             "-q",
             "-b",
             "feature",
-            worktree.to_str().expect("UTF-8 worktree path"),
+            worktree.to_str().context("UTF-8 worktree path")?,
         ],
-    );
-    Repository {
+    )?;
+    Ok(Repository {
         root,
         main,
         worktree,
-    }
+    })
 }
 
 #[test]
@@ -86,7 +78,10 @@ fn git_queries_are_safe_outside_a_repository() {
 }
 
 #[rstest]
-fn suggested_names_group_linked_worktrees_by_repository_and_branch(repository: Repository) {
+fn suggested_names_group_linked_worktrees_by_repository_and_branch(
+    repository: anyhow::Result<Repository>,
+) {
+    let repository = repository.expect("repository fixture");
     let nested = repository.worktree.join("nested");
     fs::create_dir(&nested).expect("create nested directory");
 
@@ -101,7 +96,10 @@ fn suggested_names_group_linked_worktrees_by_repository_and_branch(repository: R
 }
 
 #[rstest]
-fn detached_worktrees_use_their_directory_as_the_session_leaf(repository: Repository) {
+fn detached_worktrees_use_their_directory_as_the_session_leaf(
+    repository: anyhow::Result<Repository>,
+) {
+    let repository = repository.expect("repository fixture");
     let detached = repository.root.path().join("detached");
     git_ok(
         &repository.main,
@@ -112,7 +110,8 @@ fn detached_worktrees_use_their_directory_as_the_session_leaf(repository: Reposi
             "--detach",
             detached.to_str().unwrap(),
         ],
-    );
+    )
+    .expect("git setup command");
     assert_eq!(
         suggested_session_name(detached.to_str().unwrap()),
         "main/detached"
@@ -120,7 +119,8 @@ fn detached_worktrees_use_their_directory_as_the_session_leaf(repository: Reposi
 }
 
 #[rstest]
-fn status_distinguishes_main_linked_and_dirty_worktrees(repository: Repository) {
+fn status_distinguishes_main_linked_and_dirty_worktrees(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
     let main_status = status(repository.main.to_str().unwrap());
     assert!(main_status.in_repo);
     assert!(!main_status.is_linked_worktree);
@@ -136,13 +136,14 @@ fn status_distinguishes_main_linked_and_dirty_worktrees(repository: Repository) 
 }
 
 #[rstest]
-fn native_branch_and_diff_facts_follow_the_worktree(repository: Repository) {
+fn native_branch_and_diff_facts_follow_the_worktree(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
     assert_eq!(
         head_branch(repository.worktree.to_str().unwrap()).as_deref(),
         Some("feature")
     );
     fs::write(repository.worktree.join("staged.txt"), "one\n").expect("write staged file");
-    git_ok(&repository.worktree, &["add", "staged.txt"]);
+    git_ok(&repository.worktree, &["add", "staged.txt"]).expect("git setup command");
     assert_eq!(
         diff_counts(repository.worktree.to_str().unwrap()),
         Some((1, 0))
@@ -150,8 +151,9 @@ fn native_branch_and_diff_facts_follow_the_worktree(repository: Repository) {
 }
 
 #[rstest]
-fn detach_preserves_the_worktree_and_current_commit(repository: Repository) {
-    let before = git_read(&repository.worktree, &["rev-parse", "HEAD"]);
+fn detach_preserves_the_worktree_and_current_commit(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
+    let before = git_read(&repository.worktree, &["rev-parse", "HEAD"]).expect("git output");
     detach_head(repository.worktree.to_str().unwrap()).expect("detach HEAD");
 
     assert!(
@@ -160,47 +162,58 @@ fn detach_preserves_the_worktree_and_current_commit(repository: Repository) {
             .is_none()
     );
     assert_eq!(
-        git_read(&repository.worktree, &["rev-parse", "HEAD"]),
+        git_read(&repository.worktree, &["rev-parse", "HEAD"]).expect("git output"),
         before
     );
 }
 
 #[rstest]
-fn forced_branch_deletion_removes_unmerged_work(repository: Repository) {
+fn forced_branch_deletion_removes_unmerged_work(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
     fs::write(repository.worktree.join("feature.txt"), "work").expect("write branch file");
-    git_ok(&repository.worktree, &["add", "."]);
+    git_ok(&repository.worktree, &["add", "."]).expect("git setup command");
     git_ok(
         &repository.worktree,
         &["commit", "-q", "-m", "feature work"],
-    );
+    )
+    .expect("git setup command");
     remove_worktree(repository.worktree.to_str().unwrap(), false).expect("remove worktree");
     assert!(!repository.worktree.exists());
-    assert!(!git_read(&repository.main, &["worktree", "list"]).contains("wt"));
+    assert!(
+        !git_read(&repository.main, &["worktree", "list"])
+            .expect("git output")
+            .contains("wt")
+    );
     delete_branch(repository.main.to_str().unwrap(), "feature", true).expect("delete branch");
     assert_eq!(
-        git_read(&repository.main, &["branch", "--list", "feature"]),
+        git_read(&repository.main, &["branch", "--list", "feature"]).expect("git output"),
         ""
     );
 }
 
 #[rstest]
-fn worktree_count_includes_main_and_linked_checkouts(repository: Repository) {
+fn worktree_count_includes_main_and_linked_checkouts(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
     assert_eq!(worktree_count(repository.main.to_str().unwrap()), 2);
     assert_eq!(worktree_count(repository.worktree.to_str().unwrap()), 2);
 }
 
 #[rstest]
-fn trunk_uses_the_remote_default_then_falls_back_to_main_worktree(repository: Repository) {
+fn trunk_uses_the_remote_default_then_falls_back_to_main_worktree(
+    repository: anyhow::Result<Repository>,
+) {
+    let repository = repository.expect("repository fixture");
     assert_eq!(
         trunk_branch(repository.worktree.to_str().unwrap()).as_deref(),
         Some("main")
     );
 
-    let head = git_read(&repository.main, &["rev-parse", "HEAD"]);
+    let head = git_read(&repository.main, &["rev-parse", "HEAD"]).expect("git output");
     git_ok(
         &repository.main,
         &["update-ref", "refs/remotes/origin/release", &head],
-    );
+    )
+    .expect("git setup command");
     git_ok(
         &repository.main,
         &[
@@ -208,7 +221,8 @@ fn trunk_uses_the_remote_default_then_falls_back_to_main_worktree(repository: Re
             "refs/remotes/origin/HEAD",
             "refs/remotes/origin/release",
         ],
-    );
+    )
+    .expect("git setup command");
     assert_eq!(
         trunk_branch(repository.worktree.to_str().unwrap()).as_deref(),
         Some("release")
@@ -216,11 +230,159 @@ fn trunk_uses_the_remote_default_then_falls_back_to_main_worktree(repository: Re
 }
 
 #[rstest]
-fn add_worktree_creates_a_sibling_for_the_new_branch(repository: Repository) {
+fn add_worktree_creates_a_sibling_for_the_new_branch(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
     let created =
         add_worktree(repository.main.to_str().unwrap(), "wip/login").expect("add worktree");
     assert!(created.ends_with("main-wip-login"));
     let added = status(&created);
     assert!(added.is_linked_worktree);
     assert_eq!(added.branch.as_deref(), Some("wip/login"));
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some("custom checkout"))]
+fn create_worktree_resolves_starting_ref_and_preserves_current_checkout(
+    repository: anyhow::Result<Repository>,
+    #[case] name: Option<&str>,
+) {
+    let repository = repository.expect("repository fixture");
+    let root = repository.main.to_str().unwrap();
+    let initial = git_read(&repository.main, &["rev-parse", "HEAD"]).expect("git output");
+    git_ok(&repository.main, &["tag", "baseline"]).expect("git setup command");
+    fs::write(repository.main.join("README"), "newer").unwrap();
+    git_ok(&repository.main, &["commit", "-am", "newer"]).expect("git setup command");
+    let current = git_read(&repository.main, &["rev-parse", "HEAD"]).expect("git output");
+    let path = bootty_git::Git::new()
+        .create_worktree(
+            root,
+            &bootty_git::WorktreeRequest {
+                branch: "topic/nested".to_owned(),
+                name: name.map(str::to_owned),
+                start_ref: Some("baseline".to_owned()),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        Path::new(&path),
+        repository
+            .root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(name.unwrap_or("main-topic-nested"))
+    );
+    assert_eq!(
+        git_read(Path::new(&path), &["rev-parse", "HEAD"]).expect("git output"),
+        initial
+    );
+    assert_eq!(
+        git_read(Path::new(&path), &["branch", "--show-current"]).expect("git output"),
+        "topic/nested"
+    );
+    assert_eq!(
+        git_read(&repository.main, &["rev-parse", "HEAD"]).expect("git output"),
+        current
+    );
+    assert_eq!(
+        git_read(&repository.main, &["status", "--porcelain"]).expect("git output"),
+        ""
+    );
+}
+
+#[rstest]
+#[case("feature", "new-checkout", "HEAD")]
+#[case("new-branch", "../escape", "HEAD")]
+#[case("new-branch", "/absolute", "HEAD")]
+#[case("new-branch", "..", "HEAD")]
+#[case("new-branch", "wt", "HEAD")]
+#[case("new-branch", "new-checkout", "missing-ref")]
+#[case("@{-1}", "new-checkout", "HEAD")]
+#[case("HEAD", "new-checkout", "HEAD")]
+#[case("-bad", "new-checkout", "HEAD")]
+fn rejected_worktree_request_does_not_change_repository(
+    repository: anyhow::Result<Repository>,
+    #[case] branch: &str,
+    #[case] name: &str,
+    #[case] start_ref: &str,
+) {
+    let repository = repository.expect("repository fixture");
+    let before = git_read(&repository.main, &["show-ref"]).expect("git output");
+    let worktrees =
+        git_read(&repository.main, &["worktree", "list", "--porcelain"]).expect("git output");
+    assert!(
+        bootty_git::Git::new()
+            .create_worktree(
+                repository.main.to_str().unwrap(),
+                &bootty_git::WorktreeRequest {
+                    branch: branch.to_owned(),
+                    name: Some(name.to_owned()),
+                    start_ref: Some(start_ref.to_owned()),
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        git_read(&repository.main, &["show-ref"]).expect("git output"),
+        before
+    );
+    assert_eq!(
+        git_read(&repository.main, &["worktree", "list", "--porcelain"]).expect("git output"),
+        worktrees
+    );
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case("tab\tline\ncheckout")]
+#[case("checkout \n")]
+fn worktree_paths_preserve_tabs_and_newlines(
+    repository: anyhow::Result<Repository>,
+    #[case] name: &str,
+) {
+    let repository = repository.expect("repository fixture");
+    let path = repository.root.path().join(name);
+    git_ok(
+        &repository.main,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    )
+    .expect("git setup command");
+    let entries = bootty_git::discover_worktree_picker_entries(repository.main.to_str().unwrap());
+    let expected = path.canonicalize().unwrap();
+    assert_eq!(
+        bootty_git::worktree_root(path.to_str().unwrap()).as_deref(),
+        expected.to_str()
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.path.as_deref().map(Path::new) == Some(expected.as_path()) })
+    );
+    assert_eq!(worktree_count(repository.main.to_str().unwrap()), 3);
+}
+
+#[rstest]
+fn linked_checkout_of_bare_repository_can_be_removed(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
+    let bare = repository.root.path().join("bare.git");
+    git_ok(
+        &repository.main,
+        &["clone", "--bare", ".", bare.to_str().unwrap()],
+    )
+    .expect("git setup command");
+    let linked = repository.root.path().join("bare-checkout");
+    git_ok(
+        &bare,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    )
+    .expect("git setup command");
+    assert_eq!(
+        bootty_git::main_worktree(linked.to_str().unwrap())
+            .as_deref()
+            .map(Path::new),
+        Some(bare.canonicalize().unwrap().as_path())
+    );
+    remove_worktree(linked.to_str().unwrap(), false).expect("remove bare repository checkout");
+    assert!(!linked.exists());
 }

@@ -27,6 +27,7 @@ pub const COLD_REFRESH_BURST: usize = 1;
 /// Minimum gap between cold refreshes. A newly visible sidebar gets one deep refresh at a time.
 pub const COLD_REFRESH_SPACING: Duration = Duration::from_millis(50);
 pub const FACT_CACHE_TTL: Duration = Duration::from_mins(5);
+const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Git facts shared by sidebar, chrome and future panels. `cache_key` is
 /// supplied by the binding owner and must include host, repository and
@@ -78,6 +79,7 @@ struct CachedFacts {
     facts: GitFacts,
     seen_at: Instant,
     live_at: Option<Instant>,
+    live_revision: u64,
     /// The last deep pass, including a pass that decided the revision was already settled.
     refreshed_at: Option<Instant>,
     diff_at: Option<Instant>,
@@ -97,6 +99,7 @@ impl CachedFacts {
             },
             seen_at: now,
             live_at: None,
+            live_revision: 0,
             refreshed_at: None,
             diff_at: None,
             diff_revision: 0,
@@ -127,7 +130,31 @@ struct RefreshSchedule {
     cold_refreshes: usize,
 }
 
+impl RefreshSchedule {
+    fn allows_refresh(&self, cold: bool, now: Instant) -> bool {
+        let burst_available =
+            !cold || self.cold_frame != Some(now) || self.cold_refreshes < COLD_REFRESH_BURST;
+        let last = if cold {
+            // A cold pass is also a deep pass. Use both timestamps so a caller that
+            // presents known and new sessions in one frame still starts at most one.
+            self.last_cold_refresh.max(self.last_fact_refresh)
+        } else {
+            self.last_fact_refresh
+        };
+        burst_available
+            && last.is_none_or(|at| {
+                now.saturating_duration_since(at)
+                    >= if cold {
+                        COLD_REFRESH_SPACING
+                    } else {
+                        REFRESH_SPACING
+                    }
+            })
+    }
+}
+
 impl GitFactsCache<SystemCommandRunner> {
+    #[must_use]
     pub fn new() -> Self {
         Self::with_runner(SystemCommandRunner)
     }
@@ -202,50 +229,39 @@ where
             entry.seen_at = now;
             entry.facts.worktree_revision = revision;
 
-            if !entry.live_running
-                && entry
-                    .live_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= LIVE_FACT_INTERVAL)
-            {
-                if cwd.is_empty() {
-                    entry.live_at = Some(now);
-                } else {
-                    entry.live_running = true;
-                    start_live = true;
-                }
-            }
-
             let interval = if selected {
                 FOCUSED_FACT_INTERVAL
             } else {
                 BACKGROUND_FACT_INTERVAL
             };
+            // Watcher changes get a quick refresh; unchanged and unwatched repositories use
+            // the focus cadence instead of spawning a Git process for every sidebar row at 4 Hz.
+            let live_interval = if revision != 0 && revision != entry.live_revision {
+                LIVE_FACT_INTERVAL
+            } else {
+                interval
+            };
+            if !entry.live_running
+                && entry
+                    .live_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= live_interval)
+            {
+                entry.live_at = Some(now);
+                entry.live_revision = revision;
+                if !cwd.is_empty() {
+                    entry.live_running = true;
+                    start_live = true;
+                }
+            }
+
             let due = entry
                 .refreshed_at
                 .is_none_or(|at| now.saturating_duration_since(at) > interval);
             if !entry.diff_running && due {
                 let cold = entry.refreshed_at.is_none();
-                let allowed = schedule.as_ref().is_some_and(|schedule| {
-                    let burst_available = !cold
-                        || schedule.cold_frame != Some(now)
-                        || schedule.cold_refreshes < COLD_REFRESH_BURST;
-                    let last = if cold {
-                        // A cold pass is also a deep pass. Use both timestamps so a caller that
-                        // presents known and new sessions in one frame still starts at most one.
-                        schedule.last_cold_refresh.max(schedule.last_fact_refresh)
-                    } else {
-                        schedule.last_fact_refresh
-                    };
-                    burst_available
-                        && last.is_none_or(|at| {
-                            now.saturating_duration_since(at)
-                                >= if cold {
-                                    COLD_REFRESH_SPACING
-                                } else {
-                                    REFRESH_SPACING
-                                }
-                        })
-                });
+                let allowed = schedule
+                    .as_ref()
+                    .is_some_and(|schedule| schedule.allows_refresh(cold, now));
                 if allowed {
                     // Mark every selected pass, even one that finds an unchanged watched tree,
                     // so a due batch advances at the same bounded cadence as the Lua provider.
@@ -258,7 +274,7 @@ where
                                 schedule.cold_frame = Some(now);
                                 schedule.cold_refreshes = 0;
                             }
-                            schedule.cold_refreshes += 1;
+                            schedule.cold_refreshes = schedule.cold_refreshes.saturating_add(1);
                         }
                     }
 
@@ -278,6 +294,7 @@ where
             snapshot = entry.facts.clone();
         }
 
+        drop(schedule);
         if start_live {
             self.spawn_live(cache_key.to_owned(), identity.clone(), cwd.to_owned());
         }
@@ -370,7 +387,6 @@ where
                 } else {
                     entry.facts.branch_status = BranchStatus::Unknown;
                 }
-                entry.live_at = Some(Instant::now());
                 entry.live_running = false;
             }
         });
@@ -410,7 +426,7 @@ where
 pub struct WorktreeRevisionCache {
     revisions: Arc<Mutex<HashMap<PathBuf, WorktreeWatch>>>,
     aliases: Arc<Mutex<HashMap<String, PathBuf>>>,
-    pending: Arc<Mutex<std::collections::HashSet<String>>>,
+    registrations: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
     watch_local: bool,
 }
@@ -419,6 +435,11 @@ pub struct WorktreeRevisionCache {
 struct WorktreeWatch {
     revision: Arc<AtomicU64>,
     paths: Vec<PathBuf>,
+}
+
+enum WatchRegistration {
+    Pending,
+    FailedAt(Instant),
 }
 
 impl Default for WorktreeRevisionCache {
@@ -445,7 +466,7 @@ impl Default for WorktreeRevisionCache {
         Self {
             revisions,
             aliases: Arc::default(),
-            pending: Arc::default(),
+            registrations: Arc::default(),
             watcher: Arc::new(Mutex::new(watcher.ok())),
             watch_local: true,
         }
@@ -454,11 +475,12 @@ impl Default for WorktreeRevisionCache {
 
 impl WorktreeRevisionCache {
     /// Disable all local filesystem inspection for a remote command runner.
+    #[must_use]
     pub fn disabled() -> Self {
         Self {
             revisions: Arc::default(),
             aliases: Arc::default(),
-            pending: Arc::default(),
+            registrations: Arc::default(),
             watcher: Arc::new(Mutex::new(None)),
             watch_local: false,
         }
@@ -467,6 +489,7 @@ impl WorktreeRevisionCache {
     /// Read the current revision without touching the filesystem. A zero
     /// value means the background registration has not completed or the path
     /// is unsupported.
+    #[must_use]
     pub fn cached_revision(&self, cwd: &str) -> u64 {
         let Ok(aliases) = self.aliases.lock() else {
             return 0;
@@ -489,23 +512,37 @@ impl WorktreeRevisionCache {
         if !self.watch_local || self.cached_revision(&cwd) != 0 {
             return;
         }
-        let Ok(mut pending) = self.pending.lock() else {
+        let Ok(mut registrations) = self.registrations.lock() else {
             return;
         };
-        if !pending.insert(cwd.clone()) {
+        let now = Instant::now();
+        registrations.retain(|_, registration| {
+            matches!(registration, WatchRegistration::Pending)
+                || matches!(registration, WatchRegistration::FailedAt(at) if now.saturating_duration_since(*at) < WATCH_RETRY_INTERVAL)
+        });
+        // Non-repositories and failed watches must not spawn filesystem work every UI frame.
+        // Bound pending work too; an unavailable filesystem can keep registration blocked.
+        if registrations.contains_key(&cwd) || registrations.len() >= MAX_WATCHED_WORKTREES {
             return;
         }
+        registrations.insert(cwd.clone(), WatchRegistration::Pending);
         let cache = self.clone();
         thread::spawn(move || {
             cache.register(cwd.clone());
-            if let Ok(mut pending) = cache.pending.lock() {
-                pending.remove(&cwd);
+            let registered = cache.cached_revision(&cwd) != 0;
+            if let Ok(mut registrations) = cache.registrations.lock() {
+                if registered {
+                    registrations.remove(&cwd);
+                } else {
+                    registrations.insert(cwd, WatchRegistration::FailedAt(Instant::now()));
+                }
             }
         });
     }
 
     /// Keep the old polling helper usable by compatibility callers while
     /// retaining the no-filesystem-on-caller-thread guarantee.
+    #[must_use]
     pub fn revision(&self, cwd: &str) -> u64 {
         let revision = self.cached_revision(cwd);
         self.ensure_watched(cwd.to_owned());
@@ -516,7 +553,9 @@ impl WorktreeRevisionCache {
         let Some(paths) = worktree_watch_paths(Path::new(&cwd)) else {
             return;
         };
-        let root = paths[0].clone();
+        let Some(root) = paths.first().cloned() else {
+            return;
+        };
         if let Ok(aliases) = self.aliases.lock()
             && aliases.contains_key(&cwd)
         {

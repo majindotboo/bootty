@@ -9,8 +9,8 @@ use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
 #[fixture]
-fn home() -> TempDir {
-    TempDir::new().expect("temporary home")
+fn home() -> Result<TempDir, assert_fs::fixture::FixtureError> {
+    TempDir::new()
 }
 
 #[rstest]
@@ -24,7 +24,10 @@ fn absent_or_empty_home_is_not_a_project_root(#[case] value: Option<OsString>) {
 }
 
 #[rstest]
-fn discovery_includes_visible_project_roots_and_excludes_hidden_entries(home: TempDir) {
+fn discovery_includes_visible_project_roots_and_excludes_hidden_entries(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
     home.child("src/project").create_dir_all().expect("project");
     home.child("src/.hidden").create_dir_all().expect("hidden");
     home.child("dotfiles").create_dir_all().expect("dotfiles");
@@ -42,7 +45,10 @@ fn discovery_includes_visible_project_roots_and_excludes_hidden_entries(home: Te
 }
 
 #[rstest]
-fn favorite_toggle_and_discovery_share_the_same_file(home: TempDir) {
+fn favorite_toggle_and_discovery_share_the_same_file(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
     let project = home.child("projects/bootty");
     project.create_dir_all().expect("project");
     let project_path = project.path().to_string_lossy().into_owned();
@@ -60,7 +66,10 @@ fn favorite_toggle_and_discovery_share_the_same_file(home: TempDir) {
 }
 
 #[rstest]
-fn canonical_path_aliases_mark_the_same_worktree_occupied(home: TempDir) {
+fn canonical_path_aliases_mark_the_same_worktree_occupied(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
     let project = home.child("project");
     project.create_dir_all().expect("project");
     let path = project.path().to_string_lossy().into_owned();
@@ -83,7 +92,10 @@ fn canonical_path_aliases_mark_the_same_worktree_occupied(home: TempDir) {
 }
 
 #[rstest]
-fn non_git_directory_offers_only_its_main_entry(home: TempDir) {
+fn non_git_directory_offers_only_its_main_entry(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
     let path = home.path().to_string_lossy().into_owned();
     let directory_name = home
         .path()
@@ -104,8 +116,11 @@ fn non_git_directory_offers_only_its_main_entry(home: TempDir) {
 
 #[cfg(unix)]
 #[rstest]
-fn favorite_replacement_preserves_file_permissions(home: TempDir) {
+fn favorite_replacement_preserves_file_permissions(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
     use std::{fs, os::unix::fs::PermissionsExt};
+    let home = home.expect("home fixture");
 
     let favorites = home.child(".config/tmux/.session-favorites");
     home.child(".config/tmux").create_dir_all().unwrap();

@@ -5,7 +5,7 @@ use std::{
 
 use bootty_write::{NewFileMode, ResolveTargetError, WriteTarget};
 
-pub(super) fn toggle_favorite_project_path_at(
+pub fn toggle_favorite_project_path_at(
     favorites_file: &Path,
     home: Option<&Path>,
     project_path: &str,
@@ -47,6 +47,7 @@ pub(super) fn toggle_favorite_project_path_at(
     target
         .replace(content.as_bytes(), NewFileMode::Private)
         .map_err(bootty_write::CommitError::into_io)?;
+    drop(target);
     Ok(selected)
 }
 

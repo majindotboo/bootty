@@ -30,6 +30,7 @@ pub struct WorktreePickerEntry {
     pub occupied: bool,
 }
 
+#[must_use]
 pub fn home_dir() -> Option<PathBuf> {
     home_dir_from(|name| env::var_os(name))
 }
@@ -53,6 +54,7 @@ fn non_empty_path(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
+#[must_use]
 pub fn discover_project_picker_entries(home: Option<&Path>) -> Vec<ProjectPickerEntry> {
     let mut entries = Vec::new();
     for path in read_favorite_project_paths(home) {
@@ -71,8 +73,10 @@ pub fn discover_project_picker_entries(home: Option<&Path>) -> Vec<ProjectPicker
     entries
 }
 
+/// # Errors
+/// Returns an I/O error if the favorites file cannot be read, locked, or atomically replaced.
 pub fn toggle_favorite_project_path(home: Option<&Path>, project_path: &str) -> io::Result<bool> {
-    let Some(path) = favorite_project_paths_file(home) else {
+    let Some(path) = home.map(favorite_project_paths_file) else {
         return Ok(false);
     };
     favorite_paths::toggle_favorite_project_path_at(&path, home, project_path)
@@ -112,12 +116,12 @@ fn is_hidden_path(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with('.') && name != ".config")
 }
 
-fn favorite_project_paths_file(home: Option<&Path>) -> Option<PathBuf> {
-    home.map(|home| home.join(".config/tmux/.session-favorites"))
+fn favorite_project_paths_file(home: &Path) -> PathBuf {
+    home.join(".config/tmux/.session-favorites")
 }
 
 fn read_favorite_project_paths(home: Option<&Path>) -> Vec<PathBuf> {
-    favorite_project_paths_file(home)
+    home.map(favorite_project_paths_file)
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|content| {
             content
@@ -153,6 +157,7 @@ pub(crate) fn session_name_for_path(path: &str) -> &str {
         .trim_end_matches(".git")
 }
 
+#[must_use]
 pub fn display_path(path: &str, home: Option<&Path>) -> String {
     let path = Path::new(path);
     if let Some(home) = home

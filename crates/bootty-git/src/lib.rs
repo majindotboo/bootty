@@ -1,3 +1,4 @@
+pub mod changes;
 pub mod facts;
 mod favorite_paths;
 pub mod project;
@@ -16,3 +17,5 @@ pub use project::{
     worktree_count, worktree_root,
 };
 pub use runner::{CommandOutput, CommandRunner, SystemCommandRunner};
+
+pub use worktree::WorktreeRequest;

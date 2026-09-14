@@ -5,6 +5,51 @@ use crate::{
     runner::{CommandRunner, SystemCommandRunner},
 };
 
+/// A new branch and sibling checkout, resolved on the repository's host.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeRequest {
+    pub branch: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub start_ref: Option<String>,
+}
+impl WorktreeRequest {
+    /// # Errors
+    /// Returns an error for an invalid branch, folder name, or starting reference.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.branch.trim().is_empty()
+            || self.branch.starts_with('-')
+            || self.branch == "HEAD"
+            || self.branch.chars().any(char::is_control)
+        {
+            return Err("Enter a valid branch name".to_owned());
+        }
+        if let Some(name) = &self.name
+            && (name.trim().is_empty()
+                || matches!(name.as_str(), "." | "..")
+                || name.contains(['/', '\\'])
+                || name.ends_with([' ', '.'])
+                || !matches!(
+                    Path::new(name).components().next(),
+                    Some(std::path::Component::Normal(_))
+                )
+                || name.chars().any(char::is_control))
+        {
+            return Err("Folder name must be one directory name".to_owned());
+        }
+        if self
+            .start_ref
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        {
+            return Err("Enter a starting branch, tag or commit".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// A Git command service scoped to an execution host.
 ///
 /// Git policy lives here while command execution is injected by the host. The
@@ -12,11 +57,12 @@ use crate::{
 /// remote callers supply a host runner with the same argv.
 #[derive(Clone, Debug)]
 pub struct Git<R = SystemCommandRunner> {
-    runner: R,
+    pub(crate) runner: R,
 }
 
 impl Git<SystemCommandRunner> {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             runner: SystemCommandRunner,
         }
@@ -30,7 +76,7 @@ impl Default for Git<SystemCommandRunner> {
 }
 
 impl<R: CommandRunner> Git<R> {
-    pub fn with_runner(runner: R) -> Self {
+    pub const fn with_runner(runner: R) -> Self {
         Self { runner }
     }
 
@@ -70,18 +116,16 @@ impl<R: CommandRunner> Git<R> {
     }
 
     /// Detach HEAD while retaining the worktree and all commits.
+    /// # Errors
+    /// Returns an error if Git cannot detach the worktree HEAD.
     pub fn detach_head(&self, worktree_path: &str) -> Result<(), String> {
         self.run(worktree_path, &["checkout", "--detach"])
     }
 
     /// Count the main and linked worktrees for the repository containing `cwd`.
     pub fn worktree_count(&self, cwd: &str) -> usize {
-        self.read(cwd, &["worktree", "list", "--porcelain"])
-            .map_or(0, |out| {
-                out.lines()
-                    .filter(|line| line.starts_with("worktree "))
-                    .count()
-            })
+        self.worktree_entries(cwd)
+            .map_or(0, |entries| entries.len())
     }
 
     /// Resolve the repository's default branch, falling back to the main
@@ -100,6 +144,8 @@ impl<R: CommandRunner> Git<R> {
 
     /// Remove a linked worktree from its main worktree. `force` is required for
     /// a dirty worktree and is never inferred by this service.
+    /// # Errors
+    /// Returns an error if the main worktree cannot be located or Git refuses removal.
     pub fn remove_worktree(&self, worktree_path: &str, force: bool) -> Result<(), String> {
         let main = self
             .main_worktree(worktree_path)
@@ -108,15 +154,18 @@ impl<R: CommandRunner> Git<R> {
         if force {
             args.push("--force".to_owned());
         }
+        args.push("--".to_owned());
         args.push(worktree_path.to_owned());
         self.run_args(&main, &args)
     }
 
     /// Delete a branch from a live repository. Force maps exactly to `branch -D`.
+    /// # Errors
+    /// Returns an error if Git refuses to delete the branch.
     pub fn delete_branch(&self, repo_dir: &str, branch: &str, force: bool) -> Result<(), String> {
         self.run(
             repo_dir,
-            &["branch", if force { "-D" } else { "-d" }, branch],
+            &["branch", if force { "-D" } else { "-d" }, "--", branch],
         )
     }
 
@@ -183,14 +232,11 @@ impl<R: CommandRunner> Git<R> {
             is_new: true,
             ..WorktreePickerEntry::default()
         };
-        let Some(output) = self
-            .output(project_path, &["worktree", "list", "--porcelain"])
-            .filter(|output| output.success)
-        else {
+        let Some(worktrees) = self.worktree_entries(project_path) else {
             return vec![main_worktree_entry(project_path)];
         };
         let mut entries = vec![new_worktree];
-        entries.extend(parse_git_worktree_list(&output.stdout));
+        entries.extend(worktrees);
         entries
     }
 
@@ -212,14 +258,61 @@ impl<R: CommandRunner> Git<R> {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the branch or destination is invalid, or Git cannot create the checkout and branch.
     pub fn add_worktree(&self, repo_dir: &str, branch: &str) -> Result<String, String> {
-        let path = self.new_worktree_path(repo_dir, branch)?;
+        self.create_worktree(
+            repo_dir,
+            &WorktreeRequest {
+                branch: branch.to_owned(),
+                name: None,
+                start_ref: None,
+            },
+        )
+    }
+
+    /// # Errors
+    /// Returns an error for invalid inputs or failed Git operations.
+    /// If branch creation fails, the error reports any failure to remove the new clean checkout.
+    pub fn create_worktree(
+        &self,
+        repo_dir: &str,
+        request: &WorktreeRequest,
+    ) -> Result<String, String> {
+        request.validate()?;
+        if self
+            .read(
+                repo_dir,
+                &[
+                    "check-ref-format",
+                    &format!("refs/heads/{}", request.branch),
+                ],
+            )
+            .is_none()
+        {
+            return Err("Invalid branch name".to_owned());
+        }
+        // Resolve once so a moving branch cannot change the requested starting commit mid-create.
+        let start_ref = request.start_ref.as_deref().unwrap_or("HEAD");
+        let commit = self
+            .read(
+                repo_dir,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{start_ref}^{{commit}}"),
+                ],
+            )
+            .ok_or_else(|| format!("Starting ref {start_ref:?} does not resolve to a commit"))?;
+        let path = self.new_worktree_path(repo_dir, &request.branch, request.name.as_deref())?;
         let args = vec![
             "worktree".to_owned(),
             "add".to_owned(),
-            "-b".to_owned(),
-            branch.to_owned(),
+            "--detach".to_owned(),
+            "--".to_owned(),
             path.clone(),
+            commit,
         ];
         let output = self
             .output_args(repo_dir, &args)
@@ -227,20 +320,40 @@ impl<R: CommandRunner> Git<R> {
         if !output.success {
             return Err(output.stderr.trim().to_owned());
         }
+        // Git can create -b's branch before discovering a destination collision. Create the
+        // checkout first; on branch failure remove only our clean checkout, never a branch.
+        if let Err(error) = self.run(&path, &["checkout", "-b", &request.branch]) {
+            return match self.run(repo_dir, &["worktree", "remove", "--", &path]) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!("{error}; checkout retained at {path}: {cleanup}")),
+            };
+        }
         Ok(path)
     }
 
     pub fn main_worktree(&self, cwd: &str) -> Option<String> {
-        let common = self.read(
-            cwd,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        Path::new(&common)
-            .parent()
-            .map(|parent| parent.to_string_lossy().into_owned())
+        // Git lists the main repository first. In a bare repository this is the Git
+        // directory itself, so its parent is not a repository we can run commands in.
+        self.worktree_entries(cwd)?.into_iter().next()?.path
     }
 
-    fn new_worktree_path(&self, repo_dir: &str, branch: &str) -> Result<String, String> {
+    fn worktree_entries(&self, cwd: &str) -> Option<Vec<WorktreePickerEntry>> {
+        let output = self
+            .output(cwd, &["worktree", "list", "--porcelain", "-z"])
+            .filter(|output| output.success)?;
+        // The runner transports UTF-8 text; never act on a lossy worktree path.
+        if output.stdout.contains('\u{fffd}') {
+            return None;
+        }
+        Some(parse_git_worktree_list(&output.stdout))
+    }
+
+    fn new_worktree_path(
+        &self,
+        repo_dir: &str,
+        branch: &str,
+        name: Option<&str>,
+    ) -> Result<String, String> {
         let main = self
             .main_worktree(repo_dir)
             .unwrap_or_else(|| repo_dir.to_owned());
@@ -253,7 +366,10 @@ impl<R: CommandRunner> Git<R> {
             .and_then(|name| name.to_str())
             .ok_or_else(|| "could not read repository name".to_owned())?;
         Ok(parent
-            .join(format!("{}-{}", repo_name, branch.replace('/', "-")))
+            .join(name.map_or_else(
+                || format!("{}-{}", repo_name, branch.replace('/', "-")),
+                str::to_owned,
+            ))
             .to_string_lossy()
             .into_owned())
     }
@@ -264,7 +380,13 @@ impl<R: CommandRunner> Git<R> {
             .run("git", &args)
             .ok()
             .filter(|output| output.success)
-            .map(|output| output.stdout.trim().to_owned())
+            .map(|output| {
+                output
+                    .stdout
+                    .strip_suffix('\n')
+                    .unwrap_or(&output.stdout)
+                    .to_owned()
+            })
     }
 
     fn run(&self, cwd: &str, args: &[&str]) -> Result<(), String> {
@@ -275,7 +397,7 @@ impl<R: CommandRunner> Git<R> {
     }
 
     fn run_args(&self, cwd: &str, args: &[String]) -> Result<(), String> {
-        let output = self.output_args(cwd, args).map_err(|error| error.clone())?;
+        let output = self.output_args(cwd, args)?;
         output
             .success
             .then_some(())
@@ -302,7 +424,7 @@ impl<R: CommandRunner> Git<R> {
 }
 
 fn git_args(cwd: &str, args: &[&str]) -> Vec<String> {
-    let mut output = Vec::with_capacity(args.len() + 2);
+    let mut output = Vec::with_capacity(args.len().saturating_add(2));
     output.push("-C".to_owned());
     output.push(cwd.to_owned());
     output.extend(args.iter().map(|arg| (*arg).to_owned()));
@@ -310,7 +432,7 @@ fn git_args(cwd: &str, args: &[&str]) -> Vec<String> {
 }
 
 fn git_args_owned(cwd: &str, args: &[String]) -> Vec<String> {
-    let mut output = Vec::with_capacity(args.len() + 2);
+    let mut output = Vec::with_capacity(args.len().saturating_add(2));
     output.push("-C".to_owned());
     output.push(cwd.to_owned());
     output.extend(args.iter().cloned());
@@ -332,7 +454,7 @@ fn parse_git_worktree_list(text: &str) -> Vec<WorktreePickerEntry> {
     let mut entries = Vec::new();
     let mut path: Option<String> = None;
     let mut branch: Option<String> = None;
-    for line in text.lines().chain(std::iter::once("")) {
+    for line in text.split_terminator('\0').chain(std::iter::once("")) {
         if line.is_empty() {
             if let Some(path) = path.take() {
                 let branch = branch
@@ -367,46 +489,60 @@ pub struct WorktreeStatus {
     pub has_upstream: bool,
 }
 
+#[must_use]
 pub fn status(cwd: &str) -> WorktreeStatus {
     Git::new().status(cwd)
 }
 
+/// # Errors
+/// Returns an error if Git cannot detach the worktree HEAD.
 pub fn detach_head(worktree_path: &str) -> Result<(), String> {
     Git::new().detach_head(worktree_path)
 }
 
+#[must_use]
 pub fn worktree_count(cwd: &str) -> usize {
     Git::new().worktree_count(cwd)
 }
 
+#[must_use]
 pub fn trunk_branch(cwd: &str) -> Option<String> {
     Git::new().trunk_branch(cwd)
 }
 
+/// # Errors
+/// Returns an error if the main worktree cannot be located or Git refuses removal.
 pub fn remove_worktree(worktree_path: &str, force: bool) -> Result<(), String> {
     Git::new().remove_worktree(worktree_path, force)
 }
 
+/// # Errors
+/// Returns an error if Git refuses to delete the branch.
 pub fn delete_branch(repo_dir: &str, branch: &str, force: bool) -> Result<(), String> {
     Git::new().delete_branch(repo_dir, branch, force)
 }
 
+#[must_use]
 pub fn worktree_root(cwd: &str) -> Option<String> {
     Git::new().worktree_root(cwd)
 }
 
+#[must_use]
 pub fn head_branch(cwd: &str) -> Option<String> {
     Git::new().head_branch(cwd)
 }
 
+#[must_use]
 pub fn diff_counts(cwd: &str) -> Option<(u64, u64)> {
     Git::new().diff_counts(cwd)
 }
 
+#[must_use]
 pub fn suggested_session_name(cwd: &str) -> String {
     Git::new().suggested_session_name(cwd)
 }
 
+#[must_use]
 pub fn discover_worktree_picker_entries(project_path: &str) -> Vec<WorktreePickerEntry> {
     Git::new().discover_worktree_picker_entries(project_path)
 }
@@ -415,10 +551,13 @@ pub fn mark_occupied_worktrees(entries: &mut [WorktreePickerEntry], open_cwds: &
     Git::new().mark_occupied_worktrees(entries, open_cwds);
 }
 
+/// # Errors
+/// Returns an error if the branch or destination is invalid, or Git cannot create the checkout and branch.
 pub fn add_worktree(repo_dir: &str, branch: &str) -> Result<String, String> {
     Git::new().add_worktree(repo_dir, branch)
 }
 
+#[must_use]
 pub fn main_worktree(cwd: &str) -> Option<String> {
     Git::new().main_worktree(cwd)
 }
