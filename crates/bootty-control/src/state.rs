@@ -12,14 +12,15 @@ use crate::protocol::{
 };
 use crate::{CommandCancellation, CommandInvocation};
 
-pub(crate) type SharedControlState = Arc<Mutex<ControlState>>;
+pub type SharedControlState = Arc<Mutex<ControlState>>;
 
-pub(crate) struct ControlState {
+pub struct ControlState {
     tasks: BTreeMap<String, TaskRecord>,
     completed_tasks: VecDeque<String>,
     subscriptions: BTreeMap<String, SubscriptionRecord>,
     revisions: BTreeMap<String, u64>,
     pub(crate) topics: BTreeSet<String>,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl Default for ControlState {
@@ -30,6 +31,7 @@ impl Default for ControlState {
             subscriptions: BTreeMap::new(),
             revisions: BTreeMap::new(),
             topics: BTreeSet::from([COMMAND_COMPLETED_TOPIC.to_owned()]),
+            changed: tokio::sync::watch::channel(0).0,
         }
     }
 }
@@ -68,7 +70,33 @@ struct SubscriptionEvent {
     payload: Value,
 }
 
+#[derive(Serialize)]
+pub struct SubscriptionBatch {
+    subscription: String,
+    scope: String,
+    revision: u64,
+    cursor: u64,
+    events: VecDeque<SubscriptionEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timed_out: Option<bool>,
+}
+
+impl SubscriptionBatch {
+    pub(crate) fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+}
+
 impl ControlState {
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    fn notify(&self) {
+        self.changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
     pub(crate) fn start_task(
         &mut self,
         owner_pid: u32,
@@ -134,7 +162,7 @@ impl ControlState {
     pub(crate) fn cancel_all_tasks(&mut self) {
         for task in self.tasks.values_mut() {
             if matches!(task.state, TaskState::Running) {
-                task.cancellation.cancel();
+                let _ = task.cancellation.cancel();
                 task.state = TaskState::Cancelling;
             }
         }
@@ -174,7 +202,7 @@ impl ControlState {
         &mut self,
         subscription: &str,
         cursor: u64,
-    ) -> Result<Value, RpcError> {
+    ) -> Result<SubscriptionBatch, RpcError> {
         let (scope, cursor, events) = {
             let record = self.subscription(subscription)?;
             if let Some(gap) = record.gap {
@@ -194,16 +222,20 @@ impl ControlState {
                 ));
             }
             let mut events = VecDeque::new();
-            let mut bytes = 0;
+            let mut bytes = 0_u64;
             while let Some(event) = record.events.front() {
                 let event_bytes = serde_json::to_vec(event)
                     .map_err(|error| internal_error(&error))?
                     .len();
-                if bytes + event_bytes > REQUEST_LIMIT as usize / 2 {
+                let event_bytes = u64::try_from(event_bytes).unwrap_or(u64::MAX);
+                let total_bytes = bytes.saturating_add(event_bytes);
+                if total_bytes > REQUEST_LIMIT / 2 {
                     break;
                 }
-                bytes += event_bytes;
-                events.push_back(record.events.pop_front().expect("front event"));
+                bytes = total_bytes;
+                if let Some(event) = record.events.pop_front() {
+                    events.push_back(event);
+                }
             }
             if events.is_empty() && !record.events.is_empty() {
                 record.events.clear();
@@ -221,18 +253,20 @@ impl ControlState {
             (record.scope.clone(), record.cursor, events)
         };
         let revision = *self.revisions.get(&scope).unwrap_or(&0);
-        Ok(json!({
-            "subscription": subscription,
-            "scope": scope,
-            "revision": revision,
-            "cursor": cursor,
-            "events": events,
-        }))
+        Ok(SubscriptionBatch {
+            subscription: subscription.to_owned(),
+            scope,
+            revision,
+            cursor,
+            events,
+            timed_out: None,
+        })
     }
 
     pub(crate) fn unsubscribe(&mut self, subscription: &str) -> Result<Value, RpcError> {
         self.subscription(subscription)?;
         self.subscriptions.remove(subscription);
+        self.notify();
         Ok(json!({"unsubscribed": subscription}))
     }
 
@@ -269,13 +303,18 @@ impl ControlState {
         payload: &Value,
     ) {
         let revision = self.revisions.entry(scope.to_owned()).or_default();
-        *revision += 1;
+        *revision = revision.wrapping_add(1);
         let revision = *revision;
         for subscription in self.subscriptions.values_mut() {
             if subscription.scope != scope || !subscription.topics.contains(topic) {
                 continue;
             }
-            subscription.sequence += 1;
+            let Some(sequence) = subscription.sequence.checked_add(1) else {
+                subscription.events.clear();
+                subscription.gap = Some(subscription.sequence);
+                continue;
+            };
+            subscription.sequence = sequence;
             if subscription.gap.is_some() || subscription.events.len() >= EVENT_QUEUE_LIMIT {
                 subscription.events.clear();
                 subscription.gap = Some(subscription.sequence);
@@ -291,6 +330,7 @@ impl ControlState {
                 payload: payload.clone(),
             });
         }
+        self.notify();
     }
 }
 
@@ -310,13 +350,7 @@ fn capability_id(prefix: &str) -> Result<String, RpcError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes)
         .map_err(|error| RpcError::new(-32603, format!("generate capability ID: {error}")))?;
-    let digits = b"0123456789abcdef";
-    let mut token = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        token.push(digits[(byte >> 4) as usize] as char);
-        token.push(digits[(byte & 0x0f) as usize] as char);
-    }
-    Ok(format!("{prefix}-{token}"))
+    Ok(format!("{prefix}-{:032x}", u128::from_be_bytes(bytes)))
 }
 
 fn unique_capability_id<T>(
@@ -331,9 +365,7 @@ fn unique_capability_id<T>(
     }
 }
 
-pub(crate) fn lock_control_state(
-    state: &SharedControlState,
-) -> std::sync::MutexGuard<'_, ControlState> {
+pub fn lock_control_state(state: &SharedControlState) -> std::sync::MutexGuard<'_, ControlState> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

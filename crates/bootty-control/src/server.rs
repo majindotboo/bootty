@@ -33,6 +33,8 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
+    /// # Errors
+    /// Returns an error if the instance lease, runtime, listener, or descriptor publication fails.
     pub fn spawn(
         window_state_key: &str,
         commands: BoundAppCommandSender,
@@ -52,11 +54,17 @@ impl ControlServer {
         let server_thread = match thread::Builder::new()
             .name("bootty-control".to_owned())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
                     .build()
-                    .expect("control runtime");
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
                 runtime.block_on(async move {
                     let listener = match LocalListener::bind(&endpoint).and_then(|listener| {
                         set_owner_only_file(endpoint.as_path())?;
@@ -74,40 +82,16 @@ impl ControlServer {
                     if published_rx.recv().is_err() {
                         return;
                     }
-                    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-                    tokio::pin!(shutdown_rx);
-                    loop {
-                        tokio::select! {
-                            _ = &mut shutdown_rx => break,
-                            () = tokio::time::sleep(Duration::from_millis(5)) => {
-                                server_plane.process_events(catalog.source());
-                            },
-                            accepted = listener.accept() => {
-                                let Ok((stream, peer)) = accepted else { continue };
-                                if !same_user(&peer) { continue; }
-                                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
-                                    continue;
-                                };
-                                let commands = commands.clone();
-                                let descriptor = server_descriptor.clone();
-                                let state = Arc::clone(&server_state);
-                                let catalog = Arc::clone(&catalog);
-                                tokio::spawn(async move {
-                                    let _permit = permit;
-                                    let _ = serve_connection(
-                                        stream,
-                                        descriptor,
-                                        commands,
-                                        catalog,
-                                        state,
-                                        peer.pid,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                    }
-                    lock_control_state(&server_state).cancel_all_tasks();
+                    serve_listener(
+                        listener,
+                        shutdown_rx,
+                        server_descriptor,
+                        commands,
+                        catalog,
+                        server_state,
+                        server_plane,
+                    )
+                    .await;
                 });
             }) {
             Ok(thread) => thread,
@@ -118,12 +102,7 @@ impl ControlServer {
         };
         match ready_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(Ok(())) => {
-                if let Err(error) = plane
-                    .instance_scope
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("control plane scope is unavailable"))
-                    .map(|mut scope| *scope = Some(instance_scope(&descriptor)))
-                {
+                if let Err(error) = publish_instance_scope(plane, &descriptor) {
                     drop(published_tx);
                     let _ = server_thread.join();
                     lease.release();
@@ -179,6 +158,61 @@ impl Drop for ControlServer {
     }
 }
 
+fn publish_instance_scope(plane: &ControlPlane, descriptor: &InstanceDescriptor) -> Result<()> {
+    let mut scope = plane
+        .instance_scope
+        .lock()
+        .map_err(|_| anyhow::anyhow!("control plane scope is unavailable"))?;
+    *scope = Some(instance_scope(descriptor));
+    drop(scope);
+    Ok(())
+}
+
+async fn serve_listener(
+    listener: LocalListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    descriptor: InstanceDescriptor,
+    commands: BoundAppCommandSender,
+    catalog: Arc<ControlCatalog>,
+    state: SharedControlState,
+    plane: ControlPlane,
+) {
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    tokio::pin!(shutdown_rx);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => break,
+            () = plane.events_ready() => {
+                plane.process_events(catalog.source());
+            },
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else { continue };
+                if !same_user(&peer) { continue; }
+                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                    continue;
+                };
+                let commands = commands.clone();
+                let descriptor = descriptor.clone();
+                let state = Arc::clone(&state);
+                let catalog = Arc::clone(&catalog);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let _ = serve_connection(
+                        stream,
+                        descriptor,
+                        commands,
+                        catalog,
+                        state,
+                        peer.pid,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+    lock_control_state(&state).cancel_all_tasks();
+}
+
 async fn serve_connection(
     mut stream: rmux_ipc::LocalStream,
     descriptor: InstanceDescriptor,
@@ -195,7 +229,7 @@ async fn serve_connection(
     let response = match read {
         Err(_) => RpcResponse::error(Value::Null, -32003, "request read timed out", None),
         Ok(Err(error)) => return Err(error),
-        Ok(Ok(_)) if line.len() as u64 > REQUEST_LIMIT => {
+        Ok(Ok(_)) if u64::try_from(line.len()).unwrap_or(u64::MAX) > REQUEST_LIMIT => {
             RpcResponse::error(Value::Null, -32600, "request exceeds payload limit", None)
         }
         Ok(Ok(_)) => match serde_json::from_str::<RpcRequest>(line.trim_end()) {
@@ -217,7 +251,7 @@ async fn serve_connection(
         },
     };
     let mut encoded = serde_json::to_vec(&response).map_err(io::Error::other)?;
-    if encoded.len() as u64 > REQUEST_LIMIT {
+    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > REQUEST_LIMIT {
         encoded = serde_json::to_vec(&RpcResponse::error(
             Value::Null,
             -32603,
@@ -260,11 +294,12 @@ async fn handle_request(
                 "subscriptions": MAX_SUBSCRIPTIONS,
                 "topics_per_subscription": MAX_TOPICS_PER_SUBSCRIPTION,
                 "events_per_subscription": EVENT_QUEUE_LIMIT,
-                "command_timeout_ms": COMMAND_TIMEOUT.as_millis()
+                "command_timeout_ms": COMMAND_TIMEOUT.as_millis(),
+                "event_wait_timeout_ms": 4000
             },
             "methods": [
                 "system.ping", "system.describe", "instance.describe", "command.list",
-                "command.describe", "command.invoke", "event.subscribe", "event.unsubscribe",
+                "command.describe", "command.invoke", "event.subscribe", "event.wait", "event.unsubscribe",
                 "task.status", "task.cancel"
             ],
             "event_topics": available_event_topics(&state, &catalog)
@@ -284,17 +319,16 @@ async fn handle_request(
         }
         "command.describe" => {
             let name = request.params.get("command").and_then(Value::as_str);
-            match name.and_then(|name| catalog.describe(name)) {
-                Some(command) => {
-                    serde_json::to_value(command).map_err(|error| internal_error(&error))
-                }
-                None => Err(RpcError::new(-32602, "unknown command")),
-            }
+            name.and_then(|name| catalog.describe(name)).map_or_else(
+                || Err(RpcError::new(-32602, "unknown command")),
+                |command| serde_json::to_value(command).map_err(|error| internal_error(&error)),
+            )
         }
         "command.invoke" => {
             invoke_command(request.params, descriptor, commands, state, owner_pid).await
         }
         "event.subscribe" => subscribe_events(&request.params, &descriptor, &state, &catalog),
+        "event.wait" => wait_events(&request.params, &state).await,
         "event.unsubscribe" => unsubscribe_events(&request.params, &state),
         "task.status" => task_status(&request.params, &state),
         "task.cancel" => task_cancel(&request.params, &state),
@@ -344,14 +378,18 @@ fn start_task(
     scope: &str,
 ) -> Result<Value, RpcError> {
     let cancellation = CommandCancellation::new();
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or_else(|| RpcError::new(-32603, "command deadline is out of range"))?;
     let task_id = lock_control_state(state).start_task(owner_pid, cancellation.clone())?;
-    let response_rx = match enqueue_command(invocation.clone(), commands, cancellation.clone()) {
-        Ok(response_rx) => response_rx,
-        Err(error) => {
-            lock_control_state(state).remove_task(&task_id);
-            return Err(error);
-        }
-    };
+    let response_rx =
+        match enqueue_command(invocation.clone(), commands, deadline, cancellation.clone()) {
+            Ok(response_rx) => response_rx,
+            Err(error) => {
+                lock_control_state(state).remove_task(&task_id);
+                return Err(error);
+            }
+        };
     let worker_state = Arc::clone(state);
     let worker_task_id = task_id.clone();
     let worker_cancellation = cancellation.clone();
@@ -360,7 +398,7 @@ fn start_task(
     let worker = thread::Builder::new()
         .name(format!("bootty-control-{task_id}"))
         .spawn(move || {
-            let outcome = wait_for_task(&response_rx, &worker_cancellation);
+            let outcome = wait_for_task(&response_rx, &worker_cancellation, deadline);
             let mut state = lock_control_state(&worker_state);
             state.finish_task(&worker_task_id, outcome.clone());
             state.publish_command_completion(
@@ -371,7 +409,7 @@ fn start_task(
             );
         });
     if let Err(error) = worker {
-        cancellation.cancel();
+        let _ = cancellation.cancel();
         let outcome = failed_outcome("-32603", format!("start task worker: {error}"));
         let mut state = lock_control_state(state);
         state.finish_task(&task_id, outcome.clone());
@@ -383,10 +421,11 @@ fn start_task(
 fn enqueue_command(
     invocation: CommandInvocation,
     commands: &BoundAppCommandSender,
+    deadline: Instant,
     cancellation: CommandCancellation,
 ) -> Result<mpsc::Receiver<CommandOutcome>, RpcError> {
     commands
-        .submit(invocation, Instant::now() + COMMAND_TIMEOUT, cancellation)
+        .submit(invocation, deadline, cancellation)
         .map_err(command_send_error)
 }
 
@@ -395,22 +434,27 @@ async fn await_command(
     commands: &BoundAppCommandSender,
     cancellation: CommandCancellation,
 ) -> Result<Value, RpcError> {
-    let response_rx = enqueue_command(invocation, commands, cancellation.clone())?;
-    let outcome = tokio::task::spawn_blocking(move || response_rx.recv_timeout(COMMAND_TIMEOUT))
-        .await
-        .map_err(|error| RpcError::new(-32603, error.to_string()))?
-        .map_err(|error| {
-            cancellation.cancel();
-            RpcError::new(-32003, error.to_string())
-        })?;
+    let deadline = Instant::now()
+        .checked_add(COMMAND_TIMEOUT)
+        .ok_or_else(|| RpcError::new(-32603, "command deadline is out of range"))?;
+    let response_rx = enqueue_command(invocation, commands, deadline, cancellation.clone())?;
+    let outcome = tokio::task::spawn_blocking(move || {
+        response_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    })
+    .await
+    .map_err(|error| RpcError::new(-32603, error.to_string()))?
+    .map_err(|error| {
+        let _ = cancellation.cancel();
+        RpcError::new(-32003, error.to_string())
+    })?;
     serde_json::to_value(outcome).map_err(|error| internal_error(&error))
 }
 
 fn wait_for_task(
     response_rx: &mpsc::Receiver<CommandOutcome>,
     cancellation: &CommandCancellation,
+    deadline: Instant,
 ) -> Value {
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
     loop {
         match response_rx.try_recv() {
             Ok(outcome) => return task_outcome(outcome),
@@ -420,14 +464,14 @@ fn wait_for_task(
             Err(mpsc::TryRecvError::Empty) => {}
         }
         if cancellation.is_cancelled() {
-            return match response_rx.try_recv() {
-                Ok(outcome) => task_outcome(outcome),
-                Err(_) => failed_outcome("-32003", "command was cancelled"),
-            };
+            return response_rx.try_recv().map_or_else(
+                |_| failed_outcome("-32003", "command was cancelled"),
+                task_outcome,
+            );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            cancellation.cancel();
+            let _ = cancellation.cancel();
             return failed_outcome("-32003", "command deadline expired");
         }
         match response_rx.recv_timeout(remaining.min(TASK_WAIT_INTERVAL)) {
@@ -484,13 +528,52 @@ fn subscribe_events(
             .get("cursor")
             .and_then(Value::as_u64)
             .ok_or_else(|| RpcError::new(-32602, "missing subscription cursor"))?;
-        return lock_control_state(state).poll_subscription(subscription, cursor);
+        return serde_json::to_value(
+            lock_control_state(state).poll_subscription(subscription, cursor)?,
+        )
+        .map_err(|error| internal_error(&error));
     }
-    let extension_topics = catalog.source().topics();
+    let source_topics = catalog.source().topics();
     let mut state = lock_control_state(state);
-    let topics = event_topics(params, &state, &extension_topics)?;
+    let topics = event_topics(params, &state, &source_topics)?;
     let scope = event_scope(params, descriptor)?;
     state.create_subscription(topics, &scope)
+}
+
+async fn wait_events(params: &Value, state: &SharedControlState) -> Result<Value, RpcError> {
+    let subscription = subscription_id(params)?;
+    let cursor = params
+        .get("cursor")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RpcError::new(-32602, "missing subscription cursor"))?;
+    let timeout = params
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(4000);
+    if timeout > 4000 {
+        return Err(RpcError::new(
+            -32602,
+            "event wait is limited to 4000 ms per request",
+        ));
+    }
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(timeout))
+        .ok_or_else(|| RpcError::new(-32603, "event deadline is out of range"))?;
+    let mut changed = lock_control_state(state).changes();
+    loop {
+        let mut batch = lock_control_state(state).poll_subscription(subscription, cursor)?;
+        if batch.has_events() {
+            batch.timed_out = Some(false);
+            return serde_json::to_value(batch).map_err(|error| internal_error(&error));
+        }
+        if tokio::time::timeout_at(deadline, changed.changed())
+            .await
+            .is_err()
+        {
+            batch.timed_out = Some(true);
+            return serde_json::to_value(batch).map_err(|error| internal_error(&error));
+        }
+    }
 }
 
 fn unsubscribe_events(params: &Value, state: &SharedControlState) -> Result<Value, RpcError> {
@@ -523,13 +606,13 @@ fn subscription_id(params: &Value) -> Result<&str, RpcError> {
 fn event_topics(
     params: &Value,
     state: &ControlState,
-    extension_topics: &BTreeSet<String>,
+    source_topics: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, RpcError> {
     let available = state
         .topics
         .iter()
         .cloned()
-        .chain(extension_topics.iter().cloned())
+        .chain(source_topics.iter().cloned())
         .collect::<BTreeSet<_>>();
     let topics = params
         .get("topics")

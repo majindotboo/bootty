@@ -138,6 +138,7 @@ impl CommandInvocation {
 
     // ponytail: action-string arguments bridge existing keybindings; replace them with schema values
     // when the external command parser lands.
+    #[must_use]
     pub fn from_action(action: &str, caller: Caller) -> Self {
         let (command, arguments) = action
             .split_once(':')
@@ -147,6 +148,7 @@ impl CommandInvocation {
         Self::new(command, arguments, caller)
     }
 
+    #[must_use]
     pub fn confirmation(&self) -> Confirmation {
         Confirmation {
             command: self.command.clone(),
@@ -155,6 +157,7 @@ impl CommandInvocation {
         }
     }
 
+    #[must_use]
     pub fn action_name(&self) -> String {
         match self.arguments.as_slice() {
             [] => self.command.clone(),
@@ -169,7 +172,7 @@ pub struct CommandWarning {
     pub message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CommandOutcome {
     Success {
@@ -200,13 +203,15 @@ pub enum CommandOutcome {
 }
 
 impl CommandOutcome {
-    pub fn success() -> Self {
+    #[must_use]
+    pub const fn success() -> Self {
         Self::Success {
             value: Value::Null,
             warnings: Vec::new(),
         }
     }
 
+    #[must_use]
     pub fn cancelled() -> Self {
         Self::Failed {
             code: "cancelled".to_owned(),
@@ -214,6 +219,7 @@ impl CommandOutcome {
         }
     }
 
+    #[must_use]
     pub fn deadline_exceeded() -> Self {
         Self::Failed {
             code: "deadline_exceeded".to_owned(),

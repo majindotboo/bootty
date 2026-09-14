@@ -16,23 +16,26 @@ use crate::{
     },
 };
 
+/// # Errors
+/// Returns discovery, startup, transport, or response decoding errors.
 pub fn invoke_or_start(start: bool, method: &str, params: Value) -> Result<RpcResponse> {
     let descriptor = select_or_start(start)?;
     invoke_instance(&descriptor, method, params)
 }
 
+/// # Errors
+/// Returns an error when the private instance directory or lease cannot be read.
 pub fn running_instance() -> Result<Option<InstanceDescriptor>> {
     discover_instance()
 }
 
+/// # Errors
+/// Returns discovery or startup errors, including an absent instance when startup is disabled.
 pub fn select_or_start(start: bool) -> Result<InstanceDescriptor> {
     if !start {
         return select_instance();
     }
-    match discover_instance()? {
-        Some(instance) => Ok(instance),
-        None => start_instance(),
-    }
+    discover_instance()?.map_or_else(start_instance, Ok)
 }
 
 fn start_instance() -> Result<InstanceDescriptor> {
@@ -43,7 +46,7 @@ fn start_instance() -> Result<InstanceDescriptor> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("start Bootty instance")?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
@@ -56,18 +59,32 @@ fn start_instance() -> Result<InstanceDescriptor> {
         {
             return Ok(instance);
         }
-        if Instant::now() >= deadline {
+        if started.elapsed() >= COMMAND_TIMEOUT {
             anyhow::bail!("started Bootty instance did not become ready");
         }
         thread::sleep(Duration::from_millis(50));
     }
 }
 
+/// # Errors
+/// Returns protocol, transport, payload limit, or response decoding errors.
 pub fn invoke_instance(
     descriptor: &InstanceDescriptor,
     method: &str,
     params: Value,
 ) -> Result<RpcResponse> {
+    invoke_instance_timeout(descriptor, method, params, IO_TIMEOUT)
+}
+
+/// # Errors
+/// Returns an error for an expired timeout, incompatible protocol, failed I/O, or invalid response.
+pub fn invoke_instance_timeout(
+    descriptor: &InstanceDescriptor,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<RpcResponse> {
+    anyhow::ensure!(!timeout.is_zero(), "control request deadline expired");
     if descriptor.protocol_version != PROTOCOL_VERSION {
         anyhow::bail!(
             "unsupported Bootty protocol version {}; expected {}",
@@ -76,9 +93,9 @@ pub fn invoke_instance(
         );
     }
     let endpoint = LocalEndpoint::from_path(descriptor.endpoint.clone());
-    let mut stream = connect_blocking(&endpoint, Duration::from_secs(2))?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let mut stream = connect_blocking(&endpoint, timeout.min(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     let request = RpcRequest {
         jsonrpc: "2.0".to_owned(),
         id: json!(1),
@@ -92,7 +109,7 @@ pub fn invoke_instance(
     BufReader::new(stream)
         .take(REQUEST_LIMIT + 1)
         .read_line(&mut response)?;
-    if response.len() as u64 > REQUEST_LIMIT {
+    if u64::try_from(response.len()).unwrap_or(u64::MAX) > REQUEST_LIMIT {
         anyhow::bail!("control response exceeds payload limit");
     }
     serde_json::from_str(&response).context("decode control response")

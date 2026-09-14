@@ -7,9 +7,12 @@ mod plane;
 mod protocol;
 mod server;
 mod state;
+mod wait;
 
 pub use catalog::{CommandCatalogSource, ControlCatalog};
-pub use client::{invoke_instance, invoke_or_start, running_instance, select_or_start};
+pub use client::{
+    invoke_instance, invoke_instance_timeout, invoke_or_start, running_instance, select_or_start,
+};
 pub use command::{
     AppCommandReceiver, AppCommandRequest, AppCommandSendError, AppCommandSender, ArgumentSchema,
     BoundAppCommandSender, Caller, CommandCancellation, CommandDescriptor, CommandInvocation,
@@ -23,3 +26,5 @@ pub use lease::InstanceDescriptor;
 pub use plane::ControlPlane;
 pub use protocol::{RpcError, RpcResponse};
 pub use server::ControlServer;
+
+pub use wait::{WaitOutcome, WaitRequest, wait_for_command};

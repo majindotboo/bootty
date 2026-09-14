@@ -1,11 +1,12 @@
 #![cfg(unix)]
+use anyhow::{Context, Result, bail, ensure};
 use assert_fs::{TempDir, prelude::*};
+use bootty_config::ApplicationIdentity;
 use bootty_control::{
     AppCommandReceiver, AppCommandRequest, Caller, CommandCancellation, CommandDescriptor,
     CommandOutcome, ControlCatalog, ControlPlane, ControlServer, InstanceDescriptor, RpcResponse,
     app_command_channel, invoke_instance, running_instance,
 };
-use bootty_identity::ApplicationIdentity;
 use pretty_assertions::{assert_eq, assert_ne};
 use serde_json::{Value, json};
 use std::{
@@ -26,7 +27,11 @@ struct TestCatalog {
 
 impl TestCatalog {
     fn activate(&self, module: &str, generation: u64) {
-        *self.active.lock().unwrap() = Some((module.to_owned(), generation));
+        *self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((module.to_owned(), generation));
     }
 }
 
@@ -42,7 +47,7 @@ impl bootty_control::CommandCatalogSource for TestCatalog {
     fn topics(&self) -> std::collections::BTreeSet<String> {
         self.active
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|_| std::iter::once("test.changed".to_owned()).collect())
             .unwrap_or_default()
@@ -55,7 +60,10 @@ impl bootty_control::CommandCatalogSource for TestCatalog {
         topic: &str,
         publish: &mut dyn FnMut(),
     ) -> Result<(), String> {
-        let active = self.active.lock().unwrap();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active.as_ref() == Some(&(module.to_owned(), generation)) && topic == "test.changed" {
             publish();
             Ok(())
@@ -65,43 +73,27 @@ impl bootty_control::CommandCatalogSource for TestCatalog {
     }
 }
 
-fn isolated(kind: &str) {
-    let dir = TempDir::new().unwrap();
-    let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", "isolated_helper"])
-        .env(HELPER, kind)
+fn isolated(name: &str) -> Result<bool> {
+    if std::env::var(HELPER).as_deref() == Ok(name) {
+        return Ok(true);
+    }
+    let dir = TempDir::new()?;
+    let out = Command::new(std::env::current_exe()?)
+        .args(["--exact", name])
+        .env(HELPER, name)
         .env("XDG_RUNTIME_DIR", dir.path())
-        .env("RMUX_TMPDIR", dir.path());
-    let out = cmd.output().unwrap();
+        .env("RMUX_TMPDIR", dir.path())
+        .output()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
+    ensure!(
         out.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
-        "{kind} failed or ran zero tests\n{stdout}\n{}",
+        "{name} failed or ran zero tests\n{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    Ok(false)
 }
 
-#[test]
-fn singleton_lifecycle_recovery_and_concurrency() {
-    isolated("singleton");
-}
-
-#[test]
-fn rpc_task_generation_and_ring_overflow() {
-    isolated("rpc");
-}
-
-#[test]
-fn isolated_helper() {
-    match std::env::var(HELPER).as_deref() {
-        Ok("rpc") => rpc_and_events(65),
-        Ok("singleton") => singleton_behaviors(),
-        Ok(value) => panic!("unknown helper {value}"),
-        Err(_) => {}
-    }
-}
-
-struct S {
+struct ControlHarness {
     host: ControlServer,
     source: Arc<TestCatalog>,
     plane: ControlPlane,
@@ -109,11 +101,11 @@ struct S {
     instance: InstanceDescriptor,
 }
 
-impl S {
-    fn new() -> Self {
+impl ControlHarness {
+    fn new() -> Result<Self> {
         let command: CommandDescriptor = serde_json::from_value(json!({
             "id":"control.read", "title":"control.read", "description":"", "mutation":"read", "arguments":{}
-        })).unwrap();
+        }))?;
         let source = Arc::new(TestCatalog::default());
         let catalog = Arc::new(ControlCatalog::new(vec![command], source.clone()));
         let plane = ControlPlane::default();
@@ -123,21 +115,21 @@ impl S {
             tx.for_caller(Caller::Socket),
             Arc::clone(&catalog),
             &plane,
-        )
-        .unwrap();
-        Self {
+        )?;
+        let instance = running_instance()?.context("running test instance")?;
+        Ok(Self {
             host,
             source,
             plane,
             rx,
-            instance: running_instance().unwrap().unwrap(),
-        }
+            instance,
+        })
     }
-    fn call(&self, method: &str, params: Value) -> Value {
-        invoke_instance(&self.instance, method, params)
-            .unwrap()
+    fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let response = invoke_instance(&self.instance, method, params)?;
+        response
             .result
-            .unwrap()
+            .with_context(|| format!("{method}: {:?}", response.error))
     }
     fn detached(&self) -> thread::JoinHandle<anyhow::Result<RpcResponse>> {
         let instance = self.instance.clone();
@@ -151,34 +143,46 @@ impl S {
             )
         })
     }
-    fn recv(&self) -> AppCommandRequest {
-        let deadline = Instant::now() + Duration::from_secs(2);
+    fn recv(&self) -> Result<AppCommandRequest> {
+        let started = Instant::now();
         loop {
             match self.rx.try_recv() {
-                Ok(value) => return value,
-                Err(mpsc::TryRecvError::Empty) if Instant::now() < deadline => thread::yield_now(),
-                Err(mpsc::TryRecvError::Empty) => panic!("request timed out"),
-                Err(mpsc::TryRecvError::Disconnected) => panic!("request channel disconnected"),
+                Ok(value) => return Ok(value),
+                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(2) => {
+                    thread::yield_now();
+                }
+                Err(mpsc::TryRecvError::Empty) => bail!("request timed out"),
+                Err(mpsc::TryRecvError::Disconnected) => bail!("request channel disconnected"),
             }
         }
     }
-    fn subscribe(&self, topic: &str) -> String {
-        self.call("event.subscribe", json!({"topics":[topic]}))["subscription"]
-            .as_str()
-            .unwrap()
-            .into()
+    fn subscribe(&self, topic: &str) -> Result<String> {
+        self.call("event.subscribe", json!({"topics":[topic]}))?
+            .get("subscription")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("subscription ID")
     }
 }
 
-fn rpc_and_events(n: usize) {
-    let s = S::new();
+#[test]
+fn rpc_dispatch_and_task_cancellation() {
+    if !isolated("rpc_dispatch_and_task_cancellation").expect("isolated test process") {
+        return;
+    }
+    let s = ControlHarness::new().expect("control harness");
     assert_eq!(
-        s.call("system.describe", Value::Null)["protocol"]["current"],
+        s.call("system.describe", Value::Null)
+            .expect("successful RPC")["protocol"]["current"],
         1
     );
-    assert_eq!(s.call("command.list", Value::Null)[0]["id"], "control.read");
     assert_eq!(
-        s.call("command.describe", json!({"command":"control.read"}))["mutation"],
+        s.call("command.list", Value::Null).expect("successful RPC")[0]["id"],
+        "control.read"
+    );
+    assert_eq!(
+        s.call("command.describe", json!({"command":"control.read"}))
+            .expect("successful RPC")["mutation"],
         "read"
     );
     let instance = s.instance.clone();
@@ -192,7 +196,7 @@ fn rpc_and_events(n: usize) {
         )
         .unwrap()
     });
-    let request = s.recv();
+    let request = s.recv().expect("received command");
     assert_eq!(request.invocation.caller, Caller::Socket);
     request
         .response
@@ -206,35 +210,200 @@ fn rpc_and_events(n: usize) {
         json!({"status":"success", "value":42})
     );
 
-    let completed = s.subscribe("command.completed");
+    let completed = s.subscribe("command.completed").expect("subscription");
     let task = s.detached();
-    let request = s.recv();
+    let request = s.recv().expect("received command");
     let id = task.join().unwrap().unwrap().result.unwrap()["task"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     assert_eq!(
-        s.call("task.status", json!({"task":id}))["task"]["state"]["status"],
+        s.call("task.status", json!({"task":id}))
+            .expect("successful RPC")["task"]["state"]["status"],
         "running"
     );
     assert_eq!(
-        s.call("task.cancel", json!({"task":id}))["task"]["state"]["status"],
+        s.call("task.cancel", json!({"task":id}))
+            .expect("successful RPC")["task"]["state"]["status"],
         "cancelling"
     );
     assert!(request.cancellation.is_cancelled());
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while s.call("task.status", json!({"task":id}))["task"]["state"]["status"] != "completed" {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(2))
+        .expect("test deadline");
+    while s
+        .call("task.status", json!({"task":id}))
+        .expect("successful RPC")["task"]["state"]["status"]
+        != "completed"
+    {
         assert!(Instant::now() < deadline);
     }
-    let events = s.call(
-        "event.subscribe",
-        json!({"subscription":completed, "cursor":0}),
-    );
+    let events = s
+        .call(
+            "event.subscribe",
+            json!({"subscription":completed, "cursor":0}),
+        )
+        .expect("successful RPC");
     assert_eq!(events["events"][0]["topic"], "command.completed");
+}
 
+#[test]
+fn event_wait_timeout_cancellation_and_publication() {
+    if !isolated("event_wait_timeout_cancellation_and_publication").expect("isolated test process")
+    {
+        return;
+    }
+    let s = ControlHarness::new().expect("control harness");
     let module = "test.luau";
     s.source.activate(module, 1);
-    let subscription = s.subscribe("test.changed");
+    let expired = bootty_control::WaitRequest {
+        invocation: bootty_control::CommandInvocation::from_action("control.read", Caller::Cli),
+        topics: vec!["test.changed".to_owned()],
+        pointer: String::new(),
+        expected: Value::Null,
+        deadline: Instant::now(),
+    };
+    assert!(matches!(
+        bootty_control::wait_for_command(
+            &s.instance,
+            expired,
+            &std::sync::atomic::AtomicBool::new(false)
+        )
+        .unwrap(),
+        bootty_control::WaitOutcome::TimedOut { value: None }
+    ));
+    let cancelled = bootty_control::WaitRequest {
+        invocation: bootty_control::CommandInvocation::from_action("control.read", Caller::Cli),
+        topics: vec!["test.changed".to_owned()],
+        pointer: String::new(),
+        expected: Value::Null,
+        deadline: Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("test deadline"),
+    };
+    assert!(matches!(
+        bootty_control::wait_for_command(
+            &s.instance,
+            cancelled,
+            &std::sync::atomic::AtomicBool::new(true)
+        )
+        .unwrap(),
+        bootty_control::WaitOutcome::Cancelled { value: None }
+    ));
+    let waiting_subscription = s.subscribe("test.changed").expect("subscription");
+    assert_eq!(
+        s.call(
+            "event.wait",
+            json!({"subscription":waiting_subscription,"cursor":0,"timeout_ms":0})
+        )
+        .expect("successful RPC")["timed_out"],
+        true
+    );
+    let instance = s.instance.clone();
+    let waiting_id = waiting_subscription.clone();
+    let waiter = thread::spawn(move || {
+        invoke_instance(
+            &instance,
+            "event.wait",
+            json!({"subscription":waiting_id,"cursor":0,"timeout_ms":4000}),
+        )
+        .unwrap()
+    });
+    s.plane
+        .event_sender()
+        .publish(
+            module.to_owned(),
+            1,
+            "test.changed".to_owned(),
+            json!("wake"),
+            Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("test deadline"),
+            &CommandCancellation::new(),
+        )
+        .unwrap();
+    let batch = waiter.join().unwrap().result.unwrap();
+    assert_eq!(batch["timed_out"], false);
+    assert_eq!(batch["events"][0]["payload"], "wake");
+    s.call(
+        "event.unsubscribe",
+        json!({"subscription":waiting_subscription}),
+    )
+    .expect("successful RPC");
+}
+
+#[test]
+fn snapshot_wait_reconciles_after_publication() {
+    if !isolated("snapshot_wait_reconciles_after_publication").expect("isolated test process") {
+        return;
+    }
+    let s = ControlHarness::new().expect("control harness");
+    let module = "test.luau";
+    s.source.activate(module, 1);
+    let instance = s.instance.clone();
+    let condition = thread::spawn(move || {
+        bootty_control::wait_for_command(
+            &instance,
+            bootty_control::WaitRequest {
+                invocation: bootty_control::CommandInvocation::from_action(
+                    "control.read",
+                    Caller::Cli,
+                ),
+                topics: vec!["test.changed".to_owned()],
+                pointer: "/status".to_owned(),
+                expected: json!("ready"),
+                deadline: Instant::now()
+                    .checked_add(Duration::from_secs(2))
+                    .expect("test deadline"),
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap()
+    });
+    s.recv()
+        .expect("received command")
+        .response
+        .send(CommandOutcome::Success {
+            value: json!({"status":"pending"}),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    s.plane
+        .event_sender()
+        .publish(
+            module.to_owned(),
+            1,
+            "test.changed".to_owned(),
+            json!("ready"),
+            Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("test deadline"),
+            &CommandCancellation::new(),
+        )
+        .unwrap();
+    s.recv()
+        .expect("received command")
+        .response
+        .send(CommandOutcome::Success {
+            value: json!({"status":"ready"}),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        matches!(condition.join().unwrap(), bootty_control::WaitOutcome::Matched {value} if value["status"] == "ready")
+    );
+}
+
+#[test]
+fn event_overflow_and_generation_rejection() {
+    if !isolated("event_overflow_and_generation_rejection").expect("isolated test process") {
+        return;
+    }
+    let s = ControlHarness::new().expect("control harness");
+    let module = "test.luau";
+    s.source.activate(module, 1);
+    let n = 65;
+    let subscription = s.subscribe("test.changed").expect("subscription");
     let sender = s.plane.event_sender();
     let cancellation = CommandCancellation::new();
     for sequence in 0..n {
@@ -244,7 +413,9 @@ fn rpc_and_events(n: usize) {
                 1,
                 "test.changed".into(),
                 json!(sequence),
-                Instant::now() + Duration::from_secs(5),
+                Instant::now()
+                    .checked_add(Duration::from_secs(5))
+                    .expect("test deadline"),
                 &cancellation,
             )
             .unwrap();
@@ -257,7 +428,9 @@ fn rpc_and_events(n: usize) {
                 1,
                 "test.changed".into(),
                 Value::Null,
-                Instant::now() + Duration::from_secs(5),
+                Instant::now()
+                    .checked_add(Duration::from_secs(5))
+                    .expect("test deadline"),
                 &cancellation
             )
             .is_err()
@@ -275,7 +448,7 @@ fn rpc_and_events(n: usize) {
         (-32005, json!(n))
     );
     let pending = s.detached();
-    let request = s.recv();
+    let request = s.recv().expect("received command");
     drop(s.host);
     assert!(request.cancellation.is_cancelled());
     let _ = pending.join();
@@ -293,37 +466,46 @@ fn singleton() -> anyhow::Result<ControlServer> {
         &ControlPlane::default(),
     )
 }
-fn path() -> PathBuf {
-    PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
-        .join(ApplicationIdentity::current().cli_name())
-        .join("control.json")
+fn path() -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").context("test runtime directory")?)
+            .join(ApplicationIdentity::current().cli_name())
+            .join("control.json"),
+    )
 }
-fn descriptor() -> InstanceDescriptor {
-    serde_json::from_slice(&fs::read(path()).unwrap()).unwrap()
+fn descriptor() -> Result<InstanceDescriptor> {
+    Ok(serde_json::from_slice(&fs::read(path()?)?)?)
 }
 
+#[test]
 fn singleton_behaviors() {
+    if !isolated("singleton_behaviors").expect("isolated test process") {
+        return;
+    }
     let first = singleton().unwrap();
-    let old = descriptor();
+    let old = descriptor().expect("instance descriptor");
     invoke_instance(&old, "instance.describe", Value::Null).unwrap();
     assert!(singleton().is_err());
     let mut stale = old.clone();
-    stale.started_at_ms += 1000;
-    assert_fs::fixture::ChildPath::new(path())
+    stale.started_at_ms = stale
+        .started_at_ms
+        .checked_add(1000)
+        .expect("stale timestamp");
+    assert_fs::fixture::ChildPath::new(path().expect("descriptor path"))
         .write_binary(&serde_json::to_vec(&stale).unwrap())
         .unwrap();
     let replacement = singleton().unwrap();
-    let current = descriptor();
+    let current = descriptor().expect("instance descriptor");
     assert_ne!(
         (current.generation, &current.endpoint),
         (old.generation, &old.endpoint)
     );
     drop(first);
-    assert_eq!(descriptor(), current);
+    assert_eq!(descriptor().expect("instance descriptor"), current);
     invoke_instance(&current, "instance.describe", Value::Null).unwrap();
     drop(replacement);
 
-    let path = path();
+    let path = path().expect("descriptor path");
     assert_fs::fixture::ChildPath::new(path.parent().unwrap())
         .create_dir_all()
         .unwrap();
@@ -332,7 +514,7 @@ fn singleton_behaviors() {
         .unwrap();
     let recovered = singleton().unwrap();
     assert_eq!(
-        descriptor().instance_id,
+        descriptor().expect("instance descriptor").instance_id,
         ApplicationIdentity::current().cli_name()
     );
     drop(recovered);
@@ -355,15 +537,13 @@ fn singleton_behaviors() {
     drop(server);
 
     let barrier = Arc::new(Barrier::new(3));
-    let contenders = (0..2)
-        .map(|_| {
-            let barrier = Arc::clone(&barrier);
-            thread::spawn(move || {
-                barrier.wait();
-                singleton()
-            })
+    let contenders = [(); 2].map(|()| {
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            barrier.wait();
+            singleton()
         })
-        .collect::<Vec<_>>();
+    });
     barrier.wait();
     let winners = contenders
         .into_iter()

@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
@@ -104,6 +104,27 @@ fn dropping_the_receiver_fails_pending_and_future_requests() {
     );
     let (request, _) = request(Caller::Internal);
     assert_eq!(bound.try_send(request), Err(AppCommandSendError::Shutdown));
+}
+
+#[test]
+fn wake_can_retire_the_receiver_before_submission_returns() {
+    let owner = Arc::new(Mutex::new(None::<bootty_control::AppCommandReceiver>));
+    let waking_owner = owner.clone();
+    let (sender, receiver) = app_command_channel(
+        1,
+        Arc::new(move || {
+            drop(waking_owner.lock().unwrap().take());
+        }),
+    );
+    *owner.lock().unwrap() = Some(receiver);
+    let (request, response) = request(Caller::Internal);
+    sender
+        .for_caller(Caller::Internal)
+        .try_send(request)
+        .unwrap();
+    assert!(
+        matches!(response.recv().unwrap(), CommandOutcome::Failed { code, .. } if code == "shutdown")
+    );
 }
 
 #[test]

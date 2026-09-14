@@ -1,5 +1,5 @@
 use std::{
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -22,21 +22,30 @@ pub struct ControlEventRequest {
 #[derive(Clone)]
 pub struct ControlEventSender {
     sender: mpsc::SyncSender<ControlEventRequest>,
+    ready: Arc<tokio::sync::Notify>,
 }
 
 pub struct ControlEventReceiver {
     receiver: mpsc::Receiver<ControlEventRequest>,
+    ready: Arc<tokio::sync::Notify>,
 }
 
+#[must_use]
 pub fn event_queue() -> (ControlEventSender, ControlEventReceiver) {
     let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_LIMIT);
+    let ready = Arc::new(tokio::sync::Notify::new());
     (
-        ControlEventSender { sender },
-        ControlEventReceiver { receiver },
+        ControlEventSender {
+            sender,
+            ready: Arc::clone(&ready),
+        },
+        ControlEventReceiver { receiver, ready },
     )
 }
 
 impl ControlEventSender {
+    /// # Errors
+    /// Returns cancellation, queue, deadline, or publication errors from the event owner.
     pub fn publish(
         &self,
         identity: String,
@@ -60,7 +69,7 @@ impl ControlEventSender {
             response,
         };
         match self.sender.try_send(request) {
-            Ok(()) => {}
+            Ok(()) => self.ready.notify_one(),
             Err(mpsc::TrySendError::Full(request)) => {
                 let _ = request
                     .response
@@ -94,6 +103,12 @@ impl ControlEventSender {
 }
 
 impl ControlEventReceiver {
+    pub(crate) fn ready(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.ready)
+    }
+
+    /// # Errors
+    /// Returns `Empty` if no event is ready or `Disconnected` if all senders have closed.
     pub fn try_recv(&self) -> Result<ControlEventRequest, mpsc::TryRecvError> {
         self.receiver.try_recv()
     }

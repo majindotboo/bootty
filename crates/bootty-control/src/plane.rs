@@ -20,6 +20,7 @@ pub struct ControlPlane {
 struct ControlEventBus {
     sender: ControlEventSender,
     receiver: Mutex<ControlEventReceiver>,
+    ready: Arc<tokio::sync::Notify>,
 }
 
 impl Default for ControlPlane {
@@ -30,6 +31,7 @@ impl Default for ControlPlane {
             instance_scope: Arc::new(Mutex::new(None)),
             events: Arc::new(ControlEventBus {
                 sender,
+                ready: receiver.ready(),
                 receiver: Mutex::new(receiver),
             }),
         }
@@ -37,8 +39,13 @@ impl Default for ControlPlane {
 }
 
 impl ControlPlane {
+    #[must_use]
     pub fn event_sender(&self) -> ControlEventSender {
         self.events.sender.clone()
+    }
+
+    pub(crate) async fn events_ready(&self) {
+        self.events.ready.notified().await;
     }
 
     pub(crate) fn process_events(&self, catalog: &dyn CommandCatalogSource) {
@@ -47,7 +54,7 @@ impl ControlPlane {
         };
         for _ in 0..32 {
             let Ok(request) = receiver.try_recv() else {
-                break;
+                return;
             };
             let result = if request.cancellation.is_cancelled() {
                 Err("control event was cancelled".to_owned())
@@ -64,6 +71,7 @@ impl ControlPlane {
             };
             let _ = request.response.send(result);
         }
+        self.events.ready.notify_one();
     }
 
     fn publish_scoped(

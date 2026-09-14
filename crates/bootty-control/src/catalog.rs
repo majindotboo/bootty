@@ -10,6 +10,8 @@ pub trait CommandCatalogSource: Send + Sync {
 
     fn topics(&self) -> BTreeSet<String>;
 
+    /// # Errors
+    /// Returns an error when the module generation or topic is no longer active.
     fn with_active_topic(
         &self,
         module: &str,
@@ -34,6 +36,7 @@ impl ControlCatalog {
         }
     }
 
+    #[must_use]
     pub fn list(&self) -> Vec<CommandDescriptor> {
         let mut commands = self.core.iter().cloned().collect::<Vec<_>>();
         commands.extend(
@@ -46,6 +49,7 @@ impl ControlCatalog {
         commands
     }
 
+    #[must_use]
     pub fn describe(&self, id: &str) -> Option<CommandDescriptor> {
         self.core
             .iter()
@@ -54,6 +58,7 @@ impl ControlCatalog {
             .or_else(|| self.source.describe(id))
     }
 
+    #[must_use]
     pub fn source(&self) -> &dyn CommandCatalogSource {
         &*self.source
     }

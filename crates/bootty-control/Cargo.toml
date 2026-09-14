@@ -4,19 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-bootty-dev = ["bootty-identity/bootty-dev"]
+bootty-dev = ["bootty-config/bootty-dev"]
 
 [dependencies]
 anyhow.workspace = true
-bootty-identity = { path = "../bootty-identity" }
+bootty-config = { path = "../bootty-config" }
 getrandom.workspace = true
 rmux-ipc.workspace = true
 rmux-os.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
-tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "sync", "time"] }
-bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 assert_fs.workspace = true

@@ -65,6 +65,7 @@ impl AppCommandSender {
     /// Submission is non-blocking and responses arrive asynchronously. Code already running on
     /// the AppState/UI owner thread must dispatch directly; waiting there for this channel would
     /// prevent the next frame from draining the request.
+    #[must_use]
     pub fn for_caller(&self, caller: Caller) -> BoundAppCommandSender {
         BoundAppCommandSender {
             sender: self.sender.clone(),
@@ -76,6 +77,8 @@ impl AppCommandSender {
 }
 
 impl BoundAppCommandSender {
+    /// # Errors
+    /// Returns `Overloaded` for a full queue or `Shutdown` when the receiver has closed.
     pub fn submit(
         &self,
         invocation: CommandInvocation,
@@ -92,6 +95,8 @@ impl BoundAppCommandSender {
         Ok(receiver)
     }
 
+    /// # Errors
+    /// Returns `Overloaded` for a full queue or `Shutdown` when the receiver has closed.
     pub fn try_send(&self, mut request: AppCommandRequest) -> Result<(), AppCommandSendError> {
         let open = self
             .open
@@ -105,12 +110,15 @@ impl BoundAppCommandSender {
             TrySendError::Full(_) => AppCommandSendError::Overloaded,
             TrySendError::Disconnected(_) => AppCommandSendError::Shutdown,
         })?;
+        drop(open);
         (self.wake)();
         Ok(())
     }
 }
 
 impl AppCommandReceiver {
+    /// # Errors
+    /// Returns `Empty` if no command is ready or `Disconnected` if all senders have closed.
     pub fn try_recv(&self) -> Result<AppCommandRequest, mpsc::TryRecvError> {
         self.receiver.try_recv()
     }
@@ -123,6 +131,7 @@ impl Drop for AppCommandReceiver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *open = false;
+        drop(open);
         while let Ok(request) = self.receiver.try_recv() {
             let _ = request.response.send(CommandOutcome::Failed {
                 code: "shutdown".to_owned(),

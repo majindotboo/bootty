@@ -11,10 +11,12 @@ impl CommandCancellation {
     const STARTED: u8 = 1;
     const CANCELLED: u8 = 2;
 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn cancel(&self) -> bool {
         self.0
             .compare_exchange(
@@ -26,10 +28,12 @@ impl CommandCancellation {
             .is_ok()
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire) == Self::CANCELLED
     }
 
+    #[must_use]
     pub fn try_start(&self) -> bool {
         self.0
             .compare_exchange(

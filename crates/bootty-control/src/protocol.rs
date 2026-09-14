@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub(crate) const REQUEST_LIMIT: u64 = 1024 * 1024;
-pub(crate) const RPC_ID_LIMIT: usize = 4096;
-pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const MAX_CONNECTIONS: usize = 32;
-pub(crate) const MAX_TASKS: usize = 64;
-pub(crate) const MAX_SUBSCRIPTIONS: usize = 64;
-pub(crate) const MAX_TOPICS_PER_SUBSCRIPTION: usize = 16;
-pub(crate) const EVENT_QUEUE_LIMIT: usize = 64;
-pub(crate) const EVENT_TOPIC_LIMIT: usize = 128;
-pub(crate) const TASK_WAIT_INTERVAL: Duration = Duration::from_millis(50);
-pub(crate) const COMMAND_COMPLETED_TOPIC: &str = "command.completed";
+pub const REQUEST_LIMIT: u64 = 1024 * 1024;
+pub const RPC_ID_LIMIT: usize = 4096;
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_CONNECTIONS: usize = 32;
+pub const MAX_TASKS: usize = 64;
+pub const MAX_SUBSCRIPTIONS: usize = 64;
+pub const MAX_TOPICS_PER_SUBSCRIPTION: usize = 16;
+pub const EVENT_QUEUE_LIMIT: usize = 64;
+pub const EVENT_TOPIC_LIMIT: usize = 128;
+pub const TASK_WAIT_INTERVAL: Duration = Duration::from_millis(50);
+pub const COMMAND_COMPLETED_TOPIC: &str = "command.completed";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RpcRequest {
@@ -83,15 +83,15 @@ impl RpcError {
     }
 }
 
-pub(crate) fn negotiate_protocol(params: &Value) -> Result<Value, RpcError> {
+pub fn negotiate_protocol(params: &Value) -> Result<Value, RpcError> {
     let minimum = params
         .get("minimum_protocol_version")
         .and_then(Value::as_u64)
-        .unwrap_or(u64::from(PROTOCOL_VERSION));
+        .unwrap_or_else(|| u64::from(PROTOCOL_VERSION));
     let maximum = params
         .get("maximum_protocol_version")
         .and_then(Value::as_u64)
-        .unwrap_or(u64::from(PROTOCOL_VERSION));
+        .unwrap_or_else(|| u64::from(PROTOCOL_VERSION));
     let version = u64::from(PROTOCOL_VERSION);
     if minimum > version || maximum < version || minimum > maximum {
         let mut error = RpcError::new(-32007, "no compatible protocol version");
@@ -110,6 +110,6 @@ pub(crate) fn negotiate_protocol(params: &Value) -> Result<Value, RpcError> {
     }))
 }
 
-pub(crate) fn internal_error(error: &serde_json::Error) -> RpcError {
+pub fn internal_error(error: &serde_json::Error) -> RpcError {
     RpcError::new(-32603, error.to_string())
 }

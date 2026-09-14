@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use rmux_ipc::{LocalEndpoint, endpoint_for_label};
 use serde::{Deserialize, Serialize};
 
-use bootty_identity::ApplicationIdentity;
+use bootty_config::ApplicationIdentity;
 
 use crate::protocol::PROTOCOL_VERSION;
 
@@ -23,7 +23,7 @@ pub struct InstanceDescriptor {
     pub protocol_version: u32,
 }
 
-pub(crate) struct ControlInstanceLease {
+pub struct ControlInstanceLease {
     descriptor: InstanceDescriptor,
     descriptor_path: PathBuf,
     claim_lock: Option<File>,
@@ -61,7 +61,7 @@ impl ControlInstanceLease {
         })
     }
 
-    pub(crate) fn descriptor(&self) -> &InstanceDescriptor {
+    pub(crate) const fn descriptor(&self) -> &InstanceDescriptor {
         &self.descriptor
     }
 
@@ -247,7 +247,7 @@ fn process_started_at_ms(pid: u32) -> Option<u128> {
 }
 
 #[cfg(unix)]
-pub(crate) fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
+pub fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
     peer.uid == rmux_os::identity::real_user_id()
 }
 
@@ -257,7 +257,7 @@ pub(crate) fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
 }
 
 #[cfg(unix)]
-pub(crate) fn set_owner_only_directory(path: &Path) -> io::Result<()> {
+pub fn set_owner_only_directory(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
@@ -268,7 +268,7 @@ pub(crate) fn set_owner_only_directory(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-pub(crate) fn set_owner_only_file(path: &Path) -> io::Result<()> {
+pub fn set_owner_only_file(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
