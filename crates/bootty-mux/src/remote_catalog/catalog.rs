@@ -30,6 +30,8 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// # Errors
+    /// Returns an error unless the name identifies tmux or rmux.
     pub fn parse(value: &str) -> Result<Self> {
         Self::from_name(value).with_context(|| "remote Spaces need tmux or rmux")
     }
@@ -42,15 +44,15 @@ impl Backend {
         }
     }
 
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         self.identity().0
     }
 
-    fn wire_kind(self) -> MuxBackendKind {
+    const fn wire_kind(self) -> MuxBackendKind {
         self.identity().1
     }
 
-    fn identity(self) -> (&'static str, MuxBackendKind) {
+    const fn identity(self) -> (&'static str, MuxBackendKind) {
         match self {
             Self::Rmux => ("rmux", MuxBackendKind::Rmux),
             Self::Tmux => ("tmux", MuxBackendKind::Tmux),
@@ -64,6 +66,7 @@ pub struct LegacyCatalogPaths {
 }
 
 impl LegacyCatalogPaths {
+    #[must_use]
     pub fn from_config_path(config_path: PathBuf) -> Self {
         Self {
             path: config_path.with_file_name("session-order.sqlite3"),
@@ -79,6 +82,8 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// # Errors
+    /// Returns directory, database, schema, or legacy migration errors.
     pub fn open(
         path: &Path,
         legacy: Option<&LegacyCatalogPaths>,
@@ -221,6 +226,8 @@ impl Catalog {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns database read errors or invalid stored backend names.
     pub fn list(&self) -> Result<Vec<RemoteSpaceSummary>> {
         let mut statement = self
             .connection
@@ -245,6 +252,8 @@ impl Catalog {
         Ok(spaces)
     }
 
+    /// # Errors
+    /// Returns an error for an empty name or a failed database transaction.
     pub fn create(&mut self, requested_name: &str, backend: Backend) -> Result<RemoteSpaceSummary> {
         let requested_name = requested_name.trim();
         if requested_name.is_empty() {
@@ -284,8 +293,10 @@ impl Catalog {
         })
     }
 
+    /// # Errors
+    /// Returns an error if the Space or backend does not match, or topology cannot be read.
     pub fn snapshot(&mut self, space_id: &str, expected: Backend) -> Result<MuxSnapshot> {
-        let mut backend = self.backend(expected);
+        let mut backend = self.backend(expected)?;
         self.snapshot_with_backend(space_id, expected, backend.as_mut())
     }
 
@@ -293,6 +304,8 @@ impl Catalog {
     ///
     /// The daemon reads the `@bootty_space` tag rather than keeping a catalog of names beside the
     /// multiplexer, so there is no second copy to fall out of step and nothing to journal.
+    /// # Errors
+    /// Returns an error if the Space or backend does not match, or topology cannot be read.
     pub fn snapshot_with_backend(
         &mut self,
         space_id: &str,
@@ -312,16 +325,20 @@ impl Catalog {
         Ok(snapshot)
     }
 
+    /// # Errors
+    /// Returns invalid Space, backend, membership, or command execution errors.
     pub fn execute(
         &mut self,
         space_id: &str,
         expected: Backend,
         command: MuxCommand,
     ) -> Result<()> {
-        let mut backend = self.backend(expected);
+        let mut backend = self.backend(expected)?;
         self.execute_with_backend(space_id, expected, command, backend.as_mut())
     }
 
+    /// # Errors
+    /// Returns invalid Space, backend, membership, or command execution errors.
     pub fn execute_with_backend(
         &mut self,
         space_id: &str,
@@ -333,7 +350,7 @@ impl Catalog {
         let _lease = self.backend_lease(backend_kind)?;
         // A command may only touch a session this Space holds. Asking the session itself is the
         // whole check, and it cannot disagree with what the client sees.
-        if let Some(session_id) = command_session_id(&command) {
+        if let Some(session_id) = command.existing_session_id() {
             let snapshot = backend.snapshot()?;
             let session = snapshot
                 .sessions
@@ -350,7 +367,7 @@ impl Catalog {
     /// Stamp the sessions the old name-keyed table claims, then drop its rows. Runs once per
     /// Space; a name the backend no longer has goes away with the rows.
     fn adopt_membership_recorded_by_name(
-        &mut self,
+        &self,
         space_id: &str,
         backend: &mut dyn MuxBackend,
     ) -> Result<()> {
@@ -371,7 +388,7 @@ impl Catalog {
                 continue;
             }
             backend.execute(MuxCommand::StampSession {
-                session_id: session.id.clone(),
+                session_id: session.id,
                 tag: MuxSessionTag {
                     identity: Some(new_session_identity()),
                     space: Some(space_id.to_owned()),
@@ -406,7 +423,7 @@ impl Catalog {
         Ok(stored)
     }
 
-    fn backend(&self, backend: Backend) -> Box<dyn MuxBackend> {
+    fn backend(&self, backend: Backend) -> Result<Box<dyn MuxBackend>> {
         self.backends.build_backend_for_kind(
             backend.wire_kind(),
             &MuxBindingConfig {
@@ -445,33 +462,13 @@ fn unique_name(requested: &str, existing: &HashSet<String>) -> String {
     if !existing.contains(requested) {
         return requested.to_owned();
     }
-    (2..=u32::MAX)
-        .map(|suffix| format!("{requested} {suffix}"))
-        .find(|candidate| !existing.contains(candidate))
-        .expect("all numbered remote Space names are occupied")
-}
-
-fn command_session_id(command: &MuxCommand) -> Option<&str> {
-    match command {
-        MuxCommand::CreateProjectSession { .. } | MuxCommand::CreateWorktreeSession { .. } => None,
-        MuxCommand::ActivateWindow { session_id, .. }
-        | MuxCommand::NewWindow { session_id, .. }
-        | MuxCommand::RenameWindow { session_id, .. }
-        | MuxCommand::ActivateNextWindow { session_id }
-        | MuxCommand::ActivatePreviousWindow { session_id }
-        | MuxCommand::ActivateLastWindow { session_id }
-        | MuxCommand::ActivateWindowIndex { session_id, .. }
-        | MuxCommand::MoveWindow { session_id, .. }
-        | MuxCommand::MoveWindowPreservingSelection { session_id, .. }
-        | MuxCommand::SplitPane { session_id, .. }
-        | MuxCommand::SelectPane { session_id, .. }
-        | MuxCommand::SelectNextPane { session_id, .. }
-        | MuxCommand::SelectPreviousPane { session_id, .. }
-        | MuxCommand::KillPane { session_id, .. }
-        | MuxCommand::ClosePane { session_id, .. }
-        | MuxCommand::TogglePaneZoom { session_id, .. }
-        | MuxCommand::RenameSession { session_id, .. }
-        | MuxCommand::DitchSession { session_id }
-        | MuxCommand::StampSession { session_id, .. } => Some(session_id),
+    // u128 has more suffixes than any addressable set can contain.
+    let mut suffix = 2_u128;
+    loop {
+        let candidate = format!("{requested} {suffix}");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
     }
 }

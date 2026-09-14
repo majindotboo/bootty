@@ -3,39 +3,34 @@
 //! The remote host never resolves or executes an `rmux` binary. Bootty serializes backend requests,
 //! sends them through SSH, and handles them with the same embedded rmux SDK path used locally.
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use std::io::BufReader;
 use std::io::{BufRead, BufWriter, Write};
+#[cfg(feature = "terminal-runtime")]
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread;
-#[cfg(feature = "app")]
-use std::{
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc,
-};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(feature = "terminal-runtime")]
+use bootty_host::{CommandOutput, CommandRunner, SystemCommandRunner};
 use rmux_sdk::TerminalSizeSpec;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::backend::RmuxBackend;
+use super::bridge::rmux_execute;
+#[cfg(feature = "terminal-runtime")]
+use super::pane_io::{RMUX_OUTPUT_CHANNEL_CAPACITY, RmuxPaneIo};
+use super::pane_io::{RmuxPaneEvent, RmuxPaneTarget, open_rmux_pane_io, resize_rmux_pane};
 use crate::command::MuxCommand;
-use crate::rmux::backend::RmuxBackend;
-use crate::rmux::bridge::rmux_execute;
-#[cfg(feature = "app")]
-use crate::rmux::pane_io::{RMUX_OUTPUT_CHANNEL_CAPACITY, RmuxPaneIo};
-use crate::rmux::pane_io::{RmuxPaneEvent, RmuxPaneTarget, open_rmux_pane_io, resize_rmux_pane};
-#[cfg(feature = "app")]
-use crate::{
-    backend::MuxBackend,
-    process::{CommandOutput, CommandRunner, SystemCommandRunner},
-    snapshot::MuxSnapshot,
-};
-#[cfg(feature = "app")]
-use bootty_host::ssh::{SshRemote, remote_daemon_failure};
+#[cfg(feature = "terminal-runtime")]
+use crate::{backend::MuxBackend, snapshot::MuxSnapshot};
+#[cfg(feature = "terminal-runtime")]
+use bootty_host::remote::{RemoteHost, remote_daemon_failure};
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 const REMOTE_RMUX_SUBCOMMAND: &str = "remote-rmux";
 const MAX_REMOTE_RMUX_PAYLOAD: usize = 1024 * 1024;
 
@@ -59,6 +54,11 @@ pub enum RemoteRmuxRequest {
         cols: u16,
         rows: u16,
     },
+    ResizeWindow {
+        window: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -70,14 +70,14 @@ enum RemotePaneFrame {
     Error(String),
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub struct RemoteRmuxBackend {
-    remote: SshRemote,
+    remote: RemoteHost,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl RemoteRmuxBackend {
-    pub fn new(remote: SshRemote) -> Self {
+    pub const fn new(remote: RemoteHost) -> Self {
         Self { remote }
     }
 
@@ -95,7 +95,22 @@ impl RemoteRmuxBackend {
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
+pub fn resize_remote_rmux_window(
+    remote: &RemoteHost,
+    window: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    RemoteRmuxBackend::new(remote.clone()).run(&RemoteRmuxRequest::ResizeWindow {
+        window: window.to_owned(),
+        cols,
+        rows,
+    })?;
+    Ok(())
+}
+
+#[cfg(feature = "terminal-runtime")]
 impl MuxBackend for RemoteRmuxBackend {
     fn snapshot(&self) -> Result<MuxSnapshot> {
         let output = self.run(&RemoteRmuxRequest::Snapshot)?;
@@ -108,9 +123,9 @@ impl MuxBackend for RemoteRmuxBackend {
     }
 }
 
-#[cfg(feature = "app")]
-pub(crate) fn open_remote_rmux_pane_io(
-    remote: &SshRemote,
+#[cfg(feature = "terminal-runtime")]
+pub fn open_remote_rmux_pane_io(
+    remote: &RemoteHost,
     target: &RmuxPaneTarget,
 ) -> Result<RmuxPaneIo> {
     let pane = target.pane_selector().map(str::to_owned).with_context(|| {
@@ -124,7 +139,7 @@ pub(crate) fn open_remote_rmux_pane_io(
     let (output_tx, output_rx) = tokio_mpsc::channel(RMUX_OUTPUT_CHANNEL_CAPACITY);
     let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
     let (resize_tx, resize_rx) = tokio_mpsc::unbounded_channel();
-    let (result_tx, result_rx) = mpsc::channel();
+    let (result_tx, result_rx) = tokio_mpsc::unbounded_channel();
 
     spawn_output(
         remote,
@@ -150,9 +165,9 @@ pub(crate) fn open_remote_rmux_pane_io(
     })
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn remote_rmux_argv(
-    remote: &SshRemote,
+    remote: &RemoteHost,
     request: &RemoteRmuxRequest,
 ) -> Result<(String, Vec<String>)> {
     let payload = request.encode()?;
@@ -163,6 +178,8 @@ fn remote_rmux_argv(
 }
 
 impl RemoteRmuxRequest {
+    /// # Errors
+    /// Returns an error for invalid base64 or a malformed remote request.
     pub fn decode(payload: &str) -> Result<Self> {
         if payload.len() > MAX_REMOTE_RMUX_PAYLOAD * 2 {
             bail!("remote terminal request is too large")
@@ -173,7 +190,9 @@ impl RemoteRmuxRequest {
         serde_json::from_slice(&json).context("parse remote terminal request")
     }
 
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
+    /// # Errors
+    /// Returns an error if request serialization fails.
     pub fn encode(&self) -> Result<String> {
         let json = serde_json::to_vec(self).context("encode remote terminal request")?;
         if json.len() > MAX_REMOTE_RMUX_PAYLOAD {
@@ -182,7 +201,8 @@ impl RemoteRmuxRequest {
         Ok(URL_SAFE_NO_PAD.encode(json))
     }
 }
-
+/// # Errors
+/// Returns malformed request, connection, or backend command errors.
 pub fn run_remote_rmux_command(payload: &str) -> Result<i32> {
     match RemoteRmuxRequest::decode(payload)? {
         RemoteRmuxRequest::Snapshot => {
@@ -203,6 +223,9 @@ pub fn run_remote_rmux_command(payload: &str) -> Result<i32> {
             RmuxPaneTarget::new(session, Some(pane)),
             TerminalSizeSpec::new(cols, rows),
         )?,
+        RemoteRmuxRequest::ResizeWindow { window, cols, rows } => {
+            super::backend::resize_bootty_rmux_window(&window, cols, rows)?;
+        }
     }
     Ok(0)
 }
@@ -242,7 +265,7 @@ fn input_pane(session: String, pane: String) -> Result<()> {
             .send(bytes)
             .map_err(|_| anyhow::anyhow!("remote terminal input stopped"))?;
         io.result_rx
-            .recv()
+            .blocking_recv()
             .context("remote terminal input worker stopped")?
             .map_err(anyhow::Error::msg)?;
     }
@@ -255,13 +278,13 @@ fn decode_input_line(line: &str) -> Result<Vec<u8>> {
         .context("decode remote terminal input")
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn spawn_output(
-    remote: &SshRemote,
+    remote: &RemoteHost,
     session: String,
     pane: String,
     output_tx: tokio_mpsc::Sender<RmuxPaneEvent>,
-    result_tx: mpsc::Sender<std::result::Result<(), String>>,
+    result_tx: tokio_mpsc::UnboundedSender<std::result::Result<(), String>>,
 ) -> Result<()> {
     let request = RemoteRmuxRequest::PaneStream { session, pane };
     let (program, args) = remote_rmux_argv(remote, &request)?;
@@ -305,7 +328,7 @@ fn spawn_output(
     Ok(())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn decode_frame(frame: RemotePaneFrame) -> Result<RmuxPaneEvent> {
     Ok(match frame {
         RemotePaneFrame::Rebase(keyframe) => RmuxPaneEvent::Rebase(
@@ -324,13 +347,13 @@ fn decode_frame(frame: RemotePaneFrame) -> Result<RmuxPaneEvent> {
     })
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn spawn_input(
-    remote: &SshRemote,
+    remote: &RemoteHost,
     session: String,
     pane: String,
     mut input_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
-    result_tx: mpsc::Sender<std::result::Result<(), String>>,
+    result_tx: tokio_mpsc::UnboundedSender<std::result::Result<(), String>>,
 ) -> Result<()> {
     let request = RemoteRmuxRequest::PaneInput { session, pane };
     let (program, args) = remote_rmux_argv(remote, &request)?;
@@ -359,20 +382,20 @@ fn spawn_input(
     Ok(())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn write_input_line(writer: &mut BufWriter<ChildStdin>, bytes: &[u8]) -> std::io::Result<()> {
     writer.write_all(URL_SAFE_NO_PAD.encode(bytes).as_bytes())?;
     writer.write_all(b"\n")?;
     writer.flush()
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn spawn_resize(
-    remote: &SshRemote,
+    remote: &RemoteHost,
     session: String,
     pane: String,
     mut resize_rx: tokio_mpsc::UnboundedReceiver<TerminalSizeSpec>,
-    result_tx: mpsc::Sender<std::result::Result<(), String>>,
+    result_tx: tokio_mpsc::UnboundedSender<std::result::Result<(), String>>,
 ) {
     let remote = remote.clone();
     thread::spawn(move || {
@@ -399,10 +422,10 @@ fn spawn_resize(
     });
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 struct ChildGuard(Child);
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();

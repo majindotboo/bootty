@@ -67,7 +67,7 @@ fn migrate_legacy_order_file(
             group.sessions.push(name.to_owned());
         } else if let Some(group) = groups
             .iter_mut()
-            .find(|group| group.sessions.len() == 1 && group.sessions[0] == group_name)
+            .find(|group| matches!(group.sessions.as_slice(), [session] if session == group_name))
         {
             group.name = group_name.to_owned();
             group.sessions.push(name.to_owned());
@@ -83,11 +83,12 @@ fn migrate_legacy_order_file(
         .flat_map(|group| group.sessions.iter())
         .enumerate()
     {
+        let position = i64::try_from(position).map_err(|_| rusqlite::Error::InvalidQuery)?;
         tx.execute(
             "INSERT INTO workspace_sessions
                 (identity, space_id, backend_name, position)
              VALUES ('legacy:' || ?1 || ':' || ?2, ?1, ?2, ?3)",
-            params![space_id, session, position as i64],
+            params![space_id, session, position],
         )?;
     }
     Ok(())

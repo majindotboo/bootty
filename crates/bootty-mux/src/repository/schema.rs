@@ -11,11 +11,11 @@ pub(super) enum WorkspaceSchemaKind {
 }
 
 impl WorkspaceSchemaKind {
-    pub(super) fn uses_legacy_binding_cardinality(self) -> bool {
+    pub(super) const fn uses_legacy_binding_cardinality(self) -> bool {
         matches!(self, Self::LegacyWorkspace)
     }
 
-    pub(super) fn allows_default_creation(self) -> bool {
+    pub(super) const fn allows_default_creation(self) -> bool {
         matches!(self, Self::Fresh | Self::LegacyTables)
     }
 }
@@ -372,7 +372,7 @@ pub(super) fn migrate_workspace_journal(tx: &Transaction<'_>) -> rusqlite::Resul
     let columns = table_columns(tx, WORKSPACE_JOURNAL_TABLE)?;
     let current = ["identity", "space_id", "operation"];
     if current.iter().all(|column| columns.contains(*column))
-        && columns.len() == current.len() + JOURNAL_PAYLOAD_COLUMNS.len()
+        && columns.len().checked_sub(current.len()) == Some(JOURNAL_PAYLOAD_COLUMNS.len())
     {
         return Ok(());
     }

@@ -24,7 +24,7 @@ use crate::session_membership::{SessionMembership, WorkspaceSession};
 
 pub use crate::membership::BackendMembership;
 use crate::{controller::SpaceId, membership::MembershipOperation};
-use bootty_config::config::{MultiplexerBackendConfig, SshRemoteConfig, default_config_path};
+use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig, default_config_path};
 
 const WORKSPACE_SNAPSHOT_REVISION: i64 = 5;
 const DEFAULT_SPACE_NAME: &str = "Default Space";
@@ -83,6 +83,7 @@ pub enum BindingMembershipMutation {
 }
 
 impl BindingMembershipMutation {
+    #[must_use]
     pub fn identity(&self) -> &str {
         match self {
             Self::Create { identity, .. }
@@ -125,7 +126,8 @@ pub struct PendingBindingMembershipMutation {
 }
 
 impl PendingBindingMembershipMutation {
-    pub fn mutation(&self) -> &BindingMembershipMutation {
+    #[must_use]
+    pub const fn mutation(&self) -> &BindingMembershipMutation {
         &self.mutation
     }
 }
@@ -151,7 +153,7 @@ pub enum SpaceRemoteOverride {
     Inherit,
     Local,
     Profile(RemoteSpaceRef),
-    Inline(SshRemoteConfig),
+    Inline(RemoteConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,31 +168,38 @@ pub struct WorkspaceBinding {
 }
 
 impl WorkspaceBinding {
-    pub fn backend_override(&self) -> Option<MultiplexerBackendConfig> {
+    #[must_use]
+    pub const fn backend_override(&self) -> Option<MultiplexerBackendConfig> {
         self.backend_override
     }
 
-    pub fn remote_override(&self) -> &SpaceRemoteOverride {
+    #[must_use]
+    pub const fn remote_override(&self) -> &SpaceRemoteOverride {
         &self.remote_override
     }
 
-    pub fn hide_tmux_status(&self) -> bool {
+    #[must_use]
+    pub const fn hide_tmux_status(&self) -> bool {
         self.hide_tmux_status
     }
 
-    pub fn mux_scope(&self) -> SpaceId {
+    #[must_use]
+    pub const fn mux_scope(&self) -> SpaceId {
         self.scope
     }
 
-    pub fn unavailable(&self) -> bool {
+    #[must_use]
+    pub const fn unavailable(&self) -> bool {
         self.unavailable
     }
 
-    pub fn selection(&self) -> Option<&WorkspaceBindingSelection> {
+    #[must_use]
+    pub const fn selection(&self) -> Option<&WorkspaceBindingSelection> {
         self.selection.as_ref()
     }
 
-    pub fn sessions(&self) -> &SessionMembership {
+    #[must_use]
+    pub const fn sessions(&self) -> &SessionMembership {
         &self.sessions
     }
 }
@@ -202,10 +211,12 @@ pub struct WorkspaceBindingSelection {
 }
 
 impl WorkspaceBindingSelection {
+    #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
+    #[must_use]
     pub fn window_id(&self) -> Option<&str> {
         self.window_id.as_deref()
     }
@@ -230,50 +241,61 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
+    #[must_use]
     pub fn spaces(&self) -> &[WorkspaceSpace] {
         &self.spaces
     }
 
+    #[must_use]
     pub fn selected_space(&self, window_key: &str) -> Option<SpaceId> {
         self.selected_spaces.get(window_key).copied()
     }
 
+    #[must_use]
     pub fn has_pending_binding_operation(&self, scope: SpaceId) -> bool {
         self.pending_binding_scopes.contains(&scope)
     }
 }
 
 impl WorkspaceSpace {
-    pub fn id(&self) -> SpaceId {
+    #[must_use]
+    pub const fn id(&self) -> SpaceId {
         self.id
     }
 
+    #[must_use]
     pub fn remote_id(&self) -> &str {
         &self.remote_id
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    #[must_use]
     pub fn icon(&self) -> &str {
         &self.icon
     }
 
-    pub fn color(&self) -> [u8; 3] {
+    #[must_use]
+    pub const fn color(&self) -> [u8; 3] {
         self.color
     }
 
-    pub fn tint_sidebar(&self) -> bool {
+    #[must_use]
+    pub const fn tint_sidebar(&self) -> bool {
         self.tint_sidebar
     }
 
-    pub fn position(&self) -> i64 {
+    #[must_use]
+    pub const fn position(&self) -> i64 {
         self.position
     }
 
     /// The Space's connection to a multiplexer. There is exactly one.
-    pub fn binding(&self) -> &WorkspaceBinding {
+    #[must_use]
+    pub const fn binding(&self) -> &WorkspaceBinding {
         &self.binding
     }
 }
@@ -284,6 +306,8 @@ pub struct WorkspaceRepository {
 }
 
 impl WorkspaceRepository {
+    /// # Errors
+    /// Returns database creation, migration, or stored-state validation errors.
     pub fn open(config_path: &Path) -> WorkspaceResult<(Self, WorkspaceSnapshot)> {
         let path = sqlite_path(config_path);
         let snapshot = Self::load_or_migrate(&path)?;
@@ -294,6 +318,8 @@ impl WorkspaceRepository {
         WorkspacePersistenceError::new(format!("{operation} at {}: {error}", self.path.display()))
     }
 
+    /// # Errors
+    /// Returns database transaction errors while allocating and persisting the Space.
     pub fn create_space(
         &mut self,
         name: &str,
@@ -308,7 +334,7 @@ impl WorkspaceRepository {
     }
 
     fn create_space_db(
-        &mut self,
+        &self,
         name: &str,
         icon: &str,
         color: [u8; 3],
@@ -379,6 +405,8 @@ impl WorkspaceRepository {
         Ok(Some(space))
     }
 
+    /// # Errors
+    /// Returns database transaction errors; failed writes leave prior state intact.
     pub fn update_space(
         &mut self,
         scope: SpaceId,
@@ -393,7 +421,7 @@ impl WorkspaceRepository {
     }
 
     fn update_space_db(
-        &mut self,
+        &self,
         scope: SpaceId,
         name: &str,
         icon: &str,
@@ -428,12 +456,14 @@ impl WorkspaceRepository {
         Ok(updated != 0)
     }
 
+    /// # Errors
+    /// Returns database transaction errors; failed writes leave prior state intact.
     pub fn delete_space(&mut self, id: SpaceId) -> WorkspaceResult<bool> {
         self.delete_space_db(id)
             .map_err(|error| self.database_error("delete space", error))
     }
 
-    fn delete_space_db(&mut self, id: SpaceId) -> rusqlite::Result<bool> {
+    fn delete_space_db(&self, id: SpaceId) -> rusqlite::Result<bool> {
         let conn = open_db(&self.path)?;
         let space_count = conn.query_row("SELECT COUNT(*) FROM workspace_spaces", [], |row| {
             row.get::<_, i64>(0)
@@ -448,6 +478,8 @@ impl WorkspaceRepository {
         .map(|deleted| deleted != 0)
     }
 
+    /// # Errors
+    /// Returns database errors or an invalid window key or Space reference.
     pub fn set_selected_space(
         &mut self,
         window_key: &str,
@@ -468,6 +500,8 @@ impl WorkspaceRepository {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns invalid selection references or database write errors.
     pub fn set_binding_restore_state(
         &mut self,
         scope: SpaceId,
@@ -501,6 +535,8 @@ impl WorkspaceRepository {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error for invalid membership, a missing Space, or a failed transaction.
     pub fn commit_binding_state(
         &mut self,
         scope: SpaceId,
@@ -515,6 +551,8 @@ impl WorkspaceRepository {
     /// does can be refused because of a row they cannot see. A second mutation on the *same*
     /// session supersedes the first, which is what reconciliation would do with one whose effect
     /// it cannot observe anyway.
+    /// # Errors
+    /// Returns invalid mutation, missing Space, or journal write errors.
     pub fn begin_binding_membership_mutation(
         &mut self,
         scope: SpaceId,
@@ -559,6 +597,8 @@ impl WorkspaceRepository {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns database read errors or invalid stored journal entries.
     pub fn pending_binding_membership_mutations(
         &mut self,
         scope: SpaceId,
@@ -573,6 +613,8 @@ impl WorkspaceRepository {
     ///
     /// The in-memory stores publish only after `SQLite` commits. A failure therefore leaves both the
     /// old stores and the pending intent available for the next remote catalog operation.
+    /// # Errors
+    /// Returns invalid membership or transaction errors; live membership is published only after commit.
     pub fn commit_binding_membership_mutation(
         &mut self,
         scope: SpaceId,
@@ -602,6 +644,8 @@ impl WorkspaceRepository {
     ///
     /// Each one is applied when the snapshot shows a session carrying its identity, and discarded
     /// when it does not. Either way the row goes.
+    /// # Errors
+    /// Returns invalid membership or transaction errors; live membership is published only after commit.
     pub fn reconcile_binding_membership_mutations(
         &mut self,
         scope: SpaceId,
@@ -702,6 +746,8 @@ impl WorkspaceRepository {
     ///
     /// The transaction is all-or-nothing. Callers can publish the candidates only after this
     /// method succeeds.
+    /// # Errors
+    /// Returns an error for invalid membership, a missing Space, or a failed transaction.
     pub fn commit_binding_states(
         &mut self,
         states: &[(SpaceId, SessionMembership)],
@@ -776,6 +822,9 @@ impl WorkspaceRepository {
         )
         .map_err(|error| self.database_error("replace persisted sessions", error))?;
         for (position, session) in sessions.sessions().iter().enumerate() {
+            let position = i64::try_from(position).map_err(|_| {
+                WorkspacePersistenceError::new("session position exceeds the database range")
+            })?;
             tx.execute(
                 "INSERT INTO workspace_sessions
                     (identity, space_id, backend_name, display_name, explicit, cwd, position)
@@ -787,7 +836,7 @@ impl WorkspaceRepository {
                     session.display_name,
                     i64::from(session.explicit),
                     session.cwd,
-                    position as i64
+                    position
                 ],
             )
             .map_err(|error| self.database_error("insert persisted session", error))?;
@@ -806,13 +855,15 @@ impl WorkspaceRepository {
         if !existing.contains(&requested.to_ascii_lowercase()) {
             return requested.to_owned();
         }
-        for suffix in 2.. {
+        // u128 has more suffixes than any addressable set can contain.
+        let mut suffix = 2_u128;
+        loop {
             let candidate = format!("{requested} {suffix}");
             if !existing.contains(&candidate.to_ascii_lowercase()) {
                 return candidate;
             }
+            suffix = suffix.saturating_add(1);
         }
-        unreachable!("unbounded integer suffixes always produce a unique space name")
     }
 
     fn load_or_migrate(path: &Path) -> WorkspaceResult<WorkspaceSnapshot> {
@@ -1074,15 +1125,28 @@ fn binding_membership_mutation_from_row(
     row: &Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<BindingMembershipMutation> {
-    let operation = row.get::<_, String>(offset)?;
+    let [
+        operation,
+        identity,
+        old_name,
+        new_name,
+        display_name,
+        explicit,
+        cwd,
+    ] = [0, 1, 2, 3, 4, 5, 6].map(|column| {
+        offset
+            .checked_add(column)
+            .ok_or(rusqlite::Error::InvalidColumnIndex(offset))
+    });
+    let operation = row.get::<_, String>(operation?)?;
     binding_membership_mutation_from_storage(
         &operation,
-        row.get(offset + 1)?,
-        row.get(offset + 2)?,
-        row.get(offset + 3)?,
-        row.get(offset + 4)?,
-        row.get(offset + 5)?,
-        row.get(offset + 6)?,
+        row.get(identity?)?,
+        row.get(old_name?)?,
+        row.get(new_name?)?,
+        row.get(display_name?)?,
+        row.get(explicit?)?,
+        row.get(cwd?)?,
     )
     .map_err(|_| rusqlite::Error::InvalidQuery)
 }

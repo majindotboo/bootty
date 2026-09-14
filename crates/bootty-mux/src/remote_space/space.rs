@@ -4,19 +4,19 @@ use anyhow::{Context, Result, bail};
 use crate::{backend::MuxBackend, command::MuxCommand, snapshot::MuxSnapshot};
 
 use super::space_protocol::encode_command;
-use bootty_host::ssh::{REMOTE_DAEMON_PROGRAM, SshRemote, remote_daemon_failure};
+use bootty_host::remote::{REMOTE_DAEMON_PROGRAM, RemoteHost, remote_daemon_failure};
 use bootty_host::{CommandRunner, SystemCommandRunner};
 
 const REMOTE_SPACE_SUBCOMMAND: &str = "remote-space";
 
 pub struct RemoteSpaceBackend {
-    remote: SshRemote,
+    remote: RemoteHost,
     space_id: String,
     backend: MuxBackendKind,
 }
 
 impl RemoteSpaceBackend {
-    pub fn new(remote: SshRemote, space_id: impl Into<String>, backend: MuxBackendKind) -> Self {
+    pub fn new(remote: RemoteHost, space_id: impl Into<String>, backend: MuxBackendKind) -> Self {
         Self {
             remote,
             space_id: space_id.into(),
@@ -66,7 +66,7 @@ impl MuxBackend for RemoteSpaceBackend {
     }
 }
 
-fn backend_name(backend: MuxBackendKind) -> &'static str {
+const fn backend_name(backend: MuxBackendKind) -> &'static str {
     match backend {
         MuxBackendKind::Herdr => "herdr",
         MuxBackendKind::Native => "native",

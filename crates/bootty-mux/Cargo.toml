@@ -4,20 +4,20 @@ edition.workspace = true
 version.workspace = true
 
 [features]
-default = ["app"]
-app = [
-  "dep:bootty-runtime",
-  "dep:bootty-surface",
+# Desktop composition needs terminal attachment and pane runtime policy. Keep this
+# optional so the installed daemon can use mux providers and catalog policy without
+# pulling Ghostty VT or local PTY support.
+default = ["terminal-runtime"]
+terminal-runtime = [
   "dep:bootty-terminal",
   "dep:derive_more",
 ]
 
 [dependencies]
-bootty-config = { path = "../bootty-config" }
-bootty-control = { path = "../bootty-control" }
 bootty-git = { path = "../bootty-git" }
+bootty-config = { path = "../bootty-config" }
 bootty-host = { path = "../bootty-host" }
-bootty-write = { path = "../bootty-write" }
+bootty-control = { path = "../bootty-control" }
 anyhow.workspace = true
 base64.workspace = true
 derive_more = { workspace = true, optional = true }
@@ -26,6 +26,7 @@ inventory.workspace = true
 rusqlite.workspace = true
 rmux-client.workspace = true
 rmux-ipc.workspace = true
+rmux-os.workspace = true
 rmux-proto.workspace = true
 rmux-sdk.workspace = true
 rmux-server.workspace = true
@@ -34,9 +35,6 @@ serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
-bootty-identity = { path = "../bootty-identity" }
-bootty-runtime = { path = "../bootty-runtime", optional = true }
-bootty-surface = { path = "../bootty-surface", optional = true }
 bootty-terminal = { path = "../bootty-terminal", optional = true }
 
 [dev-dependencies]
@@ -47,3 +45,6 @@ proptest-derive.workspace = true
 rstest.workspace = true
 serde_json.workspace = true
 static_assertions.workspace = true
+
+[lints]
+workspace = true

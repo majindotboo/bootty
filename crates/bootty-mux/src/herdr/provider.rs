@@ -1,15 +1,11 @@
 use std::path::Path;
 
-use crate::herdr::HerdrBackend;
-use crate::herdr::remote::{RemoteHerdrApi, RemoteHerdrBridge};
-#[cfg(feature = "app")]
-use crate::herdr::{HerdrPanePolicy, herdr_capabilities};
 use crate::{MuxBackendKind, MuxBindingConfig};
 use crate::{
     backend::MuxBackend,
     provider::{MuxBackendProvider, MuxCommandDispatch},
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
@@ -18,11 +14,13 @@ use crate::{
         PaneTopology, PersistedSessionPolicy, SelectionPublicationPolicy, TerminalProgressPolicy,
         TerminalResidency,
     },
-    terminal::{
-        BackendPanePolicy, PaneLayoutResizeRequest, PaneStartRequest, ScopedMuxPaneTarget,
-        TerminalRuntime,
-    },
+    terminal::BackendPanePolicy,
 };
+use bootty_host::remote::RemoteHost;
+
+use super::HerdrBackend;
+#[cfg(feature = "terminal-runtime")]
+use super::{HerdrPanePolicy, herdr_capabilities};
 
 pub struct HerdrProvider;
 
@@ -40,17 +38,14 @@ impl MuxBackendProvider for HerdrProvider {
         config: &MuxBindingConfig,
         _workspace: Option<&Path>,
     ) -> Box<dyn MuxBackend> {
-        let Some(target) = config.remote.clone() else {
-            return Box::new(HerdrBackend::new(config.herdr_session.clone()));
-        };
-        match RemoteHerdrBridge::shared(target, config.herdr_session.clone()) {
-            Ok(bridge) => Box::new(HerdrBackend::with_api(RemoteHerdrApi::new(bridge))),
-            Err(error) => Box::new(FailedHerdrBackend(error.to_string())),
+        match &config.remote {
+            Some(remote) => Box::new(HerdrBackend::for_remote(RemoteHost::new(remote.clone()))),
+            None => Box::new(HerdrBackend::new()),
         }
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl MuxAppBackendProvider for HerdrProvider {
     fn app_policy(&self) -> MuxAppBackendPolicy {
         MuxAppBackendPolicy {
@@ -59,27 +54,18 @@ impl MuxAppBackendProvider for HerdrProvider {
                 cache_terminals: true,
                 resize_cached_terminals: true,
             },
-            progress: TerminalProgressPolicy::BackendSnapshot,
-            persisted_sessions: PersistedSessionPolicy::AfterEmptyInitialSnapshot,
+            progress: TerminalProgressPolicy::TerminalOsc,
+            persisted_sessions: PersistedSessionPolicy::Never,
             generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
             terminal_residency: TerminalResidency::BindingScoped,
-            selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
+            selection_publication: SelectionPublicationPolicy::Direct,
         }
     }
 
     fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
-        match config.remote.clone() {
-            Some(target) => {
-                match HerdrPanePolicy::remote(config.herdr_session.clone(), target.clone()) {
-                    Ok(policy) => Box::new(policy),
-                    Err(error) => Box::new(FailedHerdrPanePolicy {
-                        target,
-                        error: error.to_string(),
-                    }),
-                }
-            }
-            None => Box::new(HerdrPanePolicy::new(config.herdr_session.clone())),
-        }
+        Box::new(HerdrPanePolicy::new(
+            config.remote.clone().map(RemoteHost::new),
+        ))
     }
 
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
@@ -87,51 +73,4 @@ impl MuxAppBackendProvider for HerdrProvider {
     }
 }
 
-#[cfg(feature = "app")]
-struct FailedHerdrPanePolicy {
-    target: crate::SshTarget,
-    error: String,
-}
-
-#[cfg(feature = "app")]
-impl BackendPanePolicy for FailedHerdrPanePolicy {
-    fn remote_target(&self) -> Option<&crate::SshTarget> {
-        Some(&self.target)
-    }
-
-    fn start_terminal(
-        &mut self,
-        _request: PaneStartRequest<'_>,
-    ) -> anyhow::Result<Option<Box<dyn TerminalRuntime>>> {
-        anyhow::bail!(self.error.clone())
-    }
-
-    fn sync_target(&mut self, _target: Option<&ScopedMuxPaneTarget>, _hide_tmux_status: bool) {}
-
-    fn set_layout_window(&mut self, _window_id: Option<&str>) {}
-
-    fn resize_layout_window(
-        &mut self,
-        _request: PaneLayoutResizeRequest<'_>,
-    ) -> anyhow::Result<bool> {
-        anyhow::bail!(self.error.clone())
-    }
-
-    fn deactivate(&mut self) {}
-}
-
-struct FailedHerdrBackend(String);
-
-impl MuxBackend for FailedHerdrBackend {
-    fn snapshot(&self) -> anyhow::Result<crate::snapshot::MuxSnapshot> {
-        anyhow::bail!(self.0.clone())
-    }
-
-    fn execute(&mut self, _command: crate::command::MuxCommand) -> anyhow::Result<()> {
-        anyhow::bail!(self.0.clone())
-    }
-}
-
 crate::register_mux_backend!(HerdrProvider);
-
-pub fn link() {}

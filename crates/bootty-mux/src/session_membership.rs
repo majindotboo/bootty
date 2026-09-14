@@ -27,6 +27,7 @@ pub struct WorkspaceSession {
 
 impl WorkspaceSession {
     /// The name to show. Bootty's own if it has one, otherwise the backend's.
+    #[must_use]
     pub fn label(&self) -> &str {
         if self.display_name.is_empty() {
             &self.backend_name
@@ -43,29 +44,35 @@ pub struct SessionMembership {
 }
 
 impl SessionMembership {
-    pub fn from_sessions(sessions: Vec<WorkspaceSession>) -> Self {
+    #[must_use]
+    pub const fn from_sessions(sessions: Vec<WorkspaceSession>) -> Self {
         Self { sessions }
     }
 
+    #[must_use]
     pub fn sessions(&self) -> &[WorkspaceSession] {
         &self.sessions
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
 
+    #[must_use]
     pub fn get(&self, identity: &str) -> Option<&WorkspaceSession> {
         self.sessions
             .iter()
             .find(|session| session.identity == identity)
     }
 
+    #[must_use]
     pub fn contains(&self, identity: &str) -> bool {
         self.get(identity).is_some()
     }
 
     /// The claimed sessions' backend names, in order, for applying that order to the backend.
+    #[must_use]
     pub fn backend_names(&self) -> Vec<String> {
         self.sessions
             .iter()
@@ -86,7 +93,7 @@ impl SessionMembership {
                 self.sessions
                     .iter()
                     .rposition(|existing| label_group(existing.label()) == group)
-                    .map(|last| last + 1)
+                    .map(|last| last.saturating_add(1))
             })
             .flatten()
             .unwrap_or(self.sessions.len());
@@ -166,9 +173,14 @@ impl SessionMembership {
             },
             None => None,
         };
-        let source_group = label_group(self.sessions[from].label()).to_owned();
+        let Some(source) = self.sessions.get(from) else {
+            return false;
+        };
+        let source_group = label_group(source.label()).to_owned();
         if !source_group.is_empty()
-            && anchor.is_some_and(|to| label_group(self.sessions[to].label()) == source_group)
+            && anchor
+                .and_then(|to| self.sessions.get(to))
+                .is_some_and(|session| label_group(session.label()) == source_group)
         {
             return self.move_within_group(from, anchor);
         }
@@ -186,20 +198,26 @@ impl SessionMembership {
         let neighbour = if delta < 0 {
             from.checked_sub(1)
         } else {
-            (from + 1 < self.sessions.len()).then_some(from + 1)
+            from.checked_add(1)
+                .filter(|next| *next < self.sessions.len())
         };
         let Some(neighbour) = neighbour else {
             return false;
         };
-        let group = label_group(self.sessions[from].label()).to_owned();
-        if !group.is_empty() && label_group(self.sessions[neighbour].label()) == group {
+        let (Some(source), Some(neighbour_session)) =
+            (self.sessions.get(from), self.sessions.get(neighbour))
+        else {
+            return false;
+        };
+        let group = label_group(source.label()).to_owned();
+        if !group.is_empty() && label_group(neighbour_session.label()) == group {
             self.sessions.swap(from, neighbour);
             return true;
         }
         // Stepping down means landing after the neighbour's block, which is before whatever
         // follows it -- or the end of the list when nothing does.
         let anchor = if delta < 0 {
-            Some(self.block_start(neighbour))
+            self.block_start(neighbour)
         } else {
             self.block_end(neighbour)
         };
@@ -207,33 +225,35 @@ impl SessionMembership {
     }
 
     /// The span `index` belongs to: its whole group, or just itself when it is ungrouped.
-    fn block(&self, group: &str, index: usize) -> (usize, usize) {
+    fn block(&self, group: &str, index: usize) -> Option<(usize, usize)> {
+        let (before, after) = self.sessions.split_at_checked(index)?;
+        after.first()?;
         if group.is_empty() {
-            return (index, index + 1);
+            return Some((index, index.saturating_add(1)));
         }
-        let member = |position: &usize| label_group(self.sessions[*position].label()) == group;
-        let start = (0..=index).rev().take_while(member).last().unwrap_or(index);
-        let end = (index..self.sessions.len())
-            .take_while(member)
-            .last()
-            .unwrap_or(index);
-        (start, end + 1)
+        let member = |session: &&WorkspaceSession| label_group(session.label()) == group;
+        let preceding = before.iter().rev().take_while(member).count();
+        let following = after.iter().take_while(member).count();
+        Some((
+            index.saturating_sub(preceding),
+            index.saturating_add(following),
+        ))
     }
 
-    fn block_start(&self, index: usize) -> usize {
-        let group = label_group(self.sessions[index].label()).to_owned();
-        self.block(&group, index).0
+    fn block_start(&self, index: usize) -> Option<usize> {
+        let group = label_group(self.sessions.get(index)?.label());
+        self.block(group, index).map(|(start, _)| start)
     }
 
     fn block_end(&self, index: usize) -> Option<usize> {
-        let group = label_group(self.sessions[index].label()).to_owned();
-        let (_, end) = self.block(&group, index);
+        let group = label_group(self.sessions.get(index)?.label());
+        let (_, end) = self.block(group, index)?;
         (end < self.sessions.len()).then_some(end)
     }
 
     fn move_within_group(&mut self, from: usize, anchor: Option<usize>) -> bool {
         let to = anchor.unwrap_or(self.sessions.len());
-        let insert_at = if to > from { to - 1 } else { to };
+        let insert_at = if to > from { to.saturating_sub(1) } else { to };
         if insert_at == from {
             return false;
         }
@@ -244,21 +264,21 @@ impl SessionMembership {
 
     /// Lifts the block containing `from` out and reinserts it at `anchor`.
     fn move_block(&mut self, group: &str, from: usize, anchor: Option<usize>) -> bool {
-        let (start, end) = self.block(group, from);
-        let anchor = anchor.map(|anchor| self.block_start(anchor));
+        let Some((start, end)) = self.block(group, from) else {
+            return false;
+        };
+        let anchor = anchor.and_then(|anchor| self.block_start(anchor));
         let insert_at = anchor.unwrap_or(self.sessions.len());
         if insert_at >= start && insert_at <= end {
             return false;
         }
         let block = self.sessions.drain(start..end).collect::<Vec<_>>();
         let insert_at = if insert_at > start {
-            insert_at - block.len()
+            insert_at.saturating_sub(block.len())
         } else {
             insert_at
         };
-        for (offset, session) in block.into_iter().enumerate() {
-            self.sessions.insert(insert_at + offset, session);
-        }
+        self.sessions.splice(insert_at..insert_at, block);
         true
     }
 

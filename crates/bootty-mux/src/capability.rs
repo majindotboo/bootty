@@ -16,6 +16,10 @@ pub enum BindingOperation {
     NavigateWindow,
     MoveWindow,
     SplitPane,
+    MergeWindows,
+    SwapPanes,
+    MovePane,
+    ExtractPane,
     NavigatePane,
     ClosePane,
     TogglePaneZoom,
@@ -43,11 +47,13 @@ impl BindingCapabilityDescriptor {
         }
     }
 
-    pub fn version(&self) -> u16 {
+    #[must_use]
+    pub const fn version(&self) -> u16 {
         self.version
     }
 
-    pub fn scope(&self) -> SpaceId {
+    #[must_use]
+    pub const fn scope(&self) -> SpaceId {
         self.scope
     }
 
@@ -55,11 +61,13 @@ impl BindingCapabilityDescriptor {
         self.operations.iter().copied()
     }
 
+    #[must_use]
     pub fn supports(&self, operation: BindingOperation) -> bool {
         self.operations.contains(&operation)
     }
 
-    pub fn request(&self, operation: BindingOperation) -> BindingOperationRequest {
+    #[must_use]
+    pub const fn request(&self, operation: BindingOperation) -> BindingOperationRequest {
         BindingOperationRequest {
             descriptor_version: self.version,
             scope: self.scope,
@@ -74,7 +82,7 @@ impl BindingCapabilityDescriptor {
         availability: BindingOperationAvailability,
         operation: impl FnOnce() -> T,
     ) -> BindingOperationOutcome<T> {
-        if request.descriptor_version != self.version || request.scope != self.scope {
+        if (request.descriptor_version, request.scope) != (self.version, self.scope) {
             return BindingOperationOutcome::Stale;
         }
         if !self.supports(request.operation) {

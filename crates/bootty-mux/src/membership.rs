@@ -42,6 +42,7 @@ pub enum MembershipOperation {
 pub struct MembershipValidationError;
 
 impl MembershipOperation {
+    #[must_use]
     pub fn identity(&self) -> &str {
         match self {
             Self::Create { identity, .. }
@@ -51,6 +52,8 @@ impl MembershipOperation {
     }
 
     /// Reject empty or NUL-containing backend identity values.
+    /// # Errors
+    /// Returns an error for empty or NUL-containing identities or names, or a rename to the same name.
     pub fn validate(&self) -> Result<(), MembershipValidationError> {
         let valid = |value: &str| !value.is_empty() && !value.contains('\0');
         let valid = valid(self.identity())
@@ -65,6 +68,7 @@ impl MembershipOperation {
     }
 
     /// Return whether a fresh backend snapshot proves that this operation occurred.
+    #[must_use]
     pub fn effect_occurred(&self, memberships: &[BackendMembership]) -> bool {
         match self {
             Self::Create { identity, .. } => {

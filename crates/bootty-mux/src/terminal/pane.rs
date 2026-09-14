@@ -1,3 +1,8 @@
+use bootty_terminal::terminal_search::TerminalSearchOptions;
+use bootty_terminal::{
+    terminal_capture::{CaptureOptions, TerminalCapture},
+    terminal_session::PendingWorkerResponse,
+};
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -6,12 +11,12 @@ use std::{
 };
 
 use anyhow::Result;
-use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
+use bootty_terminal::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::terminal_frame::RenderFrame;
 use derive_more::{Deref, DerefMut};
 
-use crate::{MuxBackendKind, MuxBindingConfig, SshTarget};
-use bootty_runtime::{
+use crate::{MuxBackendKind, MuxBindingConfig};
+use bootty_terminal::{
     DrainStats, TerminalSession, TerminalSessionConfig, frame_source::TerminalFrameSource,
 };
 use bootty_terminal::{
@@ -28,6 +33,7 @@ use crate::{
     snapshot::MuxPaneAnchor,
 };
 
+#[derive(Clone, Copy)]
 pub struct PaneStartRequest<'a> {
     pub target: &'a ScopedMuxPaneTarget,
     pub geometry: TerminalGeometry,
@@ -46,13 +52,17 @@ pub struct PaneLayoutResizeRequest<'a> {
 }
 
 pub trait BackendPanePolicy: Send {
-    fn remote_target(&self) -> Option<&SshTarget>;
+    fn remote_target(&self) -> Option<crate::RemoteTarget>;
+    /// # Errors
+    /// Returns executable resolution, PTY, connection, or terminal startup errors.
     fn start_terminal(
         &mut self,
         request: PaneStartRequest<'_>,
     ) -> Result<Option<Box<dyn TerminalRuntime>>>;
     fn sync_target(&mut self, target: Option<&ScopedMuxPaneTarget>, hide_tmux_status: bool);
     fn set_layout_window(&mut self, window_id: Option<&str>);
+    /// # Errors
+    /// Returns backend resize or terminal transport errors.
     fn resize_layout_window(&mut self, request: PaneLayoutResizeRequest<'_>) -> Result<bool>;
     /// Drain failures produced by policy-owned background work.
     fn poll_async_errors(&mut self) -> Vec<String> {
@@ -67,24 +77,24 @@ const NATIVE_RESTART_QUIET_INTERVAL: Duration = Duration::from_secs(10);
 
 struct NativeRuntimeRestart {
     failures: u32,
-    retry_at: Option<Instant>,
+    failed_at: Option<Instant>,
     healthy_since: Option<Instant>,
     error_reported: bool,
 }
 
 impl NativeRuntimeRestart {
-    fn new(now: Instant) -> Self {
+    const fn new(now: Instant) -> Self {
         Self {
             failures: 1,
-            retry_at: Some(now + NATIVE_RESTART_MIN_DELAY),
+            failed_at: Some(now),
             healthy_since: None,
             error_reported: false,
         }
     }
 
-    fn schedule_failure(&mut self, now: Instant) {
+    const fn schedule_failure(&mut self, now: Instant) {
         self.failures = self.failures.saturating_add(1);
-        self.retry_at = Some(now + native_restart_delay(self.failures));
+        self.failed_at = Some(now);
         self.healthy_since = None;
         self.error_reported = false;
     }
@@ -124,42 +134,126 @@ pub struct BackendPaneTerminal {
     terminal: Box<dyn TerminalRuntime>,
 }
 fn idle_terminal() -> Box<dyn TerminalRuntime> {
-    Box::new(IdleTerminalRuntime)
+    Box::new(IdleTerminalRuntime {
+        frame: Arc::new(RenderFrame::default()),
+    })
 }
 
 pub trait TerminalRuntime: TerminalFrameSource + Send {
     fn drain_pty(&mut self) -> DrainStats;
     fn pending_pty_len(&self) -> usize;
+    /// # Errors
+    /// Returns an error if the process or terminal worker cannot report its status.
     fn child_exited(&mut self) -> Result<bool>;
     fn tty_name(&self) -> Option<&str>;
+    /// # Errors
+    /// Returns terminal worker or engine errors while discarding pending output.
     fn discard_pending_output(&mut self) -> Result<()>;
+    /// # Errors
+    /// Returns backend resize or terminal transport errors.
     fn force_resize(&mut self) -> Result<()>;
+    /// # Errors
+    /// Returns an error if prompt inspection is unsupported or the worker request cannot be queued.
+    fn prompt(
+        &mut self,
+        _text: Option<(u64, String, bool)>,
+    ) -> Result<
+        PendingWorkerResponse<
+            std::result::Result<bootty_terminal::shell_prompt::PromptSnapshot, String>,
+        >,
+    > {
+        anyhow::bail!("This backend cannot exclusively lease a shell prompt")
+    }
+    /// # Errors
+    /// Returns an error if capture is unsupported or its worker request cannot be queued.
+    fn capture(
+        &mut self,
+        _options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        anyhow::bail!("This terminal has no capture runtime")
+    }
+    /// # Errors
+    /// Returns terminal worker or selection formatting errors.
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>>;
+    /// # Errors
+    /// Returns terminal worker or process inspection errors.
     fn current_working_directory(&mut self) -> Result<Option<String>>;
     /// Apply colors, cursor, and terminal features as one runtime update.
     ///
     /// A runtime that is not ready yet must retain the aggregate and apply it when it starts.
+    /// # Errors
+    /// Returns the first terminal configuration error after attempting every live runtime.
     fn apply_live_config(&mut self, config: TerminalLiveConfig) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or mouse-mode inspection errors.
     fn is_mouse_tracking(&mut self) -> Result<bool>;
+    /// # Errors
+    /// Returns terminal worker or viewport update errors.
     fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or viewport update errors.
+    fn scroll_viewport_to(&mut self, offset: usize) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     fn enter_copy_mode(&mut self) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     fn copy_mode_active(&mut self) -> Result<bool>;
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     fn handle_copy_mode_action(
         &mut self,
         action: TerminalCopyModeAction,
     ) -> Result<TerminalCopyModeOutcome>;
+    /// # Errors
+    /// Returns terminal worker or search execution errors.
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool>;
+    /// # Errors
+    /// Returns terminal worker or search execution errors.
+    fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            options == TerminalSearchOptions::default(),
+            "search options are unavailable for this terminal"
+        );
+        self.search_viewport(query, direction)
+    }
+
+    /// # Errors
+    /// Returns terminal worker or selection update errors.
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or selection update errors.
     fn update_selection(&mut self, event: TerminalSelectionEvent) -> Result<()>;
+    /// # Errors
+    /// Returns terminal worker or selection update errors.
     fn end_selection(&mut self, event: Option<TerminalSelectionEvent>) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn write_paste(&mut self, text: &str) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn encode_key(&mut self, input: KeyInput) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn encode_focus(&mut self, gained: bool) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn encode_mouse(&mut self, input: MouseInput) -> Result<()>;
+    /// # Errors
+    /// Returns input encoding, terminal worker, or transport errors.
     fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()>;
 }
-struct IdleTerminalRuntime;
+struct IdleTerminalRuntime {
+    frame: Arc<RenderFrame>,
+}
 
 impl TerminalFrameSource for IdleTerminalRuntime {
     fn set_display_scale(&mut self, _display_scale: f32) -> Result<()> {
@@ -175,7 +269,7 @@ impl TerminalFrameSource for IdleTerminalRuntime {
     }
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
-        Ok(Arc::new(RenderFrame::default()))
+        Ok(Arc::clone(&self.frame))
     }
 }
 
@@ -222,6 +316,10 @@ impl TerminalRuntime for IdleTerminalRuntime {
     }
 
     fn scroll_viewport_delta(&mut self, _delta: isize) -> Result<()> {
+        Ok(())
+    }
+
+    fn scroll_viewport_to(&mut self, _offset: usize) -> Result<()> {
         Ok(())
     }
 
@@ -309,6 +407,23 @@ impl TerminalRuntime for TerminalSession {
         Ok(())
     }
 
+    fn prompt(
+        &mut self,
+        text: Option<(u64, String, bool)>,
+    ) -> Result<
+        PendingWorkerResponse<
+            std::result::Result<bootty_terminal::shell_prompt::PromptSnapshot, String>,
+        >,
+    > {
+        Self::prompt(self, text)
+    }
+    fn capture(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        Self::capture(self, options)
+    }
+
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         Self::format_selection(self, format)
     }
@@ -329,6 +444,10 @@ impl TerminalRuntime for TerminalSession {
         Self::scroll_viewport_delta(self, delta)
     }
 
+    fn scroll_viewport_to(&mut self, offset: usize) -> Result<()> {
+        Self::scroll_viewport_to(self, offset)
+    }
+
     fn enter_copy_mode(&mut self) -> Result<()> {
         Self::enter_copy_mode(self)
     }
@@ -346,6 +465,15 @@ impl TerminalRuntime for TerminalSession {
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
         Self::search_viewport(self, query, direction)
+    }
+
+    fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
+        Self::search_viewport_with_options(self, query, direction, options)
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -386,17 +514,20 @@ impl TerminalRuntime for TerminalSession {
 }
 
 impl BackendPaneTerminal {
+    /// # Errors
+    /// Returns an error when the selected backend has no app provider.
     pub fn new(
         geometry: TerminalGeometry,
         registry: Arc<MuxBackendRegistry>,
         config: &MuxBindingConfig,
         terminal_config: TerminalSessionConfig,
         repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
-    ) -> Self {
+    ) -> Result<Self> {
         let kind = registry.selected_kind(config);
-        let policy = registry.build_pane_policy(config);
-        let behavior = registry.app_policy(config).panes;
-        Self {
+        let provider = registry.app_provider(config)?;
+        let policy = provider.build_pane_policy(config);
+        let behavior = provider.app_policy().panes;
+        Ok(Self {
             registry,
             policy_kind: kind,
             policy,
@@ -404,7 +535,7 @@ impl BackendPaneTerminal {
             active_target: None,
             geometry,
             display_scale: 1.0,
-            render_cell: CellMetrics::new(geometry.cell_width as f32, geometry.cell_height as f32),
+            render_cell: geometry.cell_metrics(),
             terminal_config,
             repaint_wakeup,
             native_terminals: HashMap::new(),
@@ -415,9 +546,11 @@ impl BackendPaneTerminal {
             native_runtime_restarts: HashMap::new(),
             terminal_awaits_resize: false,
             terminal: idle_terminal(),
-        }
+        })
     }
 
+    /// # Errors
+    /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_mux_anchor(
         &mut self,
         config: &MuxBindingConfig,
@@ -426,6 +559,8 @@ impl BackendPaneTerminal {
         self.sync_mux_anchor_in_scope(None, config, anchor)
     }
 
+    /// # Errors
+    /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_scoped_mux_anchor(
         &mut self,
         scope: SpaceId,
@@ -441,9 +576,10 @@ impl BackendPaneTerminal {
         config: &MuxBindingConfig,
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
-        let next_policy = self.registry.build_pane_policy(config);
+        let provider = self.registry.app_provider(config)?;
+        let next_policy = provider.build_pane_policy(config);
         let next_kind = self.registry.selected_kind(config);
-        let next_behavior = self.registry.app_policy(config).panes;
+        let next_behavior = provider.app_policy().panes;
         let backend_changed = self.policy_kind != next_kind
             || self.policy.remote_target() != next_policy.remote_target();
         if backend_changed {
@@ -472,22 +608,22 @@ impl BackendPaneTerminal {
         }
 
         self.park_cached_terminal();
-        let phase = bootty_runtime::latency::start();
+        let phase = bootty_terminal::latency::start();
         let terminal = self.start_terminal(target.as_ref()).inspect_err(|_| {
             self.active_target = None;
             self.policy.sync_target(None, config.hide_tmux_status);
             self.terminal = idle_terminal();
         })?;
-        bootty_runtime::latency::trace_slow("attach.start_terminal", phase, 2.0);
+        bootty_terminal::latency::trace_slow("attach.start_terminal", phase, 2.0);
 
-        self.active_target = target;
-        let phase = bootty_runtime::latency::start();
-        self.set_active_terminal(terminal);
-        bootty_runtime::latency::trace_slow("attach.set_active_terminal", phase, 2.0);
-        let phase = bootty_runtime::latency::start();
+        self.active_target = terminal.as_ref().and(target);
+        let phase = bootty_terminal::latency::start();
+        self.set_active_terminal(terminal.unwrap_or_else(idle_terminal));
+        bootty_terminal::latency::trace_slow("attach.set_active_terminal", phase, 2.0);
+        let phase = bootty_terminal::latency::start();
         self.policy
             .sync_target(self.active_target.as_ref(), config.hide_tmux_status);
-        bootty_runtime::latency::trace_slow("attach.backend_policy", phase, 2.0);
+        bootty_terminal::latency::trace_slow("attach.backend_policy", phase, 2.0);
         Ok(())
     }
 
@@ -495,16 +631,14 @@ impl BackendPaneTerminal {
         self.terminal_config = terminal_config;
     }
 
+    /// # Errors
+    /// Returns the first terminal configuration error after attempting every live runtime.
     pub fn apply_live_config(&mut self, config: TerminalLiveConfig) -> Result<()> {
-        self.terminal_config.colors = config.colors.clone();
+        self.terminal_config.colors.clone_from(&config.colors);
         self.terminal_config.cursor = config.cursor;
         self.terminal_config.features = config.features;
 
         // Try every runtime. One dead native pane must not block healthy focused or parked panes.
-        let mut failures = Vec::new();
-        if let Err(error) = self.terminal.apply_live_config(config.clone()) {
-            failures.push(format!("active terminal: {error}"));
-        }
         let mut failed_cached_targets = Vec::new();
         for (target, terminal) in &mut self.native_terminals {
             if terminal.apply_live_config(config.clone()).is_err() {
@@ -516,16 +650,13 @@ impl BackendPaneTerminal {
         for target in failed_cached_targets {
             self.native_terminals.remove(&target);
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "failed to apply live terminal config: {}",
-                failures.join("; ")
-            );
-        }
+        self.terminal.apply_live_config(config).map_err(|error| {
+            anyhow::anyhow!("failed to apply live terminal config: active terminal: {error}")
+        })
     }
 
+    /// # Errors
+    /// Returns terminal worker or process inspection errors.
     pub fn current_working_directory(&mut self) -> Result<Option<String>> {
         self.terminal.current_working_directory()
     }
@@ -533,30 +664,38 @@ impl BackendPaneTerminal {
     fn start_terminal(
         &mut self,
         target: Option<&ScopedMuxPaneTarget>,
-    ) -> Result<Box<dyn TerminalRuntime>> {
+    ) -> Result<Option<Box<dyn TerminalRuntime>>> {
+        self.start_terminal_at(
+            target,
+            self.native_window_spawn_geometry.unwrap_or(self.geometry),
+        )
+    }
+
+    fn start_terminal_at(
+        &mut self,
+        target: Option<&ScopedMuxPaneTarget>,
+        spawn_geometry: TerminalGeometry,
+    ) -> Result<Option<Box<dyn TerminalRuntime>>> {
         let Some(target) = target else {
-            return Ok(idle_terminal());
+            return Ok(None);
         };
 
         if self.behavior.cache_terminals
             && let Some(terminal) = self.native_terminals.remove(target)
         {
-            return Ok(terminal);
+            return Ok(Some(terminal));
         }
 
         let request = PaneStartRequest {
             target,
             geometry: self.geometry,
-            spawn_geometry: self.native_window_spawn_geometry.unwrap_or(self.geometry),
+            spawn_geometry,
             display_scale: self.display_scale,
             render_cell: self.render_cell,
             terminal_config: &self.terminal_config,
             repaint_wakeup: &self.repaint_wakeup,
         };
-        Ok(self
-            .policy
-            .start_terminal(request)?
-            .unwrap_or_else(idle_terminal))
+        self.policy.start_terminal(request)
     }
 
     /// Swap in the runtime the pane slot renders and takes input through. The next render resize is
@@ -571,6 +710,8 @@ impl BackendPaneTerminal {
     /// the deref/input runtime and keep every other pane alive in the parked map so it renders and
     /// drains alongside. Panes are only torn down on explicit close, so switching focus or tabs
     /// never kills a shell.
+    /// # Errors
+    /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_native_window(
         &mut self,
         window_panes: &[MuxPaneAnchor],
@@ -589,6 +730,8 @@ impl BackendPaneTerminal {
         )
     }
 
+    /// # Errors
+    /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_scoped_native_window(
         &mut self,
         scope: SpaceId,
@@ -606,6 +749,66 @@ impl BackendPaneTerminal {
             layout_backend,
             hide_tmux_status,
         )
+    }
+
+    /// Attach visible panes without changing the terminal that receives keyboard input.
+    /// Attach-only providers expose one opaque terminal and cannot use this path.
+    /// # Errors
+    /// Returns target resolution, terminal startup, or backend synchronization errors.
+    pub fn prepare_scoped_native_panes(
+        &mut self,
+        scope: SpaceId,
+        panes: &[MuxPaneAnchor],
+        geometry: TerminalGeometry,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.behavior.topology != PaneTopology::Attach,
+            "this backend exposes an opaque terminal attachment"
+        );
+        let targets = panes
+            .iter()
+            .cloned()
+            .map(|anchor| ScopedMuxPaneTarget::from_anchor(Some(scope), anchor))
+            .filter(|target| target.pane_id().is_some())
+            .collect::<Vec<_>>();
+        self.prepare_native_targets(&targets, geometry)
+    }
+
+    fn prepare_native_targets(
+        &mut self,
+        targets: &[ScopedMuxPaneTarget],
+        geometry: TerminalGeometry,
+    ) -> Result<()> {
+        for target in targets {
+            if self.active_target.as_ref() == Some(target)
+                || self.native_terminals.contains_key(target)
+            {
+                continue;
+            }
+            if let Some(runtime) = self.start_terminal_at(Some(target), geometry)? {
+                self.native_terminals.insert(target.clone(), runtime);
+            }
+        }
+        Ok(())
+    }
+
+    /// Read or resize a visible pane by binding identity, independently of keyboard focus.
+    pub fn scoped_terminal_runtime(
+        &mut self,
+        scope: SpaceId,
+        pane_id: &str,
+    ) -> Option<&mut (dyn TerminalRuntime + '_)> {
+        let matches = |target: &ScopedMuxPaneTarget| {
+            target.scope == Some(scope) && target.pane_id() == Some(pane_id)
+        };
+        if self.active_target.as_ref().is_some_and(matches) {
+            return Some(self);
+        }
+        let (_, runtime) = self
+            .native_terminals
+            .iter_mut()
+            .find(|(target, _)| matches(target))?;
+        Some(runtime.as_mut())
     }
 
     fn sync_native_window_in_scope(
@@ -642,19 +845,14 @@ impl BackendPaneTerminal {
                     self.active_target = None;
                     self.terminal = idle_terminal();
                 })?;
-            self.active_target = focused_target;
-            self.set_active_terminal(terminal);
+            self.active_target = terminal.as_ref().and(focused_target);
+            self.set_active_terminal(terminal.unwrap_or_else(idle_terminal));
         }
 
-        for target in &targets {
-            if self.active_target.as_ref() == Some(target) {
-                continue;
-            }
-            if !self.native_terminals.contains_key(target) {
-                let runtime = self.start_terminal(Some(target))?;
-                self.native_terminals.insert(target.clone(), runtime);
-            }
-        }
+        self.prepare_native_targets(
+            &targets,
+            self.native_window_spawn_geometry.unwrap_or(self.geometry),
+        )?;
         let window_id = window_id.map(str::to_owned);
         if self.native_window_scope != scope || self.native_window_id != window_id {
             self.native_window_scope = scope;
@@ -668,6 +866,8 @@ impl BackendPaneTerminal {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns backend resize or terminal transport errors.
     pub fn resize_native_layout_window(&mut self, cols: u16, rows: u16) -> Result<()> {
         self.native_window_spawn_geometry = Some(TerminalGeometry {
             cols,
@@ -675,8 +875,20 @@ impl BackendPaneTerminal {
             cell_width: self.geometry.cell_width,
             cell_height: self.geometry.cell_height,
         });
+        let window_id = self.native_window_id.clone();
+        self.resize_visible_window(window_id.as_deref(), cols, rows)
+    }
+
+    /// # Errors
+    /// Returns backend resize or terminal transport errors.
+    pub fn resize_visible_window(
+        &mut self,
+        window_id: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
         let completed = self.policy.resize_layout_window(PaneLayoutResizeRequest {
-            window_id: self.native_window_id.as_deref(),
+            window_id,
             cols,
             rows,
             repaint_wakeup: &self.repaint_wakeup,
@@ -690,13 +902,8 @@ impl BackendPaneTerminal {
     fn force_native_layout_pane_resizes(&mut self) -> Result<()> {
         self.terminal.force_resize()?;
         let mut failed_cached_targets = Vec::new();
-        for target in &self.native_window_targets {
-            if self.active_target.as_ref() == Some(target) {
-                continue;
-            }
-            if let Some(runtime) = self.native_terminals.get_mut(target)
-                && runtime.force_resize().is_err()
-            {
+        for (target, runtime) in &mut self.native_terminals {
+            if runtime.force_resize().is_err() {
                 failed_cached_targets.push(target.clone());
             }
         }
@@ -804,7 +1011,7 @@ impl BackendPaneTerminal {
                         self.native_runtime_restarts
                             .get_mut(&target)
                             .is_some_and(|restart| {
-                                restart.retry_at = None;
+                                restart.failed_at = None;
                                 restart.error_reported = false;
                                 let healthy_since = restart.healthy_since.get_or_insert(now);
                                 now.saturating_duration_since(*healthy_since)
@@ -819,7 +1026,7 @@ impl BackendPaneTerminal {
                         .native_runtime_restarts
                         .entry(target.clone())
                         .or_insert_with(|| NativeRuntimeRestart::new(now));
-                    if restart.retry_at.is_none() {
+                    if restart.failed_at.is_none() {
                         restart.schedule_failure(now);
                     }
                     if let Err(error) = failure
@@ -828,13 +1035,14 @@ impl BackendPaneTerminal {
                         errors.push(format!("{}: {error}", target.input_selector()));
                         restart.error_reported = true;
                     }
-                    let retry_at = restart.retry_at.expect("failed runtime has retry deadline");
-                    if now >= retry_at {
-                        restart.retry_at = None;
+                    let failed_at = *restart.failed_at.get_or_insert(now);
+                    let wait = native_restart_delay(restart.failures)
+                        .saturating_sub(now.saturating_duration_since(failed_at));
+                    if wait.is_zero() {
+                        restart.failed_at = None;
                         restart.error_reported = false;
                         retire.push(target);
                     } else {
-                        let wait = retry_at.saturating_duration_since(now);
                         next_wake =
                             Some(next_wake.map_or(wait, |current: Duration| current.min(wait)));
                     }
@@ -889,18 +1097,32 @@ impl BackendPaneTerminal {
         stats
     }
 
+    /// # Errors
+    /// Returns terminal worker or viewport update errors.
     pub fn scroll_viewport_delta(&mut self, delta: isize) -> Result<()> {
         self.terminal.scroll_viewport_delta(delta)
     }
 
+    /// # Errors
+    /// Returns terminal worker or viewport update errors.
+    pub fn scroll_viewport_to(&mut self, offset: usize) -> Result<()> {
+        self.terminal.scroll_viewport_to(offset)
+    }
+
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     pub fn enter_copy_mode(&mut self) -> Result<()> {
         self.terminal.enter_copy_mode()
     }
 
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     pub fn copy_mode_active(&mut self) -> Result<bool> {
         self.terminal.copy_mode_active()
     }
 
+    /// # Errors
+    /// Returns terminal worker or copy-mode operation errors.
     pub fn handle_copy_mode_action(
         &mut self,
         action: TerminalCopyModeAction,
@@ -908,10 +1130,13 @@ impl BackendPaneTerminal {
         self.terminal.handle_copy_mode_action(action)
     }
 
-    pub fn grid_size(&self) -> (u16, u16) {
+    #[must_use]
+    pub const fn grid_size(&self) -> (u16, u16) {
         (self.geometry.cols, self.geometry.rows)
     }
 
+    /// # Errors
+    /// Returns an error if the process or terminal worker cannot report its status.
     pub fn child_exited(&mut self) -> Result<bool> {
         self.terminal.child_exited()
     }
@@ -964,16 +1189,35 @@ impl TerminalFrameSource for BackendPaneTerminal {
             if !std::mem::take(&mut self.terminal_awaits_resize) {
                 return Ok(());
             }
-            return self.terminal.resize(geometry);
+            if let Err(error) = self.terminal.resize(geometry) {
+                self.terminal_awaits_resize = true;
+                return Err(error);
+            }
+            return Ok(());
         }
         self.terminal_awaits_resize = false;
         self.geometry = geometry;
+        if let Err(error) = self.terminal.resize(geometry) {
+            // Geometry is the renderer's latest fact, but the runtime did not accept it. Keep the
+            // pending bit set so the next frame retries instead of deduplicating the failed write.
+            self.terminal_awaits_resize = true;
+            return Err(error);
+        }
         if self.behavior.resize_cached_terminals {
-            for terminal in self.native_terminals.values_mut() {
-                terminal.resize(geometry)?;
+            let mut failed_cached_targets = Vec::new();
+            for (target, terminal) in &mut self.native_terminals {
+                if terminal.resize(geometry).is_err() {
+                    failed_cached_targets.push(target.clone());
+                }
+            }
+            for target in failed_cached_targets {
+                // Cached attach clients are not visible. A failed resize means the client is no
+                // longer usable; retire it so it cannot block the live terminal and recreate it
+                // when that session is selected again.
+                self.native_terminals.remove(&target);
             }
         }
-        self.terminal.resize(geometry)
+        Ok(())
     }
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
@@ -1006,6 +1250,23 @@ impl TerminalRuntime for BackendPaneTerminal {
         self.terminal.force_resize()
     }
 
+    fn prompt(
+        &mut self,
+        text: Option<(u64, String, bool)>,
+    ) -> Result<
+        PendingWorkerResponse<
+            std::result::Result<bootty_terminal::shell_prompt::PromptSnapshot, String>,
+        >,
+    > {
+        self.terminal.prompt(text)
+    }
+    fn capture(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        self.terminal.capture(options)
+    }
+
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         self.terminal.format_selection(format)
     }
@@ -1026,6 +1287,10 @@ impl TerminalRuntime for BackendPaneTerminal {
         self.terminal.scroll_viewport_delta(delta)
     }
 
+    fn scroll_viewport_to(&mut self, offset: usize) -> Result<()> {
+        self.terminal.scroll_viewport_to(offset)
+    }
+
     fn enter_copy_mode(&mut self) -> Result<()> {
         self.terminal.enter_copy_mode()
     }
@@ -1043,6 +1308,16 @@ impl TerminalRuntime for BackendPaneTerminal {
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
         self.terminal.search_viewport(query, direction)
+    }
+
+    fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
+        self.terminal
+            .search_viewport_with_options(query, direction, options)
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {
@@ -1109,19 +1384,22 @@ impl Hash for MuxPaneTarget {
 }
 
 impl MuxPaneTarget {
+    #[must_use]
     pub fn session_id(&self) -> &str {
         match self {
             Self::Session { session_id, .. } | Self::Pane { session_id, .. } => session_id,
         }
     }
 
+    #[must_use]
     pub fn input_selector(&self) -> &str {
         match self {
             Self::Pane { pane_id, .. } => pane_id,
-            target => target.session_id(),
+            Self::Session { session_id, .. } => session_id,
         }
     }
 
+    #[must_use]
     pub fn pane_id(&self) -> Option<&str> {
         match self {
             Self::Pane { pane_id, .. } => Some(pane_id),
@@ -1129,6 +1407,7 @@ impl MuxPaneTarget {
         }
     }
 
+    #[must_use]
     pub fn cwd(&self) -> Option<&str> {
         match self {
             Self::Session { cwd, .. } | Self::Pane { cwd, .. } => cwd.as_deref(),
@@ -1166,32 +1445,38 @@ impl ScopedMuxPaneTarget {
         }
     }
 
+    #[must_use]
     pub fn session_id(&self) -> &str {
         self.target.session_id()
     }
 
-    pub fn mux_target(&self) -> &MuxPaneTarget {
+    #[must_use]
+    pub const fn mux_target(&self) -> &MuxPaneTarget {
         &self.target
     }
 
+    #[must_use]
     pub fn input_selector(&self) -> &str {
         self.target.input_selector()
     }
 
+    #[must_use]
     pub fn pane_id(&self) -> Option<&str> {
         self.target.pane_id()
     }
 
+    #[must_use]
     pub fn cwd(&self) -> Option<&str> {
         self.target.cwd()
     }
 
+    #[must_use]
     pub fn side_effect_pane_id(&self) -> Option<String> {
         let pane_id = self.pane_id()?;
-        Some(match self.scope {
-            Some(scope) => encode_scoped_pane_id(scope, pane_id),
-            None => pane_id.to_owned(),
-        })
+        Some(self.scope.map_or_else(
+            || pane_id.to_owned(),
+            |scope| encode_scoped_pane_id(scope, pane_id),
+        ))
     }
 }
 
@@ -1206,6 +1491,7 @@ impl From<MuxPaneTarget> for ScopedMuxPaneTarget {
 
 const SCOPED_PANE_PREFIX: &str = "bootty-scope:";
 
+#[must_use]
 pub fn encode_scoped_pane_id(scope: SpaceId, pane_id: &str) -> String {
     format!(
         "{SCOPED_PANE_PREFIX}{}:{pane_id}",
@@ -1213,6 +1499,7 @@ pub fn encode_scoped_pane_id(scope: SpaceId, pane_id: &str) -> String {
     )
 }
 
+#[must_use]
 pub fn decode_scoped_pane_id(value: &str) -> Option<(SpaceId, String)> {
     let mut parts = value.strip_prefix(SCOPED_PANE_PREFIX)?.splitn(2, ':');
     let space_id = parts.next()?.parse().ok()?;

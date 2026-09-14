@@ -78,6 +78,18 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
         return Err(rusqlite::Error::InvalidQuery);
     }
 
+    load_session_membership(tx, &mut spaces, &unsupported_ids)?;
+    Ok(LoadedSpaces {
+        spaces,
+        unsupported_ids,
+    })
+}
+
+fn load_session_membership(
+    tx: &Transaction<'_>,
+    spaces: &mut [WorkspaceSpace],
+    unsupported_ids: &HashSet<i64>,
+) -> rusqlite::Result<()> {
     let space_ids = spaces
         .iter()
         .map(|space| space.id.persistence_value())
@@ -114,13 +126,13 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
             return Err(rusqlite::Error::InvalidQuery);
         }
         let claimed = sessions.entry(space_id).or_default();
-        if claimed.len() != position as usize {
+        if usize::try_from(position).ok() != Some(claimed.len()) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         claimed.push(session);
     }
 
-    for space in &mut spaces {
+    for space in spaces {
         if space.name.trim().is_empty()
             || space.icon.trim().is_empty()
             || space.remote_id.trim().is_empty()
@@ -137,13 +149,10 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
     if !sessions.is_empty() {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    Ok(LoadedSpaces {
-        spaces,
-        unsupported_ids,
-    })
+    Ok(())
 }
 
-pub(super) fn backend_to_storage(backend: Option<MultiplexerBackendConfig>) -> &'static str {
+pub(super) const fn backend_to_storage(backend: Option<MultiplexerBackendConfig>) -> &'static str {
     match backend {
         None => "inherit",
         Some(MultiplexerBackendConfig::Herdr) => "herdr",
@@ -185,7 +194,8 @@ pub(super) fn color_to_hex([red, green, blue]: [u8; 3]) -> String {
 pub(super) fn color_from_hex(value: &str) -> Option<[u8; 3]> {
     let value = value.strip_prefix('#')?;
     let rgb = u32::from_str_radix(value, 16).ok()?;
-    (value.len() == 6).then_some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8])
+    let [_, red, green, blue] = rgb.to_be_bytes();
+    (value.len() == 6).then_some([red, green, blue])
 }
 
 pub(super) enum StoredBackend {
@@ -205,7 +215,7 @@ pub(super) fn backend_from_storage(backend: &str) -> StoredBackend {
     }
 }
 
-pub(super) fn bool_from_storage(value: i64) -> rusqlite::Result<bool> {
+pub(super) const fn bool_from_storage(value: i64) -> rusqlite::Result<bool> {
     match value {
         0 => Ok(false),
         1 => Ok(true),

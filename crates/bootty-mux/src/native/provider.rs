@@ -13,7 +13,7 @@ use crate::{
     terminal::BackendPanePolicy,
 };
 
-use crate::native::{NativeBackend, NativePanePolicy, native_capabilities};
+use super::{NativeBackend, NativePanePolicy, native_capabilities};
 
 pub struct NativeProvider;
 
@@ -31,10 +31,7 @@ impl MuxBackendProvider for NativeProvider {
         _config: &MuxBindingConfig,
         workspace: Option<&Path>,
     ) -> Box<dyn MuxBackend> {
-        Box::new(match workspace {
-            Some(workspace) => NativeBackend::for_workspace(workspace),
-            None => NativeBackend::new(),
-        })
+        Box::new(workspace.map_or_else(NativeBackend::new, NativeBackend::for_workspace))
     }
 }
 
@@ -64,5 +61,3 @@ impl MuxAppBackendProvider for NativeProvider {
 }
 
 crate::register_mux_backend!(NativeProvider);
-
-pub fn link() {}

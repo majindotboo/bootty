@@ -1,42 +1,54 @@
+// Embedded rmux server futures exceed the default auto-trait recursion depth.
 #![recursion_limit = "256"]
 
 pub use bootty_config::config::{
     MultiplexerBackendConfig as MuxBackendKind, MultiplexerConfig as MuxBindingConfig,
-    SshRemoteConfig as SshTarget,
+    RemoteConfig as RemoteTarget, SshRemoteConfig as SshTarget,
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub use controller::RepaintHandle;
 pub use remote_catalog::RemoteSpaceSummary;
 pub mod backend;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub mod capability;
 pub mod command;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub mod controller;
-pub mod herdr;
+#[cfg(feature = "terminal-runtime")]
+pub mod executor;
 pub mod membership;
-#[cfg(feature = "app")]
-pub mod native;
 pub mod process;
-pub mod project;
 pub mod provider;
 pub mod remote_catalog;
 pub mod remote_space;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub mod repository;
-pub mod rmux;
 pub mod session_membership;
 pub mod snapshot;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub mod terminal;
-pub mod tmux;
 pub mod tmux_compatible_layout;
+pub mod workflow;
 
-#[cfg(feature = "app")]
-pub use repository::{
-    BackendMembership, BindingMembershipMutation, DEFAULT_SPACE_COLOR, DEFAULT_SPACE_ICON,
-    PendingBindingMembershipMutation, RemoteSpaceRef, SpaceMuxOverride, SpaceRemoteOverride,
-    WorkspaceBinding, WorkspaceBindingSelection, WorkspacePersistenceError, WorkspaceRepository,
-    WorkspaceResult, WorkspaceSnapshot, WorkspaceSpace,
-};
-pub use session_membership::{SessionMembership, WorkspaceSession};
+#[cfg(feature = "terminal-runtime")]
+pub mod pane_layout;
+
+#[cfg(feature = "terminal-runtime")]
+pub mod terminal_config;
+
+#[cfg(feature = "terminal-runtime")]
+pub mod native;
+
+pub mod tmux;
+
+pub mod herdr;
+
+pub mod rmux;
+
+pub mod session_names;
+
+#[cfg(feature = "terminal-runtime")]
+pub mod target;
+
+#[cfg(feature = "terminal-runtime")]
+pub mod workspace;

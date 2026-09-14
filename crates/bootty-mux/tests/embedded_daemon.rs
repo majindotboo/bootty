@@ -1,0 +1,1103 @@
+#![cfg(unix)]
+
+use std::{
+    io::{BufRead, BufReader},
+    process::{Child, Command, Stdio},
+    sync::{OnceLock, mpsc},
+    thread,
+};
+
+use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bootty_config::ApplicationIdentity;
+use bootty_mux::rmux::{
+    RemoteRmuxRequest, RmuxBackend, endpoint_path_for, run_remote_rmux_command,
+};
+use bootty_mux::{MuxBackendKind, MuxBindingConfig};
+use bootty_mux::{
+    command::{MuxCommand, MuxDirection, MuxSplitDirection},
+    provider::MuxBackendRegistry,
+    snapshot::{MuxSessionTag, new_session_identity},
+    terminal::ActiveTerminal,
+};
+use bootty_terminal::geometry::TerminalGeometry;
+use bootty_terminal::terminal_engine::TerminalEngine;
+use bootty_terminal::{frame_source::TerminalFrameSource, terminal_session::TerminalSessionConfig};
+use tokio::runtime::Builder;
+
+const SCENARIO_ENV: &str = "BOOTTY_RMUX_EMBEDDED_SCENARIO";
+const SCENARIO_CHILD_TEST: &str = "embedded_rmux_scenario_child";
+const REMOTE_STREAM_PAYLOAD_ENV: &str = "BOOTTY_RMUX_REMOTE_STREAM_PAYLOAD";
+const REMOTE_STREAM_CHILD_TEST: &str = "embedded_rmux_remote_pane_stream_child";
+const ISOLATED_PATH: &str = "/usr/bin:/bin";
+const POSIX_SHELL: &str = "/bin/sh";
+/// What a prepared pane prints back. No scenario prints it for another reason.
+const PANE_READY: &str = "BOOTTY_PANE_READY";
+const PANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PANE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn start_embedded_rmux_daemon_for_tests() -> Result<()> {
+    static STARTED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+    STARTED
+        .get_or_init(|| {
+            let socket = endpoint_path_for(ApplicationIdentity::Production)
+                .map_err(|error| error.to_string())?;
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            thread::spawn(move || {
+                let started_tx = ready_tx.clone();
+                let result = (|| -> Result<()> {
+                    let runtime = Builder::new_multi_thread().enable_all().build()?;
+                    runtime.block_on(async {
+                        let daemon =
+                            rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(socket))
+                                .bind()
+                                .await?;
+                        let _ = started_tx.send(Ok(()));
+                        daemon.wait().await
+                    })?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                }
+            });
+            ready_rx.recv().map_err(|error| error.to_string())?
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+/// Every scenario below drives bootty's public rmux behaviors through the SDK
+/// only. Each gets its own `#[test]`, so a failure names the behavior that
+/// broke and the test runner spends the wall clock of the slowest scenario
+/// rather than the sum of all of them.
+///
+/// The scenario itself runs in a child process: the pane environment (`PATH`,
+/// `SHELL`, `RMUX_TMPDIR`) is process-global, and a child is the only way to
+/// set it without racing every other thread in the runner.
+macro_rules! embedded_scenarios {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() -> Result<()> {
+                run_embedded_scenario(stringify!($name))
+            }
+        )+
+
+        fn dispatch_embedded_scenario(name: &str) -> Result<()> {
+            match name {
+                $(stringify!($name) => scenario::$name(),)+
+                unknown => anyhow::bail!("unknown embedded rmux scenario: {unknown}"),
+            }
+        }
+    };
+}
+
+embedded_scenarios!(
+    session_lifecycle,
+    pane_navigation_and_zoom,
+    terminal_requests,
+    kitty_keyboard_protocol_reports_command_alt_key,
+    terminal_queries_do_not_leak_into_the_shell,
+    rmux_does_not_claim_the_system_tmux_server,
+    kitty_keyboard_protocol_pop_restores_legacy_ctrl_c,
+    multi_pane_window_resize_keeps_pane_targets_live,
+    visible_windows_keep_independent_resize_requests,
+    remote_window_resize_request_reaches_the_rmux_owner,
+    remote_pane_stream_rebase_publishes_a_frame,
+    closing_session_with_pending_resize_is_quiet,
+    closed_pane_accepts_teardown_updates,
+    bounded_live_output,
+    large_restore_progress,
+);
+
+/// The child-process entry point. A no-op in the runner's own process.
+#[test]
+fn embedded_rmux_scenario_child() -> Result<()> {
+    let Some(scenario) = std::env::var_os(SCENARIO_ENV) else {
+        return Ok(());
+    };
+    dispatch_embedded_scenario(&scenario.to_string_lossy())
+}
+
+#[test]
+fn embedded_rmux_remote_pane_stream_child() -> Result<()> {
+    let Some(payload) = std::env::var_os(REMOTE_STREAM_PAYLOAD_ENV) else {
+        return Ok(());
+    };
+    run_remote_rmux_command(&payload.to_string_lossy())?;
+    Ok(())
+}
+
+mod scenario {
+    use super::*;
+    use pretty_assertions::{assert_eq, assert_ne};
+
+    pub fn session_lifecycle() -> Result<()> {
+        let tag = MuxSessionTag {
+            identity: Some(new_session_identity()),
+            space: Some("space-under-test".to_owned()),
+        };
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(tag.clone())?;
+
+        let snapshot = backend.snapshot()?;
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .context("created rmux session")?;
+        assert_eq!(session.tag, tag, "rmux reports the tag bootty stamped");
+
+        let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        terminal.write_input(b"printf 'BOOTTY_RMUX_FRAME\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_FRAME")?;
+
+        let mut second_terminal = open_terminal(registry, &pane, &window_id)?;
+        wait_for_terminal_text(&mut second_terminal, "BOOTTY_RMUX_FRAME")?;
+
+        drop(terminal);
+        second_terminal.write_input(b"printf 'BOOTTY_RMUX_SECOND_READER\\n'\r")?;
+        wait_for_terminal_text(&mut second_terminal, "BOOTTY_RMUX_SECOND_READER")?;
+
+        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let rmux_root = endpoint.parent().context("embedded rmux endpoint parent")?;
+        let spool_files = std::fs::read_dir(rmux_root)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with("bootty-rmux-output-"))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            spool_files.is_empty(),
+            "live rmux output created unbounded disk spools: {spool_files:?}"
+        );
+
+        backend.execute(MuxCommand::DitchSession {
+            session_id: session_id.clone(),
+        })?;
+        let snapshot = backend.snapshot()?;
+        anyhow::ensure!(
+            !snapshot
+                .sessions
+                .iter()
+                .any(|session| session.id == session_id)
+        );
+        Ok(())
+    }
+
+    pub fn pane_navigation_and_zoom() -> Result<()> {
+        let (mut backend, _registry, session_id, window_id, _pane) =
+            create_embedded_session(unscoped_tag())?;
+        let initial = active_pane_id(&backend, &session_id)?;
+        backend.execute(MuxCommand::SplitPane {
+            session_id: session_id.clone(),
+            pane_id: Some(initial),
+            direction: MuxSplitDirection::Down,
+        })?;
+
+        let after_split = pane_ids(&backend, &session_id)?;
+        assert_eq!(after_split.len(), 2, "split created a second rmux pane");
+        let active_after_split = active_pane_id(&backend, &session_id)?;
+
+        backend.execute(MuxCommand::SelectNextPane {
+            session_id: session_id.clone(),
+            window_id: Some(window_id.clone()),
+        })?;
+        let after_next = active_pane_id(&backend, &session_id)?;
+        assert_ne!(
+            after_next, active_after_split,
+            "next pane changed the active pane"
+        );
+
+        backend.execute(MuxCommand::SelectPreviousPane {
+            session_id: session_id.clone(),
+            window_id: Some(window_id.clone()),
+        })?;
+        assert_eq!(active_pane_id(&backend, &session_id)?, active_after_split);
+
+        backend.execute(MuxCommand::SelectPane {
+            session_id: session_id.clone(),
+            window_id: Some(window_id),
+            direction: if after_split.first() == Some(&active_after_split) {
+                MuxDirection::Down
+            } else {
+                MuxDirection::Up
+            },
+        })?;
+        assert_ne!(active_pane_id(&backend, &session_id)?, active_after_split);
+
+        backend.execute(MuxCommand::TogglePaneZoom {
+            session_id: session_id.clone(),
+            pane_id: None,
+        })?;
+        backend.execute(MuxCommand::TogglePaneZoom {
+            session_id: session_id.clone(),
+            pane_id: None,
+        })?;
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn terminal_requests() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+
+        terminal.enter_copy_mode()?;
+        anyhow::ensure!(terminal.copy_mode_active()?);
+        let outcome = terminal.handle_copy_mode_action(
+            bootty_terminal::terminal_engine::TerminalCopyModeAction::Cancel,
+        )?;
+        anyhow::ensure!(!outcome.active);
+        assert_eq!(
+            terminal.format_selection(
+                bootty_terminal::terminal_engine::TerminalSelectionFormat::PlainText
+            )?,
+            None
+        );
+        anyhow::ensure!(!terminal.search_viewport(
+            "",
+            bootty_terminal::terminal_engine::TerminalSearchDirection::Current,
+        )?);
+        terminal.is_mouse_tracking()?;
+        terminal.discard_pending_output()?;
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn terminal_queries_do_not_leak_into_the_shell() -> Result<()> {
+        // The round trip needs a program that can put the pane in raw mode and read
+        // its own stdin. Skip rather than spending the whole `wait_for_terminal_text`
+        // deadline on a shell that printed "command not found", which would take
+        // every scenario chained after this one down with it.
+        if !std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            eprintln!("skipping terminal_queries_do_not_leak_into_the_shell: no python3 on PATH");
+            return Ok(());
+        }
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry.clone(), &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        // Reattach: delayed terminal replies used to cross this boundary and
+        // land on the shell after the querying process exited.
+        drop(terminal);
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        // Run from a file: inlining the script would put its backslash escapes
+        // through the pane shell's quoting rules.
+        let script_path =
+            std::env::temp_dir().join(format!("bootty-terminal-query-{session_id}.py"));
+        std::fs::write(
+            &script_path,
+            r#"import os, select, sys, termios, tty
+
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(fd, b"\x1b[?u\x1b[c")
+data = b""
+# RMUX owns the pane PTY and answers DA1 synchronously. Consuming that answer
+# models Crossterm's support probe, which then returns terminal ownership to the
+# shell. Bootty must not inject a second, delayed response batch afterwards.
+while b"c" not in data:
+    if not select.select([fd], [], [], 2.0)[0]:
+        break
+    data += os.read(fd, 1)
+os.write(fd, b"\x1b]11;?\x1b\\")
+colour = b""
+while b"\x1b\\" not in colour:
+    if not select.select([fd], [], [], 2.0)[0]:
+        break
+    colour += os.read(fd, 1)
+os.write(fd, b"\x1b[14t\x1b[16t")
+size = b""
+while b"\x1b[4;480;800t" not in size or b"\x1b[6;20;10t" not in size:
+    if not select.select([fd], [], [], 2.0)[0]:
+        break
+    size += os.read(fd, 1)
+os.write(fd, b"\x1b[?1016h\x1b[?1016$p")
+pixel_mouse = b""
+while b"\x1b[?1016;1$y" not in pixel_mouse:
+    if not select.select([fd], [], [], 2.0)[0]:
+        break
+    pixel_mouse += os.read(fd, 1)
+os.write(fd, b"\x1b[?1016l")
+os.write(fd, b"\x1bPtmux;\x1b\x1b_Gi=4207,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\")
+graphics = b""
+while b"\x1b_Gi=4207;OK\x1b\\" not in graphics:
+    if not select.select([fd], [], [], 2.0)[0]:
+        break
+    graphics += os.read(fd, 1)
+termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+if b"c" not in data:
+    sys.exit("rmux did not answer DA1")
+if b"rgb:" not in colour:
+    sys.exit("Bootty did not answer OSC 11")
+if b"\x1b[4;480;800t" not in size or b"\x1b[6;20;10t" not in size:
+    sys.exit("Bootty did not answer XTWINOPS pixel size queries")
+if b"\x1b[?1016;1$y" not in pixel_mouse:
+    sys.exit("Bootty did not answer the SGR pixel mouse mode query")
+if b"\x1b_Gi=4207;OK\x1b\\" not in graphics:
+    sys.exit("Bootty did not answer the tmux-wrapped Kitty graphics probe")
+print("BOOTTY_RMUX_COLOR_QUERY_OK")
+    "#,
+        )?;
+        terminal.write_input(
+            format!(
+                "stty echo; python3 {}; sleep 1; printf '%s%s\\n' 'BOOTTY_RMUX_QUERY' '_CLEAN'\r",
+                script_path.display()
+            )
+            .as_bytes(),
+        )?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_QUERY_CLEAN")?;
+        terminal.drain_pty();
+        let frame = terminal.extract_frame()?.text.iter().collect::<String>();
+        anyhow::ensure!(
+            frame.contains("BOOTTY_RMUX_COLOR_QUERY_OK")
+                && !frame.contains("?0u")
+                && !frame.contains("rgb:")
+                && !frame.contains("4;480;800t")
+                && !frame.contains("6;20;10t")
+                && !frame.contains("Gi=4207")
+                && !frame.contains("62;22;52c"),
+            "terminal replies leaked into the resumed shell: {frame:?}"
+        );
+        let _ = std::fs::remove_file(&script_path);
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn rmux_does_not_claim_the_system_tmux_server() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        terminal.write_input(
+            b"printf 'BOOTTY_RMUX_ENV TMUX=<%s> RMUX=<%s>\\n' \"$TMUX\" \"$RMUX\"\r",
+        )?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_ENV TMUX=<> RMUX=<")?;
+        let frame = terminal.extract_frame()?.text.iter().collect::<String>();
+        anyhow::ensure!(
+            !frame.contains("TMUX=</"),
+            "rmux pane claimed a tmux server: {frame:?}"
+        );
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn kitty_keyboard_protocol_pop_restores_legacy_ctrl_c() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        // Push the kitty flags and pop them straight back off. Nothing queries
+        // the state: the answer would arrive as pane input and land on the next
+        // command line.
+        terminal.write_input(
+            b"printf '\\033[0m\\033[>1u\\033[<1u'; printf 'BOOTTY_RMUX_KEYBOARD_STATE\\n'\r",
+        )?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_KEYBOARD_STATE")?;
+        drop(terminal);
+
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        // Prove the reattached terminal is live before it has to carry a key.
+        terminal.write_input(b"printf 'BOOTTY_RMUX_CTRL_C_PANE_LIVE\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_CTRL_C_PANE_LIVE")?;
+        terminal.write_input(
+            b"/bin/sh -c 'trap \"printf BOOTTY_RMUX_CTRL_C_HANDLED\\\\n; exit 0\" INT; printf BOOTTY_RMUX_CTRL_C_READY\\n; while :; do read line; done'; stty echo; printf '\\101\\102\\103\\n'\r",
+        )?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_CTRL_C_READY")?;
+        terminal.encode_key(bootty_terminal::terminal_input_model::KeyInput {
+            key: bootty_terminal::terminal_input_model::TerminalKey::C,
+            mods: bootty_terminal::terminal_input_model::KeyMods {
+                ctrl: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("c"),
+            unshifted: Some('c'),
+        })?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_CTRL_C_HANDLED")?;
+        wait_for_terminal_text(&mut terminal, "ABC")?;
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn kitty_keyboard_protocol_reports_command_alt_key() -> Result<()> {
+        if !std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            eprintln!(
+                "skipping kitty_keyboard_protocol_reports_command_alt_key: no python3 on PATH"
+            );
+            return Ok(());
+        }
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        let script_path =
+            std::env::temp_dir().join(format!("bootty-kitty-keyboard-{session_id}.py"));
+        std::fs::write(
+            &script_path,
+            r#"import os, select, sys, termios, tty
+
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(fd, b"\x1b[>7u\x1b[?u\x1b[cBOOTTY_RMUX_KITTY_READY\r\n")
+data = b""
+expected = b"\x1b[98;11u"
+while expected not in data:
+    if not select.select([fd], [], [], 10.0)[0]:
+        break
+    data += os.read(fd, 4096)
+termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+if expected in data:
+    print("BOOTTY_RMUX_COMMAND_ALT_KEY_OK")
+"#,
+        )?;
+        terminal.write_input(format!("python3 {}\r", script_path.display()).as_bytes())?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_KITTY_READY")?;
+        terminal.encode_key(bootty_terminal::terminal_input_model::KeyInput {
+            key: bootty_terminal::terminal_input_model::TerminalKey::B,
+            mods: bootty_terminal::terminal_input_model::KeyMods {
+                alt: true,
+                command: true,
+                ..Default::default()
+            },
+            repeat: false,
+            utf8: Some("b"),
+            unshifted: Some('b'),
+        })?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_COMMAND_ALT_KEY_OK")?;
+        let _ = std::fs::remove_file(&script_path);
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn multi_pane_window_resize_keeps_pane_targets_live() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        backend.execute(MuxCommand::SplitPane {
+            session_id: session_id.clone(),
+            pane_id: Some(pane.pane_id.context("split pane id")?),
+            direction: MuxSplitDirection::Down,
+        })?;
+        let snapshot = backend.snapshot()?;
+        let (panes, focused) = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.windows.first())
+            .map(|window| {
+                let focused = window
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == window.anchor.pane_id)
+                    .or_else(|| window.panes.first())
+                    .cloned();
+                (window.panes.clone(), focused)
+            })
+            .context("split rmux window")?;
+        let focused = focused.context("split rmux pane")?;
+        let mut terminal = open_terminal_with_window(registry, &panes, &focused, &window_id)?;
+
+        for _ in 0..8 {
+            terminal.write_input(b"\x7f")?;
+        }
+        terminal.drain_pty();
+        terminal.extract_frame()?;
+
+        for cols in [96, 104, 112, 120] {
+            terminal.resize_native_layout_window(cols, 30)?;
+            terminal.drain_pty();
+        }
+        terminal.resize_native_layout_window(128, 30)?;
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn visible_windows_keep_independent_resize_requests() -> Result<()> {
+        use bootty_mux::terminal::{BackendPanePolicy, PaneLayoutResizeRequest};
+        use std::sync::Arc;
+
+        let (mut backend, _, session_id, first_id, _) = create_embedded_session(unscoped_tag())?;
+        backend.execute(MuxCommand::NewWindow {
+            session_id: session_id.clone(),
+            cwd: None,
+        })?;
+        let second_id = backend
+            .snapshot()?
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.windows.iter().find(|window| window.id != first_id))
+            .context("second window")?
+            .id
+            .clone();
+        let (tx, rx) = mpsc::channel();
+        let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = tx.send(());
+        });
+        let mut policy = bootty_mux::rmux::RmuxPanePolicy::new(None);
+        for cols in 90..106 {
+            for (id, rows) in [(&first_id, 25), (&second_id, 35)] {
+                policy.resize_layout_window(PaneLayoutResizeRequest {
+                    window_id: Some(id),
+                    cols,
+                    rows,
+                    repaint_wakeup: &repaint,
+                })?;
+            }
+        }
+        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let mut sizes = None;
+        for _ in 0..32 {
+            rx.recv_timeout(PANE_TIMEOUT)
+                .context("window resize did not finish")?;
+            sizes = Some(runtime.block_on(async {
+                let rmux =
+                    rmux_sdk::Rmux::connect(rmux_sdk::RmuxEndpoint::UnixSocket(endpoint.clone()))
+                        .await?;
+                let name = rmux_sdk::SessionName::new(&session_id).map_err(anyhow::Error::msg)?;
+                let session = rmux.session(name).await?;
+                let mut info = session.window(0).info().await?;
+                info.windows.extend(session.window(1).info().await?.windows);
+                let size = |id: &str| {
+                    info.windows
+                        .iter()
+                        .find(|window| window.id.to_string() == id)
+                        .map(|window| window.size)
+                        .context("visible window missing")
+                };
+                anyhow::Ok((size(&first_id)?, size(&second_id)?))
+            })?);
+            if sizes
+                == Some((
+                    rmux_sdk::TerminalSizeSpec::new(105, 25),
+                    rmux_sdk::TerminalSizeSpec::new(105, 35),
+                ))
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            sizes,
+            Some((
+                rmux_sdk::TerminalSizeSpec::new(105, 25),
+                rmux_sdk::TerminalSizeSpec::new(105, 35)
+            ))
+        );
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn remote_window_resize_request_reaches_the_rmux_owner() -> Result<()> {
+        let (mut backend, _registry, session_id, window_id, _pane) =
+            create_embedded_session(unscoped_tag())?;
+
+        let request = RemoteRmuxRequest::ResizeWindow {
+            window: window_id.clone(),
+            cols: 101,
+            rows: 31,
+        };
+        run_remote_rmux_command(&request.encode()?)?;
+
+        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let reported_size = Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let rmux =
+                    rmux_sdk::Rmux::connect(rmux_sdk::RmuxEndpoint::UnixSocket(endpoint)).await?;
+                let session_name =
+                    rmux_sdk::SessionName::new(&session_id).map_err(anyhow::Error::msg)?;
+                let info = rmux.session(session_name).await?.window(0).info().await?;
+                info.windows
+                    .into_iter()
+                    .find(|window| window.id.to_string() == window_id)
+                    .map(|window| window.size)
+                    .context("resized rmux window was not found")
+            })?;
+        assert_eq!(reported_size, rmux_sdk::TerminalSizeSpec::new(101, 31));
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn remote_pane_stream_rebase_publishes_a_frame() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        terminal.write_input(b"printf 'BOOTTY_RMUX_REMOTE_REBASE\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_REMOTE_REBASE")?;
+
+        let request = RemoteRmuxRequest::PaneStream {
+            session: session_id.clone(),
+            pane: pane.pane_id.context("remote pane id")?,
+        };
+        let (mut stream, frames) = spawn_remote_pane_stream(request.encode()?)?;
+        let result = (|| -> Result<()> {
+            let RemotePaneStreamFrame::Rebase(keyframe) = next_remote_pane_stream_frame(&frames)?
+            else {
+                anyhow::bail!("remote pane stream sent bytes before its initial rebase")
+            };
+
+            let mut frame = TerminalEngine::new(TerminalGeometry {
+                cols: 80,
+                rows: 24,
+                cell_width: 10,
+                cell_height: 20,
+            })?;
+            // A rebase is the authoritative reset-and-reconstruct transition.
+            frame.write_vt_without_pty_responses(&keyframe);
+            frame.scroll_viewport_bottom();
+            anyhow::ensure!(
+                frame
+                    .extract_frame()?
+                    .text_rows()
+                    .iter()
+                    .any(|row| row.contains("BOOTTY_RMUX_REMOTE_REBASE")),
+                "initial remote rebase did not reconstruct the pane frame"
+            );
+
+            terminal.write_input(b"printf 'BOOTTY_RMUX_REMOTE_BYTES\\n'\r")?;
+            loop {
+                match next_remote_pane_stream_frame(&frames)? {
+                    RemotePaneStreamFrame::Rebase(_) => {
+                        anyhow::bail!("remote pane stream rebased before delivering new pane bytes")
+                    }
+                    RemotePaneStreamFrame::Bytes(bytes) => {
+                        frame.write_vt(&bytes);
+                        let rows = frame.extract_frame()?.text_rows();
+                        if rows
+                            .iter()
+                            .any(|row| row.contains("BOOTTY_RMUX_REMOTE_BYTES"))
+                        {
+                            anyhow::ensure!(
+                                rows.iter()
+                                    .any(|row| row.contains("BOOTTY_RMUX_REMOTE_REBASE")),
+                                "remote pane bytes replaced the rebase frame"
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        })();
+
+        let _ = stream.kill();
+        let _ = stream.wait();
+        ditch_session(&mut backend, &session_id)?;
+        result
+    }
+
+    pub fn closing_session_with_pending_resize_is_quiet() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+
+        terminal.resize_native_layout_window(96, 30)?;
+        backend.execute(MuxCommand::DitchSession { session_id })?;
+
+        for cols in [100, 104, 108, 112] {
+            terminal.resize_native_layout_window(cols, 30)?;
+            terminal.drain_pty();
+            terminal.extract_frame()?;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub fn closed_pane_accepts_teardown_updates() -> Result<()> {
+        use bootty_mux::terminal::TerminalRuntime as _;
+        use bootty_terminal::geometry::CellMetrics;
+        use bootty_terminal::terminal_capture::CaptureOptions;
+
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        backend.execute(MuxCommand::ClosePane {
+            session_id,
+            pane_id: pane.pane_id,
+        })?;
+
+        let deadline = std::time::Instant::now()
+            .checked_add(PANE_TIMEOUT)
+            .context("pane deadline")?;
+        while !terminal.child_exited()? {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "pane did not close");
+            thread::yield_now();
+        }
+        // A request must fail once the worker has finished, never fabricate a result.
+        while terminal.discard_pending_output().is_ok() {
+            anyhow::ensure!(std::time::Instant::now() < deadline, "worker did not stop");
+            thread::yield_now();
+        }
+
+        terminal.encode_focus(false)?;
+        terminal.resize(TerminalGeometry {
+            cols: 100,
+            rows: 30,
+            cell_width: 10,
+            cell_height: 20,
+        })?;
+        terminal.set_display_scale(2.0)?;
+        terminal.set_render_cell_metrics(CellMetrics::new(12.0, 24.0))?;
+        terminal.force_resize()?;
+        terminal.write_input(b"stale input")?;
+        terminal.extract_frame()?;
+        anyhow::ensure!(terminal.child_exited()?);
+        anyhow::ensure!(terminal.capture(CaptureOptions::default()).is_err());
+        Ok(())
+    }
+
+    pub fn bounded_live_output() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+
+        // 2MB is past the in-flight bound (`RMUX_OUTPUT_CHANNEL_CAPACITY` events
+        // of `RMUX_OUTPUT_EVENT_MAX_BYTES`), so the producer has to be held back
+        // rather than spooled to disk.
+        terminal.write_input(
+            b"printf 'BOOTTY_RMUX_BOUND_START\\n'; yes X | head -c 2000000; printf '\\nBOOTTY_RMUX_BOUND_END\\n'\r",
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_BOUND_END")?;
+        let spool_files = std::fs::read_dir(
+            endpoint_path_for(ApplicationIdentity::Production)?
+                .parent()
+                .context("embedded rmux endpoint parent")?,
+        )?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with("bootty-rmux-output-"))
+        .collect::<Vec<_>>();
+        anyhow::ensure!(
+            spool_files.is_empty(),
+            "bounded live output must not create disk spools: {spool_files:?}"
+        );
+
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn large_restore_progress() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut producer = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+        prepare_pane(&mut producer)?;
+        producer.write_input(b"yes RESTORE | head -c 2000000\r")?;
+        wait_for_terminal_text(&mut producer, "RESTORE")?;
+
+        // Attach mid-flood: the reader has a backlog to restore and still has to
+        // take a resize and input.
+        let mut reader = open_terminal(registry, &pane, &window_id)?;
+        reader.resize_native_layout_window(100, 30)?;
+        reader.write_input(b"printf 'BOOTTY_RMUX_RESTORE_INPUT_RESIZE\n'\r")?;
+        wait_for_terminal_text(&mut reader, "BOOTTY_RMUX_RESTORE_INPUT_RESIZE")?;
+
+        ditch_session(&mut backend, &session_id)
+    }
+}
+
+/// Run one scenario in a child process with its own rmux daemon and a pane
+/// environment that is the same on every machine.
+fn run_embedded_scenario(scenario: &str) -> Result<()> {
+    let directory = assert_fs::TempDir::new()?;
+    let status = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", SCENARIO_CHILD_TEST])
+        .env(SCENARIO_ENV, scenario)
+        .env("RMUX_TMPDIR", directory.path())
+        .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
+        .env("PATH", ISOLATED_PATH)
+        // Panes inherit the daemon's environment. Pin the shell and its rc file
+        // so a developer's login shell does not decide how long every pane takes
+        // to answer: an interactive zsh with plugins costs seconds per pane.
+        .env("SHELL", POSIX_SHELL)
+        .env("ENV", "")
+        .status()?;
+
+    anyhow::ensure!(
+        status.success(),
+        "embedded rmux scenario {scenario} failed: {status}"
+    );
+    Ok(())
+}
+
+enum RemotePaneStreamFrame {
+    Rebase(Vec<u8>),
+    Bytes(Vec<u8>),
+}
+
+fn spawn_remote_pane_stream(
+    payload: String,
+) -> Result<(Child, mpsc::Receiver<std::result::Result<String, String>>)> {
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", REMOTE_STREAM_CHILD_TEST, "--nocapture"])
+        .env(REMOTE_STREAM_PAYLOAD_ENV, payload)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("remote pane stream has no stdout")?;
+    let (lines_tx, lines_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|error| error.to_string());
+            let stopped = line.is_err();
+            if lines_tx.send(line).is_err() || stopped {
+                return;
+            }
+        }
+    });
+    Ok((child, lines_rx))
+}
+
+fn next_remote_pane_stream_frame(
+    frames: &mpsc::Receiver<std::result::Result<String, String>>,
+) -> Result<RemotePaneStreamFrame> {
+    let deadline = std::time::Instant::now()
+        .checked_add(PANE_TIMEOUT)
+        .context("pane deadline")?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = frames
+            .recv_timeout(remaining)
+            .map_err(|error| {
+                anyhow::anyhow!("remote pane stream did not produce a frame: {error}")
+            })?
+            .map_err(anyhow::Error::msg)?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(frame) = value.as_object() else {
+            continue;
+        };
+        if let Some(keyframe) = frame.get("Rebase").and_then(serde_json::Value::as_str) {
+            return Ok(RemotePaneStreamFrame::Rebase(
+                URL_SAFE_NO_PAD
+                    .decode(keyframe)
+                    .context("decode remote pane rebase")?,
+            ));
+        }
+        if let Some(bytes) = frame.get("Bytes").and_then(serde_json::Value::as_str) {
+            return Ok(RemotePaneStreamFrame::Bytes(
+                URL_SAFE_NO_PAD
+                    .decode(bytes)
+                    .context("decode remote pane output")?,
+            ));
+        }
+        if let Some(error) = frame.get("Error").and_then(serde_json::Value::as_str) {
+            anyhow::bail!("remote pane stream failed: {error}");
+        }
+        if frame.contains_key("End") {
+            anyhow::bail!("remote pane stream ended before its next frame");
+        }
+    }
+}
+
+fn unscoped_tag() -> MuxSessionTag {
+    MuxSessionTag {
+        identity: Some(new_session_identity()),
+        space: None,
+    }
+}
+
+fn create_embedded_session(
+    tag: MuxSessionTag,
+) -> Result<(
+    RmuxBackend,
+    std::sync::Arc<MuxBackendRegistry>,
+    String,
+    String,
+    bootty_mux::snapshot::MuxPaneAnchor,
+)> {
+    start_embedded_rmux_daemon_for_tests()?;
+    // Providers are registered by bootty-mux itself.
+    let registry = std::sync::Arc::new(MuxBackendRegistry::collect([MuxBackendKind::Rmux])?);
+    let session_id = format!("bootty-mux-test-{}", std::process::id());
+    let mut backend = RmuxBackend::new();
+    backend.execute(MuxCommand::CreateProjectSession {
+        session_id: session_id.clone(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        tag,
+    })?;
+
+    let snapshot = backend.snapshot()?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .context("created rmux session")?;
+    let window = session.windows.first().context("created rmux window")?;
+    let pane = window.panes.first().context("created rmux pane")?.clone();
+    Ok((backend, registry, session_id, window.id.clone(), pane))
+}
+
+fn open_terminal(
+    registry: std::sync::Arc<MuxBackendRegistry>,
+    pane: &bootty_mux::snapshot::MuxPaneAnchor,
+    window_id: &str,
+) -> Result<ActiveTerminal> {
+    open_terminal_with_window(registry, std::slice::from_ref(pane), pane, window_id)
+}
+
+fn open_terminal_with_window(
+    registry: std::sync::Arc<MuxBackendRegistry>,
+    panes: &[bootty_mux::snapshot::MuxPaneAnchor],
+    focused: &bootty_mux::snapshot::MuxPaneAnchor,
+    window_id: &str,
+) -> Result<ActiveTerminal> {
+    let mut terminal = ActiveTerminal::new(
+        TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        registry,
+        &MuxBindingConfig {
+            backend: MuxBackendKind::Rmux,
+            ..MuxBindingConfig::default()
+        },
+        TerminalSessionConfig::default(),
+        std::sync::Arc::new(|| {}),
+    )?;
+    terminal.sync_native_window(
+        panes,
+        Some(focused),
+        Some(window_id),
+        MuxBackendKind::Rmux,
+        false,
+    )?;
+    Ok(terminal)
+}
+
+fn ditch_session(backend: &mut RmuxBackend, session_id: &str) -> Result<()> {
+    backend.execute(MuxCommand::DitchSession {
+        session_id: session_id.to_owned(),
+    })?;
+    let snapshot = backend.snapshot()?;
+    anyhow::ensure!(
+        !snapshot
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+    );
+    Ok(())
+}
+
+fn active_pane_id(backend: &RmuxBackend, session_id: &str) -> Result<String> {
+    backend
+        .snapshot()?
+        .sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .context("rmux test session was not found")?
+        .windows
+        .into_iter()
+        .find(|window| window.active)
+        .context("rmux test active window was not found")?
+        .anchor
+        .pane_id
+        .context("rmux test active pane was not found")
+}
+
+fn pane_ids(backend: &RmuxBackend, session_id: &str) -> Result<Vec<String>> {
+    Ok(backend
+        .snapshot()?
+        .sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .context("rmux test session was not found")?
+        .windows
+        .into_iter()
+        .find(|window| window.active)
+        .context("rmux test active window was not found")?
+        .panes
+        .into_iter()
+        .filter_map(|pane| pane.pane_id)
+        .collect())
+}
+
+/// Poll the pane's frames until `matches` holds. `Some(text)` is the last frame
+/// seen before the deadline passed, so a failure reports what the pane was
+/// actually showing.
+fn poll_frames_until(
+    terminal: &mut ActiveTerminal,
+    deadline: std::time::Instant,
+    matches: impl Fn(&str) -> bool,
+) -> Result<Option<String>> {
+    loop {
+        terminal.drain_pty();
+        let frame = terminal.extract_frame()?;
+        let text = frame.text.iter().collect::<String>();
+        if matches(&text) {
+            return Ok(None);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(Some(text));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn wait_for_terminal_text(terminal: &mut ActiveTerminal, expected: &str) -> Result<()> {
+    let deadline = std::time::Instant::now()
+        .checked_add(PANE_TIMEOUT)
+        .context("pane deadline")?;
+    match poll_frames_until(terminal, deadline, |text| text.contains(expected))? {
+        None => Ok(()),
+        Some(text) => anyhow::bail!(
+            "rmux terminal did not publish {expected:?}, last frame: {:?}",
+            text.trim_end()
+        ),
+    }
+}
+
+/// Put the pane in the state every scenario expects: a shell that has claimed
+/// the pty, with echo off.
+///
+/// The probe is retried instead of waited on, because a pane drops input written
+/// before its shell claims the pty and prints nothing to announce that moment.
+/// Repeating the probe is harmless -- both halves are idempotent -- and it is
+/// the only part of a scenario that may run more than once.
+///
+/// Echo off matters as much as readiness: with it on, the pane's frame holds the
+/// command line that was typed, and a wait for a marker is satisfied by the
+/// command asking for it rather than by the pane printing it.
+fn prepare_pane(terminal: &mut ActiveTerminal) -> Result<()> {
+    let deadline = std::time::Instant::now()
+        .checked_add(PANE_TIMEOUT)
+        .context("pane deadline")?;
+    loop {
+        // Split so the echo of this line cannot answer for the pane.
+        terminal.write_input(b"stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
+        let attempt = (std::time::Instant::now()
+            .checked_add(PANE_PROBE_INTERVAL)
+            .context("probe deadline")?)
+        .min(deadline);
+        if poll_frames_until(terminal, attempt, |text| text.contains(PANE_READY))?.is_none() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "pane shell never answered a readiness probe"
+        );
+    }
+}

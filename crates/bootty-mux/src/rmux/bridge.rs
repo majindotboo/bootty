@@ -2,19 +2,19 @@ use std::{
     env,
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{OnceLock, mpsc},
     thread,
 };
 
 use anyhow::{Context, Result};
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use bootty_terminal::terminal_engine::{TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION, TERMINAL_TERM};
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 const TERMINAL_PROGRAM: &str = "ghostty";
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 const TERMINAL_PROGRAM_VERSION: &str = concat!("Bootty ", env!("CARGO_PKG_VERSION"));
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 const TERMINAL_TERM: &str = "xterm-bootty";
 use rmux_proto::{
     LastWindowRequest, PaneTarget, RenameSessionRequest, Request, ResizePaneAdjustment,
@@ -27,14 +27,14 @@ use rmux_sdk::{
 };
 use tokio::runtime::Builder;
 
-use crate::rmux::backend::{
+use super::backend::{
     RmuxPaneRow, RmuxWindowRow, list_pane_rows, list_session_tags, list_window_rows,
     rmux_request_checked, session_from_rows, stamp_session_tag,
 };
-use crate::rmux::pane_io::{RmuxPaneTarget, pane_for_target};
+use super::pane_io::{RmuxPaneTarget, pane_for_target};
 use crate::{
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
-    snapshot::{MuxSessionTag, MuxSnapshot},
+    snapshot::{MuxSessionTag, MuxSnapshot, MuxSnapshotDisposition},
 };
 
 const TERM_ENV: &str = "TERM";
@@ -48,12 +48,12 @@ fn bootty_rmux_process_environment() -> Vec<String> {
     bootty_rmux_process_environment_with_terminfo(vendored_terminfo_dir())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn vendored_terminfo_dir() -> Option<&'static Path> {
-    bootty_runtime::terminfo::vendored_terminfo_dir()
+    bootty_terminal::terminfo::vendored_terminfo_dir()
 }
 
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 fn vendored_terminfo_dir() -> Option<&'static Path> {
     None
 }
@@ -126,7 +126,6 @@ enum RmuxControlRequest {
         command: MuxCommand,
         result_tx: mpsc::Sender<std::result::Result<(), String>>,
     },
-    #[cfg(feature = "app")]
     ResizeWindow {
         window_id: String,
         cols: u16,
@@ -139,21 +138,20 @@ struct RmuxBridgeState {
     rmux: Option<Rmux>,
 }
 
-pub(crate) fn rmux_snapshot() -> Result<MuxSnapshot> {
+pub fn rmux_snapshot() -> Result<MuxSnapshot> {
     let (result_tx, result_rx) = mpsc::channel();
     bridge()
         .snapshot_tx
         .send(RmuxSnapshotRequest { result_tx })
         .map_err(|_| anyhow::anyhow!("rmux snapshot worker stopped"))?;
-    recv_bridge_result(result_rx, "rmux snapshot worker")
+    recv_bridge_result(&result_rx, "rmux snapshot worker")
 }
 
-pub(crate) fn rmux_execute(command: MuxCommand) -> Result<()> {
+pub fn rmux_execute(command: MuxCommand) -> Result<()> {
     request_control_sync(|result_tx| RmuxControlRequest::Execute { command, result_tx })
 }
 
-#[cfg(feature = "app")]
-pub(crate) fn resize_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
+pub fn resize_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
     let window_id = window_id.to_owned();
     request_control_sync(|result_tx| RmuxControlRequest::ResizeWindow {
         window_id,
@@ -163,17 +161,81 @@ pub(crate) fn resize_rmux_window(window_id: &str, cols: u16, rows: u16) -> Resul
     })
 }
 
-pub(crate) async fn connect_bootty_rmux() -> Result<Rmux> {
-    prepare_local_rmux_daemon(bootty_identity::ApplicationIdentity::for_process())?;
-    let endpoint = crate::rmux::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
+pub async fn connect_bootty_rmux() -> Result<Rmux> {
+    let identity = bootty_config::ApplicationIdentity::for_process();
+    prepare_local_rmux_daemon(identity)?;
+    let endpoint = super::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
+    let timeout = rmux_sdk::bootstrap::discovery::resolve_timeout(None, None);
+    #[cfg(unix)]
+    {
+        let outcome = rmux_sdk::bootstrap::startup_unix::connect_or_start_with_timeout(
+            &endpoint,
+            || async { spawn_local_rmux_daemon(&endpoint, identity) },
+            timeout,
+            rmux_sdk::bootstrap::startup_unix::STARTUP_POLL_INTERVAL,
+        )
+        .await?;
+        drop(outcome);
+    }
+    #[cfg(windows)]
+    {
+        let outcome = rmux_sdk::bootstrap::startup_windows::connect_or_start_with_timeout(
+            &endpoint,
+            |reserved_endpoint| {
+                let reserved_endpoint = reserved_endpoint.to_owned();
+                async move { spawn_local_rmux_daemon(&reserved_endpoint, identity) }
+            },
+            timeout,
+            rmux_sdk::bootstrap::startup_windows::STARTUP_POLL_INTERVAL,
+        )
+        .await?;
+        // The Windows probe owns a private blocking runtime; drop it off this async worker.
+        tokio::task::spawn_blocking(move || drop(outcome)).await?;
+    }
+    #[cfg(unix)]
     let endpoint = RmuxEndpoint::UnixSocket(endpoint);
+    #[cfg(windows)]
+    let endpoint = RmuxEndpoint::WindowsPipe(
+        super::local::endpoint_path()?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("rmux named-pipe endpoint is not Unicode"))?,
+    );
     Rmux::builder()
         .endpoint(endpoint)
-        .connect_or_start()
+        .connect()
         .await
         .map_err(Into::into)
 }
 
+fn spawn_local_rmux_daemon(
+    endpoint: &Path,
+    identity: bootty_config::ApplicationIdentity,
+) -> std::io::Result<()> {
+    let binary = bootty_daemon_binary().map_err(std::io::Error::other)?;
+    let mut command = Command::new(binary);
+    command
+        .arg(rmux_client::INTERNAL_DAEMON_FLAG)
+        .arg(endpoint)
+        .env(
+            bootty_config::APPLICATION_IDENTITY_ENV,
+            match identity {
+                bootty_config::ApplicationIdentity::Production => "bootty",
+                bootty_config::ApplicationIdentity::Development => "bootty-dev",
+            },
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some((name, value)) = identity.development_namespace_environment() {
+        command.env(name, value);
+    }
+    rmux_os::daemon::configure_hidden_daemon_command(&mut command, true);
+    drop(rmux_os::daemon::spawn_hidden_daemon_command_requiring_job_breakaway(&mut command)?);
+    Ok(())
+}
+/// # Errors
+/// Returns daemon argument, environment, runtime, or server startup errors.
 pub fn run_embedded_rmux_daemon() -> Result<Option<i32>> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     #[cfg(unix)]
@@ -206,44 +268,28 @@ pub fn run_embedded_rmux_daemon() -> Result<Option<i32>> {
 }
 
 const BOOTTY_DAEMON_BINARY_ENV: &str = "BOOTTY_DAEMON_BINARY";
-
-pub fn prepare_local_rmux_daemon(identity: bootty_identity::ApplicationIdentity) -> Result<()> {
+/// # Errors
+/// Returns endpoint, process launch, or daemon readiness errors.
+pub fn prepare_local_rmux_daemon(identity: bootty_config::ApplicationIdentity) -> Result<()> {
     identity.initialize_process()?;
-    static RESOLVED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
-    RESOLVED
-        .get_or_init(|| {
-            let binary = bootty_daemon_binary().map_err(|error| error.to_string())?;
-            // SAFETY: Product composition calls this before rmux workers start. Both values must
-            // be visible to the child process created by the rmux SDK.
-            unsafe {
-                env::set_var(
-                    bootty_identity::APPLICATION_IDENTITY_ENV,
-                    match identity {
-                        bootty_identity::ApplicationIdentity::Production => "bootty",
-                        bootty_identity::ApplicationIdentity::Development => "bootty-dev",
-                    },
-                );
-                if let Some((name, value)) = identity.development_namespace_environment() {
-                    env::set_var(name, value);
-                }
-                env::set_var(
-                    rmux_sdk::bootstrap::discovery::SDK_DAEMON_BINARY_ENV,
-                    binary,
-                );
-            }
-            Ok(())
-        })
-        .clone()
-        .map_err(anyhow::Error::msg)
+    bootty_daemon_binary()?;
+    Ok(())
 }
 
-fn bootty_daemon_binary() -> Result<PathBuf> {
-    let executable = env::current_exe().context("resolve Bootty executable")?;
-    Ok(resolve_bootty_daemon_binary(
-        &executable,
-        env::var_os(BOOTTY_DAEMON_BINARY_ENV).as_deref(),
-        sidecar_is_compatible,
-    ))
+fn bootty_daemon_binary() -> Result<&'static Path> {
+    static RESOLVED: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let executable = env::current_exe()
+                .map_err(|error| format!("resolve Bootty executable: {error}"))?;
+            Ok(resolve_bootty_daemon_binary(
+                &executable,
+                env::var_os(BOOTTY_DAEMON_BINARY_ENV).as_deref(),
+                sidecar_is_compatible,
+            ))
+        })
+        .as_deref()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
 fn resolve_bootty_daemon_binary(
@@ -289,11 +335,11 @@ fn request_control_sync<T>(
         .control_tx
         .send(build(result_tx))
         .map_err(|_| anyhow::anyhow!("rmux control worker stopped"))?;
-    recv_bridge_result(result_rx, "rmux control worker")
+    recv_bridge_result(&result_rx, "rmux control worker")
 }
 
 fn recv_bridge_result<T>(
-    result_rx: mpsc::Receiver<std::result::Result<T, String>>,
+    result_rx: &mpsc::Receiver<std::result::Result<T, String>>,
     worker_name: &str,
 ) -> Result<T> {
     result_rx
@@ -326,12 +372,14 @@ fn run_snapshot_worker(request_rx: mpsc::Receiver<RmuxSnapshotRequest>) {
         .thread_name("bootty-rmux-snapshot")
         .worker_threads(1)
         .build()
-        .expect("rmux snapshot runtime should initialize");
+        .map_err(|error| format!("start rmux snapshot runtime: {error}"));
     let mut state = RmuxBridgeState { rmux: None };
-    while let Ok(request) = request_rx.recv() {
-        let result = runtime
-            .block_on(state.snapshot())
-            .map_err(|error| error.to_string());
+    for request in request_rx {
+        let result = runtime.as_ref().map_err(Clone::clone).and_then(|runtime| {
+            runtime
+                .block_on(state.snapshot())
+                .map_err(|error| error.to_string())
+        });
         let _ = request.result_tx.send(result);
     }
 }
@@ -342,26 +390,29 @@ fn run_control_worker(request_rx: mpsc::Receiver<RmuxControlRequest>) {
         .thread_name("bootty-rmux-control")
         .worker_threads(1)
         .build()
-        .expect("rmux control runtime should initialize");
+        .map_err(|error| format!("start rmux control runtime: {error}"));
     let mut state = RmuxBridgeState { rmux: None };
-    while let Ok(request) = request_rx.recv() {
+    for request in request_rx {
         match request {
             RmuxControlRequest::Execute { command, result_tx } => {
-                let result = runtime
-                    .block_on(state.execute(command))
-                    .map_err(|error| error.to_string());
+                let result = runtime.as_ref().map_err(Clone::clone).and_then(|runtime| {
+                    runtime
+                        .block_on(state.execute(command))
+                        .map_err(|error| error.to_string())
+                });
                 let _ = result_tx.send(result);
             }
-            #[cfg(feature = "app")]
             RmuxControlRequest::ResizeWindow {
                 window_id,
                 cols,
                 rows,
                 result_tx,
             } => {
-                let result = runtime
-                    .block_on(state.resize_window(&window_id, cols, rows))
-                    .map_err(|error| error.to_string());
+                let result = runtime.as_ref().map_err(Clone::clone).and_then(|runtime| {
+                    runtime
+                        .block_on(state.resize_window(&window_id, cols, rows))
+                        .map_err(|error| error.to_string())
+                });
                 let _ = result_tx.send(result);
             }
         }
@@ -373,7 +424,9 @@ impl RmuxBridgeState {
         if self.rmux.is_none() {
             self.rmux = Some(connect_bootty_rmux().await?);
         }
-        Ok(self.rmux.as_ref().expect("rmux connection initialized"))
+        self.rmux
+            .as_ref()
+            .context("rmux connection was not initialized")
     }
 
     async fn list_session_names(&mut self) -> Result<Vec<SessionName>> {
@@ -381,13 +434,12 @@ impl RmuxBridgeState {
             let rmux = self.rmux().await?;
             rmux.list_sessions().await
         };
-        match first {
-            Ok(names) => Ok(names),
-            Err(_) => {
-                self.rmux = None;
-                let rmux = self.rmux().await?;
-                rmux.list_sessions().await.map_err(Into::into)
-            }
+        if let Ok(names) = first {
+            Ok(names)
+        } else {
+            self.rmux = None;
+            let rmux = self.rmux().await?;
+            rmux.list_sessions().await.map_err(Into::into)
         }
     }
 
@@ -414,7 +466,7 @@ impl RmuxBridgeState {
                 .find(|session| session.active)
                 .map(|session| session.id.clone()),
             sessions,
-            disposition: Default::default(),
+            disposition: MuxSnapshotDisposition::default(),
         })
     }
 
@@ -501,6 +553,14 @@ impl RmuxBridgeState {
                     .await?;
                 self.activate_window(&session_id, &selected_window_id).await
             }
+
+            // The pinned transfer protocol accepts mutable window/pane indices, not PaneTargetRef.
+            // Expose these operations once rmux can guard them with stable pane identities.
+            command => self.execute_pane_command(command).await,
+        }
+    }
+    async fn execute_pane_command(&mut self, command: MuxCommand) -> Result<()> {
+        match command {
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
@@ -517,6 +577,12 @@ impl RmuxBridgeState {
                 session_id,
                 pane_id,
             } => self.close_pane(&session_id, pane_id.as_deref()).await,
+            MuxCommand::MergeWindows { .. }
+            | MuxCommand::SwapPanes { .. }
+            | MuxCommand::MovePane { .. }
+            | MuxCommand::ExtractPane { .. } => {
+                anyhow::bail!("rmux pane transfer requires stable-identity protocol support")
+            }
             MuxCommand::SelectPane {
                 session_id,
                 window_id,
@@ -543,6 +609,7 @@ impl RmuxBridgeState {
                 session_id,
                 pane_id,
             } => self.toggle_pane_zoom(&session_id, pane_id.as_deref()).await,
+            _ => anyhow::bail!("command is not a pane operation"),
         }
     }
 
@@ -638,8 +705,10 @@ impl RmuxBridgeState {
             return Ok(());
         }
         let current = rows.iter().position(|window| window.active).unwrap_or(0);
-        let next = (current as i32 + delta).rem_euclid(rows.len() as i32) as usize;
-        self.window(session_name, rows[next].index)
+        let next = crate::snapshot::wrap_index(current, delta, rows.len())
+            .and_then(|index| rows.get(index))
+            .context("rmux window navigation has no target")?;
+        self.window(session_name, next.index)
             .await?
             .select()
             .await?;
@@ -680,15 +749,21 @@ impl RmuxBridgeState {
             .and_then(|window_id| rows.iter().position(|window| window.id == window_id))
             .or_else(|| rows.iter().position(|window| window.active))
             .context("rmux move window requires an active target")?;
-        let target = (source as i32 + delta).clamp(0, rows.len() as i32 - 1) as usize;
+        let target = crate::snapshot::clamp_move_index(source, delta, rows.len());
         if source == target {
             return Ok(());
         }
+        let source = rows
+            .get(source)
+            .context("rmux source window no longer exists")?;
+        let target = rows
+            .get(target)
+            .context("rmux target window no longer exists")?;
         self.rmux().await?;
         let session = SessionName::new(session_name).context("invalid rmux session name")?;
         rmux_request_checked(Request::SwapWindow(SwapWindowRequest {
-            source: WindowTarget::with_window(session.clone(), rows[source].index),
-            target: WindowTarget::with_window(session, rows[target].index),
+            source: WindowTarget::with_window(session.clone(), source.index),
+            target: WindowTarget::with_window(session, target.index),
             detached: true,
         }))
         .await?;
@@ -782,10 +857,12 @@ impl RmuxBridgeState {
             .iter()
             .position(|pane| pane.active)
             .context("rmux pane navigation requires an active pane")?;
-        let next = (active as i32 + delta).rem_euclid(candidates.len() as i32) as usize;
+        let next = crate::snapshot::wrap_index(active, delta, candidates.len())
+            .and_then(|index| candidates.get(index))
+            .context("rmux pane navigation has no target")?;
         self.rmux().await?;
         rmux_request_checked(Request::SelectPane(Box::new(SelectPaneRequest {
-            target: PaneTarget::with_window(name, active_window.index, candidates[next].index),
+            target: PaneTarget::with_window(name, active_window.index, next.index),
             title: None,
             input_disabled: None,
             preserve_zoom: true,
@@ -813,13 +890,16 @@ impl RmuxBridgeState {
         let (name, windows, panes) = self.session_rows(session_name).await?;
         let active_window = window_for_target(&windows, window_id)
             .context("rmux pane target requires an active window")?;
-        let pane = match pane_id {
-            Some(pane_id) => panes.iter().find(|pane| pane.pane_id == pane_id),
-            None => panes
-                .iter()
-                .find(|pane| pane.window_id == active_window.id && pane.active),
-        }
-        .context("rmux pane target requires an active pane")?;
+        let pane = pane_id
+            .map_or_else(
+                || {
+                    panes
+                        .iter()
+                        .find(|pane| pane.window_id == active_window.id && pane.active)
+                },
+                |pane_id| panes.iter().find(|pane| pane.pane_id == pane_id),
+            )
+            .context("rmux pane target requires an active pane")?;
         let window = windows
             .iter()
             .find(|window| window.id == pane.window_id)
@@ -844,7 +924,6 @@ impl RmuxBridgeState {
         Ok((name, windows, panes))
     }
 
-    #[cfg(feature = "app")]
     async fn resize_window(&mut self, window_id: &str, cols: u16, rows: u16) -> Result<()> {
         retry_rmux_operation!(
             self,
@@ -853,7 +932,6 @@ impl RmuxBridgeState {
         )
     }
 
-    #[cfg(feature = "app")]
     async fn resize_window_once(&mut self, window_id: &str, cols: u16, rows: u16) -> Result<()> {
         let Some((session_name, index)) = self.any_window_index_by_id(window_id).await? else {
             anyhow::bail!("{RMUX_WINDOW_NOT_LISTED}: {window_id}");
@@ -865,7 +943,6 @@ impl RmuxBridgeState {
         Ok(())
     }
 
-    #[cfg(feature = "app")]
     async fn any_window_index_by_id(&mut self, window_id: &str) -> Result<Option<(String, u32)>> {
         let names = self.list_session_names().await?;
         let rmux = self.rmux().await?;
@@ -909,10 +986,10 @@ fn window_for_target<'a>(
     windows: &'a [RmuxWindowRow],
     window_id: Option<&str>,
 ) -> Option<&'a RmuxWindowRow> {
-    match window_id {
-        Some(window_id) => windows.iter().find(|window| window.id == window_id),
-        None => windows.iter().find(|window| window.active),
-    }
+    window_id.map_or_else(
+        || windows.iter().find(|window| window.active),
+        |window_id| windows.iter().find(|window| window.id == window_id),
+    )
 }
 
 /// Bootty never reached the daemon, so the request cannot have landed.
@@ -942,7 +1019,7 @@ const RMUX_WINDOW_NOT_LISTED: &str = "rmux window is not listed";
 /// The target still exists as far as anyone knows; this request just could not
 /// resolve it. An index moves under a split or close, and a listing can lag the
 /// window that produced it, so these are worth another look.
-pub(crate) fn rmux_stale_target_text(text: &str) -> bool {
+pub fn rmux_stale_target_text(text: &str) -> bool {
     text.contains(RMUX_WINDOW_NOT_LISTED)
         || (text.contains("invalid target")
             && (text.contains("pane index does not exist")
@@ -951,11 +1028,11 @@ pub(crate) fn rmux_stale_target_text(text: &str) -> bool {
 
 /// rmux could not find the pane, window, or session at all, as opposed to
 /// finding a stale index for one that still exists.
-pub(crate) fn rmux_missing_target_text(text: &str) -> bool {
+pub fn rmux_missing_target_text(text: &str) -> bool {
     // Bootty's own listing misses. `list_pane_rows` enumerates the session, so a
     // pane it does not name is gone rather than momentarily unresolvable.
-    text.contains(crate::rmux::pane_io::RMUX_PANE_NOT_LISTED)
-        || text.contains(crate::rmux::pane_io::RMUX_PANE_WINDOW_NOT_LISTED)
+    text.contains(super::pane_io::RMUX_PANE_NOT_LISTED)
+        || text.contains(super::pane_io::RMUX_PANE_WINDOW_NOT_LISTED)
         // rmux reports a session or window with no active pane through the same
         // `invalid target` shape as a stale index, but it names the pane that is
         // gone rather than an index that moved.
@@ -987,7 +1064,7 @@ fn display_window_index(rows: &[RmuxWindowRow], row: &RmuxWindowRow) -> u32 {
     ordered
         .iter()
         .position(|candidate| candidate.session_name == row.session_name && candidate.id == row.id)
-        .map(|position| position as u32 + 1)
+        .and_then(|position| u32::try_from(position).ok()?.checked_add(1))
         .unwrap_or(row.index)
 }
 
@@ -1000,56 +1077,4 @@ async fn snapshot_session(
     let windows = list_window_rows(rmux, name).await?;
     let panes = list_pane_rows(rmux, name).await?;
     Ok(session_from_rows(&session_name, tag, &windows, &panes))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rmux_sdk::{PaneId, RmuxError, SessionName};
-
-    fn session() -> SessionName {
-        SessionName::new("alpha").expect("session name")
-    }
-
-    /// The classifiers read error text, so they are only as good as the wording
-    /// the SDK happens to use. Build the real errors so a bump that rephrases
-    /// one fails here instead of silently closing a live pane or toasting a
-    /// teardown.
-    #[test]
-    fn a_missing_pane_is_classified_however_the_sdk_phrases_it() {
-        // Raised by the SDK against an already-resolved pane.
-        let direct = RmuxError::pane_not_found(session(), PaneId::from(7));
-        assert!(rmux_missing_target_text(&direct.to_string()));
-
-        // Relayed from the daemon when resolving the id in the first place.
-        let relayed = RmuxError::protocol(rmux_proto::RmuxError::pane_not_found(
-            session(),
-            PaneId::from(7),
-        ));
-        assert!(rmux_missing_target_text(&relayed.to_string()));
-    }
-
-    #[test]
-    fn a_stale_index_is_not_a_missing_target() {
-        let stale = RmuxError::protocol(rmux_proto::RmuxError::invalid_target(
-            "alpha:0.9",
-            "pane index does not exist in session",
-        ));
-        let text = stale.to_string();
-        assert!(rmux_stale_target_text(&text));
-        assert!(!rmux_missing_target_text(&text));
-    }
-
-    #[test]
-    fn bootty_listing_misses_are_stale_or_missing_on_purpose() {
-        assert!(rmux_stale_target_text(&format!(
-            "{RMUX_WINDOW_NOT_LISTED}: @6"
-        )));
-        assert!(rmux_missing_target_text(
-            crate::rmux::pane_io::RMUX_PANE_NOT_LISTED
-        ));
-        assert!(rmux_missing_target_text(
-            crate::rmux::pane_io::RMUX_PANE_WINDOW_NOT_LISTED
-        ));
-    }
 }

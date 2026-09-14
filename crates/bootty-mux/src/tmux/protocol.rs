@@ -67,12 +67,14 @@ pub struct TmuxControlParser {
 }
 
 impl TmuxControlParser {
+    /// # Errors
+    /// Returns a format or syntax error when a completed control notification is invalid.
     pub fn put(
         &mut self,
         byte: u8,
     ) -> std::result::Result<Option<TmuxControlNotification>, TmuxParseError> {
         if byte != b'\n' {
-            self.line.push(byte as char);
+            self.line.push(char::from(byte));
             return Ok(None);
         }
 
@@ -80,7 +82,8 @@ impl TmuxControlParser {
         self.line.clear();
         self.parse_line(&line)
     }
-
+    /// # Errors
+    /// Returns the first invalid control notification encountered in the supplied bytes.
     pub fn put_str(
         &mut self,
         input: &str,

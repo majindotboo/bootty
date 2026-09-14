@@ -1,10 +1,11 @@
+use crate::snapshot::{clamp_move_index, wrap_index};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 
 use crate::{
     backend::MuxBackend,
@@ -35,6 +36,7 @@ struct NativeWindow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NativeSession {
+    next_window: u64,
     id: String,
     name: String,
     active_window_id: String,
@@ -53,7 +55,7 @@ struct NativeMuxState {
 }
 
 impl NativeMuxState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             active_session_id: String::new(),
             sessions: Vec::new(),
@@ -61,7 +63,12 @@ impl NativeMuxState {
         }
     }
 
-    fn ensure_session(&mut self, session_id: &str, cwd: impl Into<PathBuf>, tag: MuxSessionTag) {
+    fn ensure_session(
+        &mut self,
+        session_id: &str,
+        cwd: impl Into<PathBuf>,
+        tag: MuxSessionTag,
+    ) -> Result<()> {
         if let Some(session) = self
             .sessions
             .iter_mut()
@@ -71,10 +78,10 @@ impl NativeMuxState {
                 session.tag = tag;
             }
             session_id.clone_into(&mut self.active_session_id);
-            return;
+            return Ok(());
         }
 
-        let pane_id = self.next_pane_id();
+        let pane_id = self.next_pane_id()?;
         let cwd = cwd.into();
         let window = NativeWindow {
             id: "tab-1".to_owned(),
@@ -84,6 +91,7 @@ impl NativeMuxState {
             panes: vec![NativePane { id: pane_id, cwd }],
         };
         self.sessions.push(NativeSession {
+            next_window: 2,
             id: session_id.to_owned(),
             name: session_id.to_owned(),
             active_window_id: window.id.clone(),
@@ -91,6 +99,7 @@ impl NativeMuxState {
             tag,
         });
         session_id.clone_into(&mut self.active_session_id);
+        Ok(())
     }
 
     fn stamp_session(&mut self, session_id: &str, tag: MuxSessionTag) {
@@ -153,8 +162,8 @@ impl NativeMuxState {
             .find(|window| window.id == window_id)
     }
 
-    fn new_window(&mut self, session_id: &str, cwd: Option<PathBuf>) {
-        let pane_id = self.next_pane_id();
+    fn new_window(&mut self, session_id: &str, cwd: Option<PathBuf>) -> Result<()> {
+        let pane_id = self.next_pane_id()?;
         if let Some(session) = self.active_session_mut(session_id) {
             let cwd = cwd.unwrap_or_else(|| {
                 session
@@ -164,9 +173,12 @@ impl NativeMuxState {
                     .and_then(|window| window.panes.first())
                     .map_or_else(|| PathBuf::from("."), |pane| pane.cwd.clone())
             });
-            let index = session.windows.len() as u32 + 1;
+            let index = u32::try_from(session.windows.len())
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .context("native window capacity exhausted")?;
             let window = NativeWindow {
-                id: next_window_id(session),
+                id: next_window_id(session)?,
                 index,
                 name: default_window_name(),
                 active_pane_id: pane_id.clone(),
@@ -176,6 +188,7 @@ impl NativeMuxState {
             session.windows.push(window);
             session_id.clone_into(&mut self.active_session_id);
         }
+        Ok(())
     }
 
     fn activate_relative_window(&mut self, session_id: &str, delta: i32) {
@@ -185,10 +198,12 @@ impl NativeMuxState {
                 .iter()
                 .position(|window| window.id == session.active_window_id)
         {
-            let next = wrap_index(index, delta, session.windows.len());
-            session
-                .active_window_id
-                .clone_from(&session.windows[next].id);
+            let Some(next) = wrap_index(index, delta, session.windows.len())
+                .and_then(|next| session.windows.get(next))
+            else {
+                return;
+            };
+            session.active_window_id.clone_from(&next.id);
             session_id.clone_into(&mut self.active_session_id);
         }
     }
@@ -215,7 +230,7 @@ impl NativeMuxState {
                 session.windows.insert(next, window);
                 session.active_window_id = target;
                 for (index, window) in session.windows.iter_mut().enumerate() {
-                    window.index = index as u32 + 1;
+                    window.index = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
                 }
             }
         }
@@ -227,33 +242,34 @@ impl NativeMuxState {
         self.window_mut(session_id, &active_window_id)
     }
 
-    fn split_pane(&mut self, session_id: &str, source_pane_id: Option<&str>) {
-        let pane_id = self.next_pane_id();
-        if let Some(window) = self.active_window_mut(session_id) {
-            // Seed the new pane's cwd from the pane being split (the focused one), falling back to
-            // the active pane and then the first pane.
-            let cwd = source_pane_id
-                .and_then(|id| window.panes.iter().find(|pane| pane.id == id))
-                .or_else(|| {
-                    window
-                        .panes
-                        .iter()
-                        .find(|pane| pane.id == window.active_pane_id)
-                })
-                .or_else(|| window.panes.first())
-                .map_or_else(|| PathBuf::from("."), |pane| pane.cwd.clone());
-            window.active_pane_id.clone_from(&pane_id);
-            window.panes.push(NativePane { id: pane_id, cwd });
-            session_id.clone_into(&mut self.active_session_id);
-        }
-    }
-
-    fn set_active_pane(&mut self, session_id: &str, pane_id: &str) {
-        if let Some(window) = self.active_window_mut(session_id)
-            && window.panes.iter().any(|pane| pane.id == pane_id)
-        {
-            pane_id.clone_into(&mut window.active_pane_id);
-        }
+    fn split_pane(&mut self, session_id: &str, source_pane_id: Option<&str>) -> Result<()> {
+        let (window_id, cwd) = {
+            let session = self
+                .active_session_mut(session_id)
+                .context("session no longer exists")?;
+            let (window, pane) = target_pane_location(session, source_pane_id)?;
+            let window = session
+                .windows
+                .get(window)
+                .context("window no longer exists")?;
+            (
+                window.id.clone(),
+                window
+                    .panes
+                    .get(pane)
+                    .context("pane no longer exists")?
+                    .cwd
+                    .clone(),
+            )
+        };
+        let pane_id = self.next_pane_id()?;
+        let window = self
+            .window_mut(session_id, &window_id)
+            .context("window no longer exists")?;
+        window.active_pane_id.clone_from(&pane_id);
+        window.panes.push(NativePane { id: pane_id, cwd });
+        self.activate_window(session_id, &window_id);
+        Ok(())
     }
 
     fn select_relative_pane(&mut self, session_id: &str, delta: i32) {
@@ -263,8 +279,12 @@ impl NativeMuxState {
                 .iter()
                 .position(|pane| pane.id == window.active_pane_id)
         {
-            let next = wrap_index(index, delta, window.panes.len());
-            window.active_pane_id.clone_from(&window.panes[next].id);
+            let Some(next) = wrap_index(index, delta, window.panes.len())
+                .and_then(|next| window.panes.get(next))
+            else {
+                return;
+            };
+            window.active_pane_id.clone_from(&next.id);
             session_id.clone_into(&mut self.active_session_id);
         }
     }
@@ -276,69 +296,62 @@ impl NativeMuxState {
         self.select_relative_pane(session_id, delta);
     }
 
-    fn kill_active_pane(&mut self, session_id: &str) {
-        if let Some(window) = self.active_window_mut(session_id) {
-            if window.panes.len() <= 1 {
-                return;
-            }
-            if let Some(index) = window
-                .panes
-                .iter()
-                .position(|pane| pane.id == window.active_pane_id)
-            {
-                window.panes.remove(index);
-                window
-                    .active_pane_id
-                    .clone_from(&window.panes[index.min(window.panes.len() - 1)].id);
-            }
-        }
+    fn select_directional_pane(
+        &mut self,
+        session_id: &str,
+        window_id: Option<&str>,
+        direction: crate::command::MuxDirection,
+    ) {
+        let delta = match direction {
+            crate::command::MuxDirection::Left | crate::command::MuxDirection::Up => -1,
+            crate::command::MuxDirection::Right | crate::command::MuxDirection::Down => 1,
+        };
+        self.select_pane(session_id, window_id, delta);
+    }
+
+    fn move_window_preserving_selection(
+        &mut self,
+        session_id: &str,
+        window_id: &str,
+        delta: i32,
+        selected_window_id: &str,
+    ) {
+        self.move_window(session_id, Some(window_id), delta);
+        self.activate_window(session_id, selected_window_id);
     }
 
     // Close the requested pane; when it was the last pane in its window, cascade to remove that
     // window. The target can belong to an inactive tab, so never route through active_window_mut.
-    fn close_pane(&mut self, session_id: &str, pane_id: Option<&str>) {
+    fn close_pane(
+        &mut self,
+        session_id: &str,
+        pane_id: Option<&str>,
+        close_window: bool,
+    ) -> Result<()> {
         let changed_active_session = {
-            let Some(session) = self.active_session_mut(session_id) else {
-                return;
-            };
-            let window_index = pane_id
-                .and_then(|pane_id| {
-                    session
-                        .windows
-                        .iter()
-                        .position(|window| window.panes.iter().any(|pane| pane.id == pane_id))
-                })
-                .or_else(|| {
-                    session
-                        .windows
-                        .iter()
-                        .position(|window| window.id == session.active_window_id)
-                });
-            let Some(window_index) = window_index else {
-                return;
-            };
-            let target_was_active = session.windows[window_index].id == session.active_window_id;
-            let pane_index = {
-                let window = &session.windows[window_index];
-                pane_id
-                    .and_then(|pane_id| window.panes.iter().position(|pane| pane.id == pane_id))
-                    .or_else(|| {
-                        window
-                            .panes
-                            .iter()
-                            .position(|pane| pane.id == window.active_pane_id)
-                    })
-            };
-            let Some(pane_index) = pane_index else {
-                return;
-            };
-            let window = &mut session.windows[window_index];
-            let removed_active_pane = window.panes[pane_index].id == window.active_pane_id;
+            let session = self
+                .active_session_mut(session_id)
+                .context("session no longer exists")?;
+            let (window_index, pane_index) = target_pane_location(session, pane_id)?;
+            let window = session
+                .windows
+                .get_mut(window_index)
+                .context("window no longer exists")?;
+            if !close_window && window.panes.len() <= 1 {
+                return Ok(());
+            }
+            let target_was_active = window.id == session.active_window_id;
+            let removed_active_pane = window
+                .panes
+                .get(pane_index)
+                .context("pane no longer exists")?
+                .id
+                == window.active_pane_id;
             window.panes.remove(pane_index);
             if window.panes.is_empty() {
                 session.windows.remove(window_index);
                 for (position, window) in session.windows.iter_mut().enumerate() {
-                    window.index = position as u32 + 1;
+                    window.index = u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX);
                 }
                 if target_was_active {
                     session.active_window_id = session
@@ -346,16 +359,19 @@ impl NativeMuxState {
                         .get(window_index.min(session.windows.len().saturating_sub(1)))
                         .map_or_else(String::new, |window| window.id.clone());
                 }
-            } else if removed_active_pane {
-                window
-                    .active_pane_id
-                    .clone_from(&window.panes[pane_index.min(window.panes.len() - 1)].id);
+            } else if removed_active_pane
+                && let Some(next) = window
+                    .panes
+                    .get(pane_index.min(window.panes.len().saturating_sub(1)))
+            {
+                window.active_pane_id.clone_from(&next.id);
             }
             target_was_active
         };
         if changed_active_session {
             session_id.clone_into(&mut self.active_session_id);
         }
+        Ok(())
     }
 
     fn snapshot(&self) -> MuxSnapshot {
@@ -422,10 +438,13 @@ impl NativeMuxState {
         }
     }
 
-    fn next_pane_id(&mut self) -> String {
+    fn next_pane_id(&mut self) -> Result<String> {
         let id = format!("pane-{}", self.next_pane);
-        self.next_pane += 1;
-        id
+        self.next_pane = self
+            .next_pane
+            .checked_add(1)
+            .context("native pane identities exhausted")?;
+        Ok(id)
     }
 }
 
@@ -452,16 +471,14 @@ fn anchor_for_optional_pane(session_id: &str, pane: Option<&NativePane>) -> MuxP
     }
 }
 
-fn next_window_id(session: &NativeSession) -> String {
-    let next = session
-        .windows
-        .iter()
-        .filter_map(|window| window.id.strip_prefix("tab-"))
-        .filter_map(|suffix| suffix.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0)
-        + 1;
-    format!("tab-{next}")
+fn next_window_id(session: &mut NativeSession) -> Result<String> {
+    // Never reuse a closed tab's identity: queued UI commands may still name it.
+    let id = format!("tab-{}", session.next_window);
+    session.next_window = session
+        .next_window
+        .checked_add(1)
+        .context("native window identities exhausted")?;
+    Ok(id)
 }
 
 fn default_window_name() -> String {
@@ -478,20 +495,234 @@ fn default_window_name() -> String {
         .unwrap_or_else(|| "shell".to_owned())
 }
 
+impl NativeMuxState {
+    fn merge_windows(&mut self, session_id: &str, source: &str, target: &str) -> Result<()> {
+        let session = self
+            .active_session_mut(session_id)
+            .context("session no longer exists")?;
+        let source_index = session
+            .windows
+            .iter()
+            .position(|window| window.id == source)
+            .context("source tab no longer exists")?;
+        if source == target {
+            bail!("a tab cannot be merged into itself");
+        }
+        let target_index = session
+            .windows
+            .iter()
+            .position(|window| window.id == target)
+            .context("target tab no longer exists")?;
+        let [source, target] = session
+            .windows
+            .get_disjoint_mut([source_index, target_index])
+            .context("tabs must be distinct and live")?;
+        target.panes.append(&mut source.panes);
+        target.active_pane_id.clone_from(&source.active_pane_id);
+        session.active_window_id.clone_from(&target.id);
+        session.windows.remove(source_index);
+        renumber_windows(session);
+        session_id.clone_into(&mut self.active_session_id);
+        Ok(())
+    }
+
+    fn swap_panes(&mut self, session_id: &str, source: &str, target: &str) -> Result<()> {
+        let session = self
+            .active_session_mut(session_id)
+            .context("session no longer exists")?;
+        let (source_window, source_index) =
+            pane_location(session, source).context("source pane no longer exists")?;
+        let (target_window, target_index) =
+            pane_location(session, target).context("target pane no longer exists")?;
+        if source == target {
+            bail!("a pane cannot be swapped with itself");
+        }
+        if source_window == target_window {
+            let window = session
+                .windows
+                .get_mut(source_window)
+                .context("window no longer exists")?;
+            let [source_pane, target_pane] = window
+                .panes
+                .get_disjoint_mut([source_index, target_index])
+                .context("panes must be distinct and live")?;
+            std::mem::swap(source_pane, target_pane);
+            source.clone_into(&mut window.active_pane_id);
+            session.active_window_id.clone_from(&window.id);
+        } else {
+            let [source_window, target_window] = session
+                .windows
+                .get_disjoint_mut([source_window, target_window])
+                .context("windows no longer exist")?;
+            let source_pane = source_window
+                .panes
+                .get_mut(source_index)
+                .context("source pane no longer exists")?;
+            let target_pane = target_window
+                .panes
+                .get_mut(target_index)
+                .context("target pane no longer exists")?;
+            std::mem::swap(source_pane, target_pane);
+            if source_window.active_pane_id == source {
+                target.clone_into(&mut source_window.active_pane_id);
+            }
+            source.clone_into(&mut target_window.active_pane_id);
+            session.active_window_id.clone_from(&target_window.id);
+        }
+        session_id.clone_into(&mut self.active_session_id);
+        Ok(())
+    }
+
+    fn move_pane(
+        &mut self,
+        session_id: &str,
+        source: &str,
+        target: &str,
+        direction: crate::command::MuxDirection,
+    ) -> Result<()> {
+        let session = self
+            .active_session_mut(session_id)
+            .context("session no longer exists")?;
+        let (source_window, source_index) =
+            pane_location(session, source).context("source pane no longer exists")?;
+        let (target_window, _) =
+            pane_location(session, target).context("target pane no longer exists")?;
+        if source == target {
+            bail!("a pane cannot be moved beside itself");
+        }
+        let target_window_id = session
+            .windows
+            .get(target_window)
+            .context("target window no longer exists")?
+            .id
+            .clone();
+        let old = session
+            .windows
+            .get_mut(source_window)
+            .context("source window no longer exists")?;
+        let pane = old.panes.remove(source_index);
+        if old.active_pane_id == source
+            && let Some(neighbor) = old.panes.first()
+        {
+            old.active_pane_id.clone_from(&neighbor.id);
+        }
+        session.windows.retain(|window| !window.panes.is_empty());
+        let destination = session
+            .windows
+            .iter_mut()
+            .find(|window| window.id == target_window_id)
+            .context("target window no longer exists")?;
+        let target_index = destination
+            .panes
+            .iter()
+            .position(|pane| pane.id == target)
+            .context("target pane no longer exists")?;
+        let after = usize::from(matches!(
+            direction,
+            crate::command::MuxDirection::Right | crate::command::MuxDirection::Down
+        ));
+        destination
+            .panes
+            .insert(target_index.saturating_add(after), pane);
+        source.clone_into(&mut destination.active_pane_id);
+        session.active_window_id = target_window_id;
+        renumber_windows(session);
+        session_id.clone_into(&mut self.active_session_id);
+        Ok(())
+    }
+
+    fn extract_pane(&mut self, session_id: &str, pane_id: &str) -> Result<()> {
+        let session = self
+            .active_session_mut(session_id)
+            .context("session no longer exists")?;
+        let (window_index, pane_index) =
+            pane_location(session, pane_id).context("pane no longer exists")?;
+        if session
+            .windows
+            .get(window_index)
+            .context("window no longer exists")?
+            .panes
+            .len()
+            < 2
+        {
+            bail!("this pane already has its own tab");
+        }
+        let window_id = next_window_id(session)?;
+        let source = session
+            .windows
+            .get_mut(window_index)
+            .context("window no longer exists")?;
+        let pane = source.panes.remove(pane_index);
+        if source.active_pane_id == pane_id
+            && let Some(next) = source.panes.first()
+        {
+            source.active_pane_id.clone_from(&next.id);
+        }
+        let name = source.name.clone();
+        session.windows.insert(
+            window_index.saturating_add(1),
+            NativeWindow {
+                id: window_id.clone(),
+                index: 0,
+                name,
+                active_pane_id: pane_id.to_owned(),
+                panes: vec![pane],
+            },
+        );
+        session.active_window_id = window_id;
+        renumber_windows(session);
+        session_id.clone_into(&mut self.active_session_id);
+        Ok(())
+    }
+}
+
+fn target_pane_location(session: &NativeSession, pane_id: Option<&str>) -> Result<(usize, usize)> {
+    if let Some(pane_id) = pane_id {
+        return pane_location(session, pane_id).context("pane no longer exists in this session");
+    }
+    let window = session
+        .windows
+        .iter()
+        .position(|window| window.id == session.active_window_id)
+        .context("active window no longer exists")?;
+    let active_window = session
+        .windows
+        .get(window)
+        .context("active window no longer exists")?;
+    let pane = active_window
+        .panes
+        .iter()
+        .position(|pane| pane.id == active_window.active_pane_id)
+        .context("active pane no longer exists")?;
+    Ok((window, pane))
+}
+
+fn pane_location(session: &NativeSession, pane_id: &str) -> Option<(usize, usize)> {
+    session
+        .windows
+        .iter()
+        .enumerate()
+        .find_map(|(window_index, window)| {
+            window
+                .panes
+                .iter()
+                .position(|pane| pane.id == pane_id)
+                .map(|index| (window_index, index))
+        })
+}
+fn renumber_windows(session: &mut NativeSession) {
+    for (index, window) in session.windows.iter_mut().enumerate() {
+        window.index = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+    }
+}
+
 pub struct NativeBackend {
     state: Arc<Mutex<NativeMuxState>>,
 }
 
-fn wrap_index(index: usize, delta: i32, len: usize) -> usize {
-    (index as i32 + delta).rem_euclid(len as i32) as usize
-}
-
-fn clamp_move_index(index: usize, delta: i32, len: usize) -> usize {
-    (index as i32 + delta).clamp(0, len.saturating_sub(1) as i32) as usize
-}
-
 impl NativeBackend {
     /// A backend on the state shared by every caller that has no workspace to name.
+    #[must_use]
     pub fn new() -> Self {
         Self::for_workspace(Path::new(""))
     }
@@ -509,7 +740,7 @@ impl NativeBackend {
         let mut states = STATES
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
-            .expect("native mux state registry");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self {
             state: Arc::clone(
                 states
@@ -539,37 +770,43 @@ impl MuxBackend for NativeBackend {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("native mux state lock poisoned"))?;
+        state.execute(command)
+    }
+}
+
+impl NativeMuxState {
+    fn execute(&mut self, command: MuxCommand) -> Result<()> {
         match command {
             MuxCommand::ActivateWindow {
                 session_id,
                 window_id,
-            } => state.activate_window(&session_id, &window_id),
+            } => self.activate_window(&session_id, &window_id),
             MuxCommand::NewWindow { session_id, cwd } => {
-                state.new_window(&session_id, cwd.map(PathBuf::from));
+                self.new_window(&session_id, cwd.map(PathBuf::from))?;
             }
             MuxCommand::RenameWindow {
                 session_id,
                 window_id,
                 name,
             } => {
-                state.rename_window(&session_id, &window_id, name);
+                self.rename_window(&session_id, &window_id, name);
             }
             MuxCommand::ActivateNextWindow { session_id } => {
-                state.activate_relative_window(&session_id, 1);
+                self.activate_relative_window(&session_id, 1);
             }
             MuxCommand::ActivatePreviousWindow { session_id }
             | MuxCommand::ActivateLastWindow { session_id } => {
-                state.activate_relative_window(&session_id, -1);
+                self.activate_relative_window(&session_id, -1);
             }
             MuxCommand::ActivateWindowIndex { session_id, index } => {
-                state.activate_window_index(&session_id, index);
+                self.activate_window_index(&session_id, index);
             }
             MuxCommand::MoveWindow {
                 session_id,
                 window_id,
                 delta,
             } => {
-                state.move_window(&session_id, window_id.as_deref(), delta);
+                self.move_window(&session_id, window_id.as_deref(), delta);
             }
             MuxCommand::MoveWindowPreservingSelection {
                 session_id,
@@ -577,47 +814,14 @@ impl MuxBackend for NativeBackend {
                 delta,
                 selected_window_id,
             } => {
-                state.move_window(&session_id, Some(&window_id), delta);
-                state.activate_window(&session_id, &selected_window_id);
+                self.move_window_preserving_selection(
+                    &session_id,
+                    &window_id,
+                    delta,
+                    &selected_window_id,
+                );
             }
-            MuxCommand::SplitPane {
-                session_id,
-                pane_id,
-                ..
-            } => state.split_pane(&session_id, pane_id.as_deref()),
-            MuxCommand::SelectPane {
-                session_id,
-                window_id,
-                direction,
-            } => {
-                let delta = match direction {
-                    crate::command::MuxDirection::Left | crate::command::MuxDirection::Up => -1,
-                    crate::command::MuxDirection::Right | crate::command::MuxDirection::Down => 1,
-                };
-                state.select_pane(&session_id, window_id.as_deref(), delta);
-            }
-            MuxCommand::SelectNextPane {
-                session_id,
-                window_id,
-            } => state.select_pane(&session_id, window_id.as_deref(), 1),
-            MuxCommand::SelectPreviousPane {
-                session_id,
-                window_id,
-            } => state.select_pane(&session_id, window_id.as_deref(), -1),
-            MuxCommand::KillPane {
-                session_id,
-                pane_id,
-            } => {
-                if let Some(pane_id) = pane_id {
-                    state.set_active_pane(&session_id, &pane_id);
-                }
-                state.kill_active_pane(&session_id);
-            }
-            MuxCommand::ClosePane {
-                session_id,
-                pane_id,
-            } => state.close_pane(&session_id, pane_id.as_deref()),
-            MuxCommand::TogglePaneZoom { .. } => {}
+
             MuxCommand::CreateProjectSession {
                 session_id,
                 cwd,
@@ -628,18 +832,76 @@ impl MuxBackend for NativeBackend {
                 cwd,
                 tag,
             } => {
-                state.ensure_session(&session_id, cwd, tag);
+                self.ensure_session(&session_id, cwd, tag)?;
             }
             MuxCommand::RenameSession { session_id, name } => {
-                state.rename_session(&session_id, name);
+                self.rename_session(&session_id, name);
             }
-            MuxCommand::DitchSession { session_id } => state.kill_session(&session_id),
-            MuxCommand::StampSession { session_id, tag } => state.stamp_session(&session_id, tag),
+            MuxCommand::DitchSession { session_id } => self.kill_session(&session_id),
+            MuxCommand::StampSession { session_id, tag } => self.stamp_session(&session_id, tag),
+
+            command => self.execute_pane_command(command)?,
+        }
+        Ok(())
+    }
+    fn execute_pane_command(&mut self, command: MuxCommand) -> Result<()> {
+        match command {
+            MuxCommand::SplitPane {
+                session_id,
+                pane_id,
+                ..
+            } => self.split_pane(&session_id, pane_id.as_deref())?,
+            MuxCommand::MergeWindows {
+                session_id,
+                source_window_id,
+                target_window_id,
+            } => self.merge_windows(&session_id, &source_window_id, &target_window_id)?,
+            MuxCommand::SwapPanes {
+                session_id,
+                source_pane_id,
+                target_pane_id,
+            } => self.swap_panes(&session_id, &source_pane_id, &target_pane_id)?,
+            MuxCommand::MovePane {
+                session_id,
+                pane_id,
+                target_pane_id,
+                direction,
+            } => self.move_pane(&session_id, &pane_id, &target_pane_id, direction)?,
+            MuxCommand::ExtractPane {
+                session_id,
+                pane_id,
+            } => self.extract_pane(&session_id, &pane_id)?,
+            MuxCommand::SelectPane {
+                session_id,
+                window_id,
+                direction,
+            } => {
+                self.select_directional_pane(&session_id, window_id.as_deref(), direction);
+            }
+            MuxCommand::SelectNextPane {
+                session_id,
+                window_id,
+            } => self.select_pane(&session_id, window_id.as_deref(), 1),
+            MuxCommand::SelectPreviousPane {
+                session_id,
+                window_id,
+            } => self.select_pane(&session_id, window_id.as_deref(), -1),
+            MuxCommand::KillPane {
+                session_id,
+                pane_id,
+            } => self.close_pane(&session_id, pane_id.as_deref(), false)?,
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id,
+            } => self.close_pane(&session_id, pane_id.as_deref(), true)?,
+            MuxCommand::TogglePaneZoom { .. } => {}
+            _ => anyhow::bail!("command is not a pane operation"),
         }
         Ok(())
     }
 }
 
+#[must_use]
 pub fn native_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
     BindingCapabilityDescriptor::new(
         scope,
@@ -650,6 +912,10 @@ pub fn native_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
             BindingOperation::NavigateWindow,
             BindingOperation::MoveWindow,
             BindingOperation::SplitPane,
+            BindingOperation::MergeWindows,
+            BindingOperation::SwapPanes,
+            BindingOperation::MovePane,
+            BindingOperation::ExtractPane,
             BindingOperation::NavigatePane,
             BindingOperation::ClosePane,
             BindingOperation::CreateProjectSession,
@@ -664,7 +930,7 @@ pub fn native_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
 pub struct NativePanePolicy;
 
 impl BackendPanePolicy for NativePanePolicy {
-    fn remote_target(&self) -> Option<&crate::SshTarget> {
+    fn remote_target(&self) -> Option<crate::RemoteTarget> {
         None
     }
 

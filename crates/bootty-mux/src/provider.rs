@@ -1,14 +1,14 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use crate::{MuxBackendKind, MuxBindingConfig};
-use anyhow::{Result, bail};
-#[cfg(feature = "app")]
+use anyhow::{Context as _, Result, bail};
+#[cfg(feature = "terminal-runtime")]
 use strum::IntoEnumIterator;
 
 use crate::backend::MuxBackend;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::command::MuxCommand;
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::{
         BindingCapabilityDescriptor, BindingOperationAvailability, BindingOperationOutcome,
@@ -17,7 +17,7 @@ use crate::{
     terminal::BackendPanePolicy,
 };
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneTopology {
     ProcessLocal,
@@ -25,7 +25,7 @@ pub enum PaneTopology {
     Attach,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneBehavior {
     pub topology: PaneTopology,
@@ -33,14 +33,14 @@ pub struct PaneBehavior {
     pub resize_cached_terminals: bool,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalProgressPolicy {
     TerminalOsc,
     BackendSnapshot,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistedSessionPolicy {
     Immediate,
@@ -48,28 +48,28 @@ pub enum PersistedSessionPolicy {
     Never,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GeneratedSessionNamePolicy {
     Reconcile,
     PreserveBackend,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalResidency {
     WorkspaceShared,
     BindingScoped,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionPublicationPolicy {
     Direct,
     PersistBeforePublish,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MuxAppBackendPolicy {
     pub panes: PaneBehavior,
@@ -82,8 +82,8 @@ pub struct MuxAppBackendPolicy {
 
 /// Selects how the controller invokes a provider.
 ///
-/// CallerThread providers own their command lifecycle in the controller thread.
-/// WorkerThread providers run through the controller's worker path.
+/// `CallerThread` providers own their command lifecycle in the controller thread.
+/// `WorkerThread` providers run through the controller's worker path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MuxCommandDispatch {
     CallerThread,
@@ -104,7 +104,7 @@ pub trait MuxBackendProvider: Send + Sync {
     ) -> Box<dyn MuxBackend>;
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub trait MuxAppBackendProvider: MuxBackendProvider {
     fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy>;
 
@@ -116,12 +116,12 @@ pub trait MuxAppBackendProvider: MuxBackendProvider {
 #[derive(Clone)]
 pub struct MuxBackendEntry {
     core: Arc<dyn MuxBackendProvider>,
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
     app: Option<Arc<dyn MuxAppBackendProvider>>,
 }
 
 impl MuxBackendEntry {
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
     pub fn from_app_provider<P>(provider: Arc<P>) -> Self
     where
         P: MuxAppBackendProvider + 'static,
@@ -137,7 +137,7 @@ impl MuxBackendEntry {
     pub fn from_core_provider(provider: Arc<dyn MuxBackendProvider>) -> Self {
         Self {
             core: provider,
-            #[cfg(feature = "app")]
+            #[cfg(feature = "terminal-runtime")]
             app: None,
         }
     }
@@ -149,7 +149,7 @@ pub struct MuxBackendRegistration {
 
 inventory::collect!(MuxBackendRegistration);
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 #[macro_export]
 macro_rules! register_mux_backend {
     ($provider:expr) => {
@@ -165,7 +165,7 @@ macro_rules! register_mux_backend {
     };
 }
 
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 #[macro_export]
 macro_rules! register_mux_backend {
     ($provider:expr) => {
@@ -187,16 +187,19 @@ pub struct MuxBackendRegistry {
 }
 
 impl MuxBackendRegistry {
+    /// # Errors
+    /// Returns an error for duplicate providers, missing required backends, or missing app policies.
     pub fn collect(required: impl IntoIterator<Item = MuxBackendKind>) -> Result<Self> {
         Self::from_entries(
             inventory::iter::<MuxBackendRegistration>
                 .into_iter()
                 .map(|registration| (registration.constructor)()),
             required,
-            cfg!(feature = "app"),
+            cfg!(feature = "terminal-runtime"),
         )
     }
-
+    /// # Errors
+    /// Returns an error for duplicate providers or missing required backends.
     pub fn from_core_providers(
         providers: impl IntoIterator<Item = Arc<dyn MuxBackendProvider>>,
         required: impl IntoIterator<Item = MuxBackendKind>,
@@ -210,7 +213,9 @@ impl MuxBackendRegistry {
         )
     }
 
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
+    /// # Errors
+    /// Returns an error for duplicate providers or missing required backends.
     pub fn from_app_providers<P>(
         providers: impl IntoIterator<Item = Arc<P>>,
         required: impl IntoIterator<Item = MuxBackendKind>,
@@ -230,13 +235,15 @@ impl MuxBackendRegistry {
     fn from_entries(
         entries: impl IntoIterator<Item = MuxBackendEntry>,
         required: impl IntoIterator<Item = MuxBackendKind>,
-        _require_app: bool,
+        require_app: bool,
     ) -> Result<Self> {
+        #[cfg(not(feature = "terminal-runtime"))]
+        let _ = require_app;
         let mut by_kind = HashMap::new();
         for entry in entries {
             let kind = entry.core.kind();
-            #[cfg(feature = "app")]
-            if _require_app && entry.app.is_none() {
+            #[cfg(feature = "terminal-runtime")]
+            if require_app && entry.app.is_none() {
                 bail!("missing app mux backend provider for {kind:?}")
             }
             if by_kind.insert(kind, entry).is_some() {
@@ -253,86 +260,79 @@ impl MuxBackendRegistry {
         })
     }
 
+    #[must_use]
     pub fn selected_kind(&self, config: &MuxBindingConfig) -> MuxBackendKind {
         selected_backend(config)
     }
 
+    /// # Errors
+    /// Returns an error when the selected backend is not registered.
     pub fn build_backend(
         &self,
         config: &MuxBindingConfig,
         workspace: Option<&Path>,
-    ) -> Box<dyn MuxBackend> {
+    ) -> Result<Box<dyn MuxBackend>> {
         self.build_backend_for_kind(self.selected_kind(config), config, workspace)
     }
 
+    /// # Errors
+    /// Returns an error when the requested backend is not registered.
     pub fn build_backend_for_kind(
         &self,
         kind: MuxBackendKind,
         config: &MuxBindingConfig,
         workspace: Option<&Path>,
-    ) -> Box<dyn MuxBackend> {
-        self.providers
+    ) -> Result<Box<dyn MuxBackend>> {
+        let provider = self
+            .providers
             .get(&kind)
-            .expect("validated mux backend registry lost a provider")
-            .core
-            .build_backend(config, workspace)
+            .with_context(|| format!("mux backend {kind:?} is not registered"))?;
+        Ok(provider.core.build_backend(config, workspace))
     }
 
-    pub fn command_dispatch(&self, config: &MuxBindingConfig) -> MuxCommandDispatch {
-        let kind = self.selected_kind(config);
+    #[must_use]
+    pub fn command_dispatch(&self, config: &MuxBindingConfig) -> Option<MuxCommandDispatch> {
         self.providers
-            .get(&kind)
-            .expect("validated mux backend registry lost a provider")
-            .core
-            .command_dispatch()
+            .get(&self.selected_kind(config))
+            .map(|provider| provider.core.command_dispatch())
     }
 
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
+    /// # Errors
+    /// Returns an error if the registered providers do not cover every desktop backend.
     pub fn desktop() -> Result<Self> {
         Self::collect(MuxBackendKind::iter())
     }
 
-    #[cfg(feature = "app")]
-    pub fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
+    #[cfg(feature = "terminal-runtime")]
+    /// # Errors
+    /// Returns an error when the selected backend has no registered app provider.
+    pub fn app_provider(
+        &self,
+        config: &MuxBindingConfig,
+    ) -> Result<Arc<dyn MuxAppBackendProvider>> {
         let kind = self.selected_kind(config);
         self.providers
             .get(&kind)
-            .expect("validated mux backend registry lost a provider")
-            .app
-            .as_ref()
-            .expect("validated mux backend registry lost app policy")
-            .build_pane_policy(config)
+            .and_then(|provider| provider.app.clone())
+            .with_context(|| format!("app mux backend {kind:?} is not registered"))
     }
 
-    #[cfg(feature = "app")]
-    pub fn app_policy(&self, config: &MuxBindingConfig) -> MuxAppBackendPolicy {
-        let kind = self.selected_kind(config);
-        self.providers
-            .get(&kind)
-            .expect("validated mux backend registry lost a provider")
-            .app
-            .as_ref()
-            .expect("validated mux backend registry lost app policy")
-            .app_policy()
-    }
-
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
+    #[must_use]
     pub fn capabilities(
         &self,
         config: &MuxBindingConfig,
         scope: SpaceId,
-    ) -> BindingCapabilityDescriptor {
-        let kind = self.selected_kind(config);
+    ) -> Option<BindingCapabilityDescriptor> {
         self.providers
-            .get(&kind)
-            .expect("validated mux backend registry lost a provider")
+            .get(&self.selected_kind(config))?
             .app
             .as_ref()
-            .expect("validated mux backend registry lost app policy")
-            .capabilities(scope)
+            .map(|provider| provider.capabilities(scope))
     }
 
-    #[cfg(feature = "app")]
+    #[cfg(feature = "terminal-runtime")]
     pub fn execute_checked(
         &self,
         config: &MuxBindingConfig,
@@ -340,7 +340,9 @@ impl MuxBackendRegistry {
         backend: &mut dyn MuxBackend,
         command: MuxCommand,
     ) -> BindingOperationOutcome<Result<()>> {
-        let descriptor = self.capabilities(config, scope);
+        let Some(descriptor) = self.capabilities(config, scope) else {
+            return BindingOperationOutcome::Unavailable;
+        };
         descriptor.invoke(
             descriptor.request(command.operation()),
             BindingOperationAvailability::Available,
@@ -356,6 +358,7 @@ fn resolve_backend(backend: MuxBackendKind, remote: bool, windows: bool) -> MuxB
     backend
 }
 
+#[must_use]
 pub fn selected_backend(config: &MuxBindingConfig) -> MuxBackendKind {
     resolve_backend(config.backend, config.remote.is_some(), cfg!(windows))
 }

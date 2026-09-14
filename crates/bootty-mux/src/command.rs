@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::snapshot::MuxSessionTag;
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::capability::BindingOperation;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -66,6 +66,26 @@ pub enum MuxCommand {
         pane_id: Option<String>,
         direction: MuxSplitDirection,
     },
+    MergeWindows {
+        session_id: String,
+        source_window_id: String,
+        target_window_id: String,
+    },
+    SwapPanes {
+        session_id: String,
+        source_pane_id: String,
+        target_pane_id: String,
+    },
+    MovePane {
+        session_id: String,
+        pane_id: String,
+        target_pane_id: String,
+        direction: MuxDirection,
+    },
+    ExtractPane {
+        session_id: String,
+        pane_id: String,
+    },
     SelectPane {
         session_id: String,
         /// The window whose pane selection should move. `None` uses the session's active window.
@@ -125,11 +145,51 @@ pub enum MuxCommand {
 }
 
 impl MuxCommand {
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::ActivateWindow { session_id, .. }
+            | Self::NewWindow { session_id, .. }
+            | Self::RenameWindow { session_id, .. }
+            | Self::ActivateNextWindow { session_id }
+            | Self::ActivatePreviousWindow { session_id }
+            | Self::ActivateLastWindow { session_id }
+            | Self::ActivateWindowIndex { session_id, .. }
+            | Self::MoveWindow { session_id, .. }
+            | Self::MoveWindowPreservingSelection { session_id, .. }
+            | Self::MergeWindows { session_id, .. }
+            | Self::SwapPanes { session_id, .. }
+            | Self::MovePane { session_id, .. }
+            | Self::ExtractPane { session_id, .. }
+            | Self::SplitPane { session_id, .. }
+            | Self::SelectPane { session_id, .. }
+            | Self::SelectNextPane { session_id, .. }
+            | Self::SelectPreviousPane { session_id, .. }
+            | Self::KillPane { session_id, .. }
+            | Self::ClosePane { session_id, .. }
+            | Self::TogglePaneZoom { session_id, .. }
+            | Self::CreateProjectSession { session_id, .. }
+            | Self::CreateWorktreeSession { session_id, .. }
+            | Self::RenameSession { session_id, .. }
+            | Self::DitchSession { session_id }
+            | Self::StampSession { session_id, .. } => session_id,
+        }
+    }
+
+    /// The existing session whose ownership must be checked before a remote mutation.
+    pub(crate) fn existing_session_id(&self) -> Option<&str> {
+        match self {
+            Self::CreateProjectSession { .. } | Self::CreateWorktreeSession { .. } => None,
+            _ => Some(self.session_id()),
+        }
+    }
+
     /// Whether running the command again is safe when the first attempt's
     /// outcome is unknown. Relative moves double, creates duplicate, toggles
     /// flip back, and closes take the next pane along, so only commands that
     /// name an absolute end state qualify.
-    pub fn is_repeatable(&self) -> bool {
+    #[must_use]
+    pub const fn is_repeatable(&self) -> bool {
         matches!(
             self,
             Self::ActivateWindow { .. }
@@ -145,9 +205,10 @@ impl MuxCommand {
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl MuxCommand {
-    pub fn operation(&self) -> BindingOperation {
+    #[must_use]
+    pub const fn operation(&self) -> BindingOperation {
         match self {
             Self::ActivateWindow { .. } => BindingOperation::ActivateWindow,
             Self::NewWindow { .. } => BindingOperation::CreateWindow,
@@ -160,6 +221,10 @@ impl MuxCommand {
                 BindingOperation::MoveWindow
             }
             Self::SplitPane { .. } => BindingOperation::SplitPane,
+            Self::MergeWindows { .. } => BindingOperation::MergeWindows,
+            Self::SwapPanes { .. } => BindingOperation::SwapPanes,
+            Self::MovePane { .. } => BindingOperation::MovePane,
+            Self::ExtractPane { .. } => BindingOperation::ExtractPane,
             Self::SelectPane { .. }
             | Self::SelectNextPane { .. }
             | Self::SelectPreviousPane { .. } => BindingOperation::NavigatePane,

@@ -1,3 +1,8 @@
+use bootty_terminal::terminal_search::TerminalSearchOptions;
+use bootty_terminal::{
+    terminal_capture::{CaptureOptions, TerminalCapture},
+    terminal_session::PendingWorkerResponse,
+};
 use std::{
     collections::VecDeque,
     sync::{Arc, mpsc},
@@ -5,10 +10,10 @@ use std::{
 };
 
 use anyhow::Result;
-use bootty_runtime::{
+use bootty_terminal::geometry::{CellMetrics, TerminalGeometry};
+use bootty_terminal::{
     DrainStats, TerminalSession, TerminalSessionConfig, frame_source::TerminalFrameSource,
 };
-use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalLiveConfig,
@@ -31,6 +36,7 @@ enum QueuedStartupCommand {
         scroll_delta: isize,
     },
     ScrollViewport(isize),
+    ScrollViewportTo(usize),
     EnterCopyMode,
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
@@ -41,6 +47,7 @@ pub struct StartingNativeTerminal {
     rx: mpsc::Receiver<std::result::Result<TerminalSession, String>>,
     terminal: Option<TerminalSession>,
     geometry: TerminalGeometry,
+    placeholder_frame: Arc<RenderFrame>,
     display_scale: f32,
     render_cell: CellMetrics,
     pending_live_config: Option<TerminalLiveConfig>,
@@ -57,24 +64,24 @@ impl StartingNativeTerminal {
         repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
-        let thread_repaint = Arc::clone(&repaint_wakeup);
         thread::spawn(move || {
             let result = TerminalSession::new_with_config_and_host_metrics(
                 geometry,
                 display_scale,
                 render_cell,
                 config,
-                Arc::clone(&thread_repaint),
+                Arc::clone(&repaint_wakeup),
             )
             .map_err(|error| error.to_string());
             let _ = tx.send(result);
-            thread_repaint();
+            repaint_wakeup();
         });
 
         Self {
             rx,
             terminal: None,
             geometry,
+            placeholder_frame: startup_placeholder_frame(geometry),
             display_scale,
             render_cell,
             pending_live_config: None,
@@ -110,7 +117,7 @@ impl StartingNativeTerminal {
             }
         };
 
-        terminal.resize(self.geometry)?;
+        TerminalFrameSource::resize(&mut terminal, self.geometry)?;
         terminal.set_display_scale(self.display_scale)?;
         terminal.set_render_cell_metrics(self.render_cell)?;
         if let Some(config) = self.pending_live_config.take() {
@@ -137,10 +144,7 @@ impl StartingNativeTerminal {
         pending: T,
         ready: impl FnOnce(&mut TerminalSession) -> Result<T>,
     ) -> Result<T> {
-        match self.ready_terminal()? {
-            Some(terminal) => ready(terminal),
-            None => Ok(pending),
-        }
+        self.ready_terminal()?.map_or_else(|| Ok(pending), ready)
     }
 }
 
@@ -148,11 +152,11 @@ fn startup_placeholder_frame(geometry: TerminalGeometry) -> Arc<RenderFrame> {
     let mut frame = RenderFrame {
         cols: geometry.cols,
         rows: geometry.rows,
-        row_dirty: vec![true; geometry.rows as usize],
-        row_wraps: vec![false; geometry.rows as usize],
+        row_dirty: vec![true; usize::from(geometry.rows)],
+        row_wraps: vec![false; usize::from(geometry.rows)],
         ..RenderFrame::default()
     };
-    frame.stats.dirty_rows = geometry.rows as usize;
+    frame.stats.dirty_rows = usize::from(geometry.rows);
     Arc::new(frame)
 }
 
@@ -171,6 +175,7 @@ fn apply_queued_startup_command(
             scroll_delta,
         } => terminal.handle_mouse_wheel(input, scroll_delta),
         QueuedStartupCommand::ScrollViewport(delta) => terminal.scroll_viewport_delta(delta),
+        QueuedStartupCommand::ScrollViewportTo(offset) => terminal.scroll_viewport_to(offset),
         QueuedStartupCommand::EnterCopyMode => terminal.enter_copy_mode(),
         QueuedStartupCommand::SelectionBegin(event) => terminal.begin_selection(event),
         QueuedStartupCommand::SelectionUpdate(event) => terminal.update_selection(event),
@@ -195,15 +200,20 @@ impl TerminalFrameSource for StartingNativeTerminal {
     }
 
     fn resize(&mut self, geometry: TerminalGeometry) -> Result<()> {
+        if self.geometry != geometry && self.terminal.is_none() {
+            self.placeholder_frame = startup_placeholder_frame(geometry);
+        }
         self.geometry = geometry;
-        self.with_terminal((), |terminal| terminal.resize(geometry))
+        self.with_terminal((), |terminal| {
+            TerminalFrameSource::resize(terminal, geometry)
+        })
     }
 
     fn extract_frame(&mut self) -> Result<Arc<RenderFrame>> {
         if let Some(terminal) = self.ready_terminal()? {
             terminal.extract_frame()
         } else {
-            Ok(startup_placeholder_frame(self.geometry))
+            Ok(Arc::clone(&self.placeholder_frame))
         }
     }
 }
@@ -239,6 +249,27 @@ impl TerminalRuntime for StartingNativeTerminal {
         Ok(())
     }
 
+    fn prompt(
+        &mut self,
+        text: Option<(u64, String, bool)>,
+    ) -> Result<
+        PendingWorkerResponse<
+            std::result::Result<bootty_terminal::shell_prompt::PromptSnapshot, String>,
+        >,
+    > {
+        self.ready_terminal()?
+            .ok_or_else(|| anyhow::anyhow!("Terminal is still starting"))?
+            .prompt(text)
+    }
+    fn capture(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        self.ready_terminal()?
+            .ok_or_else(|| anyhow::anyhow!("Terminal is still starting"))?
+            .capture(options)
+    }
+
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
         self.with_terminal(None, |terminal| terminal.format_selection(format))
     }
@@ -267,6 +298,10 @@ impl TerminalRuntime for StartingNativeTerminal {
         self.queue_or_apply(QueuedStartupCommand::ScrollViewport(delta))
     }
 
+    fn scroll_viewport_to(&mut self, offset: usize) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::ScrollViewportTo(offset))
+    }
+
     fn enter_copy_mode(&mut self) -> Result<()> {
         self.queue_or_apply(QueuedStartupCommand::EnterCopyMode)
     }
@@ -286,6 +321,17 @@ impl TerminalRuntime for StartingNativeTerminal {
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
         self.with_terminal(false, |terminal| terminal.search_viewport(query, direction))
+    }
+
+    fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
+        self.with_terminal(false, |terminal| {
+            terminal.search_viewport_with_options(query, direction, options)
+        })
     }
 
     fn begin_selection(&mut self, event: TerminalSelectionEvent) -> Result<()> {

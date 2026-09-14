@@ -1,4 +1,10 @@
+use bootty_terminal::terminal_search::TerminalSearchOptions;
+use bootty_terminal::{
+    terminal_capture::{CaptureOptions, TerminalCapture},
+    terminal_session::PendingWorkerResponse,
+};
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -9,16 +15,17 @@ use std::{
 };
 
 use anyhow::Result;
-use bootty_runtime::{
+use bootty_terminal::geometry::{CellMetrics, TerminalGeometry};
+use bootty_terminal::{
     DrainStats, OutputBacklog, TerminalSessionConfig, drain_output_backlog,
     drain_output_backlog_with_limits,
     frame_source::TerminalFrameSource,
     terminal_session::{
+        CURSOR_COMMIT_DELAY, CursorHold, OutputSettle, PublishHold, WORKER_OUTPUT_QUIET,
         WorkerRequest, should_publish_frame_after_work, sync_output_suppresses_publish,
         worker_request,
     },
 };
-use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::{
     terminal_engine::{
         TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalEngine, TerminalLiveConfig,
@@ -30,11 +37,12 @@ use bootty_terminal::{
     terminal_side_effect::deliver_terminal_side_effects,
 };
 use rmux_sdk::TerminalSizeSpec;
+use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::rmux::bridge::{rmux_missing_target_text, rmux_stale_target_text};
-use crate::rmux::pane_io::{RmuxPaneEvent, RmuxPaneIo, RmuxPaneTarget, open_rmux_pane_io};
-use crate::rmux::remote::open_remote_rmux_pane_io;
-use bootty_host::ssh::SshRemote;
+use super::bridge::{rmux_missing_target_text, rmux_stale_target_text};
+use super::pane_io::{RmuxPaneEvent, RmuxPaneIo, RmuxPaneTarget, open_rmux_pane_io};
+use super::remote::{open_remote_rmux_pane_io, resize_remote_rmux_window};
+use bootty_host::remote::RemoteHost;
 
 use crate::terminal::{
     BackendPanePolicy, MuxPaneTarget, PaneLayoutResizeRequest, PaneStartRequest,
@@ -47,11 +55,11 @@ const RMUX_INPUT_FAST_PATH_DRAIN_CHUNKS: usize = 8;
 const RMUX_INPUT_FAST_PATH_DRAIN_TIME_US: u128 = 2_000;
 const RMUX_MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
 const RMUX_MAX_COLLECT_CHUNKS_PER_TICK: usize = 256;
-const RMUX_WORKER_IDLE_WAIT: Duration = Duration::from_millis(8);
+const RMUX_PENDING_FRAME_WAIT: Duration = Duration::from_millis(8);
 const RMUX_INITIAL_FRAME_AGE: Duration = Duration::from_millis(16);
 
 struct RmuxNativeTerminal {
-    command_tx: mpsc::Sender<RmuxTerminalCommand>,
+    command_tx: tokio_mpsc::UnboundedSender<RmuxTerminalCommand>,
     latest_frame: Arc<RmuxPublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
@@ -87,6 +95,7 @@ impl RmuxPublishedFrame {
             .lock()
             .map_err(|_| anyhow::anyhow!("rmux frame cache lock poisoned"))?;
         *latest = Arc::new(frame);
+        drop(latest);
         Ok(())
     }
 }
@@ -109,10 +118,17 @@ enum RmuxTerminalCommand {
     MouseViewportScroll {
         delta: isize,
     },
+    MouseViewportScrollTo {
+        offset: usize,
+    },
     EnterCopyMode,
     SelectionBegin(TerminalSelectionEvent),
     SelectionUpdate(TerminalSelectionEvent),
     SelectionEnd(Option<TerminalSelectionEvent>),
+    Capture {
+        options: CaptureOptions,
+        done: WorkerRequest<std::result::Result<TerminalCapture, String>>,
+    },
     FormatSelection {
         format: TerminalSelectionFormat,
         done: WorkerRequest<std::result::Result<Option<Vec<u8>>, String>>,
@@ -125,6 +141,7 @@ enum RmuxTerminalCommand {
         done: WorkerRequest<std::result::Result<TerminalCopyModeOutcome, String>>,
     },
     SearchViewport {
+        options: TerminalSearchOptions,
         query: String,
         direction: TerminalSearchDirection,
         done: WorkerRequest<std::result::Result<bool, String>>,
@@ -144,7 +161,7 @@ struct RmuxWorkerConfig {
     display_scale: f32,
     render_cell: CellMetrics,
     terminal_config: TerminalSessionConfig,
-    command_rx: mpsc::Receiver<RmuxTerminalCommand>,
+    command_rx: tokio_mpsc::UnboundedReceiver<RmuxTerminalCommand>,
     latest_frame: Arc<RmuxPublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
@@ -161,12 +178,18 @@ impl Drop for RmuxWorkerClosedGuard {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "publication, synchronized output, and channel lifetime flags are independent"
+)]
 struct RmuxWorker {
     pane_io: RmuxPaneIo,
     geometry: TerminalGeometry,
     engine: TerminalEngine,
-    command_rx: mpsc::Receiver<RmuxTerminalCommand>,
+    command_rx: tokio_mpsc::UnboundedReceiver<RmuxTerminalCommand>,
     pending_command: Option<RmuxTerminalCommand>,
+    pending_event: Option<RmuxPaneEvent>,
+    input_results_closed: bool,
     latest_frame: Arc<RmuxPublishedFrame>,
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output: OutputBacklog,
@@ -184,6 +207,9 @@ struct RmuxWorker {
     sync_output_batch_pending: bool,
     deferred_sync_publish: bool,
     last_terminal_change: Option<Instant>,
+    settle: OutputSettle,
+    last_hold: PublishHold,
+    cursor_hold: CursorHold,
     waiting_initial_remote_frame: bool,
     command_disconnected: bool,
     output_closed: bool,
@@ -191,8 +217,8 @@ struct RmuxWorker {
 
 impl RmuxNativeTerminal {
     fn new(
-        target: MuxPaneTarget,
-        remote: Option<&SshRemote>,
+        target: &MuxPaneTarget,
+        remote: Option<&RemoteHost>,
         geometry: TerminalGeometry,
         display_scale: f32,
         render_cell: CellMetrics,
@@ -201,7 +227,7 @@ impl RmuxNativeTerminal {
     ) -> Result<Self> {
         let pane_target = RmuxPaneTarget::new(
             target.session_id().to_owned(),
-            match &target {
+            match target {
                 MuxPaneTarget::Pane { pane_id, .. } => Some(pane_id.clone()),
                 MuxPaneTarget::Session { .. } => None,
             },
@@ -211,7 +237,7 @@ impl RmuxNativeTerminal {
             Some(remote) => open_remote_rmux_pane_io(remote, &pane_target)?,
             None => open_rmux_pane_io(pane_target)?,
         };
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
         let (error_tx, error_rx) = mpsc::channel();
         let latest_frame = Arc::new(RmuxPublishedFrame::new());
         let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
@@ -246,15 +272,26 @@ impl RmuxNativeTerminal {
         })
     }
 
-    fn send_command(&mut self, command: RmuxTerminalCommand) -> Result<()> {
+    fn send_command(&self, command: RmuxTerminalCommand) -> Result<()> {
         self.check_worker_error()?;
-        self.command_tx
-            .send(command)
-            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))
+        // Topology reconciliation can deliver focus, layout, or input updates after close.
+        if self.closed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if self.command_tx.send(command).is_err() {
+            // The worker may have closed between the check and the send. Report its actual
+            // failure first; only a known closure makes the disconnected queue harmless.
+            self.check_worker_error()?;
+            anyhow::ensure!(
+                self.closed.load(Ordering::Relaxed),
+                "rmux terminal worker stopped"
+            );
+        }
+        Ok(())
     }
 
     fn request<T>(
-        &mut self,
+        &self,
         operation: &'static str,
         build: impl FnOnce(WorkerRequest<std::result::Result<T, String>>) -> RmuxTerminalCommand,
     ) -> Result<T> {
@@ -268,7 +305,7 @@ impl RmuxNativeTerminal {
             .map_err(|error| anyhow::anyhow!(error))
     }
 
-    fn check_worker_error(&mut self) -> Result<()> {
+    fn check_worker_error(&self) -> Result<()> {
         let mut error = None;
         while let Ok(next) = self.error_rx.try_recv() {
             error = Some(next);
@@ -289,6 +326,7 @@ impl RmuxNativeTerminal {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RmuxWindowResizeRequest {
     window_id: String,
     cols: u16,
@@ -297,7 +335,7 @@ struct RmuxWindowResizeRequest {
 
 struct RmuxWindowResizeWorker {
     tx: mpsc::Sender<RmuxWindowResizeRequest>,
-    result_rx: mpsc::Receiver<std::result::Result<(), String>>,
+    result_rx: mpsc::Receiver<(RmuxWindowResizeRequest, std::result::Result<(), String>)>,
 }
 
 /// How long to wait before re-driving a resize at a window the daemon will not
@@ -307,20 +345,19 @@ struct RmuxWindowResizeWorker {
 const UNRESOLVED_WINDOW_RESIZE_RETRY: Duration = Duration::from_millis(500);
 
 pub struct RmuxPanePolicy {
-    remote: Option<SshRemote>,
-    window_id: Option<String>,
-    last_window_size: Option<(String, u16, u16)>,
-    unresolved_window_resize_at: Option<Instant>,
+    remote: Option<RemoteHost>,
+    window_sizes: BTreeMap<String, (u16, u16)>,
+    unresolved_window_resize_at: BTreeMap<String, Instant>,
     resize_worker: Option<RmuxWindowResizeWorker>,
 }
 
 impl RmuxPanePolicy {
-    pub fn new(remote: Option<SshRemote>) -> Self {
+    #[must_use]
+    pub const fn new(remote: Option<RemoteHost>) -> Self {
         Self {
             remote,
-            window_id: None,
-            last_window_size: None,
-            unresolved_window_resize_at: None,
+            window_sizes: BTreeMap::new(),
+            unresolved_window_resize_at: BTreeMap::new(),
             resize_worker: None,
         }
     }
@@ -330,21 +367,34 @@ impl RmuxPanePolicy {
             return;
         }
         let (tx, rx) = mpsc::channel::<RmuxWindowResizeRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<std::result::Result<(), String>>();
+        let (result_tx, result_rx) = mpsc::channel();
         let repaint = Arc::clone(repaint_wakeup);
+        let remote = self.remote.clone();
         thread::spawn(move || {
-            while let Ok(mut request) = rx.recv() {
-                while let Ok(next) = rx.try_recv() {
-                    request = next;
+            while let Ok(request) = rx.recv() {
+                // Coalesce within each window; another visible window must not lose its resize.
+                let mut pending = BTreeMap::from([(request.window_id.clone(), request)]);
+                for request in rx.try_iter() {
+                    pending.insert(request.window_id.clone(), request);
                 }
-                let result = crate::rmux::backend::resize_bootty_rmux_window(
-                    &request.window_id,
-                    request.cols,
-                    request.rows,
-                )
-                .map_err(|error| error.to_string());
-                let _ = result_tx.send(result);
-                repaint();
+                for request in pending.into_values() {
+                    let result = match remote.as_ref() {
+                        Some(remote) => resize_remote_rmux_window(
+                            remote,
+                            &request.window_id,
+                            request.cols,
+                            request.rows,
+                        ),
+                        None => super::backend::resize_bootty_rmux_window(
+                            &request.window_id,
+                            request.cols,
+                            request.rows,
+                        ),
+                    }
+                    .map_err(|error| error.to_string());
+                    let _ = result_tx.send((request, result));
+                    repaint();
+                }
             }
         });
         self.resize_worker = Some(RmuxWindowResizeWorker { tx, result_rx });
@@ -352,45 +402,32 @@ impl RmuxPanePolicy {
 
     fn drain_resize_results(&mut self) -> Result<bool> {
         let mut completed = false;
-        let mut error = None;
+        let mut errors = BTreeMap::new();
         if let Some(worker) = &self.resize_worker {
-            while let Ok(result) = worker.result_rx.try_recv() {
-                // Results arrive in order, so a later success retires an
-                // earlier rejection rather than leaving it to be acted on.
+            for (request, result) in worker.result_rx.try_iter() {
+                let current = self.window_sizes.get(&request.window_id)
+                    == Some(&(request.cols, request.rows));
                 match result {
                     Ok(()) => {
                         completed = true;
-                        error = None;
-                        self.unresolved_window_resize_at = None;
+                        errors.remove(&request.window_id);
+                        self.unresolved_window_resize_at.remove(&request.window_id);
                     }
-                    Err(result_error) => error = Some(result_error),
+                    Err(error) if current => {
+                        if rmux_stale_target_text(&error) {
+                            self.unresolved_window_resize_at
+                                .insert(request.window_id.clone(), Instant::now());
+                            self.window_sizes.remove(&request.window_id);
+                        } else if !rmux_missing_target_text(&error) {
+                            self.window_sizes.remove(&request.window_id);
+                            errors.insert(request.window_id, error);
+                        }
+                    }
+                    Err(_) => {}
                 }
             }
         }
-        if let Some(error) = error {
-            if rmux_stale_target_text(&error) {
-                // The window still exists, its index or listing moved under the
-                // request. Forget the requested size so a later paint re-drives
-                // it, rate limited so a window that never resolves again does
-                // not enumerate every session on every frame.
-                let now = Instant::now();
-                if self
-                    .unresolved_window_resize_at
-                    .is_none_or(|at| now.duration_since(at) >= UNRESOLVED_WINDOW_RESIZE_RETRY)
-                {
-                    self.unresolved_window_resize_at = Some(now);
-                    self.last_window_size = None;
-                }
-                return Ok(completed);
-            }
-            if rmux_missing_target_text(&error) {
-                // Teardown, not a terminal error. Keep the requested size so the
-                // paint path does not re-send a resize the daemon cannot route.
-                // The window stays at its old size until the layout asks for
-                // different dimensions.
-                return Ok(completed);
-            }
-            self.last_window_size = None;
+        if let Some((_, error)) = errors.into_iter().next() {
             anyhow::bail!(error);
         }
         Ok(completed)
@@ -398,8 +435,8 @@ impl RmuxPanePolicy {
 }
 
 impl BackendPanePolicy for RmuxPanePolicy {
-    fn remote_target(&self) -> Option<&crate::SshTarget> {
-        self.remote.as_ref().map(SshRemote::target)
+    fn remote_target(&self) -> Option<crate::RemoteTarget> {
+        self.remote.as_ref().map(RemoteHost::target)
     }
 
     fn start_terminal(
@@ -409,7 +446,7 @@ impl BackendPanePolicy for RmuxPanePolicy {
         let mut config = request.terminal_config.clone();
         config.side_effect_pane_id = request.target.side_effect_pane_id();
         Ok(Some(Box::new(RmuxNativeTerminal::new(
-            request.target.mux_target().clone(),
+            request.target.mux_target(),
             self.remote.as_ref(),
             request.spawn_geometry,
             request.display_scale,
@@ -421,23 +458,20 @@ impl BackendPanePolicy for RmuxPanePolicy {
 
     fn sync_target(&mut self, _target: Option<&ScopedMuxPaneTarget>, _hide_tmux_status: bool) {}
 
-    fn set_layout_window(&mut self, window_id: Option<&str>) {
-        if self.window_id.as_deref() != window_id {
-            self.window_id = window_id.map(str::to_owned);
-            self.last_window_size = None;
-            // The backoff is per window: a window that stopped resolving must not
-            // delay the next one's first retry.
-            self.unresolved_window_resize_at = None;
-        }
-    }
+    fn set_layout_window(&mut self, _window_id: Option<&str>) {}
 
     fn resize_layout_window(&mut self, request: PaneLayoutResizeRequest<'_>) -> Result<bool> {
         let completed = self.drain_resize_results()?;
         let Some(window_id) = request.window_id else {
             return Ok(completed);
         };
-        let requested = (window_id.to_owned(), request.cols, request.rows);
-        if self.last_window_size.as_ref() == Some(&requested) {
+        let requested = (request.cols, request.rows);
+        if self.window_sizes.get(window_id) == Some(&requested)
+            || self
+                .unresolved_window_resize_at
+                .get(window_id)
+                .is_some_and(|at| at.elapsed() < UNRESOLVED_WINDOW_RESIZE_RETRY)
+        {
             return Ok(completed);
         }
         self.ensure_resize_worker(request.repaint_wakeup);
@@ -452,7 +486,7 @@ impl BackendPanePolicy for RmuxPanePolicy {
                 rows: request.rows,
             })
             .map_err(|_| anyhow::anyhow!("rmux window resize worker stopped"))?;
-        self.last_window_size = Some(requested);
+        self.window_sizes.insert(window_id.to_owned(), requested);
         Ok(completed)
     }
 
@@ -522,10 +556,20 @@ impl TerminalRuntime for RmuxNativeTerminal {
     }
 
     fn force_resize(&mut self) -> Result<()> {
-        if self.closed.load(Ordering::Relaxed) {
-            return Ok(());
-        }
         self.send_command(RmuxTerminalCommand::ForceResize)
+    }
+
+    fn capture(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        options.validate().map_err(anyhow::Error::msg)?;
+        self.check_worker_error()?;
+        let (done, response) = worker_request();
+        self.command_tx
+            .send(RmuxTerminalCommand::Capture { options, done })
+            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))?;
+        Ok(response)
     }
 
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
@@ -552,6 +596,10 @@ impl TerminalRuntime for RmuxNativeTerminal {
         self.send_command(RmuxTerminalCommand::MouseViewportScroll { delta })
     }
 
+    fn scroll_viewport_to(&mut self, offset: usize) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::MouseViewportScrollTo { offset })
+    }
+
     fn enter_copy_mode(&mut self) -> Result<()> {
         self.send_command(RmuxTerminalCommand::EnterCopyMode)
     }
@@ -572,8 +620,18 @@ impl TerminalRuntime for RmuxNativeTerminal {
     }
 
     fn search_viewport(&mut self, query: &str, direction: TerminalSearchDirection) -> Result<bool> {
+        self.search_viewport_with_options(query, direction, TerminalSearchOptions::default())
+    }
+
+    fn search_viewport_with_options(
+        &mut self,
+        query: &str,
+        direction: TerminalSearchDirection,
+        options: TerminalSearchOptions,
+    ) -> Result<bool> {
         self.request("searching scrollback", |done| {
             RmuxTerminalCommand::SearchViewport {
+                options,
                 query: query.to_owned(),
                 direction,
                 done,
@@ -635,6 +693,16 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
     let (startup_tx, startup_rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let _closed_guard = RmuxWorkerClosedGuard(Arc::clone(&config.closed));
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = startup_tx.send(Err(error.to_string()));
+                return;
+            }
+        };
         let mut engine = match TerminalEngine::new_with_terminal_options(
             config.geometry,
             config.terminal_config.colors,
@@ -682,20 +750,27 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
             side_effect_tx: config.terminal_config.side_effect_tx,
             side_effect_pane_id: config.terminal_config.side_effect_pane_id,
             output_buf: Vec::with_capacity(1024),
-            last_frame_publish: Instant::now() - RMUX_INITIAL_FRAME_AGE,
+            last_frame_publish: Instant::now()
+                .checked_sub(RMUX_INITIAL_FRAME_AGE)
+                .unwrap_or_else(Instant::now),
             has_unpublished_frame: false,
             force_next_frame_publish: false,
             sync_output_since: None,
             sync_output_batch_pending: false,
             deferred_sync_publish: false,
             last_terminal_change: None,
+            settle: OutputSettle::default(),
+            last_hold: PublishHold::None,
+            cursor_hold: CursorHold::default(),
             waiting_initial_remote_frame: config.waiting_initial_remote_frame,
             command_disconnected: false,
             pending_command: None,
+            pending_event: None,
+            input_results_closed: false,
             output_closed: false,
         };
         let _ = startup_tx.send(Ok(()));
-        worker.run();
+        worker.run(&runtime);
     });
 
     startup_rx
@@ -725,10 +800,37 @@ fn is_sgr_pixel_mouse_mode_response(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1b[?1016;") && bytes.ends_with(b"$y")
 }
 
+enum RmuxWake {
+    Command(Option<RmuxTerminalCommand>),
+    Output(Option<RmuxPaneEvent>),
+    InputResult(Option<std::result::Result<(), String>>),
+    Deadline,
+}
+
+async fn wait_for_rmux_work(
+    commands: &mut tokio_mpsc::UnboundedReceiver<RmuxTerminalCommand>,
+    pane_io: &mut RmuxPaneIo,
+    output_closed: bool,
+    input_results_closed: bool,
+    delay: Option<Duration>,
+) -> RmuxWake {
+    tokio::select! {
+        command = commands.recv() => RmuxWake::Command(command),
+        event = pane_io.output_rx.recv(), if !output_closed => RmuxWake::Output(event),
+        result = pane_io.result_rx.recv(), if !input_results_closed => RmuxWake::InputResult(result),
+        () = async {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => RmuxWake::Deadline,
+    }
+}
+
 impl RmuxWorker {
-    fn run(mut self) {
+    fn run(mut self, runtime: &tokio::runtime::Runtime) {
         loop {
-            self.publish_deferred_sync_frame();
             let (mut did_work, mut terminal_changed) = self.process_commands();
             did_work |= self.collect_pane_output();
             let stats = self.drain_pending_output();
@@ -740,6 +842,9 @@ impl RmuxWorker {
             if terminal_changed {
                 self.mark_unpublished_frame();
             }
+            // After the drain, not before: bytes trailing a completed sync batch belong in the
+            // frame this publishes, not the one after it.
+            self.publish_deferred_sync_frame();
 
             if did_work {
                 self.publish_drain(stats);
@@ -757,13 +862,47 @@ impl RmuxWorker {
             if self.should_stop() {
                 break;
             }
-            match self.command_rx.recv_timeout(RMUX_WORKER_IDLE_WAIT) {
-                Ok(command) => self.pending_command = Some(command),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.command_disconnected = true;
+            self.wait_for_work(runtime);
+        }
+    }
+
+    fn wait_for_work(&mut self, runtime: &tokio::runtime::Runtime) {
+        // Only incomplete publication has a deadline. Idle workers sleep until a channel wakes
+        // them; output and command arrivals share the same cancellation-safe async wait.
+        let delay = if self.has_unpublished_frame && self.last_hold == PublishHold::Settling {
+            Some(WORKER_OUTPUT_QUIET)
+        } else if self.cursor_hold.pending() {
+            Some(CURSOR_COMMIT_DELAY)
+        } else if self.has_unpublished_frame {
+            Some(RMUX_PENDING_FRAME_WAIT)
+        } else {
+            None
+        };
+        // The VT engine stays on this OS thread; only channel waiting enters the runtime.
+        match runtime.block_on(wait_for_rmux_work(
+            &mut self.command_rx,
+            &mut self.pane_io,
+            self.output_closed,
+            self.input_results_closed,
+            delay,
+        )) {
+            RmuxWake::Command(command) => {
+                self.pending_command = command;
+                self.command_disconnected = self.pending_command.is_none();
+            }
+            RmuxWake::Output(event) => {
+                self.pending_event = event;
+                if self.pending_event.is_none() {
+                    self.output_closed = true;
+                    self.closed.store(true, Ordering::Relaxed);
                 }
             }
+            RmuxWake::InputResult(result) => match result {
+                Some(Err(error)) => self.send_error(&error),
+                Some(Ok(())) => {}
+                None => self.input_results_closed = true,
+            },
+            RmuxWake::Deadline => {}
         }
     }
 
@@ -776,156 +915,191 @@ impl RmuxWorker {
             } else {
                 match self.command_rx.try_recv() {
                     Ok(command) => command,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(tokio_mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
                         self.command_disconnected = true;
                         break;
                     }
                 }
             };
             did_work = true;
-            match command {
-                RmuxTerminalCommand::DisplayScale(display_scale) => {
-                    self.engine.set_display_scale(display_scale);
-                    self.mark_unpublished_frame();
-                }
-                RmuxTerminalCommand::RenderCellMetrics(cell) => {
-                    self.engine.set_render_cell_metrics(cell);
-                    self.mark_unpublished_frame();
-                }
-                RmuxTerminalCommand::Resize(geometry) => {
-                    self.force_next_frame_publish = true;
-                    self.geometry = geometry;
-                    self.queue_resize(geometry);
-                    if self.engine.resize(geometry).is_ok() {
-                        terminal_changed = true;
-                    }
-                }
-                RmuxTerminalCommand::ForceResize => {
-                    self.force_next_frame_publish = true;
-                    self.queue_resize(self.geometry);
-                    terminal_changed = true;
-                }
-                RmuxTerminalCommand::ApplyLiveConfig(config) => {
-                    match self.engine.apply_live_config(config) {
-                        Ok(()) => terminal_changed = true,
-                        Err(error) => self.send_error(error),
-                    }
-                }
-                RmuxTerminalCommand::Key(input) => {
-                    self.mark_input_fast_path();
-                    self.engine.scroll_viewport_bottom();
-                    terminal_changed = true;
-                    self.encode_output(|engine, out| engine.encode_key_to_vec(input, out));
-                }
-                RmuxTerminalCommand::Focus(gained) => {
-                    self.mark_input_fast_path();
-                    self.encode_output(|engine, out| engine.encode_focus_to_vec(gained, out));
-                }
-                RmuxTerminalCommand::Mouse(input) => {
-                    self.mark_input_fast_path();
-                    self.encode_output(|engine, out| engine.encode_mouse_to_vec(input, out));
-                }
-                RmuxTerminalCommand::MouseWheel {
-                    input,
-                    scroll_delta,
-                } => match self.engine.is_mouse_tracking() {
-                    Ok(true) => {
-                        self.mark_input_fast_path();
-                        self.encode_output(|engine, out| {
-                            engine.encode_mouse_wheel_to_vec(
-                                input,
-                                scroll_delta.unsigned_abs().max(1),
-                                out,
-                            )
-                        });
-                    }
-                    Ok(false) if scroll_delta != 0 => {
-                        self.mark_input_fast_path();
-                        self.engine.scroll_viewport_delta(scroll_delta);
-                        terminal_changed = true;
-                    }
-                    Ok(false) => {}
-                    Err(error) => self.send_error(error),
-                },
-                RmuxTerminalCommand::Paste(text) => {
-                    self.mark_input_fast_path();
-                    self.engine.scroll_viewport_bottom();
-                    terminal_changed = true;
-                    self.encode_output(|engine, out| engine.encode_paste_to_vec(&text, out));
-                }
-                RmuxTerminalCommand::InputBytes(bytes) => {
-                    self.mark_input_fast_path();
-                    self.engine.scroll_viewport_bottom();
-                    terminal_changed = true;
-                    self.queue_input(&bytes);
-                }
-                RmuxTerminalCommand::MouseViewportScroll { delta } => {
-                    self.mark_input_fast_path();
-                    self.engine.scroll_viewport_delta(delta);
-                    terminal_changed = true;
-                }
-                RmuxTerminalCommand::EnterCopyMode => {
-                    terminal_changed |= self.apply_terminal_change(TerminalEngine::enter_copy_mode);
-                }
-                RmuxTerminalCommand::SelectionBegin(event) => {
-                    terminal_changed |=
-                        self.apply_terminal_change(|engine| engine.begin_selection(event));
-                }
-                RmuxTerminalCommand::SelectionUpdate(event) => {
-                    terminal_changed |=
-                        self.apply_terminal_change(|engine| engine.update_selection(event));
-                }
-                RmuxTerminalCommand::SelectionEnd(event) => {
-                    terminal_changed |=
-                        self.apply_terminal_change(|engine| engine.end_selection(event));
-                }
-                RmuxTerminalCommand::FormatSelection { format, done } => {
-                    self.respond(done, |worker| worker.engine.format_selection(format));
-                }
-                RmuxTerminalCommand::CopyModeActive { done } => {
-                    self.respond(done, |worker| Ok(worker.engine.copy_mode_active()));
-                }
-                RmuxTerminalCommand::CopyModeAction { action, done } => {
-                    if self.respond(done, |worker| {
-                        worker.mark_input_fast_path();
-                        worker.engine.handle_copy_mode_action(action)
-                    }) {
-                        terminal_changed = true;
-                    }
-                }
-                RmuxTerminalCommand::SearchViewport {
-                    query,
-                    direction,
-                    done,
-                } => {
-                    if self.respond(done, |worker| {
-                        worker.mark_input_fast_path();
-                        worker.engine.search_viewport(&query, direction)
-                    }) {
-                        terminal_changed = true;
-                    }
-                }
-                RmuxTerminalCommand::IsMouseTracking { done } => {
-                    self.respond(done, |worker| worker.engine.is_mouse_tracking());
-                }
-                RmuxTerminalCommand::DiscardPendingOutput { done } => {
-                    self.respond(done, |worker| {
-                        worker.pending_output.clear();
-                        worker.pending_output_len.store(0, Ordering::Relaxed);
-                        worker.has_unpublished_frame = false;
-                        worker.sync_output_batch_pending = false;
-                        worker.deferred_sync_publish = false;
-                        Ok(())
-                    });
-                }
-                RmuxTerminalCommand::Stop => {
-                    self.command_disconnected = true;
-                    break;
-                }
+            terminal_changed |= self.apply_command(command);
+            if self.command_disconnected {
+                break;
             }
         }
         (did_work, terminal_changed)
+    }
+
+    fn apply_command(&mut self, command: RmuxTerminalCommand) -> bool {
+        let mut terminal_changed = false;
+        match command {
+            RmuxTerminalCommand::DisplayScale(display_scale) => {
+                self.engine.set_display_scale(display_scale);
+                self.mark_unpublished_frame();
+            }
+            RmuxTerminalCommand::RenderCellMetrics(cell) => {
+                self.engine.set_render_cell_metrics(cell);
+                self.mark_unpublished_frame();
+            }
+            RmuxTerminalCommand::Resize(geometry) => {
+                self.force_next_frame_publish = true;
+                self.geometry = geometry;
+                self.queue_resize(geometry);
+                terminal_changed = self.engine.resize(geometry).is_ok();
+            }
+            RmuxTerminalCommand::ForceResize => {
+                self.force_next_frame_publish = true;
+                self.queue_resize(self.geometry);
+                terminal_changed = true;
+            }
+            RmuxTerminalCommand::ApplyLiveConfig(config) => {
+                match self.engine.apply_live_config(config) {
+                    Ok(()) => terminal_changed = true,
+                    Err(error) => self.send_error(&error),
+                }
+            }
+            command @ (RmuxTerminalCommand::Key(_)
+            | RmuxTerminalCommand::Focus(_)
+            | RmuxTerminalCommand::Mouse(_)
+            | RmuxTerminalCommand::MouseWheel { .. }
+            | RmuxTerminalCommand::Paste(_)
+            | RmuxTerminalCommand::InputBytes(_)
+            | RmuxTerminalCommand::MouseViewportScroll { .. }
+            | RmuxTerminalCommand::MouseViewportScrollTo { .. }) => {
+                terminal_changed = self.apply_input_command(command);
+            }
+            RmuxTerminalCommand::EnterCopyMode => {
+                terminal_changed |= self.apply_terminal_change(TerminalEngine::enter_copy_mode);
+            }
+            RmuxTerminalCommand::SelectionBegin(event) => {
+                terminal_changed |=
+                    self.apply_terminal_change(|engine| engine.begin_selection(event));
+            }
+            RmuxTerminalCommand::SelectionUpdate(event) => {
+                terminal_changed |=
+                    self.apply_terminal_change(|engine| engine.update_selection(event));
+            }
+            RmuxTerminalCommand::SelectionEnd(event) => {
+                terminal_changed |=
+                    self.apply_terminal_change(|engine| engine.end_selection(event));
+            }
+            RmuxTerminalCommand::Capture { options, done } => {
+                self.respond(done, |worker| worker.engine.capture(options));
+            }
+            RmuxTerminalCommand::FormatSelection { format, done } => {
+                self.respond(done, |worker| worker.engine.format_selection(format));
+            }
+            RmuxTerminalCommand::CopyModeActive { done } => {
+                self.respond(done, |worker| Ok(worker.engine.copy_mode_active()));
+            }
+            RmuxTerminalCommand::CopyModeAction { action, done } => {
+                terminal_changed = self.respond(done, |worker| {
+                    worker.mark_input_fast_path();
+                    worker.engine.handle_copy_mode_action(action)
+                });
+            }
+            RmuxTerminalCommand::SearchViewport {
+                options,
+                query,
+                direction,
+                done,
+            } => {
+                terminal_changed = self.respond(done, |worker| {
+                    worker.mark_input_fast_path();
+                    worker
+                        .engine
+                        .search_viewport_with_options(&query, direction, options)
+                });
+            }
+            RmuxTerminalCommand::IsMouseTracking { done } => {
+                self.respond(done, |worker| worker.engine.is_mouse_tracking());
+            }
+            RmuxTerminalCommand::DiscardPendingOutput { done } => {
+                self.respond(done, |worker| {
+                    worker.discard_pending_output();
+                    Ok(())
+                });
+            }
+            RmuxTerminalCommand::Stop => {
+                self.command_disconnected = true;
+            }
+        }
+        terminal_changed
+    }
+
+    fn apply_input_command(&mut self, command: RmuxTerminalCommand) -> bool {
+        let mut terminal_changed = false;
+        match command {
+            RmuxTerminalCommand::MouseViewportScroll { delta } => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_delta(delta);
+                terminal_changed = true;
+            }
+            RmuxTerminalCommand::MouseViewportScrollTo { offset } => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_to(offset);
+                terminal_changed = true;
+            }
+            RmuxTerminalCommand::Key(input) => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_bottom();
+                terminal_changed = true;
+                self.encode_output(|engine, out| engine.encode_key_to_vec(input, out));
+            }
+            RmuxTerminalCommand::Focus(gained) => {
+                self.mark_input_fast_path();
+                self.encode_output(|engine, out| engine.encode_focus_to_vec(gained, out));
+            }
+            RmuxTerminalCommand::Mouse(input) => {
+                self.mark_input_fast_path();
+                self.encode_output(|engine, out| engine.encode_mouse_to_vec(input, out));
+            }
+            RmuxTerminalCommand::MouseWheel {
+                input,
+                scroll_delta,
+            } => match self.engine.is_mouse_tracking() {
+                Ok(true) => {
+                    self.mark_input_fast_path();
+                    self.encode_output(|engine, out| {
+                        engine.encode_mouse_wheel_to_vec(
+                            input,
+                            scroll_delta.unsigned_abs().max(1),
+                            out,
+                        )
+                    });
+                }
+                Ok(false) if scroll_delta != 0 => {
+                    self.mark_input_fast_path();
+                    self.engine.scroll_viewport_delta(scroll_delta);
+                    terminal_changed = true;
+                }
+                Ok(false) => {}
+                Err(error) => self.send_error(&error),
+            },
+            RmuxTerminalCommand::Paste(text) => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_bottom();
+                terminal_changed = true;
+                self.encode_output(|engine, out| engine.encode_paste_to_vec(&text, out));
+            }
+            RmuxTerminalCommand::InputBytes(bytes) => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_bottom();
+                terminal_changed = true;
+                self.queue_input(&bytes);
+            }
+            _ => {}
+        }
+        terminal_changed
+    }
+
+    fn discard_pending_output(&mut self) {
+        self.pending_output.clear();
+        self.pending_output_len.store(0, Ordering::Relaxed);
+        self.has_unpublished_frame = false;
+        self.sync_output_batch_pending = false;
+        self.deferred_sync_publish = false;
     }
 
     fn collect_pane_output(&mut self) -> bool {
@@ -936,7 +1110,11 @@ impl RmuxWorker {
             && collected_bytes < RMUX_MAX_COLLECT_BYTES_PER_TICK
             && self.total_pending_output_len() < RMUX_MAX_PENDING_OUTPUT_BYTES
         {
-            let event = match self.pane_io.output_rx.try_recv() {
+            let event = match self
+                .pending_event
+                .take()
+                .map_or_else(|| self.pane_io.output_rx.try_recv(), Ok)
+            {
                 Ok(event) => event,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -956,8 +1134,9 @@ impl RmuxWorker {
                     self.update_pending_output_len();
                     self.sync_output_batch_pending = false;
                     self.deferred_sync_publish = false;
-                    collected_chunks += 1;
-                    collected_bytes += keyframe.len();
+                    self.cursor_hold.reset();
+                    collected_chunks = collected_chunks.saturating_add(1);
+                    collected_bytes = collected_bytes.saturating_add(keyframe.len());
                     self.engine.write_vt_without_pty_responses(&keyframe);
                     self.engine.scroll_viewport_bottom();
                     self.waiting_initial_remote_frame = false;
@@ -965,22 +1144,22 @@ impl RmuxWorker {
                     self.mark_unpublished_frame();
                 }
                 RmuxPaneEvent::Bytes(bytes) => {
-                    collected_chunks += 1;
-                    collected_bytes += bytes.len();
+                    collected_chunks = collected_chunks.saturating_add(1);
+                    collected_bytes = collected_bytes.saturating_add(bytes.len());
                     self.pending_output.push_back(bytes);
                     self.update_pending_output_len();
                 }
                 RmuxPaneEvent::ProcessExited => {}
                 RmuxPaneEvent::End(error) => {
                     if let Some(reason) = error {
-                        self.send_error(anyhow::anyhow!("rmux pane output ended: {reason}"));
+                        self.send_error(&format!("rmux pane output ended: {reason}"));
                     }
                     self.output_closed = true;
                     self.closed.store(true, Ordering::Relaxed);
                     break;
                 }
                 RmuxPaneEvent::Error(error) => {
-                    self.send_error(anyhow::anyhow!(error));
+                    self.send_error(&error);
                     self.output_closed = true;
                     self.closed.store(true, Ordering::Relaxed);
                     break;
@@ -990,7 +1169,7 @@ impl RmuxWorker {
         did_work
     }
 
-    fn total_pending_output_len(&self) -> usize {
+    const fn total_pending_output_len(&self) -> usize {
         self.pending_output.len()
     }
 
@@ -1028,7 +1207,7 @@ impl RmuxWorker {
     fn drain_input_results(&mut self) {
         while let Ok(result) = self.pane_io.result_rx.try_recv() {
             if let Err(error) = result {
-                self.send_error(anyhow::anyhow!(error));
+                self.send_error(&error);
             }
         }
     }
@@ -1053,17 +1232,25 @@ impl RmuxWorker {
         if self.waiting_initial_remote_frame {
             return false;
         }
-        let sync_output_suppressed = self.sync_output_suppressed();
+        let hold = if self.sync_output_suppressed() {
+            // The quiet window measures its own delay, so it restarts after a sync block.
+            self.settle.reset();
+            PublishHold::SyncOutput
+        } else if self.settling() {
+            PublishHold::Settling
+        } else {
+            PublishHold::None
+        };
+        self.last_hold = hold;
         should_publish_frame_after_work(
             self.has_unpublished_frame,
             self.force_next_frame_publish,
-            sync_output_suppressed,
+            hold,
             self.total_pending_output_len(),
             self.last_terminal_change
-                .map(|instant| instant.elapsed())
-                .unwrap_or(Duration::ZERO),
+                .map_or(Duration::ZERO, |instant| instant.elapsed()),
             self.last_frame_publish.elapsed(),
-        )
+        ) || self.cursor_hold.commit_due(Instant::now())
     }
 
     fn sync_output_suppressed(&mut self) -> bool {
@@ -1083,11 +1270,18 @@ impl RmuxWorker {
         sync_output_suppresses_publish(active, observed, elapsed)
     }
 
+    fn settling(&mut self) -> bool {
+        self.settle.holds(
+            self.last_terminal_change
+                .map_or(Duration::ZERO, |instant| instant.elapsed()),
+        )
+    }
+
     fn publish_deferred_sync_frame(&mut self) {
         if !self.deferred_sync_publish || !self.has_unpublished_frame {
             return;
         }
-        if self.engine.is_synchronized_output().unwrap_or(false) {
+        if self.engine.is_synchronized_output().unwrap_or(false) || self.settling() {
             return;
         }
         self.publish_frame();
@@ -1098,10 +1292,14 @@ impl RmuxWorker {
         let Ok(frame) = self.engine.extract_frame() else {
             return;
         };
-        if self.latest_frame.publish(frame.clone()).is_ok() {
+        let shown = self.cursor_hold.resolve(frame.cursor, Instant::now());
+        let mut published = frame.clone();
+        published.cursor = shown;
+        if self.latest_frame.publish(published).is_ok() {
             self.force_next_frame_publish = false;
             self.has_unpublished_frame = false;
             self.deferred_sync_publish = false;
+            self.settle.reset();
             (self.repaint_wakeup)();
         }
     }
@@ -1111,12 +1309,12 @@ impl RmuxWorker {
         self.last_terminal_change = Some(Instant::now());
     }
 
-    fn mark_input_fast_path(&mut self) {
+    const fn mark_input_fast_path(&mut self) {
         self.waiting_initial_remote_frame = false;
         self.force_next_frame_publish = true;
     }
 
-    fn should_stop(&self) -> bool {
+    const fn should_stop(&self) -> bool {
         self.command_disconnected || (self.output_closed && self.total_pending_output_len() == 0)
     }
 
@@ -1182,7 +1380,7 @@ impl RmuxWorker {
         true
     }
 
-    fn send_error(&self, error: anyhow::Error) {
+    fn send_error(&self, error: &impl std::fmt::Display) {
         let _ = self.error_tx.send(error.to_string());
     }
 }

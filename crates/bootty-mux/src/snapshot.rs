@@ -8,7 +8,8 @@ pub enum MuxSnapshotDisposition {
 }
 
 impl MuxSnapshotDisposition {
-    pub fn is_authoritative(&self) -> bool {
+    #[must_use]
+    pub const fn is_authoritative(&self) -> bool {
         matches!(self, Self::Authoritative)
     }
 }
@@ -51,7 +52,8 @@ pub struct MuxSessionTag {
 }
 
 impl MuxSessionTag {
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.identity.is_none() && self.space.is_none()
     }
 }
@@ -68,6 +70,7 @@ pub const SESSION_IDENTITY_OPTION: &str = "@bootty_id";
 pub const SESSION_SPACE_OPTION: &str = "@bootty_space";
 
 /// Mints a session identity. Random, because two bootty installs can share one server.
+#[must_use]
 pub fn new_session_identity() -> String {
     let mut bytes = [0_u8; 16];
     // A failure here would leave the session untagged, which reads as "belongs to no Space" and is
@@ -75,13 +78,7 @@ pub fn new_session_identity() -> String {
     if getrandom::fill(&mut bytes).is_err() {
         return String::new();
     }
-    let digits = b"0123456789abcdef";
-    let mut identity = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        identity.push(digits[(byte >> 4) as usize] as char);
-        identity.push(digits[(byte & 0x0f) as usize] as char);
-    }
-    identity
+    format!("{:032x}", u128::from_be_bytes(bytes))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -96,8 +93,8 @@ pub enum MuxPaneLayout {
     Split {
         direction: MuxPaneSplitDirection,
         ratio_millis: u16,
-        first: Box<MuxPaneLayout>,
-        second: Box<MuxPaneLayout>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -107,7 +104,7 @@ pub struct MuxWindow {
     pub name: String,
     pub active: bool,
     pub anchor: MuxPaneAnchor,
-    /// Every pane in the window, in order. The native engine renders these as an egui split layout;
+    /// Every pane in the window, in order. The native engine renders these as a split layout;
     /// other backends own their own layout and expose only the single attach anchor here.
     pub panes: Vec<MuxPaneAnchor>,
     /// Native-layout shape for backends that expose a durable split tree.
@@ -118,7 +115,7 @@ pub struct MuxWindow {
     pub progress: Option<MuxWindowProgress>,
 }
 
-/// Backend-reported progress, in the ConEmu vocabulary the OSC 9;4 parser already speaks.
+/// Backend-reported progress, in the `ConEmu` vocabulary the OSC 9;4 parser already speaks.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct MuxWindowProgress {
     pub state: String,
@@ -136,6 +133,7 @@ pub struct MuxPaneAnchor {
     pub process: Option<String>,
 }
 
+#[must_use]
 pub fn session_matches(session: &MuxSession, session_id: &str) -> bool {
     session.id == session_id || session.name == session_id
 }
@@ -145,6 +143,7 @@ pub fn session_matches(session: &MuxSession, session_id: &str) -> bool {
 /// Answering with the id rather than the string that came in is what keeps a selection stable: a name
 /// stops resolving the moment the session is renamed, and the UI marks the current row by id, so a
 /// name-tracked selection leaves the focused session unhighlighted.
+#[must_use]
 pub fn selection_after_refresh(current: Option<String>, sessions: &[MuxSession]) -> Option<String> {
     current
         .and_then(|current| {
@@ -160,4 +159,21 @@ pub fn selection_after_refresh(current: Option<String>, sessions: &[MuxSession])
                 .or_else(|| sessions.first())
                 .map(|session| session.id.clone())
         })
+}
+
+pub(crate) fn wrap_index(index: usize, delta: impl TryInto<i128>, len: usize) -> Option<usize> {
+    let offset = i128::try_from(index)
+        .ok()?
+        .checked_add(delta.try_into().ok()?)?;
+    usize::try_from(offset.checked_rem_euclid(i128::try_from(len).ok()?)?).ok()
+}
+
+pub(crate) fn clamp_move_index(index: usize, delta: i32, len: usize) -> usize {
+    let magnitude = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    if delta < 0 {
+        index.saturating_sub(magnitude)
+    } else {
+        index.saturating_add(magnitude)
+    }
+    .min(len.saturating_sub(1))
 }

@@ -7,9 +7,8 @@ use rmux_proto::{
 };
 use rmux_sdk::{Rmux, SessionName};
 
-#[cfg(feature = "app")]
-use crate::rmux::bridge::resize_rmux_window;
-use crate::rmux::bridge::{rmux_execute, rmux_snapshot};
+use super::bridge::resize_rmux_window;
+use super::bridge::{rmux_execute, rmux_snapshot};
 
 use crate::{
     backend::MuxBackend,
@@ -20,24 +19,25 @@ use crate::{
     },
     tmux_compatible_layout::{parse, parse_with_checksum},
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::{BindingCapabilityDescriptor, BindingOperation},
     controller::SpaceId,
 };
 
 const RMUX_FIELD_SEPARATOR: char = '\u{1f}';
-pub(crate) const RMUX_WINDOW_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_active}\u{1f}#{window_name}\u{1f}#{window_layout}";
-pub(crate) const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
+pub const RMUX_WINDOW_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_active}\u{1f}#{window_name}\u{1f}#{window_layout}";
+pub const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
 /// Names and rename-stable ids, which is what the Bootty tag is keyed by.
-pub(crate) const RMUX_SESSION_ID_FORMAT: &str = "#{session_name}\u{1f}#{session_id}";
+pub const RMUX_SESSION_ID_FORMAT: &str = "#{session_name}\u{1f}#{session_id}";
 
 pub struct RmuxBackend<C = RmuxControl> {
     control: C,
 }
 
 impl RmuxBackend<RmuxControl> {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self::with_control(RmuxControl)
     }
 }
@@ -49,18 +49,21 @@ impl Default for RmuxBackend<RmuxControl> {
 }
 
 impl<C> RmuxBackend<C> {
-    pub fn with_control(control: C) -> Self {
+    pub const fn with_control(control: C) -> Self {
         Self { control }
     }
 }
 
 impl<C: MuxBackend> RmuxBackend<C> {
+    /// # Errors
+    /// Returns connection, protocol, or backend snapshot errors.
     pub fn snapshot(&self) -> Result<MuxSnapshot> {
         let mut snapshot = self.control.snapshot()?;
         snapshot.disposition = rmux_snapshot_disposition(&snapshot.sessions);
         Ok(snapshot)
     }
-
+    /// # Errors
+    /// Returns invalid target, connection, or backend command errors.
     pub fn execute(&mut self, command: MuxCommand) -> Result<()> {
         self.control.execute(command)
     }
@@ -83,18 +86,21 @@ fn rmux_snapshot_disposition(sessions: &[MuxSession]) -> MuxSnapshotDisposition 
 
 impl<C: MuxBackend> MuxBackend for RmuxBackend<C> {
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        RmuxBackend::snapshot(self)
+        Self::snapshot(self)
     }
 
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
-        RmuxBackend::execute(self, command)
+        Self::execute(self, command)
     }
 }
 
-#[cfg(feature = "app")]
-/// What an rmux binding can do, wherever its daemon runs. A remote binding drives the same rmux
+#[cfg(feature = "terminal-runtime")]
+/// What an rmux binding can do, wherever its daemon runs.
+///
+/// A remote binding drives the same rmux
 /// through its command line rather than the socket, so it has to claim the same operations and not
 /// the ones tmux happens to add.
+#[must_use]
 pub fn rmux_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
     BindingCapabilityDescriptor::new(
         scope,
@@ -129,13 +135,12 @@ impl MuxBackend for RmuxControl {
     }
 }
 
-#[cfg(feature = "app")]
-pub(crate) fn resize_bootty_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
+pub fn resize_bootty_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
     resize_rmux_window(window_id, cols, rows)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RmuxWindowRow {
+pub struct RmuxWindowRow {
     pub(crate) session_name: String,
     pub(crate) id: String,
     pub(crate) index: u32,
@@ -145,7 +150,7 @@ pub(crate) struct RmuxWindowRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RmuxPaneRow {
+pub struct RmuxPaneRow {
     pub(crate) session_name: String,
     pub(crate) window_id: String,
     pub(crate) pane_id: String,
@@ -155,10 +160,7 @@ pub(crate) struct RmuxPaneRow {
     pub(crate) process: Option<String>,
 }
 
-pub(crate) async fn list_window_rows(
-    _rmux: &Rmux,
-    name: &SessionName,
-) -> Result<Vec<RmuxWindowRow>> {
+pub async fn list_window_rows(_rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxWindowRow>> {
     let response = rmux_request(Request::ListWindows(Box::new(ListWindowsRequest {
         target: name.clone(),
         format: Some(RMUX_WINDOW_FORMAT.to_owned()),
@@ -176,7 +178,7 @@ pub(crate) async fn list_window_rows(
         .collect()
 }
 
-pub(crate) async fn list_pane_rows(_rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxPaneRow>> {
+pub async fn list_pane_rows(_rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxPaneRow>> {
     let response = rmux_request(Request::ListPanes(Box::new(ListPanesRequest {
         target: name.clone(),
         target_window_index: None,
@@ -195,8 +197,8 @@ pub(crate) async fn list_pane_rows(_rmux: &Rmux, name: &SessionName) -> Result<V
         .collect()
 }
 
-pub(crate) async fn rmux_request(request: Request) -> Result<Response> {
-    let endpoint = crate::rmux::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
+pub async fn rmux_request(request: Request) -> Result<Response> {
+    let endpoint = super::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
     let response =
         tokio::task::spawn_blocking(move || rmux_client::connect(&endpoint)?.roundtrip(&request))
             .await
@@ -207,7 +209,7 @@ pub(crate) async fn rmux_request(request: Request) -> Result<Response> {
     Ok(response)
 }
 
-pub(crate) async fn rmux_request_checked(request: Request) -> Result<()> {
+pub async fn rmux_request_checked(request: Request) -> Result<()> {
     rmux_request(request).await.map(|_| ())
 }
 
@@ -271,7 +273,7 @@ fn rmux_window_layout(raw: &str) -> Option<MuxPaneLayout> {
     parse_with_checksum(raw).or_else(|_| parse(raw)).ok()
 }
 
-pub(crate) fn session_from_rows(
+pub fn session_from_rows(
     name: &str,
     tag: MuxSessionTag,
     window_rows: &[RmuxWindowRow],
@@ -313,7 +315,7 @@ pub(crate) fn session_from_rows(
                 });
             MuxWindow {
                 id: window.id.clone(),
-                index: position as u32 + 1,
+                index: u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX),
                 name: window.name.clone(),
                 active: window.active,
                 panes: window_panes,
@@ -368,6 +370,7 @@ pub(crate) fn session_from_rows(
 /// (`rmux-core::session::store::rename_session` rekeys leases, subscriptions and attaches, but not
 /// options), so a session-scoped tag would be orphaned by a rename bootty did not issue. Keying on
 /// `session_id` -- which rmux documents as its stable identity -- gets the same guarantee.
+#[must_use]
 pub fn session_tag_option(session_id: &str, option: &str) -> String {
     // rmux renders session ids as `$3`; the sigil buys nothing inside an option name.
     format!("{option}_{}", session_id.trim_start_matches('$'))
@@ -424,7 +427,7 @@ async fn server_user_options() -> Result<HashMap<String, String>> {
 ///
 /// Also clears tags left behind by sessions that are gone, since rmux reuses a session id once
 /// nothing holds it and a stale option would be inherited by whatever takes that id next.
-pub(crate) async fn list_session_tags(_rmux: &Rmux) -> Result<HashMap<String, MuxSessionTag>> {
+pub async fn list_session_tags(_rmux: &Rmux) -> Result<HashMap<String, MuxSessionTag>> {
     let sessions = list_session_ids().await?;
     let mut options = server_user_options().await?;
     let mut tags = HashMap::with_capacity(sessions.len());
@@ -454,11 +457,13 @@ pub(crate) async fn list_session_tags(_rmux: &Rmux) -> Result<HashMap<String, Mu
     Ok(tags)
 }
 
+#[must_use]
 pub fn numeric_session_id(session_id: &str) -> Option<u32> {
     session_id.trim_start_matches('$').parse().ok()
 }
 
 /// The session id a tag option is keyed by, for the options bootty owns.
+#[must_use]
 pub fn tag_option_id(option: &str) -> Option<u32> {
     [SESSION_IDENTITY_OPTION, SESSION_SPACE_OPTION]
         .into_iter()
@@ -484,7 +489,7 @@ async fn set_server_option(name: &str, value: Option<&str>) -> Result<()> {
 
 /// Writes `tag` onto the named session. A half that is `None` is a claim being dropped, so it
 /// clears its option rather than writing an empty value.
-pub(crate) async fn stamp_session_tag(name: &SessionName, tag: &MuxSessionTag) -> Result<()> {
+pub async fn stamp_session_tag(name: &SessionName, tag: &MuxSessionTag) -> Result<()> {
     let name = name.to_string();
     let Some((_, id)) = list_session_ids()
         .await?

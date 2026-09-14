@@ -1,7 +1,7 @@
 use std::{env, ffi::OsStr, path::Path, sync::Arc};
 
 use anyhow::Result;
-use bootty_runtime::{TerminalSession, TerminalSessionConfig};
+use bootty_terminal::{TerminalSession, TerminalSessionConfig};
 
 use super::pane::{PaneStartRequest, TerminalRuntime};
 
@@ -13,7 +13,8 @@ pub struct AttachLaunch {
     pub term_program: Option<String>,
     pub remote: bool,
 }
-
+/// # Errors
+/// Returns executable resolution, PTY creation, or child process startup errors.
 pub fn start_attach_terminal(
     request: PaneStartRequest<'_>,
     launch: AttachLaunch,
@@ -23,7 +24,7 @@ pub fn start_attach_terminal(
     let config = attach_session_config(
         config,
         launch,
-        bootty_runtime::terminfo::vendored_terminfo_dir().is_some(),
+        bootty_terminal::terminfo::vendored_terminfo_dir().is_some(),
         env::var_os("PATH").as_deref(),
     )?;
     Ok(Box::new(TerminalSession::new_with_config_and_host_metrics(
@@ -48,12 +49,13 @@ fn attach_session_config(
     config.launch.term_program = launch.term_program;
 
     let terminfo_reaches_client = bootty_terminfo_available && !launch.remote;
-    if config.launch.term != bootty_runtime::terminfo::XTERM_BOOTTY || !terminfo_reaches_client {
-        config.launch.term = "xterm-256color".to_owned();
+    if config.launch.term != bootty_terminal::terminfo::XTERM_BOOTTY || !terminfo_reaches_client {
+        "xterm-256color".clone_into(&mut config.launch.term);
     }
     Ok(config)
 }
-
+/// # Errors
+/// Returns an error if the launch program cannot be resolved to an executable.
 pub fn resolve_launch_program(program: &str) -> Result<String> {
     resolve_launch_program_with_path(program, env::var_os("PATH").as_deref())
 }

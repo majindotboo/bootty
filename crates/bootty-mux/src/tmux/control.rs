@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
-use crate::process::{CommandOutput, CommandRunner, SystemCommandRunner};
-use crate::tmux::protocol::{TmuxControlNotification, TmuxControlParser};
-use bootty_host::ssh::SshRemote;
+use super::protocol::{TmuxControlNotification, TmuxControlParser};
+use bootty_host::remote::RemoteHost;
+use bootty_host::{CommandOutput, CommandRunner, SystemCommandRunner};
 
 /// tmux commands that only read state, and so can be answered by a client shared with every other
 /// reader. Everything else keeps its own process, where its exit status and stderr stand alone.
@@ -32,7 +32,9 @@ const RESTART_BACKOFF: Duration = Duration::from_secs(10);
 const READY_TOKEN: &str = "bootty-control-ready";
 
 /// Runs read-only tmux queries through a shared control-mode client, and everything else as its own
-/// process. Falls back to a process whenever the client is unavailable, so tmux versions without
+/// process.
+///
+/// Falls back to a process whenever the client is unavailable, so tmux versions without
 /// control mode behave exactly as they did before.
 #[derive(Clone, Default)]
 pub struct TmuxControlRunner {
@@ -40,12 +42,13 @@ pub struct TmuxControlRunner {
     prefix_args: Arc<[String]>,
     /// Set when the tmux server lives on another host. The control client is then a long-lived SSH
     /// process, which is the one place a remote snapshot poll can be as cheap as a local one.
-    remote: Option<SshRemote>,
+    remote: Option<RemoteHost>,
 }
 
 impl TmuxControlRunner {
-    pub fn for_identity(identity: bootty_identity::ApplicationIdentity) -> Self {
-        let prefix_args = crate::tmux::backend::local_server_args(identity);
+    #[must_use]
+    pub fn for_identity(identity: bootty_config::ApplicationIdentity) -> Self {
+        let prefix_args = super::backend::local_server_args(identity);
         Self {
             clients: Arc::default(),
             prefix_args: prefix_args.into(),
@@ -53,7 +56,8 @@ impl TmuxControlRunner {
         }
     }
 
-    pub fn for_remote(remote: SshRemote) -> Self {
+    #[must_use]
+    pub fn for_remote(remote: RemoteHost) -> Self {
         Self {
             clients: Arc::default(),
             prefix_args: Arc::default(),
@@ -63,6 +67,8 @@ impl TmuxControlRunner {
 
     /// Inject already-encoded terminal bytes into a target pane without asking tmux to interpret
     /// them as keys. The persistent control client keeps this cheap for local and remote panes.
+    /// # Errors
+    /// Returns invalid selector, transport, or tmux command errors.
     pub fn send_literal_input(&self, program: &str, target: &str, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
@@ -101,12 +107,13 @@ impl std::fmt::Debug for TmuxControlRunner {
 
 impl CommandRunner for TmuxControlRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        if let Some(output) = self.control_query(program, args) {
-            Ok(output)
-        } else {
-            let (program, args) = self.spawned(program, args);
-            SystemCommandRunner.run(&program, &args)
-        }
+        self.control_query(program, args).map_or_else(
+            || {
+                let (program, args) = self.spawned(program, args);
+                SystemCommandRunner.run(&program, &args)
+            },
+            Ok,
+        )
     }
 
     fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
@@ -131,7 +138,7 @@ impl TmuxControlClient {
     fn start_with(
         program: &str,
         prefix_args: &[String],
-        remote: Option<&SshRemote>,
+        remote: Option<&RemoteHost>,
     ) -> Result<Self> {
         // No `-t`: the most recently used session is as good as any, since the client is only ever
         // asked about the server as a whole. `no-output` keeps pane data out of the pipe, which
@@ -242,7 +249,7 @@ fn read_replies(stdout: ChildStdout, replies: &Sender<Reply>) {
 #[derive(Default)]
 struct ClientSlot {
     client: Option<TmuxControlClient>,
-    retry_after: Option<Instant>,
+    failed_at: Option<Instant>,
 }
 
 impl TmuxControlRunner {
@@ -271,21 +278,25 @@ impl TmuxControlRunner {
         let mut clients = self.clients.lock().ok()?;
         let slot = clients.entry(self.client_key(program)).or_default();
         if slot.client.is_none() {
-            if slot.retry_after.is_some_and(|at| Instant::now() < at) {
+            if slot
+                .failed_at
+                .is_some_and(|at| at.elapsed() < RESTART_BACKOFF)
+            {
                 return None;
             }
             if let Ok(client) =
                 TmuxControlClient::start_with(program, &self.prefix_args, self.remote.as_ref())
             {
                 slot.client = Some(client);
-                slot.retry_after = None;
+                slot.failed_at = None;
             } else {
-                slot.retry_after = Some(Instant::now() + RESTART_BACKOFF);
+                slot.failed_at = Some(Instant::now());
                 return None;
             }
         }
 
         if let Ok(stdout) = slot.client.as_mut()?.query(line, blocks) {
+            drop(clients);
             Some(CommandOutput {
                 success: true,
                 stdout,
@@ -295,7 +306,7 @@ impl TmuxControlRunner {
             // A client that timed out or errored cannot be trusted to still be in step with its
             // replies, so it goes rather than risk answering the next query with this one's output.
             slot.client = None;
-            slot.retry_after = Some(Instant::now() + RESTART_BACKOFF);
+            slot.failed_at = Some(Instant::now());
             None
         }
     }
@@ -326,7 +337,11 @@ fn literal_input_command_line(args: &[String]) -> Result<String> {
     Ok(line)
 }
 
-fn spawn_argv(program: &str, args: &[String], remote: Option<&SshRemote>) -> (String, Vec<String>) {
+fn spawn_argv(
+    program: &str,
+    args: &[String],
+    remote: Option<&RemoteHost>,
+) -> (String, Vec<String>) {
     remote.map_or_else(
         || (program.to_owned(), args.to_vec()),
         |remote| remote.command(program, args),
@@ -335,7 +350,10 @@ fn spawn_argv(program: &str, args: &[String], remote: Option<&SshRemote>) -> (St
 
 /// How many reply blocks `args` produces: tmux answers each `;`-separated command with its own.
 fn expected_blocks(args: &[String]) -> usize {
-    1 + args.iter().filter(|arg| *arg == ";").count()
+    args.iter()
+        .filter(|arg| *arg == ";")
+        .count()
+        .saturating_add(1)
 }
 
 /// The control-mode command line for `args`, or `None` when the control client should not run it.

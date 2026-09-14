@@ -6,7 +6,7 @@ use crate::{
     backend::MuxBackend,
     provider::{MuxBackendProvider, MuxCommandDispatch},
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
@@ -17,11 +17,11 @@ use crate::{
     },
     terminal::BackendPanePolicy,
 };
-use bootty_host::ssh::SshRemote;
+use bootty_host::remote::RemoteHost;
 
-use crate::rmux::RmuxBackend;
-#[cfg(feature = "app")]
-use crate::rmux::{RmuxPanePolicy, remote::RemoteRmuxBackend, rmux_capabilities};
+use super::RmuxBackend;
+#[cfg(feature = "terminal-runtime")]
+use super::{RmuxPanePolicy, remote::RemoteRmuxBackend, rmux_capabilities};
 
 pub struct RmuxProvider;
 
@@ -41,20 +41,20 @@ impl MuxBackendProvider for RmuxProvider {
     ) -> Box<dyn MuxBackend> {
         if let (Some(remote), Some(space_id)) = (&config.remote, &config.remote_space_id) {
             return Box::new(RemoteSpaceBackend::new(
-                SshRemote::new(remote.clone()),
+                RemoteHost::new(remote.clone()),
                 space_id.clone(),
                 MuxBackendKind::Rmux,
             ));
         }
-        #[cfg(feature = "app")]
+        #[cfg(feature = "terminal-runtime")]
         if let Some(remote) = &config.remote {
-            return Box::new(RemoteRmuxBackend::new(SshRemote::new(remote.clone())));
+            return Box::new(RemoteRmuxBackend::new(RemoteHost::new(remote.clone())));
         }
         Box::new(RmuxBackend::new())
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl MuxAppBackendProvider for RmuxProvider {
     fn app_policy(&self) -> MuxAppBackendPolicy {
         MuxAppBackendPolicy {
@@ -73,7 +73,7 @@ impl MuxAppBackendProvider for RmuxProvider {
 
     fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
         Box::new(RmuxPanePolicy::new(
-            config.remote.clone().map(SshRemote::new),
+            config.remote.clone().map(RemoteHost::new),
         ))
     }
 
@@ -83,5 +83,3 @@ impl MuxAppBackendProvider for RmuxProvider {
 }
 
 crate::register_mux_backend!(RmuxProvider);
-
-pub fn link() {}

@@ -22,17 +22,23 @@ enum ParsedLayoutContent {
 }
 
 /// Parses a tmux-compatible layout without requiring its checksum.
+/// # Errors
+/// Returns a format or syntax error for malformed layout dimensions or pane structure.
 pub fn parse(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleLayoutParseError> {
     parse_tree(input).and_then(into_mux_layout)
 }
 
 /// Parses a tmux-compatible layout and validates its four-digit checksum.
+/// # Errors
+/// Returns a syntax, checksum, or layout error when validation fails.
 pub fn parse_with_checksum(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleLayoutParseError> {
     if input.len() < 5 || input.as_bytes().get(4) != Some(&b',') {
         return Err(TmuxCompatibleLayoutParseError::SyntaxError);
     }
 
-    let layout = &input[5..];
+    let layout = input
+        .get(5..)
+        .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
     let checksum = tmux_layout_checksum(layout);
     if input.get(..4) != Some(tmux_layout_checksum_string(checksum).as_str()) {
         return Err(TmuxCompatibleLayoutParseError::ChecksumMismatch);
@@ -41,24 +47,27 @@ pub fn parse_with_checksum(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleL
     parse(layout)
 }
 
+#[must_use]
 pub fn tmux_layout_checksum(input: &str) -> u16 {
     tmux_layout_checksum_bytes(input.as_bytes())
 }
 
+#[must_use]
 pub fn tmux_layout_checksum_bytes(input: &[u8]) -> u16 {
     input.iter().fold(0u16, |checksum, byte| {
         checksum.rotate_right(1).wrapping_add(u16::from(*byte))
     })
 }
 
+#[must_use]
 pub fn tmux_layout_checksum_string(checksum: u16) -> String {
     format!("{checksum:04x}")
 }
 
 fn parse_tree(input: &str) -> Result<ParsedLayout, TmuxCompatibleLayoutParseError> {
-    let mut parser = TmuxLayoutParser { input, offset: 0 };
+    let mut parser = TmuxLayoutParser { input };
     let layout = parser.parse_next()?;
-    if parser.offset == input.len() {
+    if parser.input.is_empty() {
         Ok(layout)
     } else {
         Err(TmuxCompatibleLayoutParseError::SyntaxError)
@@ -96,10 +105,17 @@ fn fold_children(
     }
 
     let first_extent = extent(&first);
-    let total_extent = first_extent + rest.iter().map(extent).sum::<usize>();
-    let ratio_millis = ((first_extent.saturating_mul(1000) + total_extent / 2)
-        / total_extent.max(1))
-    .clamp(1, 999) as u16;
+    let total_extent = rest
+        .iter()
+        .map(extent)
+        .try_fold(first_extent, usize::checked_add)
+        .ok_or(TmuxCompatibleLayoutParseError::FormatError)?;
+    let ratio_millis = first_extent
+        .checked_mul(1000)
+        .and_then(|scaled| scaled.checked_add(total_extent.checked_div(2)?))
+        .and_then(|rounded| rounded.checked_div(total_extent.max(1)))
+        .and_then(|ratio| u16::try_from(ratio.clamp(1, 999)).ok())
+        .ok_or(TmuxCompatibleLayoutParseError::FormatError)?;
     let first_layout = into_mux_layout(first)?;
     let second_layout = fold_children(direction.clone(), rest, extent)?;
 
@@ -113,7 +129,6 @@ fn fold_children(
 
 struct TmuxLayoutParser<'a> {
     input: &'a str,
-    offset: usize,
 }
 
 impl TmuxLayoutParser<'_> {
@@ -125,27 +140,27 @@ impl TmuxLayoutParser<'_> {
         let delimiter = *self
             .input
             .as_bytes()
-            .get(self.offset)
+            .first()
             .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
 
         let content = match delimiter {
             b',' => {
-                self.offset += 1;
+                self.consume(1)?;
                 let pane_id = self.read_number_until_any(b",}]")?;
                 ParsedLayoutContent::Pane(pane_id)
             }
             b'{' | b'[' => {
-                self.offset += 1;
+                self.consume(1)?;
                 let mut children = Vec::new();
                 loop {
                     children.push(self.parse_next()?);
                     let next = *self
                         .input
                         .as_bytes()
-                        .get(self.offset)
+                        .first()
                         .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
                     if next == b',' {
-                        self.offset += 1;
+                        self.consume(1)?;
                         continue;
                     }
 
@@ -153,7 +168,7 @@ impl TmuxLayoutParser<'_> {
                     if next != expected {
                         return Err(TmuxCompatibleLayoutParseError::SyntaxError);
                     }
-                    self.offset += 1;
+                    self.consume(1)?;
                     break;
                 }
                 if delimiter == b'{' {
@@ -172,23 +187,29 @@ impl TmuxLayoutParser<'_> {
         })
     }
 
+    fn consume(&mut self, count: usize) -> Result<(), TmuxCompatibleLayoutParseError> {
+        self.input = self
+            .input
+            .get(count..)
+            .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
+        Ok(())
+    }
+
     fn read_number_until(
         &mut self,
         delimiter: u8,
         consume: bool,
     ) -> Result<usize, TmuxCompatibleLayoutParseError> {
-        let rest = self
+        let index = self
             .input
             .as_bytes()
-            .get(self.offset..)
-            .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
-        let index = rest
             .iter()
             .position(|byte| *byte == delimiter)
             .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
-        let number = parse_tmux_number(&self.input[self.offset..self.offset + index])
-            .map_err(|_| TmuxCompatibleLayoutParseError::SyntaxError)?;
-        self.offset += index + usize::from(consume);
+        let number = self.read_number(index)?;
+        if consume {
+            self.consume(1)?;
+        }
         Ok(number)
     }
 
@@ -196,18 +217,23 @@ impl TmuxLayoutParser<'_> {
         &mut self,
         delimiters: &[u8],
     ) -> Result<usize, TmuxCompatibleLayoutParseError> {
-        let rest = self
+        let index = self
             .input
             .as_bytes()
-            .get(self.offset..)
-            .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
-        let index = rest
             .iter()
             .position(|byte| delimiters.contains(byte))
-            .unwrap_or(rest.len());
-        let number = parse_tmux_number(&self.input[self.offset..self.offset + index])
-            .map_err(|_| TmuxCompatibleLayoutParseError::SyntaxError)?;
-        self.offset += index;
+            .unwrap_or(self.input.len());
+        self.read_number(index)
+    }
+
+    fn read_number(&mut self, count: usize) -> Result<usize, TmuxCompatibleLayoutParseError> {
+        let (digits, rest) = self
+            .input
+            .split_at_checked(count)
+            .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?;
+        let number =
+            parse_tmux_number(digits).map_err(|_| TmuxCompatibleLayoutParseError::SyntaxError)?;
+        self.input = rest;
         Ok(number)
     }
 }

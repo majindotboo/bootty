@@ -1,4 +1,7 @@
 //! Compatibility reexports for the host execution seam.
+//!
+//! New code should import these values from `bootty_host`; this module remains while downstream
+//! provider crates migrate off the old mux path.
 pub use bootty_host::{
     CancellableCommandRunner, CommandCancellation, CommandOutput, CommandRunner,
     SystemCommandRunner, require_success,

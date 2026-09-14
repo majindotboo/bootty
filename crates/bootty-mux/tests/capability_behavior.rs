@@ -16,13 +16,17 @@ use static_assertions::{assert_impl_all, const_assert_eq};
 const_assert_eq!(BINDING_CAPABILITY_DESCRIPTOR_VERSION, 1);
 assert_impl_all!(BindingOperation: Copy, Ord, Send, Sync);
 
-const OPERATIONS: [BindingOperation; 14] = [
+const OPERATIONS: [BindingOperation; 18] = [
     BindingOperation::ActivateWindow,
     BindingOperation::CreateWindow,
     BindingOperation::RenameWindow,
     BindingOperation::NavigateWindow,
     BindingOperation::MoveWindow,
     BindingOperation::SplitPane,
+    BindingOperation::MergeWindows,
+    BindingOperation::SwapPanes,
+    BindingOperation::MovePane,
+    BindingOperation::ExtractPane,
     BindingOperation::NavigatePane,
     BindingOperation::ClosePane,
     BindingOperation::TogglePaneZoom,
@@ -33,7 +37,7 @@ const OPERATIONS: [BindingOperation; 14] = [
     BindingOperation::StampSession,
 ];
 
-fn operation_token(operation: BindingOperation) -> &'static str {
+const fn operation_token(operation: BindingOperation) -> &'static str {
     match operation {
         BindingOperation::ActivateWindow => "activate_window",
         BindingOperation::CreateWindow => "create_window",
@@ -41,6 +45,10 @@ fn operation_token(operation: BindingOperation) -> &'static str {
         BindingOperation::NavigateWindow => "navigate_window",
         BindingOperation::MoveWindow => "move_window",
         BindingOperation::SplitPane => "split_pane",
+        BindingOperation::MergeWindows => "merge_windows",
+        BindingOperation::SwapPanes => "swap_panes",
+        BindingOperation::MovePane => "move_pane",
+        BindingOperation::ExtractPane => "extract_pane",
         BindingOperation::NavigatePane => "navigate_pane",
         BindingOperation::ClosePane => "close_pane",
         BindingOperation::TogglePaneZoom => "toggle_pane_zoom",

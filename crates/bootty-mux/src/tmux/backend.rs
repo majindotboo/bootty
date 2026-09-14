@@ -1,22 +1,22 @@
 use anyhow::{Context, Result};
+#[cfg(not(feature = "terminal-runtime"))]
+use bootty_host::SystemCommandRunner;
+use bootty_host::{CommandRunner, require_success};
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use std::{collections::HashMap, process::Command, sync::mpsc, thread};
 
-#[cfg(not(feature = "app"))]
-use crate::process::SystemCommandRunner;
-#[cfg(feature = "app")]
-use crate::tmux::control::TmuxControlRunner;
+#[cfg(feature = "terminal-runtime")]
+use super::control::TmuxControlRunner;
 use crate::{
     backend::MuxBackend,
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
-    process::{CommandRunner, require_success},
     snapshot::{
         MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow, MuxWindowProgress,
         SESSION_IDENTITY_OPTION, SESSION_SPACE_OPTION,
     },
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::{BindingCapabilityDescriptor, BindingOperation},
     controller::SpaceId,
@@ -25,8 +25,8 @@ use crate::{
         ScopedMuxPaneTarget, TerminalRuntime, resolve_launch_program, start_attach_terminal,
     },
 };
-#[cfg(feature = "app")]
-use bootty_host::ssh::SshRemote;
+#[cfg(feature = "terminal-runtime")]
+use bootty_host::remote::RemoteHost;
 
 const TMUX_FIELD_SEPARATOR: char = '\x1f';
 /// Line tags for the combined session/pane snapshot. Sessions and panes come from one tmux
@@ -34,39 +34,41 @@ const TMUX_FIELD_SEPARATOR: char = '\x1f';
 const TMUX_SESSION_LINE_TAG: char = 's';
 const TMUX_PANE_LINE_TAG: char = 'p';
 
-#[cfg(feature = "app")]
-pub fn local_server_args(identity: bootty_identity::ApplicationIdentity) -> Vec<String> {
+#[cfg(feature = "terminal-runtime")]
+#[must_use]
+pub fn local_server_args(identity: bootty_config::ApplicationIdentity) -> Vec<String> {
     match identity {
-        bootty_identity::ApplicationIdentity::Production => Vec::new(),
-        bootty_identity::ApplicationIdentity::Development => {
+        bootty_config::ApplicationIdentity::Production => Vec::new(),
+        bootty_config::ApplicationIdentity::Development => {
             vec!["-L".to_owned(), identity.namespace().to_owned()]
         }
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 const TMUX_CLIENT_FEATURES: &str =
     "256,RGB,clipboard,focus,hyperlinks,overline,strikethrough,sync,title";
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 struct TmuxOptionValue {
     value: String,
     local: bool,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub struct TmuxPanePolicy {
-    remote: Option<SshRemote>,
+    remote: Option<RemoteHost>,
     input_runner: TmuxControlRunner,
     status_hidden_sessions: Vec<String>,
     passthrough_all_panes: HashMap<String, TmuxOptionValue>,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl TmuxPanePolicy {
-    pub fn new(remote: Option<SshRemote>) -> Self {
+    #[must_use]
+    pub fn new(remote: Option<RemoteHost>) -> Self {
         let input_runner = remote.as_ref().map_or_else(
-            || TmuxControlRunner::for_identity(bootty_identity::ApplicationIdentity::for_process()),
+            || TmuxControlRunner::for_identity(bootty_config::ApplicationIdentity::for_process()),
             |remote| TmuxControlRunner::for_remote(remote.clone()),
         );
         Self {
@@ -121,10 +123,10 @@ impl TmuxPanePolicy {
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl BackendPanePolicy for TmuxPanePolicy {
-    fn remote_target(&self) -> Option<&crate::SshTarget> {
-        self.remote.as_ref().map(SshRemote::target)
+    fn remote_target(&self) -> Option<crate::RemoteTarget> {
+        self.remote.as_ref().map(RemoteHost::target)
     }
 
     fn start_terminal(
@@ -133,9 +135,9 @@ impl BackendPanePolicy for TmuxPanePolicy {
     ) -> Result<Option<Box<dyn TerminalRuntime>>> {
         self.sync_passthrough_override(Some(request.target));
         let identity = if self.remote.is_some() {
-            bootty_identity::ApplicationIdentity::Production
+            bootty_config::ApplicationIdentity::Production
         } else {
-            bootty_identity::ApplicationIdentity::for_process()
+            bootty_config::ApplicationIdentity::for_process()
         };
         let mut args = local_server_args(identity);
         args.extend([
@@ -196,7 +198,7 @@ impl BackendPanePolicy for TmuxPanePolicy {
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn spawn_literal_input_relay(
     runner: TmuxControlRunner,
     session_id: String,
@@ -214,9 +216,9 @@ fn spawn_literal_input_relay(
     Ok(tx)
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn take_pane_allow_passthrough(
-    remote: Option<&SshRemote>,
+    remote: Option<&RemoteHost>,
     pane_id: &str,
 ) -> Result<TmuxOptionValue> {
     let stdout = run_tmux(
@@ -245,13 +247,13 @@ fn take_pane_allow_passthrough(
         .ok_or_else(|| anyhow::anyhow!("tmux reported no allow-passthrough value"))
 }
 
-#[cfg(feature = "app")]
-fn run_tmux(remote: Option<&SshRemote>, args: &[&str], what: &str) -> Result<String> {
+#[cfg(feature = "terminal-runtime")]
+fn run_tmux(remote: Option<&RemoteHost>, args: &[&str], what: &str) -> Result<String> {
     let command_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     let (program, args) = if let Some(remote) = remote {
         remote.command("tmux", &command_args)
     } else {
-        let mut args = local_server_args(bootty_identity::ApplicationIdentity::for_process());
+        let mut args = local_server_args(bootty_config::ApplicationIdentity::for_process());
         args.extend(command_args);
         ("tmux".to_owned(), args)
     };
@@ -268,7 +270,7 @@ fn run_tmux(remote: Option<&SshRemote>, args: &[&str], what: &str) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn parse_allow_passthrough(stdout: &str) -> Option<TmuxOptionValue> {
     let values: Vec<&str> = stdout
         .lines()
@@ -280,9 +282,9 @@ fn parse_allow_passthrough(stdout: &str) -> Option<TmuxOptionValue> {
     })
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn restore_pane_allow_passthrough(
-    remote: Option<&SshRemote>,
+    remote: Option<&RemoteHost>,
     pane_id: &str,
     previous: &TmuxOptionValue,
 ) -> Result<()> {
@@ -297,9 +299,9 @@ fn restore_pane_allow_passthrough(
     .map(|_| ())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn set_pane_allow_passthrough(
-    remote: Option<&SshRemote>,
+    remote: Option<&RemoteHost>,
     pane_id: &str,
     value: &str,
 ) -> Result<()> {
@@ -318,9 +320,9 @@ fn set_pane_allow_passthrough(
     .map(|_| ())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 fn set_session_status_hidden(
-    remote: Option<&SshRemote>,
+    remote: Option<&RemoteHost>,
     session_id: &str,
     hidden: bool,
 ) -> Result<()> {
@@ -332,9 +334,9 @@ fn set_session_status_hidden(
     run_tmux(remote, args, "set-option status").map(|_| ())
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 pub type DefaultTmuxRunner = TmuxControlRunner;
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 pub type DefaultTmuxRunner = SystemCommandRunner;
 
 #[derive(Clone, Debug)]
@@ -343,18 +345,20 @@ pub struct TmuxBackend<R = DefaultTmuxRunner> {
     runner: R,
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl TmuxBackend<DefaultTmuxRunner> {
+    #[must_use]
     pub fn new() -> Self {
         Self::with_runner("tmux", TmuxControlRunner::default())
     }
 
-    pub fn for_identity(identity: bootty_identity::ApplicationIdentity) -> Self {
+    #[must_use]
+    pub fn for_identity(identity: bootty_config::ApplicationIdentity) -> Self {
         Self::with_runner("tmux", TmuxControlRunner::for_identity(identity))
     }
 }
 
-#[cfg(not(feature = "app"))]
+#[cfg(not(feature = "terminal-runtime"))]
 impl TmuxBackend<DefaultTmuxRunner> {
     pub fn new() -> Self {
         Self::with_runner("tmux", SystemCommandRunner)
@@ -376,7 +380,7 @@ impl<R> TmuxBackend<R> {
     }
 
     /// The runner this backend drives, so a test can read back what tmux was asked for.
-    pub fn runner(&self) -> &R {
+    pub const fn runner(&self) -> &R {
         &self.runner
     }
 }
@@ -386,7 +390,7 @@ impl<R: CommandRunner> TmuxBackend<R> {
     /// crashed server keeps failing every command from its leftover socket — including the
     /// `new-session` meant to replace it — so without clearing it a tmux crash stays unrecoverable
     /// until someone deletes the socket by hand.
-    fn run_recovering(&self, args: &[String]) -> Result<crate::process::CommandOutput> {
+    fn run_recovering(&self, args: &[String]) -> Result<bootty_host::CommandOutput> {
         let output = self.runner.run(&self.program, args)?;
         if output.success || !tmux_server_exited(&output.stderr) || !clear_stale_local_socket() {
             return Ok(output);
@@ -406,7 +410,8 @@ impl<R: CommandRunner> TmuxBackend<R> {
         if output.success {
             return Ok(Some(output.stdout));
         }
-        if tmux_server_exited(&output.stderr) {
+        // A server can be alive but have no sessions while its first session starts.
+        if tmux_server_exited(&output.stderr) || output.stderr.trim() == "no current target" {
             return Ok(None);
         }
         require_success(&self.program, &args, output).map(Some)
@@ -458,6 +463,8 @@ impl<R: CommandRunner> TmuxBackend<R> {
 }
 
 impl<R: CommandRunner> TmuxBackend<R> {
+    /// # Errors
+    /// Returns command or response parsing errors while reading sessions and panes.
     pub fn snapshot(&self) -> Result<MuxSnapshot> {
         // One tmux process for both lists: the snapshot polls several times a second, and a
         // second invocation doubled that process churn for no extra information.
@@ -476,7 +483,8 @@ impl<R: CommandRunner> TmuxBackend<R> {
         let (sessions, panes) = split_tagged_snapshot(&combined);
         parse_tmux_snapshot(&sessions, &panes)
     }
-
+    /// # Errors
+    /// Returns invalid target, transport, or tmux command errors.
     pub fn execute(&mut self, command: MuxCommand) -> Result<()> {
         match command {
             MuxCommand::ActivateWindow { window_id, .. } => {
@@ -575,6 +583,13 @@ impl<R: CommandRunner> TmuxBackend<R> {
                 self.move_window(window_id, delta)?;
                 self.run_owned(&["select-window".into(), "-t".into(), selected_window_id])?;
             }
+            command => return self.execute_pane_command(command),
+        }
+        Ok(())
+    }
+
+    fn execute_pane_command(&self, command: MuxCommand) -> Result<()> {
+        match command {
             MuxCommand::SplitPane {
                 session_id,
                 pane_id,
@@ -590,6 +605,16 @@ impl<R: CommandRunner> TmuxBackend<R> {
                     "-t".into(),
                     pane_id.unwrap_or(session_id),
                 ])?;
+            }
+            // tmux has no atomic whole-window join. Keep this unavailable until its partial
+            // completion can be represented explicitly; individual pane moves remain supported.
+            MuxCommand::MergeWindows { .. } => anyhow::bail!(
+                "tmux cannot merge a whole tab atomically; move individual panes instead"
+            ),
+            command @ (MuxCommand::SwapPanes { .. }
+            | MuxCommand::MovePane { .. }
+            | MuxCommand::ExtractPane { .. }) => {
+                return self.execute_pane_transfer(command);
             }
             MuxCommand::SelectPane {
                 session_id,
@@ -646,6 +671,99 @@ impl<R: CommandRunner> TmuxBackend<R> {
                     pane_id.unwrap_or(session_id),
                 ])?;
             }
+            _ => anyhow::bail!("command does not target a pane"),
+        }
+        Ok(())
+    }
+
+    fn execute_pane_transfer(&self, command: MuxCommand) -> Result<()> {
+        match command {
+            MuxCommand::SwapPanes {
+                session_id,
+                source_pane_id,
+                target_pane_id,
+            } => {
+                self.validate_panes(&session_id, &[&source_pane_id, &target_pane_id], false)?;
+                self.run_owned(&[
+                    "swap-pane".into(),
+                    "-s".into(),
+                    source_pane_id,
+                    "-t".into(),
+                    target_pane_id,
+                ])?;
+            }
+            MuxCommand::MovePane {
+                session_id,
+                pane_id,
+                target_pane_id,
+                direction,
+            } => {
+                anyhow::ensure!(
+                    pane_id != target_pane_id,
+                    "a pane cannot be moved beside itself"
+                );
+                self.validate_panes(&session_id, &[&pane_id, &target_pane_id], false)?;
+                let mut args = vec![
+                    "join-pane".into(),
+                    "-s".into(),
+                    pane_id,
+                    "-t".into(),
+                    target_pane_id,
+                ];
+                args.push(
+                    if matches!(direction, MuxDirection::Left | MuxDirection::Right) {
+                        "-h"
+                    } else {
+                        "-v"
+                    }
+                    .into(),
+                );
+                if matches!(direction, MuxDirection::Left | MuxDirection::Up) {
+                    args.push("-b".into());
+                }
+                self.run_owned(&args)?;
+            }
+            MuxCommand::ExtractPane {
+                session_id,
+                pane_id,
+            } => {
+                self.validate_panes(&session_id, &[&pane_id], true)?;
+                self.run_owned(&[
+                    "break-pane".into(),
+                    "-s".into(),
+                    pane_id,
+                    "-t".into(),
+                    format!("{session_id}:"),
+                ])?;
+            }
+            _ => anyhow::bail!("command does not transfer a pane"),
+        }
+        Ok(())
+    }
+}
+
+impl<R: CommandRunner> TmuxBackend<R> {
+    fn validate_panes(&self, session_id: &str, panes: &[&str], extract: bool) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .context("session no longer exists")?;
+        for pane in panes {
+            let window = session
+                .windows
+                .iter()
+                .find(|window| {
+                    window
+                        .panes
+                        .iter()
+                        .any(|candidate| candidate.pane_id.as_deref() == Some(*pane))
+                })
+                .context("pane is no longer in this session")?;
+            if extract {
+                anyhow::ensure!(window.panes.len() > 1, "this pane already has its own tab");
+            }
         }
         Ok(())
     }
@@ -653,15 +771,16 @@ impl<R: CommandRunner> TmuxBackend<R> {
 
 impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        TmuxBackend::snapshot(self)
+        Self::snapshot(self)
     }
 
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
-        TmuxBackend::execute(self, command)
+        Self::execute(self, command)
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
+#[must_use]
 pub fn tmux_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
     BindingCapabilityDescriptor::new(
         scope,
@@ -672,6 +791,9 @@ pub fn tmux_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
             BindingOperation::NavigateWindow,
             BindingOperation::MoveWindow,
             BindingOperation::SplitPane,
+            BindingOperation::SwapPanes,
+            BindingOperation::MovePane,
+            BindingOperation::ExtractPane,
             BindingOperation::NavigatePane,
             BindingOperation::ClosePane,
             BindingOperation::TogglePaneZoom,
@@ -684,11 +806,14 @@ pub fn tmux_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
     )
 }
 
-/// Whether tmux reported that its server is not there. Two different messages mean it: a server
-/// that was never started, and one that died — the second is what a crashed server leaves behind,
-/// and treating only the first as "gone" turned a tmux crash into a fatal bootty error.
+/// Missing sockets and exited servers are empty topology; other connection failures remain errors.
+#[must_use]
 pub fn tmux_server_exited(stderr: &str) -> bool {
-    stderr.contains("no server running") || stderr.contains("server exited unexpectedly")
+    stderr.contains("no server running")
+        || stderr.contains("server exited unexpectedly")
+        || (stderr.contains("error connecting to ")
+            && (stderr.contains("(No such file or directory)")
+                || stderr.contains("(Connection refused)")))
 }
 
 /// A crashed tmux server can leave a socket that every later command still fails against, including
@@ -705,6 +830,7 @@ fn clear_stale_local_socket() -> bool {
 /// Remove `path` only if it is a socket nothing is listening on. A live server answers `connect`,
 /// and deleting its socket would strand every client that has not connected yet.
 #[cfg(unix)]
+#[must_use]
 pub fn clear_dead_socket(path: &std::path::Path) -> bool {
     let is_socket = path
         .symlink_metadata()
@@ -749,7 +875,7 @@ fn tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
 
 fn underscore_joined_tmux_fields(line: &str, fixed_fields_before_tail: usize) -> Vec<String> {
     let mut parts = line
-        .splitn(fixed_fields_before_tail + 1, '_')
+        .splitn(fixed_fields_before_tail.saturating_add(1), '_')
         .collect::<Vec<_>>();
     if parts.len() <= fixed_fields_before_tail {
         return vec![line.to_owned()];
@@ -818,10 +944,10 @@ fn stamp_session_args(session_id: &str, tag: &MuxSessionTag) -> Vec<String> {
         (SESSION_IDENTITY_OPTION, tag.identity.as_deref()),
         (SESSION_SPACE_OPTION, tag.space.as_deref()),
     ] {
-        let mut entry = match value {
-            Some(value) => set_session_option_args(session_id, option, value),
-            None => unset_session_option_args(session_id, option),
-        };
+        let mut entry = value.map_or_else(
+            || unset_session_option_args(session_id, option),
+            |value| set_session_option_args(session_id, option, value),
+        );
         if args.is_empty() {
             // Only a command that follows another one carries the chaining separator.
             entry.remove(0);
@@ -956,15 +1082,17 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             .iter_mut()
             .find(|window| window.id == window_id)
         {
+            let anchor = MuxPaneAnchor {
+                session_id,
+                pane_id,
+                pane_pid: None,
+                cwd,
+                process,
+            };
             if pane_active || window.anchor.pane_id.is_none() {
-                window.anchor = MuxPaneAnchor {
-                    session_id,
-                    pane_id,
-                    pane_pid: None,
-                    cwd,
-                    process,
-                };
+                window.anchor = anchor.clone();
             }
+            window.panes.push(anchor);
             // A window's bar stands for every pane in it, so the busiest pane wins.
             window.progress = furthest_along(window.progress.take(), progress);
             continue;
@@ -981,8 +1109,8 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             index: window_index,
             name: window_name,
             active: window_active,
-            // tmux owns its own pane layout; bootty renders the single attach surface, so expose
-            // just the attach anchor here.
+            // Expose real pane identities for commands. Attach policy still renders one surface;
+            // the active anchor and tmux itself own its display and split geometry.
             panes: vec![anchor.clone()],
             layout: None,
             anchor,

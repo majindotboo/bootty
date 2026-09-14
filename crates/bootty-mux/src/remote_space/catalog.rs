@@ -1,22 +1,22 @@
 use anyhow::{Result, bail};
 use bootty_config::config::{
-    BoottyConfig, MultiplexerBackendConfig, SshProfileConfig, SshRemoteConfig,
+    BoottyConfig, MultiplexerBackendConfig, RemoteConfig, SshProfileConfig,
 };
 use bootty_git::{ProjectPickerEntry, WorktreePickerEntry};
-use bootty_host::ssh::{SshRemote, remote_daemon_failure};
+use bootty_host::remote::{RemoteHost, remote_daemon_failure};
 use bootty_host::{CommandRunner, SystemCommandRunner};
 
 use crate::repository::{
     DEFAULT_SPACE_COLOR, DEFAULT_SPACE_ICON, SpaceMuxOverride, SpaceRemoteOverride,
     WorkspaceBinding, WorkspaceRepository,
 };
-use crate::{
-    RemoteSpaceSummary, command::MuxCommand, provider::MuxBackendRegistry, snapshot::MuxSnapshot,
-};
+use crate::{RemoteSpaceSummary, provider::MuxBackendRegistry, snapshot::MuxSnapshot};
 
 /// Wire version used by the remote Space catalog and command endpoint.
 pub const REMOTE_SPACE_CATALOG_VERSION: u32 = crate::remote_catalog::CATALOG_VERSION;
 
+/// # Errors
+/// Returns database open, migration, or snapshot validation errors.
 pub fn list(config: &BoottyConfig) -> Result<Vec<RemoteSpaceSummary>> {
     let (_, snapshot) = WorkspaceRepository::open(&config.config_path)?;
     Ok(snapshot
@@ -40,6 +40,8 @@ pub fn list(config: &BoottyConfig) -> Result<Vec<RemoteSpaceSummary>> {
         .collect())
 }
 
+/// # Errors
+/// Returns unsupported backend, invalid name, or persistence errors.
 pub fn create(
     config: &BoottyConfig,
     name: &str,
@@ -70,7 +72,7 @@ pub fn create(
     })
 }
 
-fn supports_remote_space_catalog(backend: MultiplexerBackendConfig) -> bool {
+const fn supports_remote_space_catalog(backend: MultiplexerBackendConfig) -> bool {
     matches!(
         backend,
         MultiplexerBackendConfig::Rmux | MultiplexerBackendConfig::Tmux
@@ -79,6 +81,8 @@ fn supports_remote_space_catalog(backend: MultiplexerBackendConfig) -> bool {
 
 /// The sessions this remote Space holds: the ones carrying its `@bootty_space` tag. The client
 /// wrote that tag and can read it back, so there is no second copy to keep in step.
+/// # Errors
+/// Returns invalid Space, backend mismatch, or backend snapshot errors.
 pub fn snapshot(
     config: &BoottyConfig,
     backends: &MuxBackendRegistry,
@@ -102,6 +106,8 @@ fn filter_snapshot_for_space(mut snapshot: MuxSnapshot, space_id: &str) -> MuxSn
     snapshot
 }
 
+/// # Errors
+/// Returns invalid request, Space or backend mismatch, and backend execution errors.
 pub fn execute(
     config: &BoottyConfig,
     backends: &MuxBackendRegistry,
@@ -113,7 +119,7 @@ pub fn execute(
     let mut runtime = remote_space_runtime(config, backends, space_id, expected_backend)?;
     // A command may only touch a session this Space holds. Asking the session itself is the whole
     // check: no ownership table to consult, and no way for the answer to drift from the truth.
-    if let Some(session_id) = command_session_id(&command) {
+    if let Some(session_id) = command.existing_session_id() {
         let snapshot = runtime.backend.snapshot()?;
         let session = snapshot
             .sessions
@@ -161,36 +167,11 @@ fn remote_space_runtime(
     multiplexer.remote = None;
     multiplexer.remote_space_id = None;
     Ok(RemoteSpaceRuntime {
-        backend: backends.build_backend(&multiplexer, Some(&config.config_path)),
+        backend: backends.build_backend(&multiplexer, Some(&config.config_path))?,
     })
 }
 
-fn command_session_id(command: &MuxCommand) -> Option<&str> {
-    match command {
-        MuxCommand::CreateProjectSession { .. } | MuxCommand::CreateWorktreeSession { .. } => None,
-        MuxCommand::ActivateWindow { session_id, .. }
-        | MuxCommand::NewWindow { session_id, .. }
-        | MuxCommand::RenameWindow { session_id, .. }
-        | MuxCommand::ActivateNextWindow { session_id }
-        | MuxCommand::ActivatePreviousWindow { session_id }
-        | MuxCommand::ActivateLastWindow { session_id }
-        | MuxCommand::ActivateWindowIndex { session_id, .. }
-        | MuxCommand::MoveWindow { session_id, .. }
-        | MuxCommand::MoveWindowPreservingSelection { session_id, .. }
-        | MuxCommand::SplitPane { session_id, .. }
-        | MuxCommand::SelectPane { session_id, .. }
-        | MuxCommand::SelectNextPane { session_id, .. }
-        | MuxCommand::SelectPreviousPane { session_id, .. }
-        | MuxCommand::KillPane { session_id, .. }
-        | MuxCommand::ClosePane { session_id, .. }
-        | MuxCommand::TogglePaneZoom { session_id, .. }
-        | MuxCommand::RenameSession { session_id, .. }
-        | MuxCommand::DitchSession { session_id }
-        | MuxCommand::StampSession { session_id, .. } => Some(session_id),
-    }
-}
-
-fn backend_name(backend: MultiplexerBackendConfig) -> &'static str {
+const fn backend_name(backend: MultiplexerBackendConfig) -> &'static str {
     match backend {
         MultiplexerBackendConfig::Herdr => "herdr",
         MultiplexerBackendConfig::Native => "native",
@@ -199,7 +180,7 @@ fn backend_name(backend: MultiplexerBackendConfig) -> &'static str {
     }
 }
 
-fn binding_is_local(binding: &WorkspaceBinding, config: &BoottyConfig) -> bool {
+const fn binding_is_local(binding: &WorkspaceBinding, config: &BoottyConfig) -> bool {
     match binding.remote_override() {
         SpaceRemoteOverride::Local => true,
         SpaceRemoteOverride::Inherit => config.multiplexer.remote.is_none(),
@@ -207,20 +188,26 @@ fn binding_is_local(binding: &WorkspaceBinding, config: &BoottyConfig) -> bool {
     }
 }
 
+/// # Errors
+/// Returns remote command failures or invalid remote catalog responses.
 pub fn list_remote(profile: &SshProfileConfig) -> Result<Vec<RemoteSpaceSummary>> {
     list_remote_with_runner(profile, &SystemCommandRunner)
 }
 
+/// # Errors
+/// Returns remote command failures or invalid project responses.
 pub fn list_remote_projects_with_runner<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     runner: &R,
 ) -> Result<Vec<ProjectPickerEntry>> {
     let output = run_remote_config(remote, &["remote-project", "list"], runner)?;
     Ok(serde_json::from_str(&output)?)
 }
 
+/// # Errors
+/// Returns remote command failures or invalid project responses.
 pub fn toggle_remote_project_favorite_with_runner<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     path: &str,
     runner: &R,
 ) -> Result<bool> {
@@ -232,8 +219,10 @@ pub fn toggle_remote_project_favorite_with_runner<R: CommandRunner>(
     Ok(serde_json::from_str(&output)?)
 }
 
+/// # Errors
+/// Returns remote command failures or invalid project responses.
 pub fn list_remote_worktrees_with_runner<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     project: &str,
     open_cwds: &[String],
     runner: &R,
@@ -251,12 +240,36 @@ pub fn list_remote_worktrees_with_runner<R: CommandRunner>(
     Ok(serde_json::from_str(&output)?)
 }
 
+/// # Errors
+/// Returns remote command, worktree creation, or invalid response errors.
 pub fn create_remote_worktree_with_runner<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     project: &str,
     branch: &str,
     runner: &R,
 ) -> Result<String> {
+    create_remote_worktree_request_with_runner(
+        remote,
+        project,
+        &bootty_git::WorktreeRequest {
+            branch: branch.to_owned(),
+            name: None,
+            start_ref: None,
+        },
+        runner,
+    )
+}
+
+/// # Errors
+/// Returns remote command, worktree creation, or invalid response errors.
+pub fn create_remote_worktree_request_with_runner<R: CommandRunner>(
+    remote: &RemoteConfig,
+    project: &str,
+    request: &bootty_git::WorktreeRequest,
+    runner: &R,
+) -> Result<String> {
+    request.validate().map_err(anyhow::Error::msg)?;
+    let payload = serde_json::to_string(request)?;
     let output = run_remote_config(
         remote,
         &[
@@ -264,14 +277,16 @@ pub fn create_remote_worktree_with_runner<R: CommandRunner>(
             "create",
             "--project",
             project,
-            "--branch",
-            branch,
+            "--request",
+            &payload,
         ],
         runner,
     )?;
     Ok(serde_json::from_str(&output)?)
 }
 
+/// # Errors
+/// Returns remote command failures or invalid remote catalog responses.
 pub fn list_remote_with_runner<R: CommandRunner>(
     profile: &SshProfileConfig,
     runner: &R,
@@ -282,6 +297,8 @@ pub fn list_remote_with_runner<R: CommandRunner>(
     Ok(spaces)
 }
 
+/// # Errors
+/// Returns remote command failures or invalid remote catalog responses.
 pub fn create_remote_with_runner<R: CommandRunner>(
     profile: &SshProfileConfig,
     name: &str,
@@ -317,11 +334,11 @@ fn run_remote<R: CommandRunner>(
     args: &[&str],
     runner: &R,
 ) -> Result<String> {
-    run_remote_config(&profile.to_remote(), args, runner)
+    run_remote_config(&profile.to_remote().into(), args, runner)
 }
 
 fn run_remote_config<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     args: &[&str],
     runner: &R,
 ) -> Result<String> {
@@ -330,11 +347,11 @@ fn run_remote_config<R: CommandRunner>(
 }
 
 fn run_remote_config_owned<R: CommandRunner>(
-    remote: &SshRemoteConfig,
+    remote: &RemoteConfig,
     args: &[String],
     runner: &R,
 ) -> Result<String> {
-    let remote = SshRemote::new(remote.clone());
+    let remote = RemoteHost::new(remote.clone());
     remote.ensure_daemon_with(runner)?;
     let host = remote.host().to_owned();
     let (program, args) = remote.proxy_command(bootty_host::REMOTE_DAEMON_PROGRAM, args)?;

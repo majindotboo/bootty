@@ -33,7 +33,10 @@ enum LegacyBackend {
 }
 
 impl LegacyBackend {
-    fn resolve(self, inherited: MultiplexerBackendConfig) -> Option<MultiplexerBackendConfig> {
+    const fn resolve(
+        self,
+        inherited: MultiplexerBackendConfig,
+    ) -> Option<MultiplexerBackendConfig> {
         match self {
             Self::Inherit => Some(inherited),
             Self::Supported(backend) => Some(backend),
@@ -631,7 +634,7 @@ fn build_plan(
     Ok(ImportPlan { spaces: imported })
 }
 
-fn destination_backend(backend: MultiplexerBackendConfig) -> Option<Backend> {
+const fn destination_backend(backend: MultiplexerBackendConfig) -> Option<Backend> {
     match backend {
         MultiplexerBackendConfig::Herdr | MultiplexerBackendConfig::Native => None,
         MultiplexerBackendConfig::Rmux => Some(Backend::Rmux),

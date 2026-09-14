@@ -6,7 +6,7 @@ use crate::{
     backend::MuxBackend,
     provider::{MuxBackendProvider, MuxCommandDispatch},
 };
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
@@ -17,11 +17,11 @@ use crate::{
     },
     terminal::BackendPanePolicy,
 };
-use bootty_host::ssh::SshRemote;
+use bootty_host::remote::RemoteHost;
 
-use crate::tmux::TmuxBackend;
-#[cfg(feature = "app")]
-use crate::tmux::{TmuxControlRunner, TmuxPanePolicy, tmux_capabilities};
+use super::TmuxBackend;
+#[cfg(feature = "terminal-runtime")]
+use super::{TmuxControlRunner, TmuxPanePolicy, tmux_capabilities};
 
 pub struct TmuxProvider;
 
@@ -41,29 +41,29 @@ impl MuxBackendProvider for TmuxProvider {
     ) -> Box<dyn MuxBackend> {
         if let (Some(remote), Some(space_id)) = (&config.remote, &config.remote_space_id) {
             return Box::new(RemoteSpaceBackend::new(
-                SshRemote::new(remote.clone()),
+                RemoteHost::new(remote.clone()),
                 space_id.clone(),
                 MuxBackendKind::Tmux,
             ));
         }
-        #[cfg(feature = "app")]
+        #[cfg(feature = "terminal-runtime")]
         {
-            Box::new(match &config.remote {
-                Some(remote) => TmuxBackend::with_runner(
-                    "tmux",
-                    TmuxControlRunner::for_remote(SshRemote::new(remote.clone())),
-                ),
-                None => {
-                    TmuxBackend::for_identity(bootty_identity::ApplicationIdentity::for_process())
-                }
-            })
+            Box::new(config.remote.as_ref().map_or_else(
+                || TmuxBackend::for_identity(bootty_config::ApplicationIdentity::for_process()),
+                |remote| {
+                    TmuxBackend::with_runner(
+                        "tmux",
+                        TmuxControlRunner::for_remote(RemoteHost::new(remote.clone())),
+                    )
+                },
+            ))
         }
-        #[cfg(not(feature = "app"))]
+        #[cfg(not(feature = "terminal-runtime"))]
         Box::new(TmuxBackend::new())
     }
 }
 
-#[cfg(feature = "app")]
+#[cfg(feature = "terminal-runtime")]
 impl MuxAppBackendProvider for TmuxProvider {
     fn app_policy(&self) -> MuxAppBackendPolicy {
         MuxAppBackendPolicy {
@@ -82,7 +82,7 @@ impl MuxAppBackendProvider for TmuxProvider {
 
     fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
         Box::new(TmuxPanePolicy::new(
-            config.remote.clone().map(SshRemote::new),
+            config.remote.clone().map(RemoteHost::new),
         ))
     }
 
@@ -92,5 +92,3 @@ impl MuxAppBackendProvider for TmuxProvider {
 }
 
 crate::register_mux_backend!(TmuxProvider);
-
-pub fn link() {}
