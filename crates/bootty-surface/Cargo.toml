@@ -6,3 +6,6 @@ edition.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 rstest.workspace = true
+
+[dependencies]
+bootty-terminal = { path = "../bootty-terminal" }

@@ -6,8 +6,8 @@ use std::process::Command as ProcessCommand;
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::terminal_engine::{TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION};
 use crate::terminal_session::SessionLaunchConfig;
-use bootty_terminal::terminal_engine::{TERMINAL_PROGRAM, TERMINAL_PROGRAM_VERSION};
 
 pub const BOOTTY_SHELL_ENV: &str = "BOOTTY_SHELL";
 

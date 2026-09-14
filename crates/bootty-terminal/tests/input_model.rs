@@ -1,4 +1,4 @@
-use bootty_surface::geometry::{MouseSurfaceMetrics, RoundedPadding};
+use bootty_terminal::geometry::{MouseSurfaceMetrics, RoundedPadding};
 use bootty_terminal::terminal_input_model::{KeyMods, MouseEncoderSize, TerminalKey};
 use libghostty_vt::key;
 use pretty_assertions::assert_eq;

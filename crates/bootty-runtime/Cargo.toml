@@ -4,10 +4,7 @@ edition.workspace = true
 autobenches = false
 
 [dependencies]
-anyhow.workspace = true
-bootty-surface = { path = "../bootty-surface" }
 bootty-terminal = { path = "../bootty-terminal" }
-portable-pty.workspace = true
 
 [[bench]]
 name = "pty_drain"
@@ -18,6 +15,8 @@ name = "flood_response"
 harness = false
 
 [dev-dependencies]
+anyhow.workspace = true
+bootty-surface = { path = "../bootty-surface" }
 assert_fs.workspace = true
 criterion.workspace = true
 pretty_assertions.workspace = true

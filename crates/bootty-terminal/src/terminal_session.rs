@@ -17,8 +17,8 @@ use crate::pty_backlog::{PtyBacklog, drain_pty_backlog, drain_pty_backlog_with_l
 use anyhow::{Context, Result};
 use portable_pty::{MasterPty, PtySize};
 
-use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
-use bootty_terminal::{
+use crate::geometry::{CellMetrics, TerminalGeometry};
+use crate::{
     terminal_engine::{
         TERMINAL_TERM, TerminalColorConfig, TerminalCopyModeAction, TerminalCopyModeOutcome,
         TerminalCursorConfig, TerminalEngine, TerminalFeatureConfig, TerminalLiveConfig,

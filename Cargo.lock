@@ -1090,7 +1090,6 @@ dependencies = [
  "bootty-surface",
  "bootty-terminal",
  "criterion",
- "portable-pty",
  "pretty_assertions",
  "proptest",
  "proptest-derive",
@@ -1116,6 +1115,7 @@ dependencies = [
 name = "bootty-surface"
 version = "0.0.0"
 dependencies = [
+ "bootty-terminal",
  "pretty_assertions",
  "proptest",
  "rstest",
@@ -1127,11 +1127,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "bootty-surface",
  "libc",
  "libghostty-vt",
  "memchr",
  "png",
+ "portable-pty",
  "pretty_assertions",
  "proptest",
  "proptest-derive",

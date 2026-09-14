@@ -1,2 +1,1 @@
-pub mod geometry;
-pub mod selection;
+pub use bootty_terminal::{geometry, selection};

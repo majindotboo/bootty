@@ -1,4 +1,4 @@
-use bootty_surface::geometry::MouseSurfaceMetrics;
+use crate::geometry::MouseSurfaceMetrics;
 use libghostty_vt::{key, mouse};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

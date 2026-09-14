@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::geometry::{CellMetrics, TerminalGeometry};
+use crate::terminal_frame::RenderFrame;
 use anyhow::Result;
-use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
-use bootty_terminal::terminal_frame::RenderFrame;
 
 use crate::terminal_session::TerminalSession;
 
