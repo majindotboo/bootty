@@ -905,15 +905,9 @@ dependencies = [
  "anyhow",
  "bootty-mux",
  "bootty-mux-model",
- "bootty-remote",
- "bootty-runtime",
- "bootty-surface",
- "bootty-terminal",
  "bootty-workspace-hack",
- "inventory",
  "pretty_assertions",
  "rstest",
- "serde",
  "serde_json",
 ]
 
@@ -962,8 +956,12 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_fs",
- "bootty-command",
- "bootty-mux-model",
+ "base64 0.23.1",
+ "bootty-config",
+ "bootty-control",
+ "bootty-git",
+ "bootty-host",
+ "bootty-identity",
  "bootty-runtime",
  "bootty-surface",
  "bootty-terminal",
@@ -974,12 +972,19 @@ dependencies = [
  "pretty_assertions",
  "proptest",
  "proptest-derive",
+ "rmux-client",
+ "rmux-ipc",
+ "rmux-proto",
+ "rmux-sdk",
+ "rmux-server",
  "rstest",
+ "rusqlite",
  "serde",
  "serde_json",
  "static_assertions",
  "strum",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -999,11 +1004,8 @@ dependencies = [
 name = "bootty-native"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "bootty-mux",
- "bootty-mux-model",
  "bootty-workspace-hack",
- "inventory",
 ]
 
 [[package]]
@@ -1013,19 +1015,15 @@ dependencies = [
  "anyhow",
  "assert_fs",
  "base64 0.23.1",
+ "bootty-host",
  "bootty-mux",
  "bootty-mux-model",
- "bootty-runtime",
  "bootty-workspace-hack",
- "getrandom 0.4.3",
  "pretty_assertions",
  "proptest",
  "proptest-derive",
- "serde",
  "serde_json",
- "sha2 0.11.0",
  "static_assertions",
- "ureq",
 ]
 
 [[package]]
@@ -1062,22 +1060,15 @@ dependencies = [
  "bootty-identity",
  "bootty-mux",
  "bootty-mux-model",
- "bootty-remote",
  "bootty-runtime",
  "bootty-surface",
  "bootty-terminal",
  "bootty-workspace-hack",
- "inventory",
  "pretty_assertions",
  "proptest",
  "proptest-derive",
- "rmux-client",
- "rmux-ipc",
- "rmux-proto",
- "rmux-sdk",
  "rmux-server",
  "rstest",
- "serde",
  "serde_json",
  "static_assertions",
  "tokio",
@@ -1164,9 +1155,7 @@ dependencies = [
  "bootty-identity",
  "bootty-mux",
  "bootty-mux-model",
- "bootty-remote",
  "bootty-workspace-hack",
- "inventory",
  "pretty_assertions",
  "proptest",
  "proptest-derive",
@@ -1222,10 +1211,7 @@ dependencies = [
  "proptest-derive",
  "rstest",
  "rusqlite",
- "serde",
- "serde_json",
  "static_assertions",
- "thiserror 2.0.20",
 ]
 
 [[package]]

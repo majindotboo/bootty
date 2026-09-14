@@ -20,20 +20,20 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "app")]
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::backend::RmuxBackend;
-use crate::bridge::rmux_execute;
+use crate::command::MuxCommand;
+use crate::rmux::backend::RmuxBackend;
+use crate::rmux::bridge::rmux_execute;
 #[cfg(feature = "app")]
-use crate::pane_io::{RMUX_OUTPUT_CHANNEL_CAPACITY, RmuxPaneIo};
-use crate::pane_io::{RmuxPaneEvent, RmuxPaneTarget, open_rmux_pane_io, resize_rmux_pane};
-use bootty_mux::command::MuxCommand;
+use crate::rmux::pane_io::{RMUX_OUTPUT_CHANNEL_CAPACITY, RmuxPaneIo};
+use crate::rmux::pane_io::{RmuxPaneEvent, RmuxPaneTarget, open_rmux_pane_io, resize_rmux_pane};
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     backend::MuxBackend,
     process::{CommandOutput, CommandRunner, SystemCommandRunner},
     snapshot::MuxSnapshot,
 };
 #[cfg(feature = "app")]
-use bootty_remote::ssh::{SshRemote, remote_daemon_failure};
+use bootty_host::ssh::{SshRemote, remote_daemon_failure};
 
 #[cfg(feature = "app")]
 const REMOTE_RMUX_SUBCOMMAND: &str = "remote-rmux";
@@ -157,7 +157,7 @@ fn remote_rmux_argv(
 ) -> Result<(String, Vec<String>)> {
     let payload = request.encode()?;
     remote.proxy_command(
-        bootty_remote::REMOTE_DAEMON_PROGRAM,
+        bootty_host::REMOTE_DAEMON_PROGRAM,
         &[REMOTE_RMUX_SUBCOMMAND.to_owned(), payload],
     )
 }

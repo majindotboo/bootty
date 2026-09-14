@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
+use crate::{MuxBackendKind, MuxBindingConfig};
 use anyhow::{Result, bail};
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig};
 #[cfg(feature = "app")]
 use strum::IntoEnumIterator;
 

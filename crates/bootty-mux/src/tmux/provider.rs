@@ -1,11 +1,13 @@
 use std::path::Path;
 
-use bootty_mux::{
+use crate::remote_space::RemoteSpaceBackend;
+use crate::{MuxBackendKind, MuxBindingConfig};
+use crate::{
     backend::MuxBackend,
     provider::{MuxBackendProvider, MuxCommandDispatch},
 };
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
     provider::{
@@ -15,12 +17,11 @@ use bootty_mux::{
     },
     terminal::BackendPanePolicy,
 };
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig};
-use bootty_remote::{space::RemoteSpaceBackend, ssh::SshRemote};
+use bootty_host::ssh::SshRemote;
 
-use crate::TmuxBackend;
+use crate::tmux::TmuxBackend;
 #[cfg(feature = "app")]
-use crate::{TmuxControlRunner, TmuxPanePolicy, tmux_capabilities};
+use crate::tmux::{TmuxControlRunner, TmuxPanePolicy, tmux_capabilities};
 
 pub struct TmuxProvider;
 
@@ -90,6 +91,6 @@ impl MuxAppBackendProvider for TmuxProvider {
     }
 }
 
-bootty_mux::register_mux_backend!(TmuxProvider);
+crate::register_mux_backend!(TmuxProvider);
 
 pub fn link() {}

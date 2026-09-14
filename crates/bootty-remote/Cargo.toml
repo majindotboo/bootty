@@ -5,28 +5,27 @@ edition.workspace = true
 
 [features]
 default = ["app"]
-app = ["terminfo", "bootty-mux/app"]
-terminfo = ["dep:bootty-runtime"]
+app = ["bootty-mux/app"]
+terminfo = []
 
 [dependencies]
-anyhow.workspace = true
-base64.workspace = true
+bootty-host = { path = "../bootty-host" }
 bootty-mux = { path = "../bootty-mux", default-features = false }
-bootty-mux-model = { path = "../bootty-mux-model" }
-bootty-runtime = { path = "../bootty-runtime", optional = true }
-getrandom.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-ureq.workspace = true
 bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [dev-dependencies]
+anyhow.workspace = true
 assert_fs.workspace = true
+bootty-mux-model = { path = "../bootty-mux-model" }
 pretty_assertions.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true
 static_assertions.workspace = true
 
+[dev-dependencies.base64]
+workspace = true
+
+[dev-dependencies.serde_json]
+workspace = true
 [lints]
 workspace = true

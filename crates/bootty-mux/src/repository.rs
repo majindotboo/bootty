@@ -20,11 +20,11 @@ use legacy::*;
 use schema::*;
 use snapshot::*;
 
-use crate::sessions::{SessionMembership, WorkspaceSession};
+use crate::session_membership::{SessionMembership, WorkspaceSession};
 
+pub use crate::membership::BackendMembership;
+use crate::{controller::SpaceId, membership::MembershipOperation};
 use bootty_config::config::{MultiplexerBackendConfig, SshRemoteConfig, default_config_path};
-pub use bootty_mux::membership::BackendMembership;
-use bootty_mux::{controller::SpaceId, membership::MembershipOperation};
 
 const WORKSPACE_SNAPSHOT_REVISION: i64 = 5;
 const DEFAULT_SPACE_NAME: &str = "Default Space";

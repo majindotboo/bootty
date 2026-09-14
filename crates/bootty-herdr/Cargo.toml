@@ -5,29 +5,21 @@ edition.workspace = true
 
 [features]
 default = ["app"]
-app = [
-    "bootty-mux/app",
-    "bootty-runtime",
-    "bootty-surface",
-    "bootty-terminal",
-]
+app = ["bootty-mux/app"]
 
 [dependencies]
-anyhow.workspace = true
 bootty-mux = { path = "../bootty-mux", default-features = false }
-bootty-mux-model = { path = "../bootty-mux-model" }
-bootty-remote = { path = "../bootty-remote", default-features = false }
-bootty-runtime = { path = "../bootty-runtime", optional = true }
-bootty-surface = { path = "../bootty-surface", optional = true }
-bootty-terminal = { path = "../bootty-terminal", optional = true }
-inventory.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 bootty-workspace-hack = { version = "0.1", path = "../bootty-workspace-hack" }
 
 [dev-dependencies]
+bootty-mux-model = { path = "../bootty-mux-model" }
 pretty_assertions.workspace = true
 rstest.workspace = true
 
+[dev-dependencies.anyhow]
+workspace = true
+
+[dev-dependencies.serde_json]
+workspace = true
 [lints]
 workspace = true

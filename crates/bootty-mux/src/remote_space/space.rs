@@ -1,18 +1,11 @@
-pub use crate::space_protocol::decode_command;
+use crate::MuxBackendKind;
 use anyhow::{Context, Result, bail};
-use bootty_mux_model::MuxBackendKind;
 
-use bootty_mux::{
-    backend::MuxBackend,
-    command::MuxCommand,
-    process::{CommandRunner, SystemCommandRunner},
-    snapshot::MuxSnapshot,
-};
+use crate::{backend::MuxBackend, command::MuxCommand, snapshot::MuxSnapshot};
 
-use crate::{
-    space_protocol::encode_command,
-    ssh::{REMOTE_DAEMON_PROGRAM, SshRemote, remote_daemon_failure},
-};
+use super::space_protocol::encode_command;
+use bootty_host::ssh::{REMOTE_DAEMON_PROGRAM, SshRemote, remote_daemon_failure};
+use bootty_host::{CommandRunner, SystemCommandRunner};
 
 const REMOTE_SPACE_SUBCOMMAND: &str = "remote-space";
 

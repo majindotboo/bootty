@@ -8,10 +8,10 @@ use rmux_proto::{
 use rmux_sdk::{Rmux, SessionName};
 
 #[cfg(feature = "app")]
-use crate::bridge::resize_rmux_window;
-use crate::bridge::{rmux_execute, rmux_snapshot};
+use crate::rmux::bridge::resize_rmux_window;
+use crate::rmux::bridge::{rmux_execute, rmux_snapshot};
 
-use bootty_mux::{
+use crate::{
     backend::MuxBackend,
     command::MuxCommand,
     snapshot::{
@@ -21,7 +21,7 @@ use bootty_mux::{
     tmux_compatible_layout::{parse, parse_with_checksum},
 };
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     capability::{BindingCapabilityDescriptor, BindingOperation},
     controller::SpaceId,
 };
@@ -196,7 +196,7 @@ pub(crate) async fn list_pane_rows(_rmux: &Rmux, name: &SessionName) -> Result<V
 }
 
 pub(crate) async fn rmux_request(request: Request) -> Result<Response> {
-    let endpoint = crate::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
+    let endpoint = crate::rmux::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
     let response =
         tokio::task::spawn_blocking(move || rmux_client::connect(&endpoint)?.roundtrip(&request))
             .await

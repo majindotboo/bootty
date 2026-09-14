@@ -31,12 +31,12 @@ use bootty_terminal::{
 };
 use rmux_sdk::TerminalSizeSpec;
 
-use crate::bridge::{rmux_missing_target_text, rmux_stale_target_text};
-use crate::pane_io::{RmuxPaneEvent, RmuxPaneIo, RmuxPaneTarget, open_rmux_pane_io};
-use crate::remote::open_remote_rmux_pane_io;
-use bootty_remote::ssh::SshRemote;
+use crate::rmux::bridge::{rmux_missing_target_text, rmux_stale_target_text};
+use crate::rmux::pane_io::{RmuxPaneEvent, RmuxPaneIo, RmuxPaneTarget, open_rmux_pane_io};
+use crate::rmux::remote::open_remote_rmux_pane_io;
+use bootty_host::ssh::SshRemote;
 
-use bootty_mux::terminal::{
+use crate::terminal::{
     BackendPanePolicy, MuxPaneTarget, PaneLayoutResizeRequest, PaneStartRequest,
     ScopedMuxPaneTarget, TerminalRuntime,
 };
@@ -337,7 +337,7 @@ impl RmuxPanePolicy {
                 while let Ok(next) = rx.try_recv() {
                     request = next;
                 }
-                let result = crate::backend::resize_bootty_rmux_window(
+                let result = crate::rmux::backend::resize_bootty_rmux_window(
                     &request.window_id,
                     request.cols,
                     request.rows,
@@ -398,7 +398,7 @@ impl RmuxPanePolicy {
 }
 
 impl BackendPanePolicy for RmuxPanePolicy {
-    fn remote_target(&self) -> Option<&bootty_mux_model::SshTarget> {
+    fn remote_target(&self) -> Option<&crate::SshTarget> {
         self.remote.as_ref().map(SshRemote::target)
     }
 

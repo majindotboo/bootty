@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_command::CommandCancellation;
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig};
+use crate::{MuxBackendKind, MuxBindingConfig};
+use bootty_control::CommandCancellation;
 use serde::{Deserialize, Serialize};
 
 use crate::{

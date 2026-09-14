@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-use bootty_mux::command::MuxCommand;
+use crate::command::MuxCommand;
 
 const MAX_COMMAND_PAYLOAD: usize = 1024 * 1024;
 

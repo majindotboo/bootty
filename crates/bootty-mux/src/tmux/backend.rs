@@ -3,11 +3,11 @@ use anyhow::{Context, Result};
 #[cfg(feature = "app")]
 use std::{collections::HashMap, process::Command, sync::mpsc, thread};
 
-#[cfg(feature = "app")]
-use crate::control::TmuxControlRunner;
 #[cfg(not(feature = "app"))]
-use bootty_mux::process::SystemCommandRunner;
-use bootty_mux::{
+use crate::process::SystemCommandRunner;
+#[cfg(feature = "app")]
+use crate::tmux::control::TmuxControlRunner;
+use crate::{
     backend::MuxBackend,
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     process::{CommandRunner, require_success},
@@ -17,7 +17,7 @@ use bootty_mux::{
     },
 };
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     capability::{BindingCapabilityDescriptor, BindingOperation},
     controller::SpaceId,
     terminal::{
@@ -26,7 +26,7 @@ use bootty_mux::{
     },
 };
 #[cfg(feature = "app")]
-use bootty_remote::ssh::SshRemote;
+use bootty_host::ssh::SshRemote;
 
 const TMUX_FIELD_SEPARATOR: char = '\x1f';
 /// Line tags for the combined session/pane snapshot. Sessions and panes come from one tmux
@@ -123,7 +123,7 @@ impl TmuxPanePolicy {
 
 #[cfg(feature = "app")]
 impl BackendPanePolicy for TmuxPanePolicy {
-    fn remote_target(&self) -> Option<&bootty_mux_model::SshTarget> {
+    fn remote_target(&self) -> Option<&crate::SshTarget> {
         self.remote.as_ref().map(SshRemote::target)
     }
 
@@ -386,7 +386,7 @@ impl<R: CommandRunner> TmuxBackend<R> {
     /// crashed server keeps failing every command from its leftover socket — including the
     /// `new-session` meant to replace it — so without clearing it a tmux crash stays unrecoverable
     /// until someone deletes the socket by hand.
-    fn run_recovering(&self, args: &[String]) -> Result<bootty_mux::process::CommandOutput> {
+    fn run_recovering(&self, args: &[String]) -> Result<crate::process::CommandOutput> {
         let output = self.runner.run(&self.program, args)?;
         if output.success || !tmux_server_exited(&output.stderr) || !clear_stale_local_socket() {
             return Ok(output);

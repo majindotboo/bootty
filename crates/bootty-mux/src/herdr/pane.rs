@@ -4,16 +4,16 @@ use std::{
     thread,
 };
 
-use anyhow::Result;
-use bootty_mux::terminal::{
+use crate::SshTarget;
+use crate::terminal::{
     AttachLaunch, BackendPanePolicy, PaneLayoutResizeRequest, PaneStartRequest,
     ScopedMuxPaneTarget, TerminalRuntime, start_attach_terminal,
 };
-use bootty_mux_model::SshTarget;
-use bootty_remote::ssh::SshRemote;
+use anyhow::Result;
+use bootty_host::ssh::SshRemote;
 use serde_json::json;
 
-use crate::{
+use crate::herdr::{
     control::{CliHerdrApi, HerdrApi},
     remote::{RemoteHerdrApi, RemoteHerdrBridge},
 };

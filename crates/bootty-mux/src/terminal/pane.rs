@@ -10,7 +10,7 @@ use bootty_surface::geometry::{CellMetrics, TerminalGeometry};
 use bootty_terminal::terminal_frame::RenderFrame;
 use derive_more::{Deref, DerefMut};
 
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig, SshTarget};
+use crate::{MuxBackendKind, MuxBindingConfig, SshTarget};
 use bootty_runtime::{
     DrainStats, TerminalSession, TerminalSessionConfig, frame_source::TerminalFrameSource,
 };

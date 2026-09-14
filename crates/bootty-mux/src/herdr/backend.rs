@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
-use bootty_mux::{
+use crate::{
     backend::MuxBackend,
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     snapshot::{
@@ -10,13 +9,14 @@ use bootty_mux::{
     },
 };
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     capability::{BindingCapabilityDescriptor, BindingOperation},
     controller::SpaceId,
 };
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::{
+use crate::herdr::{
     control::{CliHerdrApi, HerdrApi},
     model::{
         HerdrLayout, HerdrLayoutPane, HerdrLayoutSplit, HerdrPane, HerdrSessionSnapshot, HerdrTab,

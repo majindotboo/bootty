@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use bootty_mux::{
+use crate::{MuxBackendKind, MuxBindingConfig};
+use crate::{
     backend::MuxBackend,
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
@@ -11,9 +12,8 @@ use bootty_mux::{
     },
     terminal::BackendPanePolicy,
 };
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig};
 
-use crate::{NativeBackend, NativePanePolicy, native_capabilities};
+use crate::native::{NativeBackend, NativePanePolicy, native_capabilities};
 
 pub struct NativeProvider;
 
@@ -63,6 +63,6 @@ impl MuxAppBackendProvider for NativeProvider {
     }
 }
 
-bootty_mux::register_mux_backend!(NativeProvider);
+crate::register_mux_backend!(NativeProvider);
 
 pub fn link() {}

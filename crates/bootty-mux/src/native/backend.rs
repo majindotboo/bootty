@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 
-use bootty_mux::{
+use crate::{
     backend::MuxBackend,
     capability::{BindingCapabilityDescriptor, BindingOperation},
     command::MuxCommand,
@@ -591,10 +591,8 @@ impl MuxBackend for NativeBackend {
                 direction,
             } => {
                 let delta = match direction {
-                    bootty_mux::command::MuxDirection::Left
-                    | bootty_mux::command::MuxDirection::Up => -1,
-                    bootty_mux::command::MuxDirection::Right
-                    | bootty_mux::command::MuxDirection::Down => 1,
+                    crate::command::MuxDirection::Left | crate::command::MuxDirection::Up => -1,
+                    crate::command::MuxDirection::Right | crate::command::MuxDirection::Down => 1,
                 };
                 state.select_pane(&session_id, window_id.as_deref(), delta);
             }
@@ -666,7 +664,7 @@ pub fn native_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
 pub struct NativePanePolicy;
 
 impl BackendPanePolicy for NativePanePolicy {
-    fn remote_target(&self) -> Option<&bootty_mux_model::SshTarget> {
+    fn remote_target(&self) -> Option<&crate::SshTarget> {
         None
     }
 

@@ -27,12 +27,12 @@ use rmux_sdk::{
 };
 use tokio::runtime::Builder;
 
-use crate::backend::{
+use crate::rmux::backend::{
     RmuxPaneRow, RmuxWindowRow, list_pane_rows, list_session_tags, list_window_rows,
     rmux_request_checked, session_from_rows, stamp_session_tag,
 };
-use crate::pane_io::{RmuxPaneTarget, pane_for_target};
-use bootty_mux::{
+use crate::rmux::pane_io::{RmuxPaneTarget, pane_for_target};
+use crate::{
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     snapshot::{MuxSessionTag, MuxSnapshot},
 };
@@ -165,7 +165,7 @@ pub(crate) fn resize_rmux_window(window_id: &str, cols: u16, rows: u16) -> Resul
 
 pub(crate) async fn connect_bootty_rmux() -> Result<Rmux> {
     prepare_local_rmux_daemon(bootty_identity::ApplicationIdentity::for_process())?;
-    let endpoint = crate::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
+    let endpoint = crate::rmux::local::endpoint_path().context("resolve Bootty rmux endpoint")?;
     let endpoint = RmuxEndpoint::UnixSocket(endpoint);
     Rmux::builder()
         .endpoint(endpoint)
@@ -275,7 +275,7 @@ fn sidecar_is_compatible(daemon: &Path) -> bool {
                 && String::from_utf8_lossy(&output.stdout).trim()
                     == format!(
                         "{}:{}",
-                        bootty_remote::REMOTE_DAEMON_PROTOCOL_VERSION,
+                        bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
                         env!("CARGO_PKG_VERSION")
                     )
         })
@@ -954,8 +954,8 @@ pub(crate) fn rmux_stale_target_text(text: &str) -> bool {
 pub(crate) fn rmux_missing_target_text(text: &str) -> bool {
     // Bootty's own listing misses. `list_pane_rows` enumerates the session, so a
     // pane it does not name is gone rather than momentarily unresolvable.
-    text.contains(crate::pane_io::RMUX_PANE_NOT_LISTED)
-        || text.contains(crate::pane_io::RMUX_PANE_WINDOW_NOT_LISTED)
+    text.contains(crate::rmux::pane_io::RMUX_PANE_NOT_LISTED)
+        || text.contains(crate::rmux::pane_io::RMUX_PANE_WINDOW_NOT_LISTED)
         // rmux reports a session or window with no active pane through the same
         // `invalid target` shape as a stale index, but it names the pane that is
         // gone rather than an index that moved.
@@ -995,7 +995,7 @@ async fn snapshot_session(
     rmux: &Rmux,
     name: &SessionName,
     tag: MuxSessionTag,
-) -> Result<bootty_mux::snapshot::MuxSession> {
+) -> Result<crate::snapshot::MuxSession> {
     let session_name = name.to_string();
     let windows = list_window_rows(rmux, name).await?;
     let panes = list_pane_rows(rmux, name).await?;
@@ -1046,10 +1046,10 @@ mod tests {
             "{RMUX_WINDOW_NOT_LISTED}: @6"
         )));
         assert!(rmux_missing_target_text(
-            crate::pane_io::RMUX_PANE_NOT_LISTED
+            crate::rmux::pane_io::RMUX_PANE_NOT_LISTED
         ));
         assert!(rmux_missing_target_text(
-            crate::pane_io::RMUX_PANE_WINDOW_NOT_LISTED
+            crate::rmux::pane_io::RMUX_PANE_WINDOW_NOT_LISTED
         ));
     }
 }

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
-use crate::protocol::{TmuxControlNotification, TmuxControlParser};
-use bootty_mux::process::{CommandOutput, CommandRunner, SystemCommandRunner};
-use bootty_remote::ssh::SshRemote;
+use crate::process::{CommandOutput, CommandRunner, SystemCommandRunner};
+use crate::tmux::protocol::{TmuxControlNotification, TmuxControlParser};
+use bootty_host::ssh::SshRemote;
 
 /// tmux commands that only read state, and so can be answered by a client shared with every other
 /// reader. Everything else keeps its own process, where its exit status and stderr stand alone.
@@ -45,7 +45,7 @@ pub struct TmuxControlRunner {
 
 impl TmuxControlRunner {
     pub fn for_identity(identity: bootty_identity::ApplicationIdentity) -> Self {
-        let prefix_args = crate::backend::local_server_args(identity);
+        let prefix_args = crate::tmux::backend::local_server_args(identity);
         Self {
             clients: Arc::default(),
             prefix_args: prefix_args.into(),

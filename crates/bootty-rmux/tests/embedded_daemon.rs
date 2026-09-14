@@ -269,7 +269,7 @@ mod scenario {
         // Run from a file: inlining the script would put its backslash escapes
         // through the pane shell's quoting rules.
         let script_path =
-            std::env::temp_dir().join(format!("bootty-terminal-query-{}.py", session_id));
+            std::env::temp_dir().join(format!("bootty-terminal-query-{session_id}.py"));
         std::fs::write(
             &script_path,
             r#"import os, select, sys, termios, tty
@@ -424,7 +424,7 @@ print("BOOTTY_RMUX_COLOR_QUERY_OK")
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut terminal)?;
         let script_path =
-            std::env::temp_dir().join(format!("bootty-kitty-keyboard-{}.py", session_id));
+            std::env::temp_dir().join(format!("bootty-kitty-keyboard-{session_id}.py"));
         std::fs::write(
             &script_path,
             r#"import os, select, sys, termios, tty

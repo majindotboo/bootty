@@ -9,12 +9,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::process::{CommandRunner, SystemCommandRunner, require_success};
 use anyhow::{Context, Result, bail};
-use bootty_mux::process::{CommandRunner, SystemCommandRunner, require_success};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::model::HerdrSessionSnapshot;
+use crate::herdr::model::HerdrSessionSnapshot;
 
 const HERDR_PROGRAM: &str = "herdr";
 #[cfg(unix)]

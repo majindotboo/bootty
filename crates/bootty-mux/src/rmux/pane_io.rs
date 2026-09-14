@@ -13,8 +13,8 @@ use rmux_sdk::{
 use tokio::runtime::Builder;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::backend::{list_pane_rows, list_window_rows, rmux_request};
-use crate::bridge::{connect_bootty_rmux, rmux_missing_target_text, rmux_stale_target_text};
+use crate::rmux::backend::{list_pane_rows, list_window_rows, rmux_request};
+use crate::rmux::bridge::{connect_bootty_rmux, rmux_missing_target_text, rmux_stale_target_text};
 
 pub(crate) const RMUX_OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const RMUX_OUTPUT_EVENT_MAX_BYTES: usize = 16 * 1024;

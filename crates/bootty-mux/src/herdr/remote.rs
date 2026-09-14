@@ -11,13 +11,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::SshTarget;
 use anyhow::{Context, Result, bail};
-use bootty_mux_model::SshTarget;
-use bootty_remote::ssh::SshRemote;
+use bootty_host::ssh::SshRemote;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
+use crate::herdr::{
     control::{HerdrApi, parse_snapshot_value, request_socket},
     model::HerdrSessionSnapshot,
 };
@@ -194,6 +194,7 @@ impl RemoteHerdrBridge {
         Ok(bridge)
     }
 
+    #[cfg(feature = "app")]
     pub(crate) fn target(&self) -> &SshTarget {
         &self.target
     }

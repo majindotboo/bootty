@@ -13,16 +13,28 @@ app = [
 ]
 
 [dependencies]
-bootty-command = { path = "../bootty-command" }
-bootty-mux-model = { path = "../bootty-mux-model" }
+bootty-config = { path = "../bootty-config" }
+bootty-control = { path = "../bootty-control" }
+bootty-git = { path = "../bootty-git" }
+bootty-host = { path = "../bootty-host" }
 bootty-write = { path = "../bootty-write" }
 anyhow.workspace = true
+base64.workspace = true
 derive_more = { workspace = true, optional = true }
 getrandom.workspace = true
 inventory.workspace = true
+rusqlite.workspace = true
+rmux-client.workspace = true
+rmux-ipc.workspace = true
+rmux-proto.workspace = true
+rmux-sdk.workspace = true
+rmux-server.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+bootty-identity = { path = "../bootty-identity" }
 bootty-runtime = { path = "../bootty-runtime", optional = true }
 bootty-surface = { path = "../bootty-surface", optional = true }
 bootty-terminal = { path = "../bootty-terminal", optional = true }

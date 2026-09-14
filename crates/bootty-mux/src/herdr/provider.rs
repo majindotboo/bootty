@@ -1,15 +1,16 @@
 use std::path::Path;
 
-use crate::HerdrBackend;
-use crate::remote::{RemoteHerdrApi, RemoteHerdrBridge};
+use crate::herdr::HerdrBackend;
+use crate::herdr::remote::{RemoteHerdrApi, RemoteHerdrBridge};
 #[cfg(feature = "app")]
-use crate::{HerdrPanePolicy, herdr_capabilities};
-use bootty_mux::{
+use crate::herdr::{HerdrPanePolicy, herdr_capabilities};
+use crate::{MuxBackendKind, MuxBindingConfig};
+use crate::{
     backend::MuxBackend,
     provider::{MuxBackendProvider, MuxCommandDispatch},
 };
 #[cfg(feature = "app")]
-use bootty_mux::{
+use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
     provider::{
@@ -22,7 +23,6 @@ use bootty_mux::{
         TerminalRuntime,
     },
 };
-use bootty_mux_model::{MuxBackendKind, MuxBindingConfig};
 
 pub struct HerdrProvider;
 
@@ -89,13 +89,13 @@ impl MuxAppBackendProvider for HerdrProvider {
 
 #[cfg(feature = "app")]
 struct FailedHerdrPanePolicy {
-    target: bootty_mux_model::SshTarget,
+    target: crate::SshTarget,
     error: String,
 }
 
 #[cfg(feature = "app")]
 impl BackendPanePolicy for FailedHerdrPanePolicy {
-    fn remote_target(&self) -> Option<&bootty_mux_model::SshTarget> {
+    fn remote_target(&self) -> Option<&crate::SshTarget> {
         Some(&self.target)
     }
 
@@ -123,15 +123,15 @@ impl BackendPanePolicy for FailedHerdrPanePolicy {
 struct FailedHerdrBackend(String);
 
 impl MuxBackend for FailedHerdrBackend {
-    fn snapshot(&self) -> anyhow::Result<bootty_mux::snapshot::MuxSnapshot> {
+    fn snapshot(&self) -> anyhow::Result<crate::snapshot::MuxSnapshot> {
         anyhow::bail!(self.0.clone())
     }
 
-    fn execute(&mut self, _command: bootty_mux::command::MuxCommand) -> anyhow::Result<()> {
+    fn execute(&mut self, _command: crate::command::MuxCommand) -> anyhow::Result<()> {
         anyhow::bail!(self.0.clone())
     }
 }
 
-bootty_mux::register_mux_backend!(HerdrProvider);
+crate::register_mux_backend!(HerdrProvider);
 
 pub fn link() {}
