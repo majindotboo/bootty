@@ -901,6 +901,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootty-host"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "assert_fs",
+ "base64 0.23.1",
+ "bootty-config",
+ "bootty-workspace-hack",
+ "bootty-write",
+ "getrandom 0.4.3",
+ "pretty_assertions",
+ "proptest",
+ "proptest-derive",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "ureq",
+]
+
+[[package]]
 name = "bootty-identity"
 version = "0.0.0"
 dependencies = [
