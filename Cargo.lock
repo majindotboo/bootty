@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "bootty"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-agents"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "assert_fs",
  "base64 0.23.1",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-control"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-daemon"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-git"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-host"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-mux"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-tests"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bootty-config",
  "bootty-mux",
@@ -1065,7 +1065,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-ui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
