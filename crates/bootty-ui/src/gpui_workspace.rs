@@ -1117,6 +1117,7 @@ impl GpuiWorkspace {
             Some(launch.control_plane.event_sender()),
         )?;
         cx.open_window(options, move |window, cx| {
+            crate::window::macos_enable_window_resizing(window);
             let workspace = cx.new(|cx| {
                 Self::new(
                     state,
@@ -1552,6 +1553,10 @@ impl GpuiWorkspace {
             .display(cx)
             .and_then(|display| u64::from(display.id()).try_into().ok());
         cx.observe_window_bounds(window, |this, window, cx| {
+            // AppKit finishes rebuilding native controls after fullscreen bounds change.
+            window.on_next_frame(|window, _| {
+                crate::window::macos_enable_window_resizing(window);
+            });
             // GPUI reports screen changes through this callback even if bounds stay equal.
             this.display_id = window
                 .display(cx)

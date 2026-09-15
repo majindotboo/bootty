@@ -11,7 +11,9 @@ use objc2::runtime::NSObjectProtocol;
 #[cfg(target_os = "macos")]
 use objc2::{MainThreadMarker, sel};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplication, NSScreen, NSTitlebarSeparatorStyle, NSWindow};
+use objc2_app_kit::{
+    NSApplication, NSScreen, NSTitlebarSeparatorStyle, NSWindow, NSWindowButton, NSWindowStyleMask,
+};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSNumber, NSString};
 
@@ -39,6 +41,44 @@ fn with_active_window(action: impl FnOnce(&NSWindow)) {
         action(&window);
     }
 }
+
+/// Restore native resizing before GPUI captures the window's style for simple fullscreen.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_enable_window_resizing(window: &mut gpui_kit::Window) {
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    // Remove this adapter once GPUI honors is_resizable with titlebar: None (0.3.4 does not).
+    // A temporary unique title addresses this exact window through safe AppKit APIs, even
+    // with several workspaces open.
+    let title = window.window_title();
+    let lookup_title = format!("bootty-window-{:?}", window.window_handle().window_id());
+    window.set_window_title(&lookup_title);
+    let windows = NSApplication::sharedApplication(mtm).windows();
+    for native in windows {
+        if native.title().to_string() == lookup_title {
+            let style = native.styleMask();
+            if !style.contains(NSWindowStyleMask::Resizable) {
+                native.setStyleMask(style | NSWindowStyleMask::Resizable);
+            }
+            // AppKit recreates the zoom button when restoring the window's fullscreen style.
+            if !style.contains(NSWindowStyleMask::Closable)
+                && let Some(button) = native.standardWindowButton(NSWindowButton::ZoomButton)
+                && !button.isHidden()
+            {
+                button.setHidden(true);
+            }
+            break;
+        }
+    }
+    window.set_window_title(&title);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn macos_enable_window_resizing(_window: &mut gpui_kit::Window) {}
 
 /// Whether the active window's screen has a camera-housing notch.
 ///
