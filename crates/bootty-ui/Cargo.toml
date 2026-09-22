@@ -55,6 +55,7 @@ tray-icon.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_DirectWrite", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
+# These types cross windows APIs; update together when windows adopts newer versions.
 windows-core = "0.62"
 windows-numerics = "0.3"
 sys-locale = "0.3"
@@ -68,6 +69,7 @@ swash = "0.2.6"
 sys-locale = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# These types cross zed-font-kit APIs; update when that crate adopts newer versions.
 core-text = "21"
 core-foundation = "0.10"
 core-graphics = "0.24"
@@ -83,6 +85,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 gpui-pre = { version = "0.3.1", features = ["bench-support"] }
 gpui-pre-platform = { version = "0.3.1", features = ["bench-support"] }
 assert_fs.workspace = true
+# BenchAppContext takes criterion types; update when gpui-pre upgrades its benchmark API.
 criterion = "0.5"
 pretty_assertions.workspace = true
 proptest.workspace = true

@@ -59,15 +59,15 @@ iconflow = { version = "1", features = [
 ] }
 indoc = "2"
 inventory = "0.3"
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "de9fd9b0fa4ab53faebd3d489f4c74fe0ec832ec", features = [
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "5988a0b78b4aa804d1c12e66bbfe662bd97d81c0", features = [
   "png",
   "log",
 ] }
 memchr = "2.8"
 regex = "1"
 mslnk = "0.1.8"
-muda = "0.19"
-tray-icon = { version = "0.24", default-features = false }
+muda = "0.20"
+tray-icon = { version = "0.25", default-features = false }
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
 notify-rust = "4.18"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
@@ -95,10 +95,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 png = "0.18"
-portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "770d8e1a7519a9a698090cd7d717d0c64aa0a755" }
+portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "2658f629cd7251ce63a1698f238da2585676aa4e" }
 pretty_assertions = "1.4.1"
 proptest = "1"
 proptest-derive = "0.8.0"
+# Keep Cargo.lock on rustix 1.1.4 until rmux-client stops importing rustix::runtime.
 rmux-client = "0.10"
 rmux-sdk = "0.10"
 keepawake = "0.6"
@@ -106,13 +107,13 @@ rmux-ipc = "0.10"
 rmux-os = "0.10"
 rmux-proto = "0.10"
 rmux-server = { version = "0.10", default-features = false }
-rstest = "0.26"
+rstest = "0.27"
 rustybuzz = "0.20"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-signal-hook = "0.3"
+signal-hook = "0.4"
 smallvec = "1"
 starship-battery = "0.11"
 static_assertions = "1.1.0"
@@ -127,9 +128,9 @@ toml_edit = { version = "0.25", features = ["serde"] }
 unicode-width = "0.2"
 ureq = "3"
 embed-resource = "3.0.11"
-winsafe = { version = "0.0.28", default-features = false, features = ["kernel"] }
-winreg = "0.55"
-zip = { version = "7", default-features = false, features = ["deflate"] }
+winsafe = { version = "0.0.29", default-features = false, features = ["kernel"] }
+winreg = "0.56"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.dev]
 debug = "limited"

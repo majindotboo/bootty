@@ -16,10 +16,6 @@ unicode-segmentation.workspace = true
 png.workspace = true
 portable-pty.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-# portable-pty uses these APIs but omits their winapi features in its pinned manifest.
-winapi = { version = "0.3", features = ["processthreadsapi", "winbase"] }
-
 [dev-dependencies]
 assert_fs.workspace = true
 criterion.workspace = true
