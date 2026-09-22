@@ -1822,7 +1822,10 @@ fn job_events_are_owned_by_the_live_window_registry() {
 #[case(Caller::Socket)]
 #[case(Caller::CommandPalette)]
 #[case(Caller::Internal)]
-fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: Caller) {
+fn shell_history_uses_shared_commands_and_keeps_the_shell_file(
+    #[case] caller: Caller,
+    #[values(false, true)] explicit_local: bool,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
     let path = directory.path().join("history");
     fs::write(&path, "git status\necho hello\n").unwrap();
@@ -1848,15 +1851,15 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: C
         cwd: directory.path().to_string_lossy().into_owned(),
         recent: Vec::new(),
     };
+    let mut arguments = vec![serde_json::to_string(&request).unwrap()];
+    if explicit_local {
+        arguments.push("local".into());
+    }
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
         caller,
-        CommandInvocation::new(
-            "history.search",
-            vec![serde_json::to_string(&request).unwrap()],
-            caller,
-        ),
+        CommandInvocation::new("history.search", arguments, caller),
         Instant::now(),
     );
     let CommandOutcome::Success { value, .. } = outcome else {
@@ -1867,6 +1870,23 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: C
         fs::read_to_string(path).unwrap(),
         "git status\necho hello\n"
     );
+}
+
+#[rstest]
+#[case(None, true)]
+#[case(Some("local"), true)]
+#[case(Some("semantic"), true)]
+#[case(Some("typo"), false)]
+fn history_search_modes_are_validated_at_the_shared_entry(
+    #[values("history.search", "shell.history")] command: &str,
+    #[case] mode: Option<&str>,
+    #[case] accepted: bool,
+) {
+    let mut arguments = vec!["query or spec".into()];
+    arguments.extend(mode.map(str::to_owned));
+    let result =
+        CommandCatalog::default().resolve(CommandInvocation::new(command, arguments, Caller::Cli));
+    assert_eq!(result.is_ok(), accepted);
 }
 
 #[rstest]

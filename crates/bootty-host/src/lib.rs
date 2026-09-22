@@ -25,4 +25,5 @@ pub use shell::shell_quote;
 pub mod remote;
 pub mod wsl;
 
+pub mod semantic_history;
 pub mod shell_history;

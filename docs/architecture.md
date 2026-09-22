@@ -632,6 +632,12 @@ its executing host; it never writes shell history. Handoff enters `CommandInvoca
 validates the prompt lease at the PTY owner. Shared mux attachments cannot grant
 that exclusive lease; their history reader remains available.
 
+Explicit semantic history searches retain this host-owned candidate retrieval.
+`bootty-host::semantic_history` bounds the candidate upload, validates TypeSafe
+answers, and ranks original commands. The desktop command worker owns the API
+credential and deadline; remote daemons receive neither the credential nor an
+inference request. Local search remains the default.
+
 File transfers reuse `bootty-host::jobs::JobRegistry` for deadlines, cancellation,
 progress and window ownership. Their binary stream and atomic file publication
 belong to `bootty-host`; the daemon only exposes that service. SSH forwarding remains binding-owned in the app's
