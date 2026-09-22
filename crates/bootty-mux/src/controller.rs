@@ -22,6 +22,10 @@ use crate::{
     snapshot::{MuxSession, MuxSessionTag, MuxSnapshot, selection_after_refresh, session_matches},
 };
 
+mod session_refresh;
+
+use session_refresh::SessionRefresh;
+
 pub type RepaintHandle = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// How often a focused window polls the backend for session structure.
@@ -60,18 +64,10 @@ pub struct NewMuxSessionRequest {
     pub tag: MuxSessionTag,
 }
 
-type SessionRefreshSnapshot = std::result::Result<(MuxBackendKind, MuxSnapshot), String>;
-type SessionRefreshResult = (u64, SessionRefreshSnapshot);
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MuxSessionRefreshOutcome {
     pub applied: bool,
     pub error: Option<String>,
-}
-
-struct SessionRefreshRequest {
-    generation: u64,
-    config: MuxBindingConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +150,7 @@ struct CommandConfigState {
 }
 
 struct MuxCommandJob {
-    scope: Option<SpaceId>,
+    scope: SpaceId,
     config: MuxBindingConfig,
     command: MuxCommand,
     completion: MuxCommandCompletion,
@@ -168,14 +164,9 @@ fn execute_backend_command(
     registry: &MuxBackendRegistry,
     backend: &mut dyn MuxBackend,
     config: &MuxBindingConfig,
-    scope: Option<SpaceId>,
+    scope: SpaceId,
     command: MuxCommand,
 ) -> Result<(), MuxCommandError> {
-    let Some(scope) = scope else {
-        return backend
-            .execute(command)
-            .map_err(|error| MuxCommandError::Failed(error.to_string()));
-    };
     match registry.execute_checked(config, scope, backend, command) {
         BindingOperationOutcome::Supported(result) => {
             result.map_err(|error| MuxCommandError::Failed(error.to_string()))
@@ -384,7 +375,7 @@ pub struct MuxController {
     resource_generations: BTreeMap<MuxResourceKey, u64>,
     observed_resources: BTreeMap<MuxResourceKey, String>,
     observed_backend: Option<MuxBackendKind>,
-    scope: Option<SpaceId>,
+    scope: SpaceId,
     sessions: Vec<MuxSession>,
     all_sessions: Vec<MuxSession>,
     backend_session_names: Vec<String>,
@@ -399,11 +390,7 @@ pub struct MuxController {
     /// switches made outside bootty so the highlight follows them.
     last_active_window: Option<ActiveWindow>,
     current_backend: Option<MuxBackendKind>,
-    last_session_refresh: Option<Instant>,
-    session_refresh_generation: u64,
-    session_refresh_tx: Option<mpsc::Sender<SessionRefreshRequest>>,
-    session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
-    session_refresh_pending: bool,
+    session_refresh: SessionRefresh,
     mux_command_tx: Option<mpsc::Sender<MuxCommandJob>>,
     mux_command_rx: Option<mpsc::Receiver<MuxCommandResult>>,
     registry: Arc<MuxBackendRegistry>,
@@ -426,7 +413,7 @@ impl MuxController {
             resource_generations: BTreeMap::new(),
             observed_resources: BTreeMap::new(),
             observed_backend: None,
-            scope: Some(scope),
+            scope,
             sessions: Vec::new(),
             all_sessions: Vec::new(),
             backend_session_names: Vec::new(),
@@ -436,11 +423,7 @@ impl MuxController {
             selected_window: None,
             last_active_window: None,
             current_backend: None,
-            last_session_refresh: None,
-            session_refresh_generation: 0,
-            session_refresh_tx: None,
-            session_refresh_rx: None,
-            session_refresh_pending: false,
+            session_refresh: SessionRefresh::default(),
             mux_command_tx: None,
             mux_command_rx: None,
             registry,
@@ -488,13 +471,10 @@ impl MuxController {
         config: &MuxBindingConfig,
         operation: BindingOperation,
     ) -> BindingOperationOutcome<()> {
-        let Some(scope) = self.scope else {
-            return BindingOperationOutcome::Supported(());
-        };
         if self.availability_error.is_some() {
             return BindingOperationOutcome::Unavailable;
         }
-        let Some(capabilities) = self.registry.capabilities(config, scope) else {
+        let Some(capabilities) = self.registry.capabilities(config, self.scope) else {
             return BindingOperationOutcome::Unavailable;
         };
         if capabilities.supports(operation) {
@@ -598,7 +578,7 @@ impl MuxController {
 
     pub const fn refresh_on_next_frame(&mut self) {
         self.current_backend = None;
-        self.last_session_refresh = None;
+        self.session_refresh.request_soon();
     }
 
     /// Whether the current provider has published an authoritative session listing.
@@ -789,10 +769,7 @@ impl MuxController {
     ) -> MuxSessionRefreshOutcome {
         self.observe_command_config(config);
         let mut outcome = MuxSessionRefreshOutcome::default();
-        while let Some((generation, result)) = self.poll_session_refresh() {
-            if generation != self.session_refresh_generation {
-                continue;
-            }
+        if let Some(result) = self.session_refresh.poll(config) {
             match result {
                 Ok((backend, snapshot)) => {
                     outcome.applied |= self.apply_refreshed_snapshot(backend, snapshot);
@@ -804,10 +781,7 @@ impl MuxController {
             }
         }
 
-        if self
-            .last_session_refresh
-            .is_some_and(|last| last.elapsed() < interval)
-        {
+        if !self.session_refresh.is_due(interval) {
             return outcome;
         }
 
@@ -818,29 +792,10 @@ impl MuxController {
             return outcome;
         }
 
-        if self.session_refresh_pending {
-            return outcome;
-        }
-
-        self.ensure_session_refresh_worker(repaint);
-        let Some(tx) = &self.session_refresh_tx else {
-            outcome.error = Some("mux session refresh worker did not start".to_owned());
-            return outcome;
-        };
-        self.session_refresh_generation = self.session_refresh_generation.wrapping_add(1);
-        let request = SessionRefreshRequest {
-            generation: self.session_refresh_generation,
-            config: config.clone(),
-        };
-        if matches!(tx.send(request), Ok(())) {
-            self.last_session_refresh = Some(Instant::now());
-            self.session_refresh_pending = true;
-        } else {
-            self.session_refresh_tx = None;
-            self.session_refresh_rx = None;
-            self.session_refresh_pending = false;
-            outcome.error = Some("mux session refresh worker stopped".to_owned());
-        }
+        outcome.error = self
+            .session_refresh
+            .request(&self.registry, self.workspace.as_deref(), repaint, config)
+            .err();
         outcome
     }
 
@@ -852,7 +807,7 @@ impl MuxController {
             Ok(snapshot) => {
                 let backend = self.registry.selected_kind(config);
                 let applied = self.apply_refreshed_snapshot(backend, snapshot);
-                self.last_session_refresh = Some(Instant::now());
+                self.session_refresh.record_started();
                 MuxSessionRefreshOutcome {
                     applied,
                     error: None,
@@ -948,9 +903,7 @@ impl MuxController {
                         (None, None) => {}
                     }
                 }
-                self.last_session_refresh = None;
-                self.session_refresh_generation = self.session_refresh_generation.wrapping_add(1);
-                self.session_refresh_pending = false;
+                self.session_refresh.invalidate();
                 Ok(completion)
             }
             Err(error) => {
@@ -1162,56 +1115,6 @@ impl MuxController {
         self.record_resource_snapshot();
     }
 
-    fn poll_session_refresh(&mut self) -> Option<SessionRefreshResult> {
-        let result = match self.session_refresh_rx.as_ref()?.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some((
-                self.session_refresh_generation,
-                Err("mux session refresh worker stopped".to_owned()),
-            )),
-        };
-        if matches!(result, Some((generation, _)) if generation == self.session_refresh_generation)
-        {
-            self.session_refresh_pending = false;
-        }
-        result
-    }
-
-    fn ensure_session_refresh_worker(&mut self, repaint: &RepaintHandle) {
-        if self.session_refresh_tx.is_some() && self.session_refresh_rx.is_some() {
-            return;
-        }
-
-        let (request_tx, request_rx) = mpsc::channel::<SessionRefreshRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<SessionRefreshResult>();
-        let repaint = repaint.clone();
-        let registry = Arc::clone(&self.registry);
-        let workspace = self.workspace.clone();
-        thread::spawn(move || {
-            let mut previous = None;
-            while let Ok(request) = request_rx.recv() {
-                let backend_kind = registry.selected_kind(&request.config);
-                let result = registry
-                    .build_backend(&request.config, workspace.as_deref())
-                    .and_then(|backend| backend.snapshot())
-                    .map(|snapshot| (backend_kind, snapshot))
-                    .map_err(|error| error.to_string());
-                let result = (request.generation, result);
-                let changed = previous.as_ref() != Some(&result);
-                previous = Some(result.clone());
-                if result_tx.send(result).is_err() {
-                    break;
-                }
-                if changed {
-                    repaint();
-                }
-            }
-        });
-        self.session_refresh_tx = Some(request_tx);
-        self.session_refresh_rx = Some(result_rx);
-    }
-
     pub fn execute_command(
         &mut self,
         repaint: &RepaintHandle,
@@ -1344,7 +1247,7 @@ impl MuxController {
         if result.is_err() {
             self.expected_session = None;
         }
-        self.last_session_refresh = None;
+        self.session_refresh.request_soon();
         self.last_error = result.as_ref().err().map(ToString::to_string);
         result.is_ok()
     }

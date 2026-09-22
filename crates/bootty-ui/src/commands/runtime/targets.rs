@@ -165,60 +165,22 @@ impl AppState {
 
     pub(crate) fn current_command_target(&self, kind: ResourceKind) -> Option<CommandTarget> {
         let (process, instance_generation, window_generation) = self.commands.target_identity();
-        let process = process.to_owned();
-        let window = &self.window_state_key;
-        let binding = &self.workspace.active.binding;
-        let mux = binding.mux();
-        let scope = binding.scope();
-        let binding_generation = mux.binding_generation();
-        let binding_handle = self.binding_target_handle(scope, binding_generation);
-        let (session, mux_window, pane) = self.selected_mux_resource_path();
         let (handle, generation) = match kind {
-            ResourceKind::Instance => (process, instance_generation),
+            ResourceKind::Instance => (process.to_owned(), instance_generation),
             ResourceKind::ApplicationWindow => (
-                serde_json::Value::from(vec![process.as_str(), window.as_str()]).to_string(),
+                serde_json::Value::from(vec![process, self.window_state_key.as_str()]).to_string(),
                 window_generation,
             ),
-            ResourceKind::Binding => (binding_handle, binding_generation),
-            ResourceKind::Session => {
-                let session = session?;
-                (
-                    serde_json::Value::from(vec![binding_handle.as_str(), session.as_str()])
-                        .to_string(),
-                    mux.session_generation(&session)?,
-                )
-            }
-            ResourceKind::MuxWindow => {
-                let (session, mux_window) = (session?, mux_window?);
-                (
-                    serde_json::Value::from(vec![
-                        binding_handle.as_str(),
-                        session.as_str(),
-                        mux_window.as_str(),
-                    ])
-                    .to_string(),
-                    mux.window_generation(&session, &mux_window)?,
-                )
-            }
-            ResourceKind::Pane => {
-                let (session, mux_window, pane) = (session?, mux_window?, pane?);
-                (
-                    serde_json::Value::from(vec![
-                        binding_handle.as_str(),
-                        session.as_str(),
-                        mux_window.as_str(),
-                        pane.as_str(),
-                    ])
-                    .to_string(),
-                    mux.pane_generation(&session, &mux_window, &pane)?,
-                )
-            }
-            ResourceKind::Terminal => {
-                return self.current_terminal_target(
-                    &binding_handle,
-                    binding_generation,
-                    (session, mux_window, pane),
-                );
+            _ => {
+                let binding = &self.workspace.active.binding;
+                let mux = binding.mux();
+                let handle = self.binding_target_handle(binding.scope(), mux.binding_generation());
+                let exact = if kind == ResourceKind::Terminal {
+                    self.current_terminal_target()
+                } else {
+                    self.current_exact_mux_target_for("", kind)?
+                };
+                return exact.command_target(kind, mux, &handle);
             }
         };
         Some(CommandTarget {
@@ -228,38 +190,15 @@ impl AppState {
         })
     }
 
-    fn current_terminal_target(
-        &self,
-        binding_handle: &str,
-        binding_generation: u64,
-        path: (Option<String>, Option<String>, Option<String>),
-    ) -> Option<CommandTarget> {
-        let mux = self.workspace.active.binding.mux();
-        let (handle, generation) = match path {
-            (Some(session), Some(mux_window), Some(pane)) => (
-                serde_json::Value::from(vec![
-                    binding_handle,
-                    session.as_str(),
-                    mux_window.as_str(),
-                    pane.as_str(),
-                ])
-                .to_string(),
-                mux.terminal_generation(&session, &mux_window, &pane)?,
-            ),
-            (Some(session), _, _) => (
-                serde_json::Value::from(vec![binding_handle, session.as_str()]).to_string(),
-                mux.session_generation(&session)?,
-            ),
-            (None, _, _) => (
-                serde_json::Value::from(vec![binding_handle, "active_terminal"]).to_string(),
-                binding_generation,
-            ),
-        };
-        Some(CommandTarget {
-            kind: ResourceKind::Terminal,
-            handle,
-            generation,
-        })
+    fn current_terminal_target(&self) -> ExactMuxTarget {
+        let scope = self.workspace.active.binding.scope();
+        match self.selected_mux_resource_path() {
+            (Some(session), Some(window), Some(pane)) => {
+                ExactMuxTarget::Pane(scope, session, window, pane)
+            }
+            (Some(session), _, _) => ExactMuxTarget::Session(scope, session),
+            (None, _, _) => ExactMuxTarget::Binding(scope),
+        }
     }
 
     pub(crate) fn selected_mux_resource_path(
@@ -301,33 +240,15 @@ impl AppState {
         window_id: Option<&str>,
     ) -> Option<CommandTarget> {
         let binding_runtime = self.workspace.binding(scope)?;
-        let binding = self.binding_target_handle(scope, binding_runtime.mux().binding_generation());
-        let (handle, generation) = match kind {
-            ResourceKind::Session => (
-                serde_json::Value::from(vec![binding.as_str(), session_id]).to_string(),
-                binding_runtime
-                    .mux()
-                    .session_generation(session_id)
-                    .unwrap_or(1),
-            ),
-            ResourceKind::MuxWindow => {
-                let window_id = window_id?;
-                (
-                    serde_json::Value::from(vec![binding.as_str(), session_id, window_id])
-                        .to_string(),
-                    binding_runtime
-                        .mux()
-                        .window_generation(session_id, window_id)
-                        .unwrap_or(1),
-                )
-            }
+        let mux = binding_runtime.mux();
+        let session = mux.backend_session_by_id_or_name(session_id)?;
+        let exact = match kind {
+            ResourceKind::Session => ExactMuxTarget::Session(scope, session.id.clone()),
+            ResourceKind::MuxWindow => ExactMuxTarget::window(scope, &session.id, window_id?),
             _ => return None,
         };
-        Some(CommandTarget {
-            kind,
-            handle,
-            generation,
-        })
+        let binding = self.binding_target_handle(scope, mux.binding_generation());
+        exact.command_target(kind, mux, &binding)
     }
 
     pub(super) fn mux_terminal_target(
@@ -349,14 +270,13 @@ impl AppState {
             .pane_id
             .as_deref()?;
         let binding = self.binding_target_handle(scope, binding_runtime.mux().binding_generation());
-        Some(CommandTarget {
-            kind: ResourceKind::Terminal,
-            handle: serde_json::Value::from(vec![binding.as_str(), session_id, window_id, pane_id])
-                .to_string(),
-            generation: binding_runtime
-                .mux()
-                .pane_generation(session_id, window_id, pane_id)?,
-        })
+        ExactMuxTarget::Pane(
+            scope,
+            session_id.to_owned(),
+            window_id.to_owned(),
+            pane_id.to_owned(),
+        )
+        .command_target(ResourceKind::Terminal, binding_runtime.mux(), &binding)
     }
 
     pub(crate) fn binding_target_handle(&self, scope: SpaceId, generation: u64) -> String {

@@ -95,6 +95,12 @@ pub struct SpaceUpdateOutcome {
     pub active_placement_changed: bool,
 }
 
+pub enum SpaceCloseOutcome {
+    Closed { active_changed: bool },
+    LastSpace,
+    Unchanged,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingGeneratedName {
     /// The name asked of the backend, unique across the whole server.
@@ -1346,6 +1352,17 @@ impl WorkspaceRuntime {
         self.repository
             .set_selected_space(window_state_key, space_id)?;
 
+        self.publish_space_activation(index, replacement, repaint, now);
+        Ok(true)
+    }
+
+    fn publish_space_activation(
+        &mut self,
+        index: usize,
+        replacement: Option<NativeTerminalOwner>,
+        repaint: &RepaintHandle,
+        now: Instant,
+    ) {
         let mut target = self.inactive_spaces.remove(index);
         self.pending_terminal_notifications
             .extend(self.active.binding.discard_terminal_side_effects());
@@ -1370,7 +1387,6 @@ impl WorkspaceRuntime {
             to: self.active.id,
             started: now,
         });
-        Ok(true)
     }
 
     fn terminal_residency_replacement(
@@ -1501,15 +1517,57 @@ impl WorkspaceRuntime {
     }
 
     /// # Errors
-    /// Returns persistence or binding realization errors; failed writes preserve live state.
-    pub fn delete_space(&mut self, space_id: SpaceId) -> Result<bool, WorkspacePersistenceError> {
-        // Any journal rows go with the Space. Its sessions keep running and stop being claimed,
-        // which is what the sidebar shows as unassigned.
-        let deleted = self.repository.delete_space(space_id)?;
+    /// Returns persistence or terminal preparation errors; failed closes preserve selection.
+    pub fn close_space(
+        &mut self,
+        space_id: SpaceId,
+        window_state_key: &str,
+        config: &BoottyConfig,
+        variant: AppearanceVariant,
+        repaint: &RepaintHandle,
+        now: Instant,
+    ) -> Result<SpaceCloseOutcome, WorkspacePersistenceError> {
+        if self.space(space_id).is_none() {
+            return Ok(SpaceCloseOutcome::Unchanged);
+        }
+        let active_changed = space_id == self.active.id;
+        let deleted = if active_changed {
+            // Spaces stay ordered; prefer the next neighbor, then the previous one.
+            let Some(index) = self
+                .inactive_spaces
+                .iter()
+                .position(|space| space.position > self.active.position)
+                .or_else(|| self.inactive_spaces.len().checked_sub(1))
+            else {
+                return Ok(SpaceCloseOutcome::LastSpace);
+            };
+            let Some(target) = self.inactive_spaces.get(index) else {
+                return Ok(SpaceCloseOutcome::Unchanged);
+            };
+            let replacement = self.terminal_residency_replacement(
+                target.binding.backend_policy,
+                config,
+                variant,
+                repaint,
+            )?;
+            if !self
+                .repository
+                .delete_space_and_select(space_id, window_state_key, target.id)?
+            {
+                return Ok(SpaceCloseOutcome::Unchanged);
+            }
+            self.publish_space_activation(index, replacement, repaint, now);
+            true
+        } else {
+            self.repository.delete_space(space_id)?
+        };
+        // Backend sessions survive; only the Space's claim and journal rows are removed.
         if deleted {
             self.inactive_spaces.retain(|space| space.id != space_id);
+            Ok(SpaceCloseOutcome::Closed { active_changed })
+        } else {
+            Ok(SpaceCloseOutcome::Unchanged)
         }
-        Ok(deleted)
     }
 
     /// # Errors

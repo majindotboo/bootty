@@ -5,7 +5,7 @@ use bootty_mux::repository::SpaceMuxOverride;
 
 use super::AppState;
 use crate::input::focus::InputFocus;
-use bootty_mux::workspace::SpaceSummary;
+use bootty_mux::workspace::{SpaceCloseOutcome, SpaceSummary};
 impl AppState {
     pub(crate) fn persist_space_selection_for_window(
         &mut self,
@@ -69,23 +69,32 @@ impl AppState {
         self.activate_space_from_ui(space_id)
     }
     pub fn close_space_from_ui(&mut self, space_id: SpaceId) -> bool {
-        let spaces = self.space_summaries();
-        if spaces.len() <= 1 {
-            return false;
-        }
-        let Some(index) = spaces.iter().position(|space| space.id == space_id) else {
-            return false;
-        };
-        if space_id == self.workspace.active.id {
-            let neighbor = spaces
-                .get(index.saturating_add(1))
-                .or_else(|| index.checked_sub(1).and_then(|index| spaces.get(index)));
-            if !neighbor.is_some_and(|space| self.activate_space_from_ui(space.id)) {
-                return false;
+        let config = self.config().clone();
+        let result = self.workspace.close_space(
+            space_id,
+            &self.window_state_key,
+            &config,
+            self.active_appearance_variant,
+            &self.repaint,
+            Instant::now(),
+        );
+        match result {
+            Ok(SpaceCloseOutcome::Closed { active_changed }) => {
+                if active_changed {
+                    self.publish_space_activation();
+                }
+                true
+            }
+            Ok(SpaceCloseOutcome::LastSpace) => {
+                self.record_notice(crate::error_catalog::ErrorNotice::LastSpaceCannotClose);
+                false
+            }
+            Ok(SpaceCloseOutcome::Unchanged) => false,
+            Err(error) => {
+                self.record_error(error);
+                false
             }
         }
-        let result = self.workspace.delete_space(space_id);
-        self.apply_workspace_change(result)
     }
     pub fn update_space_from_ui(
         &mut self,
@@ -161,15 +170,18 @@ impl AppState {
             self.record_error(error);
             return false;
         }
+        self.publish_space_activation();
+        crate::diagnostics::trace_phase("space.TOTAL", switch_started);
+        true
+    }
+    fn publish_space_activation(&mut self) {
         self.publish_backend_transition();
         self.clear_space_context_dialogs();
         self.input_focus = InputFocus::Terminal;
         let phase = crate::diagnostics::latency_start();
         self.sync_terminal_panes_or_record_error();
         crate::diagnostics::trace_phase("space.sync_terminal_panes", phase);
-        crate::diagnostics::trace_phase("space.TOTAL", switch_started);
         (self.repaint)();
-        true
     }
     fn clear_space_context_dialogs(&mut self) {
         self.dialogs.clear_space_context();

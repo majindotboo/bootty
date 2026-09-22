@@ -150,9 +150,7 @@ impl AppState {
                 effects.push(AppEffect::RequestRepaint);
             }
             AppAction::CloseSpace => {
-                if !self.close_space_from_ui(self.workspace.active.id) {
-                    self.record_notice(crate::error_catalog::ErrorNotice::LastSpaceCannotClose);
-                }
+                self.close_space_from_ui(self.workspace.active.id);
                 effects.push(AppEffect::RequestRepaint);
             }
             AppAction::NextSpace => {
