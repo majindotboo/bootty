@@ -545,9 +545,10 @@ fn singleton_behaviors() {
         })
     });
     barrier.wait();
+    // Keep every successful owner alive until all contenders have finished.
     let winners = contenders
         .into_iter()
         .flat_map(|handle| handle.join().unwrap())
-        .count();
-    assert_eq!(winners, 1);
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1);
 }
