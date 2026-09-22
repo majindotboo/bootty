@@ -121,7 +121,7 @@ impl BindingRuntime {
         reattach.started = true;
         self.reconnect.pending = Some(reattach);
         self.reconnect.attach_started = Some(now);
-        self.terminal.discard_active_pane();
+        self.terminal_owner.terminal.discard_active_pane();
         None
     }
 
@@ -147,7 +147,7 @@ impl BindingRuntime {
         self.reconnect.attach_started = Some(now);
         self.mux
             .set_availability_error(Some(format!("reconnecting to {}", remote.label())));
-        self.terminal.discard_active_pane();
+        self.terminal_owner.terminal.discard_active_pane();
         true
     }
 

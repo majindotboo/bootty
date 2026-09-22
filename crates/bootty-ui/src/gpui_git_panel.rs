@@ -1,5 +1,9 @@
 //! Native Changes and Diff panels; every Git operation enters the app command mailbox.
 
+mod diff;
+
+pub use diff::GitDiffPanel;
+
 use std::time::{Duration, Instant};
 
 use bootty_control::{
@@ -11,13 +15,13 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
-    input::{EditorState, Input, InputState, TextDecoration, TextDecorationCollection},
+    input::{Input, InputState},
     list::ListItem,
     tree::{Tree, TreeEntry, TreeItem, TreeState},
 };
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle, Hsla, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    SharedString, Styled, Window, div, prelude::*,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,146 +31,6 @@ pub struct GitPanelContext {
     pub directory: String,
     pub host: String,
     pub host_identity: String,
-}
-
-pub struct GitDiffPanel {
-    active: bool,
-    pub(crate) group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
-    editor: Entity<EditorState>,
-    title: Option<String>,
-    decorations: TextDecorationCollection,
-    decoration_colors: Option<[Hsla; 3]>,
-}
-
-impl GitDiffPanel {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("diff")
-                .soft_wrap(false)
-        });
-        let decorations = editor.update(cx, |editor, cx| {
-            editor.create_decorations_collection(Vec::new(), cx)
-        });
-        Self {
-            active: false,
-            group: None,
-            editor,
-            decorations,
-            decoration_colors: None,
-            title: None,
-        }
-    }
-
-    fn show(
-        &mut self,
-        title: String,
-        contents: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.title.as_ref() == Some(&title) && self.editor.read(cx).value().as_str() == contents
-        {
-            return;
-        }
-        self.title = Some(title);
-        self.decoration_colors = None;
-        self.editor
-            .update(cx, |editor, cx| editor.set_value(contents, window, cx));
-        cx.emit(PanelEvent::LayoutChanged);
-        cx.notify();
-    }
-}
-
-impl EventEmitter<PanelEvent> for GitDiffPanel {}
-impl Focusable for GitDiffPanel {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.editor.focus_handle(cx)
-    }
-}
-impl BasePanel for GitDiffPanel {
-    fn visible(&self, _: &App) -> bool {
-        self.title.is_some()
-    }
-
-    fn set_active(&mut self, active: bool, _: &mut Window, _: &mut Context<Self>) {
-        self.active = active;
-    }
-    fn on_added_to(
-        &mut self,
-        group: gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        self.group = Some(group);
-    }
-    fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {
-        self.group = None;
-        self.active = false;
-    }
-    fn panel_name(&self) -> &'static str {
-        "bootty.diff"
-    }
-}
-impl Panel for GitDiffPanel {
-    fn inner_padding(&self, _: &App) -> bool {
-        false
-    }
-    fn tab_name(&self, cx: &App) -> Option<SharedString> {
-        Some(
-            self.title
-                .clone()
-                .unwrap_or_else(|| crate::i18n::t(cx, "panel-diff"))
-                .into(),
-        )
-    }
-    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.tab_name(cx).unwrap_or_default()
-    }
-}
-impl Render for GitDiffPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = [
-            cx.theme().success,
-            cx.theme().danger,
-            cx.theme().muted_foreground,
-        ];
-        if self.decoration_colors != Some(colors) {
-            self.decoration_colors = Some(colors);
-            let contents = self.editor.read(cx).value();
-            let mut offset = 0_usize;
-            let decorations = contents
-                .split_inclusive('\n')
-                .filter_map(|line| {
-                    let range = offset..offset.saturating_add(line.len());
-                    offset = range.end;
-                    let color = if line.starts_with("+++")
-                        || line.starts_with("---")
-                        || line.starts_with("@@")
-                        || line.starts_with("diff ")
-                        || line.starts_with("index ")
-                    {
-                        colors[2]
-                    } else if line.starts_with('+') {
-                        colors[0]
-                    } else if line.starts_with('-') {
-                        colors[1]
-                    } else {
-                        return None;
-                    };
-                    Some(TextDecoration::new(
-                        range,
-                        HighlightStyle {
-                            color: Some(color),
-                            ..Default::default()
-                        },
-                    ))
-                })
-                .collect();
-            self.decorations.set(decorations, cx);
-        }
-        crate::gpui::readonly_editor(&self.editor, "Git diff")
-    }
 }
 
 #[expect(
@@ -507,36 +371,10 @@ impl GitChangesPanel {
                 this.mutating = false;
                 match outcome {
                     Ok(CommandOutcome::Success { value, .. }) => {
-                        if command == "git.status" {
-                            match serde_json::from_value(value) {
-                                Ok(changes) => {
-                                    if this.changes.as_ref() != Some(&changes) {
-                                        this.changes = Some(changes);
-                                        this.sync_tree(cx);
-                                    }
-                                    this.refresh_selected_diff(window, cx);
-                                }
-                                Err(error) => this.error = Some(error.to_string()),
-                            }
-                        } else if command == "git.overview" {
-                            match serde_json::from_value(value) {
-                                Ok(overview) => this.overview = Some(overview),
-                                Err(error) => this.error = Some(error.to_string()),
-                            }
-                        } else if matches!(command, "git.diff" | "git.commit-diff") {
-                            let contents = value.as_str().unwrap_or_default().to_owned();
-                            this.diff
-                                .update(cx, |diff, cx| diff.show(diff_title, contents, window, cx));
-                            if reveal {
-                                cx.emit(OpenDiff);
-                            }
-                        } else {
-                            this.overview = None;
-                            if matches!(command, "git.commit" | "git.amend") {
-                                this.message
-                                    .update(cx, |message, cx| message.set_value("", window, cx));
-                            }
-                            this.refresh(window, cx);
+                        if let Err(error) = this
+                            .receive_command_value(command, value, diff_title, reveal, window, cx)
+                        {
+                            this.error = Some(error.to_string());
                         }
                     }
                     Ok(outcome) => {
@@ -557,6 +395,45 @@ impl GitChangesPanel {
             });
         })
         .detach();
+    }
+
+    fn receive_command_value(
+        &mut self,
+        command: &str,
+        value: serde_json::Value,
+        diff_title: String,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), serde_json::Error> {
+        match command {
+            "git.status" => {
+                let changes = serde_json::from_value(value)?;
+                if self.changes.as_ref() != Some(&changes) {
+                    self.changes = Some(changes);
+                    self.sync_tree(cx);
+                }
+                self.refresh_selected_diff(window, cx);
+            }
+            "git.overview" => self.overview = Some(serde_json::from_value(value)?),
+            "git.diff" | "git.commit-diff" => {
+                let contents = value.as_str().unwrap_or_default().to_owned();
+                self.diff
+                    .update(cx, |diff, cx| diff.show(diff_title, contents, window, cx));
+                if reveal {
+                    cx.emit(OpenDiff);
+                }
+            }
+            _ => {
+                self.overview = None;
+                if matches!(command, "git.commit" | "git.amend") {
+                    self.message
+                        .update(cx, |message, cx| message.set_value("", window, cx));
+                }
+                self.refresh(window, cx);
+            }
+        }
+        Ok(())
     }
 
     fn sync_tree(&mut self, cx: &mut Context<Self>) {

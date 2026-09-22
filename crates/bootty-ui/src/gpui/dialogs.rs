@@ -196,6 +196,24 @@ pub enum DialogIntent {
     },
 }
 
+impl DialogIntent {
+    #[must_use]
+    pub const fn dialog_id(&self) -> &DialogId {
+        match self {
+            Self::Dismiss { dialog }
+            | Self::Activate { dialog, .. }
+            | Self::Preview { dialog, .. }
+            | Self::TextChanged { dialog, .. }
+            | Self::FieldChanged { dialog, .. }
+            | Self::SelectionChanged { dialog, .. }
+            | Self::CycleScope { dialog }
+            | Self::ToggleFavorite { dialog, .. }
+            | Self::Find { dialog, .. }
+            | Self::FocusTerminal { dialog } => dialog,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogRole {
     SearchableList,

@@ -60,20 +60,6 @@ use crate::repository::{
 };
 use crate::session_membership::{SessionMembership, WorkspaceSession};
 
-macro_rules! swap_terminal_owner {
-    ($left:expr, $right:expr) => {{
-        std::mem::swap(&mut $left.terminal, &mut $right.terminal);
-        std::mem::swap(
-            &mut $left.terminal_side_effect_tx,
-            &mut $right.terminal_side_effect_tx,
-        );
-        std::mem::swap(
-            &mut $left.terminal_side_effect_rx,
-            &mut $right.terminal_side_effect_rx,
-        );
-    }};
-}
-
 /// The only terminal data that the host needs to interpret after a workspace frame.
 ///
 /// The workspace drains every live terminal. It returns only the active drain statistics and
@@ -190,16 +176,30 @@ impl NativeTerminalOwner {
         })
     }
 
-    pub(super) const fn replace_binding(
-        binding: &mut BindingRuntime,
-        mut replacement: Self,
-    ) -> Self {
-        replacement.swap_with_binding(binding);
-        replacement
+    pub(super) const fn replace_binding(binding: &mut BindingRuntime, replacement: Self) -> Self {
+        std::mem::replace(&mut binding.terminal_owner, replacement)
     }
 
     pub(super) const fn swap_with_binding(&mut self, binding: &mut BindingRuntime) {
-        swap_terminal_owner!(self, binding);
+        std::mem::swap(self, &mut binding.terminal_owner);
+    }
+
+    fn publish_config(
+        &mut self,
+        config: &BoottyConfig,
+        variant: AppearanceVariant,
+        live_config: Option<&TerminalLiveConfig>,
+    ) -> Result<()> {
+        self.terminal
+            .set_terminal_config(terminal_session_config_with_side_effects(
+                config,
+                variant,
+                &self.terminal_side_effect_tx,
+            ));
+        if let Some(config) = live_config {
+            self.terminal.apply_live_config(config.clone())?;
+        }
+        Ok(())
     }
 
     pub(super) fn discard_side_effects(&self) -> Vec<TerminalSideEffectEvent> {
@@ -254,7 +254,7 @@ pub struct BindingRuntime {
     /// The Space id stamped onto every session this binding creates. A remote binding uses the
     /// id the far side knows its Space by, since that is what its daemon filters on.
     space_tag: String,
-    terminal: Box<ActiveTerminal>,
+    terminal_owner: NativeTerminalOwner,
     mux: MuxController,
     sessions: SessionMembership,
     pub(super) pending_generated_names: HashMap<String, PendingGeneratedName>,
@@ -268,8 +268,6 @@ pub struct BindingRuntime {
     /// repository layout does, so each one is resolved once per run; restart bootty if a path's
     /// layout changes underneath it.
     session_roots: RefCell<HashMap<String, String>>,
-    pub(super) terminal_side_effect_tx: mpsc::Sender<TerminalSideEffectEvent>,
-    pub(super) terminal_side_effect_rx: mpsc::Receiver<TerminalSideEffectEvent>,
     pub(super) pane_layouts: HashMap<ScopedWindowId, PaneLayout>,
     pub(super) pending_pane_split_directions: HashMap<ScopedWindowId, SplitDirection>,
     terminal_facts: BindingTerminalFacts,
@@ -314,12 +312,12 @@ impl BindingRuntime {
 
     /// Read-only access to the active terminal owned by this binding.
     pub fn terminal(&self) -> &ActiveTerminal {
-        &self.terminal
+        &self.terminal_owner.terminal
     }
 
     /// Mutable access to the active terminal owned by this binding.
     pub fn terminal_mut(&mut self) -> &mut ActiveTerminal {
-        &mut self.terminal
+        &mut self.terminal_owner.terminal
     }
 
     /// The persisted session membership owned by this binding.
@@ -343,11 +341,8 @@ impl BindingRuntime {
         let capabilities = provider.capabilities(scope);
         let mut binding_config = config.clone();
         binding_config.multiplexer = realized.config.clone();
-        let NativeTerminalOwner {
-            terminal,
-            terminal_side_effect_tx,
-            terminal_side_effect_rx,
-        } = NativeTerminalOwner::new(&binding_config, Arc::clone(&backends), variant, repaint)?;
+        let terminal_owner =
+            NativeTerminalOwner::new(&binding_config, Arc::clone(&backends), variant, repaint)?;
         // Bindings of one workspace share native sessions, separate workspaces cannot see each
         // other's, and reopening a window keeps its own. Native sessions live in this process rather
         // than in a server, so which state a binding reaches is a choice bootty has to make.
@@ -363,9 +358,7 @@ impl BindingRuntime {
             space_tag: realized.space_tag,
             multiplexer: realized.config,
             scope,
-            terminal,
-            terminal_side_effect_tx,
-            terminal_side_effect_rx,
+            terminal_owner,
             mux,
             sessions,
             pending_generated_names: HashMap::new(),
@@ -681,7 +674,8 @@ impl BindingRuntime {
     pub(super) fn discard_terminal_side_effects(
         &self,
     ) -> Vec<(SpaceId, u64, TerminalSideEffectEvent)> {
-        self.terminal_side_effect_rx
+        self.terminal_owner
+            .terminal_side_effect_rx
             .try_iter()
             .filter(|event| is_terminal_notification(&event.effect))
             .map(|event| (self.scope, self.mux.binding_generation(), event))
@@ -921,10 +915,15 @@ impl WorkspaceRuntime {
     /// The host owns interpretation of active terminal side effects. The workspace owns all
     /// terminal traversal. Lifecycle work starts later in `advance_frame`.
     pub fn drain(&mut self) -> WorkspaceDrainResult {
-        let active_drain = self.active.binding.terminal.drain_native_window();
+        let active_drain = self
+            .active
+            .binding
+            .terminal_owner
+            .terminal
+            .drain_native_window();
         let mut terminal_notifications = std::mem::take(&mut self.pending_terminal_notifications);
         for binding in self.bindings_mut().skip(1) {
-            binding.terminal.drain_native_window();
+            binding.terminal_owner.terminal.drain_native_window();
             terminal_notifications.extend(binding.discard_terminal_side_effects());
         }
         if let Some(owner) = &mut self.parked_native_terminal {
@@ -935,6 +934,7 @@ impl WorkspaceRuntime {
         let active_terminal_side_effects = self
             .active
             .binding
+            .terminal_owner
             .terminal_side_effect_rx
             .try_iter()
             .collect();
@@ -972,15 +972,7 @@ impl WorkspaceRuntime {
         if let Some(owner) = &mut self.parked_native_terminal {
             let mut owner_config = config.clone();
             owner_config.multiplexer.backend = MultiplexerBackendConfig::Native;
-            let session_config = terminal_session_config_with_side_effects(
-                &owner_config,
-                variant,
-                &owner.terminal_side_effect_tx,
-            );
-            owner.terminal.set_terminal_config(session_config);
-            if let Some(live_config) = live_config
-                && let Err(error) = owner.terminal.apply_live_config(live_config.clone())
-            {
+            if let Err(error) = owner.publish_config(&owner_config, variant, live_config) {
                 warnings.push(format!(
                     "terminal config publication failed for parked native terminal: {error}"
                 ));
@@ -989,14 +981,10 @@ impl WorkspaceRuntime {
         for binding in self.bindings_mut() {
             let mut binding_config = config.clone();
             binding_config.multiplexer = binding.multiplexer.clone();
-            let session_config = terminal_session_config_with_side_effects(
-                &binding_config,
-                variant,
-                &binding.terminal_side_effect_tx,
-            );
-            binding.terminal.set_terminal_config(session_config);
-            if let Some(live_config) = live_config
-                && let Err(error) = binding.terminal.apply_live_config(live_config.clone())
+            if let Err(error) =
+                binding
+                    .terminal_owner
+                    .publish_config(&binding_config, variant, live_config)
             {
                 warnings.push(format!(
                     "terminal config publication failed for {:?}: {error}",
@@ -1016,7 +1004,12 @@ impl WorkspaceRuntime {
         let mut terminal_recovery_wake = None;
         match self.active.binding.backend_policy.panes.topology {
             PaneTopology::ProcessLocal => {
-                let exited = self.active.binding.terminal.native_exited_panes();
+                let exited = self
+                    .active
+                    .binding
+                    .terminal_owner
+                    .terminal
+                    .native_exited_panes();
                 for pane_id in exited {
                     self.active.binding.close_focused_pane(repaint, &pane_id);
                 }
@@ -1025,13 +1018,14 @@ impl WorkspaceRuntime {
                 let (runtime_errors, retry_after) = self
                     .active
                     .binding
+                    .terminal_owner
                     .terminal
                     .recover_exited_native_runtimes(now);
                 errors.extend(runtime_errors);
                 terminal_recovery_wake = retry_after;
             }
             PaneTopology::Attach => {
-                match self.active.binding.terminal.child_exited() {
+                match self.active.binding.terminal_owner.terminal.child_exited() {
                     Ok(true) => {
                         if self.active.binding.handle_attach_client_exit(now) {
                             self.close_active_attach_pane(repaint);
@@ -1063,7 +1057,7 @@ impl WorkspaceRuntime {
         }
         let (mut errors, terminal_recovery_wake) = self.recover_active_terminal(repaint, now);
         for binding in self.bindings_mut() {
-            errors.extend(binding.terminal.poll_policy_errors());
+            errors.extend(binding.terminal_owner.terminal.poll_policy_errors());
         }
         for binding in self.bindings_mut() {
             binding.poll_membership_command();
@@ -1165,7 +1159,11 @@ impl WorkspaceRuntime {
                 },
             );
         }
-        self.active.binding.terminal.discard_active_pane();
+        self.active
+            .binding
+            .terminal_owner
+            .terminal
+            .discard_active_pane();
     }
 
     /// # Errors
@@ -1410,7 +1408,10 @@ impl WorkspaceRuntime {
         let target_is_shared =
             target.backend_policy.terminal_residency == TerminalResidency::WorkspaceShared;
         if active_is_shared && target_is_shared {
-            swap_terminal_owner!(self.active.binding, target);
+            std::mem::swap(
+                &mut self.active.binding.terminal_owner,
+                &mut target.terminal_owner,
+            );
         } else if let Some(replacement) = replacement {
             self.parked_native_terminal = Some(NativeTerminalOwner::replace_binding(
                 &mut self.active.binding,

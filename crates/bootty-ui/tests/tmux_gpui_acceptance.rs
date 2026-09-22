@@ -39,16 +39,6 @@ const REMOTE_START_MARKER: &str = "BOOTTY_REMOTE_TMUX_COLOR";
 const REMOTE_INPUT_MARKER: &str = "BOOTTY_REMOTE_TMUX_INPUT=accepted";
 const REMOTE_SIZE_MARKER: &str = "BOOTTY_REMOTE_TMUX_SIZE=30 100";
 
-struct TmuxServerGuard {
-    namespace: String,
-}
-
-impl Drop for TmuxServerGuard {
-    fn drop(&mut self) {
-        let _ = kill_server(&self.namespace);
-    }
-}
-
 #[rstest]
 fn tmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
     if env::var_os(CHILD_ENV).is_some() {
@@ -80,6 +70,7 @@ fn tmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
         .output()
         .context("run isolated tmux acceptance child")?;
 
+    // The parent owns cleanup after the child exits, including failed assertions.
     let cleanup = kill_server_with_tmpdir(&namespace, directory.path());
     assert_child_succeeded(&output)?;
     cleanup.context("clean up isolated tmux server")?;
@@ -181,8 +172,6 @@ fn run_child_acceptance() -> Result<()> {
     ApplicationIdentity::Development
         .initialize_process()
         .context("initialize development identity")?;
-    let namespace = ApplicationIdentity::for_process().namespace().to_owned();
-    let _server = TmuxServerGuard { namespace };
     let backend = bootty_mux::tmux::TmuxBackend::for_identity(ApplicationIdentity::Development);
     let snapshot = backend
         .snapshot()
@@ -478,11 +467,6 @@ fn assert_child_succeeded(output: &Output) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
-}
-
-fn kill_server(namespace: &str) -> Result<()> {
-    let tmpdir = env::var_os("TMUX_TMPDIR").context("TMUX_TMPDIR is unset")?;
-    kill_server_with_tmpdir(namespace, std::path::Path::new(&tmpdir))
 }
 
 fn kill_server_with_tmpdir(namespace: &str, tmpdir: &std::path::Path) -> Result<()> {

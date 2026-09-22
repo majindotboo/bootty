@@ -2,11 +2,17 @@
 //!
 //! Projects accepted configuration, mux state, and native service facts into the workspace window.
 
+mod dialogs;
+mod settings_window;
+use dialogs::WorkspaceDialogs;
+
+use crate::gpui_keymap_editor::editor_snapshot as keymap_editor_snapshot;
+use settings_window::{GpuiSettingsWindow, SettingsWindowTarget};
+
 use bootty_mux::pane_layout::SplitDirection;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    path::PathBuf,
     rc::Rc,
     sync::{
         Arc,
@@ -22,34 +28,22 @@ use bootty_control::{
     BoundAppCommandSender, Caller, CommandInvocation, ControlCatalog, ControlPlane,
 };
 use bootty_mux::provider::MuxBackendRegistry;
-use bootty_terminal::frame_source::TerminalFrameSource;
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface};
-use gpui_kit::component::{
-    Disableable as _, ElementExt as _, IconName, Root, Sizable as _, Size, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    notification::Notification,
-    tab::{Tab, TabBar},
-};
+use gpui_kit::component::{ElementExt as _, Root, WindowExt as _, notification::Notification};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
     Hsla, IntoElement, MouseButton, ParentElement, Pixels, Render, Styled, Subscription,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, div, point, prelude::*, px, size,
+    WeakEntity, Window, WindowDecorations, div, point, prelude::*, px, size,
 };
 use num_traits::ToPrimitive as _;
 
 use crate::gpui::{
-    DialogIntent, DialogView, FileEditor, FileEditorEvent, GpuiKeymapEditor, GpuiPaneColors,
-    GpuiPaneDividerSnapshot, GpuiPaneIntent, GpuiPaneSnapshot, GpuiPaneWorkspace,
-    GpuiPaneWorkspaceSnapshot, GpuiSettings, GpuiSpaceEditor, GpuiTerminalInteraction,
-    KeymapEditorIntent, ModuleIntegrationsSnapshot, OverlayHost, PaneProgress, PaneProgressState,
-    PaneRect, PaneSplitDirection, SettingsIntent, SettingsTitleBar, SpaceEditorColors,
-    SpaceEditorIntent,
+    GpuiKeymapEditor, GpuiPaneColors, GpuiPaneDividerSnapshot, GpuiPaneIntent, GpuiPaneSnapshot,
+    GpuiPaneWorkspace, GpuiPaneWorkspaceSnapshot, GpuiSettings, GpuiTerminalInteraction,
+    KeymapEditorIntent, ModuleIntegrationsSnapshot, PaneProgress, PaneProgressState, PaneRect,
+    PaneSplitDirection, SettingsIntent,
     chrome::{ChromeIntent, ChromeSnapshot, GpuiChrome, SidebarPosition},
     setup_ui_font, terminal_cell_metrics,
-};
-use crate::gpui_keymap_editor::{
-    self, editor_snapshot as keymap_editor_snapshot, persisted_edit as persisted_keymap_edit,
 };
 use crate::{
     chrome_frame,
@@ -57,7 +51,8 @@ use crate::{
     gpui_input::GpuiFrameFacts,
     gpui_settings_catalog::UnsupportedModuleDiagnostic,
     gpui_terminal_view::{
-        CachedTerminalView, GpuiTerminalView, TerminalScrollbarInput, TerminalViewInput,
+        CachedTerminalView, GpuiTerminalView, TerminalPresentation, TerminalScrollbarInput,
+        TerminalViewInput,
     },
     keymap_runtime::KeymapFocus,
     settings_runtime::SettingsRuntime,
@@ -111,787 +106,7 @@ fn gpui_color(color: crate::gpui::chrome::Rgba) -> Hsla {
     .into()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverlayKind {
-    Dialog,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RootDialogKind {
-    Dialog,
-    SpaceEditor,
-}
-
 struct BoottyErrorNotification;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SettingsWindowTab {
-    Settings,
-    Keymap,
-    File(EditorFileKind),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EditorFileKind {
-    Config,
-    Keymap,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SettingsWindowTarget {
-    Settings,
-    Setting(String),
-    Keymap(Option<String>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EditorCloseTarget {
-    Tab(EditorFileKind),
-    Window,
-}
-
-struct EditorFileTab {
-    editor: Entity<FileEditor>,
-    path: PathBuf,
-    original_contents: String,
-    reconcile_generation: u64,
-    _subscription: Subscription,
-}
-
-/// The native settings window is intentionally a thin host around the renderer-neutral settings
-/// view. The workspace remains the settings session and writeback owner.
-struct GpuiSettingsWindow {
-    settings: Entity<GpuiSettings>,
-    keymap: Entity<GpuiKeymapEditor>,
-    active_tab: SettingsWindowTab,
-    focus_initialized: bool,
-    pending_target: Option<SettingsWindowTarget>,
-    config_editor: Option<EditorFileTab>,
-    keymap_file_editor: Option<EditorFileTab>,
-    editor_close_after_save: Option<EditorCloseTarget>,
-    workspace: WeakEntity<GpuiWorkspace>,
-    close_prompt_pending: bool,
-}
-
-const SETTINGS_CONTENT_MIN_WIDTH_REMS: f32 = 25.0;
-const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 240.0;
-
-fn keep_settings_windowed(window: &Window) {
-    if window.is_fullscreen() {
-        window.toggle_fullscreen();
-    }
-}
-
-fn establish_settings_window_shadow(window: &Window) {
-    window.on_next_frame(|window, _| {
-        window.activate_window();
-        crate::window::macos_set_window_shadow(&window.window_title(), true);
-    });
-}
-
-fn activate_settings_window(
-    root: &mut GpuiSettingsWindow,
-    window: &mut Window,
-    cx: &mut Context<GpuiSettingsWindow>,
-) {
-    // A settings window is never a fullscreen surface. In particular, macOS may restore a
-    // previously-fullscreen auxiliary window when it rejoins the active Space.
-    keep_settings_windowed(window);
-    window.activate_window();
-    establish_settings_window_shadow(window);
-    match root.active_tab {
-        SettingsWindowTab::Settings => root
-            .settings
-            .update(cx, |settings, cx| settings.focus(window, cx)),
-        SettingsWindowTab::Keymap => root
-            .keymap
-            .update(cx, |keymap, cx| keymap.focus(window, cx)),
-        SettingsWindowTab::File(kind) => {
-            root.reconcile_file_editor(kind, window, cx);
-            if let Some(tab) = root.editor_tab(kind) {
-                tab.editor.update(cx, |editor, cx| editor.focus(window, cx));
-            }
-        }
-    }
-}
-
-impl GpuiSettingsWindow {
-    fn new(
-        settings: Entity<GpuiSettings>,
-        keymap: Entity<GpuiKeymapEditor>,
-        workspace: WeakEntity<GpuiWorkspace>,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> Self {
-        let root = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            root.update(cx, |root, cx| {
-                if root.first_dirty_editor(cx).is_none() {
-                    return true;
-                }
-                root.prompt_to_close(window, cx);
-                false
-            })
-            .unwrap_or(true)
-        });
-        let workspace_for_release = workspace.clone();
-        cx.on_release(move |_, cx| {
-            let _ = workspace_for_release.update_in(cx, |workspace, window, cx| {
-                workspace.settings_window = None;
-                workspace.settings_window_opening = false;
-                window.activate_window();
-                schedule_focus(workspace.focus.clone(), window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-        Self {
-            settings,
-            keymap,
-            active_tab: SettingsWindowTab::Settings,
-            focus_initialized: false,
-            pending_target: None,
-            config_editor: None,
-            keymap_file_editor: None,
-            editor_close_after_save: None,
-            workspace,
-            close_prompt_pending: false,
-        }
-    }
-
-    fn activate_target(
-        &mut self,
-        target: SettingsWindowTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        keep_settings_windowed(window);
-        window.activate_window();
-        establish_settings_window_shadow(window);
-        self.active_tab = match &target {
-            SettingsWindowTarget::Settings | SettingsWindowTarget::Setting(_) => {
-                SettingsWindowTab::Settings
-            }
-            SettingsWindowTarget::Keymap(_) => SettingsWindowTab::Keymap,
-        };
-        if !self.focus_initialized {
-            self.pending_target = Some(target);
-            cx.notify();
-            return;
-        }
-        self.focus_target(target, window, cx);
-    }
-
-    fn focus_target(
-        &mut self,
-        target: SettingsWindowTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match target {
-            SettingsWindowTarget::Settings => {
-                self.active_tab = SettingsWindowTab::Settings;
-                self.settings
-                    .update(cx, |settings, cx| settings.focus(window, cx));
-            }
-            SettingsWindowTarget::Setting(id) => {
-                self.active_tab = SettingsWindowTab::Settings;
-                self.settings.update(cx, |settings, cx| {
-                    settings.apply_search(&id, cx);
-                    settings.focus(window, cx);
-                });
-            }
-            SettingsWindowTarget::Keymap(requested_action) => {
-                self.active_tab = SettingsWindowTab::Keymap;
-                self.keymap.update(cx, |keymap, cx| {
-                    if let Some(action) = requested_action {
-                        keymap.focus_action(&action, window, cx);
-                    } else {
-                        keymap.focus(window, cx);
-                    }
-                });
-            }
-        }
-        cx.notify();
-    }
-
-    fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.first_dirty_editor(cx).is_some() {
-            self.prompt_to_close(window, cx);
-        } else {
-            window.remove_window();
-        }
-    }
-
-    fn prompt_to_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(kind) = self.first_dirty_editor(cx) {
-            self.prompt_to_close_editor(kind, EditorCloseTarget::Window, window, cx);
-            return;
-        }
-        window.remove_window();
-    }
-
-    fn open_file_editor(
-        &mut self,
-        kind: EditorFileKind,
-        path: PathBuf,
-        contents: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(editor) = self.editor_tab(kind).map(|tab| tab.editor.clone()) {
-            self.active_tab = SettingsWindowTab::File(kind);
-            self.reconcile_file_editor(kind, window, cx);
-            editor.update(cx, |editor, cx| editor.focus(window, cx));
-            cx.notify();
-            return;
-        }
-
-        let editor_path = path.clone();
-        let original_contents = contents.clone();
-        let editor = cx.new(|cx| FileEditor::new_for_path(contents, &editor_path, window, cx));
-        let subscription = cx.subscribe_in(
-            &editor,
-            window,
-            move |this, _, event: &FileEditorEvent, window, cx| match event {
-                FileEditorEvent::Save { contents } => {
-                    this.save_file_editor(kind, contents.clone(), window, cx);
-                }
-            },
-        );
-        let tab = EditorFileTab {
-            editor: editor.clone(),
-            path,
-            original_contents,
-            reconcile_generation: 0,
-            _subscription: subscription,
-        };
-        match kind {
-            EditorFileKind::Config => self.config_editor = Some(tab),
-            EditorFileKind::Keymap => self.keymap_file_editor = Some(tab),
-        }
-        self.active_tab = SettingsWindowTab::File(kind);
-        editor.update(cx, |editor, cx| editor.focus(window, cx));
-        cx.notify();
-    }
-
-    const fn editor_tab(&self, kind: EditorFileKind) -> Option<&EditorFileTab> {
-        match kind {
-            EditorFileKind::Config => self.config_editor.as_ref(),
-            EditorFileKind::Keymap => self.keymap_file_editor.as_ref(),
-        }
-    }
-
-    /// Refresh a clean file tab from disk after accepted settings change. The read runs off the
-    /// UI executor; the completion path rechecks cleanliness and the loaded baseline so a draft
-    /// or a newer refresh can never be replaced by an older snapshot.
-    fn reconcile_file_editor(&mut self, kind: EditorFileKind, window: &Window, cx: &Context<Self>) {
-        let Some(tab) = self.editor_tab(kind) else {
-            return;
-        };
-        if tab.editor.read(cx).is_dirty(cx) {
-            return;
-        }
-        let path = tab.path.clone();
-        let expected_baseline = tab.original_contents.clone();
-        let editor = tab.editor.clone();
-        let editor_id = editor.entity_id();
-        let root = cx.weak_entity();
-        let generation = self
-            .editor_tab_mut(kind)
-            .map(|tab| {
-                tab.reconcile_generation = tab.reconcile_generation.wrapping_add(1);
-                tab.reconcile_generation
-            })
-            .unwrap_or_default();
-        let read = cx
-            .background_executor()
-            .spawn(async move { bootty_host::text_file::load_text_file(path) });
-        window
-            .spawn(cx, async move |cx| {
-                let Ok(loaded) = read.await else {
-                    return;
-                };
-                let _ = cx.update(|window, cx| {
-                    let _ = root.update(cx, |root, cx| {
-                        let Some(tab) = root.editor_tab_mut(kind) else {
-                            return;
-                        };
-                        if tab.editor.entity_id() != editor_id
-                            || tab.reconcile_generation != generation
-                            || tab.original_contents != expected_baseline
-                            || tab.editor.read(cx).is_dirty(cx)
-                        {
-                            return;
-                        }
-                        if tab.editor.read(cx).contents(cx) == loaded.contents {
-                            return;
-                        }
-                        tab.original_contents.clone_from(&loaded.contents);
-                        editor.update(cx, |editor, cx| {
-                            editor.replace_snapshot(loaded.contents, window, cx);
-                        });
-                    });
-                });
-            })
-            .detach();
-    }
-
-    const fn editor_tab_mut(&mut self, kind: EditorFileKind) -> Option<&mut EditorFileTab> {
-        match kind {
-            EditorFileKind::Config => self.config_editor.as_mut(),
-            EditorFileKind::Keymap => self.keymap_file_editor.as_mut(),
-        }
-    }
-
-    fn first_dirty_editor(&self, cx: &gpui_kit::App) -> Option<EditorFileKind> {
-        [EditorFileKind::Config, EditorFileKind::Keymap]
-            .into_iter()
-            .find(|kind| {
-                self.editor_tab(*kind)
-                    .is_some_and(|tab| tab.editor.read(cx).is_dirty(cx))
-            })
-    }
-
-    fn save_file_editor(
-        &self,
-        kind: EditorFileKind,
-        contents: String,
-        window: &Window,
-        cx: &Context<Self>,
-    ) {
-        let Some(tab) = self.editor_tab(kind) else {
-            return;
-        };
-        let path = tab.path.clone();
-        let original_contents = tab.original_contents.clone();
-        let editor = tab.editor.clone();
-        let persisted_contents = contents.clone();
-        let root = cx.weak_entity();
-        let write = cx.background_executor().spawn(async move {
-            bootty_host::text_file::save_text_file_if_unchanged(path, &original_contents, &contents)
-        });
-        window
-            .spawn(cx, async move |cx| {
-                let result = write.await;
-                let _ = cx.update(|window, cx| {
-                    let saved = match result {
-                        Ok(outcome) => {
-                            editor.update(cx, |editor, cx| {
-                                editor.mark_saved(
-                                    persisted_contents.clone(),
-                                    outcome.durability_warning,
-                                    cx,
-                                );
-                            });
-                            let _ = root.update(cx, |root, _| {
-                                let tab = match kind {
-                                    EditorFileKind::Config => root.config_editor.as_mut(),
-                                    EditorFileKind::Keymap => root.keymap_file_editor.as_mut(),
-                                };
-                                if let Some(tab) = tab
-                                    && tab.editor.entity_id() == editor.entity_id()
-                                {
-                                    tab.original_contents.clone_from(&persisted_contents);
-                                    tab.reconcile_generation =
-                                        tab.reconcile_generation.wrapping_add(1);
-                                }
-                            });
-                            true
-                        }
-                        Err(error) => {
-                            editor.update(cx, |editor, cx| {
-                                editor.save_failed(error.to_string(), cx);
-                            });
-                            false
-                        }
-                    };
-                    if saved && kind == EditorFileKind::Keymap {
-                        let Some(workspace) =
-                            root.read_with(cx, |root, _| root.workspace.clone()).ok()
-                        else {
-                            return;
-                        };
-                        cx.defer(move |cx| {
-                            let _ = workspace.update_in(cx, |workspace, _, cx| {
-                                if let Err(error) = gpui_keymap_editor::reload_saved_keymap_text(
-                                    &mut workspace.state,
-                                ) {
-                                    workspace
-                                        .state
-                                        .record_error(format!("reload keymap: {error}"));
-                                }
-                                workspace.last_keymap_editor_revision =
-                                    Some(workspace.state.keymap_snapshot().revision);
-                                workspace.publish_keymap_editor_snapshot(cx);
-                                cx.notify();
-                            });
-                        });
-                    }
-                    let _ = root.update(cx, |root, cx| {
-                        root.finish_file_save(kind, window, cx);
-                    });
-                });
-            })
-            .detach();
-    }
-
-    fn finish_file_save(
-        &mut self,
-        kind: EditorFileKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.editor_tab(kind) else {
-            self.editor_close_after_save = None;
-            return;
-        };
-        if tab.editor.read(cx).save_in_flight()
-            || tab.editor.read(cx).is_dirty(cx)
-            || !tab.editor.read(cx).save_allows_close()
-        {
-            return;
-        }
-        match self.editor_close_after_save.take() {
-            Some(EditorCloseTarget::Tab(close_kind)) if close_kind == kind => {
-                self.close_file_tab(kind, window, cx);
-            }
-            Some(EditorCloseTarget::Window) => self.request_close(window, cx),
-            Some(target) => self.editor_close_after_save = Some(target),
-            None => {}
-        }
-        cx.notify();
-    }
-
-    fn request_close_file_tab(
-        &mut self,
-        kind: EditorFileKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .editor_tab(kind)
-            .is_some_and(|tab| tab.editor.read(cx).is_dirty(cx))
-        {
-            self.prompt_to_close_editor(kind, EditorCloseTarget::Tab(kind), window, cx);
-        } else {
-            self.close_file_tab(kind, window, cx);
-        }
-    }
-
-    fn close_file_tab(
-        &mut self,
-        kind: EditorFileKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_tab == SettingsWindowTab::File(kind) {
-            self.active_tab = SettingsWindowTab::Settings;
-            self.settings
-                .update(cx, |settings, cx| settings.focus(window, cx));
-        }
-        match kind {
-            EditorFileKind::Config => self.config_editor = None,
-            EditorFileKind::Keymap => self.keymap_file_editor = None,
-        }
-        self.editor_close_after_save = None;
-        cx.notify();
-    }
-
-    fn prompt_to_close_editor(
-        &mut self,
-        kind: EditorFileKind,
-        target: EditorCloseTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.close_prompt_pending {
-            return;
-        }
-        let Some(tab) = self.editor_tab(kind) else {
-            return;
-        };
-        let detail = tab.path.display().to_string();
-        let title = tab
-            .path
-            .file_name()
-            .map_or_else(|| "file".to_owned(), |name| name.to_string_lossy().into());
-        let answer = crate::gpui::prompt(
-            &format!("Save changes to {title}?"),
-            Some(&detail),
-            &["Save".into(), "Discard".into(), "Cancel".into()],
-            window,
-            cx,
-        );
-        let editor = tab.editor.clone();
-        self.close_prompt_pending = true;
-        let root = cx.weak_entity();
-        window
-            .spawn(cx, async move |cx| {
-                let answer = answer.await;
-                let _ = cx.update(|window, cx| {
-                    let _ = root.update(cx, |root, _| root.close_prompt_pending = false);
-                    match answer {
-                        Ok(0) => {
-                            let _ = root.update(cx, |root, _| {
-                                root.editor_close_after_save = Some(target);
-                            });
-                            editor.update(cx, FileEditor::request_save);
-                        }
-                        Ok(1) => {
-                            let _ = root.update(cx, |root, cx| match target {
-                                EditorCloseTarget::Tab(close_kind) => {
-                                    root.close_file_tab(close_kind, window, cx);
-                                }
-                                EditorCloseTarget::Window => {
-                                    root.close_file_tab(kind, window, cx);
-                                    root.request_close(window, cx);
-                                }
-                            });
-                        }
-                        Ok(2..) | Err(_) => {
-                            editor.update(cx, |editor, cx| editor.focus(window, cx));
-                        }
-                    }
-                });
-            })
-            .detach();
-    }
-}
-
-impl GpuiSettingsWindow {
-    fn render_tabs(
-        &self,
-        active_editor: Option<&Entity<FileEditor>>,
-        cx: &Context<Self>,
-    ) -> TabBar {
-        let active_tab = self.active_tab;
-        let file_kinds: Arc<[EditorFileKind]> = [
-            self.config_editor.as_ref().map(|_| EditorFileKind::Config),
-            self.keymap_file_editor
-                .as_ref()
-                .map(|_| EditorFileKind::Keymap),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let selected_index = match active_tab {
-            SettingsWindowTab::Settings => 0,
-            SettingsWindowTab::Keymap => 1,
-            SettingsWindowTab::File(kind) => file_kinds
-                .iter()
-                .position(|candidate| *candidate == kind)
-                .map_or(0, |index| index.saturating_add(2)),
-        };
-        let click_file_kinds = Arc::clone(&file_kinds);
-        let mut tabs = TabBar::new("settings-window-tab-bar")
-            .with_size(Size::Medium)
-            .segmented()
-            .w_full()
-            .bg(gpui_kit::component::Theme::global(cx).colors.sidebar)
-            .selected_index(selected_index)
-            .on_click(cx.listener(move |this, index: &usize, window, cx| {
-                this.active_tab = match *index {
-                    0 => SettingsWindowTab::Settings,
-                    1 => SettingsWindowTab::Keymap,
-                    index => click_file_kinds
-                        .get(index.saturating_sub(2))
-                        .copied()
-                        .map_or(SettingsWindowTab::Settings, SettingsWindowTab::File),
-                };
-                activate_settings_window(this, window, cx);
-                cx.notify();
-            }))
-            .child(
-                Tab::new()
-                    .label("Settings")
-                    .aria_label("Bootty settings")
-                    .debug_selector(|| "settings-window-tab-settings".to_owned()),
-            )
-            .child(
-                Tab::new()
-                    .label("Keymap")
-                    .aria_label("Bootty keymap editor")
-                    .debug_selector(|| "settings-window-tab-keymap".to_owned()),
-            );
-        for kind in file_kinds.iter().copied() {
-            if let Some(tab) = self.editor_tab(kind) {
-                tabs = tabs.child(Self::render_editor_tab(kind, tab, cx));
-            }
-        }
-        if active_editor.is_some() {
-            tabs = tabs.suffix(Self::save_editor_button(active_editor, cx));
-        }
-        tabs
-    }
-
-    fn save_editor_button(
-        active_editor: Option<&Entity<FileEditor>>,
-        cx: &Context<Self>,
-    ) -> Button {
-        let editor_saving = active_editor.is_some_and(|editor| editor.read(cx).save_in_flight());
-        let editor_can_save = active_editor.is_some_and(|editor| editor.read(cx).can_save(cx));
-        Button::new("settings-window-save-editor")
-            .debug_selector(|| "settings-window-save-editor".to_owned())
-            .ghost()
-            .small()
-            .label(if editor_saving { "Saving…" } else { "Save" })
-            .disabled(!editor_can_save)
-            .on_click(cx.listener(|this, _, _, cx| {
-                if let SettingsWindowTab::File(kind) = this.active_tab
-                    && let Some(tab) = this.editor_tab(kind)
-                {
-                    tab.editor.update(cx, FileEditor::request_save);
-                }
-            }))
-    }
-
-    fn render_editor_tab(kind: EditorFileKind, tab: &EditorFileTab, cx: &Context<Self>) -> Tab {
-        let dirty = tab.editor.read(cx).is_dirty(cx);
-        let file_name = tab.path.file_name().map_or_else(
-            || "Untitled".to_owned(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let label = if dirty {
-            format!("{file_name} ●")
-        } else {
-            file_name.clone()
-        };
-        let (close_id, close_selector, tab_selector) = match kind {
-            EditorFileKind::Config => (
-                "settings-window-close-config",
-                "settings-window-close-config",
-                "settings-window-tab-config",
-            ),
-            EditorFileKind::Keymap => (
-                "settings-window-close-keymap-file",
-                "settings-window-close-keymap-file",
-                "settings-window-tab-keymap-file",
-            ),
-        };
-        let close = Button::new(close_id)
-            .debug_selector(move || close_selector.to_owned())
-            .ghost()
-            .xsmall()
-            .icon(IconName::Close)
-            .accessibility_label(format!("Close {file_name}"))
-            .tooltip(format!("Close {file_name}"))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.request_close_file_tab(kind, window, cx);
-            }));
-        Tab::new()
-            .label(label)
-            .aria_label(format!("Edit {file_name}"))
-            .suffix(close)
-            .debug_selector(move || tab_selector.to_owned())
-    }
-}
-
-impl Render for GpuiSettingsWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::window::macos_set_window_shadow(&window.window_title(), true);
-        keep_settings_windowed(window);
-        // `new` and the initial target selection run before this view's tracked focus nodes exist.
-        // Defer the first focus until this render attaches those nodes, matching the main window.
-        if !self.focus_initialized {
-            self.focus_initialized = true;
-            let target = self
-                .pending_target
-                .take()
-                .unwrap_or(SettingsWindowTarget::Settings);
-            cx.defer_in(window, move |this, window, cx| {
-                this.focus_target(target, window, cx);
-            });
-        }
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
-        let font = setup_ui_font(window, cx);
-        let active_tab = self.active_tab;
-        let active_editor = match active_tab {
-            SettingsWindowTab::File(kind) => self.editor_tab(kind).map(|tab| tab.editor.clone()),
-            SettingsWindowTab::Settings | SettingsWindowTab::Keymap => None,
-        };
-        let tabs = self.render_tabs(active_editor.as_ref(), cx);
-        let tab_strip = SettingsTitleBar::new(
-            active_tab == SettingsWindowTab::Settings,
-            // Keep one title surface across Settings, Keymap, and document tabs.
-            tabs.bg(gpui_kit::component::Theme::global(cx).colors.sidebar),
-        );
-
-        let body = match (active_tab, active_editor) {
-            (SettingsWindowTab::File(_), Some(editor)) => editor.into_any_element(),
-            (SettingsWindowTab::Keymap, _) => self.keymap.clone().into_any_element(),
-            _ => self.settings.clone().into_any_element(),
-        };
-        let title_bar = crate::platform::client_title_bar("Bootty — Settings", window).map(|bar| {
-            bar.on_close_window(cx.listener(|this, _, window, cx| {
-                this.request_close(window, cx);
-            }))
-        });
-        div()
-            .relative()
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .font(font)
-            .on_action(cx.listener(
-                |_, _: &crate::gpui_actions::CycleApplicationWindow, window, cx| {
-                    crate::gpui_actions::cycle_application_window(window, cx);
-                },
-            ))
-            .children(title_bar)
-            .child(tab_strip)
-            .child(div().flex_1().min_h_0().child(body))
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
-    }
-}
-
-fn settings_window_options(
-    decorations: bootty_config::config::WindowDecoration,
-    cx: &gpui_kit::App,
-) -> WindowOptions {
-    let minimum_width = px(f32::from(crate::gpui::ui_rem_size(cx))
-        * (crate::gpui::SETTINGS_SIDEBAR_WIDTH_REMS + SETTINGS_CONTENT_MIN_WIDTH_REMS));
-    WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("Bootty — Settings".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(12.0), px(12.0))),
-        }),
-        focus: true,
-        show: true,
-        is_movable: true,
-        app_owns_titlebar_drag: cfg!(target_os = "linux"),
-        // Auxiliary windows stay decorated even when the workspace is borderless or fullscreen.
-        window_decorations: Some(
-            if decorations == bootty_config::config::WindowDecoration::Client {
-                WindowDecorations::Client
-            } else {
-                WindowDecorations::Server
-            },
-        ),
-        kind: WindowKind::Normal,
-        app_id: Some(
-            bootty_config::ApplicationIdentity::current()
-                .bundle_identifier()
-                .to_owned(),
-        ),
-        // Keep the navigation and content columns usable at the smallest size, as Zed does for
-        // its settings window. Explicit centered windowed bounds also prevent inheriting the
-        // workspace's fullscreen state when this auxiliary window is first opened.
-        window_min_size: Some(size(minimum_width, px(SETTINGS_WINDOW_MIN_HEIGHT))),
-        window_bounds: Some(WindowBounds::centered(
-            gpui_kit::DEFAULT_ADDITIONAL_WINDOW_SIZE,
-            cx,
-        )),
-        ..Default::default()
-    }
-}
 
 fn schedule_focus(focus: FocusHandle, window: &Window, cx: &mut Context<GpuiWorkspace>) {
     cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
@@ -963,36 +178,24 @@ impl WorkspaceLaunch {
     }
 }
 
-// All child views and their subscriptions exist before the workspace is published.
-struct WorkspaceInitialization {
-    display_id: Option<u32>,
-    unsupported_sources: Vec<UnsupportedModuleDiagnostic>,
-    integration_rows: Vec<ModuleIntegrationsSnapshot>,
-    terminal: gpui_kit::Entity<GpuiTerminalView>,
-    terminal_subscription: Subscription,
-    terminal_scroll_subscription: Subscription,
-    terminal_focus_subscriptions: [Subscription; 2],
-    terminal_text: crate::terminal_text::TerminalTextConfig,
-    terminal_text_contract: Arc<TerminalTextContract>,
-    terminal_cell: CellMetrics,
-    keymap_context: String,
-    input: crate::gpui::InputAccumulator,
-    workspace: WeakEntity<GpuiWorkspace>,
-    focus: FocusHandle,
-    window_activation_subscription: Subscription,
-    window_appearance_subscription: Subscription,
-    settings_runtime: SettingsRuntime,
-    settings_view: gpui_kit::Entity<GpuiSettings>,
-    settings_subscription: Subscription,
-    keymap_editor: Entity<GpuiKeymapEditor>,
-    keymap_editor_subscription: Subscription,
-    dialog_view: gpui_kit::Entity<DialogView>,
-    dialog_subscription: Subscription,
-    overlay_host: gpui_kit::Entity<OverlayHost>,
-    overlay_subscription: Subscription,
-    chrome_view: gpui_kit::Entity<GpuiChrome>,
-    last_ui_theme: crate::gpui::UiTheme,
-    chrome_subscription: Subscription,
+// A cached pane and its subscriptions have exactly the same lifetime.
+struct TerminalPaneView {
+    view: Entity<GpuiTerminalView>,
+    _subscriptions: [Subscription; 4],
+}
+
+// Retained panes may be hidden. Only views published into the current layout receive pointer input.
+#[derive(Clone)]
+struct VisibleTerminal {
+    pane_id: Option<String>,
+    // A failed publication remains a repaint target but cannot receive pointer input.
+    view: Option<Entity<GpuiTerminalView>>,
+}
+
+struct TerminalHit {
+    pane_id: Option<String>,
+    view: Entity<GpuiTerminalView>,
+    interaction: GpuiTerminalInteraction,
 }
 
 /// Root GPUI entity for one Bootty window.
@@ -1004,27 +207,18 @@ pub struct GpuiWorkspace {
     state: AppState,
     workspace_bounds: Bounds<Pixels>,
     tools: Option<Entity<crate::gpui_dock::WorkspaceDock>>,
-    tools_scope: Option<bootty_mux::controller::SpaceId>,
     document_close_prompt: bool,
-    tools_visible: bool,
     tools_focus_subscription: Option<Subscription>,
     unsupported_sources: Vec<UnsupportedModuleDiagnostic>,
     integration_rows: Vec<ModuleIntegrationsSnapshot>,
     launch: WorkspaceLaunch,
-    terminal: gpui_kit::Entity<GpuiTerminalView>,
-    _terminal_subscription: Subscription,
-    _terminal_scroll_subscription: Subscription,
-    _terminal_focus_subscriptions: [Subscription; 2],
-    terminal_panes: HashMap<String, gpui_kit::Entity<GpuiTerminalView>>,
-    terminal_pane_subscriptions: HashMap<String, Vec<Subscription>>,
-    terminal_interactions: HashMap<String, GpuiTerminalInteraction>,
+    terminal: TerminalPaneView,
+    terminal_panes: HashMap<String, TerminalPaneView>,
+    visible_terminals: Vec<VisibleTerminal>,
     terminal_mouse_buttons: HashSet<MouseButton>,
     pending_link_click: Option<(gpui_kit::Point<gpui_kit::Pixels>, Option<CommandInvocation>)>,
     visual_bell_until: Option<Instant>,
     last_locale: String,
-    pane_hit_rects: Vec<(String, SurfaceRect)>,
-    frame_metrics: RendererMetrics,
-    terminal_text: crate::terminal_text::TerminalTextConfig,
     terminal_text_contract: Arc<TerminalTextContract>,
     terminal_base_cell: CellMetrics,
     terminal_display_scale: f32,
@@ -1047,22 +241,10 @@ pub struct GpuiWorkspace {
     settings_window_opening: bool,
     keymap_editor: Entity<GpuiKeymapEditor>,
     _keymap_editor_subscription: Subscription,
-    last_keymap_revision: Option<u64>,
-    last_keymap_focus: Option<KeymapFocus>,
-    last_keymap_backend: Option<MultiplexerBackendConfig>,
+    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig)>,
     last_keymap_editor_revision: Option<u64>,
     last_config_file_editor_revision: Option<u64>,
-    dialog_view: gpui_kit::Entity<DialogView>,
-    _dialog_subscription: Subscription,
-    overlay_host: gpui_kit::Entity<OverlayHost>,
-    _overlay_subscription: Subscription,
-    overlay_kind: Option<OverlayKind>,
-    root_dialog_kind: Option<RootDialogKind>,
-    /// Dialog id plus Root title. The title and chrome are baked in at `open_dialog`, so a
-    /// multi-step dialog that keeps its id but changes role must still reopen the Root.
-    root_dialog_key: Option<(String, Option<String>)>,
-    space_editor_view: Option<gpui_kit::Entity<GpuiSpaceEditor>>,
-    space_editor_subscription: Option<Subscription>,
+    dialogs: WorkspaceDialogs,
     chrome_view: gpui_kit::Entity<GpuiChrome>,
     last_error_notification: Option<String>,
     last_ui_theme: crate::gpui::UiTheme,
@@ -1132,6 +314,11 @@ impl GpuiWorkspace {
         })
     }
 
+    // Keep construction together until another child lifetime can move behind one owner.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One initializer avoids a duplicate staging struct"
+    )]
     fn new(
         mut state: AppState,
         window_state_key: &str,
@@ -1141,103 +328,6 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial = Self::initialize_workspace(
-            &mut state,
-            window_state_key,
-            &launch,
-            &repaint,
-            repaint_rx,
-            window,
-            cx,
-        );
-        Self {
-            workspace_bounds: Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()),
-            display_id: initial.display_id,
-            tools: None,
-            tools_scope: None,
-            document_close_prompt: false,
-            tools_visible: false,
-            tools_focus_subscription: None,
-            state,
-            unsupported_sources: initial.unsupported_sources,
-            integration_rows: initial.integration_rows,
-            launch,
-            terminal: initial.terminal,
-            _terminal_subscription: initial.terminal_subscription,
-            _terminal_scroll_subscription: initial.terminal_scroll_subscription,
-            _terminal_focus_subscriptions: initial.terminal_focus_subscriptions,
-            terminal_panes: HashMap::new(),
-            terminal_pane_subscriptions: HashMap::new(),
-            terminal_interactions: HashMap::new(),
-            terminal_mouse_buttons: HashSet::new(),
-            pending_link_click: None,
-            visual_bell_until: None,
-            last_locale: String::new(),
-            pane_hit_rects: Vec::new(),
-            frame_metrics: RendererMetrics::default(),
-            terminal_text: initial.terminal_text,
-            terminal_text_contract: initial.terminal_text_contract,
-            terminal_base_cell: initial.terminal_cell,
-            terminal_display_scale: window.scale_factor(),
-            terminal_cell: initial.terminal_cell,
-            keymap_context: initial.keymap_context,
-            input: initial.input,
-            workspace: initial.workspace,
-            focus: initial.focus,
-            focus_initialized: false,
-            _window_activation_subscription: initial.window_activation_subscription,
-            _window_appearance_subscription: initial.window_appearance_subscription,
-            cursor: CursorStyle::IBeam,
-            terminal_cursor: CursorStyle::IBeam,
-            settings_runtime: initial.settings_runtime,
-            settings_started: Instant::now(),
-            last_settings_revision: None,
-            settings_view: initial.settings_view,
-            _settings_subscription: initial.settings_subscription,
-            settings_window: None,
-            settings_window_opening: false,
-            keymap_editor: initial.keymap_editor,
-            _keymap_editor_subscription: initial.keymap_editor_subscription,
-            last_keymap_revision: None,
-            last_keymap_focus: None,
-            last_keymap_backend: None,
-            last_keymap_editor_revision: None,
-            last_config_file_editor_revision: None,
-            dialog_view: initial.dialog_view,
-            _dialog_subscription: initial.dialog_subscription,
-            overlay_host: initial.overlay_host,
-            _overlay_subscription: initial.overlay_subscription,
-            overlay_kind: None,
-            root_dialog_kind: None,
-            root_dialog_key: None,
-            space_editor_view: None,
-            space_editor_subscription: None,
-            chrome_view: initial.chrome_view,
-            last_error_notification: None,
-            last_ui_theme: initial.last_ui_theme,
-            last_background_material: None,
-            _chrome_subscription: initial.chrome_subscription,
-            pending_window_move: false,
-            pending_effects: Vec::new(),
-            scheduled_repaint: None,
-            scheduled_maintenance: None,
-            frame_update_pending: true,
-            work_repaint_pending: false,
-            last_maintenance_chrome: None,
-            last_pane_layouts: Vec::new(),
-            repaint,
-        }
-    }
-
-    fn initialize_workspace(
-        state: &mut AppState,
-        window_state_key: &str,
-        launch: &WorkspaceLaunch,
-        repaint: &bootty_mux::RepaintHandle,
-        repaint_rx: async_channel::Receiver<()>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> WorkspaceInitialization {
         let config = state.config();
         Self::install_close_handler(window, cx);
         let startup_variant = config
@@ -1253,19 +343,19 @@ impl GpuiWorkspace {
         ));
         let terminal_cell = terminal_cell_metrics(&terminal_text, window);
         let font_families = Self::window_font_families(window);
-        Self::watch_workspace_work(repaint, repaint_rx, window, cx);
+        Self::watch_workspace_work(&repaint, repaint_rx, window, cx);
         let mut input = crate::gpui::InputAccumulator::default();
         input.set_wake(repaint.clone());
         input.window_focused(window_focused);
         state.set_appearance_variant(startup_variant);
         let settings_runtime = SettingsRuntime::default();
-        settings_runtime.request_catalog(&state.config().config_path, repaint);
+        settings_runtime.request_catalog(&state.config().config_path, &repaint);
         let native_settings = settings_runtime.current_catalog();
         let unsupported_sources = native_settings.unsupported_sources;
         let integration_rows = native_settings.integration_rows;
 
         let (settings_view, settings_subscription) = Self::create_settings_view(
-            state,
+            &state,
             &font_families,
             &unsupported_sources,
             &integration_rows,
@@ -1273,75 +363,104 @@ impl GpuiWorkspace {
             cx,
         );
         let (keymap_editor, keymap_editor_subscription) =
-            Self::create_keymap_editor(state, window, cx);
-        let (dialog_view, dialog_subscription) = Self::create_dialog_view(window, cx);
-        let (overlay_host, overlay_subscription) = Self::create_overlay_host(cx);
+            Self::create_keymap_editor(&state, window, cx);
+        let dialogs = WorkspaceDialogs::new(window, cx);
         let (chrome_view, chrome_subscription) =
-            Self::create_chrome_view(state, launch, &keymap_context, window, cx);
-        let terminal = cx.new(GpuiTerminalView::new);
-        terminal.update(cx, |terminal, cx| {
-            terminal.set_window_focused(window_focused, cx);
-        });
-        let focus = terminal.focus_handle(cx);
-        let terminal_focus_subscriptions = Self::subscribe_terminal_focus(&focus, window, cx);
-        let (terminal_subscription, terminal_scroll_subscription) =
-            Self::subscribe_terminal_events(&terminal, window, cx);
+            Self::create_chrome_view(&state, &launch, &keymap_context, window, cx);
+        let terminal = Self::create_terminal_view(None, window, cx);
+        let focus = terminal.view.focus_handle(cx);
         let workspace = cx.weak_entity();
         let window_activation_subscription =
-            Self::observe_workspace_activation(&terminal, window, cx);
+            Self::observe_workspace_activation(&terminal.view, window, cx);
         let (window_appearance_subscription, display_id) =
             Self::observe_workspace_window(&keymap_context, window, cx);
         let last_ui_theme = state.ui_theme();
         Self::schedule_initial_dock(window, cx);
-        WorkspaceInitialization {
+        Self {
+            workspace_bounds: Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()),
             display_id,
+            tools: None,
+            document_close_prompt: false,
+            tools_focus_subscription: None,
+            state,
             unsupported_sources,
             integration_rows,
+            launch,
             terminal,
-            terminal_subscription,
-            terminal_scroll_subscription,
-            terminal_focus_subscriptions,
-            terminal_text,
+            terminal_panes: HashMap::new(),
+            visible_terminals: Vec::new(),
+            terminal_mouse_buttons: HashSet::new(),
+            pending_link_click: None,
+            visual_bell_until: None,
+            last_locale: String::new(),
             terminal_text_contract,
+            terminal_base_cell: terminal_cell,
+            terminal_display_scale: window.scale_factor(),
             terminal_cell,
             keymap_context,
             input,
             workspace,
             focus,
-            window_activation_subscription,
-            window_appearance_subscription,
+            focus_initialized: false,
+            _window_activation_subscription: window_activation_subscription,
+            _window_appearance_subscription: window_appearance_subscription,
+            cursor: CursorStyle::IBeam,
+            terminal_cursor: CursorStyle::IBeam,
             settings_runtime,
+            settings_started: Instant::now(),
+            last_settings_revision: None,
             settings_view,
-            settings_subscription,
+            _settings_subscription: settings_subscription,
+            settings_window: None,
+            settings_window_opening: false,
             keymap_editor,
-            keymap_editor_subscription,
-            dialog_view,
-            dialog_subscription,
-            overlay_host,
-            overlay_subscription,
+            _keymap_editor_subscription: keymap_editor_subscription,
+            last_keymap: None,
+            last_keymap_editor_revision: None,
+            last_config_file_editor_revision: None,
+            dialogs,
             chrome_view,
+            last_error_notification: None,
             last_ui_theme,
-            chrome_subscription,
+            last_background_material: None,
+            _chrome_subscription: chrome_subscription,
+            pending_window_move: false,
+            pending_effects: Vec::new(),
+            scheduled_repaint: None,
+            scheduled_maintenance: None,
+            frame_update_pending: true,
+            work_repaint_pending: false,
+            last_maintenance_chrome: None,
+            last_pane_layouts: Vec::new(),
+            repaint,
         }
     }
 
-    fn subscribe_terminal_events(
-        terminal: &Entity<GpuiTerminalView>,
-        window: &Window,
+    fn create_terminal_view(
+        pane_id: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Subscription, Subscription) {
-        let terminal_subscription = cx.subscribe_in(
-            terminal,
+    ) -> TerminalPaneView {
+        let view = cx.new(GpuiTerminalView::new);
+        view.update(cx, |terminal, cx| {
+            terminal.set_window_focused(window.is_window_active(), cx);
+        });
+        let input = cx.subscribe_in(
+            &view,
             window,
             |this, _, input: &TerminalViewInput, window, cx| {
                 this.apply_terminal_view_input(input.0.clone(), window, cx);
             },
         );
-        let terminal_scroll_subscription =
-            cx.subscribe(terminal, |this, _, input: &TerminalScrollbarInput, cx| {
-                this.scroll_terminal(None, input, cx);
-            });
-        (terminal_subscription, terminal_scroll_subscription)
+        let scroll = cx.subscribe(&view, move |this, _, input: &TerminalScrollbarInput, cx| {
+            this.scroll_terminal(pane_id.as_deref(), input, cx);
+        });
+        let [focus_in, focus_out] =
+            Self::subscribe_terminal_focus(&view.focus_handle(cx), window, cx);
+        TerminalPaneView {
+            view,
+            _subscriptions: [input, scroll, focus_in, focus_out],
+        }
     }
 
     fn install_close_handler(window: &Window, cx: &Context<Self>) {
@@ -1439,40 +558,6 @@ impl GpuiWorkspace {
         (keymap_editor, keymap_editor_subscription)
     }
 
-    fn create_dialog_view(
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (Entity<DialogView>, Subscription) {
-        let dialog_view = cx.new(|cx| DialogView::new(window, cx));
-        let dialog_subscription =
-            cx.subscribe(&dialog_view, |this, _, intent: &DialogIntent, cx| {
-                let mut effects = Vec::new();
-                if intent_dialog_id(intent) == crate::presentation::dialogs::TERMINAL_FIND_ID {
-                    this.state.apply_terminal_find_dialog_intent(intent);
-                } else {
-                    this.state.apply_dialog_intent(intent, &mut effects);
-                }
-                this.pending_effects.extend(effects);
-                cx.notify();
-            });
-        (dialog_view, dialog_subscription)
-    }
-
-    fn create_overlay_host(cx: &mut Context<Self>) -> (Entity<OverlayHost>, Subscription) {
-        let overlay_host = cx.new(|_| OverlayHost::new());
-        let overlay_subscription =
-            cx.subscribe(&overlay_host, |this, _, _: &gpui_kit::DismissEvent, cx| {
-                match this.overlay_kind.take() {
-                    Some(OverlayKind::Dialog) => {
-                        this.state.close_overlay_dialogs();
-                    }
-                    None => {}
-                }
-                cx.notify();
-            });
-        (overlay_host, overlay_subscription)
-    }
-
     fn create_chrome_view(
         state: &AppState,
         launch: &WorkspaceLaunch,
@@ -1518,7 +603,7 @@ impl GpuiWorkspace {
                 terminal.set_window_focused(active, cx);
             });
             for terminal in this.terminal_panes.values() {
-                terminal.update(cx, |terminal, cx| {
+                terminal.view.update(cx, |terminal, cx| {
                     terminal.set_window_focused(active, cx);
                 });
             }
@@ -1564,7 +649,6 @@ impl GpuiWorkspace {
     fn schedule_initial_dock(window: &Window, cx: &mut Context<Self>) {
         cx.defer_in(window, |this, window, cx| {
             this.ensure_tools(window, cx);
-            this.tools_visible = false;
             if let Some(dock) = &this.tools {
                 dock.update(cx, |dock, cx| dock.set_inspector_visible(false, window, cx));
             }
@@ -1636,212 +720,12 @@ impl GpuiWorkspace {
         self.invoke_gpui_command(command, window, cx);
     }
 
-    fn open_settings_window(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.open_settings_window_target(SettingsWindowTarget::Settings, window, cx);
-    }
-
-    fn open_settings_window_target(
-        &mut self,
-        target: SettingsWindowTarget,
-        _window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(handle) = self.settings_window.clone() {
-            let existing_target = target.clone();
-            if handle
-                .update_in(cx, move |root, window, cx| {
-                    root.activate_target(existing_target, window, cx);
-                })
-                .is_ok()
-            {
-                return;
-            }
-            self.settings_window = None;
-        }
-        if self.settings_window_opening {
-            return;
-        }
-        self.settings_window_opening = true;
-
-        let settings = self.settings_view.clone();
-        let keymap = self.keymap_editor.clone();
-        let workspace = cx.weak_entity();
-        let workspace_owner = self.workspace.clone();
-        let decorations = self.state.config().window.window_decoration;
-        cx.defer(move |cx| {
-            let options = settings_window_options(decorations, cx);
-            let window = cx.open_window(options, move |window, cx| {
-                let view = cx.new(|cx| {
-                    GpuiSettingsWindow::new(
-                        settings.clone(),
-                        keymap.clone(),
-                        workspace_owner,
-                        window,
-                        cx,
-                    )
-                });
-                let target = target.clone();
-                view.update(cx, |root, cx| {
-                    root.activate_target(target, window, cx);
-                });
-                cx.new(|cx| Root::new(view, window, cx).bordered(true))
-            });
-            let _ = workspace.update(cx, |workspace, cx| {
-                workspace.settings_window = window.ok().and_then(|window| {
-                    window
-                        .read(cx)
-                        .ok()?
-                        .view()
-                        .clone()
-                        .downcast::<GpuiSettingsWindow>()
-                        .ok()
-                        .map(|view| view.downgrade())
-                });
-                workspace.settings_window_opening = false;
-                cx.notify();
-            });
-        });
-    }
-
-    fn close_settings_window(&mut self, cx: &mut Context<Self>) {
-        self.settings_window_opening = false;
-        let Some(window) = self.settings_window.clone() else {
-            return;
-        };
-        cx.defer(move |cx| {
-            let _ = window.update_in(cx, GpuiSettingsWindow::request_close);
-        });
-    }
-
-    fn request_config_editor_tab(&mut self, cx: &mut Context<Self>) {
-        let path = self.state.config().config_path.clone();
-        let loaded = match bootty_host::text_file::load_text_file(&path) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.state
-                    .record_error(format!("open {}: {error}", path.display()));
-                cx.notify();
-                return;
-            }
-        };
-        let Some(settings_window) = self.settings_window.clone() else {
-            self.state.record_error(
-                "open config.toml tab: Settings window is no longer available".to_owned(),
-            );
-            cx.notify();
-            return;
-        };
-        let contents = loaded.contents;
-        cx.defer(move |cx| {
-            let _ = settings_window.update_in(cx, |root, window, cx| {
-                root.open_file_editor(EditorFileKind::Config, path, contents, window, cx);
-            });
-        });
-    }
-
-    fn request_keymap_file_editor_tab(&mut self, cx: &mut Context<Self>) {
-        let loaded = match gpui_keymap_editor::load_keymap_text_file(&self.state) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.state.record_error(format!("open keymap: {error}"));
-                cx.notify();
-                return;
-            }
-        };
-        let path = loaded.path.clone();
-        let contents = loaded.contents;
-        let Some(settings_window) = self.settings_window.clone() else {
-            self.state.record_error(
-                "open keymap.json tab: Settings window is no longer available".to_owned(),
-            );
-            cx.notify();
-            return;
-        };
-        cx.defer(move |cx| {
-            let _ = settings_window.update_in(cx, |root, window, cx| {
-                root.open_file_editor(EditorFileKind::Keymap, path, contents, window, cx);
-            });
-        });
-    }
-
-    fn request_keymap_window(&self, requested_action: Option<String>, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        cx.defer(move |cx| {
-            let _ = workspace.update_in(cx, |workspace, window, cx| {
-                workspace.open_keymap_window(requested_action, window, cx);
-            });
-        });
-    }
-
-    fn open_keymap_window(
-        &mut self,
-        requested_action: Option<String>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_settings_window_target(
-            SettingsWindowTarget::Keymap(requested_action),
-            window,
-            cx,
-        );
-    }
-
-    fn close_keymap_window(&self, cx: &mut Context<Self>) {
-        let Some(settings_window) = self.settings_window.clone() else {
-            return;
-        };
-        cx.defer(move |cx| {
-            let _ = settings_window.update_in(cx, |root, window, cx| {
-                root.activate_target(SettingsWindowTarget::Settings, window, cx);
-            });
-        });
-    }
-
-    fn publish_keymap_editor_snapshot(&self, cx: &mut Context<Self>) {
-        let editor = self.keymap_editor.clone();
-        let snapshot = keymap_editor_snapshot(&self.state);
-        let settings_window = self.settings_window.clone();
-        cx.defer(move |cx| {
-            editor.update(cx, |editor, cx| editor.set_snapshot(snapshot, cx));
-            if let Some(settings_window) = settings_window {
-                let _ = settings_window.update_in(cx, |root, window, cx| {
-                    root.reconcile_file_editor(EditorFileKind::Keymap, window, cx);
-                    cx.notify();
-                });
-            }
-        });
-    }
-
-    fn apply_keymap_editor_intent(&mut self, intent: KeymapEditorIntent, cx: &mut Context<Self>) {
-        match intent {
-            KeymapEditorIntent::Close => {
-                self.close_keymap_window(cx);
-                return;
-            }
-            KeymapEditorIntent::OpenKeymapFile => {
-                self.request_keymap_file_editor_tab(cx);
-            }
-            edit_intent => match persisted_keymap_edit(&edit_intent) {
-                Ok(Some(edit)) => {
-                    if let Err(error) = self.state.edit_keymap(&edit) {
-                        self.state.record_error(format!("edit keymap: {error}"));
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => self.state.record_error(format!("edit keymap: {error}")),
-            },
-        }
-        self.last_keymap_editor_revision = Some(self.state.keymap_snapshot().revision);
-        self.publish_keymap_editor_snapshot(cx);
-        cx.notify();
-    }
-
     fn terminal_view_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
-        self.terminal.focus_handle(cx).is_focused(window)
+        self.terminal.view.focus_handle(cx).is_focused(window)
             || self
                 .terminal_panes
                 .values()
-                .any(|view| view.focus_handle(cx).is_focused(window))
+                .any(|pane| pane.view.focus_handle(cx).is_focused(window))
     }
 
     fn subscribe_terminal_focus(
@@ -1885,10 +769,8 @@ impl GpuiWorkspace {
             self.state.keymap_focus()
         };
         let backend = self.state.multiplexer_backend();
-        if self.last_keymap_revision == Some(snapshot.revision)
-            && self.last_keymap_focus == Some(focus)
-            && self.last_keymap_backend == Some(backend)
-        {
+        let keymap = (snapshot.revision, focus, backend);
+        if self.last_keymap == Some(keymap) {
             return;
         }
 
@@ -1899,7 +781,7 @@ impl GpuiWorkspace {
             &self.state.command_catalog(),
         );
         let hints = bindings.command_hints(&self.state.command_catalog());
-        self.dialog_view.update(cx, |view, cx| {
+        self.dialogs.view.update(cx, |view, cx| {
             view.set_command_keybindings(Some(hints), cx);
         });
         if let Err(error) = crate::gpui_actions::replace_workspace_key_bindings_for_context(
@@ -1910,9 +792,7 @@ impl GpuiWorkspace {
             self.state
                 .record_error(format!("load GPUI workspace key bindings: {error:#}"));
         }
-        self.last_keymap_revision = Some(snapshot.revision);
-        self.last_keymap_focus = Some(focus);
-        self.last_keymap_backend = Some(backend);
+        self.last_keymap = Some(keymap);
     }
 
     fn apply_terminal_view_input(
@@ -1933,7 +813,7 @@ impl GpuiWorkspace {
                     content_height: viewport.height.into(),
                 },
                 display_id: self.display_id,
-                renderer_metrics: self.frame_metrics,
+                renderer_metrics: self.renderer_metrics(cx),
                 terminal_cell_width: cell.width,
                 terminal_cell_height: cell.height,
                 terminal_scale_factor: window.scale_factor(),
@@ -2001,23 +881,21 @@ impl GpuiWorkspace {
     }
 
     fn tools_match_binding(&self, cx: &gpui_kit::App) -> bool {
-        self.tools_scope == Some(self.state.mux_scope())
-            && self
-                .state
-                .current_command_target_for("git.open", bootty_control::ResourceKind::Binding)
-                .is_some_and(|target| {
-                    self.tools.as_ref().is_some_and(|tools| {
-                        tools.read(cx).matches_target(
-                            &target,
-                            self.state
-                                .current_command_target_for(
-                                    "shell.prompt",
-                                    bootty_control::ResourceKind::Terminal,
-                                )
-                                .as_ref(),
-                        )
-                    })
+        self.state
+            .current_command_target_for("git.open", bootty_control::ResourceKind::Binding)
+            .is_some_and(|target| {
+                self.tools.as_ref().is_some_and(|tools| {
+                    tools.read(cx).matches_target(
+                        &target,
+                        self.state
+                            .current_command_target_for(
+                                "shell.prompt",
+                                bootty_control::ResourceKind::Terminal,
+                            )
+                            .as_ref(),
+                    )
                 })
+            })
     }
 
     fn ensure_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2085,7 +963,6 @@ impl GpuiWorkspace {
             };
             self.set_workspace_context(scope, context, false, window, cx);
         }
-        self.tools_visible = true;
         cx.notify();
     }
 
@@ -2097,7 +974,6 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tools_visible = true;
         let sender = self.state.app_command_sender(Caller::Internal);
         let path = self.state.config().config_path.clone();
         let key = self.state.window_state_key.clone();
@@ -2114,7 +990,6 @@ impl GpuiWorkspace {
                     tools.browse_repository(context.directory, window, cx);
                 }
             });
-            self.tools_scope = Some(scope);
             return;
         }
         let owner = cx.weak_entity();
@@ -2122,7 +997,7 @@ impl GpuiWorkspace {
             crate::gpui_dock::WorkspaceDock::new(
                 context,
                 owner,
-                self.terminal.clone(),
+                self.terminal.view.clone(),
                 self.chrome_view.clone(),
                 scope,
                 sender,
@@ -2146,7 +1021,6 @@ impl GpuiWorkspace {
             },
         ));
         self.tools = Some(tools);
-        self.tools_scope = Some(scope);
         cx.notify();
     }
 
@@ -2416,10 +1290,9 @@ impl GpuiWorkspace {
                     self.terminal_base_cell = terminal_cell_metrics(&config, window);
                     self.terminal_cell = self.terminal_base_cell;
                     self.terminal_text_contract = Arc::new(TerminalTextContract::new(
-                        config.clone(),
+                        config,
                         NativeSymbolPolicy::default(),
                     ));
-                    self.terminal_text = config;
                 }
                 AppEffect::SetTerminalCursorIcon(icon) => {
                     self.terminal_cursor = gpui_cursor(icon);
@@ -2460,7 +1333,8 @@ impl GpuiWorkspace {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
                 }
                 AppEffect::CommandAction(action) => {
-                    self.dialog_view
+                    self.dialogs
+                        .view
                         .update(cx, |view, cx| view.perform(action, window, cx));
                 }
                 AppEffect::ConfigureKeybind(action) => {
@@ -2537,9 +1411,7 @@ impl GpuiWorkspace {
             host,
             host_identity,
         };
-        if reuse {
-            self.tools_visible = true;
-        } else {
+        if !reuse {
             self.set_workspace_context(scope, context, false, window, cx);
         }
         if let Some(tools) = &self.tools {
@@ -2674,6 +1546,7 @@ impl GpuiWorkspace {
         self.frame_update_pending = false;
         let viewport = self.workspace_bounds.size;
         let cell = self.terminal_cell;
+        let renderer_metrics = self.renderer_metrics(cx);
         let frame_inputs = crate::gpui_input::drain_frame_inputs(
             &mut self.input,
             GpuiFrameFacts {
@@ -2684,7 +1557,7 @@ impl GpuiWorkspace {
                     content_height: viewport.height.into(),
                 },
                 display_id: self.display_id,
-                renderer_metrics: self.frame_metrics,
+                renderer_metrics,
                 terminal_cell_width: cell.width,
                 terminal_cell_height: cell.height,
                 terminal_scale_factor: window.scale_factor(),
@@ -2717,45 +1590,40 @@ impl GpuiWorkspace {
         )
     }
 
+    fn renderer_metrics(&self, cx: &App) -> RendererMetrics {
+        let focused = self.state.focused_pane();
+        self.visible_terminals
+            .iter()
+            .find(|terminal| terminal.pane_id.is_none() || terminal.pane_id == focused)
+            .and_then(|terminal| terminal.view.as_ref())
+            .map_or_else(RendererMetrics::default, |view| view.read(cx).metrics())
+    }
+
     fn terminal_frames_changed(&mut self, cx: &App) -> bool {
-        if self.state.uses_native_terminal_layout() {
-            for (pane_id, _) in &self.pane_hit_rects {
-                let key = self.state.pane_widget_key(pane_id);
-                let Some(runtime) = self
-                    .state
-                    .workspace
-                    .active
-                    .binding
-                    .visible_terminal_runtime(pane_id)
-                else {
-                    return true;
-                };
-                match runtime.extract_frame() {
-                    Ok(frame) => {
-                        if self
-                            .terminal_panes
-                            .get(&key)
-                            .is_none_or(|view| !view.read(cx).presents_frame(&frame))
-                        {
-                            return true;
-                        }
-                    }
-                    Err(error) => {
-                        self.state.record_error(error);
-                        return true;
-                    }
-                }
-            }
-            false
-        } else {
-            match self.state.terminal_mut().extract_frame() {
-                Ok(frame) => !self.terminal.read(cx).presents_frame(&frame),
+        // Views own the presented frame; retained but hidden panes do not drive painting.
+        for terminal in &self.visible_terminals {
+            let Some(view) = &terminal.view else {
+                return true;
+            };
+            let Some(runtime) = self
+                .state
+                .workspace
+                .active
+                .binding
+                .visible_terminal_frame_source(terminal.pane_id.as_deref())
+            else {
+                return true;
+            };
+            match runtime.extract_frame() {
+                Ok(frame) if view.read(cx).presents_frame(&frame) => {}
+                Ok(_) => return true,
                 Err(error) => {
                     self.state.record_error(error);
-                    true
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn sync_agents(&self, cx: &mut Context<Self>) {
@@ -2963,35 +1831,9 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match projection {
-            Some(crate::presentation::dialogs::DialogProjection::Dialog(spec)) => {
-                self.present_dialog(*spec, window, cx);
-            }
-            Some(crate::presentation::dialogs::DialogProjection::SpaceEditor(snapshot)) => {
-                self.present_space_editor(*snapshot, colors, window, cx);
-            }
-            None => {
-                self.dialog_view
-                    .update(cx, |view, cx| view.present(None, window, cx));
-                if self.root_dialog_kind.is_some() && window.has_active_dialog(cx) {
-                    let focus_terminal = self.state.terminal_focused();
-                    window.close_dialog(cx);
-                    if focus_terminal {
-                        // A completed picker can select a new terminal while Root still remembers
-                        // the old trigger. Restore focus to the current terminal after dismissal.
-                        schedule_focus(self.focus.clone(), window, cx);
-                    }
-                }
-                if self.overlay_kind.is_some() {
-                    self.overlay_host.update(cx, |host, cx| {
-                        host.clear(window, cx);
-                    });
-                    self.overlay_kind = None;
-                }
-                self.root_dialog_kind = None;
-                self.root_dialog_key = None;
-            }
-        }
+        let terminal_focus = self.state.terminal_focused().then(|| self.focus.clone());
+        self.dialogs
+            .present(projection, colors, terminal_focus, window, cx);
     }
 
     pub(crate) fn prepare_terminal_window(
@@ -3019,9 +1861,8 @@ impl GpuiWorkspace {
         colors: Colors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.visible_terminals.clear();
         if let Some(empty_terminal) = self.empty_terminal_state() {
-            self.pane_hit_rects.clear();
-            self.terminal_interactions.clear();
             dock.update(cx, |dock, cx| {
                 dock.clear_terminals(window, cx);
                 dock.set_empty_terminal(Some(empty_terminal), cx);
@@ -3045,152 +1886,6 @@ impl GpuiWorkspace {
             .into_any_element()
     }
 
-    fn present_dialog(
-        &mut self,
-        spec: crate::gpui::DialogSpec,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dialog_view.update(cx, |view, cx| {
-            view.present(Some(spec), window, cx);
-        });
-        if self.dialog_view.read(cx).is_non_modal() {
-            if self.root_dialog_kind.is_some() && window.has_active_dialog(cx) {
-                window.close_dialog(cx);
-            }
-            self.root_dialog_kind = None;
-            self.root_dialog_key = None;
-            if self.overlay_kind != Some(OverlayKind::Dialog) {
-                self.overlay_host.update(cx, |host, cx| {
-                    host.present(self.dialog_view.clone(), window, cx);
-                });
-                self.overlay_kind = Some(OverlayKind::Dialog);
-            }
-            return;
-        }
-        // Modal dialogs use gpui-component's Root so scrim, focus trapping, backdrop
-        // dismissal, and Escape all share one implementation. The legacy overlay host
-        // remains only for anchored TerminalFind.
-        if self.overlay_kind.is_some() {
-            self.overlay_host.update(cx, |host, cx| {
-                host.clear(window, cx);
-            });
-            self.overlay_kind = None;
-        }
-        let root_title = self.dialog_view.read(cx).root_title();
-        let dialog_key = self
-            .dialog_view
-            .read(cx)
-            .root_id()
-            .map(|id| (id.0, root_title.clone()));
-        if self.root_dialog_kind != Some(RootDialogKind::Dialog)
-            || self.root_dialog_key != dialog_key
-            || !window.has_active_dialog(cx)
-        {
-            if self.root_dialog_kind.is_some() && window.has_active_dialog(cx) {
-                window.close_dialog(cx);
-            }
-            let dialog_view = self.dialog_view.clone();
-            let show_root_chrome = root_title.is_some();
-            let workspace = cx.weak_entity();
-            window.open_dialog(cx, move |dialog, window, _| {
-                let content_view = dialog_view.clone();
-                dialog
-                    .w(px(f32::from(window.rem_size()) * 37.5))
-                    .max_w(px(f32::from(window.rem_size()) * 45.0))
-                    .when(!show_root_chrome, |dialog| dialog.p_0().gap_0())
-                    .when_some(
-                        root_title.clone(),
-                        gpui_kit::component::dialog::Dialog::title,
-                    )
-                    .close_button(show_root_chrome)
-                    .on_cancel({
-                        let workspace = workspace.clone();
-                        move |_, _, cx| {
-                            let _ = workspace.update(cx, |workspace, cx| {
-                                workspace.state.close_overlay_dialogs();
-                                cx.notify();
-                            });
-                            true
-                        }
-                    })
-                    .content(move |content, _, _| {
-                        content
-                            .when(!show_root_chrome, gpui_kit::Styled::p_0)
-                            .child(content_view.clone())
-                    })
-            });
-            self.root_dialog_kind = Some(RootDialogKind::Dialog);
-            self.root_dialog_key = dialog_key;
-            schedule_focus(self.dialog_view.focus_handle(cx), window, cx);
-        }
-    }
-
-    fn present_space_editor(
-        &mut self,
-        snapshot: crate::gpui::SpaceEditorSnapshot,
-        colors: Colors,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dialog_view
-            .update(cx, |view, cx| view.present(None, window, cx));
-        if self.overlay_kind.is_some() {
-            self.overlay_host.update(cx, |host, cx| {
-                host.clear(window, cx);
-            });
-            self.overlay_kind = None;
-        }
-        let opening_root_dialog = self.root_dialog_kind != Some(RootDialogKind::SpaceEditor)
-            || !window.has_active_dialog(cx);
-        if opening_root_dialog && self.root_dialog_kind.is_some() && window.has_active_dialog(cx) {
-            window.close_dialog(cx);
-        }
-        let mut snapshot = snapshot;
-        let root_title = snapshot.title.clone();
-        snapshot.colors = space_editor_colors(colors);
-        let entity = if let Some(entity) = &self.space_editor_view {
-            entity.update(cx, |view, cx| view.set_snapshot(snapshot, cx));
-            entity.clone()
-        } else {
-            let entity = cx.new(|cx| GpuiSpaceEditor::new_with_window(snapshot, window, cx));
-            let subscription = cx.subscribe(&entity, |this, _, intent: &SpaceEditorIntent, cx| {
-                this.state.apply_space_editor_ui_intent(intent.clone());
-                cx.notify();
-            });
-            self.space_editor_view = Some(entity.clone());
-            self.space_editor_subscription = Some(subscription);
-            entity
-        };
-        if opening_root_dialog {
-            let workspace = cx.weak_entity();
-            let editor = entity.clone();
-            window.open_dialog(cx, move |dialog, window, app| {
-                let editor = editor.clone();
-                let workspace = workspace.clone();
-                dialog
-                    .w(px(f32::from(window.rem_size()) * 37.5))
-                    .max_w(px(f32::from(window.rem_size()) * 45.0))
-                    .title(root_title.clone())
-                    .footer(GpuiSpaceEditor::render_dialog_footer(editor.clone(), app))
-                    .on_cancel(move |_, _, cx| {
-                        let _ = workspace.update(cx, |workspace, cx| {
-                            workspace.state.close_overlay_dialogs();
-                            cx.notify();
-                        });
-                        true
-                    })
-                    .content(move |content, _, _| content.p_0().child(editor.clone()))
-            });
-            let editor = entity;
-            cx.defer_in(window, move |_, window, cx| {
-                editor.update(cx, |editor, cx| editor.focus(window, cx));
-            });
-            self.root_dialog_kind = Some(RootDialogKind::SpaceEditor);
-            self.root_dialog_key = None;
-        }
-    }
-
     fn retain_live_terminal_panes(&mut self) {
         let live_keys = self
             .state
@@ -3203,8 +1898,6 @@ impl GpuiWorkspace {
             .map(|pane| self.state.pane_widget_key(pane))
             .collect::<HashSet<_>>();
         self.terminal_panes.retain(|key, _| live_keys.contains(key));
-        self.terminal_pane_subscriptions
-            .retain(|key, _| live_keys.contains(key));
     }
 
     fn empty_terminal_state(&self) -> Option<crate::workspace_composition::EmptyTerminalState> {
@@ -3288,19 +1981,7 @@ impl GpuiWorkspace {
                 max_x: bounds.right().into(),
                 max_y: bounds.bottom().into(),
             };
-            let geometry = TerminalTextGeometry::fitted(
-                &self.terminal_text,
-                panel_area.width(),
-                panel_area.height(),
-                self.terminal_base_cell,
-                terminal_content_padding(window),
-            );
-            self.terminal_cell = geometry.grid_cell;
-            let surface = TerminalSurface::new(
-                panel_area,
-                geometry.grid_cell,
-                terminal_content_padding(window),
-            );
+            let surface = self.fit_terminal_surface(panel_area, window);
             let pane_ids = self
                 .state
                 .mux()
@@ -3324,17 +2005,7 @@ impl GpuiWorkspace {
             panel.update(cx, |panel, cx| {
                 panel.prepare(surface.geometry(), pane_ids, window, cx);
             });
-            let contract = self.terminal_text_contract.clone();
-            let snapshot = self.native_terminal_snapshot(
-                window,
-                &id,
-                panel_area,
-                geometry,
-                self.terminal_text.font_size,
-                &contract,
-                colors,
-                cx,
-            );
+            let snapshot = self.native_terminal_snapshot(window, &id, surface, colors, cx);
             let title = windows
                 .iter()
                 .find(|candidate| candidate.id == id)
@@ -3372,8 +2043,7 @@ impl GpuiWorkspace {
                 dock.sync_terminals(&windows, &selected, window, cx);
             });
         }
-        self.pane_hit_rects.clear();
-        self.terminal_interactions.clear();
+        self.visible_terminals.clear();
         self.retain_live_terminal_panes();
         // Dock geometry belongs to the terminal surface; mux owns the split ratios.
         let panel = dock.read(cx).terminal_panel();
@@ -3386,7 +2056,7 @@ impl GpuiWorkspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.update_pointer_cursor(event.position, event.modifiers);
+        self.update_pointer_cursor(event.position, event.modifiers, cx);
         if let Some((start, invocation)) = &mut self.pending_link_click {
             let dx = f32::from(event.position.x) - f32::from(start.x);
             let dy = f32::from(event.position.y) - f32::from(start.y);
@@ -3396,7 +2066,7 @@ impl GpuiWorkspace {
             cx.notify();
             return;
         }
-        self.record_mouse_input_target_at(event.position);
+        self.record_mouse_input_target_at(event.position, cx);
         self.input.mouse_move(event);
         cx.notify();
     }
@@ -3437,8 +2107,8 @@ impl GpuiWorkspace {
             && !event.modifiers.control
             && !event.modifiers.platform
             && self
-                .interaction_at(event.position)
-                .is_some_and(|(_, interaction)| interaction.view_transform().is_zoomed())
+                .interaction_at(event.position, cx)
+                .is_some_and(|hit| hit.interaction.view_transform().is_zoomed())
         {
             self.transform_terminal_at(
                 event.position,
@@ -3451,7 +2121,7 @@ impl GpuiWorkspace {
         // Wheel and hover are semantic pointer targets, not focus changes. Keep their
         // presented pane geometry while letting keyboard focus remain where the user put
         // it (or where the preceding press selected it).
-        self.record_mouse_input_target_at(event.position);
+        self.record_mouse_input_target_at(event.position, cx);
         self.input.scroll(event);
         cx.notify();
     }
@@ -3489,7 +2159,7 @@ impl GpuiWorkspace {
         let position = window.mouse_position();
         if self.state.modal_dialog().is_some()
             || window.has_active_dialog(cx)
-            || self.interaction_at(position).is_none()
+            || self.interaction_at(position, cx).is_none()
         {
             return;
         }
@@ -3505,12 +2175,12 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.focus_pointer_target_at(event.position, window, cx);
-        if event.button == MouseButton::Left && self.begin_link_click(event) {
+        if event.button == MouseButton::Left && self.begin_link_click(event, cx) {
             cx.stop_propagation();
             return;
         }
         self.terminal_mouse_buttons.insert(event.button);
-        self.record_mouse_input_target_at(event.position);
+        self.record_mouse_input_target_at(event.position, cx);
         self.input.mouse_down(event);
         cx.notify();
     }
@@ -3570,6 +2240,19 @@ impl GpuiWorkspace {
             .into_any_element()
     }
 
+    fn fit_terminal_surface(&mut self, area: SurfaceRect, window: &Window) -> TerminalSurface {
+        let padding = terminal_content_padding(window);
+        let geometry = TerminalTextGeometry::fitted(
+            &self.terminal_text_contract.config,
+            area.width(),
+            area.height(),
+            self.terminal_base_cell,
+            padding,
+        );
+        self.terminal_cell = geometry.grid_cell;
+        TerminalSurface::new(area, geometry.grid_cell, padding)
+    }
+
     fn terminal_element(
         &mut self,
         window: &mut Window,
@@ -3577,30 +2260,17 @@ impl GpuiWorkspace {
         colors: Colors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let padding = terminal_content_padding(window);
-        let geometry = TerminalTextGeometry::fitted(
-            &self.terminal_text,
-            area.width(),
-            area.height(),
-            self.terminal_base_cell,
-            padding,
-        );
-        self.terminal_cell = geometry.grid_cell;
-        let font_size = self.terminal_text.font_size;
-        let contract = Arc::clone(&self.terminal_text_contract);
+        let surface = self.fit_terminal_surface(area, window);
         if self.state.uses_native_terminal_layout() {
-            return Some(self.native_terminal_element(
-                window, area, geometry, font_size, &contract, colors, cx,
-            ));
+            return Some(self.native_terminal_element(window, surface, colors, cx));
         }
 
-        // Native panes own one focus handle and one interaction map per pane. Drop both before
-        // returning to the attached/runtime presentation so a backend switch cannot route the
+        // Native panes own their focus handles and painted facts. Drop them before
+        // returning to the attached presentation so a backend switch cannot route the
         // next pointer event through a removed pane or leave keyboard focus on its child view.
-        let terminal_focus = self.terminal.focus_handle(cx);
-        let native_pointer_state_was_active = self.focus != terminal_focus
-            || !self.pane_hit_rects.is_empty()
-            || !self.terminal_panes.is_empty();
+        let terminal_focus = self.terminal.view.focus_handle(cx);
+        let native_pointer_state_was_active =
+            self.focus != terminal_focus || !self.terminal_panes.is_empty();
         if native_pointer_state_was_active {
             self.terminal_mouse_buttons.clear();
             self.pending_link_click = None;
@@ -3609,67 +2279,102 @@ impl GpuiWorkspace {
             self.focus = terminal_focus.clone();
             schedule_focus(terminal_focus, window, cx);
         }
-        self.pane_hit_rects.clear();
         self.terminal_panes.clear();
-        self.terminal_pane_subscriptions.clear();
-        self.terminal_interactions.clear();
-        let surface = TerminalSurface::new(area, geometry.grid_cell, padding);
-        let transition_key = self.state.terminal_transition_key();
-        let dim_inactive_cursor = self.state.config().cursor.dim_inactive_pane;
-        let scrollbar_mode = self.state.config().session.scrollbar;
-        let background_opacity = self.state.config().window.background_opacity;
-        self.terminal.update(cx, |terminal, cx| {
-            terminal.set_scrollbar_mode(scrollbar_mode, cx);
-            terminal.set_background_opacity(background_opacity, cx);
-        });
-        let result = terminal_element_for_runtime(
-            &self.terminal,
-            self.state.terminal_mut(),
-            transition_key,
-            surface,
-            window.scale_factor(),
-            font_size,
-            geometry.ink_cell.height,
-            Arc::clone(&contract),
-            true,
-            dim_inactive_cursor,
-            cx,
-        );
-        match result {
-            Ok((element, interaction, metrics)) => {
-                self.frame_metrics = metrics;
-                self.state.record_surface(surface);
-                if let Some(interaction) = interaction {
-                    self.terminal_interactions
-                        .insert(String::new(), interaction);
-                }
-                Some(element.into_any_element())
-            }
-            Err(error) => {
-                self.state.record_render_error(error);
-                None
-            }
-        }
+        self.visible_terminals.clear();
+        self.present_terminal(&self.terminal.view.clone(), None, surface, window, cx)
+            .map(IntoElement::into_any_element)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn present_terminal(
+        &mut self,
+        view: &Entity<GpuiTerminalView>,
+        pane_id: Option<&str>,
+        surface: TerminalSurface,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<CachedTerminalView> {
+        let terminal = self.prepare_terminal(view, pane_id, surface, window, cx);
+        self.visible_terminals.push(VisibleTerminal {
+            pane_id: pane_id.map(str::to_owned),
+            view: terminal.as_ref().map(|terminal| terminal.0.clone()),
+        });
+        terminal
+    }
+
+    fn prepare_terminal(
+        &mut self,
+        view: &Entity<GpuiTerminalView>,
+        pane_id: Option<&str>,
+        surface: TerminalSurface,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<CachedTerminalView> {
+        let transition_key = pane_id.map_or_else(
+            || self.state.terminal_transition_key(),
+            |pane| Some(self.state.pane_widget_key(pane)),
+        );
+        let focused = pane_id.is_none_or(|pane| self.state.focused_pane().as_deref() == Some(pane));
+        let runtime = self
+            .state
+            .workspace
+            .active
+            .binding
+            .visible_terminal_frame_source(pane_id)?;
+        let frame = (|| {
+            runtime.set_display_scale(window.scale_factor())?;
+            runtime.set_render_cell_metrics(surface.cell)?;
+            runtime.resize(surface.geometry())?;
+            runtime.extract_frame()
+        })();
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.state.record_render_error(error);
+                return None;
+            }
+        };
+        let config = self.state.config();
+        view.update(cx, |view, cx| {
+            view.set_window_focused(window.is_window_active(), cx);
+            view.set_scrollbar_mode(config.session.scrollbar, cx);
+            view.set_background_opacity(config.window.background_opacity, cx);
+        });
+        GpuiTerminalView::publish(
+            view,
+            TerminalPresentation {
+                transition_key,
+                surface,
+                frame,
+                text_cell_height: self.terminal_base_cell.height,
+                pixels_per_point: window.scale_factor(),
+                text_contract: Arc::clone(&self.terminal_text_contract),
+                animate_cursor: focused,
+                dim_inactive_cursor: config.cursor.dim_inactive_pane,
+            },
+            cx,
+        );
+        if focused {
+            let focus = view.focus_handle(cx);
+            if self.focus != focus {
+                self.focus = focus.clone();
+                schedule_focus(focus, window, cx);
+            }
+            self.state.record_surface(surface);
+        }
+        Some(CachedTerminalView(view.clone()))
+    }
+
     fn native_terminal_element(
         &mut self,
         window: &mut Window,
-        area: SurfaceRect,
-        geometry: TerminalTextGeometry,
-        font_size: f32,
-        contract: &Arc<TerminalTextContract>,
+        surface: TerminalSurface,
         colors: Colors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.pane_hit_rects.clear();
-        self.terminal_interactions.clear();
+        self.visible_terminals.clear();
         let window_id = self.state.workspace.active.binding.current_window_id();
         self.retain_live_terminal_panes();
-        let snapshot = self.native_terminal_snapshot(
-            window, &window_id, area, geometry, font_size, contract, colors, cx,
-        );
+        let snapshot = self.native_terminal_snapshot(window, &window_id, surface, colors, cx);
         let weak = cx.entity().downgrade();
         GpuiPaneWorkspace::new(snapshot, move |intent, window, cx| {
             let _ = weak.update(cx, |this, cx| {
@@ -3680,26 +2385,18 @@ impl GpuiWorkspace {
         .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn native_terminal_snapshot(
         &mut self,
         window: &mut Window,
         window_id: &bootty_mux::workspace::ScopedWindowId,
-        area: SurfaceRect,
-        geometry: TerminalTextGeometry,
-        font_size: f32,
-        contract: &Arc<TerminalTextContract>,
+        surface: TerminalSurface,
         colors: Colors,
         cx: &mut Context<Self>,
     ) -> GpuiPaneWorkspaceSnapshot<CachedTerminalView> {
-        let cell = geometry.grid_cell;
+        let area = surface.rect;
         let config = self.state.config();
         let gap = config.chrome.pane_divider_width;
         let focused = self.state.focused_pane();
-        let window_focused = window.is_window_active();
-        let dim_inactive_cursor = config.cursor.dim_inactive_pane;
-        let scrollbar_mode = config.session.scrollbar;
-        let background_opacity = config.window.background_opacity;
         let layout = self
             .state
             .workspace
@@ -3714,7 +2411,6 @@ impl GpuiWorkspace {
         if *window_id == self.state.workspace.active.binding.current_window_id() {
             self.state.record_pane_area(area);
         }
-        self.pane_hit_rects.extend(rects.iter().cloned());
 
         let pane_surfaces = rects
             .iter()
@@ -3722,72 +2418,27 @@ impl GpuiWorkspace {
                 (
                     pane_id.clone(),
                     *rect,
-                    TerminalSurface::new(*rect, cell, terminal_content_padding(window)),
+                    TerminalSurface::new(*rect, surface.cell, surface.padding),
                 )
             })
             .collect::<Vec<_>>();
         self.resize_native_pane_window(window_id, layout.as_ref(), &pane_surfaces);
 
         let mut panes = Vec::with_capacity(pane_surfaces.len());
-        self.frame_metrics = RendererMetrics::default();
         for (pane_id, rect, surface) in pane_surfaces {
             let is_focused = focused.as_deref() == Some(pane_id.as_str());
             let key = self.state.pane_widget_key(&pane_id);
             let terminal_view = self.ensure_terminal_pane(&pane_id, &key, window, cx);
-            terminal_view.update(cx, |terminal, cx| {
-                terminal.set_window_focused(window_focused, cx);
-                terminal.set_scrollbar_mode(scrollbar_mode, cx);
-                terminal.set_background_opacity(background_opacity, cx);
-            });
-            if is_focused {
-                let pane_focus = terminal_view.focus_handle(cx);
-                if self.focus != pane_focus {
-                    self.focus = pane_focus.clone();
-                    schedule_focus(pane_focus, window, cx);
-                }
-            }
-            // A visible Dock pane can differ from the binding's current input target.
-            let Some(runtime) = self
-                .state
-                .workspace
-                .active
-                .binding
-                .visible_terminal_runtime(&pane_id)
-            else {
-                continue;
-            };
-            let result = terminal_element_for_runtime(
-                &terminal_view,
-                runtime,
-                Some(key),
-                surface,
-                window.scale_factor(),
-                font_size,
-                geometry.ink_cell.height,
-                Arc::clone(contract),
-                is_focused,
-                dim_inactive_cursor,
-                cx,
-            );
-            match result {
-                Ok((terminal, interaction, metrics)) => {
-                    if is_focused {
-                        self.frame_metrics = metrics;
-                        self.state.record_surface(surface);
-                    }
-                    if let Some(interaction) = interaction {
-                        self.terminal_interactions
-                            .insert(pane_id.clone(), interaction);
-                    }
-                    panes.push(GpuiPaneSnapshot {
-                        id: pane_id.clone(),
-                        rect: pane_rect(rect),
-                        terminal,
-                        focused: is_focused,
-                        progress: self.state.pane_progress(&pane_id).map(pane_progress),
-                    });
-                }
-                Err(error) => self.state.record_render_error(error),
+            if let Some(terminal) =
+                self.present_terminal(&terminal_view, Some(&pane_id), surface, window, cx)
+            {
+                panes.push(GpuiPaneSnapshot {
+                    id: pane_id.clone(),
+                    rect: pane_rect(rect),
+                    terminal,
+                    focused: is_focused,
+                    progress: self.state.pane_progress(&pane_id).map(pane_progress),
+                });
             }
         }
 
@@ -3826,31 +2477,13 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<GpuiTerminalView> {
-        if let Some(view) = self.terminal_panes.get(key) {
-            view.clone()
-        } else {
-            let view = cx.new(GpuiTerminalView::new);
-            let subscription = cx.subscribe_in(
-                &view,
-                window,
-                |this, _, input: &TerminalViewInput, window, cx| {
-                    this.apply_terminal_view_input(input.0.clone(), window, cx);
-                },
-            );
-            self.terminal_panes.insert(key.to_owned(), view.clone());
-            let scroll_pane = pane_id.to_owned();
-            let scroll_subscription =
-                cx.subscribe(&view, move |this, _, input: &TerminalScrollbarInput, cx| {
-                    this.scroll_terminal(Some(&scroll_pane), input, cx);
-                });
-            let [focus_in, focus_out] =
-                Self::subscribe_terminal_focus(&view.focus_handle(cx), window, cx);
-            self.terminal_pane_subscriptions.insert(
-                key.to_owned(),
-                vec![subscription, scroll_subscription, focus_in, focus_out],
-            );
-            view
+        if let Some(pane) = self.terminal_panes.get(key) {
+            return pane.view.clone();
         }
+        let pane = Self::create_terminal_view(Some(pane_id.to_owned()), window, cx);
+        let view = pane.view.clone();
+        self.terminal_panes.insert(key.to_owned(), pane);
+        view
     }
 
     fn resize_native_pane_window(
@@ -4008,8 +2641,8 @@ impl GpuiWorkspace {
         }
         if let Some(pane) = self.state.focused_pane() {
             let key = self.state.pane_widget_key(&pane);
-            if let Some(view) = self.terminal_panes.get(&key) {
-                self.focus = view.focus_handle(cx);
+            if let Some(pane) = self.terminal_panes.get(&key) {
+                self.focus = pane.view.focus_handle(cx);
                 self.focus.focus(window, cx);
             }
         }
@@ -4044,8 +2677,8 @@ impl GpuiWorkspace {
                 self.focus_terminal_window(target, id, window, cx);
                 self.state.focus_pane(&pane);
                 let key = self.state.pane_widget_key(&pane);
-                if let Some(view) = self.terminal_panes.get(&key) {
-                    self.focus = view.focus_handle(cx);
+                if let Some(pane) = self.terminal_panes.get(&key) {
+                    self.focus = pane.view.focus_handle(cx);
                     self.focus.focus(window, cx);
                 }
             }
@@ -4095,32 +2728,32 @@ impl GpuiWorkspace {
         }
     }
 
-    fn interaction_at(
-        &self,
-        position: gpui_kit::Point<gpui_kit::Pixels>,
-    ) -> Option<(String, GpuiTerminalInteraction)> {
+    fn interaction_at(&self, position: gpui_kit::Point<Pixels>, cx: &App) -> Option<TerminalHit> {
         let point = bootty_terminal::geometry::SurfacePoint {
             x: position.x.into(),
             y: position.y.into(),
         };
-        let key = self
-            .pane_hit_rects
-            .iter()
-            .find(|(_, rect)| rect.contains(point))
-            .map_or("", |(pane_id, _)| pane_id.as_str());
-        self.terminal_interactions
-            .get(key)
-            .cloned()
-            .map(|interaction| (key.to_owned(), interaction))
+        self.visible_terminals.iter().find_map(|terminal| {
+            let view = terminal.view.as_ref()?;
+            let interaction = view.read(cx).interaction()?;
+            interaction
+                .surface()
+                .rect
+                .contains(point)
+                .then(|| TerminalHit {
+                    pane_id: terminal.pane_id.clone(),
+                    view: view.clone(),
+                    interaction,
+                })
+        })
     }
 
-    fn record_mouse_input_target_at(&mut self, position: gpui_kit::Point<gpui_kit::Pixels>) {
-        if let Some((pane_id, interaction)) = self.interaction_at(position) {
-            let pane_id = (!pane_id.is_empty()).then_some(pane_id);
+    fn record_mouse_input_target_at(&mut self, position: gpui_kit::Point<Pixels>, cx: &App) {
+        if let Some(hit) = self.interaction_at(position, cx) {
             self.state.record_mouse_input_target_for_pane(
-                pane_id,
-                interaction.surface(),
-                interaction.view_transform(),
+                hit.pane_id,
+                hit.interaction.surface(),
+                hit.interaction.view_transform(),
                 Some(crate::gpui::Point {
                     x: position.x.into(),
                     y: position.y.into(),
@@ -4132,7 +2765,7 @@ impl GpuiWorkspace {
     }
 
     fn transform_terminal_at(
-        &mut self,
+        &self,
         position: gpui_kit::Point<Pixels>,
         transform: impl FnOnce(
             bootty_terminal::geometry::ViewTransform,
@@ -4140,48 +2773,33 @@ impl GpuiWorkspace {
         ) -> bootty_terminal::geometry::ViewTransform,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((pane_id, interaction)) = self.interaction_at(position) else {
+        let Some(hit) = self.interaction_at(position, cx) else {
             return false;
         };
-        let view = transform(interaction.view_transform(), interaction.surface().rect);
-        let terminal = if pane_id.is_empty() {
-            Some(self.terminal.clone())
-        } else {
-            self.terminal_panes
-                .get(&self.state.pane_widget_key(&pane_id))
-                .cloned()
-        };
-        if let Some(terminal) = terminal {
-            terminal.update(cx, |terminal, cx| terminal.set_view_transform(view, cx));
-            self.terminal_interactions
-                .insert(pane_id, interaction.with_view_transform(view));
-            cx.notify();
-        }
+        let view = transform(
+            hit.interaction.view_transform(),
+            hit.interaction.surface().rect,
+        );
+        hit.view
+            .update(cx, |terminal, cx| terminal.set_view_transform(view, cx));
+        cx.notify();
         true
     }
 
     fn focus_pointer_target_at(
         &mut self,
-        position: gpui_kit::Point<gpui_kit::Pixels>,
+        position: gpui_kit::Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.state.uses_native_terminal_layout() {
-            window.focus(&self.focus, cx);
+        let Some(hit) = self.interaction_at(position, cx) else {
             return;
+        };
+        if let Some(pane) = hit.pane_id {
+            self.state.focus_pane(&pane);
         }
-
-        let Some((pane_id, _)) = self.interaction_at(position) else {
-            return;
-        };
-        self.state.focus_pane(&pane_id);
-        let key = self.state.pane_widget_key(&pane_id);
-        let Some(terminal_view) = self.terminal_panes.get(&key).cloned() else {
-            return;
-        };
-        let focus = terminal_view.focus_handle(cx);
-        self.focus = focus.clone();
-        window.focus(&focus, cx);
+        self.focus = hit.view.focus_handle(cx);
+        window.focus(&self.focus, cx);
     }
 
     fn finish_terminal_mouse_input(
@@ -4209,12 +2827,12 @@ impl GpuiWorkspace {
         if !self.terminal_mouse_buttons.remove(&event.button) {
             return;
         }
-        self.record_mouse_input_target_at(event.position);
+        self.record_mouse_input_target_at(event.position, cx);
         self.input.mouse_up(event);
         cx.notify();
     }
 
-    fn begin_link_click(&mut self, event: &gpui_kit::MouseDownEvent) -> bool {
+    fn begin_link_click(&mut self, event: &gpui_kit::MouseDownEvent, cx: &App) -> bool {
         let activation = if cfg!(target_os = "macos") {
             event.modifiers.platform
         } else {
@@ -4227,10 +2845,10 @@ impl GpuiWorkspace {
             x: event.position.x.into(),
             y: event.position.y.into(),
         };
-        let Some((_, interaction)) = self.interaction_at(event.position) else {
+        let Some(hit) = self.interaction_at(event.position, cx) else {
             return false;
         };
-        let Some(link) = interaction.hyperlink_at(point) else {
+        let Some(link) = hit.interaction.hyperlink_at(point) else {
             return false;
         };
         if let bootty_terminal::terminal_links::LinkTarget::File { path, .. } = &link.target {
@@ -4262,82 +2880,25 @@ impl GpuiWorkspace {
         &mut self,
         position: gpui_kit::Point<gpui_kit::Pixels>,
         modifiers: gpui_kit::Modifiers,
+        cx: &App,
     ) {
         let point = bootty_terminal::geometry::SurfacePoint {
             x: position.x.into(),
             y: position.y.into(),
         };
         self.cursor = self
-            .interaction_at(position)
-            .and_then(|(_, interaction)| {
+            .interaction_at(position, cx)
+            .and_then(|hit| {
                 let activation_modifier = if cfg!(target_os = "macos") {
                     modifiers.platform
                 } else {
                     modifiers.control
                 };
-                (activation_modifier && interaction.hyperlink_at(point).is_some())
+                (activation_modifier && hit.interaction.hyperlink_at(point).is_some())
                     .then_some(CursorStyle::PointingHand)
             })
             .unwrap_or(self.terminal_cursor);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn terminal_element_for_runtime<T: TerminalFrameSource + ?Sized>(
-    terminal_view: &gpui_kit::Entity<GpuiTerminalView>,
-    terminal: &mut T,
-    transition_key: Option<String>,
-    surface: TerminalSurface,
-    display_scale: f32,
-    font_size: f32,
-    text_cell_height: f32,
-    contract: Arc<TerminalTextContract>,
-    animate_cursor: bool,
-    dim_inactive_cursor: bool,
-    cx: &mut Context<GpuiWorkspace>,
-) -> Result<(
-    CachedTerminalView,
-    Option<GpuiTerminalInteraction>,
-    RendererMetrics,
-)> {
-    terminal.set_display_scale(display_scale)?;
-    terminal.set_render_cell_metrics(surface.cell)?;
-    terminal.resize(surface.geometry())?;
-    let frame = terminal.extract_frame()?;
-    if !terminal_view.read(cx).matches_presentation(
-        transition_key.as_deref(),
-        surface,
-        &frame,
-        font_size,
-        text_cell_height,
-        display_scale,
-        &contract,
-        animate_cursor,
-        dim_inactive_cursor,
-    ) {
-        let terminal_view = terminal_view.clone();
-        cx.defer(move |cx| {
-            terminal_view.update(cx, |view, cx| {
-                view.update(
-                    transition_key,
-                    surface,
-                    frame,
-                    font_size,
-                    text_cell_height,
-                    display_scale,
-                    contract,
-                    animate_cursor,
-                    dim_inactive_cursor,
-                    cx,
-                );
-            });
-        });
-    }
-    Ok((
-        CachedTerminalView(terminal_view.clone()),
-        terminal_view.read(cx).interaction(),
-        terminal_view.read(cx).metrics(),
-    ))
 }
 
 fn pane_rect(rect: SurfaceRect) -> PaneRect {
@@ -4412,7 +2973,8 @@ impl GpuiWorkspace {
         let display_scale_changed = self.terminal_display_scale != window.scale_factor();
         if display_scale_changed {
             self.terminal_display_scale = window.scale_factor();
-            self.terminal_base_cell = terminal_cell_metrics(&self.terminal_text, window);
+            self.terminal_base_cell =
+                terminal_cell_metrics(&self.terminal_text_contract.config, window);
             self.terminal_cell = self.terminal_base_cell;
         }
 
@@ -4507,7 +3069,7 @@ impl GpuiWorkspace {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (ChromeSnapshot, f32) {
+    ) -> ChromeSnapshot {
         let viewport = self.workspace_bounds.size;
         let viewport_height: f32 = viewport.height.into();
         let usage_visible = self.tools.as_ref().is_some_and(|tools| {
@@ -4533,30 +3095,14 @@ impl GpuiWorkspace {
         // Context changes retarget the existing dock; unmounting it briefly resizes
         // the attached terminal through the legacy tools-overlay layout.
         let docked_terminals = self.tools.is_some();
-        let tools_visible = self.tools_visible && !docked_terminals;
-        let tools_width = if tools_visible {
-            (f32::from(window.rem_size()) * 20.).min(viewport_width * 0.45)
-        } else {
-            0.0
-        };
         let mut chrome_snapshot = chrome_frame::snapshot(
             &self.state,
             &self.launch.native_chrome.borrow(),
             &projection,
-            viewport_width - tools_width,
+            viewport_width,
             viewport_height,
         );
-        self.last_maintenance_chrome = Some(if tools_width == 0.0 {
-            chrome_snapshot.clone()
-        } else {
-            chrome_frame::snapshot(
-                &self.state,
-                &self.launch.native_chrome.borrow(),
-                &projection,
-                viewport_width,
-                viewport_height,
-            )
-        });
+        self.last_maintenance_chrome = Some(chrome_snapshot.clone());
         self.decorate_dock_chrome(&mut chrome_snapshot, window, cx);
         self.sync_key_bindings(window, cx);
         self.chrome_view.update(cx, |chrome, cx| {
@@ -4565,45 +3111,7 @@ impl GpuiWorkspace {
         self.chrome_view.update(cx, |chrome, cx| {
             chrome.update(&chrome_snapshot, window, cx);
         });
-        (chrome_snapshot, tools_width)
-    }
-
-    fn sync_settings_window(
-        &mut self,
-        settings_changed: bool,
-        config_revision: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let settings_open = self.settings_window.is_some() || self.settings_window_opening;
-        if settings_open {
-            if self.last_config_file_editor_revision != Some(config_revision) {
-                self.last_config_file_editor_revision = Some(config_revision);
-                if let Some(settings_window) = self.settings_window.clone() {
-                    cx.defer(move |cx| {
-                        let _ = settings_window.update_in(cx, |root, window, cx| {
-                            root.reconcile_file_editor(EditorFileKind::Config, window, cx);
-                        });
-                    });
-                }
-            }
-            if settings_changed || self.last_settings_revision != Some(config_revision) {
-                self.last_settings_revision = Some(config_revision);
-                self.refresh_settings(cx);
-            }
-        } else {
-            self.last_config_file_editor_revision = None;
-            self.last_settings_revision = None;
-        }
-        let keymap_open = self.settings_window.is_some() || self.settings_window_opening;
-        if keymap_open {
-            let revision = self.state.keymap_snapshot().revision;
-            if self.last_keymap_editor_revision != Some(revision) {
-                self.last_keymap_editor_revision = Some(revision);
-                self.publish_keymap_editor_snapshot(cx);
-            }
-        } else {
-            self.last_keymap_editor_revision = None;
-        }
+        chrome_snapshot
     }
 
     fn sync_frame_overlays(&mut self, colors: Colors, window: &mut Window, cx: &mut Context<Self>) {
@@ -4715,11 +3223,9 @@ impl GpuiWorkspace {
         terminal_surface: AnyElement,
         terminal_area: SurfaceRect,
         colors: Colors,
-        tools_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        let tools_visible = self.tools_visible && self.tools.is_none();
         let ui_font = setup_ui_font(window, cx);
         let workspace_origin = self.workspace_bounds.origin;
         div()
@@ -4740,7 +3246,7 @@ impl GpuiWorkspace {
                     if this.terminal_mouse_buttons.is_empty() || terminal_area.contains(point) {
                         return;
                     }
-                    this.update_pointer_cursor(event.position, event.modifiers);
+                    this.update_pointer_cursor(event.position, event.modifiers, cx);
                     this.input.mouse_move(event);
                     cx.notify();
                 }),
@@ -4769,20 +3275,7 @@ impl GpuiWorkspace {
                         .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
                 )
             })
-            .when(tools_visible, |workspace| {
-                workspace.children(self.tools.clone().map(|tools| {
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .w(px(tools_width))
-                        .h_full()
-                        .overflow_hidden()
-                        .bg(colors.mantle)
-                        .child(tools)
-                }))
-            })
-            .child(self.overlay_host.clone())
+            .child(self.dialogs.overlay.clone())
     }
 }
 
@@ -4795,7 +3288,7 @@ impl Render for GpuiWorkspace {
         self.prepare_frame_state(window, cx);
         let config_revision = self.state.config_revision();
         let settings_changed = self.poll_settings_runtime(cx);
-        let (chrome_snapshot, tools_width) = self.prepare_chrome_frame(window, cx);
+        let chrome_snapshot = self.prepare_chrome_frame(window, cx);
         let docked_terminals = self.tools.is_some();
         let colors = Colors::from_state(&self.state);
         self.sync_settings_window(settings_changed, config_revision, cx);
@@ -4814,14 +3307,7 @@ impl Render for GpuiWorkspace {
         } else {
             self.terminal_surface(window, terminal_area, colors, cx)
         };
-        let workspace = self.workspace_frame(
-            terminal_surface,
-            terminal_area,
-            colors,
-            tools_width,
-            window,
-            cx,
-        );
+        let workspace = self.workspace_frame(terminal_surface, terminal_area, colors, window, cx);
 
         let workspace = workspace.when(
             self.visual_bell_until
@@ -4866,33 +3352,4 @@ const fn gpui_cursor(icon: crate::state::CursorIcon) -> CursorStyle {
         // faithful neutral fallback rather than guessing a different interaction state.
         _ => CursorStyle::Arrow,
     }
-}
-
-const fn space_editor_colors(colors: Colors) -> SpaceEditorColors {
-    SpaceEditorColors {
-        pane: colors.pane,
-        surface: colors.surface,
-        hover: colors.hover,
-        border: colors.border,
-        text: colors.text,
-        muted: colors.muted,
-        accent: colors.accent,
-        destructive: colors.destructive,
-    }
-}
-
-fn intent_dialog_id(intent: &DialogIntent) -> &str {
-    let id = match intent {
-        DialogIntent::Dismiss { dialog }
-        | DialogIntent::Activate { dialog, .. }
-        | DialogIntent::Preview { dialog, .. }
-        | DialogIntent::TextChanged { dialog, .. }
-        | DialogIntent::SelectionChanged { dialog, .. }
-        | DialogIntent::CycleScope { dialog }
-        | DialogIntent::ToggleFavorite { dialog, .. }
-        | DialogIntent::Find { dialog, .. }
-        | DialogIntent::FocusTerminal { dialog }
-        | DialogIntent::FieldChanged { dialog, .. } => dialog,
-    };
-    &id.0
 }

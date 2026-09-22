@@ -298,3 +298,161 @@ fn rename_dialogs_preserve_their_distinct_empty_name_policies(
         })
     );
 }
+
+#[rstest::fixture]
+fn worktree_project() -> assert_fs::TempDir {
+    let repo = assert_fs::TempDir::new().expect("project directory");
+    for args in [
+        vec!["init", "--quiet"],
+        vec![
+            "-c",
+            "user.name=Bootty Test",
+            "-c",
+            "user.email=bootty@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    repo
+}
+
+fn activate_picker_row(
+    dialog: &mut NewSessionDialog,
+    row: &bootty_gpui::DialogRow,
+    open_cwds: &[String],
+) -> Option<NewSessionPickerEvent> {
+    let action = row.action.clone().expect("enabled picker row");
+    dialog.apply(
+        &DialogIntent::Activate {
+            dialog: dialog.spec().id,
+            row: row.id.clone(),
+            action: action.id,
+            payload: action.payload,
+        },
+        open_cwds,
+    )
+}
+
+#[rstest::rstest]
+fn worktree_form_keeps_its_project_and_normalizes_captured_fields(
+    worktree_project: assert_fs::TempDir,
+) {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+
+    let path = worktree_project.path().to_string_lossy().into_owned();
+    let mut dialog = NewSessionDialog::from_projects(vec![project(&path, false)]);
+    let spec = dialog.spec();
+    let row = project_row(&spec, &path);
+    assert_eq!(
+        activate_picker_row(&mut dialog, row, std::slice::from_ref(&path)),
+        None
+    );
+    let spec = dialog.spec();
+    let row = spec
+        .rows
+        .iter()
+        .find(|row| row.label == "New worktree")
+        .expect("new worktree action");
+    assert_eq!(activate_picker_row(&mut dialog, row, &[]), None);
+    let id = dialog.spec().id;
+    assert!(
+        !dialog.spec().rows[0].enabled,
+        "empty branch cannot be submitted"
+    );
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: id.clone(),
+            value: "-invalid".to_owned(),
+        },
+        &[],
+    );
+    let row = dialog.spec().rows[0].clone();
+    assert_eq!(activate_picker_row(&mut dialog, &row, &[]), None);
+    assert!(
+        dialog.spec().rows[0].detail.is_some(),
+        "invalid branch is explained"
+    );
+
+    let strategy = (
+        "[a-z][a-z0-9]{0,12}",
+        proptest::option::of("[a-z][a-z0-9]{0,12}"),
+        any::<bool>(),
+    );
+    let dialog = std::cell::RefCell::new(dialog);
+    TestRunner::new(Config {
+        cases: 24,
+        ..Config::default()
+    })
+    .run(&strategy, |(branch, folder, use_head)| {
+        let mut dialog = dialog.borrow_mut();
+        dialog.apply(
+            &DialogIntent::TextChanged {
+                dialog: id.clone(),
+                value: format!("  {branch}  "),
+            },
+            &[],
+        );
+        for (field, value) in [
+            (
+                "folder",
+                folder
+                    .as_ref()
+                    .map_or_else(|| "  ".to_owned(), |name| format!(" {name} ")),
+            ),
+            (
+                "start-ref",
+                if use_head { " HEAD " } else { "  " }.to_owned(),
+            ),
+        ] {
+            dialog.apply(
+                &DialogIntent::FieldChanged {
+                    dialog: id.clone(),
+                    field: field.to_owned(),
+                    value,
+                },
+                &[],
+            );
+        }
+        dialog.apply(
+            &DialogIntent::TextChanged {
+                dialog: bootty_gpui::DialogId::new("another-dialog"),
+                value: "wrong-project".to_owned(),
+            },
+            &[],
+        );
+        let row = dialog.spec().rows[0].clone();
+        assert_eq!(
+            row.detail, None,
+            "editing clears the earlier validation error"
+        );
+        assert_eq!(
+            activate_picker_row(&mut dialog, &row, &[]),
+            Some(NewSessionPickerEvent::CreateWorktree {
+                repo: path.clone(),
+                request: bootty_git::WorktreeRequest {
+                    branch,
+                    name: folder,
+                    start_ref: use_head.then(|| "HEAD".to_owned())
+                },
+            })
+        );
+        Ok(())
+    })
+    .expect("worktree form property");
+}

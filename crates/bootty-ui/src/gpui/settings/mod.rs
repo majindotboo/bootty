@@ -8,9 +8,11 @@ mod environment;
 mod font_features;
 mod inline_inputs;
 mod model;
+mod number_input;
 mod picker;
 mod search;
 mod status_segments;
+mod text_input;
 mod title_bar;
 mod window;
 

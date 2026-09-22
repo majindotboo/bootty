@@ -109,52 +109,6 @@ impl DocumentPanel {
             .retain(|document| document.upgrade().is_some());
         let weak = cx.weak_entity();
         cx.global_mut::<Documents>().0.push(weak);
-        if context.host_identity == "local" && host_identity == "local" {
-            let watch_path = std::path::PathBuf::from(&path);
-            cx.spawn_in(window, async move |weak, cx| {
-                let watch = cx
-                    .background_executor()
-                    .spawn(async move { bootty_host::file_watch::FileWatch::new(&watch_path).ok() })
-                    .await;
-                _ = weak.update_in(cx, |this, _, _| this.watch = watch);
-            })
-            .detach();
-        }
-        cx.spawn_in(window, async move |weak, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-                if weak
-                    .update_in(cx, |this, window, cx| {
-                        if this.active
-                            && this.host_visible
-                            && this.group.is_some()
-                            && (this.error.is_some()
-                                || this
-                                    .watch
-                                    .as_ref()
-                                    .is_none_or(bootty_host::file_watch::FileWatch::take_changed))
-                        {
-                            this.refresh(false, window, cx);
-                        }
-                        let position = this
-                            .editor
-                            .as_ref()
-                            .map(|editor| editor.read(cx).cursor_position(cx));
-                        if let Some((line, column)) = position
-                            && (line, column) != (this.line, this.column)
-                        {
-                            this.line = line;
-                            this.column = column;
-                            cx.emit(PanelEvent::LayoutChanged);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         let mut this = Self {
             context,
             host_identity,
@@ -177,8 +131,66 @@ impl DocumentPanel {
             group: None,
             subscriptions: Vec::new(),
         };
+        this.watch_local_file(window, cx);
+        Self::watch_document(window, cx);
         this.refresh(false, window, cx);
         this
+    }
+
+    fn watch_local_file(&self, window: &Window, cx: &Context<Self>) {
+        if self.context.host_identity == "local" && self.host_identity == "local" {
+            let watch_path = std::path::PathBuf::from(&self.path);
+            cx.spawn_in(window, async move |weak, cx| {
+                let watch = cx
+                    .background_executor()
+                    .spawn(async move { bootty_host::file_watch::FileWatch::new(&watch_path).ok() })
+                    .await;
+                _ = weak.update_in(cx, |this, _, _| this.watch = watch);
+            })
+            .detach();
+        }
+    }
+
+    fn watch_document(window: &Window, cx: &Context<Self>) {
+        cx.spawn_in(window, async move |weak, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if weak
+                    .update_in(cx, |this, window, cx| {
+                        this.poll_document(window, cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn poll_document(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.active
+            && self.host_visible
+            && self.group.is_some()
+            && (self.error.is_some()
+                || self
+                    .watch
+                    .as_ref()
+                    .is_none_or(bootty_host::file_watch::FileWatch::take_changed))
+        {
+            self.refresh(false, window, cx);
+        }
+        let position = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.read(cx).cursor_position(cx));
+        if let Some((line, column)) = position
+            && (line, column) != (self.line, self.column)
+        {
+            self.line = line;
+            self.column = column;
+            cx.emit(PanelEvent::LayoutChanged);
+        }
     }
 
     pub(crate) fn path(&self) -> &str {
@@ -257,57 +269,67 @@ impl DocumentPanel {
                 .spawn(async move { receiver.recv() })
                 .await;
             _ = weak.update_in(cx, |this, window, cx| {
-                this.pending = false;
-                let response = match outcome {
-                    Ok(CommandOutcome::Success { value, .. }) => {
-                        serde_json::from_value::<FileResponse>(value)
-                            .map_err(|error| error.to_string())
-                    }
-                    Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
-                        .unwrap_or_else(|| "File command failed".to_owned())),
-                    Err(error) => Err(error.to_string()),
-                };
-                match response {
-                    Ok(FileResponse::Document(snapshot)) => {
-                        this.receive(snapshot, reload, window, cx);
-                    }
-                    Ok(FileResponse::Saved {
-                        digest,
-                        durability_warning,
-                    }) => {
-                        let Some(saved) = saved else {
-                            this.fail("Unexpected save response".to_owned(), false, cx);
-                            return;
-                        };
-                        this.digest = Some(digest);
-                        this.error = None;
-                        this.external = None;
-                        if let Some(editor) = &this.editor {
-                            editor.update(cx, |editor, cx| {
-                                editor.mark_saved(saved, durability_warning, cx);
-                            });
-                        }
-                        if this.close_after_save {
-                            this.close_after_save = false;
-                            if this.editor.as_ref().is_some_and(|editor| {
-                                !editor.read(cx).is_dirty(cx) && editor.read(cx).save_allows_close()
-                            }) {
-                                Self::close(cx);
-                            }
-                        }
-                    }
-                    Ok(FileResponse::Directory(_) | FileResponse::Location { .. }) => this.fail(
-                        "Unexpected directory response".to_owned(),
-                        saved.is_some(),
-                        cx,
-                    ),
-                    Err(error) => this.fail(error, saved.is_some(), cx),
-                }
-                cx.emit(PanelEvent::LayoutChanged);
-                cx.notify();
+                this.receive_outcome(outcome, saved, reload, window, cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn receive_outcome(
+        &mut self,
+        outcome: Result<CommandOutcome, std::sync::mpsc::RecvError>,
+        saved: Option<String>,
+        reload: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending = false;
+        let response = match outcome {
+            Ok(CommandOutcome::Success { value, .. }) => {
+                serde_json::from_value::<FileResponse>(value).map_err(|error| error.to_string())
+            }
+            Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
+                .unwrap_or_else(|| "File command failed".to_owned())),
+            Err(error) => Err(error.to_string()),
+        };
+        match response {
+            Ok(FileResponse::Document(snapshot)) => {
+                self.receive(snapshot, reload, window, cx);
+            }
+            Ok(FileResponse::Saved {
+                digest,
+                durability_warning,
+            }) => {
+                let Some(saved) = saved else {
+                    self.fail("Unexpected save response".to_owned(), false, cx);
+                    return;
+                };
+                self.digest = Some(digest);
+                self.error = None;
+                self.external = None;
+                if let Some(editor) = &self.editor {
+                    editor.update(cx, |editor, cx| {
+                        editor.mark_saved(saved, durability_warning, cx);
+                    });
+                }
+                if self.close_after_save {
+                    self.close_after_save = false;
+                    if self.editor.as_ref().is_some_and(|editor| {
+                        !editor.read(cx).is_dirty(cx) && editor.read(cx).save_allows_close()
+                    }) {
+                        Self::close(cx);
+                    }
+                }
+            }
+            Ok(FileResponse::Directory(_) | FileResponse::Location { .. }) => self.fail(
+                "Unexpected directory response".to_owned(),
+                saved.is_some(),
+                cx,
+            ),
+            Err(error) => self.fail(error, saved.is_some(), cx),
+        }
+        cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
 
@@ -383,63 +405,75 @@ impl DocumentPanel {
             self.line = line;
             self.column = column;
         } else {
-            let path = Path::new(&self.path);
-            let editor = cx.new(|cx| FileEditor::new_for_path(contents, path, window, cx));
-            let subscription = cx.subscribe_in(
-                &editor,
-                window,
-                |this, _, event: &FileEditorEvent, window, cx| {
-                    let FileEditorEvent::Save { contents } = event;
-                    if this.pending {
-                        this.fail(
-                            "A file operation is still running; retry Save when it finishes."
-                                .to_owned(),
-                            true,
-                            cx,
-                        );
-                        return;
-                    }
-                    let Some(digest) = this.digest.clone() else {
-                        this.fail(
-                            "Document revision unavailable; reload before saving.".to_owned(),
-                            true,
-                            cx,
-                        );
-                        return;
-                    };
-                    match encode_document(contents) {
-                        Ok(encoded) => this.request(
-                            "files.save",
-                            vec![this.path.clone(), digest, encoded],
-                            Some(contents.clone()),
-                            false,
-                            window,
-                            cx,
-                        ),
-                        Err(error) => this.fail(error.to_string(), true, cx),
-                    }
-                },
-            );
-            let observer = cx.observe(&editor, |_, _, cx| {
-                cx.emit(PanelEvent::LayoutChanged);
-                cx.notify();
-            });
-            self.subscriptions.extend([subscription, observer]);
-            self.editor = Some(editor.clone());
-            let focus = window.focused(cx);
-            editor.update(cx, |editor, cx| {
-                editor.set_cursor_position(self.line, self.column, window, cx);
-            });
-            if self.focus.is_focused(window) && self.active {
-                let focus = editor.read(cx).focus_handle(cx);
+            self.create_editor(contents, window, cx);
+        }
+    }
+
+    fn create_editor(&mut self, contents: String, window: &mut Window, cx: &mut Context<Self>) {
+        let path = Path::new(&self.path);
+        let editor = cx.new(|cx| FileEditor::new_for_path(contents, path, window, cx));
+        let subscription = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &FileEditorEvent, window, cx| {
+                this.on_editor_event(event, window, cx);
+            },
+        );
+        let observer = cx.observe(&editor, |_, _, cx| {
+            cx.emit(PanelEvent::LayoutChanged);
+            cx.notify();
+        });
+        self.subscriptions.extend([subscription, observer]);
+        self.editor = Some(editor.clone());
+        let focus = window.focused(cx);
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(self.line, self.column, window, cx);
+        });
+        if self.focus.is_focused(window) && self.active {
+            let focus = editor.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        } else if !self.active {
+            if let Some(focus) = focus {
                 focus.focus(window, cx);
-            } else if !self.active {
-                if let Some(focus) = focus {
-                    focus.focus(window, cx);
-                } else {
-                    window.blur(cx);
-                }
+            } else {
+                window.blur(cx);
             }
+        }
+    }
+
+    fn on_editor_event(
+        &mut self,
+        event: &FileEditorEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let FileEditorEvent::Save { contents } = event;
+        if self.pending {
+            self.fail(
+                "A file operation is still running; retry Save when it finishes.".to_owned(),
+                true,
+                cx,
+            );
+            return;
+        }
+        let Some(digest) = self.digest.clone() else {
+            self.fail(
+                "Document revision unavailable; reload before saving.".to_owned(),
+                true,
+                cx,
+            );
+            return;
+        };
+        match encode_document(contents) {
+            Ok(encoded) => self.request(
+                "files.save",
+                vec![self.path.clone(), digest, encoded],
+                Some(contents.clone()),
+                false,
+                window,
+                cx,
+            ),
+            Err(error) => self.fail(error.to_string(), true, cx),
         }
     }
 
@@ -643,8 +677,6 @@ impl Panel for DocumentPanel {
 }
 impl Render for DocumentPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let markdown = self.path.to_ascii_lowercase().ends_with(".md")
-            || self.path.to_ascii_lowercase().ends_with(".markdown");
         let mut body = div()
             .id("document-panel")
             .track_focus(&self.focus)
@@ -667,75 +699,89 @@ impl Render for DocumentPanel {
         if self.external.is_some() {
             body = body.child(self.external_change_banner(cx));
         }
-        if let Some(editor) = &self.editor {
-            if self.preview {
-                body = body.child(
-                    div()
-                        .id("document-preview")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(gpui_kit::component::text::markdown(
-                            editor.read(cx).contents(cx),
-                        )),
-                );
-            } else {
-                body = body.child(div().flex_1().min_h_0().child(editor.clone()));
-            }
-        } else {
-            body = body.child(if self.pending {
+        body.child(self.render_content(cx))
+            .child(self.render_status(cx))
+    }
+}
+
+impl DocumentPanel {
+    fn render_content(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let Some(editor) = &self.editor else {
+            return if self.pending {
                 "Loading…"
             } else {
                 "Document unavailable"
-            });
+            }
+            .into_any_element();
+        };
+        if self.preview {
+            div()
+                .id("document-preview")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(gpui_kit::component::text::markdown(
+                    editor.read(cx).contents(cx),
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(editor.clone())
+                .into_any_element()
         }
+    }
+
+    fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
+        let markdown = self.path.to_ascii_lowercase().ends_with(".md")
+            || self.path.to_ascii_lowercase().ends_with(".markdown");
         let position = self
             .editor
             .as_ref()
             .map(|editor| editor.read(cx).cursor_position(cx));
-        body.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .text_sm()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(format!("{} · {}", self.context.host, self.path)),
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .text_sm()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("{} · {}", self.context.host, self.path)),
+            )
+            .when(markdown, |row| {
+                row.child(
+                    Button::new("preview-document")
+                        .label(crate::i18n::t(
+                            cx,
+                            if self.preview {
+                                "common-edit"
+                            } else {
+                                "common-preview"
+                            },
+                        ))
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.preview = !this.preview;
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.notify();
+                        })),
                 )
-                .when(markdown, |row| {
-                    row.child(
-                        Button::new("preview-document")
-                            .label(crate::i18n::t(
-                                cx,
-                                if self.preview {
-                                    "common-edit"
-                                } else {
-                                    "common-preview"
-                                },
-                            ))
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.preview = !this.preview;
-                                cx.emit(PanelEvent::LayoutChanged);
-                                cx.notify();
-                            })),
-                    )
-                })
-                .when_some(position, |row, (line, column)| {
-                    row.child(format!(
-                        "{}:{}",
-                        line.saturating_add(1),
-                        column.saturating_add(1)
-                    ))
-                }),
-        )
+            })
+            .when_some(position, |row, (line, column)| {
+                row.child(format!(
+                    "{}:{}",
+                    line.saturating_add(1),
+                    column.saturating_add(1)
+                ))
+            })
     }
 }
 
