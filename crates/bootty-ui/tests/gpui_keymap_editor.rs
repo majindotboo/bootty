@@ -439,6 +439,30 @@ fn action_search_normalizes_ids_and_ranks_non_contiguous_fuzzy_matches(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn the_table_uses_authoritative_conflicts_without_counting_unbind_rows(cx: &mut TestAppContext) {
+    initialize(cx);
+    let mut projected = snapshot();
+    for binding in &mut projected.bindings {
+        binding.keystrokes = vec!["cmd+t".to_owned()];
+        binding.persisted_keystrokes = "cmd+t".to_owned();
+        binding.context = "Global".to_owned();
+        binding.conflict_count = 0;
+    }
+    projected.bindings[1].kind = KeymapBindingKind::Unbind;
+    let editor = cx.update(|cx| cx.new(|cx| GpuiKeymapEditor::new(projected, cx)));
+    editor.update(cx, |editor, cx| {
+        assert!(
+            editor
+                .visible_rows()
+                .iter()
+                .all(|row| row.conflict_count() == 0)
+        );
+        editor.set_conflicts_only(true, cx);
+        assert_eq!(editor.visible_rows().len(), 0);
+    });
+}
+
+#[gpui_kit::test]
 fn large_catalog_render_reads_reuse_the_projected_row_cache(cx: &mut TestAppContext) {
     initialize(cx);
     let action_count = 4_096;
@@ -465,7 +489,8 @@ fn large_catalog_render_reads_reuse_the_projected_row_cache(cx: &mut TestAppCont
             source: KeymapBindingSource::Default,
             kind: KeymapBindingKind::Binding,
             trigger_options: KeymapTriggerOptions::default(),
-            conflict_count: 0,
+            // The host reports the other 63 bindings sharing this chord and context.
+            conflict_count: 63,
         })
         .collect::<Vec<_>>();
     let editor = cx.update(|cx| {
@@ -1304,6 +1329,56 @@ fn modal_requires_second_confirmation_before_add(cx: &mut TestAppContext) {
             "unexpected add intents: {intents:#?}"
         );
     });
+}
+
+#[gpui_kit::test]
+fn save_conflicts_respect_modifier_sides_and_unbinds(cx: &mut TestAppContext) {
+    initialize(cx);
+    for (existing, kind, conflicts) in [
+        ("left_ctrl+t", KeymapBindingKind::Binding, true),
+        ("right_ctrl+t", KeymapBindingKind::Binding, false),
+        ("left_ctrl+t", KeymapBindingKind::Unbind, false),
+    ] {
+        let mut projected = snapshot();
+        let binding = &mut projected.bindings[0];
+        binding.keystrokes = vec![existing.to_owned()];
+        binding.persisted_keystrokes = existing.to_owned();
+        binding.kind = kind;
+        binding.conflict_count = 0;
+        let (probe, window) = rooted_keymap_probe_with_snapshot(cx, projected);
+        let add = window
+            .debug_bounds("keymap-row-action-0")
+            .expect("create binding action");
+        window.simulate_click(bounds_center(add), Modifiers::none());
+        probe.update(window, |probe, cx| {
+            probe.editor.update(cx, |editor, cx| {
+                editor.set_modal_trigger_options(
+                    KeymapTriggerOptions {
+                        side_sensitive: true,
+                        ..KeymapTriggerOptions::default()
+                    },
+                    cx,
+                );
+                editor.record_modal_keystroke("left_ctrl+t", cx);
+                editor.submit_modal(cx);
+                assert_eq!(
+                    editor.modal_error().is_some(),
+                    conflicts,
+                    "{existing}, {kind:?}"
+                );
+                if conflicts {
+                    editor.submit_modal(cx);
+                }
+            });
+        });
+        window.run_until_parked();
+        probe.update(window, |probe, _| {
+            assert!(
+                matches!(probe.intents.borrow().as_slice(), [KeymapEditorIntent::Add { binding }]
+                if binding.keystrokes == ["left_ctrl+t"])
+            );
+        });
+    }
 }
 
 #[gpui_kit::test]

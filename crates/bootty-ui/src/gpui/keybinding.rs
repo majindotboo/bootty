@@ -6,6 +6,23 @@ use gpui_kit::{
     Styled as _, div,
 };
 
+/// Compare the accepted trigger grammar, including modifier sides, before comparing contexts.
+#[must_use]
+pub fn keybindings_conflict(
+    left: &str,
+    left_context: &str,
+    right: &str,
+    right_context: &str,
+) -> bool {
+    bootty_config::parse_keymap_sequence(left)
+        .ok()
+        .zip(bootty_config::parse_keymap_sequence(right).ok())
+        .is_some_and(|(left, right)| {
+            left.triggers == right.triggers
+                && keybinding_contexts_overlap(left_context, right_context)
+        })
+}
+
 /// Recognize conflicting built-in scopes and predicate subsets with GPUI's own semantics.
 /// Arbitrary intersecting predicates that are not subsets require a satisfiability solver.
 #[must_use]

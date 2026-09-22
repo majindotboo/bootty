@@ -403,7 +403,6 @@ pub enum KeymapEditorRow {
     Binding {
         binding: KeymapBindingSnapshot,
         action: KeymapActionSnapshot,
-        conflict_count: usize,
     },
     Unmapped(KeymapActionSnapshot),
 }
@@ -427,7 +426,7 @@ impl KeymapEditorRow {
     #[must_use]
     pub const fn conflict_count(&self) -> usize {
         match self {
-            Self::Binding { conflict_count, .. } => *conflict_count,
+            Self::Binding { binding, .. } => binding.conflict_count,
             Self::Unmapped(_) => 0,
         }
     }
@@ -438,13 +437,6 @@ struct CachedKeymapEditorRow {
     row: KeymapEditorRow,
     action_search: String,
     normalized_keystrokes: Option<String>,
-}
-
-#[derive(Default)]
-struct ConflictGroup {
-    total: usize,
-    global: usize,
-    contexts: HashMap<String, usize>,
 }
 
 enum ModalOrigin {
@@ -886,20 +878,6 @@ impl GpuiKeymapEditor {
             .map(|action| (action.id.as_str(), action))
             .collect::<HashMap<_, _>>();
 
-        let mut conflict_groups = HashMap::<String, ConflictGroup>::new();
-        for binding in &self.snapshot.bindings {
-            let group = conflict_groups
-                .entry(normalize_keystrokes(&binding.keystrokes))
-                .or_default();
-            let context = normalize_context(&binding.context);
-            group.total = group.total.saturating_add(1);
-            if context == "global" {
-                group.global = group.global.saturating_add(1);
-            }
-            let count = group.contexts.entry(context).or_default();
-            *count = count.saturating_add(1);
-        }
-
         let mut rows = self
             .snapshot
             .bindings
@@ -907,24 +885,9 @@ impl GpuiKeymapEditor {
             .filter_map(|binding| {
                 let action = actions.get(binding.action.as_str()).copied()?;
                 let normalized_keystrokes = normalize_keystrokes(&binding.keystrokes);
-                let context = normalize_context(&binding.context);
-                let group = conflict_groups.get(&normalized_keystrokes)?;
-                let derived_conflicts = if context == "global" {
-                    group.total.saturating_sub(1)
-                } else {
-                    group.global.saturating_add(
-                        group
-                            .contexts
-                            .get(&context)
-                            .copied()
-                            .unwrap_or_default()
-                            .saturating_sub(1),
-                    )
-                };
                 let row = KeymapEditorRow::Binding {
                     binding: binding.clone(),
                     action: action.clone(),
-                    conflict_count: binding.conflict_count.max(derived_conflicts),
                 };
                 Some(CachedKeymapEditorRow {
                     action_search: action_search(action),
@@ -1032,20 +995,19 @@ impl GpuiKeymapEditor {
     }
 
     fn draft_conflict_count(&self, draft: &KeymapBindingDraft, ignored_id: Option<&str>) -> usize {
+        let keystrokes = draft.keystrokes.join(" ");
         self.snapshot
             .bindings
             .iter()
             .filter(|binding| ignored_id != Some(binding.id.as_str()))
+            .filter(|binding| binding.kind != KeymapBindingKind::Unbind)
             .filter(|binding| {
-                super::keybinding::parse_keybinding(&binding.keystrokes.join(" > "))
-                    .zip(super::keybinding::parse_keybinding(
-                        &draft.keystrokes.join(" > "),
-                    ))
-                    .is_some_and(|(binding, draft)| binding == draft)
-                    && super::keybinding::keybinding_contexts_overlap(
-                        &binding.context,
-                        &draft.context,
-                    )
+                super::keybinding::keybindings_conflict(
+                    &binding.persisted_keystrokes,
+                    &binding.context,
+                    &keystrokes,
+                    &draft.context,
+                )
             })
             .count()
     }
