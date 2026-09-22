@@ -14,7 +14,7 @@ use gpui_kit::component::{
     dock::{
         BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockPlacement, DockSkin,
         DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
-        TabGroupRenderer, TilesRenderer,
+        TabGroupRenderer,
     },
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     tab::{Tab, TabBar},
@@ -242,10 +242,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             active: Cell::new(None),
             reveal_active: Rc::new(Cell::new(true)),
         })
-    }
-
-    fn tiles_renderer(&self) -> Rc<dyn TilesRenderer> {
-        self.kit.tiles_renderer()
     }
 }
 

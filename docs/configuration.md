@@ -632,6 +632,7 @@ count. Changes and Diff are native Dock panels: drag their tabs to split or comb
 groups, resize the split, close panels, or toggle the right dock. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
+Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
 
 Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
 index without changing working files. Commit uses only the index; Amend explicitly

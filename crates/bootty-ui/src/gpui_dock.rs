@@ -24,8 +24,8 @@ use gpui_kit::component::{
     menu::{PopupMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Styled, Subscription, Window, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, div, prelude::*,
 };
 
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
@@ -131,12 +131,9 @@ impl ContextPanels {
                 let focus = window.focused(cx);
                 let panel = panel_handle(this.panels.diff.clone());
                 this.add_document_panel(panel, window, cx);
-                activate(
-                    this.panels.diff.read(cx).group.clone(),
-                    this.panels.diff.entity_id(),
-                    window,
-                    cx,
-                );
+                this.area.update(cx, |area, cx| {
+                    area.select_panel(PanelId::from(this.panels.diff.entity_id()), window, cx);
+                });
                 if let Some(focus) = focus {
                     focus.focus(window, cx);
                 }
@@ -734,12 +731,9 @@ impl WorkspaceDock {
             .into_iter()
             .find(|document| PanelId::from(document.entity_id()) == id)
         {
-            activate(
-                document.read(cx).group.clone(),
-                document.entity_id(),
-                window,
-                cx,
-            );
+            self.area.update(cx, |area, cx| {
+                area.select_panel(id, window, cx);
+            });
             document.update(cx, |document, cx| document.go_to(line, column, window, cx));
         }
     }
@@ -991,7 +985,6 @@ impl WorkspaceDock {
                             PaneRef::Tabs { panels, active_ix } => {
                                 panels.get(active_ix) == Some(&id)
                             }
-                            PaneRef::Tiles { .. } => true,
                             PaneRef::Split { .. } => false,
                         })
                 })
@@ -1527,25 +1520,6 @@ impl Render for WorkspaceDock {
     }
 }
 
-fn activate(
-    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
-    panel: EntityId,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if let Some(group) = group {
-        _ = group.update(cx, |group, cx| {
-            if let Some(index) = group
-                .panels()
-                .iter()
-                .position(|candidate| candidate.panel_id(cx) == PanelId::from(panel))
-            {
-                group.select_tab(index, window, cx);
-            }
-        });
-    }
-}
-
 /// Remove before adding so a panel never belongs to two trees.
 fn evict_center_panel<P: Panel>(
     area: &mut DockArea,
@@ -1577,7 +1551,6 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
                     visit(child, format!("{path}/{ix}"), groups);
                 }
             }
-            PaneRef::Tiles { .. } => {}
         }
     }
     let mut groups = Vec::new();
@@ -1626,6 +1599,6 @@ fn panel_tab_index(
         .find_node(node)
         .and_then(|node| match node.kind() {
             PaneRef::Tabs { panels, .. } => panels.iter().position(|panel| *panel == id),
-            _ => None,
+            PaneRef::Split { .. } => None,
         })
 }

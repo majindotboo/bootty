@@ -174,7 +174,6 @@ fn restored_panels(state: &PanelState) -> Vec<PanelState> {
 #[case("StackPanel", PanelInfo::panel(serde_json::Value::Null))]
 #[case("TabPanel", PanelInfo::tabs(0))]
 #[case("TabPanel", PanelInfo::panel(serde_json::Value::Null))]
-#[case("Tiles", PanelInfo::tiles(Vec::new()))]
 fn empty_center_restores_only_the_terminal_panel(#[case] name: &str, #[case] info: PanelInfo) {
     let leaf = terminal_leaf_state(&window_id(), "shell");
     let reconciled = replace_terminal_region(
@@ -193,7 +192,7 @@ fn empty_center_restores_only_the_terminal_panel(#[case] name: &str, #[case] inf
 
 #[rstest]
 #[case("StackPanel", PanelInfo::stack(vec![gpui_kit::px(240.)], gpui_kit::Axis::Vertical))]
-#[case("Tiles", PanelInfo::tiles(vec![gpui_kit::component::dock::TileMeta::default()]))]
+#[case("StackPanel", PanelInfo::stack(vec![gpui_kit::px(240.)], gpui_kit::Axis::Horizontal))]
 fn terminal_adoption_restores_existing_container_siblings(
     #[case] name: &str,
     #[case] info: PanelInfo,
@@ -260,8 +259,8 @@ proptest! {
 #[rstest]
 #[case(PanelInfo::stack(vec![gpui_kit::px(100.), gpui_kit::px(240.), gpui_kit::px(180.)], gpui_kit::Axis::Vertical),
        PanelInfo::stack(vec![gpui_kit::px(100.), gpui_kit::px(180.)], gpui_kit::Axis::Vertical))]
-#[case(PanelInfo::tiles((0..3).map(|z_index| gpui_kit::component::dock::TileMeta { z_index, ..Default::default() }).collect()),
-       PanelInfo::tiles([0, 2].map(|z_index| gpui_kit::component::dock::TileMeta { z_index, ..Default::default() }).to_vec()))]
+#[case(PanelInfo::stack(vec![gpui_kit::px(100.), gpui_kit::px(240.), gpui_kit::px(180.)], gpui_kit::Axis::Horizontal),
+       PanelInfo::stack(vec![gpui_kit::px(100.), gpui_kit::px(180.)], gpui_kit::Axis::Horizontal))]
 fn repairing_duplicate_terminal_leaves_keeps_surviving_geometry(
     #[case] original: PanelInfo,
     #[case] expected: PanelInfo,
@@ -269,12 +268,7 @@ fn repairing_duplicate_terminal_leaves_keeps_surviving_geometry(
     let leaf = terminal_leaf_state(&window_id(), "shell");
     let repaired = replace_terminal_region(
         PanelState {
-            panel_name: if matches!(original, PanelInfo::Stack { .. }) {
-                "StackPanel"
-            } else {
-                "Tiles"
-            }
-            .to_owned(),
+            panel_name: "StackPanel".to_owned(),
             children: vec![leaf.clone(), leaf.clone(), document_panel()],
             info: original,
         },
