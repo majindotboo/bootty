@@ -76,6 +76,8 @@ pub struct GitSessionFacts {
 #[derive(Clone, Debug)]
 struct CachedFacts {
     identity: String,
+    // Returning to the same path, or recreating a pruned entry, must not revive old workers.
+    incarnation: Arc<()>,
     facts: GitFacts,
     seen_at: Instant,
     live_at: Option<Instant>,
@@ -93,6 +95,7 @@ impl CachedFacts {
     fn new(identity: String, now: Instant, revision: u64) -> Self {
         Self {
             identity,
+            incarnation: Arc::new(()),
             facts: GitFacts {
                 worktree_revision: revision,
                 ..GitFacts::default()
@@ -194,7 +197,7 @@ where
     /// `cache_key` is an owner-provided host/repository/worktree identity.
     pub fn refresh(&self, cache_key: &str, cwd: &str, selected: bool, now: Instant) -> GitFacts {
         let identity = format!("{cache_key}\0{cwd}");
-        self.refresh_with_identity(cache_key, cwd, selected, now, identity)
+        self.refresh_with_identity(cache_key, cwd, selected, now, &identity)
     }
 
     fn refresh_with_identity(
@@ -203,7 +206,7 @@ where
         cwd: &str,
         selected: bool,
         now: Instant,
-        identity: String,
+        identity: &str,
     ) -> GitFacts {
         if self.retired.load(Ordering::Acquire) {
             return GitFacts::default();
@@ -215,16 +218,16 @@ where
             self.revisions.ensure_watched(cwd.to_owned());
             revision
         };
-        let mut start_live = false;
-        let mut start_diff = false;
+        let mut start_live = None;
+        let mut start_diff = None;
         let mut snapshot = GitFacts::default();
         let mut schedule = self.schedule.lock().ok();
         if let Ok(mut entries) = self.entries.lock() {
             let entry = entries
                 .entry(cache_key.to_owned())
-                .or_insert_with(|| CachedFacts::new(identity.clone(), now, revision));
+                .or_insert_with(|| CachedFacts::new(identity.to_owned(), now, revision));
             if entry.identity != identity {
-                *entry = CachedFacts::new(identity.clone(), now, revision);
+                *entry = CachedFacts::new(identity.to_owned(), now, revision);
             }
             entry.seen_at = now;
             entry.facts.worktree_revision = revision;
@@ -250,7 +253,7 @@ where
                 entry.live_revision = revision;
                 if !cwd.is_empty() {
                     entry.live_running = true;
-                    start_live = true;
+                    start_live = Some(Arc::clone(&entry.incarnation));
                 }
             }
 
@@ -287,7 +290,7 @@ where
                         entry.diff_running = true;
                         entry.diff_at = Some(now);
                         entry.diff_revision = revision;
-                        start_diff = true;
+                        start_diff = Some(Arc::clone(&entry.incarnation));
                     }
                 }
             }
@@ -295,11 +298,11 @@ where
         }
 
         drop(schedule);
-        if start_live {
-            self.spawn_live(cache_key.to_owned(), identity.clone(), cwd.to_owned());
+        if let Some(incarnation) = start_live {
+            self.spawn_live(cache_key.to_owned(), incarnation, cwd.to_owned());
         }
-        if start_diff {
-            self.spawn_diff(cache_key.to_owned(), identity, cwd.to_owned());
+        if let Some(incarnation) = start_diff {
+            self.spawn_diff(cache_key.to_owned(), incarnation, cwd.to_owned());
         }
         snapshot
     }
@@ -314,7 +317,7 @@ where
         // closest available equivalent. It prevents a completed job for a replaced pane from
         // publishing into the new pane's row while retaining one cache entry per session.
         let identity = format!("{cache_key}\0{cwd}\0{}", input.pane_pid.unwrap_or_default());
-        let mut facts = self.refresh_with_identity(&cache_key, cwd, input.selected, now, identity);
+        let mut facts = self.refresh_with_identity(&cache_key, cwd, input.selected, now, &identity);
         GitSessionFacts {
             pane_pid: input.pane_pid,
             branch: facts.branch.take(),
@@ -363,7 +366,7 @@ where
         self.retired.store(true, Ordering::Release);
     }
 
-    fn spawn_live(&self, cache_key: String, identity: String, cwd: String) {
+    fn spawn_live(&self, cache_key: String, incarnation: Arc<()>, cwd: String) {
         let git = self.git.clone();
         let entries = Arc::clone(&self.entries);
         let retired = Arc::clone(&self.retired);
@@ -377,7 +380,7 @@ where
             }
             if let Ok(mut entries) = entries.lock()
                 && let Some(entry) = entries.get_mut(&cache_key)
-                && entry.identity == identity
+                && Arc::ptr_eq(&entry.incarnation, &incarnation)
             {
                 if branch.is_some() {
                     entry.facts.branch = branch;
@@ -392,7 +395,7 @@ where
         });
     }
 
-    fn spawn_diff(&self, cache_key: String, identity: String, cwd: String) {
+    fn spawn_diff(&self, cache_key: String, incarnation: Arc<()>, cwd: String) {
         let git = self.git.clone();
         let entries = Arc::clone(&self.entries);
         let retired = Arc::clone(&self.retired);
@@ -406,7 +409,7 @@ where
             }
             if let Ok(mut entries) = entries.lock()
                 && let Some(entry) = entries.get_mut(&cache_key)
-                && entry.identity == identity
+                && Arc::ptr_eq(&entry.incarnation, &incarnation)
             {
                 (entry.facts.diff_added, entry.facts.diff_removed) = counts
                     .map_or((None, None), |(added, removed)| {
