@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use crate::{
     commands::{
-        AgentCommandExecutor, AgentInvocation, command_descriptors, failed, nested_invocation,
-        success,
+        AgentCommandExecutor, AgentInvocation, Operation, command_descriptors, failed,
+        nested_invocation, success,
     },
     events::{AgentEvent, AgentEventPublisher},
     provider::{AgentKind, AgentPaneKey, AgentSource, AgentState, AgentStatus},
@@ -154,23 +154,18 @@ impl AgentService {
             return self.lifecycle_failure(&request.cancellation, request.deadline);
         }
         let command = request.invocation.command.as_str();
-        let Some((provider, operation)) = parse_command(command) else {
+        let Some(command) = crate::commands::resolve(command) else {
             return failed(
                 "unknown_command",
                 format!("unknown agent command `{command}`"),
             );
         };
-        if !provider_command_exists(command) {
-            return failed(
-                "unknown_command",
-                format!("unknown agent command `{command}`"),
-            );
-        }
+        let provider = command.provider;
         let args = &request.invocation.arguments;
-        if let Some(error) = validate_arguments(operation, args) {
+        if let Some(error) = command.validate_arguments(args) {
             return failed("invalid_arguments", error);
         }
-        match operation {
+        match command.operation {
             Operation::Start => self.start(provider, request, None),
             Operation::Resume => self.start(provider, request, Some(false)),
             Operation::Fork => self.start(provider, request, Some(true)),
@@ -180,25 +175,18 @@ impl AgentService {
             Operation::Abort | Operation::Interrupt => self.write_control(request),
             Operation::Stop => self.stop(request),
             Operation::State => {
-                if args.len() > 1 {
-                    failed(
-                        "invalid_arguments",
-                        "state accepts at most one pane argument",
-                    )
-                } else {
-                    let pane = args
-                        .first()
-                        .filter(|pane| !pane.is_empty())
-                        .map(String::as_str);
-                    let scope = request
-                        .scope
-                        .clone()
-                        .or_else(|| pane.and_then(|pane| self.resolver.scope_for_pane(pane)));
-                    success(
-                        self.snapshot_scoped(provider, scope.as_deref(), pane)
-                            .to_value(),
-                    )
-                }
+                let pane = args
+                    .first()
+                    .filter(|pane| !pane.is_empty())
+                    .map(String::as_str);
+                let scope = request
+                    .scope
+                    .clone()
+                    .or_else(|| pane.and_then(|pane| self.resolver.scope_for_pane(pane)));
+                success(
+                    self.snapshot_scoped(provider, scope.as_deref(), pane)
+                        .to_value(),
+                )
             }
             Operation::Ingest => self.ingest_command(provider, request),
             Operation::Acknowledge => self.acknowledge(provider, request),
@@ -249,8 +237,8 @@ impl AgentService {
             let Ok(mut store) = self.state.lock() else {
                 return failed("state_unavailable", "agent state lock is poisoned");
             };
-            if !self.is_active() {
-                return self.lifecycle_failure(cancellation, deadline);
+            if let Err(outcome) = self.begin_state_mutation(cancellation, deadline) {
+                return outcome;
             }
             let next_sequence = store.attention_sequence.saturating_add(1);
             let (snapshot, remove) = {
@@ -284,9 +272,6 @@ impl AgentService {
             }
             snapshot
         };
-        if !self.ready(cancellation, deadline) {
-            return self.lifecycle_failure(cancellation, deadline);
-        }
         let event = AgentEvent {
             provider,
             scope,
@@ -412,6 +397,9 @@ impl AgentService {
         let Ok(mut store) = self.state.lock() else {
             return failed("state_unavailable", "agent state lock is poisoned");
         };
+        if let Err(outcome) = self.begin_state_mutation(&request.cancellation, request.deadline) {
+            return outcome;
+        }
         let Some(state) = store
             .panes
             .get_mut(&provider)
@@ -706,6 +694,22 @@ impl AgentService {
         self.is_active() && !cancellation.is_cancelled() && Instant::now() < deadline
     }
 
+    fn begin_state_mutation(
+        &self,
+        cancellation: &CommandCancellation,
+        deadline: Instant,
+    ) -> Result<(), CommandOutcome> {
+        if !self.ready(cancellation, deadline) {
+            return Err(self.lifecycle_failure(cancellation, deadline));
+        }
+        // Nested invocations can already be started by the host. Claim pending requests before
+        // changing state so a late cancellation cannot report a mutation as rolled back.
+        if !cancellation.try_start() && cancellation.is_cancelled() {
+            return Err(self.lifecycle_failure(cancellation, deadline));
+        }
+        Ok(())
+    }
+
     fn begin_publication(&self) -> bool {
         let Ok(_gate) = self.publication.lock() else {
             return false;
@@ -739,10 +743,7 @@ impl CommandCatalogSource for AgentService {
     }
 
     fn describe(&self, id: &str) -> Option<bootty_control::CommandDescriptor> {
-        crate::commands::descriptors()
-            .iter()
-            .find(|command| command.id == id)
-            .cloned()
+        crate::commands::resolve(id).map(|command| command.descriptor.clone())
     }
 
     fn topics(&self) -> BTreeSet<String> {
@@ -782,82 +783,6 @@ impl CommandCatalogSource for AgentService {
         publish();
         Ok(())
     }
-}
-
-#[derive(Clone, Copy)]
-enum Operation {
-    Start,
-    Resume,
-    Fork,
-    Prompt,
-    Steer,
-    FollowUp,
-    Abort,
-    Interrupt,
-    State,
-    Stop,
-    Ingest,
-    Acknowledge,
-}
-
-fn parse_command(command: &str) -> Option<(AgentKind, Operation)> {
-    let (provider, operation) = command.strip_prefix("agents.")?.split_once('.')?;
-    let provider = match provider {
-        "pi" => AgentKind::Pi,
-        "codex" => AgentKind::Codex,
-        "claude" => AgentKind::Claude,
-        _ => return None,
-    };
-    let operation = match operation {
-        "acknowledge" => Operation::Acknowledge,
-        "start" => Operation::Start,
-        "resume" => Operation::Resume,
-        "fork" => Operation::Fork,
-        "prompt" => Operation::Prompt,
-        "steer" => Operation::Steer,
-        "follow_up" => Operation::FollowUp,
-        "abort" => Operation::Abort,
-        "interrupt" => Operation::Interrupt,
-        "state" => Operation::State,
-        "stop" => Operation::Stop,
-        "ingest" => Operation::Ingest,
-        _ => return None,
-    };
-    Some((provider, operation))
-}
-
-fn provider_command_exists(command: &str) -> bool {
-    crate::commands::descriptors()
-        .iter()
-        .any(|descriptor| descriptor.id == command)
-}
-
-fn validate_arguments(operation: Operation, arguments: &[String]) -> Option<String> {
-    let maximum = match operation {
-        Operation::Start | Operation::Ingest => 3,
-        Operation::Resume | Operation::Fork => 4,
-        Operation::Prompt
-        | Operation::Steer
-        | Operation::FollowUp
-        | Operation::State
-        | Operation::Acknowledge => 1,
-        Operation::Abort | Operation::Interrupt | Operation::Stop => 0,
-    };
-    if arguments.len() > maximum {
-        return Some(format!("command accepts at most {maximum} argument(s)"));
-    }
-    let required = matches!(
-        operation,
-        Operation::Prompt
-            | Operation::Steer
-            | Operation::FollowUp
-            | Operation::Ingest
-            | Operation::Acknowledge
-    );
-    if required && arguments.is_empty() {
-        return Some("required argument is missing".to_owned());
-    }
-    None
 }
 
 fn apply_event(state: &mut AgentState, provider: AgentKind, event: &Value) {

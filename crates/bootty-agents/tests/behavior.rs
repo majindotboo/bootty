@@ -13,6 +13,7 @@ use bootty_control::{
     Caller, CommandCancellation, CommandCatalogSource, CommandInvocation, CommandOutcome,
     CommandTarget, ResourceKind,
 };
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -129,6 +130,45 @@ fn descriptors_cover_all_provider_commands() {
     assert!(ids.contains(&"agents.pi.abort".to_owned()));
     assert!(ids.contains(&"agents.claude.abort".to_owned()));
     assert!(!ids.contains(&"agents.claude.stop".to_owned()));
+}
+
+proptest! {
+    #[test]
+    fn advertised_argument_bounds_are_enforced_before_provider_effects(
+        descriptor in prop::sample::select(bootty_agents::command_descriptors()),
+        extra in 1usize..8,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Events::default());
+        let service = service(calls.clone(), events.clone());
+        let schema = &descriptor.arguments.arguments;
+        let mut lengths = vec![schema.len().saturating_add(extra)];
+        lengths.extend(schema.iter().position(|argument| argument.required));
+        for length in lengths {
+            let outcome = service.invoke(&request(
+                &descriptor.id,
+                vec!["argument".to_owned(); length],
+                None,
+                false,
+            ));
+            prop_assert!(matches!(outcome, CommandOutcome::Failed { ref code, .. } if code == "invalid_arguments"), "{}: {:?}", descriptor.id, outcome);
+        }
+        pretty_assertions::assert_eq!(calls.lock().unwrap().len(), 0);
+        pretty_assertions::assert_eq!(events.0.lock().unwrap().len(), 0);
+    }
+}
+
+#[rstest::rstest]
+#[case("agents.claude.stop")]
+#[case("agents.codex.abort")]
+#[case("agents.codex.follow_up")]
+#[case("agents.pi.interrupt")]
+fn unadvertised_provider_operations_cannot_execute(#[case] command: &str) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let service = service(calls.clone(), Arc::new(Events::default()));
+    let outcome = service.invoke(&request(command, Vec::new(), None, false));
+    assert!(matches!(outcome, CommandOutcome::Failed { code, .. } if code == "unknown_command"));
+    pretty_assertions::assert_eq!(calls.lock().unwrap().len(), 0);
 }
 
 #[test]
@@ -592,4 +632,88 @@ fn resume_without_an_explicit_or_target_reported_session_creates_nothing() {
     let outcome = service.invoke(&request("agents.codex.resume", vec![], None, false));
     assert!(matches!(outcome, CommandOutcome::Failed { .. }));
     assert!(calls.lock().unwrap().is_empty());
+}
+
+#[rstest::rstest]
+#[case(AgentKind::Pi)]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Claude)]
+fn cancellation_during_scope_resolution_leaves_no_agent_state(#[case] provider: AgentKind) {
+    let cancellation = CommandCancellation::new();
+    let cancel = cancellation.clone();
+    let resolver: Arc<dyn AgentPaneResolver> = Arc::new(move |_: &str| {
+        let _ = cancel.cancel();
+        Some("space".to_owned())
+    });
+    let events = Arc::new(Events::default());
+    let service = AgentService::new_with_resolver(
+        Arc::new(|_: CommandInvocation, _, _| CommandOutcome::success()),
+        events.clone(),
+        resolver,
+    );
+    let outcome = service.ingest(
+        provider,
+        Some("pane"),
+        json!({"type": "agent_start", "hook_event_name": "SessionStart"}),
+        Instant::now().checked_add(Duration::from_secs(60)).unwrap(),
+        &cancellation,
+    );
+    pretty_assertions::assert_eq!(outcome, CommandOutcome::cancelled());
+    pretty_assertions::assert_eq!(service.pane_states(provider), Vec::new());
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[derive(Default)]
+struct CancellingSubscriber(Mutex<Vec<bool>>);
+
+impl AgentEventPublisher for CancellingSubscriber {
+    fn publish(
+        &self,
+        _identity: &str,
+        _generation: u64,
+        _topic: &str,
+        _payload: Value,
+        _deadline: Instant,
+        cancellation: &CommandCancellation,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(cancellation.cancel());
+        Err("subscriber rejected the event".to_owned())
+    }
+}
+
+#[rstest::rstest]
+#[case(AgentKind::Pi)]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Claude)]
+fn committed_agent_state_survives_subscriber_failure_and_late_cancellation(
+    #[case] provider: AgentKind,
+    #[values(false, true)] already_started: bool,
+) {
+    let cancellation = CommandCancellation::new();
+    if already_started {
+        assert!(cancellation.try_start());
+    }
+    let events = Arc::new(CancellingSubscriber::default());
+    let service = AgentService::new(
+        Arc::new(|_: CommandInvocation, _, _| CommandOutcome::success()),
+        events.clone(),
+    );
+    let outcome = service.ingest(
+        provider,
+        Some("pane"),
+        json!({"type": "agent_start", "hook_event_name": "SessionStart"}),
+        Instant::now().checked_add(Duration::from_secs(60)).unwrap(),
+        &cancellation,
+    );
+    let CommandOutcome::Success { value, warnings } = outcome else {
+        panic!("state was committed: {outcome:?}");
+    };
+    pretty_assertions::assert_eq!(value, service.snapshot(provider, Some("pane")).to_value());
+    pretty_assertions::assert_eq!(warnings.len(), 1);
+    pretty_assertions::assert_eq!(warnings.first().unwrap().code, "event_publish_failed");
+    pretty_assertions::assert_eq!(*events.0.lock().unwrap(), vec![false]);
+    assert!(!cancellation.is_cancelled());
 }

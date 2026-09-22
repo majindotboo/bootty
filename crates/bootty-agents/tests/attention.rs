@@ -32,6 +32,7 @@ fn acknowledgements_do_not_hide_newer_attention(
     #[case] start: &str,
     #[case] stop: &str,
     #[case] field: &str,
+    #[values(false, true)] already_started: bool,
 ) {
     let service = AgentService::new(
         Arc::new(|_, _, _| CommandOutcome::success()),
@@ -73,6 +74,10 @@ fn acknowledgements_do_not_hide_newer_attention(
     let second = service.snapshot_scoped(provider, Some("host-a"), Some("pane"));
     assert!(second.attention_sequence > first.attention_sequence);
     let acknowledge = |sequence: u64| {
+        let cancellation = CommandCancellation::new();
+        if already_started {
+            assert!(cancellation.try_start());
+        }
         let mut command = CommandInvocation::from_action(
             &format!("agents.{provider}.acknowledge"),
             Caller::Internal,
@@ -86,7 +91,12 @@ fn acknowledgements_do_not_hide_newer_attention(
             cancellation.clone(),
         );
         request.launch_context.pane = Some("pane".to_owned());
-        service.invoke(&request)
+        let outcome = service.invoke(&request);
+        assert!(
+            !cancellation.cancel(),
+            "acknowledgement already changed state"
+        );
+        outcome
     };
     assert!(matches!(
         acknowledge(first.attention_sequence),
