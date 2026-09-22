@@ -1,8 +1,8 @@
 [tools]
 rust = { version = "nightly", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
 zig = "0.16.0"
-"cargo:cargo-xwin" = "0.23.0"
-"cargo:cargo-zigbuild" = "0.23.0"
+"cargo:cargo-xwin" = "0.23.1"
+"cargo:cargo-zigbuild" = "0.23.4"
 
 [tasks.build]
 description = "Build the bootty app with dynamic local linkage; pass --static for distribution or --fast for fast-release"

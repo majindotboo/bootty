@@ -14,7 +14,7 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up mise toolchain
         uses: jdx/mise-action@v4
@@ -34,7 +34,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up mise toolchain
         uses: jdx/mise-action@v4
@@ -56,7 +56,7 @@ jobs:
         run: mise run daemon:size -- daemon-output/bootty-daemon-x86_64-unknown-linux-gnu
 
       - name: Upload daemon artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daemon-${{ matrix.target }}
           if-no-files-found: error

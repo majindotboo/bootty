@@ -58,7 +58,7 @@ jobs:
             package-asset: Bootty-linux-x86_64.tar.gz
             release-asset: bootty-x86_64-unknown-linux-gnu.tar.gz
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -100,7 +100,7 @@ jobs:
         run: cargo clean -p libghostty-vt-sys
 
       - name: Download daemon matrix
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: daemon-*
           path: target/bootty-daemons
@@ -116,7 +116,7 @@ jobs:
         run: mise run release:rename-asset -- "dist/${{ matrix.package-asset }}" "dist/${{ matrix.release-asset }}"
 
       - name: Upload release asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
@@ -128,7 +128,7 @@ jobs:
     needs: [package, daemon-artifacts]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -136,7 +136,7 @@ jobs:
         uses: jdx/mise-action@v4
 
       - name: Download release assets
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
