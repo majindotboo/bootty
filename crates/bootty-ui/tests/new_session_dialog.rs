@@ -456,3 +456,28 @@ fn worktree_form_keeps_its_project_and_normalizes_captured_fields(
     })
     .expect("worktree form property");
 }
+
+#[rstest::rstest]
+#[case::absolute_home(false)]
+#[case::abbreviated_home(true)]
+fn directory_search_accepts_both_home_path_spellings(#[case] abbreviated: bool) {
+    let home = bootty_git::home_dir().expect("home directory");
+    let path = home
+        .join("bootty-picker-project")
+        .to_string_lossy()
+        .into_owned();
+    let mut dialog = NewSessionDialog::from_projects(vec![project(&path, false)]);
+    let filter = if abbreviated {
+        "~/bootty-picker-project".to_owned()
+    } else {
+        path.clone()
+    };
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: dialog.spec().id,
+            value: filter,
+        },
+        &[],
+    );
+    assert!(project_row(&dialog.spec(), &path).action.is_some());
+}

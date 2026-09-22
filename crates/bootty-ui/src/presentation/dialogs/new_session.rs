@@ -517,7 +517,11 @@ fn project_entries(
         .filter(|project| project.favorite)
         .chain(projects.iter().filter(|project| !project.favorite))
         .map(|project| {
-            SearchableEntry::new(project.clone(), display_project_path(&project.path, remote))
+            let mut entry =
+                SearchableEntry::new(project.clone(), display_project_path(&project.path, remote));
+            // Display paths may abbreviate home; absolute path input must still find the project.
+            entry.keywords.push(project.path.clone());
+            entry
         })
         .collect()
 }
