@@ -1237,3 +1237,23 @@ fn sustained_output_preserves_the_tail_without_unbounded_worker_backlog() {
         }
     }
 }
+
+#[rstest::rstest]
+#[case::waiting(true)]
+#[case::abandoned(false)]
+fn worker_claim_requires_a_waiting_caller(#[case] waiting: bool) {
+    let (request, response) = bootty_terminal::terminal_session::worker_request();
+    let response = if waiting {
+        Some(response)
+    } else {
+        drop(response);
+        None
+    };
+
+    assert_eq!(request.try_claim(), waiting);
+    if let Some(response) = response {
+        assert!(!request.try_claim(), "a request can only be claimed once");
+        request.send("captured output");
+        assert_eq!(response.receive("capture").unwrap(), "captured output");
+    }
+}

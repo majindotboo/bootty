@@ -599,6 +599,7 @@ impl GpuiWorkspace {
         cx.observe_window_activation(window, move |this, window, cx| {
             let active = window.is_window_active();
             this.input.window_focused(active);
+            this.frame_update_pending = true;
             terminal_for_activation.update(cx, |terminal, cx| {
                 terminal.set_window_focused(active, cx);
             });

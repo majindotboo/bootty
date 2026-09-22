@@ -291,7 +291,7 @@ impl GpuiTerminalView {
             self.scrollbar.requested.set(None);
             self.scrollbar_epoch = self.scrollbar_epoch.wrapping_add(1);
         }
-        self.input.window_focused(focused);
+        self.input.observe_window_focus(focused);
         let animate_cursor = self
             .presentation
             .as_ref()
