@@ -1137,6 +1137,9 @@ impl GpuiWorkspace {
         let close = matches!(intent, SettingsIntent::Close);
         let open_keymap = matches!(&intent, SettingsIntent::Invoke(id) if id == "keymap:open");
         let open_config = matches!(&intent, SettingsIntent::Invoke(id) if id == "config:edit");
+        if matches!(intent, SettingsIntent::DiscardChanges) {
+            self.state.reload_config(&mut self.pending_effects);
+        }
         if let SettingsIntent::Invoke(id) = &intent {
             if id == "config:reload" {
                 self.state.reload_config(&mut self.pending_effects);

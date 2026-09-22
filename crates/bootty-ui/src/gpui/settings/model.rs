@@ -378,6 +378,7 @@ pub enum RemoteTestState {
 pub enum SettingsIntent {
     Close,
     Apply,
+    DiscardChanges,
     SetText {
         id: String,
         value: String,

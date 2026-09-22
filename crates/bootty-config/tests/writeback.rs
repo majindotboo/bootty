@@ -10,7 +10,7 @@ use bootty_config::color::Color;
 use bootty_config::config::{
     ExtensionSettingValue, SegmentAlign, SshAuthenticationConfig, SshHostKeyPolicyConfig,
     SshProfileConfig, StatusSegment, commit_config_document, load_config_document,
-    load_config_from_path, update_config_document,
+    load_config_from_path, load_or_create_config_document, update_config_document,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -323,6 +323,56 @@ fn whole_document_commit_validates_before_replacement() {
             .expect("read committed config")
             .starts_with("# keep me")
     );
+}
+
+#[rstest]
+#[case::edited(
+    Some("[window]\ntitle = 'original'\n"),
+    Some("[window]\ntitle = 'external'\n")
+)]
+#[case::comment(Some("# original\n"), Some("# external\n"))]
+#[case::deleted(Some("# original\n"), None)]
+#[case::created(None, Some(""))]
+fn a_stale_document_cannot_overwrite_a_concurrent_file_change(
+    #[case] original: Option<&str>,
+    #[case] external: Option<&str>,
+    #[values(false, true)] during_validation: bool,
+) {
+    let directory = assert_fs::TempDir::new().expect("temporary config directory");
+    let path = directory.path().join("config.toml");
+    if let Some(original) = original {
+        fs::write(&path, original).unwrap();
+    }
+    let mut candidate = load_or_create_config_document(&path).unwrap();
+    candidate.set_str(&["window", "title"], "draft").unwrap();
+    let change_file = || match external {
+        Some(external) => fs::write(&path, external).unwrap(),
+        None => fs::remove_file(&path).unwrap(),
+    };
+    if !during_validation {
+        change_file();
+    }
+    let result = commit_config_document(&path, candidate, |_| {
+        if during_validation {
+            change_file();
+        }
+        Ok(())
+    });
+    assert!(result.is_err(), "a stale draft must not replace the file");
+    assert_eq!(fs::read_to_string(&path).ok().as_deref(), external);
+}
+
+#[rstest]
+fn accepted_documents_can_be_edited_again_without_reloading() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("config.toml");
+    let mut document = load_or_create_config_document(&path).unwrap();
+    for title in ["first", "second", "third"] {
+        document.set_str(&["window", "title"], title).unwrap();
+        let (accepted, ()) = commit_config_document(&path, document, |_| Ok(())).unwrap();
+        assert_eq!(accepted.config.window.title, title);
+        document = accepted.document;
+    }
 }
 
 #[test]

@@ -7,9 +7,9 @@ use bootty_config::{
 };
 
 use crate::settings_session::{
-    DefaultRemote, DraftWriteback, FontFeatureDraft, ModuleOutcome, RemoteDraft,
-    RemoteEditorSnapshot, RemoteProfile, SettingsEffect, SettingsOutcome, StatusSegmentEdit,
-    dedupe_font_features, remotes::RemoteState, status_segments::apply_status_segment_edit,
+    DraftWriteback, FontFeatureDraft, ModuleOutcome, RemoteDraft, RemoteEditorSnapshot,
+    SettingsEffect, SettingsOutcome, SettingsWriteSource, StatusSegmentEdit, dedupe_font_features,
+    remotes::RemoteState, status_segments::apply_status_segment_edit,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -17,11 +17,6 @@ pub struct Catalogs {
     /// Installed font families reported by the native host text system.
     pub font_families: Arc<[String]>,
     pub status_modules: Vec<String>,
-    pub top_status_segments: Vec<StatusSegment>,
-    pub bottom_status_segments: Vec<StatusSegment>,
-    pub remotes: Vec<RemoteProfile>,
-    pub default_remote: DefaultRemote,
-    pub environment: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -30,7 +25,7 @@ pub struct EnvironmentDraft {
     pub value: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AcceptedSettings {
     pub revision: u64,
     pub config: Arc<BoottyConfig>,
@@ -46,13 +41,13 @@ pub struct SettingsSession {
     font_families: Arc<[String]>,
     writeback: DraftWriteback,
     status_modules: Vec<String>,
-    top_status_segments: Vec<StatusSegment>,
-    bottom_status_segments: Vec<StatusSegment>,
+    top_status_segments: Option<Vec<StatusSegment>>,
+    bottom_status_segments: Option<Vec<StatusSegment>>,
     remotes: RemoteState,
     integration_errors: BTreeMap<String, String>,
     unscoped_integration_error: Option<String>,
     environment: Vec<EnvironmentDraft>,
-    environment_draft_dirty: bool,
+    environment_unsubmitted: bool,
     effects: Vec<SettingsEffect>,
 }
 
@@ -61,9 +56,8 @@ impl SettingsSession {
     pub fn new(accepted: AcceptedSettings, catalogs: Catalogs) -> Self {
         let writeback = DraftWriteback::new(accepted.document, accepted.schema);
         let mut remotes = RemoteState::default();
-        remotes.set_profiles(catalogs.remotes);
-        remotes.set_default(catalogs.default_remote);
-        let environment = environment_drafts(catalogs.environment);
+        remotes.reconcile(&accepted.config);
+        let environment = environment_drafts(accepted.config.session.env.clone());
         Self {
             accepted_revision: accepted.revision,
             defaults: BoottyConfig::default(),
@@ -71,13 +65,13 @@ impl SettingsSession {
             font_families: catalogs.font_families,
             writeback,
             status_modules: catalogs.status_modules,
-            top_status_segments: catalogs.top_status_segments,
-            bottom_status_segments: catalogs.bottom_status_segments,
+            top_status_segments: None,
+            bottom_status_segments: None,
             remotes,
             integration_errors: BTreeMap::new(),
             unscoped_integration_error: None,
             environment,
-            environment_draft_dirty: false,
+            environment_unsubmitted: false,
             effects: Vec::new(),
         }
     }
@@ -88,6 +82,10 @@ impl SettingsSession {
             return;
         }
         self.config = accepted.config;
+        self.remotes.reconcile(&self.config);
+        if !self.environment_unsubmitted && !self.writeback.has_edit("session.env") {
+            self.environment = environment_drafts(self.config.session.env.clone());
+        }
         if accepted.revision == self.accepted_revision {
             return;
         }
@@ -96,16 +94,40 @@ impl SettingsSession {
         self.writeback.reconcile(accepted.document);
     }
 
+    /// Discard only config edits after an explicit user request. Remote and integration work
+    /// has its own lifetime and remains active.
+    pub fn discard_document_changes(&mut self, accepted: AcceptedSettings) {
+        self.environment_unsubmitted = false;
+        self.accept_document(accepted, None);
+        self.effects
+            .retain(|effect| !matches!(effect, SettingsEffect::SubmitDocument(_)));
+    }
+
+    fn accept_document(&mut self, accepted: AcceptedSettings, warning: Option<String>) {
+        self.accepted_revision = accepted.revision;
+        self.config = accepted.config;
+        self.remotes.reconcile(&self.config);
+        self.writeback.set_schema(accepted.schema);
+        self.writeback.accept(accepted.document, warning);
+        self.top_status_segments = None;
+        self.bottom_status_segments = None;
+        if self.environment_unsubmitted {
+            if let Err(error) = environment_is_complete(&self.environment) {
+                self.writeback.reject(error);
+            }
+        } else {
+            self.environment = environment_drafts(self.config.session.env.clone());
+        }
+    }
+
+    #[must_use]
+    pub const fn has_unsaved_changes(&self) -> bool {
+        self.writeback.is_dirty() || self.environment_unsubmitted
+    }
+
     pub fn set_catalogs(&mut self, catalogs: Catalogs) {
         self.font_families = catalogs.font_families;
         self.status_modules = catalogs.status_modules;
-        self.top_status_segments = catalogs.top_status_segments;
-        self.bottom_status_segments = catalogs.bottom_status_segments;
-        self.remotes.set_profiles(catalogs.remotes);
-        self.remotes.set_default(catalogs.default_remote);
-        if !self.environment_draft_dirty {
-            self.environment = environment_drafts(catalogs.environment);
-        }
     }
 
     /// Surface validation from a structured editor without mutating the draft.
@@ -188,6 +210,8 @@ impl SettingsSession {
             self.writeback.set_env(&path, &entries);
         }
         self.environment = environment_drafts(entries);
+        // These rows now belong to the document submission, including a rejected write.
+        self.environment_unsubmitted = false;
         self.queue_document_submission();
         true
     }
@@ -197,7 +221,7 @@ impl SettingsSession {
             return false;
         };
         entry.name = name;
-        self.environment_draft_dirty = true;
+        self.environment_unsubmitted = true;
         self.submit_environment_draft();
         true
     }
@@ -207,14 +231,14 @@ impl SettingsSession {
             return false;
         };
         entry.value = value;
-        self.environment_draft_dirty = true;
+        self.environment_unsubmitted = true;
         self.submit_environment_draft();
         true
     }
 
     pub fn add_environment_variable(&mut self) {
         self.environment.push(EnvironmentDraft::default());
-        self.environment_draft_dirty = true;
+        self.environment_unsubmitted = true;
     }
 
     pub fn remove_environment_variable(&mut self, index: usize) -> bool {
@@ -222,7 +246,7 @@ impl SettingsSession {
             return false;
         }
         self.environment.remove(index);
-        self.environment_draft_dirty = true;
+        self.environment_unsubmitted = true;
         self.submit_environment_draft();
         true
     }
@@ -236,7 +260,7 @@ impl SettingsSession {
         }
         let entry = self.environment.remove(index);
         self.environment.insert(target, entry);
-        self.environment_draft_dirty = true;
+        self.environment_unsubmitted = true;
         self.submit_environment_draft();
         true
     }
@@ -261,20 +285,16 @@ impl SettingsSession {
             self.writeback.set_bottom_status_segments(&segments);
         }
         if top {
-            self.top_status_segments = segments;
+            self.top_status_segments = Some(segments);
         } else {
-            self.bottom_status_segments = segments;
+            self.bottom_status_segments = Some(segments);
         }
         self.queue_document_submission();
         true
     }
 
     pub fn edit_status_segments(&mut self, top: bool, edit: StatusSegmentEdit) -> bool {
-        let mut segments = if top {
-            self.top_status_segments.clone()
-        } else {
-            self.bottom_status_segments.clone()
-        };
+        let mut segments = self.status_segments(top).to_vec();
         if let Err(error) = apply_status_segment_edit(&mut segments, edit) {
             self.writeback.reject(error);
             return false;
@@ -284,10 +304,25 @@ impl SettingsSession {
 
     #[must_use]
     pub fn status_segments(&self, top: bool) -> &[StatusSegment] {
-        if top {
-            &self.top_status_segments
+        let (path, draft, accepted, defaults) = if top {
+            (
+                "chrome.top-segment",
+                &self.top_status_segments,
+                &self.config.chrome.top_segments,
+                &self.defaults.chrome.top_segments,
+            )
         } else {
-            &self.bottom_status_segments
+            (
+                "chrome.bottom-segment",
+                &self.bottom_status_segments,
+                &self.config.chrome.bottom_segments,
+                &self.defaults.chrome.bottom_segments,
+            )
+        };
+        if self.writeback.was_removed(path) {
+            defaults
+        } else {
+            draft.as_deref().unwrap_or(accepted)
         }
     }
 
@@ -308,9 +343,14 @@ impl SettingsSession {
         };
         let defaults = &self.defaults;
         if let Some(spec) = self.writeback_schema().get(id)
-            && let Some(equal) = self.writeback.scalar_is_default(spec, current, defaults)
+            && let (Some(value), Some(default)) = (self.value(id), spec.default_value(defaults))
         {
-            return equal;
+            return value == default
+                || (matches!(
+                    spec.kind,
+                    bootty_config::settings_schema::SettingKind::FontStyle
+                ) && value == SettingValue::Token(String::new())
+                    && default == SettingValue::Token("auto".into()));
         }
         let path = id.split('.').collect::<Vec<_>>();
         let document = self.writeback.document();
@@ -333,24 +373,12 @@ impl SettingsSession {
         }
         match id {
             "font.features" => self.font_features_are_default(current, defaults),
-            "chrome.top-segment" => {
-                let value = if self.writeback.has_edit(id) && !self.writeback.was_removed(id) {
-                    &self.top_status_segments
-                } else {
-                    &current.chrome.top_segments
-                };
-                *value == defaults.chrome.top_segments
-            }
+            "chrome.top-segment" => self.status_segments(true) == defaults.chrome.top_segments,
             "chrome.bottom-segment" => {
-                let value = if self.writeback.has_edit(id) && !self.writeback.was_removed(id) {
-                    &self.bottom_status_segments
-                } else {
-                    &current.chrome.bottom_segments
-                };
-                *value == defaults.chrome.bottom_segments
+                self.status_segments(false) == defaults.chrome.bottom_segments
             }
             "session.env" => {
-                if self.environment_draft_dirty || self.writeback.has_edit(id) {
+                if self.environment_unsubmitted || self.writeback.has_edit(id) {
                     self.environment
                         .iter()
                         .map(|entry| (&entry.name, &entry.value))
@@ -426,7 +454,7 @@ impl SettingsSession {
         self.writeback.remove(&spec.path_parts());
         if id == "session.env" {
             self.environment.clear();
-            self.environment_draft_dirty = false;
+            self.environment_unsubmitted = false;
         }
         self.queue_document_submission();
         true
@@ -445,9 +473,14 @@ impl SettingsSession {
 
     #[must_use]
     pub fn value(&self, id: &str) -> Option<SettingValue> {
-        self.writeback_schema()
-            .get(id)
-            .and_then(|spec| self.writeback.value_of(spec))
+        let spec = self.writeback_schema().get(id)?;
+        if self.writeback.was_removed(id) {
+            spec.default_value(&self.defaults)
+        } else if self.writeback.has_edit(id) {
+            self.writeback.value_of(spec)
+        } else {
+            spec.default_value(&self.config)
+        }
     }
 
     #[must_use]
@@ -583,7 +616,7 @@ impl SettingsSession {
     }
 
     pub fn clear_default_remote(&mut self) {
-        self.effects.push(self.remotes.clear_default());
+        self.effects.push(SettingsEffect::ClearDefaultRemote);
     }
 
     pub fn edit_default_remote(&mut self, field: &str, value: String) -> bool {
@@ -632,15 +665,37 @@ impl SettingsSession {
     pub fn apply_outcome(&mut self, outcome: SettingsOutcome) {
         match outcome {
             SettingsOutcome::DocumentAccepted {
-                revision,
-                document,
+                source,
+                accepted,
                 warning,
             } => {
-                self.accepted_revision = self.accepted_revision.max(revision);
-                self.writeback.accept(document, warning);
-                self.environment_draft_dirty = false;
+                if accepted.revision < self.accepted_revision {
+                    return;
+                }
+                match source {
+                    SettingsWriteSource::Document => self.accept_document(*accepted, warning),
+                    SettingsWriteSource::DefaultRemote | SettingsWriteSource::RemoteProfile(_) => {
+                        self.reconcile_accepted(*accepted);
+                        if let SettingsWriteSource::RemoteProfile(id) = source {
+                            self.remotes.accept_profile(&id);
+                        } else {
+                            self.remotes.accept_default(&self.config);
+                        }
+                        if let Some(warning) = warning {
+                            self.writeback.reject(warning);
+                        }
+                    }
+                }
             }
-            SettingsOutcome::DocumentRejected(error) => self.writeback.reject(error),
+            SettingsOutcome::DocumentRejected { source, error } => match source {
+                SettingsWriteSource::Document => self.writeback.reject(error),
+                SettingsWriteSource::DefaultRemote => self.remotes.reject_default(error),
+                SettingsWriteSource::RemoteProfile(id) => {
+                    if !self.remotes.reject_profile(&id, &error) {
+                        self.writeback.reject(error);
+                    }
+                }
+            },
             SettingsOutcome::Module(ModuleOutcome::IntegrationUpdated { identity }) => {
                 self.integration_errors.remove(&identity);
                 self.unscoped_integration_error = None;
@@ -687,7 +742,13 @@ impl SettingsSession {
 
     fn queue_document_submission(&mut self) {
         if let Some(document) = self.writeback.take_submission() {
-            self.effects.push(SettingsEffect::SubmitDocument(document));
+            // Consecutive edits already share one accumulated draft. Only its newest
+            // snapshot may commit; intermediate snapshots have the same source revision.
+            if let Some(SettingsEffect::SubmitDocument(pending)) = self.effects.last_mut() {
+                *pending = document;
+            } else {
+                self.effects.push(SettingsEffect::SubmitDocument(document));
+            }
         }
     }
 
@@ -698,6 +759,9 @@ impl SettingsSession {
     }
 
     fn selected_backend_supports_remote(&self) -> bool {
+        if !self.writeback.has_edit("multiplexer.backend") {
+            return self.config.multiplexer.backend.supports_remote();
+        }
         matches!(
             self.writeback
                 .document()
@@ -707,27 +771,18 @@ impl SettingsSession {
     }
 
     fn submit_environment_draft(&mut self) {
-        let mut names = std::collections::HashSet::new();
-        let mut entries = Vec::with_capacity(self.environment.len());
-        for entry in &self.environment {
-            // An empty row is an unfinished addition/rename, not a failed write.
-            if entry.name.is_empty() {
-                return;
+        match environment_is_complete(&self.environment) {
+            Ok(true) => {
+                self.set_environment(
+                    self.environment
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.value.clone()))
+                        .collect(),
+                );
             }
-            if !valid_environment_name(&entry.name) {
-                self.writeback.reject("Environment variable names must start with a letter or underscore and contain only letters, digits, or underscores.");
-                return;
-            }
-            if !names.insert(entry.name.clone()) {
-                self.writeback.reject(format!(
-                    "Environment variable {} appears more than once. Use a unique name.",
-                    entry.name
-                ));
-                return;
-            }
-            entries.push((entry.name.clone(), entry.value.clone()));
+            Ok(false) => {}
+            Err(error) => self.writeback.reject(error),
         }
-        self.set_environment(entries);
     }
 }
 
@@ -736,6 +791,26 @@ fn environment_drafts(entries: Vec<(String, String)>) -> Vec<EnvironmentDraft> {
         .into_iter()
         .map(|(name, value)| EnvironmentDraft { name, value })
         .collect()
+}
+
+/// An empty name is an unfinished addition or rename, not a validation failure.
+fn environment_is_complete(entries: &[EnvironmentDraft]) -> Result<bool, String> {
+    let mut names = std::collections::HashSet::new();
+    for entry in entries {
+        if entry.name.is_empty() {
+            return Ok(false);
+        }
+        if !valid_environment_name(&entry.name) {
+            return Err("Environment variable names must start with a letter or underscore and contain only letters, digits, or underscores.".to_owned());
+        }
+        if !names.insert(entry.name.as_str()) {
+            return Err(format!(
+                "Environment variable {} appears more than once. Use a unique name.",
+                entry.name
+            ));
+        }
+    }
+    Ok(true)
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -747,9 +822,7 @@ fn valid_environment_name(name: &str) -> bool {
 }
 
 fn custom_scalar(config: &BoottyConfig, id: &str) -> Option<SettingValue> {
-    use bootty_config::config::config_token;
     Some(match id {
-        "appearance.mode" => SettingValue::Token(config_token(&config.appearance.mode)?),
         "appearance.light.theme" => {
             SettingValue::Token(config.appearance.light.theme.clone().unwrap_or_default())
         }
@@ -766,29 +839,6 @@ fn custom_scalar(config: &BoottyConfig, id: &str) -> Option<SettingValue> {
             }
             .into(),
         ),
-        "font.ui-use-terminal-family" => SettingValue::Bool(config.font.ui_use_terminal_family),
-        "chrome.top-bar" => SettingValue::Bool(config.chrome.top_bar),
-        "chrome.notched-fullscreen-black-chrome" => {
-            SettingValue::Bool(config.chrome.notched_fullscreen_black_chrome)
-        }
-        "input.hide-mouse-pointer-while-typing" => {
-            SettingValue::Bool(config.input.hide_mouse_pointer_while_typing)
-        }
-        "input.copy-on-select" => SettingValue::Bool(config.input.copy_on_select),
-        "input.macos-option-as-alt" => SettingValue::Token(
-            match config.input.macos_option_as_alt {
-                bootty_config::config::MacosOptionAsAltConfig::None => "none",
-                bootty_config::config::MacosOptionAsAltConfig::Left => "left",
-                bootty_config::config::MacosOptionAsAltConfig::Right => "right",
-                bootty_config::config::MacosOptionAsAltConfig::Both => "both",
-            }
-            .into(),
-        ),
-        "input.preset" => SettingValue::Token(config.input.preset.as_str().into()),
-        "input.prefix" => SettingValue::Text(config.input.prefix.clone().unwrap_or_default()),
-        "multiplexer.backend" => {
-            SettingValue::Token(config.multiplexer.backend.to_string().to_ascii_lowercase())
-        }
         "session.max-scrollback" => {
             SettingValue::Number(config.session.max_scrollback.to_f32().unwrap_or(f32::MAX))
         }

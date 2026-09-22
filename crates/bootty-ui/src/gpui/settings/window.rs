@@ -893,6 +893,32 @@ impl GpuiSettings {
         .into_any_element()
     }
 
+    fn render_write_warning(&self, warning: String, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                gpui_kit::component::alert::Alert::warning("settings-write-warning", warning)
+                    .banner(),
+            )
+            .when(self.draft.has_unsaved_changes(), |this| {
+                this.child(
+                    div().flex().justify_end().child(
+                        Button::new("settings-discard-changes")
+                            .debug_selector(|| "settings-discard-changes".to_owned())
+                            .label("Discard unsaved changes")
+                            .tab_index(0_isize)
+                            .outline()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.focus_handle().focus(window, cx);
+                                this.emit(SettingsIntent::DiscardChanges, cx);
+                            })),
+                    ),
+                )
+            })
+    }
+
     fn render_page(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
         let open_entity = cx.entity();
         let warning = self.content.write_error.clone();
@@ -962,13 +988,7 @@ impl GpuiSettings {
                             ),
                     )
                     .when_some(warning, |this, warning| {
-                        this.child(
-                            gpui_kit::component::alert::Alert::warning(
-                                "settings-write-warning",
-                                warning,
-                            )
-                            .banner(),
-                        )
+                        this.child(self.render_write_warning(warning, cx))
                     }),
             )
             .child(

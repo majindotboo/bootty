@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::config::{
-    BoottyConfig, ConfigFileSnapshot, ConfigResult, config_dependency_snapshot, load_config_attempt,
+    BoottyConfig, ConfigFileSnapshot, ConfigResult, LoadedConfig, config_dependency_snapshot,
+    load_config_attempt,
 };
 
 pub const CONFIG_HOT_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
@@ -43,9 +44,13 @@ impl ConfigHotReload {
     /// # Errors
     /// Returns a file, include, TOML, or value-validation error from the new configuration.
     pub fn reload_config(&mut self) -> ConfigResult<BoottyConfig> {
+        self.reload_document().map(|loaded| loaded.config)
+    }
+
+    pub(crate) fn reload_document(&mut self) -> ConfigResult<LoadedConfig> {
         let attempt = load_config_attempt(&self.path);
         self.snapshot = attempt.snapshot;
-        attempt.config
+        attempt.loaded
     }
 
     pub fn refresh_dependency_graph(&mut self) {

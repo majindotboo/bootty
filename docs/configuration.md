@@ -235,7 +235,8 @@ include = ["shared.toml", "?local.toml"]
 - Paths are relative to the containing config file.
 - Included files are applied after the containing file, so included values can
   override earlier values.
-- Prefix a path with `?` to make it optional.
+- Prefix a path with `?` to allow a missing file. Read and parse errors still
+  reject the reload, preserving the last accepted config.
 - Include cycles are rejected.
 
 ## Terminal backgrounds
@@ -516,6 +517,24 @@ If a writeback target file does not exist, Bootty creates it. If an existing
 file cannot be parsed as TOML, writeback fails rather than replacing the file.
 Bootty writers for one config path are serialized. External editors do not use
 the Bootty writer lease, so writeback is not a cross-program compare-and-swap.
+Before replacement, Bootty compares the file with the draft's original bytes,
+including comments. A stale draft cannot overwrite an observed external edit,
+deletion, or newly created file. Settings retains rejected edits and offers
+**Discard unsaved changes** to return to the accepted config before editing again.
+Catalog refreshes preserve unsaved status segments and environment rows. A successful
+save replaces the editor's accepted config and document together; untouched values
+follow subsequent config reloads. Scalar controls and reset indicators read the
+resolved accepted values, including values inherited from includes and legacy
+spellings; only local edits override that display. Ordinary scalar controls are
+described by their `SettingSpec` and share the same editor and writeback path.
+Remote editors use that same accepted snapshot.
+A remote save or removal acknowledges only its own editor: rejected remote edits
+remain visible, and unrelated unsaved settings are preserved. External profile
+changes refresh untouched editors while preserving unsaved drafts, even when the
+saved profile was removed. Incomplete or invalid
+environment rows also survive saves made by other editors and remain editable
+until completed or explicitly discarded.
+Connection tests report results for both saved profiles and unsaved drafts.
 
 ## Compatibility notes
 

@@ -20,6 +20,27 @@ fn init_zed_ui(cx: &TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
 }
 
+#[gpui_kit::test]
+fn a_failed_settings_draft_has_an_explicit_discard_action(cx: &mut TestAppContext) {
+    init_zed_ui(cx);
+    let mut snapshot = snapshot_with_category(SettingsCategory::General);
+    snapshot.write_error = Some("Config changed on disk".to_owned());
+    let mut draft = settings_support::draft();
+    draft.set_value("font.size", &ScalarValue::Number(20.0));
+    let (probe, cx) =
+        cx.add_window_view(|_, cx| SettingsWindowProbe::with_draft(snapshot, draft, cx));
+    let discard = cx
+        .debug_bounds("settings-discard-changes")
+        .expect("discard draft action");
+    cx.simulate_click(bounds_center(discard), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert!(matches!(
+            probe.intents.borrow().as_slice(),
+            [SettingsIntent::DiscardChanges]
+        ));
+    });
+}
+
 struct SettingsTitleBarProbe;
 
 impl Render for SettingsTitleBarProbe {

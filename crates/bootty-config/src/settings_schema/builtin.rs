@@ -1217,11 +1217,23 @@ fn themes_specs() -> [SettingSpec; 7] {
     [
         custom(&["theme"], "colors", "THEME", SettingEditor::Colors),
         custom(&["colors", "*"], "colors", "COLORS", SettingEditor::Colors),
-        custom(
+        spec(
             &["appearance", "mode"],
+            "Color mode",
+            "Follow the system appearance or choose light or dark.",
             "colors",
             "COLOR MODE",
-            SettingEditor::Colors,
+            SettingKind::Choice {
+                options: [
+                    (&crate::config::AppearanceMode::System, "System"),
+                    (&crate::config::AppearanceMode::Light, "Light"),
+                    (&crate::config::AppearanceMode::Dark, "Dark"),
+                ]
+                .into_iter()
+                .map(|(value, label)| SettingOption::of(value, label))
+                .collect(),
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.appearance.mode))),
         ),
         custom(
             &["appearance", "light", "theme"],
@@ -1312,11 +1324,14 @@ fn font_styles_specs() -> [SettingSpec; 9] {
             SettingDefault::Field(|config| (&config.font.style_bold_italic).into()),
         ),
         custom(&["font", "ui-family"], "text", "FONT", SettingEditor::Text),
-        custom(
+        spec(
             &["font", "ui-use-terminal-family"],
+            "Use terminal font for interface",
+            "Use the terminal font family throughout the interface.",
             "text",
             "FONT",
-            SettingEditor::Text,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.font.ui_use_terminal_family)),
         ),
         custom(
             &["font", "features"],
@@ -1341,11 +1356,14 @@ fn font_styles_specs() -> [SettingSpec; 9] {
 
 fn custom_chrome_specs() -> [SettingSpec; 7] {
     [
-        custom(
+        spec(
             &["chrome", "top-bar"],
+            "Top bar",
+            "Show the top status bar.",
             "status",
             "BARS",
-            SettingEditor::Status,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.top_bar)),
         ),
         custom(
             &["chrome", "status-background"],
@@ -1359,11 +1377,16 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
             "CHROME COLORS",
             SettingEditor::Colors,
         ),
-        custom(
+        spec(
             &["chrome", "notched-fullscreen-black-chrome"],
+            "Black chrome in notched fullscreen",
+            "Use black chrome around the display notch in fullscreen.",
             "appearance",
             "FULLSCREEN NOTCH",
-            SettingEditor::Appearance,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.chrome.notched_fullscreen_black_chrome)
+            }),
         ),
         custom(
             &["chrome", "pane-focus-border-color"],
@@ -1435,11 +1458,30 @@ fn sidebar_specs() -> [SettingSpec; 7] {
 
 fn backend_specs() -> [SettingSpec; 7] {
     [
-        custom(
+        spec(
             &["multiplexer", "backend"],
+            "Terminal backend",
+            "Choose which backend owns terminal sessions and pane layout.",
             "general",
             "MULTIPLEXER",
-            SettingEditor::General,
+            SettingKind::Choice {
+                options: [
+                    (crate::config::MultiplexerBackendConfig::Native, "Native"),
+                    (crate::config::MultiplexerBackendConfig::Herdr, "Herdr"),
+                    (crate::config::MultiplexerBackendConfig::Rmux, "rmux"),
+                    (crate::config::MultiplexerBackendConfig::Tmux, "tmux"),
+                ]
+                .into_iter()
+                .map(|(backend, label)| SettingOption {
+                    token: backend.to_string().to_ascii_lowercase().into(),
+                    label: label.into(),
+                    description: None,
+                })
+                .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(config.multiplexer.backend.to_string().to_ascii_lowercase())
+            }),
         ),
         custom(
             &["multiplexer", "remote", "distribution"],
@@ -1545,7 +1587,15 @@ fn ssh_profiles_specs() -> [SettingSpec; 10] {
     ]
 }
 
-fn input_specs() -> [SettingSpec; 12] {
+fn input_specs() -> impl Iterator<Item = SettingSpec> {
+    let binding_paths: [&[&str]; 6] = [
+        &["input", "keybind"],
+        &["input", "sidebar-keybind"],
+        &["input", "backend-keybind", "herdr"],
+        &["input", "backend-keybind", "native"],
+        &["input", "backend-keybind", "rmux"],
+        &["input", "backend-keybind", "tmux"],
+    ];
     [
         custom(
             &["input", "modifier-remap"],
@@ -1553,73 +1603,85 @@ fn input_specs() -> [SettingSpec; 12] {
             "INPUT",
             SettingEditor::Keys,
         ),
-        custom(
+        spec(
             &["input", "macos-option-as-alt"],
+            "Option as Alt",
+            "Choose which Option keys send Alt input on macOS.",
             "keys",
             "INPUT",
-            SettingEditor::Keys,
+            SettingKind::Choice {
+                options: [
+                    (&crate::config::MacosOptionAsAltConfig::None, "None"),
+                    (&crate::config::MacosOptionAsAltConfig::Left, "Left"),
+                    (&crate::config::MacosOptionAsAltConfig::Right, "Right"),
+                    (&crate::config::MacosOptionAsAltConfig::Both, "Both"),
+                ]
+                .into_iter()
+                .map(|(value, label)| SettingOption::of(value, label))
+                .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.input.macos_option_as_alt))
+            }),
         ),
-        custom(
+        spec(
             &["input", "hide-mouse-pointer-while-typing"],
+            "Hide mouse pointer while typing",
+            "Hide the pointer while entering terminal input.",
             "appearance",
             "MOUSE POINTER",
-            SettingEditor::Appearance,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.input.hide_mouse_pointer_while_typing)
+            }),
         ),
-        custom(
+        spec(
             &["input", "copy-on-select"],
+            "Copy on select",
+            "Copy terminal text when a selection completes.",
             "keys",
             "INPUT",
-            SettingEditor::Keys,
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.input.copy_on_select)),
         ),
-        custom(
+        spec(
             &["input", "preset"],
+            "Keybinding preset",
+            "Choose the base keyboard shortcuts.",
             "keys",
             "KEYBINDS",
-            SettingEditor::Keys,
+            SettingKind::Choice {
+                options: crate::config::KeybindPreset::ALL
+                    .into_iter()
+                    .map(|preset| SettingOption {
+                        token: preset.as_str().into(),
+                        label: preset.label().into(),
+                        description: None,
+                    })
+                    .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(config.input.preset.as_str().to_owned())
+            }),
         ),
-        custom(
+        spec(
             &["input", "prefix"],
+            "Keybinding prefix",
+            "Override the prefix key used by the selected preset.",
             "keys",
             "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "keybind"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "sidebar-keybind"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "backend-keybind", "herdr"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "backend-keybind", "native"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "backend-keybind", "rmux"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
-        ),
-        custom(
-            &["input", "backend-keybind", "tmux"],
-            "keys",
-            "KEYBINDS",
-            SettingEditor::Keys,
+            text("Preset default", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(config.input.prefix.clone().unwrap_or_default())
+            }),
         ),
     ]
+    .into_iter()
+    .chain(
+        binding_paths
+            .into_iter()
+            .map(|path| custom(path, "keys", "KEYBINDS", SettingEditor::Keys)),
+    )
 }
 
 fn custom_runtime_specs() -> [SettingSpec; 4] {
