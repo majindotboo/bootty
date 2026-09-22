@@ -1,9 +1,9 @@
-use super::{CommandDispatch, PendingCommandResult};
+use super::CommandDispatch;
 use crate::{AppState, commands::FileAction};
 use bootty_control::{CommandCancellation, CommandOutcome};
 use bootty_host::{SystemCommandRunner, remote::RemoteHost};
 use bootty_mux::{controller::SpaceId, executor};
-use std::{sync::mpsc, time::Instant};
+use std::time::Instant;
 
 impl AppState {
     pub(super) fn dispatch_file_action(
@@ -80,34 +80,21 @@ impl AppState {
                 });
             }
         };
-        let (deadline, cancellation) = executor::command_execution(execution);
-        let (sender, result) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        std::thread::spawn(move || {
-            // A started atomic save must report its observed result, never a fictitious rollback.
-            let outcome = if let Err(error) =
-                executor::begin_synchronous_command(Some((deadline, cancellation)))
-            {
-                super::command_outcome_for_mux_error(error)
-            } else {
-                let result = remote.map_or_else(
-                    || request.execute(),
-                    |remote| request.execute_remote(&RemoteHost::new(remote), SystemCommandRunner),
-                );
-                match result.and_then(|response| Ok(serde_json::to_value(response)?)) {
-                    Ok(value) => CommandOutcome::Success {
-                        value,
-                        warnings: Vec::new(),
-                    },
-                    Err(error) => CommandOutcome::Failed {
-                        code: "file_failed".to_owned(),
-                        message: format!("{error:#}"),
-                    },
-                }
-            };
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(result))
+        self.dispatch_committed_command(execution, move || {
+            let result = remote.map_or_else(
+                || request.execute(),
+                |remote| request.execute_remote(&RemoteHost::new(remote), SystemCommandRunner),
+            );
+            match result.and_then(|response| Ok(serde_json::to_value(response)?)) {
+                Ok(value) => CommandOutcome::Success {
+                    value,
+                    warnings: Vec::new(),
+                },
+                Err(error) => CommandOutcome::Failed {
+                    code: "file_failed".to_owned(),
+                    message: format!("{error:#}"),
+                },
+            }
+        })
     }
 }

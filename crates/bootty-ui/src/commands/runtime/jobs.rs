@@ -1,7 +1,7 @@
-use super::{CommandDispatch, PendingCommandResult};
+use super::CommandDispatch;
 use crate::{AppState, commands::JobAction};
 use bootty_control::{CommandCancellation, CommandOutcome};
-use bootty_mux::{controller::SpaceId, executor};
+use bootty_mux::controller::SpaceId;
 use std::{sync::mpsc, time::Instant};
 impl AppState {
     pub(super) fn dispatch_job_command(
@@ -17,62 +17,51 @@ impl AppState {
             .map(bootty_host::remote::RemoteHost::new);
         let jobs = self.commands.jobs.clone();
         let repaint = self.repaint.clone();
-        let (deadline, cancellation) = executor::command_execution(execution);
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let outcome = if let Err(error) =
-                executor::begin_synchronous_command(Some((deadline, cancellation)))
-            {
-                super::command_outcome_for_mux_error(error)
-            } else {
-                let result = (|| -> anyhow::Result<serde_json::Value> {
-                    let arg = |index: usize| {
-                        arguments
-                            .get(index)
-                            .ok_or_else(|| anyhow::anyhow!("Missing job argument {index}"))
-                    };
-                    Ok(match action {
-                        JobAction::Transfer => serde_json::to_value(jobs.start_transfer(
-                            serde_json::from_str(arg(0)?)?,
-                            remote,
-                            repaint.clone(),
-                        )?)?,
-                        JobAction::RetryTransfer => {
-                            serde_json::to_value(jobs.retry_transfer(arg(0)?, repaint.clone())?)?
-                        }
-                        JobAction::Start => serde_json::to_value(jobs.start(
-                            serde_json::from_str(arg(0)?)?,
-                            remote,
-                            repaint.clone(),
-                        )?)?,
-                        JobAction::List => serde_json::to_value(jobs.list())?,
-                        JobAction::Read => serde_json::to_value(jobs.read(
-                            arg(0)?,
-                            arg(1)?.parse()?,
-                            arg(2)?.parse()?,
-                        )?)?,
-                        JobAction::Cancel => serde_json::to_value(jobs.cancel(arg(0)?)?)?,
-                        JobAction::Forget => {
-                            jobs.forget(arg(0)?)?;
-                            serde_json::json!({"forgotten":arg(0)?})
-                        }
-                    })
-                })();
-                match result {
-                    Ok(value) => CommandOutcome::Success {
-                        value,
-                        warnings: Vec::new(),
-                    },
-                    Err(error) => CommandOutcome::Failed {
-                        code: "job_failed".to_owned(),
-                        message: format!("{error:#}"),
-                    },
-                }
-            };
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+        self.dispatch_committed_command(execution, move || {
+            let result = (|| -> anyhow::Result<serde_json::Value> {
+                let arg = |index: usize| {
+                    arguments
+                        .get(index)
+                        .ok_or_else(|| anyhow::anyhow!("Missing job argument {index}"))
+                };
+                Ok(match action {
+                    JobAction::Transfer => serde_json::to_value(jobs.start_transfer(
+                        serde_json::from_str(arg(0)?)?,
+                        remote,
+                        repaint.clone(),
+                    )?)?,
+                    JobAction::RetryTransfer => {
+                        serde_json::to_value(jobs.retry_transfer(arg(0)?, repaint.clone())?)?
+                    }
+                    JobAction::Start => serde_json::to_value(jobs.start(
+                        serde_json::from_str(arg(0)?)?,
+                        remote,
+                        repaint.clone(),
+                    )?)?,
+                    JobAction::List => serde_json::to_value(jobs.list())?,
+                    JobAction::Read => serde_json::to_value(jobs.read(
+                        arg(0)?,
+                        arg(1)?.parse()?,
+                        arg(2)?.parse()?,
+                    )?)?,
+                    JobAction::Cancel => serde_json::to_value(jobs.cancel(arg(0)?)?)?,
+                    JobAction::Forget => {
+                        jobs.forget(arg(0)?)?;
+                        serde_json::json!({"forgotten":arg(0)?})
+                    }
+                })
+            })();
+            match result {
+                Ok(value) => CommandOutcome::Success {
+                    value,
+                    warnings: Vec::new(),
+                },
+                Err(error) => CommandOutcome::Failed {
+                    code: "job_failed".to_owned(),
+                    message: format!("{error:#}"),
+                },
+            }
+        })
     }
 }
 

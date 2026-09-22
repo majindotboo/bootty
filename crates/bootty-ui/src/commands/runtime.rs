@@ -325,6 +325,27 @@ impl AppState {
         CommandDispatch::Complete(outcome)
     }
 
+    /// Cancel before work starts; once committed, publish the observed result. Atomic file writes,
+    /// Git hooks, and job-registry mutations cannot report a fictitious rollback on cancellation.
+    fn dispatch_committed_command(
+        &self,
+        execution: Option<(Instant, CommandCancellation)>,
+        run: impl FnOnce() -> CommandOutcome + Send + 'static,
+    ) -> CommandDispatch {
+        let execution = executor::command_execution(execution);
+        let (sender, receiver) = mpsc::channel();
+        let repaint = self.repaint.clone();
+        std::thread::spawn(move || {
+            let outcome = match executor::begin_synchronous_command(Some(execution)) {
+                Ok(()) => run(),
+                Err(error) => command_outcome_for_mux_error(error),
+            };
+            let _ = sender.send(outcome);
+            repaint();
+        });
+        CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+    }
+
     /// Returns a non-blocking sender for producers outside the UI-owner call stack.
     ///
     /// UI code dispatches directly and must not synchronously wait on this channel's response.
