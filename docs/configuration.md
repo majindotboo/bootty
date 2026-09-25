@@ -656,7 +656,18 @@ filters loaded entries, shares Git decorations with Changes, and pages large
 directories. Refresh rereads the displayed directory; reopening a directory
 refreshes its children.
 
-Documents support Save (including Command/Ctrl-S), Reload, and Markdown Preview.
+Documents support Save (including Command/Ctrl-S), Reload, Markdown Preview, and
+Format Document (Alt/Option-Shift-F). Formatting uses `rustfmt` for Rust, `taplo`
+for TOML, and `prettier` for JavaScript, TypeScript, JSON/JSONC, Markdown,
+HTML, CSS, and YAML. The formatter must be installed on the document's host.
+Formatting reads the current draft through standard input and returns an
+undoable edit; it does not save the file. If the draft changes while formatting
+runs, Bootty leaves it alone and asks you to run Format again.
+
+The document editor supports multiple cursors: Alt/Option-click adds one,
+Alt/Option-Shift-drag selects a column, and Escape returns to one cursor.
+Use Alt-Shift-Up/Down on Linux, Command-Option-Up/Down on macOS, or
+Control-Alt-Up/Down on Windows to add cursors above or below.
 A dirty document's Close button offers Save, Discard, and Cancel. Closing a
 window or quitting with unsaved documents also asks; Save all keeps the window
 open so save errors remain visible. Saving over an external edit is rejected.
@@ -665,6 +676,8 @@ binary files and larger documents report an explicit error.
 
 Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
 `files.save PATH EXPECTED_SHA256 CONTENT_BASE64` for the CLI and control socket.
+`files.format PATH CONTENT_BASE64` returns formatted document bytes without
+writing the host file.
 All paths belong to the selected binding's host, including remote paths.
 
 Shell completion notifications require live OSC 133 command-start and finish

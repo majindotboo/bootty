@@ -8,6 +8,7 @@ command_actions! {
         List => ("files.list", "List Directory", ["path", "offset"], Read),
         Read => ("files.read", "Read Document", ["path"], Read),
         Save => ("files.save", "Save Document Revision", ["path", "digest", "content_base64"], Write),
+        Format => ("files.format", "Format Document", ["path", "content_base64"], Read),
     }
 }
 
@@ -64,6 +65,10 @@ impl FileAction {
             (Self::Save, [path, digest, content]) => Ok(FileRequest::Save {
                 path: path.clone(),
                 expected_digest: digest.clone(),
+                content_base64: content.clone(),
+            }),
+            (Self::Format, [path, content]) => Ok(FileRequest::Format {
+                path: path.clone(),
                 content_base64: content.clone(),
             }),
             (Self::Browse | Self::Open, _) => {

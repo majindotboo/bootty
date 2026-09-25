@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context as _, ensure};
 use assert_fs::prelude::*;
 use bootty_host::files::{
-    FileRequest, FileResponse, FileSnapshot, MAX_DOCUMENT_BYTES, encode_document,
+    FileRequest, FileResponse, FileSnapshot, MAX_DOCUMENT_BYTES, decode_document, encode_document,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -106,6 +106,42 @@ fn text_revisions_keep_crlf_and_bom_bytes() {
     .execute()
     .unwrap();
     file.assert("\u{feff}first\r\nchanged\r\n");
+}
+
+#[rstest]
+fn formatting_changes_only_the_returned_draft() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("main.rs");
+    file.write_str("fn main() {}\n").unwrap();
+    let FileResponse::Formatted { content_base64 } = (FileRequest::Format {
+        path: file.path().to_str().unwrap().to_owned(),
+        content_base64: encode_document("fn main(){println!(\"hi\");}").unwrap(),
+    })
+    .execute()
+    .unwrap() else {
+        panic!("formatted document");
+    };
+    assert_eq!(
+        decode_document(&content_base64).unwrap(),
+        "fn main() {\n    println!(\"hi\");\n}\n"
+    );
+    file.assert("fn main() {}\n");
+}
+
+#[rstest]
+fn formatting_rejects_unknown_types_without_changing_the_file() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("notes.txt");
+    file.write_str("keep me").unwrap();
+    assert!(
+        (FileRequest::Format {
+            path: file.path().to_str().unwrap().to_owned(),
+            content_base64: encode_document("draft").unwrap(),
+        })
+        .execute()
+        .is_err()
+    );
+    file.assert("keep me");
 }
 
 #[cfg(unix)]
@@ -238,7 +274,8 @@ impl bootty_host::CommandRunner for &RemoteFiles {
             FileRequest::Resolve { path, .. }
             | FileRequest::List { path, .. }
             | FileRequest::Read { path }
-            | FileRequest::Save { path, .. } => {
+            | FileRequest::Save { path, .. }
+            | FileRequest::Format { path, .. } => {
                 let original = path.clone();
                 self.remote
                     .to_str()
@@ -262,9 +299,9 @@ impl bootty_host::CommandRunner for &RemoteFiles {
 #[rstest]
 fn remote_reads_and_saves_never_touch_a_local_namesake() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let local = directory.child("local");
+    let local = directory.child("local.rs");
     local.write_str("local contents").unwrap();
-    let remote = directory.child("remote");
+    let remote = directory.child("remote.rs");
     remote.write_str("remote contents").unwrap();
     let transport = RemoteFiles {
         remote: remote.path().to_owned(),
@@ -286,6 +323,17 @@ fn remote_reads_and_saves_never_touch_a_local_namesake() {
     }
     .execute_remote(&host, &transport)
     .unwrap();
+    local.assert("local contents");
+    remote.assert("remote replacement");
+    let FileResponse::Formatted { content_base64 } = (FileRequest::Format {
+        path: local.path().to_str().unwrap().to_owned(),
+        content_base64: encode_document("fn main(){}").unwrap(),
+    })
+    .execute_remote(&host, &transport)
+    .unwrap() else {
+        panic!("formatted remote draft");
+    };
+    assert_eq!(decode_document(&content_base64).unwrap(), "fn main() {}\n");
     local.assert("local contents");
     remote.assert("remote replacement");
     let identity = bootty_host::files::host_identity(Some(&config.clone().into()))

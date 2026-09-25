@@ -1052,9 +1052,9 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
 #[case(Caller::Socket)]
 #[case(Caller::Keybinding)]
 fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] caller: Caller) {
-    use bootty_host::files::{FileResponse, encode_document};
+    use bootty_host::files::{FileResponse, decode_document, encode_document};
     let directory = assert_fs::TempDir::new().unwrap();
-    let path = directory.path().join("document.txt");
+    let path = directory.path().join("document.rs");
     fs::write(&path, "original").unwrap();
     let name = path.to_str().unwrap().to_owned();
     let (wake, wakes) = mpsc::channel();
@@ -1103,6 +1103,23 @@ fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] 
         panic!("document");
     };
     assert_eq!(snapshot.contents().unwrap(), "original");
+    let CommandOutcome::Success { value, .. } = run(
+        "files.format",
+        vec![
+            name.clone(),
+            encode_document("fn main(){println!(\"hi\");}").unwrap(),
+        ],
+    ) else {
+        panic!("format");
+    };
+    let FileResponse::Formatted { content_base64 } = serde_json::from_value(value).unwrap() else {
+        panic!("formatted document");
+    };
+    assert_eq!(
+        decode_document(&content_base64).unwrap(),
+        "fn main() {\n    println!(\"hi\");\n}\n"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     let arguments = vec![name, snapshot.digest, encode_document("saved").unwrap()];
     assert!(matches!(
         run("files.save", arguments.clone()),

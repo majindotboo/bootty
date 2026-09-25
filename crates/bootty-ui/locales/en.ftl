@@ -367,6 +367,12 @@ command-toggle_sidebar_visibility-description = Show or hide the session sidebar
 command-toggle_sidebar_visibility-title = Toggle Sidebar
 
 document-revert = Revert from Disk…
+document-format = Format Document
+document-format-short = Format
+document-formatting = Formatting…
+document-format-shortcut = Format Document · Alt/Option+Shift+F
+document-multi-cursor-hint = Alt/Option+click: cursors
+document-changed-during-format = Document changed while formatting; run Format again.
 document-external-change = This file changed outside Bootty. Your unsaved changes are preserved.
 
 panel-agents = Agents

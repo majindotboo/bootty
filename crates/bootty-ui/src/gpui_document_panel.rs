@@ -7,7 +7,9 @@ use crate::{
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
 };
-use bootty_host::files::{FileResponse, FileSnapshot, encode_document};
+use bootty_host::files::{
+    FileResponse, FileSnapshot, can_format, decode_document, encode_document,
+};
 use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -27,21 +29,26 @@ gpui_kit::actions!(
     document,
     [
         #[derive(Eq)]
-        CloseDocument
+        CloseDocument,
+        #[derive(Eq)]
+        FormatDocument
     ]
 );
 pub struct DocumentClosed;
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([gpui_kit::KeyBinding::new(
-        if cfg!(target_os = "macos") {
-            "cmd-w"
-        } else {
-            "ctrl-w"
-        },
-        CloseDocument,
-        Some("BoottyDocument"),
-    )]);
+    cx.bind_keys([
+        gpui_kit::KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-w"
+            } else {
+                "ctrl-w"
+            },
+            CloseDocument,
+            Some("BoottyDocument"),
+        ),
+        gpui_kit::KeyBinding::new("shift-alt-f", FormatDocument, Some("BoottyDocument")),
+    ]);
 }
 
 #[derive(Default)]
@@ -78,6 +85,7 @@ pub struct DocumentPanel {
     error: Option<String>,
     external: Option<FileSnapshot>,
     pending: bool,
+    formatting: bool,
     active: bool,
     host_visible: bool,
     watch: Option<bootty_host::file_watch::FileWatch>,
@@ -120,6 +128,7 @@ impl DocumentPanel {
             error: None,
             external: None,
             pending: false,
+            formatting: false,
             active: false,
             host_visible: true,
             watch: None,
@@ -213,6 +222,96 @@ impl DocumentPanel {
         if let Some(editor) = &self.editor {
             editor.update(cx, FileEditor::request_save);
         }
+    }
+
+    fn can_format(&self) -> bool {
+        can_format(Path::new(&self.path)) && self.editor.is_some() && !self.pending && !self.preview
+    }
+
+    fn format(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.can_format() {
+            return;
+        }
+        let Some(editor) = &self.editor else { return };
+        let source = editor.read(cx).contents(cx);
+        let encoded = match encode_document(&source) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let mut invocation = CommandInvocation::from_action("files.format", Caller::Internal);
+        invocation.target = Some(self.context.target.clone());
+        invocation.arguments = vec![self.path.clone(), encoded];
+        let receiver = match self.sender.submit(
+            invocation,
+            Instant::now()
+                .checked_add(Duration::from_mins(2))
+                .unwrap_or_else(Instant::now),
+            CommandCancellation::new(),
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.error = Some(format!("Format unavailable: {error:?}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.pending = true;
+        self.formatting = true;
+        self.error = None;
+        cx.spawn_in(window, async move |weak, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { receiver.recv() })
+                .await;
+            _ = weak.update_in(cx, |this, window, cx| {
+                this.receive_format(outcome, &source, window, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn receive_format(
+        &mut self,
+        outcome: Result<CommandOutcome, std::sync::mpsc::RecvError>,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending = false;
+        self.formatting = false;
+        let result = match outcome {
+            Ok(CommandOutcome::Success { value, .. }) => {
+                serde_json::from_value::<FileResponse>(value)
+                    .map_err(|error| error.to_string())
+                    .and_then(|response| match response {
+                        FileResponse::Formatted { content_base64 } => {
+                            decode_document(&content_base64).map_err(|error| error.to_string())
+                        }
+                        _ => Err("Unexpected format response".to_owned()),
+                    })
+            }
+            Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
+                .unwrap_or_else(|| "Format failed".to_owned())),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok(formatted) => {
+                if let Some(editor) = &self.editor
+                    && !editor.update(cx, |editor, cx| {
+                        editor.apply_format(source, formatted, window, cx)
+                    })
+                {
+                    self.error = Some(crate::i18n::t(cx, "document-changed-during-format"));
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
     }
     pub(crate) fn go_to(
         &mut self,
@@ -322,7 +421,11 @@ impl DocumentPanel {
                     }
                 }
             }
-            Ok(FileResponse::Directory(_) | FileResponse::Location { .. }) => self.fail(
+            Ok(
+                FileResponse::Directory(_)
+                | FileResponse::Location { .. }
+                | FileResponse::Formatted { .. },
+            ) => self.fail(
                 "Unexpected directory response".to_owned(),
                 saved.is_some(),
                 cx,
@@ -659,6 +762,7 @@ impl Panel for DocumentPanel {
     ) -> PopupMenu {
         let save = cx.weak_entity();
         let revert = save.clone();
+        let format = save.clone();
         menu.item(
             PopupMenuItem::new(crate::i18n::t(cx, "common-save"))
                 .disabled(self.pending || !self.needs_close_prompt(cx))
@@ -673,6 +777,13 @@ impl Panel for DocumentPanel {
                     _ = revert.update(cx, |this, cx| this.request_reload(window, cx));
                 }),
         )
+        .item(
+            PopupMenuItem::new(crate::i18n::t(cx, "document-format"))
+                .disabled(!self.can_format())
+                .on_click(move |_, window, cx| {
+                    _ = format.update(cx, |this, cx| this.format(window, cx));
+                }),
+        )
     }
 }
 impl Render for DocumentPanel {
@@ -683,6 +794,10 @@ impl Render for DocumentPanel {
             .key_context("BoottyDocument")
             .on_action(cx.listener(|this, _: &CloseDocument, window, cx| {
                 this.request_close(window, cx);
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|this, _: &FormatDocument, window, cx| {
+                this.format(window, cx);
                 cx.stop_propagation();
             }))
             .size_full()
@@ -774,6 +889,30 @@ impl DocumentPanel {
                             cx.notify();
                         })),
                 )
+            })
+            .when(
+                can_format(Path::new(&self.path)) && self.editor.is_some(),
+                |row| {
+                    row.child(
+                        Button::new("format-document")
+                            .label(crate::i18n::t(
+                                cx,
+                                if self.formatting {
+                                    "document-formatting"
+                                } else {
+                                    "document-format-short"
+                                },
+                            ))
+                            .ghost()
+                            .small()
+                            .disabled(!self.can_format())
+                            .tooltip(crate::i18n::t(cx, "document-format-shortcut"))
+                            .on_click(cx.listener(|this, _, window, cx| this.format(window, cx))),
+                    )
+                },
+            )
+            .when(self.editor.is_some() && !self.preview, |row| {
+                row.child(crate::i18n::t(cx, "document-multi-cursor-hint"))
             })
             .when_some(position, |row, (line, column)| {
                 row.child(format!(

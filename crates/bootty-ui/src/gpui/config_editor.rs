@@ -222,6 +222,27 @@ impl FileEditor {
         cx.notify();
     }
 
+    /// Apply a formatter result only to the draft it read, keeping the change undoable.
+    pub fn apply_format(
+        &mut self,
+        source: &str,
+        formatted: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.contents(cx) != source {
+            return false;
+        }
+        if source != formatted {
+            let position = self.editor.read(cx).cursor_position();
+            self.editor.update(cx, |editor, cx| {
+                editor.replace_all(formatted, window, cx);
+                editor.set_cursor_position(position, window, cx);
+            });
+        }
+        true
+    }
+
     fn status_banner(&self) -> Option<impl IntoElement> {
         match self.status.as_ref()? {
             SaveStatus::Saved => None,
