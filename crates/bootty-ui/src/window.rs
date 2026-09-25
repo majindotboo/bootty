@@ -78,7 +78,7 @@ pub(crate) fn macos_enable_window_resizing(window: &mut gpui_kit::Window) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn macos_enable_window_resizing(_window: &mut gpui_kit::Window) {}
+pub(crate) const fn macos_enable_window_resizing(_window: &mut gpui_kit::Window) {}
 
 /// Whether the active window's screen has a camera-housing notch.
 ///
