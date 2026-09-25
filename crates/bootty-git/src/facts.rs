@@ -583,24 +583,28 @@ impl WorktreeRevisionCache {
         if revisions.len() >= MAX_WATCHED_WORKTREES {
             return;
         }
+        // Publish before registering: notify may invoke the callback synchronously.
+        revisions.insert(
+            root.clone(),
+            WorktreeWatch {
+                revision: Arc::new(AtomicU64::new(1)),
+                paths: paths.clone(),
+            },
+        );
+        drop(revisions);
         let mut registered: Vec<PathBuf> = Vec::new();
         for path in &paths {
             if watcher.watch(path, RecursiveMode::Recursive).is_err() {
                 for registered_path in registered {
                     let _ = watcher.unwatch(&registered_path);
                 }
+                if let Ok(mut revisions) = self.revisions.lock() {
+                    revisions.remove(&root);
+                }
                 return;
             }
             registered.push(path.clone());
         }
-        revisions.insert(
-            root.clone(),
-            WorktreeWatch {
-                revision: Arc::new(AtomicU64::new(1)),
-                paths,
-            },
-        );
-        drop(revisions);
         if let Ok(mut aliases) = self.aliases.lock() {
             aliases.insert(cwd, root);
         }
