@@ -64,7 +64,7 @@ mod platform_menu {
             SETTINGS_ID,
             localizer.message("menu-settings", None),
             true,
-            Some(Accelerator::new(Some(Modifiers::META), Code::Comma)),
+            Some(Accelerator::new(Modifiers::META, Code::Comma)),
         );
         app_menu
             .append_items(&[

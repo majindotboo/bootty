@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use bootty_config::{
     color::Color,
-    config::{BoottyConfig, ConfigDocument, ConfigResult, StatusSegment},
+    config::{ConfigDocument, ConfigResult, StatusSegment},
     settings_schema::{SettingKind, SettingSpec, SettingValue, SettingsSchema},
 };
 
@@ -106,34 +106,6 @@ impl DraftWriteback {
                 .map(|value| SettingValue::Token(value.to_owned())),
             SettingKind::Custom(_) => None,
         }
-    }
-
-    /// Compare persisted scalar values with their schema-owned typed default.
-    pub(super) fn scalar_is_default(
-        &self,
-        spec: &SettingSpec,
-        current: &BoottyConfig,
-        defaults: &BoottyConfig,
-    ) -> Option<bool> {
-        let default = spec.default_value(defaults)?;
-        let path = spec.path_parts();
-        let path = if self.document.contains(&path) {
-            path
-        } else if let Some(legacy) = spec.supersedes.iter().find(|legacy| {
-            self.document
-                .contains(&legacy.iter().map(AsRef::as_ref).collect::<Vec<_>>())
-        }) {
-            legacy.iter().map(AsRef::as_ref).collect()
-        } else {
-            return Some(spec.default_value(current)? == default);
-        };
-        let value = self.value_at(spec, &path);
-        Some(value.is_some_and(|value| {
-            value == default
-                || (matches!(spec.kind, SettingKind::FontStyle)
-                    && value == SettingValue::Token(String::new())
-                    && default == SettingValue::Token("auto".into()))
-        }))
     }
 
     pub(super) fn custom_scalar_is_default(

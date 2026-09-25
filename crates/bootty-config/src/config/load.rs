@@ -72,6 +72,9 @@ impl ConfigFileStamp {
 #[derive(Clone, Debug)]
 pub struct ConfigDocument {
     pub(super) document: DocumentMut,
+    // Keep the exact loaded bytes, including comments, shared by editable draft clones.
+    // None distinguishes a missing file from an existing empty file.
+    pub(super) source: Option<std::sync::Arc<str>>,
 }
 
 impl ConfigDocument {
@@ -179,7 +182,7 @@ impl ConfigDocument {
 /// or invalid configuration values.
 pub fn load_config_from_path(path: impl AsRef<Path>) -> ConfigResult<BoottyConfig> {
     let path = path.as_ref();
-    load_config_attempt(path).config
+    load_config_attempt(path).loaded.map(|loaded| loaded.config)
 }
 
 pub(super) fn validate_config_document(
@@ -191,26 +194,30 @@ pub(super) fn validate_config_document(
     resolve_loaded_document(&mut document, path)
 }
 
+pub struct LoadedConfig {
+    pub config: BoottyConfig,
+    pub document: ConfigDocument,
+}
+
 pub struct ConfigLoadAttempt {
-    pub(crate) config: ConfigResult<BoottyConfig>,
+    pub(crate) loaded: ConfigResult<LoadedConfig>,
     pub(crate) snapshot: ConfigFileSnapshot,
 }
 
 pub fn load_config_attempt(path: &Path) -> ConfigLoadAttempt {
-    if !path.exists() {
-        let config = BoottyConfig {
-            config_path: path.to_path_buf(),
-            ..Default::default()
-        };
-        return ConfigLoadAttempt {
-            config: Ok(config),
-            snapshot: ConfigFileSnapshot::from_paths([path.to_path_buf()]),
-        };
-    }
-
     let ConfigGraphLoad { document, snapshot } = load_config_graph(path);
-    let config = document.and_then(|mut document| resolve_loaded_document(&mut document, path));
-    ConfigLoadAttempt { config, snapshot }
+    let loaded = document.and_then(|(document, mut merged)| {
+        let config = if document.source.is_none() {
+            BoottyConfig {
+                config_path: path.to_path_buf(),
+                ..Default::default()
+            }
+        } else {
+            resolve_loaded_document(&mut merged, path)?
+        };
+        Ok(LoadedConfig { config, document })
+    });
+    ConfigLoadAttempt { loaded, snapshot }
 }
 
 ///
@@ -218,9 +225,6 @@ pub fn load_config_attempt(path: &Path) -> ConfigLoadAttempt {
 /// Returns an error if the configuration or its include graph cannot be loaded.
 pub fn config_file_snapshot(path: impl AsRef<Path>) -> ConfigResult<ConfigFileSnapshot> {
     let path = path.as_ref();
-    if !path.exists() {
-        return Ok(ConfigFileSnapshot::from_paths([path.to_path_buf()]));
-    }
     let ConfigGraphLoad { document, snapshot } = load_config_graph(path);
     document?;
     Ok(snapshot)
@@ -244,7 +248,10 @@ pub fn load_config_document(path: impl AsRef<Path>) -> ConfigResult<Option<Confi
                     path.display()
                 ))
             })?;
-            Ok(Some(ConfigDocument { document }))
+            Ok(Some(ConfigDocument {
+                document,
+                source: Some(source.into()),
+            }))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ConfigLoadError::new(format!(
@@ -262,12 +269,13 @@ pub fn load_or_create_config_document(path: impl AsRef<Path>) -> ConfigResult<Co
     load_config_document(path).map(|document| {
         document.unwrap_or_else(|| ConfigDocument {
             document: DocumentMut::new(),
+            source: None,
         })
     })
 }
 
 struct ConfigGraphLoad {
-    document: ConfigResult<DocumentMut>,
+    document: ConfigResult<(ConfigDocument, DocumentMut)>,
     snapshot: ConfigFileSnapshot,
 }
 
@@ -279,8 +287,14 @@ struct ConfigGraphTraversal {
 }
 
 fn load_config_graph(path: &Path) -> ConfigGraphLoad {
-    let mut traversal = ConfigGraphTraversal::default();
-    let document = traversal.load_merged_document(path);
+    let mut traversal = ConfigGraphTraversal {
+        paths: vec![config_file_id(path)],
+        ..ConfigGraphTraversal::default()
+    };
+    let document = load_or_create_config_document(path).and_then(|document| {
+        let merged = traversal.merge_root_document(path, document.document.clone())?;
+        Ok((document, merged))
+    });
     ConfigGraphLoad {
         document,
         snapshot: ConfigFileSnapshot::from_paths(traversal.paths),
@@ -298,7 +312,7 @@ impl ConfigGraphTraversal {
         self.merge_includes(path, id, document)
     }
 
-    fn load_merged_document(&mut self, path: &Path) -> ConfigResult<DocumentMut> {
+    fn load_merged_document(&mut self, path: &Path, optional: bool) -> ConfigResult<DocumentMut> {
         let id = config_file_id(path);
         self.paths.push(id.clone());
         if self.stack.contains(&id) {
@@ -311,28 +325,16 @@ impl ConfigGraphTraversal {
             return Ok(DocumentMut::new());
         }
 
-        let source = match fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(ConfigLoadError::new(format!(
-                    "config file not found: {}",
-                    path.display()
-                )));
+        let Some(document) = load_config_document(path)? else {
+            if optional {
+                return Ok(DocumentMut::new());
             }
-            Err(error) => {
-                return Err(ConfigLoadError::new(format!(
-                    "failed to read config file {}: {error}",
-                    path.display()
-                )));
-            }
-        };
-        let document = source.parse::<DocumentMut>().map_err(|error| {
-            ConfigLoadError::new(format!(
-                "failed to parse config file {}: {error}",
+            return Err(ConfigLoadError::new(format!(
+                "config file not found: {}",
                 path.display()
-            ))
-        })?;
-        self.merge_includes(path, id, document)
+            )));
+        };
+        self.merge_includes(path, id, document.document)
     }
 
     fn merge_includes(
@@ -347,13 +349,11 @@ impl ConfigGraphTraversal {
         for include in includes {
             let include = IncludePath::parse(&include);
             let include_path = include.resolve(base_dir);
-            if !include_path.exists() && include.optional {
-                self.paths.push(config_file_id(&include_path));
-                continue;
-            }
             merge_toml_tables(
                 document.as_table_mut(),
-                &self.load_merged_document(&include_path)?.into_table(),
+                &self
+                    .load_merged_document(&include_path, include.optional)?
+                    .into_table(),
             );
         }
         self.stack.pop();

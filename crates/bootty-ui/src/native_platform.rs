@@ -2,7 +2,7 @@
 use anyhow::Result;
 use futures::channel::oneshot;
 use gpui_kit::{
-    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
+    Action, ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
     ClipboardReadError, CursorStyle, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu,
     PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, ScreenCaptureSource,
@@ -83,6 +83,7 @@ impl Platform for BoottyPlatform {
         fn open_with_system(&self, path: &Path) -> ();
         fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) -> ();
         fn on_reopen(&self, callback: Box<dyn FnMut()>) -> ();
+        fn on_system_sleep(&self, callback: Box<dyn FnMut()>) -> ();
         fn on_system_wake(&self, callback: Box<dyn FnMut()>) -> ();
         fn on_app_lifecycle(&self, callback: Box<dyn FnMut(AppLifecyclePhase)>) -> ();
         fn on_memory_warning(&self, callback: Box<dyn FnMut()>) -> ();
@@ -98,6 +99,7 @@ impl Platform for BoottyPlatform {
         fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) -> ();
         fn thermal_state(&self) -> ThermalState;
         fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) -> ();
+        fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>>;
         fn set_app_identity(&self, identifier: &str, name: &str) -> ();
         fn show_system_notification(&self, notification: SystemNotification) -> ();
         fn dismiss_system_notification(&self, tag: &str) -> ();

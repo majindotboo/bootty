@@ -1,3 +1,8 @@
+mod agents;
+mod targets;
+
+use agents::{AgentScopeIndex, AppCommandAgentExecutor};
+
 mod capture;
 mod clipboard;
 mod files;
@@ -5,45 +10,42 @@ mod forwards;
 mod git;
 mod jobs;
 mod links;
+mod mux;
 mod recovery;
 mod shell;
 mod wsl;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
     task::{Poll, ready},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
     app_actions::{KeybindAction, MuxKeyAction},
     commands::{
-        AgentWorkspaceAction, CommandCatalog, CommandExecutor, CoreCommandExecutor, ExactMuxTarget,
-        SynchronousCommand,
+        CommandCatalog, CommandExecutor, CoreCommandExecutor, ExactMuxTarget, SynchronousCommand,
     },
     error_catalog::ErrorNotice,
     state::{AppEffect, AppState, ViewportSnapshot},
 };
-use bootty_agents::{AgentCommandExecutor, AgentInvocation, AgentPaneResolver, AgentService};
+use bootty_agents::{AgentCommandExecutor, AgentService};
 use bootty_control::{
-    AppCommandReceiver, AppCommandSendError, AppCommandSender, BoundAppCommandSender, Caller,
-    CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ControlEventSender,
-    MutationClass, ResourceKind, app_command_channel,
+    AppCommandReceiver, AppCommandSender, BoundAppCommandSender, Caller, CommandCancellation,
+    CommandInvocation, CommandOutcome, CommandTarget, ControlEventSender, MutationClass,
+    ResourceKind, app_command_channel,
 };
 use bootty_mux::repository::BindingMembershipMutation;
 use bootty_mux::{
     RepaintHandle,
     command::MuxCommand,
-    controller::{MuxCommandCompletion, MuxCommandError, MuxCommandResult, SpaceId},
+    controller::{MuxCommandError, MuxCommandResult, SpaceId},
     executor,
     provider::PaneTopology,
-    target,
-    terminal::decode_scoped_pane_id,
     workspace::WorkspaceRuntime,
 };
 use bootty_terminal::terminal::{KeyInput, KeyMods, TerminalKey};
@@ -97,110 +99,6 @@ fn serialized_command_outcome(value: impl serde::Serialize) -> CommandOutcome {
 }
 
 static NEXT_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-/// Runs the service's nested terminal commands through the app mailbox. Each nested invocation
-/// gets its own cancellation token because the outer agent request is already marked started.
-#[derive(Clone)]
-struct AppCommandAgentExecutor {
-    sender: AppCommandSender,
-}
-
-impl AgentCommandExecutor for AppCommandAgentExecutor {
-    fn execute(
-        &self,
-        invocation: CommandInvocation,
-        deadline: Instant,
-        cancellation: CommandCancellation,
-    ) -> CommandOutcome {
-        let nested_cancellation = CommandCancellation::new();
-        let receiver = match self.sender.for_caller(Caller::Internal).submit(
-            invocation,
-            deadline,
-            nested_cancellation.clone(),
-        ) {
-            Ok(receiver) => receiver,
-            Err(AppCommandSendError::Overloaded) => {
-                return CommandOutcome::Failed {
-                    code: "overloaded".to_owned(),
-                    message: "application command queue is overloaded".to_owned(),
-                };
-            }
-            Err(AppCommandSendError::Shutdown) => {
-                return CommandOutcome::Failed {
-                    code: "shutdown".to_owned(),
-                    message: "application command channel shut down".to_owned(),
-                };
-            }
-        };
-        loop {
-            if cancellation.is_cancelled() {
-                let _ = nested_cancellation.cancel();
-                return CommandOutcome::cancelled();
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                let _ = nested_cancellation.cancel();
-                return CommandOutcome::deadline_exceeded();
-            }
-            match receiver.recv_timeout(remaining.min(Duration::from_millis(5))) {
-                Ok(outcome) => return outcome,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return CommandOutcome::Failed {
-                        code: "shutdown".to_owned(),
-                        message: "application command response channel closed".to_owned(),
-                    };
-                }
-            }
-        }
-    }
-}
-
-/// Snapshot of backend pane labels to their unique Space binding. Hooks only carry the backend
-/// pane label, so an ambiguous label deliberately resolves to no scope instead of the active one.
-#[derive(Clone, Default)]
-struct AgentScopeIndex {
-    scopes: Arc<Mutex<BTreeMap<String, Option<String>>>>,
-}
-
-impl AgentPaneResolver for AgentScopeIndex {
-    fn scope_for_pane(&self, pane: &str) -> Option<String> {
-        self.scopes.lock().ok()?.get(pane).cloned().flatten()
-    }
-}
-
-impl AgentScopeIndex {
-    fn refresh(&self, workspace: &WorkspaceRuntime) {
-        let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for binding in workspace.all_bindings() {
-            let scope = binding.scope().persistence_value().to_string();
-            for session in binding.mux().all_sessions() {
-                for window in &session.windows {
-                    for pane in std::iter::once(&window.anchor).chain(&window.panes) {
-                        if let Some(pane_id) = pane.pane_id.as_deref() {
-                            candidates
-                                .entry(pane_id.to_owned())
-                                .or_default()
-                                .insert(scope.clone());
-                        }
-                    }
-                }
-            }
-        }
-        let scopes = candidates
-            .into_iter()
-            .map(|(pane, candidates)| {
-                let scope = (candidates.len() == 1)
-                    .then(|| candidates.into_iter().next())
-                    .flatten();
-                (pane, scope)
-            })
-            .collect();
-        if let Ok(mut current) = self.scopes.lock() {
-            *current = scopes;
-        }
-    }
-}
 
 fn process_handle() -> String {
     static HANDLE: OnceLock<String> = OnceLock::new();
@@ -427,6 +325,27 @@ impl AppState {
         CommandDispatch::Complete(outcome)
     }
 
+    /// Cancel before work starts; once committed, publish the observed result. Atomic file writes,
+    /// Git hooks, and job-registry mutations cannot report a fictitious rollback on cancellation.
+    fn dispatch_committed_command(
+        &self,
+        execution: Option<(Instant, CommandCancellation)>,
+        run: impl FnOnce() -> CommandOutcome + Send + 'static,
+    ) -> CommandDispatch {
+        let execution = executor::command_execution(execution);
+        let (sender, receiver) = mpsc::channel();
+        let repaint = self.repaint.clone();
+        std::thread::spawn(move || {
+            let outcome = match executor::begin_synchronous_command(Some(execution)) {
+                Ok(()) => run(),
+                Err(error) => command_outcome_for_mux_error(error),
+            };
+            let _ = sender.send(outcome);
+            repaint();
+        });
+        CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+    }
+
     /// Returns a non-blocking sender for producers outside the UI-owner call stack.
     ///
     /// UI code dispatches directly and must not synchronously wait on this channel's response.
@@ -617,60 +536,6 @@ impl AppState {
             },
         };
         Poll::Ready(Some(outcome))
-    }
-
-    fn poll_ditch_cleanup(
-        &mut self,
-        scope: SpaceId,
-        command: &MuxCommand,
-        membership: &mut Option<Box<BindingMembershipMutation>>,
-        result: &mpsc::Receiver<bootty_mux::workflow::DitchCleanupOutcome>,
-        execution: (Instant, CommandCancellation),
-    ) -> Poll<Option<PendingCommandResult>> {
-        use bootty_mux::workflow::DitchCleanupOutcome;
-        let cleanup = match ready!(poll_command_result(result)) {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvError) => {
-                DitchCleanupOutcome::NoAction("Git cleanup worker stopped".to_owned())
-            }
-        };
-        match cleanup {
-            DitchCleanupOutcome::NoAction(error) => {
-                self.workspace
-                    .defer_binding_membership_reconciliation(scope);
-                self.record_notice(ErrorNotice::Ditch(error));
-                return Poll::Ready(None);
-            }
-            DitchCleanupOutcome::Partial { branch, error } => {
-                self.record_notice(ErrorNotice::DitchPartial(format!(
-                    "worktree removed; branch '{branch}' remains: {error}"
-                )));
-            }
-            DitchCleanupOutcome::Complete => {}
-        }
-        // Commit against the original binding with the original deadline and cancellation token.
-        let Some(submitted) = executor::submit_authoritative_command_for_scope(
-            &mut self.workspace,
-            &self.repaint,
-            scope,
-            command.clone(),
-            membership.take(),
-            Some(execution),
-        ) else {
-            self.workspace
-                .defer_binding_membership_reconciliation(scope);
-            self.record_notice(ErrorNotice::Ditch(
-                "Session binding disappeared after cleanup".to_owned(),
-            ));
-            return Poll::Ready(None);
-        };
-        Poll::Ready(Some(PendingCommandResult::Mux {
-            scope: submitted.scope,
-            command: submitted.command,
-            membership: submitted.membership,
-            layout: submitted.layout,
-            result: submitted.result,
-        }))
     }
 
     pub(crate) fn dispatch_command(
@@ -899,48 +764,6 @@ impl AppState {
         CommandDispatch::Pending(PendingCommandResult::Outcome(result))
     }
 
-    fn dispatch_pane_command(
-        &mut self,
-        action: super::PaneAction,
-        arguments: &[String],
-        exact_target: Option<ExactMuxTarget>,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) -> CommandDispatch {
-        let Some(ExactMuxTarget::Session(scope, session)) = exact_target else {
-            return self.reject_command(CommandOutcome::StaleTarget {
-                message: "Pane arrangement requires a live session target".to_owned(),
-            });
-        };
-        let command = match action.command(session, arguments) {
-            Ok(command) => command,
-            Err(message) => {
-                return self.reject_command(CommandOutcome::Failed {
-                    code: "invalid_arguments".to_owned(),
-                    message,
-                });
-            }
-        };
-        let Some(submitted) = executor::submit_authoritative_command_for_scope(
-            &mut self.workspace,
-            &self.repaint,
-            scope,
-            command,
-            None,
-            execution,
-        ) else {
-            return self.reject_command(CommandOutcome::StaleTarget {
-                message: "Pane binding was closed".to_owned(),
-            });
-        };
-        CommandDispatch::Pending(PendingCommandResult::Mux {
-            scope: submitted.scope,
-            command: submitted.command,
-            membership: submitted.membership,
-            layout: submitted.layout,
-            result: submitted.result,
-        })
-    }
-
     fn preflight_resolved_invocation(
         &mut self,
         resolved: &crate::commands::ResolvedCommandInvocation,
@@ -1005,503 +828,6 @@ impl AppState {
             return Err(outcome);
         }
         Ok(planned_mux_command)
-    }
-
-    fn dispatch_agent_invocation(
-        &self,
-        agents: Arc<AgentService>,
-        invocation: CommandInvocation,
-        target_supplied: bool,
-        exact_target: Option<&ExactMuxTarget>,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) -> CommandDispatch {
-        let (deadline, cancellation) = executor::command_execution(execution);
-        if let Err(error) =
-            executor::begin_synchronous_command(Some((deadline, cancellation.clone())))
-        {
-            return CommandDispatch::Complete(command_outcome_for_mux_error(error));
-        }
-        let scope = if invocation.command.ends_with(".ingest")
-            || (invocation.command.rsplit('.').next() == Some("state")
-                && invocation
-                    .arguments
-                    .first()
-                    .is_some_and(|pane| !pane.is_empty()))
-        {
-            // Hook and pane-specific state commands resolve their backend pane through
-            // AgentScopeIndex. Never stamp them with whichever Space is active now.
-            None
-        } else {
-            Some(
-                exact_target
-                    .map_or_else(
-                        || self.workspace.active.binding.scope(),
-                        ExactMuxTarget::scope,
-                    )
-                    .persistence_value()
-                    .to_string(),
-            )
-        };
-        let mut request =
-            AgentInvocation::new(invocation, target_supplied, scope, deadline, cancellation);
-        if let Some(exact) = exact_target {
-            let scope = exact.scope();
-            let (session, window, pane) = exact.ids();
-            request.launch_context.new_tab = session
-                .and_then(|session| {
-                    self.mux_resource_target(scope, ResourceKind::Session, session, None)
-                })
-                .or_else(|| self.current_command_target_for("new_tab", ResourceKind::Session));
-            request.launch_context.pane = pane.map(str::to_owned);
-            if let Some(binding) = self.workspace.binding(scope) {
-                request.launch_context.shell =
-                    if cfg!(windows) && binding.multiplexer().remote.is_none() {
-                        bootty_agents::LaunchShell::Windows
-                    } else {
-                        bootty_agents::LaunchShell::Posix
-                    };
-                request.launch_context.cwd = binding
-                    .mux()
-                    .all_sessions()
-                    .iter()
-                    .find(|candidate| Some(candidate.id.as_str()) == session)
-                    .and_then(|session| {
-                        session
-                            .windows
-                            .iter()
-                            .find(|candidate| Some(candidate.id.as_str()) == window)
-                    })
-                    .and_then(|window| {
-                        window
-                            .panes
-                            .iter()
-                            .find(|candidate| candidate.pane_id.as_deref() == pane)
-                            .or(Some(&window.anchor))
-                    })
-                    .and_then(|anchor| anchor.cwd.clone());
-            }
-        }
-        let (result_sender, result_receiver) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        std::thread::spawn(move || {
-            let outcome = agents.invoke(&request);
-            let _ = result_sender.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(result_receiver))
-    }
-
-    fn dispatch_agent_workspace_command(
-        &mut self,
-        action: AgentWorkspaceAction,
-        exact_target: Option<&ExactMuxTarget>,
-        effects: &mut Vec<AppEffect>,
-    ) -> CommandDispatch {
-        let outcome = match action {
-            AgentWorkspaceAction::List => serialized_command_outcome(self.agent_overview()),
-            AgentWorkspaceAction::Focus => exact_target.map_or_else(
-                || CommandOutcome::Unavailable {
-                    message: "No agent pane is available".to_owned(),
-                },
-                |target| {
-                    self.activate_terminal_target(target)
-                        .map_or_else(|outcome| outcome, |()| CommandOutcome::success())
-                },
-            ),
-            AgentWorkspaceAction::Next => {
-                let current =
-                    self.current_command_target_for("agents.focus", ResourceKind::Terminal);
-                let entries = self.agent_overview();
-                let next = entries
-                    .iter()
-                    .filter(|entry| entry.unread)
-                    .find(|entry| current.as_ref() != Some(&entry.target))
-                    .or_else(|| entries.iter().find(|entry| entry.unread));
-                next.map_or_else(
-                    || CommandOutcome::Unavailable {
-                        message: "No unread agents".to_owned(),
-                    },
-                    |entry| match self.resolve_command_target(
-                        "agents.focus",
-                        Some(ResourceKind::Terminal),
-                        Some(&entry.target),
-                    ) {
-                        Ok((_, Some(target))) => self
-                            .activate_terminal_target(&target)
-                            .map_or_else(|outcome| outcome, |()| CommandOutcome::success()),
-                        Err(outcome) => outcome,
-                        _ => CommandOutcome::Unavailable {
-                            message: "Agent pane is unavailable".to_owned(),
-                        },
-                    },
-                )
-            }
-        };
-        if action != AgentWorkspaceAction::List && matches!(outcome, CommandOutcome::Success { .. })
-        {
-            self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal);
-            effects.push(AppEffect::FocusTerminal);
-        }
-        CommandDispatch::Complete(outcome)
-    }
-
-    fn preflight_mux_command(&self, command: &MuxCommand) -> Option<CommandOutcome> {
-        match executor::preflight_command(&self.workspace, command) {
-            Err(MuxCommandError::Failed(message)) => Some(CommandOutcome::Unavailable { message }),
-            Err(MuxCommandError::Unsupported) => Some(CommandOutcome::Unsupported {
-                message: ErrorNotice::MuxOperationUnsupported.to_string(),
-            }),
-            Err(MuxCommandError::Unavailable) => Some(CommandOutcome::Unavailable {
-                message: ErrorNotice::MuxOperationUnavailable.to_string(),
-            }),
-            Err(MuxCommandError::Stale) => Some(CommandOutcome::StaleTarget {
-                message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
-            }),
-            Ok(()) | Err(MuxCommandError::Cancelled | MuxCommandError::DeadlineExceeded) => None,
-        }
-    }
-
-    fn resolve_command_target(
-        &self,
-        command: &str,
-        expected: Option<ResourceKind>,
-        supplied: Option<&CommandTarget>,
-    ) -> Result<(Option<CommandTarget>, Option<ExactMuxTarget>), CommandOutcome> {
-        let Some(expected) = expected else {
-            return if supplied.is_none() {
-                Ok((None, None))
-            } else {
-                Err(CommandOutcome::Denied {
-                    message: ErrorNotice::CommandDoesNotAcceptTarget.to_string(),
-                })
-            };
-        };
-        if supplied.is_some_and(|target| {
-            target.kind != expected
-                && !(command == "new_tab" && target.kind == ResourceKind::Binding)
-        }) {
-            return Err(CommandOutcome::Denied {
-                message: ErrorNotice::CommandRequiresTarget(format!(
-                    "command requires a {expected:?} target"
-                ))
-                .raw_message(),
-            });
-        }
-        if let Some(supplied) = supplied {
-            if self
-                .current_command_target_for(command, expected)
-                .is_some_and(|current| current == *supplied)
-            {
-                return Ok((
-                    Some(supplied.clone()),
-                    self.current_exact_mux_target_for(command, expected),
-                ));
-            }
-            if let Some(exact) = target::exact_mux_target(
-                self.workspace.active.binding.scope(),
-                self.workspace.active.binding.mux(),
-                supplied,
-                &self.binding_target_handle(
-                    self.workspace.active.binding.scope(),
-                    self.workspace.active.binding.mux().binding_generation(),
-                ),
-            ) {
-                return Ok((Some(supplied.clone()), Some(exact)));
-            }
-            if ((command.starts_with("git.")
-                || command.starts_with("files.")
-                || matches!(
-                    command,
-                    "jobs.start" | "transfers.start" | "forwards.open" | "history.search"
-                ))
-                && expected == ResourceKind::Binding)
-                || (command.starts_with("pane.") && expected == ResourceKind::Session)
-                || ((command == "link.open"
-                    || command == "agents.focus"
-                    || command.ends_with(".acknowledge"))
-                    && expected == ResourceKind::Terminal)
-            {
-                for binding in self.workspace.all_bindings() {
-                    let handle = self
-                        .binding_target_handle(binding.scope(), binding.mux().binding_generation());
-                    if let Some(exact) =
-                        target::exact_mux_target(binding.scope(), binding.mux(), supplied, &handle)
-                    {
-                        return Ok((Some(supplied.clone()), Some(exact)));
-                    }
-                }
-            }
-            return Err(CommandOutcome::StaleTarget {
-                message: ErrorNotice::StaleCommandTarget(format!(
-                    "the {expected:?} target is stale"
-                ))
-                .raw_message(),
-            });
-        }
-        let Some(current) = self.current_command_target_for(command, expected) else {
-            return Err(CommandOutcome::Unavailable {
-                message: ErrorNotice::NoCurrentTarget(format!(
-                    "no current {expected:?} target is available"
-                ))
-                .raw_message(),
-            });
-        };
-        // The opaque handle is only an equality token. Build the typed target from current mux
-        // state after the complete wire target (kind, handle, and generation) has matched.
-        let exact = self.current_exact_mux_target_for(command, expected);
-        Ok((Some(current), exact))
-    }
-
-    fn activate_terminal_target(&mut self, target: &ExactMuxTarget) -> Result<(), CommandOutcome> {
-        let scope = target.scope();
-        let (session, window, pane) = target.ids();
-        let Some(session) = session.map(str::to_owned) else {
-            return Ok(());
-        };
-        let window = window.map(str::to_owned);
-        let pane = pane.map(str::to_owned);
-        self.workspace
-            .activate_target(scope, &session, window.as_deref(), &self.repaint)
-            .map_err(|error| CommandOutcome::Failed {
-                code: "execution_failed".to_owned(),
-                message: error.to_string(),
-            })?;
-        if let Some(pane) = pane {
-            self.workspace.active.binding.focus_pane(&pane);
-        }
-        self.sync_terminal_panes_now();
-        (self.repaint)();
-        Ok(())
-    }
-
-    pub(crate) fn current_exact_mux_target_for(
-        &self,
-        command: &str,
-        kind: ResourceKind,
-    ) -> Option<ExactMuxTarget> {
-        let scope = self.workspace.active.binding.scope();
-        let (session_id, window_id, pane_id) = self.selected_mux_resource_path();
-        match kind {
-            ResourceKind::Binding => Some(ExactMuxTarget::Binding(scope)),
-            ResourceKind::Session => session_id
-                .map(|session_id| ExactMuxTarget::Session(scope, session_id))
-                .or_else(|| (command == "new_tab").then_some(ExactMuxTarget::Binding(scope))),
-            ResourceKind::MuxWindow => Some(ExactMuxTarget::Window(scope, session_id?, window_id?)),
-            ResourceKind::Pane => Some(ExactMuxTarget::Pane(
-                scope,
-                session_id?,
-                window_id?,
-                pane_id?,
-            )),
-            ResourceKind::Terminal => match (session_id, window_id, pane_id) {
-                (Some(session), Some(window), Some(pane)) => {
-                    Some(ExactMuxTarget::Pane(scope, session, window, pane))
-                }
-                (Some(session), Some(window), None) => {
-                    Some(ExactMuxTarget::Window(scope, session, window))
-                }
-                (Some(session), None, _) => Some(ExactMuxTarget::Session(scope, session)),
-                (None, _, _) => Some(ExactMuxTarget::Binding(scope)),
-            },
-            ResourceKind::Instance | ResourceKind::ApplicationWindow => None,
-        }
-    }
-
-    pub(crate) fn current_command_target_for(
-        &self,
-        command: &str,
-        kind: ResourceKind,
-    ) -> Option<CommandTarget> {
-        let target = self.current_command_target(kind);
-        if target.is_some() || command != "new_tab" || kind != ResourceKind::Session {
-            return target;
-        }
-        self.current_command_target(ResourceKind::Binding)
-            .map(|binding| CommandTarget {
-                kind,
-                handle: serde_json::Value::from(vec!["no-session", binding.handle.as_str()])
-                    .to_string(),
-                generation: binding.generation,
-            })
-    }
-
-    pub(crate) fn current_command_target(&self, kind: ResourceKind) -> Option<CommandTarget> {
-        let (process, instance_generation, window_generation) = self.commands.target_identity();
-        let process = process.to_owned();
-        let window = &self.window_state_key;
-        let scope = self.workspace.active.binding.scope();
-        let binding_generation = self.workspace.active.binding.mux().binding_generation();
-        let binding_handle = self.binding_target_handle(scope, binding_generation);
-        let (session, mux_window, pane) = self.selected_mux_resource_path();
-        let target = match kind {
-            ResourceKind::Instance => CommandTarget {
-                kind,
-                handle: process,
-                generation: instance_generation,
-            },
-            ResourceKind::ApplicationWindow => CommandTarget {
-                kind,
-                handle: serde_json::Value::from(vec![process.as_str(), window.as_str()])
-                    .to_string(),
-                generation: window_generation,
-            },
-            ResourceKind::Binding => CommandTarget {
-                kind,
-                handle: binding_handle,
-                generation: binding_generation,
-            },
-            ResourceKind::Session => {
-                let session = session?;
-                CommandTarget {
-                    kind,
-                    handle: serde_json::Value::from(vec![
-                        binding_handle.as_str(),
-                        session.as_str(),
-                    ])
-                    .to_string(),
-                    generation: self
-                        .workspace
-                        .active
-                        .binding
-                        .mux()
-                        .session_generation(&session)?,
-                }
-            }
-            ResourceKind::MuxWindow => {
-                let (session, mux_window) = (session?, mux_window?);
-                CommandTarget {
-                    kind,
-                    handle: serde_json::Value::from(vec![
-                        binding_handle.as_str(),
-                        session.as_str(),
-                        mux_window.as_str(),
-                    ])
-                    .to_string(),
-                    generation: self
-                        .workspace
-                        .active
-                        .binding
-                        .mux()
-                        .window_generation(&session, &mux_window)?,
-                }
-            }
-            ResourceKind::Pane => {
-                let (session, mux_window, pane) = (session?, mux_window?, pane?);
-                CommandTarget {
-                    kind,
-                    handle: serde_json::Value::from(vec![
-                        binding_handle.as_str(),
-                        session.as_str(),
-                        mux_window.as_str(),
-                        pane.as_str(),
-                    ])
-                    .to_string(),
-                    generation: self.workspace.active.binding.mux().pane_generation(
-                        &session,
-                        &mux_window,
-                        &pane,
-                    )?,
-                }
-            }
-            ResourceKind::Terminal => self.current_terminal_target(
-                &binding_handle,
-                binding_generation,
-                (session, mux_window, pane),
-            )?,
-        };
-        Some(target)
-    }
-
-    fn current_terminal_target(
-        &self,
-        binding_handle: &str,
-        binding_generation: u64,
-        path: (Option<String>, Option<String>, Option<String>),
-    ) -> Option<CommandTarget> {
-        let (handle, generation) = match path {
-            (Some(session), Some(mux_window), Some(pane)) => (
-                serde_json::Value::from(vec![
-                    binding_handle,
-                    session.as_str(),
-                    mux_window.as_str(),
-                    pane.as_str(),
-                ])
-                .to_string(),
-                self.workspace.active.binding.mux().terminal_generation(
-                    &session,
-                    &mux_window,
-                    &pane,
-                )?,
-            ),
-            (Some(session), _, _) => (
-                serde_json::Value::from(vec![binding_handle, session.as_str()]).to_string(),
-                self.workspace
-                    .active
-                    .binding
-                    .mux()
-                    .session_generation(&session)?,
-            ),
-            (None, _, _) => (
-                serde_json::Value::from(vec![binding_handle, "active_terminal"]).to_string(),
-                binding_generation,
-            ),
-        };
-        Some(CommandTarget {
-            kind: ResourceKind::Terminal,
-            handle,
-            generation,
-        })
-    }
-
-    pub(crate) fn selected_mux_resource_path(
-        &self,
-    ) -> (Option<String>, Option<String>, Option<String>) {
-        let Some(anchor) = self
-            .workspace
-            .active
-            .binding
-            .mux()
-            .selected_session_anchor()
-        else {
-            return (None, None, None);
-        };
-        let session = anchor.session_id.clone();
-        let mux_window = self
-            .workspace
-            .active
-            .binding
-            .mux()
-            .selected_window()
-            .map(str::to_owned)
-            .or_else(|| {
-                self.workspace
-                    .active
-                    .binding
-                    .mux()
-                    .sessions()
-                    .iter()
-                    .find(|candidate| candidate.id == session)
-                    .and_then(|candidate| candidate.active_window_id.clone())
-            });
-        let pane = if self.uses_native_terminal_layout() {
-            self.workspace
-                .active
-                .binding
-                .terminal()
-                .focused_pane_id()
-                .map(|pane_id| {
-                    decode_scoped_pane_id(pane_id).map_or_else(
-                        || pane_id.to_owned(),
-                        |(scope, pane_id)| {
-                            debug_assert_eq!(scope, self.workspace.active.binding.scope());
-                            pane_id
-                        },
-                    )
-                })
-        } else {
-            anchor.pane_id.clone()
-        };
-        (Some(session), mux_window, pane)
     }
 
     fn read_active_terminal(&mut self) -> CommandOutcome {
@@ -1656,140 +982,6 @@ impl AppState {
         }
     }
 
-    fn submit_authoritative_mux_command(
-        &mut self,
-        command: MuxCommand,
-        membership: Option<Box<BindingMembershipMutation>>,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) -> PendingCommandResult {
-        let submitted = executor::submit_authoritative_command(
-            &mut self.workspace,
-            &self.repaint,
-            command,
-            membership,
-            execution,
-        );
-        PendingCommandResult::Mux {
-            scope: submitted.scope,
-            command: submitted.command,
-            membership: submitted.membership,
-            layout: submitted.layout,
-            result: submitted.result,
-        }
-    }
-
-    fn begin_authoritative_membership(
-        &mut self,
-        command: &MuxCommand,
-    ) -> Result<Option<Box<BindingMembershipMutation>>, CommandOutcome> {
-        executor::begin_authoritative_membership(&mut self.workspace, command).map_err(|error| {
-            let outcome = CommandOutcome::Failed {
-                code: "persistence_failed".to_owned(),
-                message: error.to_string(),
-            };
-            if let Some(message) = command_outcome_message(&outcome) {
-                self.record_error(message);
-            }
-            outcome
-        })
-    }
-
-    pub(crate) fn prepare_ditch_session_command(
-        &mut self,
-        session_id: String,
-    ) -> Result<(SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>), CommandOutcome> {
-        let command = MuxCommand::DitchSession { session_id };
-        let scope = self.workspace.active.binding.scope();
-        if self
-            .commands
-            .pending
-            .iter()
-            .any(|pending| match &pending.result {
-                PendingCommandResult::DitchCleanup {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                }
-                | PendingCommandResult::Mux {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                } => *pending_scope == scope && *pending_command == command,
-                PendingCommandResult::Outcome(_)
-                | PendingCommandResult::Forward { .. }
-                | PendingCommandResult::Clipboard { .. }
-                | PendingCommandResult::Link { .. } => false,
-            })
-        {
-            let outcome = CommandOutcome::Unavailable {
-                message: "This session is already being closed".to_owned(),
-            };
-            self.record_error("This session is already being closed".to_owned());
-            return Err(outcome);
-        }
-        if let Some(outcome) = self.preflight_mux_command(&command) {
-            if let Some(message) = command_outcome_message(&outcome) {
-                self.record_error(message);
-            }
-            return Err(outcome);
-        }
-        let membership = self.begin_authoritative_membership(&command)?;
-        Ok((scope, command, membership))
-    }
-
-    pub(crate) fn submit_prepared_ditch_session_command(
-        &mut self,
-        (scope, command, membership): (SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>),
-    ) {
-        debug_assert_eq!(scope, self.workspace.active.binding.scope());
-        let (deadline, cancellation) = executor::command_execution(None);
-        let result = self.submit_authoritative_mux_command(
-            command,
-            membership,
-            Some((deadline, cancellation.clone())),
-        );
-        self.commands.pending.push(PendingAppCommand {
-            deadline,
-            cancellation,
-            response: None,
-            result,
-        });
-    }
-
-    pub(crate) fn submit_ditch_cleanup(
-        &mut self,
-        (scope, command, membership): (SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>),
-        cwd: Option<String>,
-        action: &crate::presentation::dialogs::DitchAction,
-    ) {
-        let action = crate::state::ditch::mux_ditch_action(action);
-        let (deadline, cancellation) = executor::command_execution(None);
-        let (sender, result) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        let cleanup_cancellation = cancellation.clone();
-        std::thread::spawn(move || {
-            let outcome = bootty_mux::workflow::run_ditch_cleanup_with_deadline(
-                cwd.as_deref(),
-                &action,
-                deadline,
-                cleanup_cancellation,
-            );
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        self.commands.pending.push(PendingAppCommand {
-            deadline,
-            cancellation,
-            response: None,
-            result: PendingCommandResult::DitchCleanup {
-                scope,
-                command,
-                membership,
-                result,
-            },
-        });
-    }
-
     fn dispatch_resolved_keybind_command(
         &mut self,
         action: KeybindAction,
@@ -1905,206 +1097,5 @@ impl AppState {
             || serde_json::json!({}),
             |focused| serde_json::json!({ "focused": focused }),
         )
-    }
-
-    fn command_outcome_for_mux_result(
-        &mut self,
-        scope: SpaceId,
-        command: &MuxCommand,
-        membership: Option<&BindingMembershipMutation>,
-        result: MuxCommandResult,
-        layout: Option<&bootty_mux::workspace::PreparedPaneArrangement>,
-    ) -> CommandOutcome {
-        let completion = match executor::complete_authoritative_command(
-            &mut self.workspace,
-            scope,
-            membership,
-            result,
-            layout,
-        ) {
-            Ok(completion) => completion,
-            Err(error) => {
-                let message = error.to_string();
-                self.record_error(message.clone());
-                return CommandOutcome::Failed {
-                    code: "persistence_failed".to_owned(),
-                    message,
-                };
-            }
-        };
-        let (completion, sync_error) = completion;
-        if let Some(error) = sync_error {
-            self.record_error(error);
-        }
-        match completion {
-            Ok(completion) => {
-                let Some(value) = self.mux_command_completion_value(scope, command, &completion)
-                else {
-                    let outcome = CommandOutcome::StaleTarget {
-                        message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
-                    };
-                    if let Some(message) = command_outcome_message(&outcome) {
-                        self.record_error(message);
-                    }
-                    return outcome;
-                };
-                serialized_command_outcome(value)
-            }
-            Err(error) => {
-                let message = error.to_string();
-                let outcome = match error {
-                    MuxCommandError::Cancelled => CommandOutcome::Failed {
-                        code: "cancelled".to_owned(),
-                        message,
-                    },
-                    MuxCommandError::DeadlineExceeded => CommandOutcome::Failed {
-                        code: "deadline_exceeded".to_owned(),
-                        message,
-                    },
-                    MuxCommandError::Unsupported => CommandOutcome::Unsupported {
-                        message: ErrorNotice::MuxOperationUnsupported.to_string(),
-                    },
-                    MuxCommandError::Unavailable => CommandOutcome::Unavailable {
-                        message: ErrorNotice::MuxOperationUnavailable.to_string(),
-                    },
-                    MuxCommandError::Stale => CommandOutcome::StaleTarget {
-                        message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
-                    },
-                    MuxCommandError::Failed(_) => CommandOutcome::Failed {
-                        code: "execution_failed".to_owned(),
-                        message,
-                    },
-                };
-                if let Some(message) = command_outcome_message(&outcome) {
-                    self.record_error(message);
-                }
-                outcome
-            }
-        }
-    }
-
-    fn mux_command_completion_value(
-        &self,
-        scope: SpaceId,
-        command: &MuxCommand,
-        completion: &MuxCommandCompletion,
-    ) -> Option<BTreeMap<String, CommandTarget>> {
-        let mut value = BTreeMap::new();
-        if let Some(session_id) = match command {
-            MuxCommand::CreateProjectSession { session_id, .. }
-            | MuxCommand::CreateWorktreeSession { session_id, .. } => Some(session_id.as_str()),
-            _ => None,
-        } {
-            value.insert(
-                "created".to_owned(),
-                self.mux_resource_target(scope, ResourceKind::Session, session_id, None)?,
-            );
-        }
-        if let (Some(session_id), Some(window_id)) = (
-            completion.selected_session.as_deref(),
-            completion.selected_window.as_deref(),
-        ) {
-            value.insert(
-                "focused".to_owned(),
-                self.mux_resource_target(
-                    scope,
-                    ResourceKind::MuxWindow,
-                    session_id,
-                    Some(window_id),
-                )?,
-            );
-            if matches!(command, MuxCommand::NewWindow { .. })
-                && let Some(created) = self.mux_terminal_target(scope, session_id, window_id)
-            {
-                value.insert("created".to_owned(), created);
-            }
-        }
-        if !value.contains_key("focused")
-            && let Some(session_id) = completion.selected_session.as_deref()
-        {
-            value.insert(
-                "focused".to_owned(),
-                self.mux_resource_target(scope, ResourceKind::Session, session_id, None)?,
-            );
-        }
-        Some(value)
-    }
-
-    pub(crate) fn mux_resource_target(
-        &self,
-        scope: SpaceId,
-        kind: ResourceKind,
-        session_id: &str,
-        window_id: Option<&str>,
-    ) -> Option<CommandTarget> {
-        let binding_runtime = self.workspace.binding(scope)?;
-        let binding = self.binding_target_handle(scope, binding_runtime.mux().binding_generation());
-        let (handle, generation) = match kind {
-            ResourceKind::Session => (
-                serde_json::Value::from(vec![binding.as_str(), session_id]).to_string(),
-                binding_runtime
-                    .mux()
-                    .session_generation(session_id)
-                    .unwrap_or(1),
-            ),
-            ResourceKind::MuxWindow => {
-                let window_id = window_id?;
-                (
-                    serde_json::Value::from(vec![binding.as_str(), session_id, window_id])
-                        .to_string(),
-                    binding_runtime
-                        .mux()
-                        .window_generation(session_id, window_id)
-                        .unwrap_or(1),
-                )
-            }
-            _ => return None,
-        };
-        Some(CommandTarget {
-            kind,
-            handle,
-            generation,
-        })
-    }
-
-    fn mux_terminal_target(
-        &self,
-        scope: SpaceId,
-        session_id: &str,
-        window_id: &str,
-    ) -> Option<CommandTarget> {
-        let binding_runtime = self.workspace.binding(scope)?;
-        let pane_id = binding_runtime
-            .mux()
-            .sessions()
-            .iter()
-            .find(|session| session.id == session_id)?
-            .windows
-            .iter()
-            .find(|window| window.id == window_id)?
-            .anchor
-            .pane_id
-            .as_deref()?;
-        let binding = self.binding_target_handle(scope, binding_runtime.mux().binding_generation());
-        Some(CommandTarget {
-            kind: ResourceKind::Terminal,
-            handle: serde_json::Value::from(vec![binding.as_str(), session_id, window_id, pane_id])
-                .to_string(),
-            generation: binding_runtime
-                .mux()
-                .pane_generation(session_id, window_id, pane_id)?,
-        })
-    }
-
-    pub(crate) fn binding_target_handle(&self, scope: SpaceId, generation: u64) -> String {
-        let (process, _, window_generation) = self.commands.target_identity();
-        serde_json::Value::Array(vec![
-            process.into(),
-            self.window_state_key.clone().into(),
-            window_generation.into(),
-            scope.persistence_value().to_string().into(),
-            generation.into(),
-        ])
-        .to_string()
     }
 }

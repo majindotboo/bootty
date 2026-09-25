@@ -636,8 +636,9 @@ impl KeybindPreset {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, strum::IntoStaticStr)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum MacosOptionAsAltConfig {
     #[serde(alias = "false")]
     None,
@@ -779,8 +780,11 @@ pub struct ResolvedTheme {
     pub info: ThemeInfo,
     pub colors: ColorConfig,
 }
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum AppearanceMode {
     #[default]
     System,

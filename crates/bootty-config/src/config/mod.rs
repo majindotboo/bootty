@@ -38,4 +38,4 @@ pub use writeback::{
     write_font_size_preference,
 };
 
-pub(crate) use load::{config_dependency_snapshot, load_config_attempt};
+pub(crate) use load::{LoadedConfig, config_dependency_snapshot, load_config_attempt};

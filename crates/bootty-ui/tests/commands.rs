@@ -1052,9 +1052,9 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
 #[case(Caller::Socket)]
 #[case(Caller::Keybinding)]
 fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] caller: Caller) {
-    use bootty_host::files::{FileResponse, encode_document};
+    use bootty_host::files::{FileResponse, decode_document, encode_document};
     let directory = assert_fs::TempDir::new().unwrap();
-    let path = directory.path().join("document.txt");
+    let path = directory.path().join("document.rs");
     fs::write(&path, "original").unwrap();
     let name = path.to_str().unwrap().to_owned();
     let (wake, wakes) = mpsc::channel();
@@ -1103,6 +1103,23 @@ fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] 
         panic!("document");
     };
     assert_eq!(snapshot.contents().unwrap(), "original");
+    let CommandOutcome::Success { value, .. } = run(
+        "files.format",
+        vec![
+            name.clone(),
+            encode_document("fn main(){println!(\"hi\");}").unwrap(),
+        ],
+    ) else {
+        panic!("format");
+    };
+    let FileResponse::Formatted { content_base64 } = serde_json::from_value(value).unwrap() else {
+        panic!("formatted document");
+    };
+    assert_eq!(
+        decode_document(&content_base64).unwrap(),
+        "fn main() {\n    println!(\"hi\");\n}\n"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     let arguments = vec![name, snapshot.digest, encode_document("saved").unwrap()];
     assert!(matches!(
         run("files.save", arguments.clone()),
@@ -1822,7 +1839,10 @@ fn job_events_are_owned_by_the_live_window_registry() {
 #[case(Caller::Socket)]
 #[case(Caller::CommandPalette)]
 #[case(Caller::Internal)]
-fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: Caller) {
+fn shell_history_uses_shared_commands_and_keeps_the_shell_file(
+    #[case] caller: Caller,
+    #[values(false, true)] explicit_local: bool,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
     let path = directory.path().join("history");
     fs::write(&path, "git status\necho hello\n").unwrap();
@@ -1848,15 +1868,15 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: C
         cwd: directory.path().to_string_lossy().into_owned(),
         recent: Vec::new(),
     };
+    let mut arguments = vec![serde_json::to_string(&request).unwrap()];
+    if explicit_local {
+        arguments.push("local".into());
+    }
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
         caller,
-        CommandInvocation::new(
-            "history.search",
-            vec![serde_json::to_string(&request).unwrap()],
-            caller,
-        ),
+        CommandInvocation::new("history.search", arguments, caller),
         Instant::now(),
     );
     let CommandOutcome::Success { value, .. } = outcome else {
@@ -1867,6 +1887,23 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(#[case] caller: C
         fs::read_to_string(path).unwrap(),
         "git status\necho hello\n"
     );
+}
+
+#[rstest]
+#[case(None, true)]
+#[case(Some("local"), true)]
+#[case(Some("semantic"), true)]
+#[case(Some("typo"), false)]
+fn history_search_modes_are_validated_at_the_shared_entry(
+    #[values("history.search", "shell.history")] command: &str,
+    #[case] mode: Option<&str>,
+    #[case] accepted: bool,
+) {
+    let mut arguments = vec!["query or spec".into()];
+    arguments.extend(mode.map(str::to_owned));
+    let result =
+        CommandCatalog::default().resolve(CommandInvocation::new(command, arguments, Caller::Cli));
+    assert_eq!(result.is_ok(), accepted);
 }
 
 #[rstest]

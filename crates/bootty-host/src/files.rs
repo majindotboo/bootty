@@ -7,7 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CommandRunner,
+    CommandRunner, SystemCommandRunner,
     remote::{RemoteCommandRunner, RemoteHost},
     text_file::save_text_file_if_digest,
 };
@@ -36,6 +36,10 @@ pub enum FileRequest {
     Save {
         path: String,
         expected_digest: String,
+        content_base64: String,
+    },
+    Format {
+        path: String,
         content_base64: String,
     },
 }
@@ -85,6 +89,9 @@ pub enum FileResponse {
         digest: String,
         durability_warning: Option<String>,
     },
+    Formatted {
+        content_base64: String,
+    },
 }
 
 impl FileRequest {
@@ -112,6 +119,43 @@ impl FileRequest {
                 FileResponse::Saved {
                     digest: crate::install::checksum(contents.as_bytes()),
                     durability_warning: outcome.durability_warning,
+                }
+            }
+            Self::Format {
+                path,
+                content_base64,
+            } => {
+                let path = require_absolute(path)?;
+                let contents = decode_document(content_base64)?;
+                let formatter = formatter_for_path(path)
+                    .context("no formatter is available for this file type")?;
+                let (program, args) = match formatter {
+                    Formatter::Rustfmt => (
+                        "rustfmt",
+                        vec![
+                            "--emit".into(),
+                            "stdout".into(),
+                            "--edition".into(),
+                            "2024".into(),
+                        ],
+                    ),
+                    Formatter::Taplo => ("taplo", vec!["fmt".into(), "-".into()]),
+                    Formatter::Prettier => (
+                        "prettier",
+                        vec![
+                            "--stdin-filepath".into(),
+                            path.to_string_lossy().into_owned(),
+                        ],
+                    ),
+                };
+                let output = SystemCommandRunner
+                    .run_with_input(program, &args, contents.into_bytes())
+                    .with_context(|| format!("run {program} on the document host"))?;
+                if !output.success {
+                    bail!("{program} failed: {}", output.stderr.trim());
+                }
+                FileResponse::Formatted {
+                    content_base64: encode_document(&output.stdout)?,
                 }
             }
         };
@@ -145,6 +189,30 @@ impl FileRequest {
     }
 }
 
+/// Whether Bootty knows a formatter for this document type. The formatter must also be installed
+/// on the document host; adding a language here requires a stdin/stdout formatter command below.
+#[must_use]
+pub fn can_format(path: &Path) -> bool {
+    formatter_for_path(path).is_some()
+}
+
+enum Formatter {
+    Rustfmt,
+    Taplo,
+    Prettier,
+}
+
+fn formatter_for_path(path: &Path) -> Option<Formatter> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => Some(Formatter::Rustfmt),
+        "toml" => Some(Formatter::Taplo),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "json" | "jsonc" | "md" | "markdown"
+        | "html" | "htm" | "css" | "yaml" | "yml" => Some(Formatter::Prettier),
+        _ => None,
+    }
+}
+
 /// # Errors
 /// Returns input, payload limit, decoding, or requested filesystem operation errors.
 pub fn receive_file_request(mut input: impl std::io::Read) -> Result<FileResponse> {
@@ -168,7 +236,9 @@ pub fn encode_document(contents: &str) -> Result<String> {
     Ok(STANDARD.encode(contents.as_bytes()))
 }
 
-fn decode_document(encoded: &str) -> Result<String> {
+/// # Errors
+/// Returns invalid base64, non-UTF-8, binary content, or document size errors.
+pub fn decode_document(encoded: &str) -> Result<String> {
     if encoded.len() > MAX_DOCUMENT_BYTES.div_ceil(3).saturating_mul(4) {
         bail!("documents are limited to 512 KiB");
     }

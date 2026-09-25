@@ -12,19 +12,18 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 fn session(environment: Vec<(String, String)>, path: &std::path::Path) -> SettingsSession {
+    let mut config = bootty_config::config::BoottyConfig::default();
+    config.session.env = environment;
     SettingsSession::new(
         AcceptedSettings {
-            config: std::sync::Arc::new(bootty_config::config::BoottyConfig::default()),
+            config: Arc::new(config),
             revision: 1,
             document: load_or_create_config_document(path).expect("empty config document"),
             schema: Arc::new(SettingsSchema::new(
                 SettingsSchema::builtin().specs().to_vec(),
             )),
         },
-        Catalogs {
-            environment,
-            ..Catalogs::default()
-        },
+        Catalogs::default(),
     )
 }
 
@@ -137,4 +136,51 @@ fn resetting_environment_discards_unsubmitted_rows_and_removes_the_override() {
         load_config_from_path(&path).unwrap().session.env,
         Vec::<(std::string::String, std::string::String)>::new()
     );
+}
+
+#[rstest]
+#[case("")]
+#[case("1INVALID")]
+#[case("FIRST")]
+fn saving_another_setting_preserves_unsubmitted_environment_rows(#[case] name: &str) {
+    use bootty_config::settings_schema::SettingValue;
+    use bootty_ui::settings_session::{SettingsOutcome, SettingsWriteSource};
+
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "[session]\nenv = [{ name = 'FIRST', value = 'one' }, { name = 'SECOND', value = 'two' }]\n").unwrap();
+    let mut accepted = AcceptedSettings {
+        config: Arc::new(load_config_from_path(&path).unwrap()),
+        revision: 1,
+        document: load_or_create_config_document(&path).unwrap(),
+        schema: Arc::new(SettingsSchema::new(
+            SettingsSchema::builtin().specs().to_vec(),
+        )),
+    };
+    let mut session = SettingsSession::new(accepted.clone(), Catalogs::default());
+    session.set_environment_name(1, name.to_owned());
+    let draft = session.environment().to_vec();
+    assert!(session.take_effects().is_empty());
+    session.set_value("font.size", &SettingValue::Number(19.0));
+    let effects = session.take_effects();
+    let [SettingsEffect::SubmitDocument(document)] = effects.as_slice() else {
+        panic!("one setting save");
+    };
+    let (written, ()) =
+        commit_config_document(&path, document.clone(), |_| Ok::<(), String>(())).unwrap();
+    accepted.config = Arc::new(written.config);
+    accepted.document = written.document;
+    accepted.revision = 2;
+    session.apply_outcome(SettingsOutcome::DocumentAccepted {
+        source: SettingsWriteSource::Document,
+        accepted: Box::new(accepted.clone()),
+        warning: None,
+    });
+    assert_eq!(session.environment(), draft);
+    assert!(session.has_unsaved_changes());
+    assert_eq!(session.write_error().is_some(), !name.is_empty());
+    session.discard_document_changes(accepted);
+    assert!(!session.has_unsaved_changes());
+    assert_eq!(session.environment().get(1).unwrap().name, "SECOND");
+    assert_eq!(session.write_error(), None);
 }

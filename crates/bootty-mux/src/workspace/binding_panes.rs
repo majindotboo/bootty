@@ -103,7 +103,7 @@ impl BindingRuntime {
         bootty_terminal::latency::trace_slow("panes.clone_config", phase, 2.0);
         if !self.uses_native_terminal_layout() {
             let phase = bootty_terminal::latency::start();
-            let result = self.terminal.sync_scoped_mux_anchor(
+            let result = self.terminal_owner.terminal.sync_scoped_mux_anchor(
                 self.scope,
                 &config,
                 self.mux.selected_session_anchor(),
@@ -117,7 +117,7 @@ impl BindingRuntime {
             .filter_map(|pane| pane.pane_id.clone())
             .collect();
         if pane_ids.is_empty() {
-            return self.terminal.sync_scoped_mux_anchor(
+            return self.terminal_owner.terminal.sync_scoped_mux_anchor(
                 self.scope,
                 &config,
                 self.mux.selected_session_anchor(),
@@ -141,7 +141,7 @@ impl BindingRuntime {
             .iter()
             .find(|pane| pane.pane_id.as_deref() == Some(focused_id.as_str()))
             .cloned();
-        self.terminal.sync_scoped_native_window(
+        self.terminal_owner.terminal.sync_scoped_native_window(
             self.scope,
             &panes,
             focused_anchor.as_ref(),
@@ -245,8 +245,11 @@ impl BindingRuntime {
             window.layout.as_ref(),
             window.anchor.pane_id.as_deref(),
         )?;
-        self.terminal
-            .prepare_scoped_native_panes(self.scope, &window.panes, geometry)
+        self.terminal_owner.terminal.prepare_scoped_native_panes(
+            self.scope,
+            &window.panes,
+            geometry,
+        )
     }
 
     pub fn window_pane_layout(&self, session_id: &str, window_id: &str) -> Option<&PaneLayout> {
@@ -254,11 +257,20 @@ impl BindingRuntime {
             .get(&self.window_id(session_id.to_owned(), window_id.to_owned()))
     }
 
-    pub fn visible_terminal_runtime(
+    /// The nonblocking frame source for a presented pane, or the opaque attached terminal.
+    /// Presentation cannot use this interface to perform terminal input or backend operations.
+    pub fn visible_terminal_frame_source(
         &mut self,
-        pane_id: &str,
-    ) -> Option<&mut (dyn TerminalRuntime + '_)> {
-        self.terminal.scoped_terminal_runtime(self.scope, pane_id)
+        pane_id: Option<&str>,
+    ) -> Option<&mut (dyn bootty_terminal::frame_source::TerminalFrameSource + '_)> {
+        match pane_id {
+            Some(pane_id) => Some(
+                self.terminal_owner
+                    .terminal
+                    .scoped_terminal_runtime(self.scope, pane_id)?,
+            ),
+            None => Some(self.terminal_mut()),
+        }
     }
 
     /// The focused live pane of this window, including a retained selection in an inactive tab.
@@ -334,10 +346,12 @@ impl BindingRuntime {
         &mut self,
         pane_id: &str,
     ) -> Option<&mut (dyn TerminalRuntime + '_)> {
-        if self.terminal.focused_pane_id() == Some(pane_id) {
+        if self.terminal_owner.terminal.focused_pane_id() == Some(pane_id) {
             return None;
         }
-        self.terminal.scoped_terminal_runtime(self.scope, pane_id)
+        self.terminal_owner
+            .terminal
+            .scoped_terminal_runtime(self.scope, pane_id)
     }
 
     pub fn pane_terminal_window_size<F>(&self, leaf_size: F) -> Option<(u16, u16)>
@@ -350,7 +364,9 @@ impl BindingRuntime {
     /// # Errors
     /// Returns backend window resize or terminal transport errors.
     pub fn resize_native_layout_window(&mut self, cols: u16, rows: u16) -> Result<()> {
-        self.terminal.resize_native_layout_window(cols, rows)
+        self.terminal_owner
+            .terminal
+            .resize_native_layout_window(cols, rows)
     }
 
     pub fn split_focused_pane(
@@ -482,7 +498,7 @@ impl BindingRuntime {
                 pane_id: Some(pane_id.to_owned()),
             },
         );
-        self.terminal.discard_pane(pane_id);
+        self.terminal_owner.terminal.discard_pane(pane_id);
         let window = self.current_window_id();
         self.remove_pane_from_layout(&window, pane_id, true);
     }

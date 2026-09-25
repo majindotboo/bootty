@@ -66,8 +66,26 @@ pub fn copy_file(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(unix)]
 pub fn copy_executable(source: &Path, destination: &Path) -> Result<()> {
-    copy_file(source, destination)?;
-    set_executable(destination)
+    let parent = destination
+        .parent()
+        .with_context(|| format!("{} has no parent directory", destination.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".bootty-")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to stage {}", destination.display()))?;
+    fs::copy(source, temporary.path()).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    set_executable(temporary.path())?;
+    temporary
+        .persist(destination)
+        .with_context(|| format!("failed to replace {}", destination.display()))?;
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", windows))]

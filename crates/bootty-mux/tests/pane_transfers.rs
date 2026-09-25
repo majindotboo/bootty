@@ -67,6 +67,7 @@ fn tmux_transfers_keep_processes_and_reject_foreign_panes() -> Result<()> {
     let server = PrivateTmux {
         directory: assert_fs::TempDir::new().expect("private socket"),
     };
+    // Separate argv bypasses the user shell and its asynchronous startup/exec.
     server.run_checked(&[
         "new-session",
         "-d",
@@ -76,10 +77,11 @@ fn tmux_transfers_keep_processes_and_reject_foreign_panes() -> Result<()> {
         "160",
         "-y",
         "80",
-        "sh",
+        "/bin/sh",
+        "-i",
     ])?;
-    server.run_checked(&["split-window", "-h", "-t", "transfer", "sh"])?;
-    server.run_checked(&["new-session", "-d", "-s", "foreign", "sh"])?;
+    server.run_checked(&["split-window", "-h", "-t", "transfer", "/bin/sh", "-i"])?;
+    server.run_checked(&["new-session", "-d", "-s", "foreign", "/bin/sh", "-i"])?;
     let before = server.processes()?;
     let ids = server
         .run_checked(&["list-panes", "-t", "transfer", "-F", "#{pane_id}"])?

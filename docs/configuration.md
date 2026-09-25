@@ -235,7 +235,8 @@ include = ["shared.toml", "?local.toml"]
 - Paths are relative to the containing config file.
 - Included files are applied after the containing file, so included values can
   override earlier values.
-- Prefix a path with `?` to make it optional.
+- Prefix a path with `?` to allow a missing file. Read and parse errors still
+  reject the reload, preserving the last accepted config.
 - Include cycles are rejected.
 
 ## Terminal backgrounds
@@ -516,6 +517,24 @@ If a writeback target file does not exist, Bootty creates it. If an existing
 file cannot be parsed as TOML, writeback fails rather than replacing the file.
 Bootty writers for one config path are serialized. External editors do not use
 the Bootty writer lease, so writeback is not a cross-program compare-and-swap.
+Before replacement, Bootty compares the file with the draft's original bytes,
+including comments. A stale draft cannot overwrite an observed external edit,
+deletion, or newly created file. Settings retains rejected edits and offers
+**Discard unsaved changes** to return to the accepted config before editing again.
+Catalog refreshes preserve unsaved status segments and environment rows. A successful
+save replaces the editor's accepted config and document together; untouched values
+follow subsequent config reloads. Scalar controls and reset indicators read the
+resolved accepted values, including values inherited from includes and legacy
+spellings; only local edits override that display. Ordinary scalar controls are
+described by their `SettingSpec` and share the same editor and writeback path.
+Remote editors use that same accepted snapshot.
+A remote save or removal acknowledges only its own editor: rejected remote edits
+remain visible, and unrelated unsaved settings are preserved. External profile
+changes refresh untouched editors while preserving unsaved drafts, even when the
+saved profile was removed. Incomplete or invalid
+environment rows also survive saves made by other editors and remain editable
+until completed or explicitly discarded.
+Connection tests report results for both saved profiles and unsaved drafts.
 
 ## Compatibility notes
 
@@ -613,6 +632,7 @@ count. Changes and Diff are native Dock panels: drag their tabs to split or comb
 groups, resize the split, close panels, or toggle the right dock. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
+Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
 
 Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
 index without changing working files. Commit uses only the index; Amend explicitly
@@ -636,7 +656,18 @@ filters loaded entries, shares Git decorations with Changes, and pages large
 directories. Refresh rereads the displayed directory; reopening a directory
 refreshes its children.
 
-Documents support Save (including Command/Ctrl-S), Reload, and Markdown Preview.
+Documents support Save (including Command/Ctrl-S), Reload, Markdown Preview, and
+Format Document (Alt/Option-Shift-F). Formatting uses `rustfmt` for Rust, `taplo`
+for TOML, and `prettier` for JavaScript, TypeScript, JSON/JSONC, Markdown,
+HTML, CSS, and YAML. The formatter must be installed on the document's host.
+Formatting reads the current draft through standard input and returns an
+undoable edit; it does not save the file. If the draft changes while formatting
+runs, Bootty leaves it alone and asks you to run Format again.
+
+The document editor supports multiple cursors: Alt/Option-click adds one,
+Alt/Option-Shift-drag selects a column, and Escape returns to one cursor.
+Use Alt-Shift-Up/Down on Linux, Command-Option-Up/Down on macOS, or
+Control-Alt-Up/Down on Windows to add cursors above or below.
 A dirty document's Close button offers Save, Discard, and Cancel. Closing a
 window or quitting with unsaved documents also asks; Save all keeps the window
 open so save errors remain visible. Saving over an external edit is rejected.
@@ -645,6 +676,8 @@ binary files and larger documents report an explicit error.
 
 Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
 `files.save PATH EXPECTED_SHA256 CONTENT_BASE64` for the CLI and control socket.
+`files.format PATH CONTENT_BASE64` returns formatted document bytes without
+writing the host file.
 All paths belong to the selected binding's host, including remote paths.
 
 Shell completion notifications require live OSC 133 command-start and finish

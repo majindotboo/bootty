@@ -1092,6 +1092,88 @@ fn an_inactive_placement_update_rebuilds_before_activation(directory: assert_fs:
 }
 
 #[rstest]
+#[case("files.open")]
+#[case("files.browse")]
+#[case("git.open")]
+fn captured_host_commands_keep_their_binding_after_switching_spaces(
+    directory: assert_fs::TempDir,
+    #[case] command: &str,
+) {
+    let config_path = directory.path().join("config.toml");
+    let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Native);
+    let (mut repository, _) = WorkspaceRepository::open(&config_path).expect("workspace");
+    let second = create_space(
+        &mut repository,
+        "Second",
+        "2",
+        [1, 2, 3],
+        SpaceMuxOverride::default(),
+    );
+    let mut state = app_state(config, support::backends());
+    let first = state.active_space_id();
+    let started = Instant::now();
+    let CommandOutcome::Success { value, .. } = submit_command(
+        &mut state,
+        CommandInvocation::new(
+            "resource.current",
+            vec!["binding".to_owned()],
+            Caller::Socket,
+        ),
+        started,
+    ) else {
+        panic!("current binding target");
+    };
+    let target: bootty_control::CommandTarget =
+        serde_json::from_value(value["target"].clone()).unwrap();
+    assert!(state.activate_space_from_ui(second.id()));
+
+    let mut invocation = CommandInvocation::new(
+        command,
+        vec![directory.path().to_string_lossy().into_owned()],
+        Caller::Socket,
+    );
+    invocation.target = Some(target.clone());
+    let response = state
+        .app_command_sender(Caller::Socket)
+        .submit(
+            invocation.clone(),
+            started
+                .checked_add(Duration::from_secs(1))
+                .expect("test deadline fits"),
+            CommandCancellation::new(),
+        )
+        .expect("submit captured command");
+    let effects = state.update_frame(frames::idle_frame(started));
+    assert!(matches!(
+        response.try_recv().unwrap(),
+        CommandOutcome::Success { .. }
+    ));
+    let opened = effects.iter().find_map(|effect| match effect {
+        bootty_ui::AppEffect::OpenFiles(request) => Some((request.scope, &request.target)),
+        bootty_ui::AppEffect::OpenGitChanges { scope, target, .. } => Some((*scope, target)),
+        _ => None,
+    });
+    assert_eq!(opened, Some((first, &target)));
+    assert_eq!(state.active_space_id(), second.id());
+
+    invocation.target.as_mut().unwrap().generation = target
+        .generation
+        .checked_add(1)
+        .expect("test generation fits");
+    assert!(matches!(
+        submit_command(&mut state, invocation, started),
+        CommandOutcome::StaleTarget { .. }
+    ));
+    let mut active_only = CommandInvocation::from_action("edit_space", Caller::Socket);
+    active_only.target = Some(target);
+    assert!(matches!(
+        submit_command(&mut state, active_only, started),
+        CommandOutcome::StaleTarget { .. }
+    ));
+    assert_eq!(state.active_space_id(), second.id());
+}
+
+#[rstest]
 fn deleting_an_inactive_space_removes_live_and_durable_state(directory: assert_fs::TempDir) {
     let config_path = directory.path().join("config.toml");
     let config = BoottyConfig {
@@ -1593,4 +1675,146 @@ program = "/bootty/missing-ssh"
         summary.error.as_deref(),
         Some("reconnecting to reconnect.test")
     );
+}
+
+#[rstest]
+#[case(MultiplexerBackendConfig::Native)]
+#[case(MultiplexerBackendConfig::Rmux)]
+#[case(MultiplexerBackendConfig::Tmux)]
+fn failed_active_space_delete_preserves_selection(
+    directory: assert_fs::TempDir,
+    #[case] backend: MultiplexerBackendConfig,
+    #[values(true, false)] reject_delete: bool,
+) {
+    let config_path = directory.path().join("config.toml");
+    let config = test_config::config(config_path.clone(), backend);
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config_path).unwrap();
+    let first = snapshot.spaces()[0].id();
+    create_space(
+        &mut repository,
+        "Second",
+        "2",
+        [0x22, 0x44, 0x66],
+        SpaceMuxOverride::default(),
+    );
+    repository.set_selected_space("close-test", first).unwrap();
+    let mut state = AppState::new_for_window(
+        config,
+        "close-test".to_owned(),
+        support::backends(),
+        Arc::new(|| {}),
+        None,
+        None,
+    )
+    .unwrap();
+    let database = Connection::open(directory.path().join("session-order.sqlite3")).unwrap();
+    let trigger = if reject_delete {
+        "CREATE TRIGGER reject_space_delete BEFORE DELETE ON workspace_spaces
+         BEGIN SELECT RAISE(ABORT, 'Space close rejected'); END;"
+    } else {
+        "CREATE TRIGGER reject_space_selection BEFORE INSERT ON workspace_window_state
+         BEGIN SELECT RAISE(ABORT, 'Space close rejected'); END;"
+    };
+    database.execute_batch(trigger).unwrap();
+
+    assert!(!state.close_space_from_ui(first));
+    assert_eq!(state.active_space_id(), first);
+    assert_eq!(state.space_summaries().len(), 2);
+    assert!(state.last_error().unwrap().contains("Space close rejected"));
+    let (_, reopened) = WorkspaceRepository::open(&config_path).unwrap();
+    assert_eq!(reopened.selected_space("close-test"), Some(first));
+    assert_eq!(reopened.spaces().len(), 2);
+
+    let mut invocation = CommandInvocation::from_action("close_space", Caller::Socket);
+    let outcome = submit_command(&mut state, invocation.clone(), Instant::now());
+    let CommandOutcome::ConfirmationRequired { confirmation } = outcome else {
+        panic!("expected close confirmation: {outcome:?}");
+    };
+    invocation.target.clone_from(&confirmation.target);
+    invocation.confirmation = Some(*confirmation);
+    let outcome = submit_command(&mut state, invocation, Instant::now());
+    assert!(
+        matches!(&outcome, CommandOutcome::Failed { message, .. } if message.contains("Space close rejected")),
+        "report the actual persistence failure: {outcome:?}"
+    );
+    assert_eq!(state.active_space_id(), first);
+}
+
+#[rstest]
+#[case::first(0, 1)]
+#[case::middle(1, 2)]
+#[case::last(2, 1)]
+fn closing_active_space_selects_the_neighbor_and_preserves_the_last_space(
+    directory: assert_fs::TempDir,
+    #[case] closing: usize,
+    #[case] neighbor: usize,
+    #[values(
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux
+    )]
+    backend: MultiplexerBackendConfig,
+) {
+    let config_path = directory.path().join("config.toml");
+    let config = test_config::config(config_path.clone(), backend);
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config_path).unwrap();
+    let spaces = [
+        snapshot.spaces()[0].id(),
+        create_space(
+            &mut repository,
+            "Second",
+            "2",
+            [2; 3],
+            SpaceMuxOverride::default(),
+        )
+        .id(),
+        create_space(
+            &mut repository,
+            "Third",
+            "3",
+            [3; 3],
+            SpaceMuxOverride::default(),
+        )
+        .id(),
+    ];
+    repository
+        .set_selected_space("close-test", spaces[closing])
+        .unwrap();
+    let mut state = AppState::new_for_window(
+        config,
+        "close-test".to_owned(),
+        support::backends(),
+        Arc::new(|| {}),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(state.close_space_from_ui(spaces[closing]));
+    assert_eq!(state.active_space_id(), spaces[neighbor]);
+    let (_, reopened) = WorkspaceRepository::open(&config_path).unwrap();
+    assert_eq!(
+        reopened.selected_space("close-test"),
+        Some(spaces[neighbor])
+    );
+    assert_eq!(reopened.spaces().len(), 2);
+    assert!(
+        reopened
+            .spaces()
+            .iter()
+            .all(|space| space.id() != spaces[closing])
+    );
+
+    assert!(state.close_space_from_ui(spaces[neighbor]));
+    let last = state.active_space_id();
+    assert!(!state.close_space_from_ui(last));
+    assert_eq!(
+        state.last_error(),
+        Some("the last space cannot be closed".to_owned())
+    );
+    assert_eq!(state.active_space_id(), last);
+    assert_eq!(state.space_summaries().len(), 1);
+    let (_, reopened) = WorkspaceRepository::open(&config_path).unwrap();
+    assert_eq!(reopened.selected_space("close-test"), Some(last));
+    assert_eq!(reopened.spaces().len(), 1);
 }

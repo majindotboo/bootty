@@ -322,6 +322,43 @@ fn file_editor_edits_and_emits_the_exact_revision_to_save(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn formatter_result_is_undoable_and_cannot_replace_a_newer_draft(cx: &mut TestAppContext) {
+    init(cx);
+    let window = cx.update(|cx| {
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            cx.new(|cx| ConfigEditorProbe::new("fn main(){}", window, cx))
+        })
+        .expect("open editor")
+    });
+    window
+        .update(cx, |probe, window, cx| {
+            let editor = &probe.editor;
+            assert!(!editor.update(cx, |editor, cx| {
+                editor.apply_format("stale", "discarded".to_owned(), window, cx)
+            }));
+            assert!(editor.update(cx, |editor, cx| {
+                editor.apply_format("fn main(){}", "fn main() {}\n".to_owned(), window, cx)
+            }));
+            assert_eq!(editor.read(cx).contents(cx), "fn main() {}\n");
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        })
+        .unwrap();
+    cx.simulate_keystrokes(
+        *window,
+        if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        },
+    );
+    window
+        .update(cx, |probe, _, cx| {
+            assert_eq!(probe.editor.read(cx).contents(cx), "fn main(){}");
+        })
+        .unwrap();
+}
+
+#[gpui_kit::test]
 fn save_is_available_only_for_an_unsaved_revision(cx: &mut TestAppContext) {
     init(cx);
     let window = cx.update(|cx| {

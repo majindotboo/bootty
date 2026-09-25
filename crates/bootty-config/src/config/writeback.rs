@@ -221,6 +221,7 @@ pub fn update_config_document(
 /// Resolution, including includes and referenced themes, and the caller's application-specific
 /// validation finish before the first byte is replaced. On failure both the caller's accepted
 /// config and the file remain unchanged. The validator may return prepared publication state.
+/// A draft whose source changed on disk is rejected instead of overwriting the newer file.
 ///
 /// # Errors
 /// Returns an error if configuration resolution, caller validation, locking,
@@ -264,7 +265,7 @@ fn commit_locked_document<T>(
 fn replace_locked_document(
     requested_path: &Path,
     target: &bootty_write::LockedWriteTarget,
-    document: ConfigDocument,
+    mut document: ConfigDocument,
 ) -> ConfigResult<(ConfigDocument, ConfigWriteOutcome)> {
     let source = document.document.to_string();
     source.parse::<DocumentMut>().map_err(|error| {
@@ -273,6 +274,17 @@ fn replace_locked_document(
             requested_path.display()
         ))
     })?;
+    let current = match fs::read_to_string(target.path()) {
+        Ok(current) => Some(current),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(write_error(requested_path, "read current file", error)),
+    };
+    if current.as_deref() != document.source.as_deref() {
+        return Err(ConfigLoadError::new(format!(
+            "config file {} changed on disk; reload the document before saving",
+            requested_path.display()
+        )));
+    }
     let outcome = target
         .replace(source.as_bytes(), NewFileMode::Private)
         .map_err(|error| {
@@ -288,6 +300,7 @@ fn replace_locked_document(
             ))
         }
     };
+    document.source = Some(source.into());
     Ok((document, write_outcome))
 }
 

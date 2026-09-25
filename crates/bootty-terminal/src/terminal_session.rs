@@ -30,6 +30,7 @@ use crate::{
         TerminalSideEffectEvent,
     },
     terminal_frame::{CursorSnapshot, RenderFrame},
+    terminal_input::TerminalInputCommand,
     terminal_input_model::{KeyInput, MacosOptionAsAlt, MouseInput},
     terminal_side_effect::deliver_terminal_side_effects,
 };
@@ -240,10 +241,22 @@ pub struct WorkerRequest<T> {
     sender: Sender<T>,
 }
 
-/// Caller-side half of a single-response request.
+/// Caller-side half of a single-response request. Dropping it cancels unclaimed work.
 pub struct PendingWorkerResponse<T> {
     state: Arc<AtomicU8>,
     receiver: Receiver<T>,
+}
+
+impl<T> Drop for PendingWorkerResponse<T> {
+    fn drop(&mut self) {
+        // Claimed operations own their completion and cannot be rolled back by the caller.
+        let _ = self.state.compare_exchange(
+            REQUEST_PENDING,
+            REQUEST_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
 }
 
 /// Creates a request/response pair for one worker round trip.
@@ -343,14 +356,7 @@ enum TerminalCommand {
         pty_size: PtySize,
         done: Option<WorkerRequest<()>>,
     },
-    Key(KeyInput),
-    Focus(bool),
-    Mouse(MouseInput),
-    MouseWheel {
-        input: MouseInput,
-        scroll_delta: isize,
-    },
-    Paste(String),
+    Input(TerminalInputCommand),
     RawInput(Vec<u8>),
     MouseViewportScroll {
         delta: isize,
@@ -641,38 +647,40 @@ impl TerminalSession {
     /// # Errors
     /// Returns an error if the worker has failed or its command channel is closed.
     pub fn write_paste(&mut self, text: &str) -> Result<()> {
-        self.send_command(TerminalCommand::Paste(text.to_owned()))
+        self.send_command(TerminalCommand::Input(TerminalInputCommand::Paste(
+            text.to_owned(),
+        )))
     }
 
     ///
     /// # Errors
     /// Returns an error if the worker has failed or its command channel is closed.
     pub fn encode_key(&mut self, input: KeyInput) -> Result<()> {
-        self.send_command(TerminalCommand::Key(input))
+        self.send_command(TerminalCommand::Input(TerminalInputCommand::Key(input)))
     }
 
     ///
     /// # Errors
     /// Returns an error if the worker has failed or its command channel is closed.
     pub fn encode_focus(&mut self, gained: bool) -> Result<()> {
-        self.send_command(TerminalCommand::Focus(gained))
+        self.send_command(TerminalCommand::Input(TerminalInputCommand::Focus(gained)))
     }
 
     ///
     /// # Errors
     /// Returns an error if the worker has failed or its command channel is closed.
     pub fn encode_mouse(&mut self, input: MouseInput) -> Result<()> {
-        self.send_command(TerminalCommand::Mouse(input))
+        self.send_command(TerminalCommand::Input(TerminalInputCommand::Mouse(input)))
     }
 
     ///
     /// # Errors
     /// Returns an error if the worker has failed or its command channel is closed.
     pub fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()> {
-        self.send_command(TerminalCommand::MouseWheel {
+        self.send_command(TerminalCommand::Input(TerminalInputCommand::MouseWheel {
             input,
             scroll_delta,
-        })
+        }))
     }
 
     ///
@@ -1220,14 +1228,7 @@ impl TerminalWorker {
                     Err(error) => self.worker_health.record("apply_live_config", error),
                 }
             }
-            TerminalCommand::Key(input) => self.key_command(input, stats),
-            TerminalCommand::Focus(gained) => self.focus_command(gained),
-            TerminalCommand::Mouse(input) => self.mouse_command(input),
-            TerminalCommand::MouseWheel {
-                input,
-                scroll_delta,
-            } => self.mouse_wheel_command(input, scroll_delta, stats),
-            TerminalCommand::Paste(text) => self.paste_command(&text, stats),
+            TerminalCommand::Input(input) => self.input_command(&input, stats),
             TerminalCommand::DiscardPendingOutput(done) => {
                 if !done.try_claim() {
                     return;
@@ -1376,84 +1377,37 @@ impl TerminalWorker {
         }
     }
 
-    fn key_command(&mut self, input: KeyInput, stats: &mut WorkerCommandStats) {
-        self.shell_prompt.input(matches!(
-            input.key,
-            crate::terminal_input_model::TerminalKey::Enter
-                | crate::terminal_input_model::TerminalKey::NumpadEnter
-        ));
-        self.mark_input_fast_path();
-        self.engine.scroll_viewport_bottom();
-        stats.terminal_changed = true;
-        match self.engine.encode_key_to_vec(input, &mut self.output_buf) {
-            Ok(()) => self.write_key_output(input),
-            Err(error) => self.worker_health.record("encode_key", error),
-        }
-    }
-
-    fn focus_command(&mut self, gained: bool) {
-        self.mark_input_fast_path();
-        match self
-            .engine
-            .encode_focus_to_vec(gained, &mut self.output_buf)
-        {
-            Ok(()) => self.write_output_buf(),
-            Err(error) => self.worker_health.record("encode_focus", error),
-        }
-    }
-
-    fn mouse_command(&mut self, input: MouseInput) {
-        if self.engine.is_mouse_tracking().unwrap_or(false) {
-            self.shell_prompt.input(false);
-        }
-        match self.engine.encode_mouse_to_vec(input, &mut self.output_buf) {
-            // Motion over a pane with no mouse tracking sends nothing, so it must not
-            // force a publish either: that would bypass the quiet window on every move.
-            Ok(()) if self.output_buf.is_empty() => {}
-            Ok(()) => {
-                self.mark_input_fast_path();
-                self.write_output_buf();
-            }
-            Err(error) => self.worker_health.record("encode_mouse", error),
-        }
-    }
-
-    fn mouse_wheel_command(
-        &mut self,
-        input: MouseInput,
-        scroll_delta: isize,
-        stats: &mut WorkerCommandStats,
-    ) {
-        match self.engine.is_mouse_tracking() {
-            Ok(true) => {
-                self.mark_input_fast_path();
-                match self.engine.encode_mouse_wheel_to_vec(
-                    input,
-                    scroll_delta.unsigned_abs().max(1),
-                    &mut self.output_buf,
-                ) {
-                    Ok(()) => self.write_output_buf(),
-                    Err(error) => self.worker_health.record("encode_mouse_wheel", error),
+    fn input_command(&mut self, input: &TerminalInputCommand, stats: &mut WorkerCommandStats) {
+        match input {
+            TerminalInputCommand::Key(input) => self.shell_prompt.input(matches!(
+                input.key,
+                crate::terminal_input_model::TerminalKey::Enter
+                    | crate::terminal_input_model::TerminalKey::NumpadEnter
+            )),
+            TerminalInputCommand::Paste(_) => self.shell_prompt.input(false),
+            TerminalInputCommand::Text(text) => {
+                for byte in text.bytes() {
+                    self.shell_prompt.input(matches!(byte, b'\r' | b'\n'));
                 }
             }
-            Ok(false) if scroll_delta != 0 => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_delta(scroll_delta);
-                stats.terminal_changed = true;
+            TerminalInputCommand::Mouse(_) if self.engine.is_mouse_tracking().unwrap_or(false) => {
+                self.shell_prompt.input(false);
             }
-            Ok(false) => {}
-            Err(error) => self.worker_health.record("mouse_tracking_for_wheel", error),
+            _ => {}
         }
-    }
-
-    fn paste_command(&mut self, text: &str, stats: &mut WorkerCommandStats) {
-        self.shell_prompt.input(false);
-        self.mark_input_fast_path();
-        self.engine.scroll_viewport_bottom();
-        stats.terminal_changed = true;
-        match self.engine.encode_paste_to_vec(text, &mut self.output_buf) {
-            Ok(()) => self.write_output_buf(),
-            Err(error) => self.worker_health.record("encode_paste", error),
+        match input.apply(&mut self.engine, &mut self.output_buf) {
+            Ok(effects) => {
+                if effects.force_publish {
+                    self.mark_input_fast_path();
+                }
+                stats.terminal_changed |= effects.viewport_changed;
+                if let TerminalInputCommand::Key(input) = input {
+                    self.write_key_output(*input);
+                } else {
+                    self.write_output_buf();
+                }
+            }
+            Err(error) => self.worker_health.record("apply_input", error),
         }
     }
 

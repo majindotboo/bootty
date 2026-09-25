@@ -1,27 +1,34 @@
+#![cfg(test)]
+
 use std::{
     path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
+use bootty_control::ResourceKind;
 use bootty_mux::{
     MuxBackendKind, MuxBindingConfig,
     backend::MuxBackend,
     capability::{BindingCapabilityDescriptor, BindingOperation, BindingOperationOutcome},
     command::{MuxCommand, MuxSplitDirection},
-    controller::{MuxController, RepaintHandle, SpaceId},
+    controller::{MuxCommandCompletion, MuxController, RepaintHandle, SpaceId},
     provider::{
         GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
         MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
         SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
     },
-    snapshot::{MuxSessionTag, MuxSnapshot},
+    snapshot::{MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow},
+    target::{ExactMuxTarget, exact_mux_target},
 };
 use pretty_assertions::assert_eq;
+use proptest::prelude::*;
+use proptest_derive::Arbitrary;
 use static_assertions::assert_obj_safe;
 
 assert_obj_safe!(MuxBackend);
@@ -31,16 +38,35 @@ struct Calls {
     snapshot: Mutex<MuxSnapshot>,
     snapshots: AtomicUsize,
     executes: AtomicUsize,
+    snapshot_queries: Option<mpsc::Sender<SnapshotQuery>>,
+}
+
+struct SnapshotQuery {
+    config: MuxBindingConfig,
+    response: mpsc::Sender<Result<MuxSnapshot>>,
 }
 
 struct Backend {
     calls: Arc<Calls>,
     fail_snapshot_at: usize,
+    config: MuxBindingConfig,
 }
 
 impl MuxBackend for Backend {
     fn snapshot(&self) -> Result<MuxSnapshot> {
         let call = self.calls.snapshots.fetch_add(1, Ordering::SeqCst);
+        if let Some(queries) = &self.calls.snapshot_queries {
+            let (response, receiver) = mpsc::channel();
+            queries
+                .send(SnapshotQuery {
+                    config: self.config.clone(),
+                    response,
+                })
+                .expect("test receives snapshot request");
+            return receiver
+                .recv()
+                .expect("snapshot worker deliberately stopped by test");
+        }
         (call < self.fail_snapshot_at)
             .then(|| {
                 self.calls
@@ -87,10 +113,11 @@ impl MuxBackendProvider for Provider {
         }
     }
 
-    fn build_backend(&self, _: &MuxBindingConfig, _: Option<&Path>) -> Box<dyn MuxBackend> {
+    fn build_backend(&self, config: &MuxBindingConfig, _: Option<&Path>) -> Box<dyn MuxBackend> {
         Box::new(Backend {
             calls: Arc::clone(&self.calls),
             fail_snapshot_at: self.fail_snapshot_at,
+            config: config.clone(),
         })
     }
 }
@@ -161,6 +188,7 @@ fn unavailable_provider_never_executes_a_command(#[case] core_only: bool) -> Res
     let mut backend = Backend {
         calls: Arc::clone(&provider.calls),
         fail_snapshot_at: usize::MAX,
+        config: config.clone(),
     };
     anyhow::ensure!(registry.app_provider(&config).is_err());
     anyhow::ensure!(registry.capabilities(&config, scope).is_none());
@@ -185,6 +213,7 @@ fn unsupported_command_does_not_reach_backend() {
     let mut backend = Backend {
         calls: Arc::clone(&provider.calls),
         fail_snapshot_at: usize::MAX,
+        config: config(),
     };
 
     let unsupported = registry.execute_checked(
@@ -317,12 +346,253 @@ fn caller_thread_snapshot_failure_still_executes_the_command_once() {
     assert_eq!(controller.poll_command(), None);
 }
 
+struct ControlledRefresh {
+    controller: MuxController,
+    requests: mpsc::Receiver<SnapshotQuery>,
+    repaint: RepaintHandle,
+    wakes: mpsc::Receiver<()>,
+}
+
+#[rstest::fixture]
+fn controlled_refresh() -> ControlledRefresh {
+    let (queries, requests) = mpsc::channel();
+    let provider = Arc::new(Provider {
+        kind: MuxBackendKind::Tmux,
+        caller_thread: AtomicBool::new(false),
+        calls: Arc::new(Calls {
+            snapshot_queries: Some(queries),
+            ..Calls::default()
+        }),
+        fail_snapshot_at: usize::MAX,
+    });
+    let (wake, wakes) = mpsc::channel();
+    let repaint: RepaintHandle = Arc::new(move || {
+        let _ = wake.send(());
+    });
+    ControlledRefresh {
+        controller: controller(provider, 4).expect("provider controller"),
+        requests,
+        repaint,
+        wakes,
+    }
+}
+
+fn receive<T>(receiver: &mpsc::Receiver<T>) -> T {
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must make progress")
+}
+
+enum RefreshSupersession {
+    Configuration,
+    Commands(usize),
+}
+
+#[rstest::rstest]
+#[case::configuration(RefreshSupersession::Configuration)]
+#[case::command_completion(RefreshSupersession::Commands(1))]
+#[case::command_burst(RefreshSupersession::Commands(20))]
+fn superseded_refreshes_neither_publish_nor_queue_a_backlog(
+    controlled_refresh: ControlledRefresh,
+    #[case] supersession: RefreshSupersession,
+) {
+    let ControlledRefresh {
+        mut controller,
+        requests,
+        repaint,
+        wakes,
+    } = controlled_refresh;
+    let mut config = config();
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    let old = receive(&requests);
+    match supersession {
+        RefreshSupersession::Configuration => {
+            config.hide_tmux_status = !config.hide_tmux_status;
+            controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+        }
+        RefreshSupersession::Commands(count) => {
+            for _ in 0..count {
+                controller
+                    .complete_authoritative_command(Ok(MuxCommandCompletion::default()), &config)
+                    .expect("complete newer command");
+                controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+            }
+        }
+    }
+    old.response
+        .send(Ok(MuxSnapshot::default()))
+        .expect("finish old snapshot");
+    receive(&wakes);
+    assert!(
+        !controller
+            .refresh_sessions(&repaint, &config, Duration::MAX)
+            .applied
+    );
+
+    let current = receive(&requests);
+    assert_eq!(current.config, config);
+    current
+        .response
+        .send(Ok(MuxSnapshot::default()))
+        .expect("finish current snapshot");
+    receive(&wakes);
+    let outcome = controller.refresh_sessions(&repaint, &config, Duration::MAX);
+    assert!(
+        outcome.applied,
+        "the next refresh must be current: {outcome:?}"
+    );
+    assert_eq!(outcome.error, None);
+    assert!(controller.has_session_snapshot());
+}
+
+#[rstest::rstest]
+fn a_stopped_snapshot_worker_reports_failure_once_and_can_recover(
+    controlled_refresh: ControlledRefresh,
+) {
+    let ControlledRefresh {
+        mut controller,
+        requests,
+        repaint,
+        wakes,
+    } = controlled_refresh;
+    let config = config();
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    drop(receive(&requests).response);
+    // No sleep: let the worker unwind, bounded only to diagnose a stuck worker.
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(2))
+        .expect("test deadline fits");
+    let failure = loop {
+        let outcome = controller.refresh_sessions(&repaint, &config, Duration::MAX);
+        if outcome.error.is_some() {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "stopped worker must be detected");
+        std::thread::yield_now();
+    };
+    assert_eq!(
+        failure.error.as_deref(),
+        Some("mux session refresh worker stopped")
+    );
+    assert!(!controller.has_session_snapshot());
+    assert_eq!(
+        controller
+            .refresh_sessions(&repaint, &config, Duration::ZERO)
+            .error,
+        None
+    );
+    receive(&requests)
+        .response
+        .send(Ok(MuxSnapshot::default()))
+        .expect("recovery snapshot");
+    receive(&wakes);
+    assert!(
+        controller
+            .refresh_sessions(&repaint, &config, Duration::MAX)
+            .applied
+    );
+    assert!(controller.has_session_snapshot());
+    assert_eq!(controller.last_error(), None);
+}
+
+#[derive(Arbitrary, Debug)]
+struct ResourceIds {
+    #[proptest(regex = ".{1,16}")]
+    session: String,
+    #[proptest(regex = ".{1,16}")]
+    window: String,
+    #[proptest(regex = ".{1,16}")]
+    pane: String,
+}
+
+impl ResourceIds {
+    fn snapshot(&self) -> MuxSnapshot {
+        let anchor = MuxPaneAnchor {
+            session_id: self.session.clone(),
+            pane_id: Some(self.pane.clone()),
+            ..Default::default()
+        };
+        MuxSnapshot {
+            active_session_id: Some(self.session.clone()),
+            sessions: vec![MuxSession {
+                id: self.session.clone(),
+                name: "display name".to_owned(),
+                active: true,
+                anchor: anchor.clone(),
+                active_window_id: Some(self.window.clone()),
+                tag: MuxSessionTag::default(),
+                windows: vec![MuxWindow {
+                    id: self.window.clone(),
+                    index: 0,
+                    name: "window display name".to_owned(),
+                    active: true,
+                    anchor,
+                    panes: Vec::new(),
+                    layout: None,
+                    progress: None,
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn live_targets_round_trip_and_cannot_retarget_recreated_resources(ids in any::<ResourceIds>()) {
+        let provider = Provider::new(MuxBackendKind::Tmux, usize::MAX);
+        provider.caller_thread.store(true, Ordering::SeqCst);
+        let mut controller = controller(Arc::clone(&provider), 5).unwrap();
+        let scope = SpaceId::from_persistence(5);
+        let repaint: RepaintHandle = Arc::new(|| {});
+        let snapshot = ids.snapshot();
+        *provider.calls.snapshot.lock().unwrap() = snapshot.clone();
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        let binding = "opaque host binding";
+        let pane = ExactMuxTarget::Pane(scope, ids.session.clone(), ids.window.clone(), ids.pane.clone());
+        let resources = [
+            (ResourceKind::Binding, ExactMuxTarget::Binding(scope)),
+            (ResourceKind::Session, ExactMuxTarget::Session(scope, ids.session.clone())),
+            (ResourceKind::MuxWindow, ExactMuxTarget::window(scope, &ids.session, &ids.window)),
+            (ResourceKind::Pane, pane.clone()),
+            (ResourceKind::Terminal, pane),
+        ];
+        let mut captured = Vec::new();
+        for (kind, exact) in resources {
+            let target = exact.command_target(kind, &controller, binding).unwrap();
+            prop_assert_eq!(exact_mux_target(scope, &controller, &target, binding), Some(exact.clone()));
+            let mut stale = target.clone();
+            stale.generation = stale.generation.checked_add(1).unwrap();
+            prop_assert_eq!(exact_mux_target(scope, &controller, &stale, binding), None);
+            prop_assert_eq!(exact_mux_target(scope, &controller, &target, "another binding"), None);
+            captured.push((exact, target));
+        }
+        *provider.calls.snapshot.lock().unwrap() = MuxSnapshot::default();
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        for (exact, target) in &captured {
+            if target.kind != ResourceKind::Binding {
+                prop_assert_eq!(exact.command_target(target.kind, &controller, binding), None);
+                prop_assert_eq!(exact_mux_target(scope, &controller, target, binding), None);
+            }
+        }
+        *provider.calls.snapshot.lock().unwrap() = snapshot;
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        for (exact, old) in captured {
+            let current = exact.command_target(old.kind, &controller, binding).unwrap();
+            if old.kind != ResourceKind::Binding {
+                prop_assert!(current.generation > old.generation);
+                prop_assert_eq!(exact_mux_target(scope, &controller, &old, binding), None);
+            }
+            prop_assert_eq!(exact_mux_target(scope, &controller, &current, binding), Some(exact));
+        }
+    }
+}
+
 #[rstest::rstest]
 #[case(MuxBackendKind::Native)]
 #[case(MuxBackendKind::Rmux)]
 #[case(MuxBackendKind::Tmux)]
 fn session_switch_selects_its_known_window_before_refresh(#[case] kind: MuxBackendKind) {
-    use bootty_mux::snapshot::{MuxPaneAnchor, MuxSession, MuxWindow};
     let provider = Provider::new(kind, usize::MAX);
     provider.caller_thread.store(true, Ordering::SeqCst);
     let sessions = ["one", "two"].map(|id| {

@@ -33,6 +33,7 @@ use bootty_terminal::{
         TerminalSideEffectEvent,
     },
     terminal_frame::RenderFrame,
+    terminal_input::TerminalInputCommand,
     terminal_input_model::{KeyInput, MouseInput},
     terminal_side_effect::deliver_terminal_side_effects,
 };
@@ -106,14 +107,7 @@ enum RmuxTerminalCommand {
     Resize(TerminalGeometry),
     ForceResize,
     ApplyLiveConfig(TerminalLiveConfig),
-    Key(KeyInput),
-    Focus(bool),
-    Mouse(MouseInput),
-    MouseWheel {
-        input: MouseInput,
-        scroll_delta: isize,
-    },
-    Paste(String),
+    Input(TerminalInputCommand),
     InputBytes(Vec<u8>),
     MouseViewportScroll {
         delta: isize,
@@ -660,26 +654,34 @@ impl TerminalRuntime for RmuxNativeTerminal {
     }
 
     fn write_paste(&mut self, text: &str) -> Result<()> {
-        self.send_command(RmuxTerminalCommand::Paste(text.to_owned()))
+        self.send_command(RmuxTerminalCommand::Input(TerminalInputCommand::Paste(
+            text.to_owned(),
+        )))
     }
 
     fn encode_key(&mut self, input: KeyInput) -> Result<()> {
-        self.send_command(RmuxTerminalCommand::Key(input))
+        self.send_command(RmuxTerminalCommand::Input(TerminalInputCommand::Key(input)))
     }
 
     fn encode_focus(&mut self, gained: bool) -> Result<()> {
-        self.send_command(RmuxTerminalCommand::Focus(gained))
+        self.send_command(RmuxTerminalCommand::Input(TerminalInputCommand::Focus(
+            gained,
+        )))
     }
 
     fn encode_mouse(&mut self, input: MouseInput) -> Result<()> {
-        self.send_command(RmuxTerminalCommand::Mouse(input))
+        self.send_command(RmuxTerminalCommand::Input(TerminalInputCommand::Mouse(
+            input,
+        )))
     }
 
     fn handle_mouse_wheel(&mut self, input: MouseInput, scroll_delta: isize) -> Result<()> {
-        self.send_command(RmuxTerminalCommand::MouseWheel {
-            input,
-            scroll_delta,
-        })
+        self.send_command(RmuxTerminalCommand::Input(
+            TerminalInputCommand::MouseWheel {
+                input,
+                scroll_delta,
+            },
+        ))
     }
 }
 
@@ -932,166 +934,119 @@ impl RmuxWorker {
     }
 
     fn apply_command(&mut self, command: RmuxTerminalCommand) -> bool {
-        let mut terminal_changed = false;
         match command {
             RmuxTerminalCommand::DisplayScale(display_scale) => {
                 self.engine.set_display_scale(display_scale);
                 self.mark_unpublished_frame();
+                false
             }
             RmuxTerminalCommand::RenderCellMetrics(cell) => {
                 self.engine.set_render_cell_metrics(cell);
                 self.mark_unpublished_frame();
+                false
             }
             RmuxTerminalCommand::Resize(geometry) => {
                 self.force_next_frame_publish = true;
                 self.geometry = geometry;
                 self.queue_resize(geometry);
-                terminal_changed = self.engine.resize(geometry).is_ok();
+                self.apply_terminal_change(|engine| engine.resize(geometry))
             }
             RmuxTerminalCommand::ForceResize => {
                 self.force_next_frame_publish = true;
                 self.queue_resize(self.geometry);
-                terminal_changed = true;
+                true
             }
             RmuxTerminalCommand::ApplyLiveConfig(config) => {
-                match self.engine.apply_live_config(config) {
-                    Ok(()) => terminal_changed = true,
-                    Err(error) => self.send_error(&error),
-                }
+                self.apply_terminal_change(|engine| engine.apply_live_config(config))
             }
-            command @ (RmuxTerminalCommand::Key(_)
-            | RmuxTerminalCommand::Focus(_)
-            | RmuxTerminalCommand::Mouse(_)
-            | RmuxTerminalCommand::MouseWheel { .. }
-            | RmuxTerminalCommand::Paste(_)
-            | RmuxTerminalCommand::InputBytes(_)
-            | RmuxTerminalCommand::MouseViewportScroll { .. }
-            | RmuxTerminalCommand::MouseViewportScrollTo { .. }) => {
-                terminal_changed = self.apply_input_command(command);
+            RmuxTerminalCommand::Input(input) => self.apply_input_command(&input),
+            RmuxTerminalCommand::InputBytes(bytes) => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_bottom();
+                self.queue_input(&bytes);
+                true
+            }
+            RmuxTerminalCommand::MouseViewportScroll { delta } => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_delta(delta);
+                true
+            }
+            RmuxTerminalCommand::MouseViewportScrollTo { offset } => {
+                self.mark_input_fast_path();
+                self.engine.scroll_viewport_to(offset);
+                true
             }
             RmuxTerminalCommand::EnterCopyMode => {
-                terminal_changed |= self.apply_terminal_change(TerminalEngine::enter_copy_mode);
+                self.apply_input_change(TerminalEngine::enter_copy_mode)
             }
             RmuxTerminalCommand::SelectionBegin(event) => {
-                terminal_changed |=
-                    self.apply_terminal_change(|engine| engine.begin_selection(event));
+                self.apply_input_change(|engine| engine.begin_selection(event))
             }
             RmuxTerminalCommand::SelectionUpdate(event) => {
-                terminal_changed |=
-                    self.apply_terminal_change(|engine| engine.update_selection(event));
+                self.apply_input_change(|engine| engine.update_selection(event))
             }
             RmuxTerminalCommand::SelectionEnd(event) => {
-                terminal_changed |=
-                    self.apply_terminal_change(|engine| engine.end_selection(event));
+                self.apply_input_change(|engine| engine.end_selection(event))
             }
             RmuxTerminalCommand::Capture { options, done } => {
                 self.respond(done, |worker| worker.engine.capture(options));
+                false
             }
             RmuxTerminalCommand::FormatSelection { format, done } => {
                 self.respond(done, |worker| worker.engine.format_selection(format));
+                false
             }
             RmuxTerminalCommand::CopyModeActive { done } => {
                 self.respond(done, |worker| Ok(worker.engine.copy_mode_active()));
+                false
             }
-            RmuxTerminalCommand::CopyModeAction { action, done } => {
-                terminal_changed = self.respond(done, |worker| {
-                    worker.mark_input_fast_path();
-                    worker.engine.handle_copy_mode_action(action)
-                });
-            }
+            RmuxTerminalCommand::CopyModeAction { action, done } => self.respond(done, |worker| {
+                worker.mark_input_fast_path();
+                worker.engine.handle_copy_mode_action(action)
+            }),
             RmuxTerminalCommand::SearchViewport {
                 options,
                 query,
                 direction,
                 done,
-            } => {
-                terminal_changed = self.respond(done, |worker| {
-                    worker.mark_input_fast_path();
-                    worker
-                        .engine
-                        .search_viewport_with_options(&query, direction, options)
-                });
-            }
+            } => self.respond(done, |worker| {
+                worker.mark_input_fast_path();
+                worker
+                    .engine
+                    .search_viewport_with_options(&query, direction, options)
+            }),
             RmuxTerminalCommand::IsMouseTracking { done } => {
                 self.respond(done, |worker| worker.engine.is_mouse_tracking());
+                false
             }
             RmuxTerminalCommand::DiscardPendingOutput { done } => {
                 self.respond(done, |worker| {
                     worker.discard_pending_output();
                     Ok(())
                 });
+                false
             }
             RmuxTerminalCommand::Stop => {
                 self.command_disconnected = true;
+                false
             }
         }
-        terminal_changed
     }
 
-    fn apply_input_command(&mut self, command: RmuxTerminalCommand) -> bool {
-        let mut terminal_changed = false;
-        match command {
-            RmuxTerminalCommand::MouseViewportScroll { delta } => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_delta(delta);
-                terminal_changed = true;
-            }
-            RmuxTerminalCommand::MouseViewportScrollTo { offset } => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_to(offset);
-                terminal_changed = true;
-            }
-            RmuxTerminalCommand::Key(input) => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_bottom();
-                terminal_changed = true;
-                self.encode_output(|engine, out| engine.encode_key_to_vec(input, out));
-            }
-            RmuxTerminalCommand::Focus(gained) => {
-                self.mark_input_fast_path();
-                self.encode_output(|engine, out| engine.encode_focus_to_vec(gained, out));
-            }
-            RmuxTerminalCommand::Mouse(input) => {
-                self.mark_input_fast_path();
-                self.encode_output(|engine, out| engine.encode_mouse_to_vec(input, out));
-            }
-            RmuxTerminalCommand::MouseWheel {
-                input,
-                scroll_delta,
-            } => match self.engine.is_mouse_tracking() {
-                Ok(true) => {
+    fn apply_input_command(&mut self, input: &TerminalInputCommand) -> bool {
+        match input.apply(&mut self.engine, &mut self.output_buf) {
+            Ok(effects) => {
+                if effects.force_publish {
                     self.mark_input_fast_path();
-                    self.encode_output(|engine, out| {
-                        engine.encode_mouse_wheel_to_vec(
-                            input,
-                            scroll_delta.unsigned_abs().max(1),
-                            out,
-                        )
-                    });
                 }
-                Ok(false) if scroll_delta != 0 => {
-                    self.mark_input_fast_path();
-                    self.engine.scroll_viewport_delta(scroll_delta);
-                    terminal_changed = true;
-                }
-                Ok(false) => {}
-                Err(error) => self.send_error(&error),
-            },
-            RmuxTerminalCommand::Paste(text) => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_bottom();
-                terminal_changed = true;
-                self.encode_output(|engine, out| engine.encode_paste_to_vec(&text, out));
+                self.write_output_buf();
+                effects.viewport_changed
             }
-            RmuxTerminalCommand::InputBytes(bytes) => {
-                self.mark_input_fast_path();
-                self.engine.scroll_viewport_bottom();
-                terminal_changed = true;
-                self.queue_input(&bytes);
+            Err(error) => {
+                self.send_error(&error);
+                false
             }
-            _ => {}
         }
-        terminal_changed
     }
 
     fn discard_pending_output(&mut self) {
@@ -1351,21 +1306,25 @@ impl RmuxWorker {
         self.queue_input(&bytes);
     }
 
-    fn encode_output(
+    fn apply_input_change(
         &mut self,
-        encode: impl FnOnce(&mut TerminalEngine, &mut Vec<u8>) -> Result<()>,
-    ) {
-        if encode(&mut self.engine, &mut self.output_buf).is_ok() {
-            self.write_output_buf();
-        }
+        change: impl FnOnce(&mut TerminalEngine) -> Result<()>,
+    ) -> bool {
+        self.mark_input_fast_path();
+        self.apply_terminal_change(change)
     }
 
     fn apply_terminal_change(
         &mut self,
         change: impl FnOnce(&mut TerminalEngine) -> Result<()>,
     ) -> bool {
-        self.mark_input_fast_path();
-        change(&mut self.engine).is_ok()
+        match change(&mut self.engine) {
+            Ok(()) => true,
+            Err(error) => {
+                self.send_error(&error);
+                false
+            }
+        }
     }
 
     fn respond<T>(

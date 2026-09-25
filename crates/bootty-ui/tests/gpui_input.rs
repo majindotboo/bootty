@@ -179,3 +179,44 @@ fn external_file_drop_delivers_paths_once_and_ignores_cancelled_drags(cx: &mut T
             .unwrap();
     }
 }
+
+#[rstest::rstest]
+#[case::window_owner(true)]
+#[case::terminal_view(false)]
+fn focus_loss_clears_held_input_and_preserves_queued_text(#[case] owns_window: bool) {
+    let mut input = InputAccumulator::default();
+    input.mouse_down(&gpui_kit::MouseDownEvent {
+        button: gpui_kit::MouseButton::Left,
+        modifiers: gpui_kit::Modifiers {
+            control: true,
+            ..gpui_kit::Modifiers::default()
+        },
+        ..gpui_kit::MouseDownEvent::default()
+    });
+    let pressed = input.drain_frame();
+    assert!(pressed.modifiers.control);
+    assert_eq!(
+        pressed.pressed_mouse_button,
+        Some(bootty_gpui::PointerButton::Left)
+    );
+    input.ime_commit("queued text");
+
+    if owns_window {
+        input.window_focused(false);
+    } else {
+        input.observe_window_focus(false);
+    }
+
+    let frame = input.drain_frame();
+    assert!(!frame.window_focused);
+    assert_eq!(frame.modifiers, bootty_gpui::Modifiers::default());
+    assert_eq!(frame.pressed_mouse_button, None);
+    let mut expected = vec![InputEvent::ImeCommit("queued text".to_owned())];
+    if owns_window {
+        expected.extend([
+            InputEvent::WindowFocused(false),
+            InputEvent::ModifiersChanged(bootty_gpui::Modifiers::default()),
+        ]);
+    }
+    assert_eq!(frame.events, expected);
+}

@@ -459,23 +459,45 @@ impl WorkspaceRepository {
     /// # Errors
     /// Returns database transaction errors; failed writes leave prior state intact.
     pub fn delete_space(&mut self, id: SpaceId) -> WorkspaceResult<bool> {
-        self.delete_space_db(id)
+        self.delete_space_db(id, None)
             .map_err(|error| self.database_error("delete space", error))
     }
 
-    fn delete_space_db(&self, id: SpaceId) -> rusqlite::Result<bool> {
-        let conn = open_db(&self.path)?;
-        let space_count = conn.query_row("SELECT COUNT(*) FROM workspace_spaces", [], |row| {
+    pub(crate) fn delete_space_and_select(
+        &self,
+        id: SpaceId,
+        window_key: &str,
+        replacement: SpaceId,
+    ) -> WorkspaceResult<bool> {
+        self.delete_space_db(id, Some((window_key, replacement)))
+            .map_err(|error| self.database_error("close active space", error))
+    }
+
+    fn delete_space_db(
+        &self,
+        id: SpaceId,
+        selection: Option<(&str, SpaceId)>,
+    ) -> rusqlite::Result<bool> {
+        let mut conn = open_db(&self.path)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let space_count = tx.query_row("SELECT COUNT(*) FROM workspace_spaces", [], |row| {
             row.get::<_, i64>(0)
         })?;
         if space_count <= 1 {
             return Ok(false);
         }
-        conn.execute(
+        let deleted = tx.execute(
             "DELETE FROM workspace_spaces WHERE id = ?1",
             [id.persistence_value()],
-        )
-        .map(|deleted| deleted != 0)
+        )? != 0;
+        if !deleted {
+            return Ok(false);
+        }
+        if let Some((window_key, replacement)) = selection {
+            Self::write_selected_space(&tx, window_key, replacement)?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// # Errors
@@ -491,6 +513,14 @@ impl WorkspaceRepository {
 
     fn set_selected_space_db(&self, window_key: &str, space_id: SpaceId) -> rusqlite::Result<()> {
         let conn = open_db(&self.path)?;
+        Self::write_selected_space(&conn, window_key, space_id)
+    }
+
+    fn write_selected_space(
+        conn: &Connection,
+        window_key: &str,
+        space_id: SpaceId,
+    ) -> rusqlite::Result<()> {
         conn.execute(
             "INSERT INTO workspace_window_state (window_key, selected_space_id)
              VALUES (?1, ?2)

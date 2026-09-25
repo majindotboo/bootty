@@ -73,16 +73,29 @@ impl ScrollbarHandle for TerminalScrollHandle {
     }
 }
 
-struct TerminalPresentation {
-    transition_key: Option<String>,
-    surface: TerminalSurface,
-    frame: Arc<RenderFrame>,
-    font_size: f32,
-    text_cell_height: f32,
-    pixels_per_point: f32,
-    text_contract: Arc<TerminalTextContract>,
-    animate_cursor: bool,
-    dim_inactive_cursor: bool,
+/// One immutable frame and the complete inputs needed to present it.
+pub struct TerminalPresentation {
+    pub transition_key: Option<String>,
+    pub surface: TerminalSurface,
+    pub frame: Arc<RenderFrame>,
+    pub text_cell_height: f32,
+    pub pixels_per_point: f32,
+    pub text_contract: Arc<TerminalTextContract>,
+    pub animate_cursor: bool,
+    pub dim_inactive_cursor: bool,
+}
+
+impl PartialEq for TerminalPresentation {
+    fn eq(&self, other: &Self) -> bool {
+        self.transition_key == other.transition_key
+            && self.surface == other.surface
+            && Arc::ptr_eq(&self.frame, &other.frame)
+            && self.text_cell_height.to_bits() == other.text_cell_height.to_bits()
+            && self.pixels_per_point.to_bits() == other.pixels_per_point.to_bits()
+            && Arc::ptr_eq(&self.text_contract, &other.text_contract)
+            && self.animate_cursor == other.animate_cursor
+            && self.dim_inactive_cursor == other.dim_inactive_cursor
+    }
 }
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(700);
@@ -171,88 +184,44 @@ impl GpuiTerminalView {
             .is_some_and(|presentation| Arc::ptr_eq(&presentation.frame, frame))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn matches_presentation(
-        &self,
-        transition_key: Option<&str>,
-        surface: TerminalSurface,
-        frame: &Arc<RenderFrame>,
-        font_size: f32,
-        text_cell_height: f32,
-        pixels_per_point: f32,
-        text_contract: &Arc<TerminalTextContract>,
-        animate_cursor: bool,
-        dim_inactive_cursor: bool,
-    ) -> bool {
-        self.presentation.as_ref().is_some_and(|presentation| {
-            presentation.transition_key.as_deref() == transition_key
-                && presentation.surface == surface
-                && Arc::ptr_eq(&presentation.frame, frame)
-                && presentation.font_size.to_bits() == font_size.to_bits()
-                && presentation.text_cell_height.to_bits() == text_cell_height.to_bits()
-                && presentation.pixels_per_point.to_bits() == pixels_per_point.to_bits()
-                && Arc::ptr_eq(&presentation.text_contract, text_contract)
-                && presentation.animate_cursor == animate_cursor
-                && presentation.dim_inactive_cursor == dim_inactive_cursor
-        })
+    /// Publish after the parent's render. The view owns both invalidation and its painted facts.
+    pub(crate) fn publish(view: &Entity<Self>, presentation: TerminalPresentation, cx: &mut App) {
+        if view.read(cx).presentation.as_ref() == Some(&presentation) {
+            return;
+        }
+        let view = view.clone();
+        cx.defer(move |cx| {
+            view.update(cx, |view, cx| view.apply_presentation(presentation, cx));
+        });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn update(
-        &mut self,
-        transition_key: Option<String>,
-        surface: TerminalSurface,
-        frame: Arc<RenderFrame>,
-        font_size: f32,
-        text_cell_height: f32,
-        pixels_per_point: f32,
-        text_contract: Arc<TerminalTextContract>,
-        animate_cursor: bool,
-        dim_inactive_cursor: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.matches_presentation(
-            transition_key.as_deref(),
-            surface,
-            &frame,
-            font_size,
-            text_cell_height,
-            pixels_per_point,
-            &text_contract,
-            animate_cursor,
-            dim_inactive_cursor,
-        ) {
+    fn apply_presentation(&mut self, presentation: TerminalPresentation, cx: &mut Context<Self>) {
+        if self.presentation.as_ref() == Some(&presentation) {
             return;
         }
         if self
             .presentation
             .as_ref()
-            .is_none_or(|presentation| presentation.transition_key != transition_key)
+            .is_none_or(|previous| previous.transition_key != presentation.transition_key)
         {
-            self.adapter.set_transition_key(transition_key.clone());
+            self.adapter
+                .set_transition_key(presentation.transition_key.clone());
             self.scrollbar.requested.set(None);
         }
         self.metrics = RendererMetrics {
-            dirty_rows: frame.stats.dirty_rows,
+            dirty_rows: presentation.frame.stats.dirty_rows,
             text_runs: self.metrics.text_runs,
-            cursor_blinking: frame.cursor.is_some_and(|cursor| cursor.blinking),
+            cursor_blinking: presentation
+                .frame
+                .cursor
+                .is_some_and(|cursor| cursor.blinking),
         };
-        self.presentation = Some(TerminalPresentation {
-            transition_key,
-            surface,
-            frame,
-            font_size,
-            text_cell_height,
-            pixels_per_point,
-            text_contract,
-            animate_cursor,
-            dim_inactive_cursor,
-        });
-        self.frame_facts_dirty = true;
         let cursor_blinking = self.metrics.cursor_blinking
-            && animate_cursor
+            && presentation.animate_cursor
             && self.window_focused
             && self.marked_text.is_empty();
+        self.presentation = Some(presentation);
+        self.frame_facts_dirty = true;
         if self.cursor_blinking == cursor_blinking && cursor_blinking {
             self.reset_cursor_blink(cx);
         } else {
@@ -322,7 +291,7 @@ impl GpuiTerminalView {
             self.scrollbar.requested.set(None);
             self.scrollbar_epoch = self.scrollbar_epoch.wrapping_add(1);
         }
-        self.input.window_focused(focused);
+        self.input.observe_window_focus(focused);
         let animate_cursor = self
             .presentation
             .as_ref()
@@ -733,7 +702,7 @@ impl Render for GpuiTerminalView {
         let base = self.adapter.element(
             presentation.surface,
             &presentation.frame,
-            presentation.font_size,
+            presentation.text_contract.config.font_size,
             presentation.text_cell_height,
             presentation.pixels_per_point,
             &presentation.text_contract,
@@ -762,7 +731,7 @@ impl Render for GpuiTerminalView {
                     TerminalZoomRequest {
                         surface: presentation.surface,
                         frame: Arc::clone(base.source_frame().unwrap_or(&presentation.frame)),
-                        font_size: presentation.font_size,
+                        font_size: presentation.text_contract.config.font_size,
                         text_cell_height: presentation.text_cell_height,
                         pixels_per_point: presentation.pixels_per_point
                             * self.view_transform.raster_supersample(),

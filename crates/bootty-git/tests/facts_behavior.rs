@@ -233,3 +233,115 @@ fn display_process_preserves_tmux_only_contract(
 
     assert_eq!(facts.display_process.as_deref(), expected);
 }
+
+struct ControlledRead {
+    diff: bool,
+    response: std::sync::mpsc::Sender<String>,
+    finished: std::sync::mpsc::Receiver<()>,
+}
+
+impl ControlledRead {
+    fn complete(self, branch: &str, counts: &str) -> anyhow::Result<()> {
+        self.response
+            .send(if self.diff { counts } else { branch }.to_owned())?;
+        self.finished.recv()?;
+        Ok(())
+    }
+}
+
+struct ControlledRunner {
+    reads: std::sync::mpsc::Sender<ControlledRead>,
+    finished: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+}
+
+impl Clone for ControlledRunner {
+    fn clone(&self) -> Self {
+        Self {
+            reads: self.reads.clone(),
+            finished: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for ControlledRunner {
+    fn drop(&mut self) {
+        // Each worker owns its runner clone until after publishing its result.
+        if let Some(finished) = self
+            .finished
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = finished.send(());
+        }
+    }
+}
+
+impl CommandRunner for ControlledRunner {
+    fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+        anyhow::ensure!(program == "git", "unexpected program: {program}");
+        let diff = args.iter().any(|arg| arg == "diff");
+        anyhow::ensure!(
+            diff || args.iter().any(|arg| arg == "symbolic-ref"),
+            "unexpected arguments: {args:?}"
+        );
+        let (response, result) = std::sync::mpsc::channel();
+        let (finished, completion) = std::sync::mpsc::channel();
+        *self
+            .finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(finished);
+        self.reads
+            .send(ControlledRead {
+                diff,
+                response,
+                finished: completion,
+            })
+            .map_err(|_| anyhow::anyhow!("test reader disconnected"))?;
+        Ok(CommandOutput {
+            success: true,
+            stdout: result.recv()?,
+            stderr: String::new(),
+        })
+    }
+}
+
+#[rstest::rstest]
+fn replaced_git_facts_reject_old_workers_even_when_the_path_returns(
+    #[values(false, true)] pruned: bool,
+) {
+    let (reads, requests) = std::sync::mpsc::channel();
+    let cache = GitFactsCache::with_remote_runner(ControlledRunner {
+        reads,
+        finished: Mutex::new(None),
+    });
+    let start = Instant::now();
+    cache.refresh("session", "/remote/repo", true, start);
+    let old = [requests.recv().unwrap(), requests.recv().unwrap()];
+
+    let now = start
+        .checked_add(bootty_git::facts::FACT_CACHE_TTL)
+        .unwrap()
+        .checked_add(Duration::from_secs(1))
+        .unwrap();
+    if pruned {
+        cache.prune(now);
+    } else {
+        // The session leaves and returns to the same cwd while the first reads are blocked.
+        cache.refresh("session", "", true, start);
+    }
+    cache.refresh("session", "/remote/repo", true, now);
+    for request in [requests.recv().unwrap(), requests.recv().unwrap()] {
+        request.complete("current\n", "7\t3\tfile.rs\n").unwrap();
+    }
+    let expected = cache.get("session", now).unwrap();
+    assert_eq!(expected.branch.as_deref(), Some("current"));
+    assert_eq!(
+        (expected.diff_added, expected.diff_removed),
+        (Some(7), Some(3))
+    );
+    for request in old {
+        request.complete("obsolete\n", "99\t88\tfile.rs\n").unwrap();
+    }
+    assert_eq!(cache.get("session", now), Some(expected));
+}

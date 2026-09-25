@@ -1,27 +1,31 @@
 //! Native tool-panel composition and presentation-only layout persistence.
 
+mod layout;
+mod registry;
+
 use crate::commands::DockAction;
+use layout::{LayoutSaveHandle, SavedLayout};
+use registry::{PanelFactory, register, register_factory};
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, mpsc},
+    sync::Arc,
 };
 
 use bootty_control::{BoundAppCommandSender, CommandTarget};
 use gpui_kit::component::{
     dock::{
-        BasePanel, BasePanelView, DockArea, DockAreaState, DockEvent, DockLayout, DockPlacement,
-        InsertTarget, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo,
-        panel_handle, register_panel,
+        BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, NodeId,
+        PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo, panel_handle,
     },
     menu::{PopupMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global, IntoElement,
-    ParentElement, Render, Styled, Subscription, Window, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, div, prelude::*,
 };
 
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
@@ -58,142 +62,11 @@ macro_rules! tool_panel {
 }
 pub(crate) use tool_panel;
 
-type PanelFactory = Rc<dyn Fn(&PanelInfo, &mut Window, &mut App) -> Arc<dyn BasePanelView>>;
-
 #[derive(Clone)]
 pub struct TerminalWindowPresentation {
     pub(crate) id: bootty_mux::workspace::ScopedWindowId,
     pub(crate) title: String,
 }
-#[derive(Default)]
-struct NativePanels(HashMap<(EntityId, String), PanelFactory>);
-impl Global for NativePanels {}
-
-fn register_factory(area: &Entity<DockArea>, name: &str, factory: PanelFactory, cx: &mut App) {
-    if cx.try_global::<NativePanels>().is_none() {
-        cx.set_global(NativePanels::default());
-    }
-    cx.global_mut::<NativePanels>()
-        .0
-        .insert((area.entity_id(), name.to_owned()), factory);
-    let name = name.to_owned();
-    register_panel(cx, &name.clone(), move |context, window, cx| {
-        let factory = cx
-            .global::<NativePanels>()
-            .0
-            .get(&(context.dock_area().entity_id(), name.clone()))
-            .cloned();
-        if let Some(factory) = factory {
-            factory(context.info(), window, cx)
-        } else {
-            let state = context.state().clone();
-            panel_handle(cx.new(|cx| UnavailablePanel {
-                state,
-                focus: cx.focus_handle(),
-            }))
-        }
-    });
-}
-struct UnavailablePanel {
-    state: gpui_kit::component::dock::PanelState,
-    focus: FocusHandle,
-}
-impl BasePanel for UnavailablePanel {
-    fn panel_name(&self) -> &'static str {
-        "bootty.unavailable"
-    }
-    fn dump(&self, _: &App) -> gpui_kit::component::dock::PanelState {
-        self.state.clone()
-    }
-}
-impl Panel for UnavailablePanel {}
-impl EventEmitter<PanelEvent> for UnavailablePanel {}
-impl Focusable for UnavailablePanel {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-impl Render for UnavailablePanel {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().p_2().child(format!(
-            "The {} panel is unavailable in this workspace.",
-            self.state.panel_name
-        ))
-    }
-}
-
-fn register<P: Panel>(area: &Entity<DockArea>, panel: Entity<P>, cx: &mut App) {
-    let handle = panel_handle(panel);
-    let name = handle.panel_name(cx);
-    register_factory(area, name, Rc::new(move |_, _, _| handle.clone()), cx);
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SavedLayout {
-    #[serde(flatten)]
-    layout: DockAreaState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    always_show_tabs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    always_hide_tabs: Vec<String>,
-}
-
-struct LayoutSave {
-    path: PathBuf,
-    key: String,
-    state: SavedLayout,
-    result: async_channel::Sender<Result<(), String>>,
-}
-
-struct LayoutWriter(mpsc::Sender<LayoutSave>);
-impl Global for LayoutWriter {}
-
-impl LayoutWriter {
-    fn new() -> Self {
-        let (sender, receiver) = mpsc::channel::<LayoutSave>();
-        std::thread::spawn(move || {
-            while let Ok(first) = receiver.recv() {
-                let mut pending = BTreeMap::new();
-                for save in std::iter::once(first).chain(receiver.try_iter()) {
-                    pending.insert((save.path.clone(), save.key.clone()), save);
-                }
-                for save in pending.into_values() {
-                    let result = save_layout(&save.path, &save.key, save.state)
-                        .map_err(|error| error.to_string());
-                    // A closed Dock must not stop saves for other windows or Spaces.
-                    let _ = save.result.send_blocking(result);
-                }
-            }
-        });
-        Self(sender)
-    }
-}
-
-struct LayoutSaveHandle {
-    sender: mpsc::Sender<LayoutSave>,
-    path: PathBuf,
-    key: String,
-    result: async_channel::Sender<Result<(), String>>,
-}
-impl LayoutSaveHandle {
-    fn send(&self, state: SavedLayout) {
-        if self
-            .sender
-            .send(LayoutSave {
-                path: self.path.clone(),
-                key: self.key.clone(),
-                state,
-                result: self.result.clone(),
-            })
-            .is_err()
-        {
-            let _ = self
-                .result
-                .try_send(Err("Layout writer is unavailable".to_owned()));
-        }
-    }
-}
-
 pub struct DockFocusChanged;
 
 #[derive(Clone, Copy)]
@@ -201,6 +74,14 @@ enum InspectorPanel {
     Changes,
     Files,
     Agents,
+}
+
+/// Requests accepted while the persisted layout is still loading.
+#[derive(Default)]
+struct RestoreRequests {
+    panel: Option<InspectorPanel>,
+    commands: Vec<crate::commands::DockRequest>,
+    documents: Vec<(String, u32, u32)>,
 }
 
 /// Session-bound content. Retain only unfinished work when navigation replaces it.
@@ -250,12 +131,9 @@ impl ContextPanels {
                 let focus = window.focused(cx);
                 let panel = panel_handle(this.panels.diff.clone());
                 this.add_document_panel(panel, window, cx);
-                activate(
-                    this.panels.diff.read(cx).group.clone(),
-                    this.panels.diff.entity_id(),
-                    window,
-                    cx,
-                );
+                this.area.update(cx, |area, cx| {
+                    area.select_panel(PanelId::from(this.panels.diff.entity_id()), window, cx);
+                });
                 if let Some(focus) = focus {
                     focus.focus(window, cx);
                 }
@@ -317,10 +195,7 @@ pub struct WorkspaceDock {
     focused_group: Option<NodeId>,
     target: CommandTarget,
     sender: BoundAppCommandSender,
-    restoring: bool,
-    requested_panel: Option<InspectorPanel>,
-    pending_commands: Vec<crate::commands::DockRequest>,
-    pending_documents: Vec<(String, u32, u32)>,
+    restoring: Option<RestoreRequests>,
     focus: FocusHandle,
     error: Option<String>,
     pub(crate) empty_terminal: Option<(NodeId, crate::workspace_composition::EmptyTerminalState)>,
@@ -446,10 +321,7 @@ impl WorkspaceDock {
             focused_group: None,
             target,
             sender: open_sender,
-            restoring: true,
-            requested_panel: None,
-            pending_commands: Vec::new(),
-            pending_documents: Vec::new(),
+            restoring: Some(RestoreRequests::default()),
             focus,
             error: None,
             empty_terminal: None,
@@ -507,16 +379,7 @@ impl WorkspaceDock {
     }
 
     fn layout_writer(path: PathBuf, state_key: String, cx: &mut Context<Self>) -> LayoutSaveHandle {
-        if cx.try_global::<LayoutWriter>().is_none() {
-            cx.set_global(LayoutWriter::new());
-        }
-        let (result_tx, result_rx) = async_channel::unbounded();
-        let save = LayoutSaveHandle {
-            sender: cx.global::<LayoutWriter>().0.clone(),
-            path,
-            key: state_key,
-            result: result_tx,
-        };
+        let (save, result_rx) = LayoutSaveHandle::new(path, state_key, cx);
         cx.spawn(async move |weak, cx| {
             while let Ok(result) = result_rx.recv().await {
                 if weak
@@ -549,9 +412,7 @@ impl WorkspaceDock {
         });
         let area_id = area.entity_id();
         cx.on_release(move |_, cx| {
-            cx.global_mut::<NativePanels>()
-                .0
-                .retain(|(id, _), _| *id != area_id);
+            registry::unregister(area_id, cx);
         })
         .detach();
         (focus, vec![subscription, focus_in, focus_out])
@@ -567,68 +428,30 @@ impl WorkspaceDock {
         cx.spawn_in(window, async move |weak, cx| {
             let saved = cx
                 .background_executor()
-                .spawn(async move {
-                    std::fs::read(path)
-                        .ok()
-                        .and_then(|bytes| {
-                            serde_json::from_slice::<BTreeMap<String, SavedLayout>>(&bytes).ok()
-                        })
-                        .and_then(|mut states| {
-                            states
-                                .remove(&state_key)
-                                .or_else(|| states.remove(&legacy_key))
-                                .or_else(|| {
-                                    let prefix = format!("{legacy_key}:directory:");
-                                    states
-                                        .into_iter()
-                                        .find(|(key, _)| key.starts_with(&prefix))
-                                        .map(|(_, state)| state)
-                                })
-                        })
-                })
+                .spawn(async move { SavedLayout::load(&path, &state_key, &legacy_key) })
                 .await;
             _ = weak.update_in(cx, |this, window, cx| {
-                let tab_preferences = saved
-                    .as_ref()
-                    .map(|s| s.always_show_tabs.clone())
-                    .unwrap_or_default();
-                let hidden_preferences = saved
-                    .as_ref()
-                    .map(|s| s.always_hide_tabs.clone())
-                    .unwrap_or_default();
-                let saved = saved.map(|s| s.layout);
-                // A save from another schema version is discarded; the area starts from its
-                // defaults instead of guessing at a migration.
-                if let Some(saved) = saved
-                    && saved.version == this.area.read(cx).version()
-                {
-                    this.error = this
-                        .area
-                        .update(cx, |area, cx| area.load(saved, window, cx))
-                        .err()
-                        .map(|error| error.to_string());
+                if let Some(saved) = saved {
+                    // Incompatible saves leave the default layout in place.
+                    if saved.layout.version == this.area.read(cx).version() {
+                        this.load_layout(saved, window, cx);
+                    } else {
+                        this.restore_tab_preferences(&saved, cx);
+                    }
+                } else {
+                    this.restore_tab_paths(&[], &[], cx);
                 }
-                *this.always_show_tabs.borrow_mut() = group_paths(this.area.read(cx))
-                    .into_iter()
-                    .filter(|(path, _)| tab_preferences.contains(path))
-                    .map(|(_, node)| node)
-                    .collect();
-                *this.always_hide_tabs.borrow_mut() = group_paths(this.area.read(cx))
-                    .into_iter()
-                    .filter(|(path, _)| hidden_preferences.contains(path))
-                    .map(|(_, node)| node)
-                    .collect();
-                this.restoring = false;
-                match this.requested_panel.take() {
+                let pending = this.restoring.take().unwrap_or_default();
+                match pending.panel {
                     Some(InspectorPanel::Changes) => this.refresh(window, cx),
                     Some(InspectorPanel::Files) => this.show_files(window, cx),
                     Some(InspectorPanel::Agents) => this.show_agents(window, cx),
                     None => {}
                 }
-                for request in std::mem::take(&mut this.pending_commands) {
+                for request in pending.commands {
                     this.apply_request(request, window, cx);
                 }
-                for (path, line, column) in std::mem::take(&mut this.pending_documents) {
+                for (path, line, column) in pending.documents {
                     this.open_document(path, line, column, window, cx);
                 }
             });
@@ -645,7 +468,7 @@ impl WorkspaceDock {
     ) {
         // Selection reconciliation retries after startup restoration; a content change
         // must not discard a saved layout that is still being read.
-        if self.restoring || self.panels.context == context {
+        if self.restoring.is_some() || self.panels.context == context {
             return;
         }
         let saved = self.saved_layout(cx);
@@ -672,21 +495,7 @@ impl WorkspaceDock {
             terminal.set_binding_target(self.target.clone());
         });
         self.panels.register(&self.area, cx);
-        self.error = self
-            .area
-            .update(cx, |area, cx| area.load(saved.layout, window, cx))
-            .err()
-            .map(|error| error.to_string());
-        *self.always_show_tabs.borrow_mut() = group_paths(self.area.read(cx))
-            .into_iter()
-            .filter(|(path, _)| saved.always_show_tabs.contains(path))
-            .map(|(_, node)| node)
-            .collect();
-        *self.always_hide_tabs.borrow_mut() = group_paths(self.area.read(cx))
-            .into_iter()
-            .filter(|(path, _)| saved.always_hide_tabs.contains(path))
-            .map(|(_, node)| node)
-            .collect();
+        self.load_layout(saved, window, cx);
         self.resume(cx);
         self.panels
             .files
@@ -798,8 +607,8 @@ impl WorkspaceDock {
     }
 
     pub(crate) fn show_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restoring {
-            self.requested_panel = Some(InspectorPanel::Agents);
+        if let Some(pending) = &mut self.restoring {
+            pending.panel = Some(InspectorPanel::Agents);
             return;
         }
         self.show_tool(bootty_config::config::PanelKind::Agents, window, cx);
@@ -818,14 +627,34 @@ impl WorkspaceDock {
     }
 
     pub(crate) fn show_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restoring {
-            self.requested_panel = Some(InspectorPanel::Files);
+        if let Some(pending) = &mut self.restoring {
+            pending.panel = Some(InspectorPanel::Files);
             return;
         }
-        self.panels
-            .files
-            .update(cx, |files, cx| files.refresh(window, cx));
+        self.refresh_tool(bootty_config::config::PanelKind::Files, window, cx);
         self.show_tool(bootty_config::config::PanelKind::Files, window, cx);
+    }
+
+    fn refresh_tool(
+        &mut self,
+        kind: bootty_config::config::PanelKind,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        use bootty_config::config::PanelKind;
+        match kind {
+            PanelKind::Files => self
+                .panels
+                .files
+                .update(cx, |files, cx| files.refresh(window, cx)),
+            PanelKind::Changes => {
+                self.resume(cx);
+                self.panels
+                    .changes
+                    .update(cx, |changes, cx| changes.refresh(window, cx));
+            }
+            _ => {}
+        }
     }
 
     fn show_diff(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -886,8 +715,8 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.restoring {
-            self.pending_documents.push((path, line, column));
+        if let Some(pending) = &mut self.restoring {
+            pending.documents.push((path, line, column));
             return;
         }
         let panel = (self.document_factory)(
@@ -902,12 +731,9 @@ impl WorkspaceDock {
             .into_iter()
             .find(|document| PanelId::from(document.entity_id()) == id)
         {
-            activate(
-                document.read(cx).group.clone(),
-                document.entity_id(),
-                window,
-                cx,
-            );
+            self.area.update(cx, |area, cx| {
+                area.select_panel(id, window, cx);
+            });
             document.update(cx, |document, cx| document.go_to(line, column, window, cx));
         }
     }
@@ -974,8 +800,8 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !visible {
-            self.requested_panel = None;
+        if !visible && let Some(pending) = &mut self.restoring {
+            pending.panel = None;
         }
         self.area.update(cx, |area, cx| {
             if area.is_dock_open(DockPlacement::Right) != visible {
@@ -1015,27 +841,6 @@ impl WorkspaceDock {
                 .is_some_and(|tree| tree.contains_panel(sessions_id))
         })
         .unwrap_or(DockPlacement::Left);
-        let home_of =
-            |name: &str| crate::workspace_composition::center_eviction_home(name, sidebar);
-        // Every panel that can exist in a saved layout except the terminal
-        // singleton. Membership is tested by id; the home dock comes from the
-        // panel's live registered name, so a rename falls back to the right
-        // dock instead of stranding the panel.
-        macro_rules! evict {
-            ($area:expr, $panel:expr, $window:expr, $cx:expr) => {{
-                let id = PanelId::from($panel.entity_id());
-                let in_center = $area
-                    .layout(DockPlacement::Center)
-                    .is_some_and(|tree| tree.contains_panel(id));
-                if in_center {
-                    let name = $area
-                        .panel(id)
-                        .map(|view| view.panel_name($cx))
-                        .unwrap_or("");
-                    relocate_panel($area, $panel, home_of(name), $window, $cx);
-                }
-            }};
-        }
         let attachment = self.attachment.clone();
         let changes = self.panels.changes.clone();
         let diff = self.panels.diff.clone();
@@ -1044,14 +849,14 @@ impl WorkspaceDock {
         let sessions = self.sessions.clone();
         let documents = self.documents();
         self.area.update(cx, |area, cx| {
-            evict!(area, attachment, window, cx);
-            evict!(area, changes, window, cx);
-            evict!(area, diff, window, cx);
-            evict!(area, files, window, cx);
-            evict!(area, agents, window, cx);
-            evict!(area, sessions, window, cx);
+            evict_center_panel(area, attachment, sidebar, window, cx);
+            evict_center_panel(area, changes, sidebar, window, cx);
+            evict_center_panel(area, diff, sidebar, window, cx);
+            evict_center_panel(area, files, sidebar, window, cx);
+            evict_center_panel(area, agents, sidebar, window, cx);
+            evict_center_panel(area, sessions, sidebar, window, cx);
             for document in documents {
-                evict!(area, document, window, cx);
+                evict_center_panel(area, document, sidebar, window, cx);
             }
         });
     }
@@ -1063,7 +868,7 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.restoring {
+        if self.restoring.is_some() {
             return;
         }
         let Some(selected_window) = windows.iter().find(|candidate| &candidate.id == selected)
@@ -1107,15 +912,11 @@ impl WorkspaceDock {
     }
 
     pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restoring {
-            self.requested_panel = Some(InspectorPanel::Changes);
+        if let Some(pending) = &mut self.restoring {
+            pending.panel = Some(InspectorPanel::Changes);
             return;
         }
-        self.resume(cx);
-        self.panels.changes.update(cx, |changes, cx| {
-            changes.set_host_visible(true);
-            changes.refresh(window, cx);
-        });
+        self.refresh_tool(bootty_config::config::PanelKind::Changes, window, cx);
         self.show_tool(bootty_config::config::PanelKind::Changes, window, cx);
     }
 }
@@ -1184,7 +985,6 @@ impl WorkspaceDock {
                             PaneRef::Tabs { panels, active_ix } => {
                                 panels.get(active_ix) == Some(&id)
                             }
-                            PaneRef::Tiles { .. } => true,
                             PaneRef::Split { .. } => false,
                         })
                 })
@@ -1200,7 +1000,7 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.restoring || &self.panel_preferences == preferences {
+        if self.restoring.is_some() || &self.panel_preferences == preferences {
             return;
         }
         for kind in bootty_config::config::PanelKind::ALL {
@@ -1284,7 +1084,7 @@ impl WorkspaceDock {
     /// Layout edits before the saved layout has been read are startup noise (window frame
     /// restoration, first-frame measurements); persisting them would clobber the real save.
     fn layout_changed(&self, cx: &App) {
-        if self.restoring || !self.present {
+        if self.restoring.is_some() || !self.present {
             return;
         }
         self.save_layout(cx);
@@ -1375,6 +1175,37 @@ impl WorkspaceDock {
             document_list.borrow_mut().push(panel.downgrade());
             panel_handle(panel)
         })
+    }
+
+    fn load_layout(&mut self, saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let SavedLayout {
+            layout,
+            always_show_tabs,
+            always_hide_tabs,
+        } = saved;
+        self.error = self
+            .area
+            .update(cx, |area, cx| area.load(layout, window, cx))
+            .err()
+            .map(|error| error.to_string());
+        self.restore_tab_paths(&always_show_tabs, &always_hide_tabs, cx);
+    }
+
+    fn restore_tab_preferences(&self, saved: &SavedLayout, cx: &App) {
+        self.restore_tab_paths(&saved.always_show_tabs, &saved.always_hide_tabs, cx);
+    }
+
+    fn restore_tab_paths(&self, shown: &[String], hidden: &[String], cx: &App) {
+        let groups = group_paths(self.area.read(cx));
+        let resolve = |paths: &[String]| {
+            groups
+                .iter()
+                .filter(|(path, _)| paths.contains(path))
+                .map(|(_, node)| *node)
+                .collect()
+        };
+        *self.always_show_tabs.borrow_mut() = resolve(shown);
+        *self.always_hide_tabs.borrow_mut() = resolve(hidden);
     }
 
     fn save_layout(&self, cx: &App) {
@@ -1492,8 +1323,8 @@ impl WorkspaceDock {
         cx: &mut Context<Self>,
     ) {
         self.remember_focus(window, cx);
-        if self.restoring {
-            self.pending_commands.push(request);
+        if let Some(pending) = &mut self.restoring {
+            pending.commands.push(request);
             return;
         }
         if let Err(error) = request.begin() {
@@ -1521,28 +1352,11 @@ impl WorkspaceDock {
         } else {
             request.action
         };
-        let existing = match action {
-            DockAction::Sidebar | DockAction::Spaces => Some(self.sessions.entity_id()),
-            DockAction::Files => Some(self.panels.files.entity_id()),
-            DockAction::Changes => Some(self.panels.changes.entity_id()),
-            DockAction::Diff => Some(self.panels.diff.entity_id()),
-            DockAction::Agents | DockAction::CodexBar => Some(self.agents.entity_id()),
-            _ => None,
-        }
-        .and_then(|id| {
-            [
-                DockPlacement::Center,
-                DockPlacement::Left,
-                DockPlacement::Right,
-                DockPlacement::Bottom,
-            ]
-            .into_iter()
-            .find_map(|placement| {
-                self.area
-                    .read(cx)
-                    .layout(placement)
-                    .and_then(|tree| tree.find_panel_node(PanelId::from(id)))
-            })
+        let area = self.area.read(cx);
+        let existing = action.panel().and_then(|kind| {
+            let id = self.tool_panel(kind).panel_id(cx);
+            let placement = panel_placement_in_area(area, id)?;
+            area.layout(placement)?.find_panel_node(id)
         });
         let node = if let Some(id) = request.group {
             let node = group_paths(self.area.read(cx))
@@ -1661,26 +1475,11 @@ impl WorkspaceDock {
         let Some(placement) = placement else {
             return;
         };
-        let panel = match action {
-            DockAction::Sidebar | DockAction::Spaces => panel_handle(self.sessions.clone()),
-            DockAction::Files => {
-                self.panels
-                    .files
-                    .update(cx, |files, cx| files.refresh(window, cx));
-                panel_handle(self.panels.files.clone())
-            }
-            DockAction::Changes => {
-                self.resume(cx);
-                self.panels.changes.update(cx, |changes, cx| {
-                    changes.set_host_visible(true);
-                    changes.refresh(window, cx);
-                });
-                panel_handle(self.panels.changes.clone())
-            }
-            DockAction::Diff => panel_handle(self.panels.diff.clone()),
-            DockAction::Agents | DockAction::CodexBar => panel_handle(self.agents.clone()),
-            _ => return,
+        let Some(kind) = action.panel() else {
+            return;
         };
+        self.refresh_tool(kind, window, cx);
+        let panel = self.tool_panel(kind);
         let id = panel.panel_id(cx);
         self.area.update(cx, |area, cx| {
             if area.panel(id).is_none() {
@@ -1721,64 +1520,28 @@ impl Render for WorkspaceDock {
     }
 }
 
-fn save_layout(path: &std::path::Path, key: &str, state: SavedLayout) -> anyhow::Result<()> {
-    std::fs::create_dir_all(
-        path.parent()
-            .ok_or_else(|| anyhow::anyhow!("layout path has no parent"))?,
-    )?;
-    let target = bootty_write::WriteTarget::resolve(path)
-        .map_err(bootty_write::ResolveTargetError::into_io)?
-        .lock()?;
-    let mut states: BTreeMap<String, SavedLayout> = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(error) => return Err(error.into()),
-    };
-    states.insert(key.to_owned(), state);
-    target
-        .replace(
-            &serde_json::to_vec(&states)?,
-            bootty_write::NewFileMode::Private,
-        )
-        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    drop(target);
-    Ok(())
-}
-
-fn activate(
-    group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
-    panel: EntityId,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if let Some(group) = group {
-        _ = group.update(cx, |group, cx| {
-            if let Some(index) = group
-                .panels()
-                .iter()
-                .position(|candidate| candidate.panel_id(cx) == PanelId::from(panel))
-            {
-                group.select_tab(index, window, cx);
-            }
-        });
-    }
-}
-
-// Paths are serialized with the same layout snapshot; live preferences follow stable node IDs.
-/// Move one stranded center panel to its home dock. Remove-then-add, never the
-/// reverse: the panel must leave the center tree before the destination adopts
-/// it, or it briefly belongs to two trees.
-fn relocate_panel<P: Panel + BasePanel>(
+/// Remove before adding so a panel never belongs to two trees.
+fn evict_center_panel<P: Panel>(
     area: &mut DockArea,
     panel: Entity<P>,
-    home: DockPlacement,
+    sidebar: DockPlacement,
     window: &mut Window,
     cx: &mut Context<DockArea>,
 ) {
+    let id = PanelId::from(panel.entity_id());
+    if !area
+        .layout(DockPlacement::Center)
+        .is_some_and(|tree| tree.contains_panel(id))
+    {
+        return;
+    }
+    let name = area.panel(id).map_or("", |view| view.panel_name(cx));
+    let home = crate::workspace_composition::center_eviction_home(name, sidebar);
     area.remove_panel(panel.clone(), window, cx);
     area.add_panel_view(panel_handle(panel), home, None, window, cx);
 }
 
+// Paths are serialized with the same layout snapshot; live preferences follow stable node IDs.
 fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
     fn visit(node: &PaneNode, path: String, groups: &mut Vec<(String, NodeId)>) {
         match node.kind() {
@@ -1788,7 +1551,6 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
                     visit(child, format!("{path}/{ix}"), groups);
                 }
             }
-            PaneRef::Tiles { .. } => {}
         }
     }
     let mut groups = Vec::new();
@@ -1837,6 +1599,6 @@ fn panel_tab_index(
         .find_node(node)
         .and_then(|node| match node.kind() {
             PaneRef::Tabs { panels, .. } => panels.iter().position(|panel| *panel == id),
-            _ => None,
+            PaneRef::Split { .. } => None,
         })
 }

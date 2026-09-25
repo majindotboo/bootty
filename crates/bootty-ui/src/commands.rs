@@ -569,11 +569,22 @@ fn register_shell_prompt_commands(commands: &mut BTreeMap<String, RegisteredComm
             MutationClass::Write,
         ),
     ] {
+        let mut arguments = names
+            .into_iter()
+            .map(|name| argument(name, ValueType::String))
+            .collect::<Vec<_>>();
+        if matches!(id, "history.search" | "shell.history") {
+            arguments.push(ArgumentSchema {
+                required: false,
+                choices: vec!["local".to_owned(), "semantic".to_owned()],
+                ..argument("mode", ValueType::String)
+            });
+        }
         commands.insert(id.to_owned(), RegisteredCommand {
                 descriptor: CommandDescriptor {
                     id: id.to_owned(), title: id.to_owned(),
-                    description: "Inspect a supported shell prompt, search its history, or atomically hand an edited command to an untouched prompt.".to_owned(),
-                    arguments: CompactSchema { arguments: names.into_iter().map(|name| argument(name, ValueType::String)).collect() },
+                    description: "Inspect a supported shell prompt, search its history, or atomically hand an edited command to an untouched prompt. History defaults to local matching; semantic mode sends bounded command candidates to TypeSafe.".to_owned(),
+                    arguments: CompactSchema { arguments },
                     mutation, target: Some(if id == "history.search" { ResourceKind::Binding } else { ResourceKind::Terminal }), palette: false,
                 },
                 executor: CommandExecutorResolver::ShellPrompt(id),

@@ -6,6 +6,14 @@ Bootty keeps GPUI input capture separate from terminal encoding. Each pane's foc
 `TerminalSurface` geometry into UI-free `TerminalInputCommand` values. `TerminalEngine` turns
 those commands into bytes using Ghostty-compatible encoders or direct UTF-8 writes.
 
+The native and rmux workers share `TerminalInputCommand::apply` for encoding and viewport
+policy. Its result tells each worker whether input requires a frame publication; untracked
+pointer motion does not bypass the output quiet window. Workers own transport delivery and
+report encoding failures through their normal terminal error channel.
+
+The workspace owns window-focus events. Terminal views observe that state for cursor and input
+cleanup without emitting another focus event for each rendered pane.
+
 Configured application shortcuts do not pass through terminal input. `gpui_actions.rs` translates
 them into typed GPUI actions that submit the same `CommandInvocation` used by every other caller.
 
@@ -19,8 +27,9 @@ them into typed GPUI actions that submit the same `CommandInvocation` used by ev
   `libghostty-vt`.
 - Keyboard events become `TerminalInputCommand::Key` with `KeyInput`,
   `KeyMods`, and `TerminalKey`.
-- Pointer move, pointer button, and mouse wheel events become
-  `TerminalInputCommand::Mouse` after conversion through `TerminalSurface`.
+- Pointer move and pointer button events become `TerminalInputCommand::Mouse` after
+  conversion through `TerminalSurface`. Wheel events use `MouseWheel`, retaining their
+  resolved scroll delta for either scrollback movement or repeated mouse reports.
 
 ## Keyboard policy
 

@@ -65,121 +65,185 @@ impl AgentInvocation {
     }
 }
 
-#[must_use]
-pub fn command_descriptors() -> Vec<CommandDescriptor> {
-    descriptors().to_vec()
+#[derive(Clone, Copy)]
+pub enum Operation {
+    Start,
+    Resume,
+    Fork,
+    Prompt,
+    Steer,
+    FollowUp,
+    Abort,
+    Interrupt,
+    State,
+    Stop,
+    Ingest,
+    Acknowledge,
 }
 
-pub fn descriptors() -> &'static [CommandDescriptor] {
-    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
-    DESCRIPTORS.get_or_init(build_descriptors)
-}
-
-fn build_descriptors() -> Vec<CommandDescriptor> {
-    let mut descriptors = pi_descriptors()
-        .into_iter()
-        .chain(codex_descriptors())
-        .chain(claude_descriptors())
-        .collect::<Vec<_>>();
-    for provider in crate::AgentKind::ALL {
-        descriptors.push(terminal_descriptor(
-            &format!("agents.{provider}.acknowledge"),
-            &format!("Acknowledge {provider} attention"),
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("sequence", true)],
-        ));
-        for action in ["resume", "fork"] {
-            descriptors.push(terminal_descriptor(
-                &format!("agents.{provider}.{action}"),
-                &format!("{action} {provider} session"),
-                MutationClass::Write,
-                ResourceKind::Terminal,
-                vec![
-                    string_argument("session", false),
-                    string_argument("cwd", false),
-                    string_argument("program", false),
-                    string_argument("argv", false),
-                ],
-            ));
+impl Operation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Resume => "resume",
+            Self::Fork => "fork",
+            Self::Prompt => "prompt",
+            Self::Steer => "steer",
+            Self::FollowUp => "follow_up",
+            Self::Abort => "abort",
+            Self::Interrupt => "interrupt",
+            Self::State => "state",
+            Self::Stop => "stop",
+            Self::Ingest => "ingest",
+            Self::Acknowledge => "acknowledge",
         }
     }
-    descriptors
-}
 
-fn start_descriptor(provider: &str, title: &str) -> CommandDescriptor {
-    terminal_descriptor(
-        &format!("agents.{provider}.start"),
-        title,
-        MutationClass::Write,
-        ResourceKind::Terminal,
-        vec![
-            string_argument("cwd", false),
-            string_argument("program", false),
-            string_argument("argv", false),
-        ],
-    )
-}
-
-fn state_descriptor(id: &str, title: &str) -> CommandDescriptor {
-    CommandDescriptor {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        description: String::new(),
-        mutation: MutationClass::Read,
-        arguments: CompactSchema {
-            arguments: vec![string_argument("pane", false)],
-        },
-        target: None,
-        palette: false,
-    }
-}
-
-fn ingest_descriptor(id: &str, title: &str) -> CommandDescriptor {
-    CommandDescriptor {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        description: String::new(),
-        mutation: MutationClass::Write,
-        arguments: CompactSchema {
-            arguments: vec![
-                string_argument("event", true),
-                string_argument("pane", false),
-                string_argument("launch", false),
+    const fn arguments(self) -> &'static [(&'static str, bool)] {
+        match self {
+            Self::Start => &[("cwd", false), ("program", false), ("argv", false)],
+            Self::Resume | Self::Fork => &[
+                ("session", false),
+                ("cwd", false),
+                ("program", false),
+                ("argv", false),
             ],
-        },
-        target: None,
-        palette: false,
+            Self::Prompt | Self::Steer | Self::FollowUp => &[("message", true)],
+            Self::State => &[("pane", false)],
+            Self::Ingest => &[("event", true), ("pane", false), ("launch", false)],
+            Self::Acknowledge => &[("sequence", true)],
+            Self::Abort | Self::Interrupt | Self::Stop => &[],
+        }
     }
 }
 
-fn terminal_descriptor(
-    id: &str,
-    title: &str,
-    mutation: MutationClass,
-    target: ResourceKind,
-    arguments: Vec<ArgumentSchema>,
-) -> CommandDescriptor {
-    CommandDescriptor {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        description: String::new(),
-        mutation,
-        arguments: CompactSchema { arguments },
-        target: Some(target),
-        palette: false,
+/// One registration owns both the advertised schema and the executable operation.
+pub struct AgentCommand {
+    pub provider: crate::AgentKind,
+    pub operation: Operation,
+    pub descriptor: CommandDescriptor,
+}
+
+impl AgentCommand {
+    fn new(provider: crate::AgentKind, operation: Operation, title: &str) -> Self {
+        let mutation = match operation {
+            Operation::State => MutationClass::Read,
+            Operation::Abort | Operation::Interrupt | Operation::Stop => MutationClass::Destructive,
+            _ => MutationClass::Write,
+        };
+        let target = match operation {
+            Operation::State | Operation::Ingest => None,
+            Operation::Stop => Some(ResourceKind::Pane),
+            _ => Some(ResourceKind::Terminal),
+        };
+        Self {
+            provider,
+            operation,
+            descriptor: CommandDescriptor {
+                id: format!("agents.{provider}.{}", operation.name()),
+                title: title.to_owned(),
+                description: String::new(),
+                mutation,
+                arguments: CompactSchema {
+                    arguments: operation
+                        .arguments()
+                        .iter()
+                        .map(|(name, required)| ArgumentSchema {
+                            name: (*name).to_owned(),
+                            value_type: ValueType::String,
+                            required: *required,
+                            choices: Vec::new(),
+                            minimum: None,
+                            maximum: None,
+                        })
+                        .collect(),
+                },
+                target,
+                palette: false,
+            },
+        }
+    }
+
+    pub fn validate_arguments(&self, arguments: &[String]) -> Option<String> {
+        let schema = &self.descriptor.arguments.arguments;
+        let maximum = schema.len();
+        if arguments.len() > maximum {
+            return Some(format!("command accepts at most {maximum} argument(s)"));
+        }
+        if schema
+            .iter()
+            .skip(arguments.len())
+            .any(|argument| argument.required)
+        {
+            return Some("required argument is missing".to_owned());
+        }
+        None
     }
 }
 
-fn string_argument(name: &str, required: bool) -> ArgumentSchema {
-    ArgumentSchema {
-        name: name.to_owned(),
-        value_type: ValueType::String,
-        required,
-        choices: Vec::new(),
-        minimum: None,
-        maximum: None,
-    }
+#[must_use]
+pub fn command_descriptors() -> Vec<CommandDescriptor> {
+    catalog()
+        .iter()
+        .map(|command| command.descriptor.clone())
+        .collect()
+}
+
+pub fn resolve(command: &str) -> Option<&'static AgentCommand> {
+    catalog()
+        .iter()
+        .find(|entry| entry.descriptor.id == command)
+}
+
+fn catalog() -> &'static [AgentCommand] {
+    static COMMANDS: OnceLock<Vec<AgentCommand>> = OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        use crate::AgentKind::{Claude, Codex, Pi};
+        use Operation::{Abort, FollowUp, Ingest, Interrupt, Prompt, Start, State, Steer, Stop};
+
+        let mut commands = [
+            (Pi, Start, "Start Pi"),
+            (Pi, Prompt, "Prompt Pi"),
+            (Pi, Steer, "Steer Pi"),
+            (Pi, FollowUp, "Follow up with Pi"),
+            (Pi, Abort, "Abort Pi"),
+            (Pi, State, "Inspect Pi state"),
+            (Pi, Stop, "Stop Pi pane"),
+            (Pi, Ingest, "Ingest a Pi native event"),
+            (Codex, Start, "Start Codex"),
+            (Codex, Prompt, "Prompt Codex"),
+            (Codex, Steer, "Steer Codex"),
+            (Codex, Interrupt, "Interrupt Codex"),
+            (Codex, State, "Inspect Codex state"),
+            (Codex, Stop, "Stop Codex pane"),
+            (Codex, Ingest, "Ingest a Codex hook event"),
+            (Claude, Start, "Start Claude Code"),
+            (Claude, Prompt, "Send text to Claude Code"),
+            (Claude, Steer, "Send text to Claude Code"),
+            (Claude, FollowUp, "Send text to Claude Code"),
+            (Claude, Abort, "Interrupt Claude Code"),
+            (Claude, Ingest, "Ingest a Claude Code hook event"),
+            (Claude, State, "Inspect Claude Code state"),
+        ]
+        .into_iter()
+        .map(|(provider, operation, title)| AgentCommand::new(provider, operation, title))
+        .collect::<Vec<_>>();
+        for provider in crate::AgentKind::ALL {
+            commands.push(AgentCommand::new(
+                provider,
+                Operation::Acknowledge,
+                &format!("Acknowledge {provider} attention"),
+            ));
+            for operation in [Operation::Resume, Operation::Fork] {
+                commands.push(AgentCommand::new(
+                    provider,
+                    operation,
+                    &format!("{} {provider} session", operation.name()),
+                ));
+            }
+        }
+        commands
+    })
 }
 
 pub const fn success(value: Value) -> CommandOutcome {
@@ -204,119 +268,4 @@ pub fn nested_invocation(
     let mut invocation = CommandInvocation::new(command, arguments, Caller::Internal);
     invocation.target = target;
     invocation
-}
-
-fn pi_descriptors() -> [CommandDescriptor; 8] {
-    [
-        start_descriptor("pi", "Start Pi"),
-        terminal_descriptor(
-            "agents.pi.prompt",
-            "Prompt Pi",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.pi.steer",
-            "Steer Pi",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.pi.follow_up",
-            "Follow up with Pi",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.pi.abort",
-            "Abort Pi",
-            MutationClass::Destructive,
-            ResourceKind::Terminal,
-            Vec::new(),
-        ),
-        state_descriptor("agents.pi.state", "Inspect Pi state"),
-        terminal_descriptor(
-            "agents.pi.stop",
-            "Stop Pi pane",
-            MutationClass::Destructive,
-            ResourceKind::Pane,
-            Vec::new(),
-        ),
-        ingest_descriptor("agents.pi.ingest", "Ingest a Pi native event"),
-    ]
-}
-
-fn codex_descriptors() -> [CommandDescriptor; 7] {
-    [
-        start_descriptor("codex", "Start Codex"),
-        terminal_descriptor(
-            "agents.codex.prompt",
-            "Prompt Codex",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.codex.steer",
-            "Steer Codex",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.codex.interrupt",
-            "Interrupt Codex",
-            MutationClass::Destructive,
-            ResourceKind::Terminal,
-            Vec::new(),
-        ),
-        state_descriptor("agents.codex.state", "Inspect Codex state"),
-        terminal_descriptor(
-            "agents.codex.stop",
-            "Stop Codex pane",
-            MutationClass::Destructive,
-            ResourceKind::Pane,
-            Vec::new(),
-        ),
-        ingest_descriptor("agents.codex.ingest", "Ingest a Codex hook event"),
-    ]
-}
-
-fn claude_descriptors() -> [CommandDescriptor; 7] {
-    [
-        start_descriptor("claude", "Start Claude Code"),
-        terminal_descriptor(
-            "agents.claude.prompt",
-            "Send text to Claude Code",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.claude.steer",
-            "Send text to Claude Code",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.claude.follow_up",
-            "Send text to Claude Code",
-            MutationClass::Write,
-            ResourceKind::Terminal,
-            vec![string_argument("message", true)],
-        ),
-        terminal_descriptor(
-            "agents.claude.abort",
-            "Interrupt Claude Code",
-            MutationClass::Destructive,
-            ResourceKind::Terminal,
-            Vec::new(),
-        ),
-        ingest_descriptor("agents.claude.ingest", "Ingest a Claude Code hook event"),
-        state_descriptor("agents.claude.state", "Inspect Claude Code state"),
-    ]
 }

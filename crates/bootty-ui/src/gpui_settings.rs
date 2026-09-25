@@ -18,21 +18,20 @@ use crate::{
         settings_section as catalog_section, unsupported_module_rows,
     },
     settings_session::{
-        AcceptedSettings, Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, RemoteProfile,
-        SettingsSession, StatusSegmentEdit, normalize_number, parse_display_number,
+        Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, SettingsSession, StatusSegmentEdit,
+        normalize_number, parse_display_number,
     },
     state::AppState,
 };
 use bootty_config::{
     color::Color,
     config::{
-        BoottyConfig, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, SegmentAlign,
-        SshAuthenticationConfig, SshHostKeyPolicyConfig, available_theme_names,
+        BoottyConfig, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, SegmentAlign, available_theme_names,
     },
     settings_schema::{NumberControl, SettingEditor, SettingKind, SettingSpec, SettingValue},
 };
 use gpui_kit::{Context, Window};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 impl GpuiSettings {
     pub(crate) fn for_app(
@@ -43,10 +42,8 @@ impl GpuiSettings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let draft = SettingsSession::new(
-            accepted_settings(state),
-            settings_catalogs(state, font_families),
-        );
+        let draft =
+            SettingsSession::new(state.accepted_settings(), settings_catalogs(font_families));
         let content = settings_content(&draft, state, unsupported, integrations);
         Self::new_with_window(content, draft, window, cx)
     }
@@ -58,11 +55,9 @@ impl GpuiSettings {
         integrations: &[ModuleIntegrationsSnapshot],
         cx: &mut Context<Self>,
     ) -> bool {
-        self.draft.reconcile_accepted(accepted_settings(state));
-        self.draft.set_catalogs(settings_catalogs(
-            state,
-            Arc::clone(self.draft.font_families()),
-        ));
+        self.draft.reconcile_accepted(state.accepted_settings());
+        self.draft
+            .set_catalogs(settings_catalogs(Arc::clone(self.draft.font_families())));
         let content = settings_content(&self.draft, state, unsupported, integrations);
         self.set_content(content, cx)
     }
@@ -70,17 +65,9 @@ impl GpuiSettings {
     pub(crate) fn apply_edit(&mut self, intent: SettingsIntent, state: &AppState) {
         match intent {
             SettingsIntent::Close | SettingsIntent::Apply => {}
-            SettingsIntent::SetValue {
-                id,
-                value: ScalarValue::Number(value),
-            } => {
-                let schema = state.settings_schema();
-                let Some(spec) = schema.get(&id) else {
-                    return;
-                };
-                if let Some(value) = normalize_setting_number(spec, value) {
-                    self.draft.set_value(&id, &SettingValue::Number(value));
-                }
+            SettingsIntent::DiscardChanges => {
+                self.draft
+                    .discard_document_changes(state.accepted_settings());
             }
             SettingsIntent::SetValue { id, value } => self.set_scalar_value(&id, &value, state),
             SettingsIntent::RemoveValue(id) => {
@@ -169,6 +156,14 @@ impl GpuiSettings {
 
     fn set_scalar_value(&mut self, id: &str, value: &ScalarValue, state: &AppState) {
         match (id, value) {
+            (_, ScalarValue::Number(value)) => {
+                let schema = state.settings_schema();
+                if let Some(spec) = schema.get(id)
+                    && let Some(value) = normalize_setting_number(spec, *value)
+                {
+                    self.draft.set_value(id, &SettingValue::Number(value));
+                }
+            }
             (_, ScalarValue::Token(token))
                 if state
                     .settings_schema()
@@ -470,13 +465,6 @@ impl GpuiSettings {
                     self.draft.set_value(id, &SettingValue::Text(text));
                 }
             }
-            SettingKind::Custom(_) if id == "input.prefix" => {
-                if text.is_empty() {
-                    self.draft.remove_value(id);
-                } else {
-                    self.draft.set_value(id, &SettingValue::Text(text));
-                }
-            }
             SettingKind::Custom(_) if id == "session.max-scrollback" => {
                 match text.trim().parse::<usize>() {
                     Ok(lines) => {
@@ -529,64 +517,12 @@ impl GpuiSettings {
     }
 }
 
-fn accepted_settings(state: &AppState) -> AcceptedSettings {
-    AcceptedSettings {
-        revision: state.config_revision(),
-        config: Arc::new(state.config().clone()),
-        document: state.config_document(),
-        schema: state.settings_schema(),
-    }
-}
-
-fn settings_catalogs(state: &AppState, font_families: Arc<[String]>) -> Catalogs {
-    let status_modules = ["session", "windows", "sysinfo", "clock"]
-        .map(str::to_owned)
-        .to_vec();
-    let remotes = state
-        .config()
-        .ssh_profiles
-        .iter()
-        .map(|(id, profile)| RemoteProfile {
-            id: id.clone(),
-            name: profile.name.clone(),
-            host: profile.host.clone(),
-            user: profile.user.clone(),
-            port: profile.port,
-            authentication: authentication_token(profile.authentication).to_owned(),
-            host_key_policy: host_key_policy_token(profile.host_key_policy).to_owned(),
-            identity_file: profile.identity_file.clone(),
-            proxy_jump: profile.proxy_jump.clone(),
-            program: profile.program.clone(),
-            args: profile.args.clone(),
-        })
-        .collect::<Vec<_>>();
-    let default_remote = state
-        .config()
-        .multiplexer
-        .remote
-        .as_ref()
-        .and_then(bootty_config::config::RemoteConfig::as_ssh)
-        .map(|remote| RemoteProfile {
-            id: "default".to_owned(),
-            name: "Default remote".to_owned(),
-            host: remote.host.clone(),
-            user: remote.user.clone(),
-            port: remote.port,
-            authentication: "auto".to_owned(),
-            host_key_policy: "strict".to_owned(),
-            identity_file: None,
-            proxy_jump: None,
-            program: remote.program.clone(),
-            args: remote.args.clone(),
-        });
+fn settings_catalogs(font_families: Arc<[String]>) -> Catalogs {
     Catalogs {
         font_families,
-        status_modules,
-        top_status_segments: state.config().chrome.top_segments.clone(),
-        bottom_status_segments: state.config().chrome.bottom_segments.clone(),
-        environment: state.config().session.env.clone(),
-        remotes,
-        default_remote: DefaultRemote::from_remote(default_remote.as_ref()),
+        status_modules: ["session", "windows", "sysinfo", "clock"]
+            .map(str::to_owned)
+            .to_vec(),
     }
 }
 
@@ -596,7 +532,6 @@ fn settings_content(
     unsupported_sources: &[UnsupportedModuleDiagnostic],
     integration_rows: &[ModuleIntegrationsSnapshot],
 ) -> SettingsContent {
-    let defaults = BoottyConfig::default();
     let schema = state.settings_schema();
     let mut pages: Vec<_> =
         settings_catalog_pages()
@@ -623,7 +558,7 @@ fn settings_content(
                 specs.sort_by_key(|spec| catalog_row_order(category.category, &spec.id()));
                 for spec in specs {
                     let spec_rows = match &spec.kind {
-                        SettingKind::FontStyle => font_style_row(spec, state.config(), session, &defaults).into_iter().collect(),
+                        SettingKind::FontStyle => font_style_row(spec, state.config(), session).into_iter().collect(),
                         SettingKind::Custom(editor) => custom_setting_rows(
                             spec,
                             *editor,
@@ -638,7 +573,6 @@ fn settings_content(
                             } else {
                                 session
                                     .value(&spec.id())
-                                    .or_else(|| spec.default_value(&defaults))
                             };
                             let Some(value) = value else { continue };
                             vec![SettingsRow::Value {
@@ -701,6 +635,15 @@ fn settings_content(
 
 fn remote_settings_rows(session: &SettingsSession, state: &AppState) -> Vec<SettingsRow> {
     let remotes = session.remotes();
+    let test_state = if remotes.testing.is_some() {
+        RemoteTestState::Testing
+    } else {
+        match &remotes.message {
+            Some(Ok(())) => RemoteTestState::Passed,
+            Some(Err(error)) => RemoteTestState::Failed(error.clone()),
+            None => RemoteTestState::Idle,
+        }
+    };
     let mut rows = Vec::new();
     rows.push(SettingsRow::Section("DEFAULT REMOTE".to_owned()));
     if let Some(bootty_config::config::RemoteConfig::Wsl(remote)) =
@@ -728,28 +671,23 @@ fn remote_settings_rows(session: &SettingsSession, state: &AppState) -> Vec<Sett
     });
     rows.extend(remotes.profiles.iter().map(|profile| {
         let selected = remotes.selected.as_deref() == Some(&profile.id);
-        let test_state = if selected && remotes.testing.is_some() {
-            RemoteTestState::Testing
-        } else if selected {
-            match &remotes.message {
-                Some(Ok(())) => RemoteTestState::Passed,
-                Some(Err(error)) => RemoteTestState::Failed(error.clone()),
-                None => RemoteTestState::Idle,
-            }
+        let test_state = if selected {
+            test_state.clone()
         } else {
             RemoteTestState::Idle
         };
-        SettingsRow::Remote(remote_snapshot(
-            profile,
-            selected.then_some(remotes.draft.as_ref()).flatten(),
-            test_state,
-            selected,
-        ))
+        let draft = match (selected, &remotes.draft) {
+            (true, Some(draft)) => Cow::Borrowed(draft),
+            _ => Cow::Owned(RemoteDraft::from_profile(profile)),
+        };
+        SettingsRow::Remote(remote_snapshot(&draft, test_state, selected))
     }));
     if remotes.selected.is_none()
         && let Some(draft) = remotes.draft.as_ref()
     {
-        rows.push(SettingsRow::Remote(new_remote_snapshot(draft)));
+        rows.push(SettingsRow::Remote(remote_snapshot(
+            draft, test_state, true,
+        )));
     }
     rows
 }
@@ -851,7 +789,6 @@ fn font_style_row(
     spec: &SettingSpec,
     config: &BoottyConfig,
     session: &SettingsSession,
-    defaults: &BoottyConfig,
 ) -> Option<SettingsRow> {
     let id = spec.id();
     let families = if id.starts_with("font.ui-weights.") {
@@ -859,9 +796,7 @@ fn font_style_row(
     } else {
         &config.font.family
     };
-    let value = session
-        .value(&id)
-        .or_else(|| spec.default_value(defaults))?;
+    let value = session.value(&id)?;
     let selected = match &value {
         SettingValue::Bool(false) => "disabled".to_owned(),
         SettingValue::Text(name) | SettingValue::Token(name) if name != "auto" => {
@@ -972,78 +907,6 @@ fn editable_custom_setting(spec: &SettingSpec, config: &BoottyConfig) -> Option<
     let id = spec.id();
     let (value, control) = match id.as_str() {
         "cursor.style" => cursor_style_control(config),
-        "chrome.notched-fullscreen-black-chrome" => (
-            ScalarValue::Bool(config.chrome.notched_fullscreen_black_chrome),
-            SettingsControl::Toggle,
-        ),
-        "input.hide-mouse-pointer-while-typing" => (
-            ScalarValue::Bool(config.input.hide_mouse_pointer_while_typing),
-            SettingsControl::Toggle,
-        ),
-        "appearance.mode" => (
-            ScalarValue::Token(
-                match config.appearance.mode {
-                    bootty_config::config::AppearanceMode::System => "system",
-                    bootty_config::config::AppearanceMode::Light => "light",
-                    bootty_config::config::AppearanceMode::Dark => "dark",
-                }
-                .to_owned(),
-            ),
-            choice_control(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]),
-        ),
-        "font.ui-use-terminal-family" => (
-            ScalarValue::Bool(config.font.ui_use_terminal_family),
-            SettingsControl::Toggle,
-        ),
-        "multiplexer.backend" => (
-            ScalarValue::Token(config.multiplexer.backend.to_string().to_ascii_lowercase()),
-            choice_control(&[
-                ("native", "Native"),
-                ("herdr", "Herdr"),
-                ("rmux", "rmux"),
-                ("tmux", "tmux"),
-            ]),
-        ),
-        "chrome.top-bar" => (
-            ScalarValue::Bool(config.chrome.top_bar),
-            SettingsControl::Toggle,
-        ),
-        "input.macos-option-as-alt" => (
-            ScalarValue::Token(
-                match config.input.macos_option_as_alt {
-                    bootty_config::config::MacosOptionAsAltConfig::None => "none",
-                    bootty_config::config::MacosOptionAsAltConfig::Left => "left",
-                    bootty_config::config::MacosOptionAsAltConfig::Right => "right",
-                    bootty_config::config::MacosOptionAsAltConfig::Both => "both",
-                }
-                .to_owned(),
-            ),
-            choice_control(&[
-                ("none", "None"),
-                ("left", "Left"),
-                ("right", "Right"),
-                ("both", "Both"),
-            ]),
-        ),
-        "input.copy-on-select" => (
-            ScalarValue::Bool(config.input.copy_on_select),
-            SettingsControl::Toggle,
-        ),
-        "input.preset" => (
-            ScalarValue::Token(config.input.preset.as_str().to_owned()),
-            choice_control(&[
-                ("ghostty", "Ghostty"),
-                ("bootty", "Bootty"),
-                ("tmux", "Tmux"),
-            ]),
-        ),
-        "input.prefix" => (
-            ScalarValue::Text(config.input.prefix.clone().unwrap_or_default()),
-            SettingsControl::Text {
-                placeholder: "Preset default".to_owned(),
-                optional: true,
-            },
-        ),
         "session.max-scrollback" => (
             ScalarValue::Text(
                 crate::presentation::scrollback::lines_from_bytes(config.session.max_scrollback)
@@ -1738,45 +1601,39 @@ fn remote_argument_index(field: &str) -> Option<usize> {
 }
 
 fn remote_snapshot(
-    profile: &RemoteProfile,
-    draft: Option<&RemoteDraft>,
+    draft: &RemoteDraft,
     test_state: RemoteTestState,
     selected: bool,
 ) -> RemoteEditorSnapshot {
-    let fields = remote_profile_fields(profile, draft);
-    RemoteEditorSnapshot {
-        id: profile.id.clone(),
-        label: draft.map_or_else(|| profile.name.clone(), |draft| draft.name.clone()),
-        detail: format!(
-            "{}{}",
-            draft.map_or_else(
-                || profile
-                    .user
-                    .as_deref()
-                    .map_or(String::new(), |user| format!("{user}@")),
-                |draft| {
-                    if draft.user.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{}@", draft.user)
-                    }
-                },
-            ),
-            draft.map_or(profile.host.as_str(), |draft| draft.host.as_str())
-        ),
-        error: draft.and_then(|draft| draft.error.clone()),
-        profile: selected.then(|| RemoteProfileSnapshot {
-            id: profile.id.clone(),
-            arguments: draft.map_or_else(|| profile.args.clone(), |draft| draft.args.clone()),
+    let profile = selected.then(|| {
+        let fields = remote_profile_fields(draft);
+        RemoteProfileSnapshot {
+            id: draft.id.clone(),
+            arguments: draft.args.clone(),
             test: Some(RemoteTestIntent {
-                profile_id: profile.id.clone(),
+                profile_id: draft.id.clone(),
                 fields: fields
                     .iter()
                     .map(|field| (field.id.clone(), field.value.clone()))
                     .collect(),
             }),
             fields,
-        }),
+        }
+    });
+    RemoteEditorSnapshot {
+        id: draft.id.clone(),
+        label: draft.name.clone(),
+        detail: format!(
+            "{}{}",
+            if draft.user.is_empty() {
+                String::new()
+            } else {
+                format!("{}@", draft.user)
+            },
+            draft.host,
+        ),
+        error: draft.error.clone(),
+        profile,
         test_state,
         actions: if selected {
             vec![
@@ -1787,7 +1644,7 @@ fn remote_snapshot(
                     selected: false,
                 },
                 SettingsListItem {
-                    id: format!("remote:delete:{}", profile.id),
+                    id: format!("remote:delete:{}", draft.id),
                     label: "Delete".to_owned(),
                     detail: None,
                     selected: false,
@@ -1795,7 +1652,7 @@ fn remote_snapshot(
             ]
         } else {
             vec![SettingsListItem {
-                id: format!("remote:select:{}", profile.id),
+                id: format!("remote:select:{}", draft.id),
                 label: "Edit".to_owned(),
                 detail: None,
                 selected: false,
@@ -1804,10 +1661,7 @@ fn remote_snapshot(
     }
 }
 
-fn remote_profile_fields(
-    profile: &RemoteProfile,
-    draft: Option<&RemoteDraft>,
-) -> Vec<RemoteProfileFieldSnapshot> {
+fn remote_profile_fields(draft: &RemoteDraft) -> Vec<RemoteProfileFieldSnapshot> {
     let authentication = vec![
         remote_option("auto", "Automatic"),
         remote_option("agent", "SSH agent"),
@@ -1818,95 +1672,36 @@ fn remote_profile_fields(
         remote_option("accept-new", "Accept new"),
     ];
     vec![
-        remote_field(
-            "name",
-            "Name",
-            draft.map_or(profile.name.as_str(), |draft| draft.name.as_str()),
-            Vec::new(),
-        ),
-        remote_field(
-            "host",
-            "Host",
-            draft.map_or(profile.host.as_str(), |draft| draft.host.as_str()),
-            Vec::new(),
-        ),
-        remote_field(
-            "user",
-            "User",
-            draft.map_or_else(
-                || profile.user.as_deref().unwrap_or(""),
-                |draft| draft.user.as_str(),
-            ),
-            Vec::new(),
-        ),
-        remote_field(
-            "port",
-            "Port",
-            &draft.map_or_else(
-                || {
-                    profile
-                        .port
-                        .map(|port| port.to_string())
-                        .unwrap_or_default()
-                },
-                |draft| draft.port.clone(),
-            ),
-            Vec::new(),
-        ),
+        remote_field("name", "Name", &draft.name, Vec::new()),
+        remote_field("host", "Host", &draft.host, Vec::new()),
+        remote_field("user", "User", &draft.user, Vec::new()),
+        remote_field("port", "Port", &draft.port, Vec::new()),
         remote_field(
             "authentication",
             "Authentication",
-            draft.map_or(profile.authentication.as_str(), |draft| {
-                draft.authentication.as_str()
-            }),
+            &draft.authentication,
             authentication,
         ),
         remote_field(
             "host-key-policy",
             "Host key policy",
-            draft.map_or(profile.host_key_policy.as_str(), |draft| {
-                draft.host_key_policy.as_str()
-            }),
+            &draft.host_key_policy,
             host_key_policy,
         ),
         remote_field(
             "identity-file",
             "Identity file",
-            &draft.map_or_else(
-                || {
-                    profile
-                        .identity_file
-                        .as_ref()
-                        .map_or_else(String::new, |path| path.display().to_string())
-                },
-                |draft| draft.identity_file.clone(),
-            ),
+            &draft.identity_file,
             Vec::new(),
         ),
         remote_field(
             "proxy-jump",
             "Proxy / jump host",
-            draft.map_or_else(
-                || profile.proxy_jump.as_deref().unwrap_or(""),
-                |draft| draft.proxy_jump.as_str(),
-            ),
+            &draft.proxy_jump,
             Vec::new(),
         ),
-        remote_field(
-            "program",
-            "SSH client",
-            draft.map_or(profile.program.as_str(), |draft| draft.program.as_str()),
-            Vec::new(),
-        ),
+        remote_field("program", "SSH client", &draft.program, Vec::new()),
     ]
-}
-
-fn new_remote_snapshot(draft: &RemoteDraft) -> RemoteEditorSnapshot {
-    let profile = RemoteProfile {
-        id: draft.id.clone(),
-        ..RemoteProfile::default()
-    };
-    remote_snapshot(&profile, Some(draft), RemoteTestState::Idle, true)
 }
 
 fn default_remote_snapshot(remote: &DefaultRemote) -> RemoteEditorSnapshot {
@@ -1962,20 +1757,5 @@ fn remote_option(id: &str, label: &str) -> RemoteProfileOption {
     RemoteProfileOption {
         id: id.to_owned(),
         label: label.to_owned(),
-    }
-}
-
-const fn authentication_token(value: SshAuthenticationConfig) -> &'static str {
-    match value {
-        SshAuthenticationConfig::Auto => "auto",
-        SshAuthenticationConfig::Agent => "agent",
-        SshAuthenticationConfig::KeyFile => "key-file",
-    }
-}
-
-const fn host_key_policy_token(value: SshHostKeyPolicyConfig) -> &'static str {
-    match value {
-        SshHostKeyPolicyConfig::Strict => "strict",
-        SshHostKeyPolicyConfig::AcceptNew => "accept-new",
     }
 }

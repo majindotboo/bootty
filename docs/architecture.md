@@ -449,6 +449,8 @@ execute the same typed request. Documents are UTF-8, at most 512 KiB; transport
 uses base64 so JSON escaping cannot overflow the control frame limit. The
 existing atomic-write owner preserves target permissions and symlinks. A save
 compares the loaded SHA-256 revision under the writer lease before replacement.
+Formatting runs a selected formatter on the host with the bounded draft on
+standard input and returns bounded output. It never writes the file.
 
 `bootty-ui` owns document drafts and Files/Document panel presentation. All I/O
 enters `files.*` through `CommandInvocation`, capturing a binding generation.
@@ -631,6 +633,12 @@ in `bootty-terminal`'s worker. `bootty-host` reads and ranks shell-owned history
 its executing host; it never writes shell history. Handoff enters `CommandInvocation` and
 validates the prompt lease at the PTY owner. Shared mux attachments cannot grant
 that exclusive lease; their history reader remains available.
+
+Explicit semantic history searches retain this host-owned candidate retrieval.
+`bootty-host::semantic_history` bounds the candidate upload, validates TypeSafe
+answers, and ranks original commands. The desktop command worker owns the API
+credential and deadline; remote daemons receive neither the credential nor an
+inference request. Local search remains the default.
 
 File transfers reuse `bootty-host::jobs::JobRegistry` for deadlines, cancellation,
 progress and window ownership. Their binary stream and atomic file publication

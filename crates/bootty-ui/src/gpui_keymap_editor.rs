@@ -301,18 +301,12 @@ fn bindings_conflict(left: &KeymapBindingSnapshot, right: &KeymapBindingSnapshot
     if left.kind == KeymapBindingKind::Unbind || right.kind == KeymapBindingKind::Unbind {
         return false;
     }
-    let parsed = |binding: &KeymapBindingSnapshot| {
-        crate::keymap_runtime::parse_sequence_with_flags(&binding.persisted_keystrokes)
-            .ok()
-            .map(|(sequence, _)| sequence)
-    };
-    match (parsed(left), parsed(right)) {
-        (Some(left_keys), Some(right_keys)) => {
-            left_keys == right_keys
-                && crate::gpui::keybinding_contexts_overlap(&left.context, &right.context)
-        }
-        _ => false,
-    }
+    crate::gpui::keybindings_conflict(
+        &left.persisted_keystrokes,
+        &left.context,
+        &right.persisted_keystrokes,
+        &right.context,
+    )
 }
 
 fn split_trigger_options(source: &str) -> (KeymapTriggerOptions, &str) {

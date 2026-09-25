@@ -312,13 +312,21 @@ impl InputAccumulator {
         });
     }
 
+    /// Publish the window owner's focus transition once.
     pub fn window_focused(&mut self, focused: bool) {
-        self.window_focused = focused;
+        self.observe_window_focus(focused);
         self.push(InputEvent::WindowFocused(focused));
+        if !focused {
+            self.push(InputEvent::ModifiersChanged(Modifiers::default()));
+        }
+    }
+
+    /// Synchronize a child view's input state without rebroadcasting the window event.
+    pub fn observe_window_focus(&mut self, focused: bool) {
+        self.window_focused = focused;
         if !focused {
             self.modifiers = Modifiers::default();
             self.pressed_mouse_button = None;
-            self.push(InputEvent::ModifiersChanged(Modifiers::default()));
         }
     }
 

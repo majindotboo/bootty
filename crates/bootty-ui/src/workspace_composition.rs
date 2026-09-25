@@ -99,12 +99,6 @@ fn map_panel_children(
                     .position(|index| index >= active_index)
                     .unwrap_or_else(|| retained.len().saturating_sub(1));
             }
-            PanelInfo::Tiles { metas } => {
-                *metas = retained
-                    .iter()
-                    .map(|index| metas.get(*index).copied().unwrap_or_default())
-                    .collect();
-            }
             PanelInfo::Panel(_) => {}
         }
         if matches!(state.info, PanelInfo::Stack { .. }) && state.children.len() == 1 {
@@ -155,7 +149,7 @@ pub fn replace_terminal_region(current: PanelState, leaf: PanelState) -> PanelSt
     }
     PanelState {
         panel_name: "StackPanel".to_owned(),
-        // Stack and tile containers remain siblings: Kit treats a container inside
+        // Stack containers remain siblings: Kit treats a container inside
         // Tabs as a registered leaf rather than recursively restoring its panels.
         children: vec![tab_group_state(vec![leaf]), base],
         info: PanelInfo::stack(vec![px(1.0), px(1.0)], gpui_kit::Axis::Horizontal),

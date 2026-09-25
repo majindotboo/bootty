@@ -17,7 +17,9 @@ use bootty_config::{
     settings_schema::{SettingValue, SettingsSchema},
 };
 use bootty_mux::snapshot::MuxPaneAnchor;
-use bootty_ui::settings_session::{AcceptedSettings, Catalogs, SettingsEffect, SettingsSession};
+use bootty_ui::settings_session::{
+    AcceptedSettings, Catalogs, SettingsEffect, SettingsOutcome, SettingsSession,
+};
 use bootty_ui::{AppEffect, AppState};
 use rstest::rstest;
 
@@ -63,9 +65,80 @@ fn persist_settings_submissions(config_file: &ChildPath, session: &mut SettingsS
         let SettingsEffect::SubmitDocument(document) = effect else {
             panic!("color edits only submit config documents");
         };
-        commit_config_document(config_file.path(), document, |_| Ok::<(), String>(()))
-            .expect("commit settings document");
+        let (accepted, ()) =
+            commit_config_document(config_file.path(), document, |_| Ok::<(), String>(()))
+                .expect("commit settings document");
+        session.apply_outcome(SettingsOutcome::DocumentAccepted {
+            source: bootty_ui::settings_session::SettingsWriteSource::Document,
+            accepted: Box::new(AcceptedSettings {
+                revision: 2,
+                config: Arc::new(accepted.config),
+                document: accepted.document,
+                schema: Arc::new(SettingsSchema::new(
+                    SettingsSchema::builtin().specs().to_vec(),
+                )),
+            }),
+            warning: accepted
+                .write_outcome
+                .durability_warning()
+                .map(str::to_owned),
+        });
     }
+}
+
+#[rstest]
+#[expect(
+    clippy::float_cmp,
+    reason = "The explicit saved font size must be preserved exactly"
+)]
+fn stale_settings_drafts_preserve_external_edits_and_can_be_discarded() {
+    let directory = TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str("[window]\ntitle = 'original'\n").unwrap();
+    let mut session = settings_session(&file);
+    session.set_value("font.size", &SettingValue::Number(20.0));
+    let [SettingsEffect::SubmitDocument(candidate)]: [SettingsEffect; 1] =
+        session.take_effects().try_into().unwrap()
+    else {
+        panic!("one submitted config edit");
+    };
+    session.add_environment_variable();
+    session.set_environment_value(0, "unfinished".to_owned());
+    let external = "# retain this comment\n[window]\ntitle = 'external'\n";
+    file.write_str(external).unwrap();
+    let error = commit_config_document(file.path(), candidate, |_| Ok(())).unwrap_err();
+    session.apply_outcome(SettingsOutcome::DocumentRejected {
+        source: bootty_ui::settings_session::SettingsWriteSource::Document,
+        error: error.to_string(),
+    });
+    let accepted = AcceptedSettings {
+        config: Arc::new(load_config_from_path(file.path()).unwrap()),
+        revision: 2,
+        document: load_or_create_config_document(file.path()).unwrap(),
+        schema: Arc::new(SettingsSchema::new(
+            SettingsSchema::builtin().specs().to_vec(),
+        )),
+    };
+    session.reconcile_accepted(accepted.clone());
+    assert!(session.has_unsaved_changes());
+    assert!(session.write_error().is_some());
+    assert_eq!(std::fs::read_to_string(file.path()).unwrap(), external);
+
+    session.discard_document_changes(accepted);
+    assert!(!session.has_unsaved_changes());
+    assert_eq!(session.write_error(), None);
+    assert_eq!(session.environment(), []);
+    assert_eq!(session.take_effects().len(), 0);
+    session.set_value("font.size", &SettingValue::Number(18.0));
+    persist_settings_submissions(&file, &mut session);
+    let config = load_config_from_path(file.path()).unwrap();
+    assert_eq!(config.window.title, "external");
+    assert_eq!(config.font.size, 18.0);
+    assert!(
+        std::fs::read_to_string(file.path())
+            .unwrap()
+            .starts_with("# retain this comment")
+    );
 }
 
 #[test]
@@ -239,10 +312,7 @@ fn incomplete_environment_rename_waits_for_a_complete_typed_writeback() {
                 SettingsSchema::builtin().specs().to_vec(),
             )),
         },
-        Catalogs {
-            environment: state.config().session.env.clone(),
-            ..Catalogs::default()
-        },
+        Catalogs::default(),
     );
 
     assert!(session.set_environment_name(0, String::new()));

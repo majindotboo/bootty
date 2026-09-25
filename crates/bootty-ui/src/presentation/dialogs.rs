@@ -1,9 +1,13 @@
 //! Renderer-neutral product dialog ownership and GPUI projections.
 
+mod new_session;
+pub use new_session::{NewSessionDialog, NewSessionPickerEvent};
+
 use bootty_mux::RemoteSpaceSummary;
 use gpui_kit::component::Colorize as _;
 
-use std::{collections::HashMap, path::Path};
+use crate::strings::home_dir;
+use std::collections::HashMap;
 
 use crate::{
     gpui::{
@@ -23,20 +27,14 @@ use crate::{
 use bootty_config::config::{
     AppearanceMode, MultiplexerBackendConfig, RemoteConfig, SshProfileConfig,
 };
-use bootty_git::{
-    self as project, ProjectPickerEntry, WorktreePickerEntry, WorktreeStatus,
-    discover_project_picker_entries, discover_worktree_picker_entries,
-    toggle_favorite_project_path,
-};
+use bootty_git::{self as project, WorktreeStatus};
 use bootty_mux::repository::{RemoteSpaceRef, SpaceMuxOverride, SpaceRemoteOverride};
 use bootty_mux::{RepaintHandle, controller::SpaceId};
 
 use crate::{
     action_catalog::Command,
     commands::CommandRegistry,
-    new_session::{NewSessionEffect, NewSessionOutcome, NewSessionWorker},
     remote_catalog::{RemoteCatalogResult, RemoteCatalogTask},
-    strings::home_dir,
 };
 use bootty_mux::workspace::{BindingSessionGroup, ScopedSessionTarget};
 
@@ -228,45 +226,6 @@ pub struct SpaceDraft {
 pub enum SpaceEditorEvent {
     Close,
     Save(SpaceDraft),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NewSessionPickerEvent {
-    Close,
-    Error(String),
-    CreateWorktree {
-        repo: String,
-        request: bootty_git::WorktreeRequest,
-    },
-    CreateSession {
-        cwd: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NewSessionStep {
-    Project,
-    Worktree,
-    BranchName,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum NewSessionChoice {
-    Project(ProjectPickerEntry),
-    Worktree(WorktreePickerEntry),
-}
-
-pub struct NewSessionDialog {
-    step: NewSessionStep,
-    list: SearchableList<NewSessionChoice>,
-    projects: Vec<ProjectPickerEntry>,
-    worktrees: Vec<WorktreePickerEntry>,
-    selected_project: Option<ProjectPickerEntry>,
-    branch: String,
-    folder: String,
-    start_ref: String,
-    error: Option<String>,
-    worker: Option<NewSessionWorker>,
 }
 
 #[derive(Default)]
@@ -727,496 +686,6 @@ impl SpaceEditorDialog {
     }
 }
 
-impl NewSessionDialog {
-    #[must_use]
-    pub fn open() -> Self {
-        let projects = discover_project_picker_entries(project::home_dir().as_deref());
-        Self::from_projects(projects)
-    }
-
-    pub fn open_local(repaint: RepaintHandle) -> Self {
-        Self::new(Vec::new(), Some(NewSessionWorker::local(repaint)))
-    }
-
-    /// Build a local picker from an already-owned project catalog.
-    #[must_use]
-    pub fn from_projects(projects: Vec<ProjectPickerEntry>) -> Self {
-        Self::new(projects, None)
-    }
-
-    pub fn open_remote(remote: RemoteConfig, repaint: RepaintHandle) -> Self {
-        Self::new(Vec::new(), Some(NewSessionWorker::remote(remote, repaint)))
-    }
-
-    fn new(projects: Vec<ProjectPickerEntry>, worker: Option<NewSessionWorker>) -> Self {
-        let entries = project_entries(
-            &projects,
-            worker.as_ref().is_some_and(NewSessionWorker::is_remote),
-        );
-        Self {
-            step: NewSessionStep::Project,
-            list: SearchableList::new(entries),
-            projects,
-            worktrees: Vec::new(),
-            selected_project: None,
-            branch: String::new(),
-            folder: String::new(),
-            start_ref: String::new(),
-            error: None,
-            worker,
-        }
-    }
-
-    pub fn poll(&mut self) -> Option<NewSessionPickerEvent> {
-        let result = self.worker.as_mut()?.poll()?;
-        let remote = self.is_remote();
-        match result {
-            Ok(NewSessionOutcome::Projects(projects)) => {
-                self.projects = projects;
-                self.replace_project_entries(remote);
-                if !remote {
-                    let filter = self.list.filter().to_owned();
-                    self.inject_direct_project(&filter);
-                }
-                None
-            }
-            Ok(NewSessionOutcome::Worktrees(worktrees)) => {
-                if let Some(cwd) = single_unused_worktree_cwd(&worktrees, &[], true) {
-                    return Some(NewSessionPickerEvent::CreateSession { cwd });
-                }
-                self.worktrees = worktrees;
-                self.list.replace_entries(worktree_entries(&self.worktrees));
-                select_source(
-                    &mut self.list,
-                    default_worktree_selection(&self.worktrees, &[], true),
-                );
-                None
-            }
-            Ok(NewSessionOutcome::Favorite { path, favorite }) => {
-                self.set_project_favorite(&path, favorite);
-                self.replace_project_entries(remote);
-                None
-            }
-            Ok(NewSessionOutcome::CreatedWorktree(cwd)) => {
-                Some(NewSessionPickerEvent::CreateSession { cwd })
-            }
-            Err(error) if self.step == NewSessionStep::BranchName => {
-                self.error = Some(error);
-                None
-            }
-            Err(error) => Some(NewSessionPickerEvent::Error(error)),
-        }
-    }
-
-    #[must_use]
-    pub fn spec(&self) -> DialogSpec {
-        let (rows, title, icon, hint, empty, text_hint) = match self.step {
-            NewSessionStep::BranchName => return self.branch_spec(),
-            NewSessionStep::Project => (
-                self.project_rows(),
-                "Directory",
-                "folder",
-                "Enter open   Ctrl+Shift+F favorite   Esc close",
-                if self.worker_busy() {
-                    if self.is_remote() {
-                        "loading remote projects…"
-                    } else {
-                        "loading directories…"
-                    }
-                } else {
-                    "no matching directories"
-                },
-                "filter directories…",
-            ),
-            NewSessionStep::Worktree => (
-                self.worktree_rows(),
-                "Worktree",
-                "git-branch",
-                "Enter create session   Esc close",
-                if self.worker_busy() {
-                    if self.is_remote() {
-                        "loading remote worktrees…"
-                    } else {
-                        "loading worktrees…"
-                    }
-                } else {
-                    "no matching worktrees"
-                },
-                "filter worktrees…",
-            ),
-        };
-        let mut spec = DialogSpec::searchable(NEW_SESSION_ID, title, self.list.filter(), rows);
-        spec.icon = Some(icon.to_owned());
-        spec.hint = Some(hint.to_owned());
-        empty.clone_into(&mut spec.empty_text);
-        spec.text_hint = Some(text_hint.to_owned());
-        spec
-    }
-
-    fn branch_spec(&self) -> DialogSpec {
-        let repo = self
-            .selected_project
-            .as_ref()
-            .map(|project| display_project_path(&project.path, self.is_remote()))
-            .unwrap_or_default();
-        let mut spec = DialogSpec::prompt(
-            NEW_SESSION_ID,
-            "New Worktree",
-            &self.branch,
-            "branch name…",
-            DialogAction::new("create-worktree"),
-        );
-        spec.icon = Some("git-branch".to_owned());
-        spec.busy = self.worker_busy();
-        spec.text_label = Some("Branch".to_owned());
-        spec.fields = vec![
-            crate::gpui::DialogField {
-                kind: crate::gpui::DialogFieldKind::Text,
-                id: "folder".to_owned(),
-                label: "Folder name (optional)".to_owned(),
-                value: self.folder.clone(),
-                placeholder: "repository-branch".to_owned(),
-            },
-            crate::gpui::DialogField {
-                kind: crate::gpui::DialogFieldKind::Text,
-                id: "start-ref".to_owned(),
-                label: "Start from".to_owned(),
-                value: self.start_ref.clone(),
-                placeholder: "HEAD — or a branch, tag or commit".to_owned(),
-            },
-        ];
-        spec.footer = Some(format!("Creates a sibling checkout of {repo}."));
-        if let Some(row) = spec.rows.first_mut() {
-            (if self.worker_busy() {
-                "Creating…"
-            } else {
-                "Create Worktree"
-            })
-            .clone_into(&mut row.label);
-            row.detail.clone_from(&self.error);
-            row.enabled = !self.branch.trim().is_empty() && !self.worker_busy();
-        }
-        spec
-    }
-
-    fn worktree_rows(&self) -> Vec<DialogRow> {
-        self.list
-            .rows()
-            .into_iter()
-            .enumerate()
-            .map(|(visible, row)| {
-                let (icon, label) = match row.value {
-                    NewSessionChoice::Project(project) => (
-                        if project.favorite { "star" } else { "folder" },
-                        display_project_path(&project.path, self.is_remote()),
-                    ),
-                    NewSessionChoice::Worktree(worktree) => (
-                        if worktree.is_new {
-                            "plus"
-                        } else {
-                            "git-branch"
-                        },
-                        worktree.label.clone(),
-                    ),
-                };
-                picker_row(
-                    RowId::new(visible.to_string()),
-                    icon,
-                    label,
-                    !self.worker_busy(),
-                )
-            })
-            .collect()
-    }
-
-    pub fn apply(
-        &mut self,
-        intent: &DialogIntent,
-        open_cwds: &[String],
-    ) -> Option<NewSessionPickerEvent> {
-        match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == NEW_SESSION_ID => {
-                Some(NewSessionPickerEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == NEW_SESSION_ID => {
-                if self.step == NewSessionStep::BranchName {
-                    self.branch.clone_from(value);
-                    self.error = None;
-                } else {
-                    self.list.apply(SearchableIntent::SetFilter(value.clone()));
-                    if self.step == NewSessionStep::Project && !self.is_remote() {
-                        self.inject_direct_project(value);
-                    }
-                }
-                None
-            }
-            DialogIntent::FieldChanged {
-                dialog,
-                field,
-                value,
-            } if dialog.0 == NEW_SESSION_ID => {
-                match field.as_str() {
-                    "folder" => self.folder.clone_from(value),
-                    "start-ref" => self.start_ref.clone_from(value),
-                    _ => return None,
-                }
-                self.error = None;
-                None
-            }
-            DialogIntent::SelectionChanged { dialog, row } if dialog.0 == NEW_SESSION_ID => {
-                let index = if self.step == NewSessionStep::Project {
-                    self.project_row_index(row)
-                } else {
-                    parse_index(row)
-                };
-                if let Some(index) = index {
-                    self.list.apply(SearchableIntent::Select(index));
-                }
-                None
-            }
-            DialogIntent::ToggleFavorite { dialog, row } if dialog.0 == NEW_SESSION_ID => {
-                if self.step != NewSessionStep::Project || self.worker_busy() {
-                    return None;
-                }
-                let index = self.project_row_index(row)?;
-                self.list.apply(SearchableIntent::Select(index));
-                let NewSessionChoice::Project(project) = self.list.selected_value()?.clone() else {
-                    return None;
-                };
-                self.toggle_project_favorite(project)
-            }
-            DialogIntent::Activate { dialog, row, .. } if dialog.0 == NEW_SESSION_ID => {
-                if self.worker_busy() {
-                    return None;
-                }
-                if self.step == NewSessionStep::BranchName {
-                    return self.create_worktree();
-                }
-                let index = if self.step == NewSessionStep::Project {
-                    self.project_row_index(row)?
-                } else {
-                    parse_index(row)?
-                };
-                self.list.apply(SearchableIntent::Select(index));
-                match self.list.selected_value()?.clone() {
-                    NewSessionChoice::Project(project) => self.activate_project(project, open_cwds),
-                    NewSessionChoice::Worktree(worktree) => self.activate_worktree(worktree),
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn inject_direct_project(&mut self, filter: &str) {
-        let Some(project) = direct_project_entry(filter) else {
-            self.list
-                .replace_entries(project_entries(&self.projects, false));
-            return;
-        };
-        let mut projects = self.projects.clone();
-        if !projects
-            .iter()
-            .any(|existing| same_dir(&existing.path, &project.path, false))
-        {
-            projects.insert(0, project);
-        }
-        self.list.replace_entries(project_entries(&projects, false));
-        self.list
-            .apply(SearchableIntent::SetFilter(filter.to_owned()));
-    }
-
-    fn activate_project(
-        &mut self,
-        project: ProjectPickerEntry,
-        open_cwds: &[String],
-    ) -> Option<NewSessionPickerEvent> {
-        if let Some(worker) = &mut self.worker {
-            let path = project.path.clone();
-            self.step = NewSessionStep::Worktree;
-            self.list.apply(SearchableIntent::SetFilter(String::new()));
-            self.worktrees.clear();
-            self.selected_project = Some(project);
-            self.list.replace_entries(Vec::new());
-            worker.start(NewSessionEffect::ListWorktrees(path, open_cwds.to_vec()));
-            return None;
-        }
-        let worktrees = discover_worktree_picker_entries(&project.path);
-        if let Some(cwd) = single_unused_worktree_cwd(&worktrees, open_cwds, false) {
-            return Some(NewSessionPickerEvent::CreateSession { cwd });
-        }
-        let selected = default_worktree_selection(&worktrees, open_cwds, false);
-        self.step = NewSessionStep::Worktree;
-        self.list.apply(SearchableIntent::SetFilter(String::new()));
-        self.worktrees = worktrees;
-        self.selected_project = Some(project);
-        self.list.replace_entries(worktree_entries(&self.worktrees));
-        select_source(&mut self.list, selected);
-        None
-    }
-
-    fn activate_worktree(
-        &mut self,
-        worktree: WorktreePickerEntry,
-    ) -> Option<NewSessionPickerEvent> {
-        if worktree.is_new {
-            self.step = NewSessionStep::BranchName;
-            self.branch.clear();
-            self.folder.clear();
-            self.start_ref.clear();
-            self.error = None;
-            None
-        } else {
-            worktree
-                .path
-                .map(|cwd| NewSessionPickerEvent::CreateSession { cwd })
-                .or(Some(NewSessionPickerEvent::Close))
-        }
-    }
-
-    fn create_worktree(&mut self) -> Option<NewSessionPickerEvent> {
-        let repo = self.selected_project.as_ref()?.path.clone();
-        let branch = self.branch.trim().to_owned();
-        if branch.is_empty() || self.worker_busy() {
-            return None;
-        }
-        let request = bootty_git::WorktreeRequest {
-            branch,
-            name: (!self.folder.trim().is_empty()).then(|| self.folder.trim().to_owned()),
-            start_ref: (!self.start_ref.trim().is_empty())
-                .then(|| self.start_ref.trim().to_owned()),
-        };
-        if let Err(error) = request.validate() {
-            self.error = Some(error);
-            return None;
-        }
-        self.error = None;
-        if let Some(worker) = &mut self.worker {
-            worker.start(NewSessionEffect::CreateWorktree(repo, request));
-            None
-        } else {
-            // `from_projects` is the synchronous, already-owned catalog seam used by tests.
-            Some(NewSessionPickerEvent::CreateWorktree { repo, request })
-        }
-    }
-
-    fn toggle_project_favorite(
-        &mut self,
-        project: ProjectPickerEntry,
-    ) -> Option<NewSessionPickerEvent> {
-        if let Some(worker) = &mut self.worker {
-            worker.start(NewSessionEffect::ToggleFavorite(project.path));
-            return None;
-        }
-        match toggle_favorite_project_path(project::home_dir().as_deref(), &project.path) {
-            Ok(favorite) => {
-                self.set_project_favorite(&project.path, favorite);
-                self.replace_project_entries(self.is_remote());
-                None
-            }
-            Err(error) => Some(NewSessionPickerEvent::Error(format!(
-                "favorite {}: {error}",
-                display_project_path(&project.path, false)
-            ))),
-        }
-    }
-
-    fn set_project_favorite(&mut self, path: &str, favorite: bool) {
-        let remote = self.is_remote();
-        if let Some(project) = self
-            .projects
-            .iter_mut()
-            .find(|project| same_dir(&project.path, path, remote))
-        {
-            project.favorite = favorite;
-        } else if favorite {
-            self.projects.push(ProjectPickerEntry {
-                path: path.to_owned(),
-                favorite,
-            });
-        }
-    }
-
-    fn worker_busy(&self) -> bool {
-        self.worker.as_ref().is_some_and(NewSessionWorker::is_busy)
-    }
-
-    fn is_remote(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_some_and(NewSessionWorker::is_remote)
-    }
-
-    fn selected_project_path(&self) -> Option<String> {
-        match self.list.selected_value()? {
-            NewSessionChoice::Project(project) => Some(project.path.clone()),
-            NewSessionChoice::Worktree(_) => None,
-        }
-    }
-
-    fn replace_project_entries(&mut self, remote: bool) {
-        let selected = self.selected_project_path();
-        self.list
-            .replace_entries(project_entries(&self.projects, remote));
-        self.restore_project_path(selected.as_deref());
-    }
-
-    fn restore_project_path(&mut self, path: Option<&str>) {
-        if let Some(path) = path.and_then(|path| self.project_index_for_path(path)) {
-            self.list.apply(SearchableIntent::Select(path));
-        }
-    }
-
-    fn project_row_index(&self, row: &RowId) -> Option<usize> {
-        let path = row.0.strip_prefix("project:")?;
-        self.project_index_for_path(path)
-    }
-
-    fn project_index_for_path(&self, path: &str) -> Option<usize> {
-        self.list.rows().into_iter().position(|candidate| {
-            matches!(candidate.value, NewSessionChoice::Project(project)
-                if same_dir(&project.path, path, self.is_remote()))
-        })
-    }
-
-    fn project_rows(&self) -> Vec<DialogRow> {
-        let enabled = !self.worker_busy();
-        let mut favorites = Vec::new();
-        let mut directories = Vec::new();
-        for row in self.list.rows() {
-            let NewSessionChoice::Project(project) = row.value else {
-                continue;
-            };
-            let target = if project.favorite {
-                &mut favorites
-            } else {
-                &mut directories
-            };
-            target.push(picker_row(
-                project_row_id(&project.path),
-                if project.favorite { "star" } else { "folder" },
-                display_project_path(&project.path, self.is_remote()),
-                enabled,
-            ));
-        }
-
-        let mut rows = Vec::with_capacity(
-            favorites
-                .len()
-                .saturating_add(directories.len())
-                .saturating_add(2),
-        );
-        if !favorites.is_empty() {
-            rows.push(DialogRow::section("favorites", "Favorites"));
-            rows.extend(favorites);
-        }
-        if !directories.is_empty() {
-            rows.push(DialogRow::section("directories", "Directories"));
-            rows.extend(directories);
-        }
-        rows
-    }
-}
-
 pub struct CommandPaletteDialog {
     localizer: crate::i18n::Localizer,
     list: SearchableList<usize>,
@@ -1355,23 +824,22 @@ impl CommandPaletteDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<CommandPaletteEvent> {
+        if intent.dialog_id().0 != COMMAND_PALETTE_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == COMMAND_PALETTE_ID => {
-                Some(CommandPaletteEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == COMMAND_PALETTE_ID => {
+            DialogIntent::Dismiss { .. } => Some(CommandPaletteEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.list.apply(SearchableIntent::SetFilter(value.clone()));
                 None
             }
-            DialogIntent::SelectionChanged { dialog, row } if dialog.0 == COMMAND_PALETTE_ID => {
+            DialogIntent::SelectionChanged { row, .. } => {
                 if let Some(index) = parse_index(row) {
                     self.list.apply(SearchableIntent::Select(index));
                 }
                 None
             }
-            DialogIntent::Activate {
-                dialog, payload, ..
-            } if dialog.0 == COMMAND_PALETTE_ID => payload_index(payload)
+            DialogIntent::Activate { payload, .. } => payload_index(payload)
                 .and_then(|index| self.commands.get(index).copied())
                 .map(CommandPaletteEvent::Run),
             _ => None,
@@ -1490,21 +958,19 @@ impl SessionPickerDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<SessionPickerEvent> {
+        if intent.dialog_id().0 != SESSION_PICKER_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == SESSION_PICKER_ID => {
-                Some(SessionPickerEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == SESSION_PICKER_ID => {
+            DialogIntent::Dismiss { .. } => Some(SessionPickerEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.list.apply(SearchableIntent::SetFilter(value.clone()));
                 None
             }
             DialogIntent::Activate {
-                dialog,
                 payload: DialogPayload::Session(target),
                 ..
-            } if dialog.0 == SESSION_PICKER_ID => {
-                Some(SessionPickerEvent::ActivateSession(target.clone()))
-            }
+            } => Some(SessionPickerEvent::ActivateSession(target.clone())),
             _ => None,
         }
     }
@@ -1586,32 +1052,31 @@ impl SpacePickerDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<SpacePickerEvent> {
+        if intent.dialog_id().0 != SPACE_PICKER_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == SPACE_PICKER_ID => {
-                Some(SpacePickerEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == SPACE_PICKER_ID => {
+            DialogIntent::Dismiss { .. } => Some(SpacePickerEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.list.apply(SearchableIntent::SetFilter(value.clone()));
                 None
             }
-            DialogIntent::SelectionChanged { dialog, row } if dialog.0 == SPACE_PICKER_ID => {
+            DialogIntent::SelectionChanged { row, .. } => {
                 if let Some(index) = parse_index(row) {
                     self.list.apply(SearchableIntent::Select(index));
                 }
                 None
             }
-            DialogIntent::Activate { dialog, row, .. } if dialog.0 == SPACE_PICKER_ID => {
-                parse_index(row).and_then(|index| {
-                    self.list.apply(SearchableIntent::Select(index));
-                    self.list
-                        .selected_value()
-                        .copied()
-                        .map(|space| SpacePickerEvent::Move {
-                            session: self.session.clone(),
-                            space,
-                        })
-                })
-            }
+            DialogIntent::Activate { row, .. } => parse_index(row).and_then(|index| {
+                self.list.apply(SearchableIntent::Select(index));
+                self.list
+                    .selected_value()
+                    .copied()
+                    .map(|space| SpacePickerEvent::Move {
+                        session: self.session.clone(),
+                        space,
+                    })
+            }),
             _ => None,
         }
     }
@@ -1757,14 +1222,13 @@ impl DitchSessionDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<DitchSessionEvent> {
+        if intent.dialog_id().0 != DITCH_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == DITCH_ID => {
-                Some(DitchSessionEvent::Close)
-            }
-            DialogIntent::Activate {
-                dialog, payload, ..
-            } if dialog.0 == DITCH_ID && self.inspection.is_none() => payload_index(payload)
-                .and_then(|index| {
+            DialogIntent::Dismiss { .. } => Some(DitchSessionEvent::Close),
+            DialogIntent::Activate { payload, .. } if self.inspection.is_none() => {
+                payload_index(payload).and_then(|index| {
                     self.list
                         .rows()
                         .get(index)
@@ -1773,7 +1237,8 @@ impl DitchSessionDialog {
                             cwd: self.cwd.clone(),
                             action: row.value.clone(),
                         })
-                }),
+                })
+            }
             _ => None,
         }
     }
@@ -1825,13 +1290,16 @@ impl KeybindHelpDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> bool {
+        if intent.dialog_id().0 != KEYBIND_HELP_ID {
+            return false;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == KEYBIND_HELP_ID => true,
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == KEYBIND_HELP_ID => {
+            DialogIntent::Dismiss { .. } => true,
+            DialogIntent::TextChanged { value, .. } => {
                 self.model.apply(SearchableIntent::SetFilter(value.clone()));
                 false
             }
-            DialogIntent::SelectionChanged { dialog, row } if dialog.0 == KEYBIND_HELP_ID => {
+            DialogIntent::SelectionChanged { row, .. } => {
                 if let Some(index) = parse_index(row) {
                     self.model.apply(SearchableIntent::Select(index));
                 }
@@ -1873,17 +1341,16 @@ impl RenameSessionDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<RenameSessionEvent> {
+        if intent.dialog_id().0 != RENAME_SESSION_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == RENAME_SESSION_ID => {
-                Some(RenameSessionEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == RENAME_SESSION_ID => {
+            DialogIntent::Dismiss { .. } => Some(RenameSessionEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.name.clone_from(value);
                 None
             }
-            DialogIntent::Activate { dialog, .. }
-                if dialog.0 == RENAME_SESSION_ID && !self.name.trim().is_empty() =>
-            {
+            DialogIntent::Activate { .. } if !self.name.trim().is_empty() => {
                 Some(RenameSessionEvent::Rename {
                     session_id: self.session_id.clone(),
                     name: self.name.trim().to_owned(),
@@ -1925,21 +1392,20 @@ impl RenameTabDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<RenameTabEvent> {
+        if intent.dialog_id().0 != RENAME_TAB_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == RENAME_TAB_ID => {
-                Some(RenameTabEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == RENAME_TAB_ID => {
+            DialogIntent::Dismiss { .. } => Some(RenameTabEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.name.clone_from(value);
                 None
             }
-            DialogIntent::Activate { dialog, .. } if dialog.0 == RENAME_TAB_ID => {
-                Some(RenameTabEvent::Rename {
-                    session_id: self.session_id.clone(),
-                    window_id: self.window_id.clone(),
-                    name: self.name.trim().to_owned(),
-                })
-            }
+            DialogIntent::Activate { .. } => Some(RenameTabEvent::Rename {
+                session_id: self.session_id.clone(),
+                window_id: self.window_id.clone(),
+                name: self.name.trim().to_owned(),
+            }),
             _ => None,
         }
     }
@@ -2040,15 +1506,16 @@ impl ThemePickerDialog {
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<ThemePickerEvent> {
+        if intent.dialog_id().0 != THEME_PICKER_ID {
+            return None;
+        }
         match intent {
-            DialogIntent::Dismiss { dialog } if dialog.0 == THEME_PICKER_ID => {
-                Some(ThemePickerEvent::Close)
-            }
-            DialogIntent::TextChanged { dialog, value } if dialog.0 == THEME_PICKER_ID => {
+            DialogIntent::Dismiss { .. } => Some(ThemePickerEvent::Close),
+            DialogIntent::TextChanged { value, .. } => {
                 self.filter.clone_from(value);
                 None
             }
-            DialogIntent::CycleScope { dialog } if dialog.0 == THEME_PICKER_ID => {
+            DialogIntent::CycleScope { .. } => {
                 self.scope = match self.scope {
                     None => Some(ThemeKind::Light),
                     Some(ThemeKind::Light) => Some(ThemeKind::Dark),
@@ -2058,12 +1525,9 @@ impl ThemePickerDialog {
                 None
             }
             DialogIntent::Preview {
-                dialog,
                 payload: DialogPayload::Text(name),
                 ..
-            } if dialog.0 == THEME_PICKER_ID
-                && self.entries.iter().any(|(entry, _)| entry == name) =>
-            {
+            } if self.entries.iter().any(|(entry, _)| entry == name) => {
                 if self.current.as_ref() == Some(name) {
                     self.last_preview
                         .take()
@@ -2076,12 +1540,9 @@ impl ThemePickerDialog {
                 }
             }
             DialogIntent::Activate {
-                dialog,
                 payload: DialogPayload::Text(name),
                 ..
-            } if dialog.0 == THEME_PICKER_ID
-                && self.entries.iter().any(|(entry, _)| entry == name) =>
-            {
+            } if self.entries.iter().any(|(entry, _)| entry == name) => {
                 Some(ThemePickerEvent::Select(name.clone()))
             }
             _ => None,
@@ -2177,143 +1638,6 @@ fn ditch_action_text(action: &DitchAction) -> (&'static str, String) {
                 "Remove the worktree and delete branch '{branch}' (uncommitted changes and unmerged commits are lost)"
             ),
         ),
-    }
-}
-
-fn project_entries(
-    projects: &[ProjectPickerEntry],
-    remote: bool,
-) -> Vec<SearchableEntry<NewSessionChoice>> {
-    projects
-        .iter()
-        .filter(|project| project.favorite)
-        .chain(projects.iter().filter(|project| !project.favorite))
-        .map(|project| {
-            SearchableEntry::new(
-                NewSessionChoice::Project(project.clone()),
-                display_project_path(&project.path, remote),
-            )
-        })
-        .collect()
-}
-
-fn picker_row(id: RowId, icon: &str, label: String, enabled: bool) -> DialogRow {
-    DialogRow {
-        id,
-        icon: Some(icon.to_owned()),
-        label,
-        color: None,
-        detail: None,
-        trailing: None,
-        keybinding: None,
-        current: false,
-        enabled,
-        destructive: false,
-        action: enabled.then(|| DialogAction::new("activate")),
-        preview: None,
-    }
-}
-
-fn project_row_id(path: &str) -> RowId {
-    RowId::new(format!("project:{path}"))
-}
-
-fn worktree_entries(worktrees: &[WorktreePickerEntry]) -> Vec<SearchableEntry<NewSessionChoice>> {
-    worktrees
-        .iter()
-        .cloned()
-        .map(|worktree| {
-            SearchableEntry::new(NewSessionChoice::Worktree(worktree.clone()), worktree.label)
-        })
-        .collect()
-}
-
-fn display_project_path(path: &str, remote: bool) -> String {
-    if remote {
-        path.to_owned()
-    } else {
-        bootty_git::project::display_path(path, home_dir().as_deref())
-    }
-}
-
-fn direct_project_entry(filter: &str) -> Option<ProjectPickerEntry> {
-    let filter = filter.trim();
-    if !looks_like_directory_path(filter) {
-        return None;
-    }
-    let path = crate::strings::expand_home_path(filter);
-    path.is_dir().then(|| ProjectPickerEntry {
-        path: path
-            .canonicalize()
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned(),
-        favorite: false,
-    })
-}
-
-fn looks_like_directory_path(filter: &str) -> bool {
-    Path::new(filter).has_root()
-        || filter.starts_with("~/")
-        || filter.starts_with("./")
-        || filter.starts_with("../")
-        || cfg!(windows)
-            && (filter.starts_with(r"~\")
-                || filter.starts_with(r".\")
-                || filter.starts_with(r"..\"))
-}
-
-fn same_dir(a: &str, b: &str, remote: bool) -> bool {
-    if remote {
-        return a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\']);
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
-    }
-}
-
-fn single_unused_worktree_cwd(
-    entries: &[WorktreePickerEntry],
-    open_cwds: &[String],
-    remote: bool,
-) -> Option<String> {
-    let mut real = entries.iter().filter(|entry| !entry.is_new);
-    let only = real.next()?;
-    if real.next().is_some() || worktree_is_open(only, open_cwds, remote) {
-        return None;
-    }
-    only.path.clone()
-}
-
-fn default_worktree_selection(
-    entries: &[WorktreePickerEntry],
-    open_cwds: &[String],
-    remote: bool,
-) -> usize {
-    entries
-        .iter()
-        .position(|entry| !entry.is_new && !worktree_is_open(entry, open_cwds, remote))
-        .unwrap_or(0)
-}
-
-fn worktree_is_open(entry: &WorktreePickerEntry, open_cwds: &[String], remote: bool) -> bool {
-    if remote {
-        return entry.occupied;
-    }
-    entry
-        .path
-        .as_deref()
-        .is_some_and(|path| open_cwds.iter().any(|cwd| same_dir(cwd, path, false)))
-}
-
-fn select_source<T>(list: &mut SearchableList<T>, source: usize) {
-    if let Some(visible) = list
-        .rows()
-        .iter()
-        .position(|row| row.source_index == source)
-    {
-        list.apply(SearchableIntent::Select(visible));
     }
 }
 

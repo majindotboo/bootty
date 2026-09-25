@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+use bootty_config::config::{
+    BoottyConfig, RemoteConfig, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshRemoteConfig,
+};
+
 use crate::settings_session::{RemoteOutcome, SettingsEffect};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -15,7 +19,7 @@ pub struct DefaultRemote {
 
 impl DefaultRemote {
     #[must_use]
-    pub fn from_remote(remote: Option<&RemoteProfile>) -> Self {
+    fn from_remote(remote: Option<&SshRemoteConfig>) -> Self {
         let Some(remote) = remote else {
             return Self {
                 program: "ssh".to_owned(),
@@ -182,10 +186,65 @@ pub struct RemoteState {
 }
 
 impl RemoteState {
-    pub(crate) fn set_default(&mut self, default: DefaultRemote) {
+    pub(crate) fn reconcile(&mut self, config: &BoottyConfig) {
+        self.set_profiles(
+            config
+                .ssh_profiles
+                .iter()
+                .map(|(id, profile)| RemoteProfile {
+                    id: id.clone(),
+                    name: profile.name.clone(),
+                    host: profile.host.clone(),
+                    user: profile.user.clone(),
+                    port: profile.port,
+                    authentication: match profile.authentication {
+                        SshAuthenticationConfig::Auto => "auto",
+                        SshAuthenticationConfig::Agent => "agent",
+                        SshAuthenticationConfig::KeyFile => "key-file",
+                    }
+                    .to_owned(),
+                    host_key_policy: match profile.host_key_policy {
+                        SshHostKeyPolicyConfig::Strict => "strict",
+                        SshHostKeyPolicyConfig::AcceptNew => "accept-new",
+                    }
+                    .to_owned(),
+                    identity_file: profile.identity_file.clone(),
+                    proxy_jump: profile.proxy_jump.clone(),
+                    program: profile.program.clone(),
+                    args: profile.args.clone(),
+                })
+                .collect(),
+        );
         if !self.default.dirty {
-            self.default = default;
+            self.accept_default(config);
         }
+    }
+
+    pub(crate) fn accept_default(&mut self, config: &BoottyConfig) {
+        self.default = DefaultRemote::from_remote(
+            config
+                .multiplexer
+                .remote
+                .as_ref()
+                .and_then(RemoteConfig::as_ssh),
+        );
+    }
+
+    pub(crate) fn accept_profile(&mut self, id: &str) {
+        if self.draft.as_ref().is_some_and(|draft| draft.id == id) && !self.select(id) {
+            self.draft = None;
+            self.selected = None;
+            self.testing = None;
+            self.message = None;
+        }
+    }
+
+    pub(crate) fn reject_profile(&mut self, id: &str, error: &str) -> bool {
+        let Some(draft) = self.draft.as_mut().filter(|draft| draft.id == id) else {
+            return false;
+        };
+        draft.error = Some(error.to_owned());
+        true
     }
 
     pub(crate) fn edit_default(&mut self, field: &str, value: String) -> bool {
@@ -269,7 +328,6 @@ impl RemoteState {
         match self.default.validate() {
             Ok(profile) => {
                 self.default.error = None;
-                self.default.dirty = false;
                 Some(SettingsEffect::SetDefaultRemote(profile))
             }
             Err(error) => {
@@ -283,25 +341,31 @@ impl RemoteState {
         self.default.error = Some(error.into());
     }
 
-    pub(crate) fn clear_default(&mut self) -> SettingsEffect {
-        self.default = DefaultRemote {
-            program: "ssh".to_owned(),
-            dirty: false,
-            ..DefaultRemote::default()
-        };
-        SettingsEffect::ClearDefaultRemote
-    }
-    pub(crate) fn set_profiles(&mut self, profiles: Vec<RemoteProfile>) {
-        self.profiles = profiles;
-        if self
+    fn set_profiles(&mut self, profiles: Vec<RemoteProfile>) {
+        let unedited = self
             .selected
             .as_ref()
-            .is_some_and(|id| !self.profiles.iter().any(|profile| &profile.id == id))
-        {
+            .and_then(|id| self.profiles.iter().find(|profile| &profile.id == id))
+            .is_some_and(|profile| {
+                self.draft.as_ref() == Some(&RemoteDraft::from_profile(profile))
+            });
+        self.profiles = profiles;
+        let selected = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.profiles.iter().find(|profile| &profile.id == id));
+        if unedited {
+            let draft = selected.map(RemoteDraft::from_profile);
+            if self.draft != draft {
+                self.draft = draft;
+                self.testing = None;
+                self.message = None;
+            }
+        }
+        // An externally removed profile can still have an unsaved draft. Keep it editable as
+        // a new profile; only an acknowledged removal clears its editor.
+        if selected.is_none() {
             self.selected = None;
-            self.draft = None;
-            self.testing = None;
-            self.message = None;
         }
     }
 

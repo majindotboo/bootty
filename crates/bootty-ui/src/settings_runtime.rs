@@ -10,14 +10,16 @@ use std::{
 
 use crate::gpui::{ModuleIntegrationSnapshot, ModuleIntegrationStatus, ModuleIntegrationsSnapshot};
 use crate::settings_session::{
-    ModuleOutcome, RemoteOutcome, RemoteProfile, SettingsEffect, SettingsOutcome,
+    AcceptedSettings, ModuleOutcome, RemoteOutcome, RemoteProfile, SettingsEffect, SettingsOutcome,
+    SettingsWriteSource,
 };
 use bootty_agents::{
     AgentIntegration, IntegrationStatus, agent_integrations, install_integration,
     integration_status, uninstall_integration,
 };
 use bootty_config::config::{
-    SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig, SshRemoteConfig,
+    ConfigDocument, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
+    SshRemoteConfig,
 };
 use bootty_mux::RepaintHandle;
 
@@ -74,7 +76,9 @@ impl SettingsRuntime {
         repaint: &RepaintHandle,
     ) -> (Vec<SettingsOutcome>, Vec<AppEffect>) {
         match effect {
-            SettingsEffect::SubmitDocument(document) => commit_document(state, document),
+            SettingsEffect::SubmitDocument(document) => {
+                commit_document(state, document, SettingsWriteSource::Document)
+            }
             SettingsEffect::InstallIntegration {
                 identity,
                 module,
@@ -105,21 +109,17 @@ impl SettingsRuntime {
                 );
                 (Vec::new(), Vec::new())
             }
-            SettingsEffect::UpsertRemote(profile) => {
-                let mut document = state.config_document();
-                let id = profile.id.clone();
-                let result = remote_config(&profile).and_then(|profile| {
+            SettingsEffect::UpsertRemote(profile) => update_remote_document(
+                state,
+                SettingsWriteSource::RemoteProfile(profile.id.clone()),
+                |document| {
+                    let config = remote_config(&profile)?;
                     document
-                        .set_ssh_profile(&id, &profile)
+                        .set_ssh_profile(&profile.id, &config)
                         .map_err(|error| error.to_string())
-                });
-                match result {
-                    Ok(()) => commit_document(state, document),
-                    Err(error) => (vec![SettingsOutcome::DocumentRejected(error)], Vec::new()),
-                }
-            }
+                },
+            ),
             SettingsEffect::SetDefaultRemote(profile) => {
-                let mut document = state.config_document();
                 let remote = SshRemoteConfig {
                     host: profile.host,
                     user: profile.user,
@@ -127,34 +127,28 @@ impl SettingsRuntime {
                     program: profile.program,
                     args: profile.args,
                 };
-                match document.set_multiplexer_remote(&remote) {
-                    Ok(()) => commit_document(state, document),
-                    Err(error) => (
-                        vec![SettingsOutcome::DocumentRejected(error.to_string())],
-                        Vec::new(),
-                    ),
-                }
+                update_remote_document(state, SettingsWriteSource::DefaultRemote, |document| {
+                    document
+                        .set_multiplexer_remote(&remote)
+                        .map_err(|error| error.to_string())
+                })
             }
             SettingsEffect::ClearDefaultRemote => {
-                let mut document = state.config_document();
-                match document.remove_multiplexer_remote() {
-                    Ok(()) => commit_document(state, document),
-                    Err(error) => (
-                        vec![SettingsOutcome::DocumentRejected(error.to_string())],
-                        Vec::new(),
-                    ),
-                }
+                update_remote_document(state, SettingsWriteSource::DefaultRemote, |document| {
+                    document
+                        .remove_multiplexer_remote()
+                        .map_err(|error| error.to_string())
+                })
             }
-            SettingsEffect::RemoveRemote { id } => {
-                let mut document = state.config_document();
-                match document.remove_ssh_profile(&id) {
-                    Ok(()) => commit_document(state, document),
-                    Err(error) => (
-                        vec![SettingsOutcome::DocumentRejected(error.to_string())],
-                        Vec::new(),
-                    ),
-                }
-            }
+            SettingsEffect::RemoveRemote { id } => update_remote_document(
+                state,
+                SettingsWriteSource::RemoteProfile(id.clone()),
+                |document| {
+                    document
+                        .remove_ssh_profile(&id)
+                        .map_err(|error| error.to_string())
+                },
+            ),
             SettingsEffect::TestRemote {
                 request_id,
                 profile,
@@ -174,7 +168,7 @@ impl SettingsRuntime {
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             });
-            let _ = sender.try_send(SettingsOutcome::Remote(RemoteOutcome {
+            let _ = sender.send_blocking(SettingsOutcome::Remote(RemoteOutcome {
                 request_id,
                 result,
             }));
@@ -299,21 +293,51 @@ impl SettingsRuntime {
     }
 }
 
+impl AppState {
+    pub(crate) fn accepted_settings(&self) -> AcceptedSettings {
+        AcceptedSettings {
+            revision: self.config_revision(),
+            config: Arc::new(self.config().clone()),
+            document: self.config_document(),
+            schema: self.settings_schema(),
+        }
+    }
+}
+
+fn update_remote_document(
+    state: &mut AppState,
+    source: SettingsWriteSource,
+    update: impl FnOnce(&mut ConfigDocument) -> Result<(), String>,
+) -> (Vec<SettingsOutcome>, Vec<AppEffect>) {
+    let mut document = state.config_document();
+    match update(&mut document) {
+        Ok(()) => commit_document(state, document, source),
+        Err(error) => (
+            vec![SettingsOutcome::DocumentRejected { source, error }],
+            Vec::new(),
+        ),
+    }
+}
+
 fn commit_document(
     state: &mut AppState,
-    document: bootty_config::config::ConfigDocument,
+    document: ConfigDocument,
+    source: SettingsWriteSource,
 ) -> (Vec<SettingsOutcome>, Vec<AppEffect>) {
     match state.commit_settings_document(document) {
-        Ok((document, warning, effects)) => (
+        Ok((_, warning, effects)) => (
             vec![SettingsOutcome::DocumentAccepted {
-                revision: state.config_revision(),
-                document,
+                source,
+                accepted: Box::new(state.accepted_settings()),
                 warning,
             }],
             effects,
         ),
         Err(error) => (
-            vec![SettingsOutcome::DocumentRejected(error.to_string())],
+            vec![SettingsOutcome::DocumentRejected {
+                source,
+                error: error.to_string(),
+            }],
             Vec::new(),
         ),
     }

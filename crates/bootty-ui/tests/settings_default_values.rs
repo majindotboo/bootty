@@ -27,13 +27,10 @@ fn session(source: &str) -> (assert_fs::TempDir, SettingsSession) {
     let path = directory.child("config.toml");
     path.write_str(source).unwrap();
     let accepted = accepted(path.path(), 1);
-    let catalogs = Catalogs {
-        top_status_segments: accepted.config.chrome.top_segments.clone(),
-        bottom_status_segments: accepted.config.chrome.bottom_segments.clone(),
-        environment: accepted.config.session.env.clone(),
-        ..Catalogs::default()
-    };
-    (directory, SettingsSession::new(accepted, catalogs))
+    (
+        directory,
+        SettingsSession::new(accepted, Catalogs::default()),
+    )
 }
 
 #[rstest]
@@ -163,18 +160,19 @@ fn resolved_inherited_values_and_aliases_are_used_when_the_root_has_no_value() {
 }
 
 #[rstest]
-fn equal_revision_reconciliation_updates_resolved_values_after_document_acceptance() {
+fn document_acceptance_updates_resolved_values_without_a_followup_reconciliation() {
     let (directory, mut session) = session("");
     let path = directory.child("config.toml");
     path.write_str("[font]\nfamily = ['Lilex-Bold']\n").unwrap();
     let next = accepted(path.path(), 2);
     session.apply_outcome(
         bootty_ui::settings_session::SettingsOutcome::DocumentAccepted {
-            revision: 2,
-            document: next.document.clone(),
+            source: bootty_ui::settings_session::SettingsWriteSource::Document,
+            accepted: Box::new(next.clone()),
             warning: None,
         },
     );
+    assert!(!session.is_default("font.family"));
     session.reconcile_accepted(next);
     assert!(!session.is_default("font.family"));
 }
@@ -213,4 +211,44 @@ fn selected_user_theme_is_the_color_reset_baseline() {
     let session = SettingsSession::new(legacy, Catalogs::default());
     assert!(!session.is_default("appearance.dark.colors.foreground"));
     assert!(!session.is_default("appearance.light.colors.foreground"));
+}
+
+#[rstest]
+#[case("font.size", SettingValue::Number(23.0), SettingValue::Number(17.0))]
+#[case("session.term", SettingValue::Text("vt100".to_owned()), SettingValue::Text("xterm".to_owned()))]
+#[case(
+    "session.shell-integration",
+    SettingValue::Bool(false),
+    SettingValue::Bool(true)
+)]
+fn scalar_values_follow_accepted_includes_until_locally_edited(
+    #[case] id: &str,
+    #[case] inherited: SettingValue,
+    #[case] edited: SettingValue,
+    #[values(false, true)] shadowed_root_values: bool,
+) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.child("config.toml");
+    path.write_str(if shadowed_root_values {
+        "include = ['included.toml']\n[font]\nsize = 11\n[session]\nterm = 'ansi'\nshell-integration = true\n"
+    } else { "include = ['included.toml']\n" }).unwrap();
+    directory
+        .child("included.toml")
+        .write_str("[font]\nsize = 23\n[session]\nterm = 'vt100'\nshell-integration = false\n")
+        .unwrap();
+    let accepted = accepted(path.path(), 1);
+    let default = accepted
+        .schema
+        .get(id)
+        .unwrap()
+        .default_value(&BoottyConfig::default())
+        .unwrap();
+    let mut session = SettingsSession::new(accepted.clone(), Catalogs::default());
+    assert_eq!(session.value(id), Some(inherited.clone()));
+    session.set_value(id, &edited);
+    assert_eq!(session.value(id), Some(edited));
+    session.remove_value(id);
+    assert_eq!(session.value(id), Some(default));
+    session.discard_document_changes(accepted);
+    assert_eq!(session.value(id), Some(inherited));
 }

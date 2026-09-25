@@ -1,4 +1,6 @@
 use crate::terminal::{KeyInput, MouseInput};
+use crate::terminal_engine::TerminalEngine;
+use anyhow::Result;
 
 /// Modifier side state retained by a native input adapter when the host reports physical keys.
 /// GPUI itself exposes aggregate modifiers, so the desktop may leave this at its default value.
@@ -77,4 +79,57 @@ pub enum TerminalInputCommand {
         input: MouseInput,
         scroll_delta: isize,
     },
+}
+
+/// Frame work required after applying input, independent of its transport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalInputEffects {
+    pub viewport_changed: bool,
+    pub force_publish: bool,
+}
+
+impl TerminalInputCommand {
+    /// Apply input policy and encode bytes for the runtime to deliver.
+    ///
+    /// # Errors
+    /// Returns an error if the terminal cannot inspect its input modes or encode the event.
+    pub fn apply(
+        &self,
+        engine: &mut TerminalEngine,
+        output: &mut Vec<u8>,
+    ) -> Result<TerminalInputEffects> {
+        output.clear();
+        let mut effects = TerminalInputEffects::default();
+        match self {
+            Self::Text(text) => output.extend_from_slice(text.as_bytes()),
+            Self::Paste(text) => engine.encode_paste_to_vec(text, output)?,
+            Self::Key(input) => engine.encode_key_to_vec(*input, output)?,
+            Self::Focus(gained) => engine.encode_focus_to_vec(*gained, output)?,
+            Self::Mouse(input) => engine.encode_mouse_to_vec(*input, output)?,
+            Self::MouseWheel {
+                input,
+                scroll_delta,
+            } => {
+                if engine.is_mouse_tracking()? {
+                    engine.encode_mouse_wheel_to_vec(
+                        *input,
+                        scroll_delta.unsigned_abs().max(1),
+                        output,
+                    )?;
+                    effects.force_publish = true;
+                } else if *scroll_delta != 0 {
+                    engine.scroll_viewport_delta(*scroll_delta);
+                    effects.viewport_changed = true;
+                }
+            }
+        }
+        if matches!(self, Self::Text(_) | Self::Paste(_) | Self::Key(_)) {
+            engine.scroll_viewport_bottom();
+            effects.viewport_changed = true;
+        }
+        // Untracked pointer motion must not bypass the output quiet window.
+        effects.force_publish |=
+            effects.viewport_changed || !output.is_empty() || matches!(self, Self::Focus(_));
+        Ok(effects)
+    }
 }

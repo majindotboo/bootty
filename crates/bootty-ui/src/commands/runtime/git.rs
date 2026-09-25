@@ -1,4 +1,4 @@
-use std::{sync::mpsc, time::Instant};
+use std::time::Instant;
 
 use bootty_control::{CommandCancellation, CommandOutcome};
 use bootty_host::{
@@ -7,7 +7,7 @@ use bootty_host::{
 };
 use bootty_mux::{controller::SpaceId, executor};
 
-use super::{CommandDispatch, PendingCommandResult};
+use super::CommandDispatch;
 use crate::{AppState, commands::GitAction};
 
 impl AppState {
@@ -93,53 +93,37 @@ impl AppState {
             });
         };
         let remote = binding.multiplexer().remote.clone();
-        let (deadline, cancellation) = executor::command_execution(execution);
-        let (sender, result) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        std::thread::spawn(move || {
-            // Once Git starts, wait for its result: killing commit hooks can leave an ambiguous commit.
-            let outcome = if let Err(error) =
-                executor::begin_synchronous_command(Some((deadline, cancellation)))
-            {
-                super::command_outcome_for_mux_error(error)
-            } else {
-                let result = remote.map_or_else(
-                    || action.execute(SystemCommandRunner, &arguments),
-                    |remote| {
-                        if action == GitAction::CreateWorktree {
-                            bootty_mux::remote_space::create_remote_worktree_request_with_runner(
-                                &remote,
-                                arguments.first().ok_or("Repository path is required")?,
-                                &GitAction::worktree_request(&arguments)?,
-                                &SystemCommandRunner,
-                            )
-                            .map(serde_json::Value::String)
-                            .map_err(|error| error.to_string())
-                        } else {
-                            action.execute(
-                                RemoteCommandRunner::new(
-                                    RemoteHost::new(remote),
-                                    SystemCommandRunner,
-                                ),
-                                &arguments,
-                            )
-                        }
-                    },
-                );
-                match result {
-                    Ok(value) => CommandOutcome::Success {
-                        value,
-                        warnings: Vec::new(),
-                    },
-                    Err(message) => CommandOutcome::Failed {
-                        code: "git_failed".to_owned(),
-                        message,
-                    },
-                }
-            };
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(result))
+        self.dispatch_committed_command(execution, move || {
+            let result = remote.map_or_else(
+                || action.execute(SystemCommandRunner, &arguments),
+                |remote| {
+                    if action == GitAction::CreateWorktree {
+                        bootty_mux::remote_space::create_remote_worktree_request_with_runner(
+                            &remote,
+                            arguments.first().ok_or("Repository path is required")?,
+                            &GitAction::worktree_request(&arguments)?,
+                            &SystemCommandRunner,
+                        )
+                        .map(serde_json::Value::String)
+                        .map_err(|error| error.to_string())
+                    } else {
+                        action.execute(
+                            RemoteCommandRunner::new(RemoteHost::new(remote), SystemCommandRunner),
+                            &arguments,
+                        )
+                    }
+                },
+            );
+            match result {
+                Ok(value) => CommandOutcome::Success {
+                    value,
+                    warnings: Vec::new(),
+                },
+                Err(message) => CommandOutcome::Failed {
+                    code: "git_failed".to_owned(),
+                    message,
+                },
+            }
+        })
     }
 }

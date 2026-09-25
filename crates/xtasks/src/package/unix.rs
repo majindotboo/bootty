@@ -133,6 +133,12 @@ fn dynamic_dependencies(binary: &Path) -> Result<Vec<String>> {
         "linux" => command::stdout(Command::new("ldd").arg(binary))?,
         os => bail!("dynamic packaging is unsupported on {os}; pass --static"),
     };
+    if env::consts::OS == "linux" && output.lines().any(|line| line.contains("=> not found")) {
+        bail!(
+            "unresolved dynamic dependency for {}:\n{output}",
+            binary.display()
+        );
+    }
     let dependencies = output
         .lines()
         .filter_map(|line| {
@@ -151,7 +157,7 @@ fn dynamic_dependencies(binary: &Path) -> Result<Vec<String>> {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if dependencies.is_empty() {
+    if dependencies.is_empty() && env::consts::OS == "macos" {
         bail!(
             "expected dynamic Rust libraries referenced by {}",
             binary.display()
@@ -171,14 +177,17 @@ fn copy_dynamic_libraries(binary: &Path, destination: &Path, layout: &Layout) ->
         let source = source_dirs
             .iter()
             .map(|directory| directory.join(&name))
-            .find(|path| path.is_file())
-            .with_context(|| {
-                format!(
-                    "could not find dynamic dependency {name} for {}",
-                    binary.display()
-                )
-            })?;
-        filesystem::copy_file(&source, &destination.join(name))?;
+            .find(|path| path.is_file());
+        // Linux ldd also lists host libraries such as X11 and libc; the bundle only owns
+        // libraries from the Cargo output and Rust toolchain.
+        if let Some(source) = source {
+            filesystem::copy_file(&source, &destination.join(name))?;
+        } else if env::consts::OS == "macos" {
+            bail!(
+                "could not find dynamic dependency {name} for {}",
+                binary.display()
+            );
+        }
     }
     Ok(())
 }

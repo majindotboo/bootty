@@ -19,19 +19,17 @@ impl AppState {
             Ok(request) => request,
             Err(error) => return shell_failure(error.to_string()),
         };
+        let mode = arguments
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "local".to_owned());
         let (deadline, cancellation) = executor::command_execution(execution);
         let (sender, receiver) = mpsc::channel();
         let repaint = self.repaint.clone();
         std::thread::spawn(move || {
             let result = executor::begin_synchronous_command(Some((deadline, cancellation)))
                 .map_err(|error| anyhow::anyhow!("History read stopped: {error:?}"))
-                .and_then(|()| {
-                    remote.map_or_else(
-                        || request.execute(),
-                        |remote| request.execute_remote(&remote, bootty_host::SystemCommandRunner),
-                    )
-                })
-                .and_then(|history| Ok(serde_json::to_value(history)?));
+                .and_then(|()| search_history(request, remote, &mode, deadline));
             let outcome = match result {
                 Ok(value) => CommandOutcome::Success {
                     value,
@@ -96,6 +94,10 @@ impl AppState {
             Err(error) => return shell_failure(error.to_string()),
         };
         let query = arguments.first().cloned().unwrap_or_default();
+        let mode = arguments
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| "local".to_owned());
         let (sender, receiver) = mpsc::channel();
         let repaint = self.repaint.clone();
         std::thread::spawn(move || {
@@ -133,10 +135,7 @@ impl AppState {
                             })
                             .collect(),
                     };
-                    let history = remote.map_or_else(
-                        || request.execute(),
-                        |remote| request.execute_remote(&remote, bootty_host::SystemCommandRunner),
-                    )?;
+                    let history = search_history(request, remote, &mode, deadline)?;
                     Ok(serde_json::json!({"prompt":prompt,"history":history}))
                 });
             let outcome = match result {
@@ -153,6 +152,47 @@ impl AppState {
             repaint();
         });
         CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+    }
+}
+
+fn search_history(
+    mut request: bootty_host::shell_history::HistoryRequest,
+    remote: Option<bootty_host::remote::RemoteHost>,
+    mode: &str,
+    deadline: Instant,
+) -> anyhow::Result<serde_json::Value> {
+    use anyhow::Context as _;
+    use bootty_host::semantic_history;
+
+    let semantic = match mode {
+        "local" => None,
+        "semantic" => {
+            if request.query.trim().is_empty() || request.query.len() > 4096 {
+                anyhow::bail!("Semantic history requires a nonempty query of at most 4096 bytes");
+            }
+            let key = std::env::var("TYPESAFE_API_KEY").context(
+                "Semantic history requires TYPESAFE_API_KEY in the desktop process environment",
+            )?;
+            // Retrieve a broad candidate set on its owning host; credentials stay on the desktop.
+            Some((std::mem::take(&mut request.query), key))
+        }
+        _ => anyhow::bail!("History mode must be local or semantic"),
+    };
+    let history = remote.map_or_else(
+        || request.execute(),
+        |remote| request.execute_remote(&remote, bootty_host::SystemCommandRunner),
+    )?;
+    if let Some((query, key)) = semantic {
+        let history = semantic_history::rerank(history, &query, |body| {
+            semantic_history::evaluate(
+                body,
+                &key,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+        })?;
+        Ok(serde_json::to_value(history)?)
+    } else {
+        Ok(serde_json::to_value(history)?)
     }
 }
 

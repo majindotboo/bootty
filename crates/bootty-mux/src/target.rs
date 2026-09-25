@@ -36,6 +36,55 @@ impl ExactMuxTarget {
             Self::Pane(_, session, window, pane) => (Some(session), Some(window), Some(pane)),
         }
     }
+
+    /// Project a live mux resource into its wire target. Unknown resources have no target.
+    /// The host owns `binding_handle`; this module owns all paths below that binding.
+    #[must_use]
+    pub fn command_target(
+        &self,
+        kind: ResourceKind,
+        mux: &MuxController,
+        binding_handle: &str,
+    ) -> Option<CommandTarget> {
+        let (path, generation) = match (kind, self) {
+            (ResourceKind::Binding, Self::Binding(_)) => {
+                return Some(CommandTarget {
+                    kind,
+                    handle: binding_handle.to_owned(),
+                    generation: mux.binding_generation(),
+                });
+            }
+            (ResourceKind::Terminal, Self::Binding(_)) => (
+                vec![binding_handle, "active_terminal"],
+                mux.binding_generation(),
+            ),
+            (ResourceKind::Session | ResourceKind::Terminal, Self::Session(_, session)) => (
+                vec![binding_handle, session.as_str()],
+                mux.session_generation(session)?,
+            ),
+            (ResourceKind::MuxWindow, Self::Window(_, session, window)) => (
+                vec![binding_handle, session.as_str(), window.as_str()],
+                mux.window_generation(session, window)?,
+            ),
+            (ResourceKind::Pane | ResourceKind::Terminal, Self::Pane(_, session, window, pane)) => {
+                (
+                    vec![
+                        binding_handle,
+                        session.as_str(),
+                        window.as_str(),
+                        pane.as_str(),
+                    ],
+                    mux.pane_generation(session, window, pane)?,
+                )
+            }
+            _ => return None,
+        };
+        Some(CommandTarget {
+            kind,
+            handle: serde_json::Value::from(path).to_string(),
+            generation,
+        })
+    }
 }
 
 /// Resolve a complete command target against the controller's observed resources.
@@ -49,79 +98,30 @@ pub fn exact_mux_target(
     target: &CommandTarget,
     binding_handle: &str,
 ) -> Option<ExactMuxTarget> {
-    for session in mux.sessions() {
-        if let Some(generation) = mux.session_generation(&session.id) {
-            let session_target = CommandTarget {
-                kind: ResourceKind::Session,
-                handle: serde_json::Value::from(vec![binding_handle, session.id.as_str()])
-                    .to_string(),
-                generation,
-            };
-            if target == &session_target {
-                return Some(ExactMuxTarget::Session(scope, session.id.clone()));
+    let candidate = if target.kind == ResourceKind::Binding {
+        ExactMuxTarget::Binding(scope)
+    } else {
+        // The encoded path is only a lookup hint. Authority comes from the observed resource
+        // generation and the complete, canonical wire target comparison below.
+        let path: Vec<String> = serde_json::from_str(&target.handle).ok()?;
+        match (target.kind, path.as_slice()) {
+            (ResourceKind::Session, [binding, session]) if binding == binding_handle => {
+                ExactMuxTarget::Session(scope, session.clone())
             }
+            (ResourceKind::MuxWindow, [binding, session, window]) if binding == binding_handle => {
+                ExactMuxTarget::window(scope, session, window)
+            }
+            (ResourceKind::Pane | ResourceKind::Terminal, [binding, session, window, pane])
+                if binding == binding_handle =>
+            {
+                ExactMuxTarget::Pane(scope, session.clone(), window.clone(), pane.clone())
+            }
+            _ => return None,
         }
-        for window in &session.windows {
-            if let Some(generation) = mux.window_generation(&session.id, &window.id) {
-                let window_target = CommandTarget {
-                    kind: ResourceKind::MuxWindow,
-                    handle: serde_json::Value::from(vec![
-                        binding_handle,
-                        session.id.as_str(),
-                        window.id.as_str(),
-                    ])
-                    .to_string(),
-                    generation,
-                };
-                if target == &window_target {
-                    return Some(ExactMuxTarget::Window(
-                        scope,
-                        session.id.clone(),
-                        window.id.clone(),
-                    ));
-                }
-            }
-            for pane in std::iter::once(&window.anchor).chain(&window.panes) {
-                let Some(pane_id) = pane.pane_id.as_deref() else {
-                    continue;
-                };
-                let Some(generation) = mux.pane_generation(&session.id, &window.id, pane_id) else {
-                    continue;
-                };
-                let pane_target = CommandTarget {
-                    kind: ResourceKind::Pane,
-                    handle: serde_json::Value::from(vec![
-                        binding_handle,
-                        session.id.as_str(),
-                        window.id.as_str(),
-                        pane_id,
-                    ])
-                    .to_string(),
-                    generation,
-                };
-                if target == &pane_target {
-                    return Some(ExactMuxTarget::Pane(
-                        scope,
-                        session.id.clone(),
-                        window.id.clone(),
-                        pane_id.to_owned(),
-                    ));
-                }
-                let terminal_target = CommandTarget {
-                    kind: ResourceKind::Terminal,
-                    handle: pane_target.handle,
-                    generation,
-                };
-                if target == &terminal_target {
-                    return Some(ExactMuxTarget::Pane(
-                        scope,
-                        session.id.clone(),
-                        window.id.clone(),
-                        pane_id.to_owned(),
-                    ));
-                }
-            }
-        }
-    }
-    None
+    };
+    (candidate
+        .command_target(target.kind, mux, binding_handle)
+        .as_ref()
+        == Some(target))
+    .then_some(candidate)
 }

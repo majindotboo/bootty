@@ -108,11 +108,10 @@ impl ConfigRuntime {
         &mut self,
         validate: impl FnOnce(&BoottyConfig) -> Result<T, String>,
     ) -> Result<(ConfigChange, T), ConfigRuntimeError> {
-        let next = self.hot_reload.reload_config()?;
-        let document = load_or_create_config_document(&next.config_path)?;
-        let validated = validate(&next).map_err(ConfigRuntimeError::Validation)?;
-        let change = self.accept(next);
-        self.document = document;
+        let loaded = self.hot_reload.reload_document()?;
+        let validated = validate(&loaded.config).map_err(ConfigRuntimeError::Validation)?;
+        let change = self.accept(loaded.config);
+        self.document = loaded.document;
         Ok((change, validated))
     }
 

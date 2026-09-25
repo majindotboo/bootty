@@ -19,6 +19,10 @@ Each adapter reads `${TMUX_PANE:-${BOOTTY_PANE:-}}` and passes it as the
 second argument of its `ingest` command. An event with no pane lands on no
 session row.
 
+State mutations claim pending requests under the state lock after scope resolution.
+Cancellation before that claim leaves state unchanged; event publication failure
+after the mutation returns the committed snapshot with a warning.
+
 The native provider owns its adapter and bounded protocol state. Install or
 remove it from the provider's entry in Settings. Bootty writes the adapter and
 updates the tool's configuration. Existing custom Lua/Luau files are preserved
