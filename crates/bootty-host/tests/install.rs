@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 #[derive(Clone)]
 struct InstallerRunner {
     state: Rc<RefCell<InstallerState>>,
-    candidate_succeeds: bool,
+    candidate_ping: CommandOutput,
 }
 
 #[derive(Default)]
@@ -32,11 +32,7 @@ impl CommandRunner for InstallerRunner {
         let output = if command == "uname -s && uname -m" {
             output(true, platform_probe())
         } else if command.ends_with("remote-ping") && command.contains(".upload") {
-            if self.candidate_succeeds {
-                compatible_ping()
-            } else {
-                output(false, "candidate is incompatible")
-            }
+            self.candidate_ping.clone()
         } else if command.ends_with("remote-ping") {
             if self.state.borrow().installed {
                 compatible_ping()
@@ -127,7 +123,7 @@ fn candidate_is_verified_before_publication() -> Result<()> {
     let successful = Rc::new(RefCell::new(InstallerState::default()));
     remote().ensure_daemon_with(&InstallerRunner {
         state: Rc::clone(&successful),
-        candidate_succeeds: true,
+        candidate_ping: compatible_ping(),
     })?;
     let successful = successful.borrow();
     let position = |needle| {
@@ -155,7 +151,7 @@ fn candidate_is_verified_before_publication() -> Result<()> {
     let error = remote()
         .ensure_daemon_with(&InstallerRunner {
             state: Rc::clone(&failed),
-            candidate_succeeds: false,
+            candidate_ping: output(false, "candidate is incompatible"),
         })
         .expect_err("an incompatible candidate must not publish");
     let failed = failed.borrow();
@@ -175,6 +171,20 @@ fn candidate_is_verified_before_publication() -> Result<()> {
         error.to_string(),
         format!(
             "uploaded Bootty daemon on devbox did not start with protocol {}: candidate is incompatible",
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION
+        )
+    );
+
+    let wrong_response = remote()
+        .ensure_daemon_with(&InstallerRunner {
+            state: Rc::new(RefCell::new(InstallerState::default())),
+            candidate_ping: output(true, "a different daemon"),
+        })
+        .expect_err("the observed response should explain a failed ping");
+    assert_eq!(
+        wrong_response.to_string(),
+        format!(
+            "uploaded Bootty daemon on devbox did not start with protocol {}: unexpected response \"a different daemon\"",
             bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION
         )
     );

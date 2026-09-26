@@ -313,7 +313,7 @@ pub fn ensure<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<()> {
             "Bootty daemon installation on {} did not start with protocol {}: {}",
             remote.host(),
             crate::ssh::REMOTE_DAEMON_PROTOCOL_VERSION,
-            first_error(&output.stderr)
+            ping_failure(&output)
         )
     }
     Ok(())
@@ -338,7 +338,7 @@ fn candidate_ping<R: CommandRunner>(remote: &SshRemote, runner: &R, temporary: &
         "uploaded Bootty daemon on {} did not start with protocol {}: {}",
         remote.host(),
         crate::ssh::REMOTE_DAEMON_PROTOCOL_VERSION,
-        first_error(&output.stderr)
+        ping_failure(&output)
     )
 }
 
@@ -421,6 +421,17 @@ fn first_error(detail: &str) -> &str {
         .next()
         .filter(|line| !line.is_empty())
         .unwrap_or("command failed")
+}
+
+fn ping_failure(output: &CommandOutput) -> String {
+    if let Some(error) = output.stderr.lines().find(|line| !line.is_empty()) {
+        return error.to_owned();
+    }
+    if !output.stdout.is_empty() {
+        let response = output.stdout.chars().take(256).collect::<String>();
+        return format!("unexpected response {response:?}");
+    }
+    "command failed without output".to_owned()
 }
 
 pub fn linux_daemon(architecture: &str) -> Result<PathBuf> {
