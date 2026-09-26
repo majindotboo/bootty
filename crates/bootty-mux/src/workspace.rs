@@ -618,8 +618,7 @@ impl BindingRuntime {
                         .anchor
                         .cwd
                         .as_deref()
-                        .map(|cwd| self.session_cwd(cwd))
-                        .unwrap_or_default(),
+                        .map_or_else(Default::default, |cwd| self.session_cwd(cwd)),
                 });
             }
             if let Some(cwd) = session.anchor.cwd.as_deref() {
@@ -1843,8 +1842,7 @@ impl WorkspaceRuntime {
         };
         let space_tag = self
             .binding(target)
-            .map(|binding| binding.space_tag.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |binding| binding.space_tag.clone());
 
         let Some(mut source_state) = self.binding_state_candidate(from) else {
             return Ok(false);

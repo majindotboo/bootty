@@ -287,11 +287,10 @@ impl GpuiSettingsWindow {
         let root = cx.weak_entity();
         let generation = self
             .editor_tab_mut(kind)
-            .map(|tab| {
+            .map_or_else(Default::default, |tab| {
                 tab.reconcile_generation = tab.reconcile_generation.wrapping_add(1);
                 tab.reconcile_generation
-            })
-            .unwrap_or_default();
+            });
         let read = cx
             .background_executor()
             .spawn(async move { bootty_host::text_file::load_text_file(path) });

@@ -177,8 +177,7 @@ impl BindingRuntime {
         let previous_panes = self
             .pane_layouts
             .get(key)
-            .map(PaneLayout::panes)
-            .unwrap_or_default();
+            .map_or_else(Default::default, PaneLayout::panes);
         let new_panes = pane_ids
             .iter()
             .filter(|pane| !previous_panes.contains(pane))
@@ -304,14 +303,12 @@ impl BindingRuntime {
 
     pub fn pane_rects(&self, area: SurfaceRect, gap: f32) -> Vec<(String, SurfaceRect)> {
         self.current_pane_layout()
-            .map(|layout| layout.rects(area, gap))
-            .unwrap_or_default()
+            .map_or_else(Default::default, |layout| layout.rects(area, gap))
     }
 
     pub fn pane_dividers(&self, area: SurfaceRect, gap: f32) -> Vec<Divider> {
         self.current_pane_layout()
-            .map(|layout| layout.dividers(area, gap))
-            .unwrap_or_default()
+            .map_or_else(Default::default, |layout| layout.dividers(area, gap))
     }
 
     pub fn focus_pane(&mut self, pane_id: &str) {

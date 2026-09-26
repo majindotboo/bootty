@@ -541,16 +541,14 @@ fn replay_fixture(
     stats.virtual_replay_us = fixture
         .chunks
         .last()
-        .map(|chunk| scaled_time(speed, chunk.at_us))
-        .unwrap_or_default();
+        .map_or_else(Default::default, |chunk| scaled_time(speed, chunk.at_us));
     stats.visible_catch_up_us = stats.virtual_replay_us.saturating_sub(
         fixture
             .chunks
             .iter()
             .rev()
             .find(|chunk| !chunk.bytes.is_empty())
-            .map(|chunk| scaled_time(speed, chunk.at_us))
-            .unwrap_or_default(),
+            .map_or_else(Default::default, |chunk| scaled_time(speed, chunk.at_us)),
     );
     let mut p50 = frame_intervals.clone();
     let mut p95 = frame_intervals.clone();

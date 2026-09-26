@@ -220,17 +220,15 @@ impl GitChangesPanel {
             .changes
             .as_ref()
             .and_then(|changes| changes.files.iter().find(|file| file.path == path));
-        let groups = file
-            .map(|file| {
-                file.groups()
-                    .map(|group| match group {
-                        ChangeGroup::Staged => "staged",
-                        ChangeGroup::Unstaged => "unstaged",
-                        ChangeGroup::Untracked => "untracked",
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let groups = file.map_or_else(Default::default, |file| {
+            file.groups()
+                .map(|group| match group {
+                    ChangeGroup::Staged => "staged",
+                    ChangeGroup::Unstaged => "unstaged",
+                    ChangeGroup::Untracked => "untracked",
+                })
+                .collect::<Vec<_>>()
+        });
         if let Some(group) = groups
             .iter()
             .find(|candidate| **candidate == group)

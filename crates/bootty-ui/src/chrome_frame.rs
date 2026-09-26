@@ -1311,8 +1311,9 @@ fn system_status_items(
                 .battery_time_to_full_secs
                 .or(metrics.battery_time_to_empty_secs)
                 .and_then(|seconds| (seconds / 60.0).round().to_u64())
-                .map(|minutes| format!(" {}:{:02}", minutes / 60, minutes % 60))
-                .unwrap_or_default();
+                .map_or_else(Default::default, |minutes| {
+                    format!(" {}:{:02}", minutes / 60, minutes % 60)
+                });
             let mut item = status_cell(
                 "power",
                 format!("{percent:.0}%{remaining}"),

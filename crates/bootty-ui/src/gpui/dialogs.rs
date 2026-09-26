@@ -787,8 +787,7 @@ impl DialogView {
         let fields = self
             .spec
             .as_ref()
-            .map(|spec| spec.fields.clone())
-            .unwrap_or_default();
+            .map_or_else(Default::default, |spec| spec.fields.clone());
         self.fields
             .retain(|id, _| fields.iter().any(|field| &field.id == id));
         for field in fields

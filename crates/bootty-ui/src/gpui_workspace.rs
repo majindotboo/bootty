@@ -2003,14 +2003,13 @@ impl GpuiWorkspace {
                         .iter()
                         .find(|window| window.id == id.window_id())
                 })
-                .map(|window| {
+                .map_or_else(Default::default, |window| {
                     window
                         .panes
                         .iter()
                         .filter_map(|pane| pane.pane_id.clone())
                         .collect()
-                })
-                .unwrap_or_default();
+                });
             panel.update(cx, |panel, cx| {
                 panel.prepare(surface.geometry(), pane_ids, window, cx);
             });
@@ -2018,8 +2017,7 @@ impl GpuiWorkspace {
             let title = windows
                 .iter()
                 .find(|candidate| candidate.id == id)
-                .map(|candidate| candidate.title.clone())
-                .unwrap_or_default();
+                .map_or_else(Default::default, |candidate| candidate.title.clone());
             panel.update(cx, |panel, cx| panel.publish(title, snapshot, cx));
         }
     }
@@ -2415,8 +2413,7 @@ impl GpuiWorkspace {
             .cloned();
         let rects = layout
             .as_ref()
-            .map(|layout| layout.rects(area, gap))
-            .unwrap_or_default();
+            .map_or_else(Default::default, |layout| layout.rects(area, gap));
         if *window_id == self.state.workspace.active.binding.current_window_id() {
             self.state.record_pane_area(area);
         }
@@ -2461,9 +2458,7 @@ impl GpuiWorkspace {
         area: SurfaceRect,
         gap: f32,
     ) -> Vec<GpuiPaneDividerSnapshot> {
-        let dividers = layout
-            .map(|layout| layout.dividers(area, gap))
-            .unwrap_or_default();
+        let dividers = layout.map_or_else(Default::default, |layout| layout.dividers(area, gap));
         dividers
             .into_iter()
             .map(|divider| {

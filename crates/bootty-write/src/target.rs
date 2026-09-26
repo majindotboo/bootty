@@ -167,8 +167,7 @@ fn lock_file_name(path: &Path) -> String {
     }
     let label = path
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let label = label
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))

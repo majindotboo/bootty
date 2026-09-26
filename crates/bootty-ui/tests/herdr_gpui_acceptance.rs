@@ -479,8 +479,16 @@ fn wait_for_shell_size(
     let mut observed = Vec::new();
     let mut last_rows = Vec::new();
     let mut marker = format!("{phase}_{sequence}=");
-    terminal.write_input(format!("printf '{marker}%s\\n' \"$(stty size)\"\n").as_bytes())?;
+    let mut next_probe = Instant::now();
     while Instant::now() < deadline {
+        let now = Instant::now();
+        if now >= next_probe {
+            terminal
+                .write_input(format!("printf '{marker}%s\\n' \"$(stty size)\"\n").as_bytes())?;
+            next_probe = now
+                .checked_add(Duration::from_millis(250))
+                .context("probe deadline overflow")?;
+        }
         terminal.drain_pty();
         let frame = terminal.extract_frame()?;
         last_rows = frame.text_rows();
@@ -494,8 +502,7 @@ fn wait_for_shell_size(
             }
             sequence = sequence.checked_add(1).context("shell sequence overflow")?;
             marker = format!("{phase}_{sequence}=");
-            terminal
-                .write_input(format!("printf '{marker}%s\\n' \"$(stty size)\"\n").as_bytes())?;
+            next_probe = Instant::now();
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let _ = repaint_rx.recv_timeout(remaining.min(Duration::from_millis(25)));

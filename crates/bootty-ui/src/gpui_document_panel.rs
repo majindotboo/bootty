@@ -58,7 +58,7 @@ impl Global for Documents {}
 impl Documents {
     pub(crate) fn pending(cx: &App) -> Vec<Entity<DocumentPanel>> {
         cx.try_global::<Self>()
-            .map(|documents| {
+            .map_or_else(Default::default, |documents| {
                 documents
                     .0
                     .iter()
@@ -66,7 +66,6 @@ impl Documents {
                     .filter(|document| document.read(cx).needs_close_prompt(cx))
                     .collect()
             })
-            .unwrap_or_default()
     }
 }
 

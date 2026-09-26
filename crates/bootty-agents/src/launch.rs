@@ -215,8 +215,9 @@ impl AgentLaunch {
                     .cwd
                     .as_ref()
                     .filter(|cwd| !cwd.is_empty())
-                    .map(|cwd| format!("Set-Location -LiteralPath {}; ", quote(cwd)))
-                    .unwrap_or_default();
+                    .map_or_else(String::new, |cwd| {
+                        format!("Set-Location -LiteralPath {}; ", quote(cwd))
+                    });
                 let script = format!(
                     "$ErrorActionPreference='Stop'; {cwd}$env:BOOTTY_AGENT_LAUNCH_CONTEXT={}; & {argv}; exit $LASTEXITCODE",
                     quote(&context)

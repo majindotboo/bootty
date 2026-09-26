@@ -29,7 +29,9 @@ impl DefaultRemote {
         Self {
             host: remote.host.clone(),
             user: remote.user.clone().unwrap_or_default(),
-            port: remote.port.map(|port| port.to_string()).unwrap_or_default(),
+            port: remote
+                .port
+                .map_or_else(Default::default, |port| port.to_string()),
             program: remote.program.clone(),
             args: remote.args.clone(),
             error: None,
@@ -106,15 +108,13 @@ impl RemoteDraft {
             user: profile.user.clone().unwrap_or_default(),
             port: profile
                 .port
-                .map(|port| port.to_string())
-                .unwrap_or_default(),
+                .map_or_else(Default::default, |port| port.to_string()),
             authentication: profile.authentication.clone(),
             host_key_policy: profile.host_key_policy.clone(),
             identity_file: profile
                 .identity_file
                 .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
+                .map_or_else(Default::default, |path| path.display().to_string()),
             proxy_jump: profile.proxy_jump.clone().unwrap_or_default(),
             program: profile.program.clone(),
             args: profile.args.clone(),

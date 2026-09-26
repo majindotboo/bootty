@@ -49,8 +49,9 @@ impl bootty_control::CommandCatalogSource for TestCatalog {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(|_| std::iter::once("test.changed".to_owned()).collect())
-            .unwrap_or_default()
+            .map_or_else(std::collections::BTreeSet::new, |_| {
+                std::iter::once("test.changed".to_owned()).collect()
+            })
     }
 
     fn with_active_topic(

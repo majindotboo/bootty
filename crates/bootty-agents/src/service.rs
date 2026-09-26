@@ -369,16 +369,12 @@ impl AgentService {
         let Ok(store) = self.state.lock() else {
             return Vec::new();
         };
-        store
-            .panes
-            .get(&provider)
-            .map(|states| {
-                states
-                    .iter()
-                    .map(|(pane, state)| (pane.clone(), state.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        store.panes.get(&provider).map_or_else(Vec::new, |states| {
+            states
+                .iter()
+                .map(|(pane, state)| (pane.clone(), state.clone()))
+                .collect()
+        })
     }
 
     fn acknowledge(&self, provider: AgentKind, request: &AgentInvocation) -> CommandOutcome {
@@ -459,9 +455,7 @@ impl AgentService {
                 }
             }
         } else {
-            saved
-                .map(|launch| launch.arguments.clone())
-                .unwrap_or_default()
+            saved.map_or_else(Vec::new, |launch| launch.arguments.clone())
         };
         let mut launch = crate::AgentLaunch {
             program,

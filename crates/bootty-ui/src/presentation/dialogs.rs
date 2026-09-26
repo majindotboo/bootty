@@ -1093,7 +1093,9 @@ pub struct DitchSessionDialog {
 
 impl DitchSessionDialog {
     pub fn open(session_id: String, cwd: Option<String>) -> Self {
-        let status = cwd.as_deref().map(project::status).unwrap_or_default();
+        let status = cwd
+            .as_deref()
+            .map_or_else(Default::default, project::status);
         let main = cwd.as_deref().and_then(project::main_worktree);
         let trunk = cwd.as_deref().and_then(project::trunk_branch);
         let multi_worktree = cwd.as_deref().map_or(0, project::worktree_count) > 1;

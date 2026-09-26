@@ -675,8 +675,7 @@ impl MuxController {
     #[must_use]
     pub fn selected_session_windows(&self) -> &[crate::snapshot::MuxWindow] {
         self.selected_session_snapshot()
-            .map(|session| session.windows.as_slice())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |session| session.windows.as_slice())
     }
 
     /// Panes of the selected window (the active window of the selected session unless a specific
@@ -685,8 +684,7 @@ impl MuxController {
     #[must_use]
     pub fn selected_window_panes(&self) -> &[crate::snapshot::MuxPaneAnchor] {
         self.selected_window_snapshot()
-            .map(|window| window.panes.as_slice())
-            .unwrap_or_default()
+            .map_or_else(Default::default, |window| window.panes.as_slice())
     }
 
     #[must_use]
@@ -1409,8 +1407,9 @@ impl MuxController {
         execution: Option<(Instant, CommandCancellation)>,
     ) {
         let (deadline, cancellation) = execution
-            .map(|(deadline, cancellation)| (Some(deadline), Some(cancellation)))
-            .unwrap_or_default();
+            .map_or_else(Default::default, |(deadline, cancellation)| {
+                (Some(deadline), Some(cancellation))
+            });
         let config_generation = self.observe_command_config(config);
         self.ensure_command_worker(repaint);
         let job = MuxCommandJob {

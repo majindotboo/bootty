@@ -123,7 +123,7 @@ fn favorite_project_paths_file(home: &Path) -> PathBuf {
 fn read_favorite_project_paths(home: Option<&Path>) -> Vec<PathBuf> {
     home.map(favorite_project_paths_file)
         .and_then(|path| fs::read_to_string(path).ok())
-        .map(|content| {
+        .map_or_else(Vec::new, |content| {
             content
                 .lines()
                 .map(str::trim)
@@ -131,7 +131,6 @@ fn read_favorite_project_paths(home: Option<&Path>) -> Vec<PathBuf> {
                 .map(|line| expand_home_path(home, line))
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn expand_home_path(home: Option<&Path>, path: &str) -> PathBuf {

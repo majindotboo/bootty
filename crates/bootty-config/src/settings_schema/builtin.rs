@@ -710,8 +710,7 @@ fn background_image_specs() -> [SettingSpec; 3] {
                         .window
                         .background_image
                         .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                        .map_or_else(String::new, |path| path.to_string_lossy().into_owned()),
                 )
             }),
         ),
@@ -739,18 +738,15 @@ fn background_effects_specs() -> [SettingSpec; 4] {
             "BACKGROUND",
             text("#RRGGBBAA", true),
             SettingDefault::Field(|config| {
-                SettingValue::Text(
-                    config
-                        .window
-                        .background_gradient_start
-                        .map(|color| {
-                            format!(
-                                "#{:02X}{:02X}{:02X}{:02X}",
-                                color.r, color.g, color.b, color.a
-                            )
-                        })
-                        .unwrap_or_default(),
-                )
+                SettingValue::Text(config.window.background_gradient_start.map_or_else(
+                    String::new,
+                    |color| {
+                        format!(
+                            "#{:02X}{:02X}{:02X}{:02X}",
+                            color.r, color.g, color.b, color.a
+                        )
+                    },
+                ))
             }),
         ),
         spec(
@@ -761,18 +757,15 @@ fn background_effects_specs() -> [SettingSpec; 4] {
             "BACKGROUND",
             text("#RRGGBBAA", true),
             SettingDefault::Field(|config| {
-                SettingValue::Text(
-                    config
-                        .window
-                        .background_gradient_end
-                        .map(|color| {
-                            format!(
-                                "#{:02X}{:02X}{:02X}{:02X}",
-                                color.r, color.g, color.b, color.a
-                            )
-                        })
-                        .unwrap_or_default(),
-                )
+                SettingValue::Text(config.window.background_gradient_end.map_or_else(
+                    String::new,
+                    |color| {
+                        format!(
+                            "#{:02X}{:02X}{:02X}{:02X}",
+                            color.r, color.g, color.b, color.a
+                        )
+                    },
+                ))
             }),
         ),
         spec(
@@ -1125,8 +1118,7 @@ fn terminal_environment_specs() -> [SettingSpec; 4] {
                         .session
                         .working_directory
                         .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default(),
+                        .map_or_else(String::new, |path| path.display().to_string()),
                 )
             }),
         ),
@@ -1206,8 +1198,7 @@ fn diagnostics_specs() -> [SettingSpec; 1] {
                     .diagnostics
                     .stability_trace
                     .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default(),
+                    .map_or_else(String::new, |path| path.display().to_string()),
             )
         }),
     )]
