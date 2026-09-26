@@ -807,7 +807,7 @@ fn background_effects_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn window_size_specs() -> [SettingSpec; 3] {
+fn window_size_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["window", "width"],
@@ -830,12 +830,23 @@ fn window_size_specs() -> [SettingSpec; 3] {
         spec(
             &["window", "fullscreen-tabs-in-notch"],
             "Tabs in notch band",
-            "Allow terminal chrome to occupy the notch/menu-bar band.",
+            "Place fullscreen tabs to the left of the camera.",
             "window",
             "FULLSCREEN NOTCH",
             SettingKind::Bool,
             SettingDefault::Field(|config| {
                 SettingValue::Bool(config.window.fullscreen_tabs_in_notch)
+            }),
+        ),
+        spec(
+            &["window", "fullscreen-tabs-wrap-at-notch"],
+            "Wrap tabs below notch",
+            "Continue tabs below the camera when the first row fills. Otherwise scroll on the left.",
+            "window",
+            "FULLSCREEN NOTCH",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.window.fullscreen_tabs_wrap_at_notch)
             }),
         ),
     ]
@@ -920,7 +931,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
         spec(
             &["font", "ui-size"],
             "UI font size",
-            "Text size for Bootty chrome, extensions, the sidebar, and the status bar.",
+            "Font size for the app interface.",
             "text",
             "FONT",
             number(6.0..=48.0, NumberControl::Slider, "px"),

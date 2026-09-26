@@ -226,9 +226,10 @@ pub struct WindowConfig {
     /// Top offset reserved when the window covers a notched screen in fullscreen. `None` uses the
     /// calibrated auto-detected notch offset; `Some` overrides it exactly.
     pub fullscreen_top_offset: Option<f32>,
-    /// When fullscreen on a notched screen, let the terminal/tab bar sit inside the notch band
-    /// instead of being pushed entirely below it.
+    /// When fullscreen on a notched screen, let the terminal/tab bar sit inside the notch band.
     pub fullscreen_tabs_in_notch: bool,
+    /// Wrap overflowing notch-band tabs onto a second row below the camera.
+    pub fullscreen_tabs_wrap_at_notch: bool,
     pub window_decoration: WindowDecoration,
     pub macos_titlebar_style: MacosTitlebarStyle,
 }
@@ -367,8 +368,9 @@ pub enum TabAppearance {
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum TabClosePosition {
+    #[cfg_attr(target_os = "macos", default)]
     Left,
-    #[default]
+    #[cfg_attr(not(target_os = "macos"), default)]
     Right,
 }
 

@@ -23,15 +23,10 @@ use bootty_config::config::{
 };
 use bootty_mux::RepaintHandle;
 
-use crate::{
-    AppEffect,
-    gpui_settings_catalog::{UnsupportedModuleDiagnostic, scan_unsupported_module_sources},
-    state::AppState,
-};
+use crate::{AppEffect, state::AppState};
 
 #[derive(Clone, Debug, Default)]
 pub struct NativeSettingsCatalog {
-    pub(crate) unsupported_sources: Vec<UnsupportedModuleDiagnostic>,
     pub(crate) integration_rows: Vec<ModuleIntegrationsSnapshot>,
 }
 
@@ -347,18 +342,8 @@ fn load_native_settings_catalog(config_path: &Path) -> NativeSettingsCatalog {
     let config_dir = config_path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let unsupported_sources =
-        scan_unsupported_module_sources(&config_dir).unwrap_or_else(|error| {
-            vec![UnsupportedModuleDiagnostic {
-                path: config_dir.clone(),
-                detail: format!("scan failed: {error}"),
-            }]
-        });
     let integration_rows = native_integration_rows(&config_dir);
-    NativeSettingsCatalog {
-        unsupported_sources,
-        integration_rows,
-    }
+    NativeSettingsCatalog { integration_rows }
 }
 
 fn native_integration_rows(config_dir: &Path) -> Vec<ModuleIntegrationsSnapshot> {

@@ -343,6 +343,93 @@ fn mux_session(id: &str, cwd: String, tag: MuxSessionTag, active: bool) -> MuxSe
     }
 }
 
+#[rstest]
+fn moving_a_session_publishes_the_new_order_immediately(directory: assert_fs::TempDir) {
+    let config_path = directory.path().join("config.toml");
+    let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Tmux);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config_path).expect("workspace");
+    let space = &snapshot.spaces()[0];
+    let mut claimed = space.binding().sessions().clone();
+    for (identity, name) in [("first-id", "first"), ("second-id", "second")] {
+        assert!(claimed.claim(claimed_session(identity, name, &cwd)));
+    }
+    repository
+        .commit_binding_state(space.binding().mux_scope(), &claimed)
+        .expect("claim sessions");
+    let sessions = Arc::new(Mutex::new(
+        [("first-id", "first"), ("second-id", "second")]
+            .into_iter()
+            .map(|(identity, name)| {
+                mux_session(
+                    name,
+                    cwd.clone(),
+                    MuxSessionTag {
+                        identity: Some(identity.to_owned()),
+                        space: Some(space.remote_id().to_owned()),
+                    },
+                    name == "first",
+                )
+            })
+            .collect(),
+    ));
+    drop(repository);
+    let backends = registry(
+        [Arc::new(restore_provider(
+            MuxBackendKind::Tmux,
+            sessions,
+            Arc::new(AtomicUsize::new(0)),
+        ))],
+        [MuxBackendKind::Tmux],
+    );
+    let repaints = Arc::new(AtomicUsize::new(0));
+    let repaint = {
+        let repaints = Arc::clone(&repaints);
+        Arc::new(move || {
+            repaints.fetch_add(1, Ordering::Relaxed);
+        })
+    };
+    let mut state = AppState::new(config, backends, repaint, None, None).expect("app state");
+    state.update_frame(frames::idle_frame(Instant::now()));
+    let order = |state: &AppState| {
+        state
+            .mux()
+            .sessions()
+            .iter()
+            .map(|session| session.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&state), ["first", "second"]);
+    let before = repaints.load(Ordering::Relaxed);
+
+    assert!(state.move_session_from_ui("second", -1));
+    state.update_frame(frames::idle_frame(Instant::now()));
+    assert_eq!(order(&state), ["second", "first"]);
+    assert!(repaints.load(Ordering::Relaxed) > before);
+
+    assert!(state.move_session_from_ui("second", 1));
+    state.update_frame(frames::idle_frame(Instant::now()));
+    assert_eq!(order(&state), ["first", "second"]);
+
+    assert!(state.reorder_session_before("second", Some("first")));
+    assert_eq!(order(&state), ["second", "first"]);
+
+    state.activate_session_from_ui("second");
+    for (delta, expected) in [
+        (1, ["first", "second"]),
+        (-1, ["second", "first"]),
+        (1, ["first", "second"]),
+    ] {
+        let outcome = submit_command(
+            &mut state,
+            CommandInvocation::new("move_session", vec![delta.to_string()], Caller::Keybinding),
+            Instant::now(),
+        );
+        assert!(matches!(outcome, CommandOutcome::Success { .. }));
+        assert_eq!(order(&state), expected);
+    }
+}
+
 fn session_with_pane(id: &str) -> MuxSession {
     let pane = MuxPaneAnchor {
         session_id: id.to_owned(),

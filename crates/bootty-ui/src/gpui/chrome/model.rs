@@ -102,6 +102,8 @@ pub struct ChromeLayout {
     pub sidebar_width: f32,
     pub gap: f32,
     pub top_inset: f32,
+    pub notch_span: Option<(f32, f32)>,
+    pub wrap_tabs_at_notch: bool,
     pub titlebar_height: f32,
     pub status_height: f32,
     pub sidebar_visible: bool,

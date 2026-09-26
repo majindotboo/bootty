@@ -12,10 +12,9 @@ use crate::{
         StatusSegmentIntent, StatusSegmentsSnapshot,
     },
     gpui_settings_catalog::{
-        UnsupportedModuleDiagnostic, advanced_configuration_rows,
-        setting_is_visible_in_native_settings, settings_catalog_pages, settings_category_for,
-        settings_page, settings_row_order as catalog_row_order,
-        settings_section as catalog_section, unsupported_module_rows,
+        advanced_configuration_rows, setting_is_visible_in_native_settings, settings_catalog_pages,
+        settings_category_for, settings_page, settings_row_order as catalog_row_order,
+        settings_section as catalog_section,
     },
     settings_session::{
         Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, SettingsSession, StatusSegmentEdit,
@@ -37,28 +36,26 @@ impl GpuiSettings {
     pub(crate) fn for_app(
         state: &AppState,
         font_families: Arc<[String]>,
-        unsupported: &[UnsupportedModuleDiagnostic],
         integrations: &[ModuleIntegrationsSnapshot],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let draft =
             SettingsSession::new(state.accepted_settings(), settings_catalogs(font_families));
-        let content = settings_content(&draft, state, unsupported, integrations);
+        let content = settings_content(&draft, state, integrations);
         Self::new_with_window(content, draft, window, cx)
     }
 
     pub(crate) fn reconcile(
         &mut self,
         state: &AppState,
-        unsupported: &[UnsupportedModuleDiagnostic],
         integrations: &[ModuleIntegrationsSnapshot],
         cx: &mut Context<Self>,
     ) -> bool {
         self.draft.reconcile_accepted(state.accepted_settings());
         self.draft
             .set_catalogs(settings_catalogs(Arc::clone(self.draft.font_families())));
-        let content = settings_content(&self.draft, state, unsupported, integrations);
+        let content = settings_content(&self.draft, state, integrations);
         self.set_content(content, cx)
     }
 
@@ -529,77 +526,78 @@ fn settings_catalogs(font_families: Arc<[String]>) -> Catalogs {
 fn settings_content(
     session: &SettingsSession,
     state: &AppState,
-    unsupported_sources: &[UnsupportedModuleDiagnostic],
     integration_rows: &[ModuleIntegrationsSnapshot],
 ) -> SettingsContent {
     let schema = state.settings_schema();
-    let mut pages: Vec<_> =
-        settings_catalog_pages()
-            .iter()
-            .map(|category| {
-                let mut rows = Vec::new();
-                let mut section = if category.category == SettingsCategory::Advanced {
-                    rows.extend(advanced_configuration_rows(
-                        &state.config().config_path,
-                        session.write_error(),
-                    ));
-                    Some("STATE".to_owned())
-                } else { None };
+    let mut pages: Vec<_> = settings_catalog_pages()
+        .iter()
+        .map(|category| {
+            let mut rows = Vec::new();
+            let mut section = if category.category == SettingsCategory::Advanced {
+                rows.extend(advanced_configuration_rows(
+                    &state.config().config_path,
+                    session.write_error(),
+                ));
+                Some("RELOAD".to_owned())
+            } else {
+                None
+            };
 
-                let mut specs = schema
-                    .specs()
-                    .iter()
-                    .filter(|spec| {
-                        setting_is_visible_in_native_settings(&spec.id())
-                            && settings_category_for(&spec.id(), spec.page.as_ref())
-                                == category.category
-                    })
-                    .collect::<Vec<_>>();
-                specs.sort_by_key(|spec| catalog_row_order(category.category, &spec.id()));
-                for spec in specs {
-                    let spec_rows = match &spec.kind {
-                        SettingKind::FontStyle => font_style_row(spec, state.config(), session).into_iter().collect(),
-                        SettingKind::Custom(editor) => custom_setting_rows(
-                            spec,
-                            *editor,
-                            state.config(),
-                            session,
-                            session.font_families(),
-                        ),
-                        kind => {
-                            let (label, help) = setting_copy(spec);
-                            let value = if spec.id() == "window.fullscreen-enabled" {
-                                Some(SettingValue::Bool(state.config().window.fullscreen_enabled))
-                            } else {
-                                session
-                                    .value(&spec.id())
-                            };
-                            let Some(value) = value else { continue };
-                            vec![SettingsRow::Value {
-                                id: spec.id(),
-                                label,
-                                help,
-                                value,
-                                control: settings_control(kind),
-                                enabled: true,
-                            }]
-                        }
-                    };
-                    if spec_rows.is_empty() {
-                        continue;
+            let mut specs = schema
+                .specs()
+                .iter()
+                .filter(|spec| {
+                    setting_is_visible_in_native_settings(&spec.id())
+                        && settings_category_for(&spec.id(), spec.page.as_ref())
+                            == category.category
+                })
+                .collect::<Vec<_>>();
+            specs.sort_by_key(|spec| catalog_row_order(category.category, &spec.id()));
+            for spec in specs {
+                let spec_rows = match &spec.kind {
+                    SettingKind::FontStyle => font_style_row(spec, state.config(), session)
+                        .into_iter()
+                        .collect(),
+                    SettingKind::Custom(editor) => custom_setting_rows(
+                        spec,
+                        *editor,
+                        state.config(),
+                        session,
+                        session.font_families(),
+                    ),
+                    kind => {
+                        let (label, help) = setting_copy(spec);
+                        let value = if spec.id() == "window.fullscreen-enabled" {
+                            Some(SettingValue::Bool(state.config().window.fullscreen_enabled))
+                        } else {
+                            session.value(&spec.id())
+                        };
+                        let Some(value) = value else { continue };
+                        vec![SettingsRow::Value {
+                            id: spec.id(),
+                            label,
+                            help,
+                            value,
+                            control: settings_control(kind),
+                            enabled: true,
+                        }]
                     }
-                    let display_section =
-                        catalog_section(category.category, &spec.id(), spec.section.as_ref());
-                    if section.as_deref() != Some(display_section) {
-                        section = Some(display_section.to_owned());
-                        rows.push(SettingsRow::Section(display_section.to_owned()));
-                    }
-                    rows.extend(spec_rows);
+                };
+                if spec_rows.is_empty() {
+                    continue;
                 }
+                let display_section =
+                    catalog_section(category.category, &spec.id(), spec.section.as_ref());
+                if section.as_deref() != Some(display_section) {
+                    section = Some(display_section.to_owned());
+                    rows.push(SettingsRow::Section(display_section.to_owned()));
+                }
+                rows.extend(spec_rows);
+            }
 
-                if category.category == SettingsCategory::Keymap {
-                    rows.push(SettingsRow::Section("KEYMAP EDITOR".to_owned()));
-                    rows.push(SettingsRow::Action {
+            if category.category == SettingsCategory::Keymap {
+                rows.push(SettingsRow::Section("KEYMAP EDITOR".to_owned()));
+                rows.push(SettingsRow::Action {
                     id: "keymap:open".to_owned(),
                     label: "Keymap".to_owned(),
                     help:
@@ -608,24 +606,18 @@ fn settings_content(
                     button: "Open Keymap".to_owned(),
                     enabled: true,
                 });
-                } else if category.category == SettingsCategory::Remotes {
-                    rows = remote_settings_rows(session, state);
-                } else if category.category == SettingsCategory::Advanced {
-                    rows.push(SettingsRow::Section("AGENT INTEGRATIONS".to_owned()));
-                    rows.extend(integration_rows.iter().cloned().map(|mut row| {
-                        row.error = session.integration_error(&row.identity).map(str::to_owned);
-                        SettingsRow::ModuleIntegrations(row)
-                    }));
-                    rows.push(SettingsRow::Section("CUSTOM SCRIPTS".to_owned()));
-                    rows.push(SettingsRow::Notice {
-                        text: "Custom Lua and Luau scripts are no longer executed. Existing source files are preserved.".to_owned(),
-                        destructive: false,
-                    });
-                    rows.extend(unsupported_module_rows(unsupported_sources));
-                }
-                settings_page(category, rows)
-            })
-            .collect();
+            } else if category.category == SettingsCategory::Remotes {
+                rows = remote_settings_rows(session, state);
+            } else if category.category == SettingsCategory::Advanced {
+                rows.push(SettingsRow::Section("AGENT INTEGRATIONS".to_owned()));
+                rows.extend(integration_rows.iter().cloned().map(|mut row| {
+                    row.error = session.integration_error(&row.identity).map(str::to_owned);
+                    SettingsRow::ModuleIntegrations(row)
+                }));
+            }
+            settings_page(category, rows)
+        })
+        .collect();
     crate::i18n::localize_settings(&mut pages, &state.localizer);
     SettingsContent {
         pages,
@@ -894,10 +886,6 @@ fn custom_setting_rows(
             spec,
             config.font.cell_height,
             1.0..=128.0,
-        )],
-        (_, "extensions.*") => vec![read_only_setting(
-            spec,
-            format!("{} configured module(s)", config.extensions.len()),
         )],
         _ => Vec::new(),
     }
@@ -1480,22 +1468,6 @@ fn ansi_palette_rows(
             enabled: true,
         },
     ]
-}
-
-fn read_only_setting(spec: &SettingSpec, value: String) -> SettingsRow {
-    let (label, help) = setting_copy(spec);
-    SettingsRow::Value {
-        id: spec.id(),
-        label,
-        help,
-        value: ScalarValue::Text(if value.is_empty() {
-            "None".to_owned()
-        } else {
-            value
-        }),
-        control: SettingsControl::ReadOnly,
-        enabled: true,
-    }
 }
 
 fn color_hex(color: Color) -> String {

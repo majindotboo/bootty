@@ -434,7 +434,6 @@ const fn ghostty_common_keybinds() -> &'static [&'static str] {
 
 pub(super) const fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
     &[
-        "cmd+shift+,=reload_config",
         "cmd+,=open_settings",
         "cmd+f=start_search",
         "performable:cmd+c=copy_to_clipboard",
@@ -534,6 +533,8 @@ pub(super) const fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
         "cmd+9=select_session:9",
         "ctrl+cmd+]=next_session",
         "ctrl+cmd+[=previous_session",
+        "cmd+shift+,=move_session:-1",
+        "cmd+shift+.=move_session:1",
         "cmd+r=rename_tab",
         "cmd+shift+r=rename_session",
     ]

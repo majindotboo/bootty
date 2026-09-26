@@ -16,9 +16,9 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    App, Bounds, Context, Div, Empty, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window, canvas, div,
-    prelude::*, px, relative,
+    App, Bounds, Context, Div, Empty, IntoElement, MouseButton, MouseUpEvent, ParentElement,
+    Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window, canvas, div, prelude::*,
+    px, relative,
 };
 
 use super::{
@@ -269,15 +269,74 @@ impl SidebarRows {
                         .child("no sessions"),
                 )
             })
-            .children(
-                self.snapshot
-                    .rows
-                    .iter()
-                    .map(|row| self.render_row(row, current_rail_color)),
-            )
+            .children(self.render_session_blocks(current_rail_color))
             .child(self.reorder_end())
             .child(self.hover_reconciliation())
             .into_any_element()
+    }
+
+    fn render_session_blocks(&self, current_rail_color: Option<Rgba>) -> Vec<gpui_kit::AnyElement> {
+        let mut blocks = Vec::new();
+        let mut rows = self.snapshot.rows.iter().peekable();
+        while let Some(row) = rows.next() {
+            if !matches!(row.kind, SidebarRowKind::Session) {
+                blocks.push(self.render_row(row, current_rail_color, false));
+                continue;
+            }
+            let mut session_rows = vec![self.render_row(row, current_rail_color, true)];
+            while rows.peek().is_some_and(|next| {
+                !matches!(next.kind, SidebarRowKind::Group | SidebarRowKind::Session)
+                    && next.target == row.target
+            }) {
+                if let Some(detail) = rows.next() {
+                    session_rows.push(self.render_row(detail, current_rail_color, true));
+                }
+            }
+            let hovered = row
+                .target
+                .as_ref()
+                .is_some_and(|target| self.pointer_hovered_session.as_ref() == Some(target));
+            let selected = row.current || row.active;
+            let block = div()
+                .id(SharedString::from(format!("sidebar-session-{}", row.key)))
+                .debug_selector({
+                    let key = row.key.clone();
+                    move || format!("sidebar-session-{key}")
+                })
+                .relative()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(color(if hovered {
+                    self.snapshot.hover
+                } else if selected {
+                    self.snapshot.current
+                } else {
+                    self.snapshot.tint
+                }))
+                .when(row.current, |block| {
+                    block.child(Self::current_rail(row, current_rail_color))
+                })
+                .children(session_rows)
+                .when_some(row.target.clone(), |block, target| {
+                    let owner = self.owner.clone();
+                    block.on_hover(move |hovered: &bool, _, cx| {
+                        _ = owner.update(cx, |this, cx| {
+                            if *hovered && this.pointer_hovered_session.as_ref() != Some(&target) {
+                                this.pointer_hovered_session = Some(target.clone());
+                                cx.notify();
+                            } else if !*hovered
+                                && this.pointer_hovered_session.as_ref() == Some(&target)
+                            {
+                                this.pointer_hovered_session = None;
+                                cx.notify();
+                            }
+                        });
+                    })
+                });
+            blocks.push(self.drop_target(block, row).into_any_element());
+        }
+        blocks
     }
 
     fn hover_reconciliation(&self) -> gpui_kit::AnyElement {
@@ -690,23 +749,31 @@ impl SidebarRows {
             background: snapshot.current,
             border: colors.border_variant,
         };
-        let drop_target = source.clone();
         let drag_owner = self.owner.clone();
+        element.cursor_move().on_drag(drag, move |_, _, _, cx| {
+            _ = drag_owner.update(cx, |this, cx| {
+                this.sidebar_dragging = true;
+                cx.notify();
+            });
+            cx.new(|_| preview.clone())
+        })
+    }
+
+    fn drop_target(&self, element: Stateful<Div>, row: &SidebarRow) -> Stateful<Div> {
+        let Some(source) = row.reorder_anchor.clone() else {
+            return element;
+        };
+        let colors = self.colors;
         element
-            .cursor_move()
-            .drag_over::<DraggedSidebarRow>(move |element, dragged, _, _| {
-                if dragged.source == drop_target {
-                    element
-                } else {
-                    element.border_t_2().border_color(color(colors.accent))
+            .drag_over::<DraggedSidebarRow>({
+                let source = source.clone();
+                move |element, dragged, _, _| {
+                    if dragged.source == source {
+                        element
+                    } else {
+                        element.border_1().border_color(color(colors.accent))
+                    }
                 }
-            })
-            .on_drag(drag, move |_, _, _, cx| {
-                _ = drag_owner.update(cx, |this, cx| {
-                    this.sidebar_dragging = true;
-                    cx.notify();
-                });
-                cx.new(|_| preview.clone())
             })
             .on_drop({
                 let owner = self.owner.clone();
@@ -771,7 +838,7 @@ impl SidebarRows {
                 "sidebar-row-button-{}",
                 row.key
             )))
-            .ghost()
+            .text()
             .p_0()
             .w_full()
             .h(px(row_height))
@@ -812,6 +879,7 @@ impl SidebarRows {
         &self,
         row: &SidebarRow,
         current_rail_color: Option<Rgba>,
+        in_session_block: bool,
     ) -> gpui_kit::AnyElement {
         let snapshot = &self.snapshot;
         let current = row.current;
@@ -845,7 +913,7 @@ impl SidebarRows {
             .text_sm()
             .text_left()
             .overflow_hidden()
-            .when(current, |element| {
+            .when(current && !in_session_block, |element| {
                 element.child(Self::current_rail(row, current_rail_color))
             })
             .when(keyboard_focused, |element| {
@@ -854,7 +922,9 @@ impl SidebarRows {
             .when(!snapshot.focused, |row| {
                 row.opacity(1.0 - snapshot.dim_when_unfocused.clamp(0.0, 1.0))
             })
-            .bg(if pointer_hovered {
+            .bg(if in_session_block {
+                gpui_kit::Hsla::transparent_black()
+            } else if pointer_hovered {
                 color(snapshot.hover)
             } else if selected {
                 color(snapshot.current)
@@ -868,19 +938,13 @@ impl SidebarRows {
             .child(self.label(row))
             .children(self.bounds_probe(row))
             .children(self.diff_button(row))
-            .when_some(progress(&row.kind, row), ParentElement::child)
-            .when_some(row.target.clone(), |element, target| {
-                let owner = self.owner.clone();
-                element.on_mouse_move(move |_: &MouseMoveEvent, _, cx| {
-                    _ = owner.update(cx, |this, cx| {
-                        if this.pointer_hovered_session.as_ref() != Some(&target) {
-                            this.pointer_hovered_session = Some(target.clone());
-                            cx.notify();
-                        }
-                    });
-                })
-            });
+            .when_some(progress(&row.kind, row), ParentElement::child);
         let element = self.drag_row(element, row);
+        let element = if !in_session_block && matches!(row.kind, SidebarRowKind::Group) {
+            self.drop_target(element, row)
+        } else {
+            element
+        };
         self.row_control(element, row, row_height)
     }
 }

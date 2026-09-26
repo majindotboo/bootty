@@ -90,13 +90,13 @@ unfocused-terminal-dim = 0.0
 
 [chrome.dock-tabs]
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "right" # left, right
+close-position = "left" # macOS default; right elsewhere
 close-button = "hover" # always, hover, hidden
 
 [chrome.terminal-tabs]
-appearance = "classic"
-close-position = "right"
-close-button = "always"
+appearance = "pill"
+close-position = "left" # macOS default; right elsewhere
+close-button = "hover"
 
 [multiplexer]
 backend = "rmux"
@@ -136,7 +136,7 @@ host = "devbox" # ~/.ssh/config alias, hostname, or address
 [input]
 preset = "ghostty" # ghostty (default), bootty, or tmux — which built-in default keybind set to use
 prefix = "ctrl+space" # leader for prefixed chords (bootty/tmux presets); defaults to ctrl+space / ctrl+b
-keybind = ["cmd+shift+,=reload_config"]
+keybind = ["cmd+alt+shift+r=reload_config"]
 sidebar-keybind = ["Enter=activate_session", "j=next_session", "k=previous_session"]
 hide-mouse-pointer-while-typing = true
 macos-option-as-alt = "both" # none, left, right, or both
@@ -418,7 +418,7 @@ retry or edge cases:
 
 ```toml
 [input]
-keybind = ["cmd+shift+,=reload_config"]
+keybind = ["cmd+alt+shift+r=reload_config"]
 ```
 
 Bootty parses compatibility TOML keybind strings with the shared Ghostty-style
@@ -489,9 +489,24 @@ either setting. Configurations without `fullscreen-enabled` retain the legacy
 behavior: any non-disabled `fullscreen` value starts active.
 Native fullscreen uses the platform fullscreen path. Non-native modes create a
 borderless fullscreen-style window.
-On macOS, `"non-native"` and `"non-native-padded-notch"` auto-hide the menu bar
-and Dock so they reappear when the pointer reaches the screen edge;
-`"non-native-visible-menu"` intentionally leaves the menu bar visible.
+On macOS, `"non-native"` and `"non-native-padded-notch"` keep the menu bar and
+Dock hidden while the borderless window is focused, so they cannot take clicks
+from the top bar. `"non-native-visible-menu"` leaves the menu bar visible.
+
+Fullscreen tabs start to the left of the camera. By default,
+`[window].fullscreen-tabs-wrap-at-notch = true` continues them on a second row
+below the camera when needed. The last tab on the first row may extend up to
+halfway behind the camera; later tabs go below it. Set the option to `false` for
+one scrollable strip confined to the left of the camera. Set
+`[window].fullscreen-tabs-in-notch = false` to place the entire strip below it.
+An explicit `[window].fullscreen-top-offset` overrides the reserved height.
+
+Tab strips reveal a newly selected or keyboard-focused tab and show scroll
+buttons only in directions with more tabs. Terminal tab widths grow as needed,
+then wait for the title to remain unchanged for one second before shrinking.
+Close buttons default to the left on macOS and the right elsewhere. Override
+`close-position = "left"` or `"right"` under `[chrome.terminal-tabs]` or
+`[chrome.dock-tabs]` independently.
 
 ## Preference writeback
 
@@ -541,9 +556,8 @@ Connection tests report results for both saved profiles and unsaved drafts.
 - Status and sidebar modules are native implementations. Status segments support
   `session`, `windows`, `clock`, and `sysinfo`; the sidebar includes native session
   facts and agent integrations. Existing Lua/Luau files under the config tree
-  and raw `[extensions]` values are preserved, but are not executed. Settings
-  reports unsupported custom sources and module IDs. Native Pi, Codex, and Claude
-  integration setup remains available; see [agent integrations](agent-integrations.md).
+  and raw `[extensions]` values are preserved, but are not executed. Native Pi,
+  Codex, and Claude integration setup is documented in [agent integrations](agent-integrations.md).
 
 - `BOOTTY_SHELL` remains a compatibility override in the session launcher.
   Configured `[session].shell` is passed as the explicit shell setting, then the

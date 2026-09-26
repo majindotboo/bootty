@@ -18,7 +18,7 @@ use gpui_kit::component::{
     ActiveTheme as _, ElementExt as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     menu::ContextMenuExt,
-    tab::{Tab, TabBar},
+    tab::Tab,
 };
 
 #[derive(Clone)]
@@ -29,8 +29,6 @@ struct DraggedStatusItem {
     colors: ChromePalette,
     width: f32,
 }
-
-const TAB_MAX_WIDTH: f32 = 240.0;
 
 impl Render for DraggedStatusItem {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -75,6 +73,7 @@ pub(super) struct RenderParams<'a> {
     pub(super) snapshot: &'a StatusBarSnapshot,
     pub(super) row_height: f32,
     pub(super) top_padding: f32,
+    pub(super) notch_span: Option<(f32, f32)>,
     pub(super) compact: bool,
     pub(super) partition: Option<(f32, bool)>,
     pub(super) colors: ChromePalette,
@@ -90,6 +89,7 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
         snapshot,
         row_height,
         top_padding,
+        notch_span,
         compact,
         partition,
         colors,
@@ -160,7 +160,7 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
         }
         .into_any_element();
     }
-    let status_row = aligned_status_row(left, center, right, row_height, snapshot, cx);
+    let status_row = aligned_status_row(left, center, right, row_height, notch_span, snapshot, cx);
     status_frame(snapshot, row_height, top_padding, has_tabs, status_row, cx)
 }
 
@@ -169,9 +169,55 @@ fn aligned_status_row(
     center: Vec<gpui_kit::AnyElement>,
     right: Vec<gpui_kit::AnyElement>,
     row_height: f32,
+    notch_span: Option<(f32, f32)>,
     snapshot: &StatusBarSnapshot,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::Div {
+    let left = div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .overflow_hidden()
+        .gap_1()
+        .items_center()
+        .children(left);
+    let center = div()
+        .flex_initial()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .overflow_hidden()
+        .gap_1()
+        .items_center()
+        .justify_center()
+        .children(center);
+    let right = div()
+        .flex_initial()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .overflow_hidden()
+        .gap_1()
+        .items_center()
+        .justify_end()
+        .children(right)
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "status-reorder-end-{}",
+                    snapshot.key
+                )))
+                .h_full()
+                .w(px(8.0))
+                .flex_none()
+                .on_drop(cx.listener(|_, dragged: &DraggedStatusItem, _, cx| {
+                    cx.emit(ChromeIntent::Status(StatusIntent::Reorder {
+                        source: dragged.source.clone(),
+                        before: None,
+                    }));
+                })),
+        );
     div()
         .relative()
         .h(px(row_height))
@@ -181,57 +227,12 @@ fn aligned_status_row(
         .items_center()
         .overflow_hidden()
         .bg(color(snapshot.background))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .overflow_hidden()
-                .gap_1()
-                .items_center()
-                .children(left),
-        )
-        .child(
-            div()
-                .flex_initial()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .overflow_hidden()
-                .gap_1()
-                .items_center()
-                .justify_center()
-                .children(center),
-        )
-        .child(
-            div()
-                .flex_initial()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .overflow_hidden()
-                .gap_1()
-                .items_center()
-                .justify_end()
-                .children(right)
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "status-reorder-end-{}",
-                            snapshot.key
-                        )))
-                        .h_full()
-                        .w(px(8.0))
-                        .flex_none()
-                        .on_drop(cx.listener(|_, dragged: &DraggedStatusItem, _, cx| {
-                            cx.emit(ChromeIntent::Status(StatusIntent::Reorder {
-                                source: dragged.source.clone(),
-                                before: None,
-                            }));
-                        })),
-                ),
-        )
+        .child(left.when_some(notch_span, |left, (start, _)| left.w(px(start)).flex_none()))
+        .when_some(notch_span, |row, (start, end)| {
+            row.child(div().h_full().w(px((end - start).max(0.0))).flex_none())
+        })
+        .child(center.when_some(notch_span, |center, _| center.flex_1()))
+        .child(right)
 }
 
 fn status_frame(
@@ -249,7 +250,9 @@ fn status_frame(
             move || format!("status-{key}")
         })
         .relative()
-        .h(px(row_height + top_padding))
+        .when(row_height > 0.0, |frame| {
+            frame.h(px(row_height + top_padding))
+        })
         .w_full()
         .flex_col()
         .overflow_hidden()
@@ -305,9 +308,15 @@ fn update_tab_drag(this: &mut GpuiChrome, event: &MouseMoveEvent, has_tabs: bool
             let mut ordered = bounds.iter().collect::<Vec<_>>();
             ordered.sort_by(|(_, left), (_, right)| {
                 left.origin
-                    .x
-                    .partial_cmp(&right.origin.x)
+                    .y
+                    .partial_cmp(&right.origin.y)
                     .unwrap_or(Ordering::Equal)
+                    .then_with(|| {
+                        left.origin
+                            .x
+                            .partial_cmp(&right.origin.x)
+                            .unwrap_or(Ordering::Equal)
+                    })
             });
             let before = ordered
                 .iter()
@@ -350,6 +359,15 @@ pub(super) fn tab_ids(snapshot: &StatusBarSnapshot) -> Vec<String> {
         .collect()
 }
 
+fn tab_label(items: &[StatusItemSnapshot]) -> String {
+    items
+        .iter()
+        .map(|item| item.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn tab_id(bar_key: &str, source_slot: usize, key: &str) -> String {
     format!("status-tab-{bar_key}-{source_slot}-{key}")
 }
@@ -365,6 +383,48 @@ fn tab_ids_for_segment(bar_key: &str, segment: &StatusSegmentSnapshot) -> Vec<St
         .filter_map(|items| items.first())
         .map(|item| tab_id(bar_key, segment.source_slot, &item.key))
         .collect()
+}
+
+pub(super) fn dock_tabs(
+    chrome: &GpuiChrome,
+    notch: Option<crate::gpui::tabs::NotchTabLayout>,
+    cx: &Context<GpuiChrome>,
+) -> Option<gpui_kit::AnyElement> {
+    let snapshot = chrome.snapshot.top_status.as_ref()?;
+    let segment = snapshot
+        .segments
+        .iter()
+        .find(|segment| segment.surface == "windows")?;
+    let strip = tab_strip(
+        segment,
+        chrome.snapshot.palette,
+        StatusBarStyle {
+            tab_config: chrome.snapshot.layout.terminal_tabs,
+            keymap_context: chrome.keymap_context(),
+            key: &snapshot.key,
+            background: snapshot.background,
+            segmented: false,
+        },
+        &chrome.tab_bounds,
+        chrome.tab_drag.insertion_target(),
+        &chrome.status_tab_focus_handles,
+        notch,
+        cx,
+    );
+    Some(status_frame(
+        snapshot,
+        if notch.is_some() {
+            0.0
+        } else {
+            crate::gpui::UI_TAB_BAR_HEIGHT
+        },
+        0.0,
+        true,
+        div()
+            .when(notch.is_none(), gpui_kit::Styled::h_full)
+            .child(strip),
+        cx,
+    ))
 }
 
 fn render_segment_items(
@@ -393,6 +453,46 @@ fn render_segment_items(
             })
             .collect();
     }
+    vec![
+        div()
+            .id(SharedString::from(format!(
+                "status-tabs-{}-{}",
+                bar.key, segment.source_slot
+            )))
+            .debug_selector({
+                let key = bar.key.to_owned();
+                let slot = segment.source_slot;
+                move || format!("status-tabs-{key}-{slot}")
+            })
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
+            .child(tab_strip(
+                segment,
+                colors,
+                bar,
+                tab_bounds,
+                insertion_target,
+                tab_focus_handles,
+                None,
+                cx,
+            ))
+            .into_any_element(),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tab_strip(
+    segment: &StatusSegmentSnapshot,
+    colors: ChromePalette,
+    bar: StatusBarStyle<'_>,
+    tab_bounds: &TabBounds,
+    insertion_target: Option<&TabInsertionTarget>,
+    tab_focus_handles: &std::collections::HashMap<String, FocusHandle>,
+    notch: Option<crate::gpui::tabs::NotchTabLayout>,
+    cx: &Context<GpuiChrome>,
+) -> crate::gpui::tabs::ScrollableTabBar {
     let groups = tab_groups(segment).collect::<Vec<_>>();
     let active_index = groups
         .iter()
@@ -401,61 +501,40 @@ fn render_segment_items(
     let tabs = groups
         .into_iter()
         .map(|items| {
-            render_tab(
-                segment,
-                items,
-                bar,
-                colors,
-                tab_bounds.clone(),
-                insertion_target,
-                tab_focus_handles,
-                &tab_ids,
-                cx,
-            )
+            let id = tab_id(
+                bar.key,
+                segment.source_slot,
+                items.first().map_or("empty", |item| item.key.as_str()),
+            );
+            let title = tab_label(items);
+            crate::gpui::tabs::ScrollableTab {
+                focus: tab_focus_handles.get(&id).cloned(),
+                id,
+                title: Some(title.into()),
+                tab: render_tab(
+                    segment,
+                    items,
+                    bar,
+                    colors,
+                    tab_bounds.clone(),
+                    insertion_target,
+                    tab_focus_handles,
+                    &tab_ids,
+                    cx,
+                ),
+            }
         })
-        .collect::<Vec<_>>();
-    let end_target = tab_end_target(bar, segment.source_slot, insertion_target, colors, cx);
-    vec![
-        div()
-            .relative()
-            .min_w_0()
-            .h_full()
-            .flex_1()
-            .overflow_hidden()
-            .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "status-tabs-{}-{}",
-                        bar.key, segment.source_slot
-                    )))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    // Preserve the custom mux drag gesture and horizontal scrolling.
-                    .overflow_x_scroll()
-                    .child(crate::gpui::tabs::blend_bar(
-                        TabBar::new(SharedString::from(format!(
-                            "mux-tabs-{}-{}",
-                            bar.key, segment.source_slot
-                        )))
-                        .with_variant(crate::gpui::tabs::variant(bar.tab_config.appearance))
-                        .with_size(crate::gpui::tabs::size(bar.tab_config.appearance))
-                        .max_width(px(TAB_MAX_WIDTH))
-                        .min_w_full()
-                        .flex_shrink_0()
-                        .when_some(
-                            active_index,
-                            gpui_kit::component::tab::TabBar::selected_index,
-                        )
-                        .children(tabs)
-                        .suffix(gpui_kit::Empty)
-                        .last_empty_space(end_target),
-                        bar.tab_config.appearance,
-                        color(bar.background),
-                    )),
-            )
+        .collect();
+    crate::gpui::tabs::ScrollableTabBar {
+        id: format!("mux-tabs-{}-{}", bar.key, segment.source_slot).into(),
+        config: bar.tab_config,
+        background: color(bar.background),
+        tabs,
+        selected: active_index,
+        notch,
+        end: tab_end_target(bar, segment.source_slot, insertion_target, colors, cx)
             .into_any_element(),
-    ]
+    }
 }
 
 fn tab_end_target(
@@ -509,12 +588,7 @@ fn render_tab(
 ) -> Tab {
     let active = items.iter().any(tab_is_active);
     let key = items.first().map_or("empty", |item| item.key.as_str());
-    let label = items
-        .iter()
-        .map(|item| item.text.trim())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let label = tab_label(items);
     let tab_context = items.iter().find_map(|item| item.tab_context.clone());
     let activation = tab_activation(items, tab_context.as_ref());
     let source = items.first().and_then(|item| item.reorder_anchor.clone());
@@ -584,7 +658,7 @@ fn render_tab(
         .when(insertion_here, |element| {
             element.border_l_2().border_color(color(colors.accent))
         })
-        .when_some(tab_focus, |element, focus| {
+        .when_some(tab_focus.clone(), |element, focus| {
             element.track_focus(&focus).focusable().tab_index(0_isize)
         })
         .cursor_pointer()
@@ -600,7 +674,10 @@ fn render_tab(
             );
         }))
         .when_some(activation, |element, intent| {
-            element.on_click(cx.listener(move |_, _, _, cx| {
+            element.on_click(cx.listener(move |_, _, window, cx| {
+                if let Some(focus) = &tab_focus {
+                    focus.focus(window, cx);
+                }
                 cx.emit(ChromeIntent::Status(intent.clone()));
             }))
         })

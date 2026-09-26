@@ -499,6 +499,8 @@ pub fn snapshot(
                 top_status.as_ref().map_or(0.0, |_| status_height),
                 config.window.fullscreen_top_offset,
             ),
+            notch_span: facts.notch_span,
+            wrap_tabs_at_notch: config.window.fullscreen_tabs_wrap_at_notch,
             titlebar_height: 0.0,
             status_height,
             sidebar_visible: chrome.sidebar,

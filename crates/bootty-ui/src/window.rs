@@ -109,10 +109,9 @@ fn platform_screen_facts(display_id: Option<u32>) -> MacosScreenFacts {
         return MacosScreenFacts::default();
     };
     let app = NSApplication::sharedApplication(mtm);
-    let screen = display_id.map_or_else(
-        || active_window(&app).and_then(|window| window.screen()),
-        |id| screen_for_display_id(mtm, id),
-    );
+    let screen = display_id
+        .and_then(|id| screen_for_display_id(mtm, id))
+        .or_else(|| active_window(&app).and_then(|window| window.screen()));
     screen
         .as_deref()
         .map_or_else(MacosScreenFacts::default, |screen| {
@@ -232,7 +231,7 @@ fn screen_facts(screen: &NSScreen, display_id: Option<u32>) -> MacosScreenFacts 
     }
 
     MacosScreenFacts {
-        notched: named_as_notched || measured_height > 0.0,
+        notched: named_as_notched || measured_height > 0.0 || notch_span.is_some(),
         notch_height,
         notch_span,
     }
@@ -313,3 +312,29 @@ pub const fn disable_automatic_window_tabbing() {}
 pub const fn handles_macos_non_native_fullscreen_frame() -> bool {
     cfg!(target_os = "macos")
 }
+
+/// GPUI simple fullscreen auto-hides system chrome; Bootty's top row occupies its reveal band.
+/// Keep that chrome hidden while this borderless window is focused, without disabling app switching.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_sync_fullscreen_presentation(borderless: Option<bool>) {
+    use objc2_app_kit::NSApplicationPresentationOptions as Options;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let current = app.presentationOptions();
+    let hidden = Options::HideDock | Options::HideMenuBar;
+    let desired = borderless.map_or_else(
+        || current & !hidden,
+        |hide| {
+            let options = current & !(hidden | Options::AutoHideDock | Options::AutoHideMenuBar);
+            if hide { options | hidden } else { options }
+        },
+    );
+    if desired != current {
+        app.setPresentationOptions(desired);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) const fn macos_sync_fullscreen_presentation(_borderless: Option<bool>) {}

@@ -47,9 +47,9 @@ use crate::gpui::{
 };
 use crate::{
     chrome_frame,
+    error_catalog::ErrorNotice,
     frame_facts::RendererMetrics,
     gpui_input::GpuiFrameFacts,
-    gpui_settings_catalog::UnsupportedModuleDiagnostic,
     gpui_terminal_view::{
         CachedTerminalView, GpuiTerminalView, TerminalPresentation, TerminalScrollbarInput,
         TerminalViewInput,
@@ -209,7 +209,6 @@ pub struct GpuiWorkspace {
     tools: Option<Entity<crate::gpui_dock::WorkspaceDock>>,
     document_close_prompt: bool,
     tools_focus_subscription: Option<Subscription>,
-    unsupported_sources: Vec<UnsupportedModuleDiagnostic>,
     integration_rows: Vec<ModuleIntegrationsSnapshot>,
     launch: WorkspaceLaunch,
     terminal: TerminalPaneView,
@@ -256,7 +255,6 @@ pub struct GpuiWorkspace {
     scheduled_repaint: Option<Instant>,
     scheduled_maintenance: Option<Instant>,
     frame_update_pending: bool,
-    work_repaint_pending: bool,
     last_maintenance_chrome: Option<ChromeSnapshot>,
     last_pane_layouts: Vec<bootty_mux::pane_layout::PaneLayout>,
     repaint: bootty_mux::RepaintHandle,
@@ -316,10 +314,6 @@ impl GpuiWorkspace {
     }
 
     // Keep construction together until another child lifetime can move behind one owner.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One initializer avoids a duplicate staging struct"
-    )]
     fn new(
         mut state: AppState,
         window_state_key: &str,
@@ -352,17 +346,10 @@ impl GpuiWorkspace {
         let settings_runtime = SettingsRuntime::default();
         settings_runtime.request_catalog(&state.config().config_path, &repaint);
         let native_settings = settings_runtime.current_catalog();
-        let unsupported_sources = native_settings.unsupported_sources;
         let integration_rows = native_settings.integration_rows;
 
-        let (settings_view, settings_subscription) = Self::create_settings_view(
-            &state,
-            &font_families,
-            &unsupported_sources,
-            &integration_rows,
-            window,
-            cx,
-        );
+        let (settings_view, settings_subscription) =
+            Self::create_settings_view(&state, &font_families, &integration_rows, window, cx);
         let (keymap_editor, keymap_editor_subscription) =
             Self::create_keymap_editor(&state, window, cx);
         let dialogs = WorkspaceDialogs::new(window, cx);
@@ -384,7 +371,6 @@ impl GpuiWorkspace {
             document_close_prompt: false,
             tools_focus_subscription: None,
             state,
-            unsupported_sources,
             integration_rows,
             launch,
             terminal,
@@ -430,7 +416,6 @@ impl GpuiWorkspace {
             scheduled_repaint: None,
             scheduled_maintenance: None,
             frame_update_pending: true,
-            work_repaint_pending: false,
             last_maintenance_chrome: None,
             last_pane_layouts: Vec::new(),
             repaint,
@@ -498,20 +483,8 @@ impl GpuiWorkspace {
             .detach();
         cx.spawn_in(window, async move |weak, cx| {
             while repaint_rx.recv().await.is_ok() {
-                let (frame_tx, frame_rx) = async_channel::bounded(1);
-                let repaint = weak.update_in(cx, |this, window, cx| {
-                    let repaint = this.process_work(window, cx);
-                    if repaint {
-                        window.on_next_frame(move |_, _| {
-                            let _ = frame_tx.try_send(());
-                        });
-                    }
-                    repaint
-                });
-                match repaint {
-                    Err(_) => break,
-                    Ok(true) if frame_rx.recv().await.is_err() => break,
-                    _ => {}
+                if weak.update_in(cx, Self::process_work).is_err() {
+                    break;
                 }
             }
         })
@@ -521,7 +494,6 @@ impl GpuiWorkspace {
     fn create_settings_view(
         state: &AppState,
         font_families: &Arc<[String]>,
-        unsupported_sources: &[UnsupportedModuleDiagnostic],
         integration_rows: &[ModuleIntegrationsSnapshot],
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -530,7 +502,6 @@ impl GpuiWorkspace {
             GpuiSettings::for_app(
                 state,
                 Arc::clone(font_families),
-                unsupported_sources,
                 integration_rows,
                 window,
                 cx,
@@ -1207,12 +1178,7 @@ impl GpuiWorkspace {
     fn refresh_settings(&mut self, cx: &mut Context<Self>) {
         self.last_settings_revision = Some(self.state.config_revision());
         let changed = self.settings_view.update(cx, |view, cx| {
-            view.reconcile(
-                &self.state,
-                &self.unsupported_sources,
-                &self.integration_rows,
-                cx,
-            )
+            view.reconcile(&self.state, &self.integration_rows, cx)
         });
         if changed && let Some(window) = self.settings_window.clone() {
             cx.defer(move |cx| {
@@ -1658,7 +1624,6 @@ impl GpuiWorkspace {
         let mut settings_changed = false;
         if let Some(catalog) = self.settings_runtime.drain_catalog() {
             settings_changed = true;
-            self.unsupported_sources = catalog.unsupported_sources;
             self.integration_rows = catalog.integration_rows;
         }
         for outcome in self.settings_runtime.drain_outcomes() {
@@ -1717,11 +1682,11 @@ impl GpuiWorkspace {
             || chrome_changed
             || revision != self.state.config_revision()
             || error != self.state.last_error();
-        // Read-only control requests and unchanged backend results still complete while a
-        // window is occluded. Only changed presentation needs a frame, coalesced until paint.
-        if changed && !self.work_repaint_pending {
-            self.work_repaint_pending = true;
+        // The one-slot wake channel coalesces work. A frame callback can be missed after a
+        // child-only chrome paint, so do not gate the next wake on a later root frame.
+        if changed {
             cx.notify();
+            window.refresh();
             true
         } else {
             false
@@ -1815,10 +1780,15 @@ impl GpuiWorkspace {
         match error {
             Some(error) => {
                 let workspace = cx.weak_entity();
+                let title = if error.contains("rmux") {
+                    "Terminal unavailable"
+                } else {
+                    "Something went wrong"
+                };
                 window.push_notification(
-                    Notification::error(error)
+                    Notification::error(ErrorNotice::from_text(error).to_string())
                         .id::<BoottyErrorNotification>()
-                        .title("Something went wrong")
+                        .title(title)
                         .autohide(false)
                         .on_close(move |_, cx| {
                             let _ = workspace.update(cx, |workspace, cx| {
@@ -2969,7 +2939,16 @@ fn expanded_divider_hit_rect(rect: SurfaceRect, direction: SplitDirection) -> Su
 
 impl GpuiWorkspace {
     fn prepare_frame_metrics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.work_repaint_pending = false;
+        if window.is_window_active() {
+            crate::window::macos_sync_fullscreen_presentation(window.is_simple_fullscreen().then(
+                || {
+                    self.state
+                        .config()
+                        .window
+                        .hides_macos_menu_bar_in_non_native_fullscreen()
+                },
+            ));
+        }
         #[expect(
             clippy::float_cmp,
             reason = "An exact platform display-scale change invalidates cached cell metrics"

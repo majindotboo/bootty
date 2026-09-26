@@ -1132,11 +1132,19 @@ impl AppState {
     }
     pub fn move_session_from_ui(&mut self, session_id: &str, delta: i32) -> bool {
         let result = self.workspace.move_active_session(session_id, delta);
-        self.apply_workspace_change(result)
+        let changed = self.apply_workspace_change(result);
+        if changed {
+            (self.repaint)();
+        }
+        changed
     }
     pub fn reorder_session_before(&mut self, source: &str, target: Option<&str>) -> bool {
         let result = self.workspace.reorder_active_session_before(source, target);
-        self.apply_workspace_change(result)
+        let changed = self.apply_workspace_change(result);
+        if changed {
+            (self.repaint)();
+        }
+        changed
     }
     fn apply_workspace_change(&mut self, result: Result<bool, WorkspacePersistenceError>) -> bool {
         match result {

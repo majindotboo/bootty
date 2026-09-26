@@ -64,10 +64,9 @@ pub mod workspace_composition;
 
 pub use gpui_keymap_editor::{load_keymap_text_file, reload_saved_keymap_text};
 pub use gpui_settings_catalog::{
-    SettingsCatalogPage, SettingsDependency, UnsupportedModuleDiagnostic,
-    advanced_configuration_rows, scan_unsupported_module_sources,
+    SettingsCatalogPage, SettingsDependency, advanced_configuration_rows,
     setting_is_visible_in_native_settings, settings_catalog_pages, settings_category_for,
-    settings_dependency_for, unsupported_module_rows,
+    settings_dependency_for,
 };
 pub use state::{
     AppEffect, AppState, CursorIcon, FrameInputs, ModalDialog, OpenFilesRequest, ViewportSnapshot,

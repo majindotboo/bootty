@@ -130,8 +130,7 @@ impl FilesPanel {
         ) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.errors
-                    .insert(path, format!("File command unavailable: {error:?}"));
+                self.record_error(path, format!("File command unavailable: {error:?}"));
                 self.sync_tree(cx);
                 return;
             }
@@ -163,23 +162,22 @@ impl FilesPanel {
                                 this.pages.insert(path.clone(), page);
                             }
                             Ok(_) => {
-                                this.errors
-                                    .insert(path.clone(), "Unexpected file response".to_owned());
+                                this.record_error(path.clone(), "Unexpected file response");
                             }
                             Err(error) => {
-                                this.errors.insert(path.clone(), error.to_string());
+                                this.record_error(path.clone(), error);
                             }
                         }
                     }
                     Ok(outcome) => {
-                        this.errors.insert(
+                        this.record_error(
                             path.clone(),
                             crate::commands::command_outcome_message(&outcome)
                                 .unwrap_or_else(|| "Directory listing failed".to_owned()),
                         );
                     }
                     Err(error) => {
-                        this.errors.insert(path.clone(), error.to_string());
+                        this.record_error(path.clone(), error);
                     }
                 }
                 this.sync_tree(cx);
@@ -188,6 +186,12 @@ impl FilesPanel {
         .detach();
         self.sync_tree(cx);
     }
+    fn record_error(&mut self, path: String, details: impl std::fmt::Display) {
+        eprintln!("Directory listing failed for {path}: {details}");
+        self.errors
+            .insert(path, "Could not read this folder.".to_owned());
+    }
+
     fn sync_tree(&mut self, cx: &mut Context<Self>) {
         let query = self.filter.read(cx).value().to_lowercase();
         self.more.clear();

@@ -100,6 +100,8 @@ fn sidebar_width_matches_zed_bounds_without_starving_the_center(
         sidebar_width: configured_width,
         gap: 1.0,
         top_inset: 0.0,
+        notch_span: None,
+        wrap_tabs_at_notch: true,
         titlebar_height: 0.0,
         status_height: 30.0,
         sidebar_visible: true,

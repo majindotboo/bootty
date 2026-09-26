@@ -28,7 +28,7 @@ pub struct GpuiChrome {
     docked_status: bool,
     keymap_context: String,
     pub(super) focus: FocusHandle,
-    status_tab_focus_handles: HashMap<String, FocusHandle>,
+    pub(super) status_tab_focus_handles: HashMap<String, FocusHandle>,
     pub(super) pointer_hovered_session: Option<SessionTarget>,
     pub(super) sidebar_dragging: bool,
     pub(super) sidebar_reconcile_hover: bool,
@@ -129,6 +129,7 @@ impl GpuiChrome {
                     .status_height
                     .max(crate::gpui::UI_TAB_BAR_HEIGHT),
                 top_padding: 0.0,
+                notch_span: None,
                 compact: true,
                 partition: Some((right_width, in_right)),
                 colors: self.snapshot.palette,
@@ -140,35 +141,16 @@ impl GpuiChrome {
         ))
     }
 
-    pub(crate) fn dock_tabs(&self, cx: &Context<Self>) -> Option<gpui_kit::AnyElement> {
-        let mut status = self.snapshot.top_status.clone()?;
-        status
-            .segments
-            .retain(|segment| segment.surface == "windows");
-        if status.segments.is_empty() {
-            return None;
-        }
-        let insertion_target = self.tab_drag.insertion_target().cloned();
-        Some(status_bar::render(
-            status_bar::RenderParams {
-                tab_config: self.snapshot.layout.terminal_tabs,
-                keymap_context: &self.keymap_context,
-                snapshot: &status,
-                row_height: self
-                    .snapshot
-                    .layout
-                    .status_height
-                    .max(crate::gpui::UI_TAB_BAR_HEIGHT),
-                top_padding: 0.0,
-                compact: false,
-                partition: None,
-                colors: self.snapshot.palette,
-                tab_bounds: self.tab_bounds.clone(),
-                insertion_target: insertion_target.as_ref(),
-                tab_focus_handles: &self.status_tab_focus_handles,
-            },
-            cx,
-        ))
+    pub(crate) fn dock_tabs(
+        &self,
+        notch: Option<crate::gpui::tabs::NotchTabLayout>,
+        cx: &Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        status_bar::dock_tabs(self, notch, cx)
+    }
+
+    pub(crate) const fn wrap_tabs_at_notch(&self) -> bool {
+        self.snapshot.layout.wrap_tabs_at_notch
     }
 
     pub(crate) fn dock_bottom_height(&self) -> gpui_kit::Pixels {
@@ -223,6 +205,10 @@ impl GpuiChrome {
         } else {
             0.0
         }
+    }
+
+    pub(crate) const fn notch_span(&self) -> Option<(f32, f32)> {
+        self.snapshot.layout.notch_span
     }
 
     pub(crate) fn panel_background(&self) -> gpui_kit::Hsla {
@@ -320,6 +306,7 @@ impl GpuiChrome {
             .and_then(|id| self.status_tab_focus_handles.get(id))
         {
             handle.focus(window, cx);
+            cx.notify();
         }
     }
 
@@ -467,6 +454,16 @@ impl GpuiChrome {
                             snapshot: &status,
                             row_height: layout.status_height,
                             top_padding: layout.top_inset,
+                            notch_span: layout.notch_span.map(|(left, right)| {
+                                let offset = if layout.sidebar_visible
+                                    && layout.sidebar_position == SidebarPosition::Left
+                                {
+                                    layout.effective_sidebar_width() + layout.gap
+                                } else {
+                                    0.0
+                                };
+                                ((left - offset).max(0.0), (right - offset).max(0.0))
+                            }),
                             compact: false,
                             partition: None,
                             colors,
@@ -489,6 +486,7 @@ impl GpuiChrome {
                         snapshot: &status,
                         row_height: layout.status_height,
                         top_padding: 0.0,
+                        notch_span: None,
                         compact: false,
                         partition: None,
                         colors,

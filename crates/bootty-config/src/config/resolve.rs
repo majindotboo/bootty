@@ -144,6 +144,7 @@ fn apply_partial_window(window: &mut WindowConfig, partial: WindowPatch) {
     apply_fields!(window, partial;
         fullscreen_top_offset,
         fullscreen_tabs_in_notch,
+        fullscreen_tabs_wrap_at_notch,
         window_decoration,
         macos_titlebar_style,
     );

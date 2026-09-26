@@ -59,6 +59,7 @@ pub(super) struct WindowPatch {
     pub(super) fullscreen: Option<WindowFullscreen>,
     pub(super) fullscreen_top_offset: Option<f32>,
     pub(super) fullscreen_tabs_in_notch: Option<bool>,
+    pub(super) fullscreen_tabs_wrap_at_notch: Option<bool>,
     pub(super) window_decoration: Option<WindowDecoration>,
     pub(super) macos_titlebar_style: Option<MacosTitlebarStyle>,
 }

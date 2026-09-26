@@ -225,6 +225,7 @@ impl AppState {
             Some((deadline, cancellation.clone())),
         );
         self.commands.pending.push(PendingAppCommand {
+            label: "Session cleanup".to_owned(),
             deadline,
             cancellation,
             response: None,
@@ -254,6 +255,7 @@ impl AppState {
             repaint();
         });
         self.commands.pending.push(PendingAppCommand {
+            label: "Session cleanup".to_owned(),
             deadline,
             cancellation,
             response: None,

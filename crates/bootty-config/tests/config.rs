@@ -104,6 +104,42 @@ fn zed_shaped_general_lifecycle_defaults_match_bootty_behavior() {
 }
 
 #[rstest]
+fn fullscreen_tabs_share_the_notch_band_by_default() {
+    let config = load_config_source("").expect("valid config");
+    assert!(config.window.fullscreen_tabs_in_notch);
+    assert!(config.window.fullscreen_tabs_wrap_at_notch);
+}
+
+#[rstest]
+#[case(true)]
+#[case(false)]
+fn fullscreen_tab_wrapping_is_configurable(#[case] wrap: bool) {
+    let config = load_config_source(&format!(
+        "[window]\nfullscreen-tabs-wrap-at-notch = {wrap}\n"
+    ))
+    .expect("valid config");
+    assert_eq!(config.window.fullscreen_tabs_wrap_at_notch, wrap);
+}
+
+#[rstest]
+fn terminal_tabs_default_to_pills_with_hover_close() {
+    let config = load_config_source("").expect("valid config");
+    assert_eq!(config.chrome.terminal_tabs.appearance, TabAppearance::Pill);
+    assert_eq!(
+        config.chrome.terminal_tabs.close_position,
+        if cfg!(target_os = "macos") {
+            bootty_config::config::TabClosePosition::Left
+        } else {
+            bootty_config::config::TabClosePosition::Right
+        }
+    );
+    assert_eq!(
+        config.chrome.terminal_tabs.close_button,
+        TabCloseButton::Hover
+    );
+}
+
+#[rstest]
 fn zed_shaped_general_lifecycle_settings_are_typed_and_loadable() {
     let config = load_config_source(indoc! {r#"
         restore_on_startup = "none"
@@ -1430,6 +1466,10 @@ fn ghostty_preset_ignores_prefix_and_ships_direct_combos() {
         .input
         .keybinds_for_backend(MultiplexerBackendConfig::Native);
     assert!(keybinds.iter().all(|entry| !entry.contains('>')));
+    if cfg!(target_os = "macos") {
+        assert!(keybinds.contains(&"cmd+shift+,=move_session:-1".to_owned()));
+        assert!(keybinds.contains(&"cmd+shift+.=move_session:1".to_owned()));
+    }
     assert_eq!(
         config
             .input

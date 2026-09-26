@@ -266,6 +266,33 @@ fn shifted_brackets_dispatch_tab_navigation(cx: &mut TestAppContext) {
     assert_eq!(received.borrow().as_slice(), ["next_tab", "previous_tab"]);
 }
 
+#[gpui_kit::test]
+fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
+    let input = input(&["cmd+shift+,=move_session:-1", "cmd+shift+.=move_session:1"]);
+    cx.update(|cx| cx.bind_keys(key_bindings(&input, cx).unwrap()));
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.update(|cx| {
+        let received = Rc::clone(&received);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            cx.new(|_| BindingProbe {
+                focus,
+                received,
+                key_context: WORKSPACE_KEY_CONTEXT.to_owned(),
+            })
+        })
+        .expect("open binding probe")
+    });
+
+    cx.simulate_keystrokes(*window, "cmd-< cmd->");
+
+    assert_eq!(
+        received.borrow().as_slice(),
+        ["move_session:-1", "move_session:1"]
+    );
+}
+
 #[rstest]
 fn palette_filter_selects_and_runs_its_first_visible_command() {
     let mut palette = CommandPaletteDialog::open(&[], CommandPaletteState::default()).unwrap();

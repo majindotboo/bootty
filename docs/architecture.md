@@ -251,7 +251,7 @@ silently retarget a command.
 
 Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
-## Agents and preserved custom scripts
+## Agents
 
 `bootty-agents` owns the native Pi, Codex, and Claude providers: provider state,
 explicit event parsing, command forwarding, lifecycle generations, hook and
@@ -265,8 +265,6 @@ through the desktop command catalog, and projects typed agent facts into chrome
 and panels. Agent workers and event publication remain asynchronous and are
 retired before a replacement can publish stale state.
 
-Existing `.lua` and `.luau` files under `<config>/extensions` are preserved and
-reported as unsupported. Bootty does not execute those files or delete them.
 Bootty does not infer agent state from process names, terminal output, screen
 contents, or transcripts.
 

@@ -156,6 +156,7 @@ pub enum CommandDispatch {
 }
 
 pub struct PendingAppCommand {
+    pub(crate) label: String,
     pub(crate) deadline: Instant,
     pub(crate) cancellation: CommandCancellation,
     pub(crate) response: Option<mpsc::Sender<CommandOutcome>>,
@@ -376,6 +377,14 @@ impl AppState {
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             };
             drained = drained.saturating_add(1);
+            let label = self
+                .commands
+                .catalog
+                .describe(&request.invocation.command)
+                .map_or_else(
+                    || request.invocation.command.clone(),
+                    |descriptor| descriptor.title,
+                );
             let now = Instant::now();
             let dispatch = if request.cancellation.is_cancelled() {
                 CommandDispatch::Complete(CommandOutcome::cancelled())
@@ -396,6 +405,7 @@ impl AppState {
                 }
                 CommandDispatch::Pending(result) => {
                     self.commands.pending.push(PendingAppCommand {
+                        label,
                         deadline: request.deadline,
                         cancellation: request.cancellation,
                         response: Some(request.response),
@@ -422,6 +432,9 @@ impl AppState {
                 Poll::Ready(Some(outcome)) => {
                     if let Some(response) = pending.response {
                         let _ = response.send(outcome);
+                    } else if matches!(&outcome, CommandOutcome::Failed { code, .. } if code == "deadline_exceeded")
+                    {
+                        self.record_error(format!("{} took too long. Try again.", pending.label));
                     } else if let Some(message) = command_outcome_message(&outcome) {
                         self.record_error(message);
                     }
@@ -544,6 +557,11 @@ impl AppState {
         viewport: ViewportSnapshot,
         effects: &mut Vec<AppEffect>,
     ) -> CommandOutcome {
+        let label = self
+            .commands
+            .catalog
+            .describe(&invocation.command)
+            .map_or_else(|| invocation.command.clone(), |descriptor| descriptor.title);
         let asynchronous = crate::action_catalog::Command::from_action(&invocation.command)
             .and_then(crate::commands::DockAction::from_command)
             .is_some()
@@ -569,6 +587,7 @@ impl AppState {
             CommandDispatch::Complete(outcome) => outcome,
             CommandDispatch::Pending(result) => {
                 self.commands.pending.push(PendingAppCommand {
+                    label,
                     deadline,
                     cancellation,
                     response: None,

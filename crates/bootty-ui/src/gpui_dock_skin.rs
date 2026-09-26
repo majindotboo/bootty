@@ -1,15 +1,9 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Selectable as _,
-    Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{
         BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockPlacement, DockSkin,
@@ -17,12 +11,12 @@ use gpui_kit::component::{
         TabGroupRenderer,
     },
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
-    tab::{Tab, TabBar},
+    tab::Tab,
 };
 use gpui_kit::{
     AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
-    Render, ScrollHandle, SharedString, Stateful, Styled, WeakEntity, Window, WindowControlArea,
-    div, prelude::*, px,
+    Render, SharedString, Stateful, Styled, WeakEntity, Window, WindowControlArea, div, prelude::*,
+    px,
 };
 
 use crate::{gpui::chrome::GpuiChrome, gpui_dock::WorkspaceDock};
@@ -238,9 +232,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             chrome: self.chrome.clone(),
             always_show_tabs: self.always_show_tabs.clone(),
             always_hide_tabs: self.always_hide_tabs.clone(),
-            scroll: ScrollHandle::default(),
-            active: Cell::new(None),
-            reveal_active: Rc::new(Cell::new(true)),
         })
     }
 }
@@ -311,9 +302,6 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
 
 #[derive(Clone)]
 struct WorkspaceTabGroup {
-    scroll: ScrollHandle,
-    active: Cell<Option<usize>>,
-    reveal_active: Rc<Cell<bool>>,
     kit: Rc<dyn TabGroupRenderer>,
     area: WeakEntity<DockArea>,
     owner: WeakEntity<WorkspaceDock>,
@@ -346,11 +334,22 @@ impl WorkspaceTitleBar {
 }
 
 impl Render for WorkspaceTitleBar {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one titlebar layout owns the notch split"
+    )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area.upgrade();
         let left_open = area
             .as_ref()
             .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Left));
+        let left_width = if left_open {
+            area.as_ref()
+                .and_then(|area| area.read(cx).dock_size(DockPlacement::Left))
+                .map_or(0.0, f32::from)
+        } else {
+            0.0
+        };
         let right_open = area
             .as_ref()
             .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Right));
@@ -361,52 +360,51 @@ impl Render for WorkspaceTitleBar {
         } else {
             0.0
         };
-        let (status, tabs, inset, show_left, show_right) = self.chrome.update(cx, |chrome, cx| {
-            let (show_left, show_right, _, _) = chrome.dock_presentation();
-            (
-                chrome.dock_status(
-                    if right_open {
-                        dock_status_width(right_width, show_right)
-                    } else {
+        let (status, inset, show_left, show_right, notch_span) =
+            self.chrome.update(cx, |chrome, cx| {
+                let (show_left, show_right, _, _) = chrome.dock_presentation();
+                (
+                    chrome.dock_status(
+                        if right_open {
+                            dock_status_width(right_width, show_right)
+                        } else {
+                            0.0
+                        },
+                        false,
+                        cx,
+                    ),
+                    if left_open {
                         0.0
+                    } else {
+                        chrome.window_controls_inset()
                     },
-                    false,
-                    cx,
-                ),
-                chrome.dock_tabs(cx),
-                if left_open {
-                    0.0
-                } else {
-                    chrome.window_controls_inset()
-                },
-                show_left && !left_open,
-                show_right && !right_open,
-            )
+                    show_left && !left_open,
+                    show_right && !right_open,
+                    chrome.notch_span(),
+                )
+            });
+        let first_inset = inset + if show_left { 32.0 } else { 0.0 };
+        let notch = notch_span.map(|(left, _)| crate::gpui::tabs::NotchTabLayout {
+            width: (left - left_width - first_inset).max(0.0),
+            inset: first_inset,
+            height: crate::gpui::UI_TAB_BAR_HEIGHT,
+            wrap: self.chrome.read(cx).wrap_tabs_at_notch(),
         });
-
-        div()
-            .id("workspace-titlebar")
-            .flex_none()
+        let tabs = self
+            .chrome
+            .update(cx, |chrome, cx| chrome.dock_tabs(notch, cx));
+        let controls = div()
+            .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
             .flex()
             .items_center()
-            .w_full()
-            .min_w_0()
-            .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-            .overflow_hidden()
-            .pl(px(inset))
-            .pr_1()
-            .bg(self.chrome.read(cx).panel_background())
-            .window_control_area(WindowControlArea::Drag)
-            .when(show_left, |element| {
-                element.child(panel_toggle(
-                    self.dock.clone(),
-                    DockPlacement::Left,
-                    false,
-                    &self.chrome,
-                    cx,
-                ))
+            .when_some(notch_span, |controls, (_, right)| {
+                controls
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .left(px((right - left_width).max(0.0)))
+                    .justify_end()
             })
-            .child(div().flex_1().min_w_0().h_full().children(tabs))
             .children(status)
             .when(show_right, |element| {
                 element.child(panel_toggle(
@@ -416,7 +414,47 @@ impl Render for WorkspaceTitleBar {
                     &self.chrome,
                     cx,
                 ))
+            });
+        div()
+            .id("workspace-titlebar")
+            .relative()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .bg(self.chrome.read(cx).panel_background())
+            .window_control_area(WindowControlArea::Drag)
+            .when(notch.is_none(), |bar| {
+                bar.flex()
+                    .items_center()
+                    .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
+                    .pl(px(inset))
+                    .pr_1()
             })
+            .when(show_left, |bar| {
+                bar.child(
+                    div()
+                        .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .when(notch.is_some(), |toggle| {
+                            toggle.absolute().top_0().left(px(inset))
+                        })
+                        .child(panel_toggle(
+                            self.dock.clone(),
+                            DockPlacement::Left,
+                            false,
+                            &self.chrome,
+                            cx,
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .when(notch.is_none(), |tabs| tabs.flex_1().h_full())
+                    .children(tabs),
+            )
+            .child(controls)
     }
 }
 
@@ -535,65 +573,51 @@ impl WorkspaceTabGroup {
             .filter(|(_, panel)| panel.visible(cx))
             .map(|(ix, _)| ix)
             .collect::<Vec<_>>();
-        if self.active.replace(Some(group.active_ix())) != Some(group.active_ix()) {
-            self.reveal_active.set(true);
-        }
         let selected = visible
             .iter()
             .position(|ix| *ix == group.active_ix())
             .unwrap_or(0);
-        let tab_indices = visible.clone();
-        let select_group = group.clone();
         let tabs = visible
             .into_iter()
-            .filter_map(|ix| self.render_group_tab(group, ix, style, tab_config, window, cx))
-            .collect::<Vec<_>>();
-        let target = group.clone();
-        let tabs = TabBar::new("workspace-tabs")
-            .with_variant(crate::gpui::tabs::variant(tab_config.appearance))
-            .with_size(crate::gpui::tabs::size(tab_config.appearance))
-            .min_w_full()
-            .flex_shrink_0()
-            .selected_index(selected)
-            .on_click(move |ix, window, cx| {
-                if let Some(index) = tab_indices.get(*ix) {
-                    select_group.select_tab(*index, window, cx);
-                }
+            .filter_map(|ix| {
+                let panel = group.panels().get(ix)?;
+                let id = format!("{:?}", panel.panel_id(cx));
+                Some(crate::gpui::tabs::ScrollableTab {
+                    id,
+                    title: None,
+                    focus: None,
+                    tab: Self::render_group_tab(group, ix, style, tab_config, window, cx)?,
+                })
             })
-            .children(tabs)
-            // Kit includes the trailing context-menu target when a suffix is present.
-            .suffix(gpui_kit::Empty)
-            .last_empty_space(div().id("after-tabs").h_full().flex_1().min_w_4().when(
-                group.is_droppable(),
-                |e| {
+            .collect();
+        let target = group.clone();
+        crate::gpui::tabs::ScrollableTabBar {
+            id: format!("workspace-tabs-{:?}", group.node()).into(),
+            config: tab_config,
+            background: self.chrome.read(cx).panel_background(),
+            tabs,
+            selected: Some(selected),
+            notch: None,
+            end: div()
+                .id("after-tabs")
+                .h_full()
+                .flex_1()
+                .min_w_4()
+                .when(group.is_droppable(), |e| {
                     e.on_drop(move |drag: &DragPanel, window, cx| {
                         let ix = (drag.source() == target.node())
                             .then(|| target.panels().len().saturating_sub(1));
                         target.drop_panel(drag.clone(), ix, false, window, cx);
                     })
-                },
-            ));
-        let tabs = crate::gpui::tabs::blend_bar(
-            tabs,
-            tab_config.appearance,
-            self.chrome.read(cx).panel_background(),
-        );
-        div()
-            .id("workspace-tab-scroll")
-            .flex()
-            .w_full()
-            .min_w_0()
-            .h_full()
-            .overflow_x_scroll()
-            .track_scroll(&self.scroll)
-            .child(tabs)
-            .into_any_element()
+                })
+                .into_any_element(),
+        }
+        .into_any_element()
     }
 }
 
 impl WorkspaceTabGroup {
     fn render_group_tab(
-        &self,
         group: &TabGroupContext,
         ix: usize,
         style: bootty_config::config::PanelTabStyle,
@@ -615,14 +639,9 @@ impl WorkspaceTabGroup {
                 .closable(cx)
                 .then(|| close_panel_tab(group, id, &label))
         });
-        let scroll = self.scroll.clone();
-        let reveal = self.reveal_active.clone();
         let selected = ix == group.active_ix();
         let hover_group = SharedString::from(format!("panel-tab-hover-{id:?}"));
         let title = div()
-            .on_prepaint(move |bounds, window, _| {
-                reveal_tab(bounds, &scroll, &reveal, selected, window);
-            })
             .id(SharedString::from(format!("panel-tab-{id:?}")))
             .flex()
             .items_center()
@@ -681,31 +700,6 @@ impl WorkspaceTabGroup {
                 })
             }),
         )
-    }
-}
-
-fn reveal_tab(
-    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
-    scroll: &ScrollHandle,
-    reveal: &Cell<bool>,
-    selected: bool,
-    window: &mut Window,
-) {
-    if selected && reveal.replace(false) {
-        let viewport = scroll.bounds();
-        let mut offset = scroll.offset();
-        if bounds.right() > viewport.right() {
-            offset.x =
-                px(f32::from(offset.x) - (f32::from(bounds.right()) - f32::from(viewport.right())));
-        }
-        if bounds.left() < viewport.left() {
-            offset.x =
-                px(f32::from(offset.x) + (f32::from(viewport.left()) - f32::from(bounds.left())));
-        }
-        if offset != scroll.offset() {
-            scroll.set_offset(offset);
-            window.refresh();
-        }
     }
 }
 

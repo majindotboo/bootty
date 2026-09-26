@@ -109,6 +109,8 @@ fn chrome_layout() -> ChromeLayout {
         sidebar_width: 240.0,
         gap: 1.0,
         top_inset: 0.0,
+        notch_span: None,
+        wrap_tabs_at_notch: true,
         titlebar_height: 32.0,
         status_height: 28.0,
         sidebar_visible: true,
@@ -331,20 +333,64 @@ fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
             });
             row.text.clone_from(&row.key);
             row.current = index == 0;
+            row.reorder_anchor = Some(row.key.clone());
             let target = row.target.clone();
             let mut cwd = detail_template.clone();
             cwd.key = format!("session-{index}:cwd");
             cwd.text = format!("/workspaces/session-{index}");
             cwd.target.clone_from(&target);
             cwd.current = row.current;
+            cwd.reorder_anchor.clone_from(&row.reorder_anchor);
             let mut branch = detail_template.clone();
             branch.key = format!("session-{index}:branch");
             branch.text = format!("main-{index}");
             branch.target = target;
             branch.current = row.current;
+            branch.reorder_anchor.clone_from(&row.reorder_anchor);
             [row, cwd, branch]
         })
         .collect();
+}
+
+#[gpui_kit::test]
+fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    fill_sidebar_sessions(sidebar);
+    sidebar.rows.truncate(6);
+    let (probe, cx) =
+        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let start = center(
+        cx.debug_bounds("sidebar-row-hitbox-session-0")
+            .expect("source session"),
+    );
+    let end = center(
+        cx.debug_bounds("sidebar-row-hitbox-session-1:cwd")
+            .expect("destination detail"),
+    );
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(start.x.add(px(15.0)), start.y.add(px(15.0))),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_event(MouseUpEvent {
+        position: end,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [ChromeIntent::ReorderSession {
+                source: "session-0".to_owned(),
+                before: Some("session-1".to_owned()),
+            }]
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -451,6 +497,9 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     let hitbox = cx
         .debug_bounds("sidebar-row-hitbox-session")
         .expect("session row hitbox");
+    let block = cx
+        .debug_bounds("sidebar-session-session")
+        .expect("session block");
     let rail = cx
         .debug_bounds("sidebar-current-rail-session")
         .expect("current session rail");
@@ -458,19 +507,21 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     assert_eq!(row.size.width, px(240.0));
     assert_eq!(hitbox.origin.x, row.origin.x);
     assert_eq!(hitbox.size.width, row.size.width);
-    assert_eq!(rail.origin.x, row.origin.x);
+    assert_eq!(block.origin.x, row.origin.x);
+    assert_eq!(block.size.width, row.size.width);
+    assert_eq!(rail.origin.x, block.origin.x);
     assert_eq!(rail.size.width, px(4.0));
-    assert_eq!(rail.size.height, row.size.height);
 
     let detail = cx
         .debug_bounds("sidebar-row-session:cwd")
         .expect("session detail row");
-    let detail_rail = cx
-        .debug_bounds("sidebar-current-rail-session:cwd")
-        .expect("current session detail rail");
-    assert_eq!(detail_rail.origin.x, detail.origin.x);
-    assert_eq!(detail_rail.size.width, px(4.0));
-    assert_eq!(detail_rail.size.height, detail.size.height);
+    assert!(detail.top() >= row.bottom());
+    assert!(block.bottom() >= detail.bottom());
+    assert_eq!(rail.size.height, block.size.height);
+    assert!(
+        cx.debug_bounds("sidebar-current-rail-session:cwd")
+            .is_none()
+    );
 
     let first_space = cx.debug_bounds("space-1").expect("first space");
     let second_space = cx.debug_bounds("space-2").expect("second space");
@@ -490,6 +541,38 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     );
     assert!(first_space.right() < second_space.left());
     assert!(second_space.right() < create_space.left());
+}
+
+#[gpui_kit::test]
+fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    snapshot.layout.notch_span = Some((380.0, 600.0));
+    let mut center_item = snapshot.top_status.as_ref().unwrap().segments[0].items[0].clone();
+    center_item.key = "center".to_owned();
+    center_item.text = "center".to_owned();
+    snapshot
+        .top_status
+        .as_mut()
+        .unwrap()
+        .segments
+        .push(StatusSegmentSnapshot {
+            align: StatusAlignment::Center,
+            source_slot: 2,
+            surface: "custom".to_owned(),
+            items: vec![center_item],
+        });
+    let (_, view) =
+        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let tabs = view.debug_bounds("status-tabs-top-1").expect("tab region");
+    let center = view
+        .debug_bounds("status-item-2-center")
+        .expect("center status");
+    assert!(tabs.right() <= px(380.0), "tabs enter notch: {tabs:?}");
+    assert!(
+        center.left() >= px(600.0),
+        "status enters notch: {center:?}"
+    );
 }
 
 #[gpui_kit::test]
@@ -672,10 +755,9 @@ fn top_status_inset_stays_clear_of_status_items_and_tabs(cx: &mut TestAppContext
 
     assert!(item.origin.y >= inset_bottom);
     assert!(tab.origin.y >= inset_bottom);
-    // The row surfaces reach the content boundary: metrics paint their bottom edge while the
-    // active tab leaves it open. A parent border must not consume a pixel beneath every child.
+    // Metrics reach the content boundary; the compact pill tab keeps its bottom margin.
     assert_eq!(item.bottom(), status.bottom());
-    assert_eq!(tab.bottom(), status.bottom());
+    assert_eq!(tab.bottom().add(px(4.0)), status.bottom());
 }
 
 #[gpui_kit::test]
@@ -1579,4 +1661,177 @@ fn empty_chrome_click_preserves_keyboard_focus(cx: &mut TestAppContext) {
         cx.simulate_click(position, Modifiers::none());
         assert!(cx.update(|window, _| previous.is_focused(window)));
     }
+}
+
+fn overflowing_tabs() -> ChromeSnapshot {
+    let mut snapshot = chrome_snapshot();
+    let segment = snapshot
+        .top_status
+        .as_mut()
+        .unwrap()
+        .segments
+        .iter_mut()
+        .find(|segment| segment.surface == "windows")
+        .unwrap();
+    let template = segment.items[0].clone();
+    segment.items = (0..16)
+        .map(|ix| {
+            let mut item = template.clone();
+            item.key = format!("tab-{ix}");
+            item.text = format!("{ix} shell");
+            item.reorder_anchor = Some(format!("tab-{ix}"));
+            item.tab_context.as_mut().unwrap().window_id = format!("window-{ix}");
+            item.active = ix == 0;
+            item
+        })
+        .collect();
+    snapshot
+}
+
+fn draw_chrome(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+}
+
+fn update_chrome(
+    probe: &Entity<ChromeProbe>,
+    snapshot: &ChromeSnapshot,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|window, cx| {
+        probe
+            .read(cx)
+            .chrome
+            .clone()
+            .update(cx, |chrome, cx| chrome.update(snapshot, window, cx));
+    });
+    draw_chrome(cx);
+}
+
+#[gpui_kit::test]
+fn tab_strip_reveals_selection_and_preserves_manual_scrolling(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = overflowing_tabs();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("mux-tabs-top-1-scroll-left").is_none());
+    assert!(cx.debug_bounds("mux-tabs-top-1-scroll-right").is_some());
+    let region = cx.debug_bounds("status-tabs-top-1").unwrap();
+    for (selected, selector) in [
+        (15, "status-tab-top-1-tab-15"),
+        (0, "status-tab-top-1-tab-0"),
+        (9, "status-tab-top-1-tab-9"),
+    ] {
+        for (ix, item) in snapshot.top_status.as_mut().unwrap().segments[1]
+            .items
+            .iter_mut()
+            .enumerate()
+        {
+            item.active = ix == selected;
+        }
+        update_chrome(&probe, &snapshot, cx);
+        let tab = cx.debug_bounds(selector).unwrap();
+        assert!(
+            tab.left() >= region.left(),
+            "selected tab is clipped on left: {tab:?}"
+        );
+        assert!(
+            tab.right() <= region.right(),
+            "selected tab is clipped on right: {tab:?}"
+        );
+    }
+    let before = cx.debug_bounds("status-tab-top-1-tab-9").unwrap();
+    cx.simulate_event(ScrollWheelEvent {
+        position: region.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(150.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    draw_chrome(cx);
+    let after = cx.debug_bounds("status-tab-top-1-tab-9").unwrap();
+    assert!(
+        after.left() > before.left(),
+        "vertical wheel must scroll tabs horizontally"
+    );
+    snapshot.titlebar.title = "Unrelated update".into();
+    update_chrome(&probe, &snapshot, cx);
+    assert_eq!(cx.debug_bounds("status-tab-top-1-tab-9"), Some(after));
+    let next = cx.debug_bounds("mux-tabs-top-1-scroll-right").unwrap();
+    cx.simulate_click(next.center(), Modifiers::none());
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("status-tab-top-1-tab-9").unwrap().left() < after.left());
+}
+
+#[gpui_kit::test]
+fn keyboard_focus_reveals_offscreen_tabs(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let (_, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(overflowing_tabs(), window, cx));
+    draw_chrome(cx);
+    let first = cx.debug_bounds("status-tab-top-1-tab-0").unwrap().center();
+    cx.simulate_click(first, Modifiers::none());
+    cx.simulate_keystrokes("end");
+    draw_chrome(cx);
+    let region = cx.debug_bounds("status-tabs-top-1").unwrap();
+    let last = cx.debug_bounds("status-tab-top-1-tab-15").unwrap();
+    assert!(
+        last.left() >= region.left() && last.right() <= region.right(),
+        "focused tab must be visible: {last:?}, {region:?}"
+    );
+    cx.simulate_keystrokes("home");
+    draw_chrome(cx);
+    let first = cx.debug_bounds("status-tab-top-1-tab-0").unwrap();
+    assert!(first.left() >= region.left() && first.right() <= region.right());
+}
+
+#[gpui_kit::test]
+fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = overflowing_tabs();
+    snapshot.top_status.as_mut().unwrap().segments[1].items[0].text =
+        "A considerably longer terminal task title".into();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    draw_chrome(cx);
+    let initial = cx
+        .debug_bounds("status-tab-top-1-tab-0")
+        .unwrap()
+        .size
+        .width;
+    snapshot.top_status.as_mut().unwrap().segments[1].items[0].text = "shell".into();
+    update_chrome(&probe, &snapshot, cx);
+    assert_eq!(
+        cx.debug_bounds("status-tab-top-1-tab-0")
+            .unwrap()
+            .size
+            .width,
+        initial
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(750));
+    snapshot.top_status.as_mut().unwrap().segments[1].items[0].text = "build".into();
+    update_chrome(&probe, &snapshot, cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(750));
+    draw_chrome(cx);
+    assert_eq!(
+        cx.debug_bounds("status-tab-top-1-tab-0")
+            .unwrap()
+            .size
+            .width,
+        initial
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    draw_chrome(cx);
+    assert!(
+        cx.debug_bounds("status-tab-top-1-tab-0")
+            .unwrap()
+            .size
+            .width
+            < initial.div(2.0),
+        "a short title should settle to a compact tab"
+    );
 }

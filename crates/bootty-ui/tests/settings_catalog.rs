@@ -5,13 +5,11 @@
 use bootty_ui::gpui as bootty_gpui;
 use std::collections::HashSet;
 
-use assert_fs::{TempDir, prelude::*};
 use bootty_config::settings_schema::{SettingEditor, SettingKind, SettingSpec, SettingsSchema};
 use bootty_ui::gpui::{ScalarValue, SettingsCategory, SettingsRow};
 use bootty_ui::{
-    UnsupportedModuleDiagnostic, advanced_configuration_rows, scan_unsupported_module_sources,
-    setting_is_visible_in_native_settings, settings_catalog_pages, settings_category_for,
-    settings_dependency_for, unsupported_module_rows,
+    advanced_configuration_rows, setting_is_visible_in_native_settings, settings_catalog_pages,
+    settings_category_for, settings_dependency_for,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -43,93 +41,10 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
 }
 
 #[rstest]
-fn unsupported_custom_sources_remain_visible_without_an_edit_action() {
-    let rows = unsupported_module_rows(&[UnsupportedModuleDiagnostic {
-        path: "/tmp/bootty/extensions/custom.luau".into(),
-        detail: "native feature has no matching owner".to_owned(),
-    }]);
-
-    assert!(matches!(
-        rows.as_slice(),
-        [SettingsRow::Notice { text, destructive: false }]
-            if text == "Unsupported custom module source preserved: /tmp/bootty/extensions/custom.luau (native feature has no matching owner)"
-    ));
-}
-
-#[rstest]
-fn unsupported_source_scan_is_read_only_and_recursive() {
-    let directory = TempDir::new().expect("temporary config directory");
-    directory
-        .child("extensions/custom.luau")
-        .write_str("return { source = 'must not be read' }")
-        .expect("custom source");
-    directory
-        .child("extensions/nested/other.lua")
-        .write_str("return {}")
-        .expect("nested source");
-    directory
-        .child("extensions/ignored.txt")
-        .write_str("not a module")
-        .expect("non module");
-    directory
-        .child("status/legacy.lua")
-        .write_str("return {}")
-        .expect("legacy status source");
-
-    let diagnostics = scan_unsupported_module_sources(directory.path()).expect("scan succeeds");
-    assert_eq!(
-        diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.path.strip_prefix(directory.path()).unwrap())
-            .collect::<Vec<_>>(),
-        vec![
-            std::path::Path::new("extensions/custom.luau"),
-            std::path::Path::new("extensions/nested/other.lua"),
-            std::path::Path::new("status/legacy.lua"),
-        ]
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.detail == "native script execution is retired")
-    );
-}
-
-#[rstest]
-fn unsupported_source_scan_reports_the_depth_bound() {
-    let directory = TempDir::new().expect("temporary config directory");
-    let mut nested = directory.path().join("session");
-    for _ in 0..17 {
-        nested.push("nested");
-    }
-    std::fs::create_dir_all(&nested).expect("nested source directories");
-    std::fs::write(nested.join("hidden.luau"), "return {}").expect("deep source");
-
-    let diagnostics = scan_unsupported_module_sources(directory.path()).expect("scan succeeds");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.path == directory.path().join("session")
-            && diagnostic.detail.contains("scan incomplete")
-    }));
-    assert!(
-        diagnostics
-            .iter()
-            .all(|diagnostic| !diagnostic.path.ends_with("hidden.luau"))
-    );
-}
-
-#[rstest]
-#[case(None, "No write errors", "No settings write errors recorded.", false)]
-#[case(
-    Some("permission denied"),
-    "Last write failed",
-    "permission denied",
-    true
-)]
-fn advanced_configuration_keeps_locations_and_write_status_visible(
+#[case(None)]
+#[case(Some("permission denied"))]
+fn advanced_configuration_keeps_locations_and_write_errors_visible(
     #[case] write_error: Option<&str>,
-    #[case] summary: &str,
-    #[case] detail: &str,
-    #[case] detail_is_destructive: bool,
 ) {
     let rows =
         advanced_configuration_rows(std::path::Path::new("/tmp/bootty/config.toml"), write_error);
@@ -158,26 +73,26 @@ fn advanced_configuration_keeps_locations_and_write_status_visible(
                 "Themes directory",
                 "/tmp/bootty/themes"
             ),
-            (
-                "config.extensions-directory",
-                "Extensions directory",
-                "/tmp/bootty/extensions"
-            ),
         ]
     );
     assert!(rows.iter().any(|row| matches!(
         row,
         SettingsRow::Action { id, .. } if id == "config:reload"
     )));
-    assert!(rows.iter().any(|row| matches!(
-        row,
-        SettingsRow::Notice { text, destructive: false } if text == summary
-    )));
-    assert!(rows.iter().any(|row| matches!(
-        row,
-        SettingsRow::Notice { text, destructive }
-            if text == detail && *destructive == detail_is_destructive
-    )));
+    let notices = rows
+        .iter()
+        .filter_map(|row| match row {
+            SettingsRow::Notice { text, destructive } => Some((text.as_str(), *destructive)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        notices,
+        write_error
+            .into_iter()
+            .map(|error| (error, true))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[rstest]
@@ -222,7 +137,7 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         }
 
         // Preserved extension settings have no native editor after script retirement.
-        "extensions.*" => NativeSettingsSurface::Replacement("unsupported custom module"),
+        "extensions.*" => NativeSettingsSurface::Replacement("stored configuration"),
 
         "appearance.mode"
         | "appearance.light.theme"
@@ -369,7 +284,7 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("input.backend-keybind.native".to_owned(), "keymap editor"),
             ("input.backend-keybind.rmux".to_owned(), "keymap editor"),
             ("input.backend-keybind.tmux".to_owned(), "keymap editor"),
-            ("extensions.*".to_owned(), "unsupported custom module"),
+            ("extensions.*".to_owned(), "stored configuration"),
         ]
     );
 }
@@ -381,7 +296,8 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
 #[case("input.backend-keybind.native")]
 #[case("input.backend-keybind.rmux")]
 #[case("input.backend-keybind.tmux")]
-fn legacy_toml_keybinding_inputs_do_not_compete_with_the_keymap_editor(#[case] id: &str) {
+#[case("extensions.*")]
+fn compatibility_only_inputs_stay_out_of_settings(#[case] id: &str) {
     assert!(!setting_is_visible_in_native_settings(id));
 }
 

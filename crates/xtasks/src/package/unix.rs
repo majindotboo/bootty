@@ -340,6 +340,7 @@ fn info_plist(layout: &Layout, version: &str) -> String {
   </dict></array>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>A program running in Bootty would like to use your microphone.</string>
 </dict>
 </plist>
 "#,

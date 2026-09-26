@@ -132,16 +132,17 @@ impl ErrorNotice {
 
 fn technical_summary(message: &str) -> String {
     let lower = message.to_ascii_lowercase();
+    if lower.contains("command deadline expired") {
+        return "The command took too long. Try again.".to_owned();
+    }
+    if lower.contains("rmux pane output ended: transportlost") {
+        return "The terminal connection was lost. Try reopening this pane.".to_owned();
+    }
     if lower.contains("rmux") {
-        return "Could not reach remote rmux.".to_owned();
+        return "The terminal is unavailable. Try reconnecting.".to_owned();
     }
     if lower.contains("ssh") || lower.contains("connection") {
         return "Could not reach the remote workspace.".to_owned();
     }
-    let first_line = message.lines().next().unwrap_or("operation failed");
-    if first_line.chars().count() <= 96 {
-        first_line.to_owned()
-    } else {
-        "the operation failed; open details for the technical error".to_owned()
-    }
+    "The operation could not be completed.".to_owned()
 }

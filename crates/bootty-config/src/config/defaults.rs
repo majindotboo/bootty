@@ -107,7 +107,7 @@ impl Default for ChromeConfig {
                 ..Default::default()
             },
             terminal_tabs: super::model::TabConfig {
-                close_button: super::model::TabCloseButton::Always,
+                appearance: super::model::TabAppearance::Pill,
                 ..Default::default()
             },
             sidebar: true,
@@ -256,6 +256,7 @@ impl Default for BoottyConfig {
                 fullscreen: WindowFullscreen::default(),
                 fullscreen_top_offset: None,
                 fullscreen_tabs_in_notch: true,
+                fullscreen_tabs_wrap_at_notch: true,
                 window_decoration: WindowDecoration::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
             },

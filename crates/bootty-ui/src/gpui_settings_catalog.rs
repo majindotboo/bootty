@@ -3,19 +3,9 @@
 //! The configuration schema still owns each setting's TOML path and legacy page metadata. This
 //! catalog only decides where that setting appears in the native settings window.
 
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, path::Path};
 
 use crate::gpui::{ScalarValue, SettingsCategory, SettingsPage, SettingsPageItem, SettingsRow};
-
-const UNSUPPORTED_SCAN_ROOTS: &[&str] = &["extensions", "status", "sidebar", "session"];
-// Keep the metadata-only refresh bounded; raise these only with cancellation and streaming UI
-// diagnostics so a hostile config tree cannot monopolize the catalog worker.
-const UNSUPPORTED_SCAN_MAX_DEPTH: usize = 16;
-const UNSUPPORTED_SCAN_MAX_ENTRIES: usize = 4096;
 
 /// One top-level destination in the native settings window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,11 +16,7 @@ pub struct SettingsCatalogPage {
     pub search_terms: &'static str,
 }
 
-/// Project the Advanced page's host-owned configuration locations and last write result.
-///
-/// The settings session owns the write result while the loaded config owns the source path. The
-/// native UI only presents those facts; directory paths remain read-only, matching the legacy
-/// settings surface without adding a second filesystem action path.
+/// Configuration paths, reload action, and any write error for the Advanced page.
 #[must_use]
 pub fn advanced_configuration_rows(
     config_path: &Path,
@@ -48,11 +34,6 @@ pub fn advanced_configuration_rows(
                 "Themes directory",
                 &directory.join("themes"),
             ),
-            read_only_path_row(
-                "config.extensions-directory",
-                "Extensions directory",
-                &directory.join("extensions"),
-            ),
         ]);
     }
     rows.extend([
@@ -65,23 +46,13 @@ pub fn advanced_configuration_rows(
             button: "Reload config.toml".to_owned(),
             enabled: true,
         },
-        SettingsRow::Notice {
-            text: if write_error.is_some() {
-                "Last write failed".to_owned()
-            } else {
-                "No write errors".to_owned()
-            },
-            destructive: false,
-        },
-        SettingsRow::Section("STATE".to_owned()),
-        SettingsRow::Notice {
-            text: write_error.map_or_else(
-                || "No settings write errors recorded.".to_owned(),
-                str::to_owned,
-            ),
-            destructive: write_error.is_some(),
-        },
     ]);
+    if let Some(error) = write_error {
+        rows.push(SettingsRow::Notice {
+            text: error.to_owned(),
+            destructive: true,
+        });
+    }
     rows
 }
 
@@ -94,127 +65,6 @@ fn read_only_path_row(id: &str, label: &str, path: &Path) -> SettingsRow {
         control: crate::gpui::SettingsControl::ReadOnly,
         enabled: true,
     }
-}
-
-/// One user source retained on disk but unsupported by the native settings host.
-///
-/// The discovery owner supplies paths without reading or executing their contents. Keeping the
-/// path in the diagnostic lets users identify the preserved file while native settings remain
-/// source free.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnsupportedModuleDiagnostic {
-    pub path: PathBuf,
-    pub detail: String,
-}
-
-/// Discover preserved user scripts without opening or executing their contents.
-///
-/// Missing legacy source roots are normal for a new config. Symlinked directories are not
-/// followed, and bounded traversal keeps this diagnostic walk within the configured roots.
-///
-/// # Errors
-/// Returns an error when filesystem metadata or a directory cannot be read.
-pub fn scan_unsupported_module_sources(
-    config_root: &Path,
-) -> Result<Vec<UnsupportedModuleDiagnostic>, String> {
-    let mut diagnostics = Vec::new();
-    let mut entries_seen = 0;
-    for relative_root in UNSUPPORTED_SCAN_ROOTS {
-        let root = config_root.join(relative_root);
-        let root_type = match fs::symlink_metadata(&root) {
-            Ok(metadata) => metadata.file_type(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "scan unsupported module sources: {}: {error}",
-                    root.display()
-                ));
-            }
-        };
-        if !root_type.is_dir() {
-            continue;
-        }
-        if collect_module_paths(&root, 0, &mut entries_seen, &mut diagnostics)? {
-            diagnostics.push(UnsupportedModuleDiagnostic {
-                path: root,
-                detail: format!(
-                    "scan incomplete: depth is capped at {UNSUPPORTED_SCAN_MAX_DEPTH} and entries at {UNSUPPORTED_SCAN_MAX_ENTRIES}"
-                ),
-            });
-        }
-    }
-    diagnostics.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(diagnostics)
-}
-
-fn collect_module_paths(
-    root: &Path,
-    depth: usize,
-    entries_seen: &mut usize,
-    diagnostics: &mut Vec<UnsupportedModuleDiagnostic>,
-) -> Result<bool, String> {
-    let mut limited = false;
-    for entry in fs::read_dir(root).map_err(|error| {
-        format!(
-            "scan unsupported module sources: {}: {error}",
-            root.display()
-        )
-    })? {
-        if *entries_seen >= UNSUPPORTED_SCAN_MAX_ENTRIES {
-            limited = true;
-            break;
-        }
-        let entry = entry.map_err(|error| format!("scan unsupported module sources: {error}"))?;
-        *entries_seen = entries_seen.saturating_add(1);
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|error| {
-            format!(
-                "scan unsupported module sources: {}: {error}",
-                path.display()
-            )
-        })?;
-        if file_type.is_dir() {
-            if depth >= UNSUPPORTED_SCAN_MAX_DEPTH
-                || collect_module_paths(&path, depth.saturating_add(1), entries_seen, diagnostics)?
-            {
-                limited = true;
-            }
-        } else if file_type.is_file()
-            && matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("lua" | "luau")
-            )
-        {
-            diagnostics.push(UnsupportedModuleDiagnostic {
-                path,
-                detail: "native script execution is retired".to_owned(),
-            });
-        }
-    }
-    Ok(limited)
-}
-
-/// Project preserved user scripts into visible, non-editable diagnostics.
-#[must_use]
-pub fn unsupported_module_rows(diagnostics: &[UnsupportedModuleDiagnostic]) -> Vec<SettingsRow> {
-    diagnostics
-        .iter()
-        .map(|diagnostic| SettingsRow::Notice {
-            text: if diagnostic.detail.is_empty() {
-                format!(
-                    "Unsupported custom module source preserved: {}",
-                    diagnostic.path.display()
-                )
-            } else {
-                format!(
-                    "Unsupported custom module source preserved: {} ({})",
-                    diagnostic.path.display(),
-                    diagnostic.detail
-                )
-            },
-            destructive: false,
-        })
-        .collect()
 }
 
 /// One parent setting and the ordered rows whose meaning depends on it.
@@ -387,7 +237,7 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
         category: SettingsCategory::Panels,
         id: SettingsCategory::Panels.id(),
         label: SettingsCategory::Panels.label(),
-        search_terms: "panels|sidebar|status bar|top bar|bottom bar|module|extension region|dock|width|visibility",
+        search_terms: "panels|sidebar|status bar|top bar|bottom bar|dock|width|visibility",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Terminal,
@@ -405,7 +255,7 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
         category: SettingsCategory::Advanced,
         id: SettingsCategory::Advanced.id(),
         label: SettingsCategory::Advanced.label(),
-        search_terms: "advanced|config|diagnostics|unsupported custom module|settings|reload",
+        search_terms: "advanced|config|diagnostics|settings|reload",
     },
 ];
 
@@ -443,6 +293,7 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
             | "input.backend-keybind.tmux"
             | "sidebar.session-modules"
             | "sidebar.modules"
+            | "extensions.*"
     )
 }
 
@@ -485,8 +336,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
             "panels" | "sidebar" | "status" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
             "general" => SettingsCategory::General,
-            // Extension-declared settings use `extensions` today. Keep an unknown future page
-            // contained in Advanced rather than silently dropping its writable schema row.
+            // Keep unknown schema pages accessible in Advanced.
             _ => SettingsCategory::Advanced,
         },
     }
