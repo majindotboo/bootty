@@ -2,6 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader},
+    os::unix::fs::PermissionsExt as _,
     process::{Child, Command, Stdio},
     sync::{OnceLock, mpsc},
     thread,
@@ -107,13 +108,18 @@ embedded_scenarios!(
     remote_pane_stream_rebase_publishes_a_frame,
     closing_session_with_pending_resize_is_quiet,
     closed_pane_accepts_teardown_updates,
+    shell_exit_is_quiet,
     bounded_live_output,
+    kitty_images_reach_terminal_frames,
     large_restore_progress,
 );
 
 /// The child-process entry point. A no-op in the runner's own process.
 #[test]
 fn embedded_rmux_scenario_child() -> Result<()> {
+    if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
+        return bootty_mux::rmux::run_pipe_helper(endpoint.into());
+    }
     let Some(scenario) = std::env::var_os(SCENARIO_ENV) else {
         return Ok(());
     };
@@ -636,7 +642,7 @@ if expected in data:
     }
 
     pub fn remote_pane_stream_rebase_publishes_a_frame() -> Result<()> {
-        let (mut backend, registry, session_id, window_id, pane) =
+        let (_backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut terminal)?;
@@ -644,7 +650,7 @@ if expected in data:
         wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_REMOTE_REBASE")?;
 
         let request = RemoteRmuxRequest::PaneStream {
-            session: session_id.clone(),
+            session: session_id,
             pane: pane.pane_id.context("remote pane id")?,
         };
         let (mut stream, frames) = spawn_remote_pane_stream(request.encode()?)?;
@@ -675,6 +681,9 @@ if expected in data:
             terminal.write_input(b"printf 'BOOTTY_RMUX_REMOTE_BYTES\\n'\r")?;
             loop {
                 match next_remote_pane_stream_frame(&frames)? {
+                    RemotePaneStreamFrame::End => {
+                        anyhow::bail!("remote pane ended before new output")
+                    }
                     RemotePaneStreamFrame::Rebase(_) => {
                         anyhow::bail!("remote pane stream rebased before delivering new pane bytes")
                     }
@@ -690,16 +699,24 @@ if expected in data:
                                     .any(|row| row.contains("BOOTTY_RMUX_REMOTE_REBASE")),
                                 "remote pane bytes replaced the rebase frame"
                             );
-                            return Ok(());
+                            break;
                         }
                     }
+                }
+            }
+            terminal.write_input(b"\x04")?;
+            loop {
+                if matches!(
+                    next_remote_pane_stream_frame(&frames)?,
+                    RemotePaneStreamFrame::End
+                ) {
+                    return Ok(());
                 }
             }
         })();
 
         let _ = stream.kill();
         let _ = stream.wait();
-        ditch_session(&mut backend, &session_id)?;
         result
     }
 
@@ -763,6 +780,72 @@ if expected in data:
         Ok(())
     }
 
+    pub fn shell_exit_is_quiet() -> Result<()> {
+        let (_backend, registry, _session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        terminal.write_input(b"\x04")?;
+
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(5))
+            .context("shell exit deadline")?;
+        loop {
+            terminal.drain_pty();
+            if terminal.child_exited()? {
+                while terminal.discard_pending_output().is_ok() {
+                    anyhow::ensure!(std::time::Instant::now() < deadline, "worker did not stop");
+                    thread::yield_now();
+                }
+                anyhow::ensure!(!terminal.copy_mode_active()?);
+                return Ok(());
+            }
+            anyhow::ensure!(std::time::Instant::now() < deadline, "shell did not exit");
+            thread::yield_now();
+        }
+    }
+
+    pub fn kitty_images_reach_terminal_frames() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        let mut second = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut second)?;
+        let fixture = assert_fs::NamedTempFile::new("kitty.vt")?;
+        let payload =
+            base64::engine::general_purpose::STANDARD.encode(vec![255_u8; 1024 * 512 * 4]);
+        let mut output = Vec::new();
+        let chunks = payload.as_bytes().chunks(4096);
+        let count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            let more = u8::from(index.saturating_add(1) < count);
+            let header = if index == 0 {
+                format!("\x1b_Ga=T,i=42,q=2,f=32,s=1024,v=512,c=20,r=10,m={more};")
+            } else {
+                format!("\x1b_Gm={more};")
+            };
+            output.extend_from_slice(header.as_bytes());
+            output.extend_from_slice(chunk);
+            output.extend_from_slice(b"\x1b\\");
+        }
+        output.extend_from_slice(b"\r\nBOOTTY_IMAGE_COMPLETE\r\n");
+        std::fs::write(fixture.path(), &output)?;
+        terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
+        wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
+        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
+        drop(second);
+        terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
+        let frame = terminal.extract_frame()?;
+        assert_eq!(frame.images.placements.len(), 1);
+        let image = frame.images.placements.first().context("rendered image")?;
+        assert_eq!(image.image_width, 1024);
+        assert_eq!(image.image_height, 512);
+        ditch_session(&mut backend, &session_id)
+    }
+
     pub fn bounded_live_output() -> Result<()> {
         let (mut backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
@@ -817,9 +900,19 @@ if expected in data:
 /// environment that is the same on every machine.
 fn run_embedded_scenario(scenario: &str) -> Result<()> {
     let directory = assert_fs::TempDir::new()?;
+    let helper = directory.path().join("bootty-daemon");
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact embedded_rmux_scenario_child --nocapture\n",
+            bootty_host::shell_quote(&std::env::current_exe()?.to_string_lossy()),
+        ),
+    )?;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", SCENARIO_CHILD_TEST])
         .env(SCENARIO_ENV, scenario)
+        .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
         .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", ISOLATED_PATH)
@@ -838,6 +931,7 @@ fn run_embedded_scenario(scenario: &str) -> Result<()> {
 }
 
 enum RemotePaneStreamFrame {
+    End,
     Rebase(Vec<u8>),
     Bytes(Vec<u8>),
 }
@@ -905,8 +999,9 @@ fn next_remote_pane_stream_frame(
         if let Some(error) = frame.get("Error").and_then(serde_json::Value::as_str) {
             anyhow::bail!("remote pane stream failed: {error}");
         }
-        if frame.contains_key("End") {
-            anyhow::bail!("remote pane stream ended before its next frame");
+        if let Some(reason) = frame.get("End") {
+            anyhow::ensure!(reason.is_null(), "remote pane stream failed: {reason}");
+            return Ok(RemotePaneStreamFrame::End);
         }
     }
 }

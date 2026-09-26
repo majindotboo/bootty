@@ -135,6 +135,12 @@ catalog-backed remote Spaces.
 
 ## Terminal path
 
+`bootty-mux` delivers rmux live pane bytes through its public `pipe-pane` API.
+A Bootty daemon helper shares each pane's stream over local IPC with bounded
+buffers and exits when its last reader leaves. No output is spooled to disk.
+The SDK keyframe restores the initial text and modes; its bounded recovery ring
+is not used for live image data. Remote pane readers use the same host-side path.
+
 ```text
 TerminalSession
   -> TerminalWorker

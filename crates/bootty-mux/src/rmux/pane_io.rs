@@ -3,8 +3,8 @@ use std::{collections::VecDeque, sync::OnceLock, thread};
 use anyhow::{Context, Result};
 use rmux_proto::{PaneTarget, Request, Response};
 use rmux_sdk::{
-    Pane, PaneId, PaneOutputChunk, PaneOutputStart, PaneRecoveryEvent, PaneStreamEndReason, Rmux,
-    SessionName, TerminalSizeSpec,
+    Pane, PaneId, PaneOutputChunk, PaneOutputStart, PaneRecoveryEvent, Rmux, SessionName,
+    TerminalSizeSpec,
 };
 use tokio::runtime::Builder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -14,8 +14,6 @@ use super::bridge::{connect_bootty_rmux, rmux_missing_target_text, rmux_stale_ta
 
 pub const RMUX_OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const RMUX_OUTPUT_EVENT_MAX_BYTES: usize = 16 * 1024;
-const RMUX_OUTPUT_POLL_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(2);
-const RMUX_OUTPUT_POLL_MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(16);
 // Kitty keyboard sequences are a handful of bytes; anything longer is some
 // other CSI the scanner can skip instead of buffering.
 const RMUX_KEYBOARD_PROTOCOL_MAX_SEQUENCE_BYTES: usize = 64;
@@ -71,6 +69,12 @@ pub enum RmuxPaneEvent {
     ProcessExited,
     End(Option<String>),
     Error(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneStreamOutcome {
+    Closed,
+    TransportLost,
 }
 
 pub struct RmuxPaneIo {
@@ -209,63 +213,81 @@ fn run_pane_worker(mut request_rx: tokio_mpsc::UnboundedReceiver<RmuxPaneRequest
 async fn run_pane_io(mut request: RmuxOpenPaneRequest) {
     let result: Result<()> = async {
         request.target.session_name()?;
-        let rmux = connect_bootty_rmux().await?;
-        let pane = pane_for_target(&rmux, &request.target).await?;
-        let mut keyboard_protocol = restore_keyboard_protocol(&pane).await?;
-        let stored_sgr_pixels_mouse = pane
-            .option(RMUX_SGR_PIXELS_MOUSE_OPTION)
-            .await
-            .ok()
-            .flatten();
-        let mut sgr_pixels_mouse = if let Some(stored) = stored_sgr_pixels_mouse {
-            SgrPixelsMouseMode::restored(&stored)
-        } else {
-            retained_sgr_pixels_mouse_mode(&pane).await?
-        };
-        // Programs push and pop these flags around every prompt, so the daemon
-        // round-trip must not sit in the byte path. The writer coalesces bursts and
-        // keeps the writes ordered; it stops when this worker drops the sender.
-        let (keyboard_option_tx, keyboard_option_writer) = spawn_option_writer(
-            &pane,
-            RMUX_KEYBOARD_PROTOCOL_OPTION,
-            keyboard_protocol.flags_text(),
-        );
-        let (sgr_pixels_mouse_tx, sgr_pixels_mouse_writer) = spawn_option_writer(
-            &pane,
-            RMUX_SGR_PIXELS_MOUSE_OPTION,
-            sgr_pixels_mouse.option_text(),
-        );
-
-        stream_pane_output(
-            &mut request,
-            &rmux,
-            &pane,
-            &mut keyboard_protocol,
-            &mut sgr_pixels_mouse,
-            &keyboard_option_tx,
-            &sgr_pixels_mouse_tx,
-        )
-        .await?;
-        // The next open reads this option, and reopening can follow the worker's
-        // exit immediately. Let the writer finish, then make the final state
-        // durable before this worker goes away.
-        drop(keyboard_option_tx);
-        let _ = keyboard_option_writer.await;
-        drop(sgr_pixels_mouse_tx);
-        let _ = sgr_pixels_mouse_writer.await;
-        let _ = pane
-            .set_option(
+        let mut reconnects = 0_u8;
+        loop {
+            let rmux = connect_bootty_rmux().await?;
+            let pane = pane_for_target(&rmux, &request.target).await?;
+            let mut keyboard_protocol = restore_keyboard_protocol(&pane).await?;
+            let stored_sgr_pixels_mouse = pane
+                .option(RMUX_SGR_PIXELS_MOUSE_OPTION)
+                .await
+                .ok()
+                .flatten();
+            let mut sgr_pixels_mouse = if let Some(stored) = stored_sgr_pixels_mouse {
+                SgrPixelsMouseMode::restored(&stored)
+            } else {
+                retained_sgr_pixels_mouse_mode(&pane).await?
+            };
+            // Programs push and pop these flags around every prompt, so the daemon
+            // round-trip must not sit in the byte path. The writer coalesces bursts and
+            // keeps the writes ordered; it stops when this worker drops the sender.
+            let (keyboard_option_tx, keyboard_option_writer) = spawn_option_writer(
+                &pane,
                 RMUX_KEYBOARD_PROTOCOL_OPTION,
-                &keyboard_protocol.flags_text(),
-            )
-            .await;
-        let _ = pane
-            .set_option(
+                keyboard_protocol.flags_text(),
+            );
+            let (sgr_pixels_mouse_tx, sgr_pixels_mouse_writer) = spawn_option_writer(
+                &pane,
                 RMUX_SGR_PIXELS_MOUSE_OPTION,
-                &sgr_pixels_mouse.option_text(),
+                sgr_pixels_mouse.option_text(),
+            );
+
+            let outcome = stream_pane_output(
+                &mut request,
+                &rmux,
+                &pane,
+                &mut keyboard_protocol,
+                &mut sgr_pixels_mouse,
+                &keyboard_option_tx,
+                &sgr_pixels_mouse_tx,
             )
-            .await;
-        Ok(())
+            .await?;
+            if outcome == PaneStreamOutcome::TransportLost {
+                // A new recovery stream starts with a complete rebase. Stop the
+                // old option writers before reconnecting to the daemon.
+                keyboard_option_writer.abort();
+                sgr_pixels_mouse_writer.abort();
+                reconnects = reconnects.saturating_add(1);
+                // Deliberate limit: repeated losses need an error instead of a
+                // busy reconnect loop. Raise this only if transient failures
+                // regularly outlast two fresh streams.
+                if reconnects > 2 {
+                    anyhow::bail!("rmux pane output ended: TransportLost");
+                }
+                continue;
+            }
+            let _ = request.output_tx.send(RmuxPaneEvent::End(None)).await;
+            // The next open reads this option, and reopening can follow the worker's
+            // exit immediately. Let the writer finish, then make the final state
+            // durable before this worker goes away.
+            drop(keyboard_option_tx);
+            let _ = keyboard_option_writer.await;
+            drop(sgr_pixels_mouse_tx);
+            let _ = sgr_pixels_mouse_writer.await;
+            let _ = pane
+                .set_option(
+                    RMUX_KEYBOARD_PROTOCOL_OPTION,
+                    &keyboard_protocol.flags_text(),
+                )
+                .await;
+            let _ = pane
+                .set_option(
+                    RMUX_SGR_PIXELS_MOUSE_OPTION,
+                    &sgr_pixels_mouse.option_text(),
+                )
+                .await;
+            return Ok(());
+        }
     }
     .await;
     if let Err(error) = result {
@@ -287,59 +309,75 @@ async fn stream_pane_output(
     sgr_pixels_mouse: &mut SgrPixelsMouseMode,
     keyboard_option_tx: &tokio::sync::watch::Sender<String>,
     sgr_pixels_mouse_tx: &tokio::sync::watch::Sender<String>,
-) -> Result<()> {
-    let mut recovery = pane.recover_output().await?;
+) -> Result<PaneStreamOutcome> {
+    let target = pane_input_target(rmux, &request.target).await?;
+    let pane_id = request
+        .target
+        .pane_id
+        .as_deref()
+        .context("pane output requires a pane id")?;
+    let mut output = super::pipe_output::PipeOutput::open(target, pane_id).await?;
+    let capture = pane.recover_output();
+    tokio::pin!(capture);
+    let mut buffer = vec![0; RMUX_OUTPUT_EVENT_MAX_BYTES];
+    // Keep bytes produced during capture before its authoritative redraw, as in
+    // the original pipe-pane restore path. Later bytes continue from that frame.
+    let mut recovery = loop {
+        tokio::select! {
+            () = request.output_tx.closed() => return Ok(PaneStreamOutcome::Closed),
+            result = &mut capture => break result?,
+            count = output.read(&mut buffer) => {
+                let count = count?;
+                if count == 0 { return Ok(PaneStreamOutcome::Closed); }
+                if request.output_tx.send(RmuxPaneEvent::Bytes(buffer.get(..count).context("invalid pipe read length")?.to_vec())).await.is_err() {
+                    return Ok(PaneStreamOutcome::Closed);
+                }
+            }
+        }
+    };
+    for event in recovery.poll_once().await? {
+        if let PaneRecoveryEvent::Rebase(mut rebase) = event {
+            append_kitty_keyboard_protocol(&mut rebase.keyframe, keyboard_protocol);
+            append_sgr_pixels_mouse_mode(&mut rebase.keyframe, sgr_pixels_mouse);
+            if request
+                .output_tx
+                .send(RmuxPaneEvent::Rebase(rebase.keyframe))
+                .await
+                .is_err()
+            {
+                return Ok(PaneStreamOutcome::Closed);
+            }
+        }
+    }
+    drop(recovery);
     let mut pending_events = VecDeque::new();
     let mut recovery_ended = false;
-    let mut poll_delay = RMUX_OUTPUT_POLL_INITIAL_DELAY;
-    let mut next_poll = tokio::time::Instant::now();
+    let mut transport_lost = false;
     loop {
         if request.output_tx.is_closed() || (recovery_ended && pending_events.is_empty()) {
             break;
         }
-
         tokio::select! {
+            () = request.output_tx.closed() => break,
             permit = request.output_tx.reserve(), if !pending_events.is_empty() => {
-                let Ok(permit) = permit else {
-                    break;
-                };
+                let Ok(permit) = permit else { break; };
                 if let Some(event) = pending_events.pop_front() { permit.send(event); }
             }
-            () = tokio::time::sleep_until(next_poll), if pending_events.is_empty() && !recovery_ended => {
-                let events = recovery.poll_once().await?;
-                if events.is_empty() {
-                    poll_delay = poll_delay.saturating_mul(2).min(RMUX_OUTPUT_POLL_MAX_DELAY);
+            count = output.read(&mut buffer), if pending_events.is_empty() && !recovery_ended => {
+                let count = count?;
+                if count == 0 {
+                    transport_lost = !pane_process_exited(pane).await;
+                    recovery_ended = true;
+                    if !transport_lost { pending_events.push_back(RmuxPaneEvent::ProcessExited); }
                 } else {
-                    poll_delay = RMUX_OUTPUT_POLL_INITIAL_DELAY;
-                }
-                next_poll = tokio::time::Instant::now().checked_add(poll_delay).context("rmux output poll deadline overflow")?;
-                for event in events {
-                    match event {
-                        PaneRecoveryEvent::Rebase(mut rebase) => {
-                            append_kitty_keyboard_protocol(&mut rebase.keyframe, keyboard_protocol);
-                            append_sgr_pixels_mouse_mode(&mut rebase.keyframe, sgr_pixels_mouse);
-                            pending_events.push_back(RmuxPaneEvent::Rebase(rebase.keyframe));
-                        }
-                        PaneRecoveryEvent::Bytes { bytes, .. } => {
-                            if let Some(flags) = keyboard_protocol.observe(&bytes) {
-                                let _ = keyboard_option_tx.send(flags);
-                            }
-                            if let Some(enabled) = sgr_pixels_mouse.observe(&bytes) {
-                                let _ = sgr_pixels_mouse_tx.send(enabled);
-                            }
-                            queue_bytes(&mut pending_events, bytes);
-                        }
-                        PaneRecoveryEvent::Lifecycle(_) => {
-                            pending_events.push_back(RmuxPaneEvent::ProcessExited);
-                        }
-                        PaneRecoveryEvent::End(reason) => {
-                            let error = (!matches!(reason, PaneStreamEndReason::PaneRemoved))
-                                .then(|| format!("{reason:?}"));
-                            pending_events.push_back(RmuxPaneEvent::End(error));
-                            recovery_ended = true;
-                        }
-                        _ => anyhow::bail!("rmux returned an unsupported pane recovery event"),
+                    let bytes = buffer.get(..count).context("invalid pipe read length")?;
+                    if let Some(flags) = keyboard_protocol.observe(bytes) {
+                        let _ = keyboard_option_tx.send(flags);
                     }
+                    if let Some(enabled) = sgr_pixels_mouse.observe(bytes) {
+                        let _ = sgr_pixels_mouse_tx.send(enabled);
+                    }
+                    queue_bytes(&mut pending_events, bytes.to_vec());
                 }
             }
             Some(mut bytes) = request.input_rx.recv() => {
@@ -368,7 +406,21 @@ async fn stream_pane_output(
             else => break,
         }
     }
-    Ok(())
+    Ok(if transport_lost && !request.output_tx.is_closed() {
+        PaneStreamOutcome::TransportLost
+    } else {
+        PaneStreamOutcome::Closed
+    })
+}
+
+async fn pane_process_exited(pane: &Pane) -> bool {
+    match pane.info().await {
+        Ok(info) => info
+            .panes
+            .iter()
+            .all(|pane| pane.process == rmux_sdk::PaneProcessState::Exited),
+        Err(error) => pane_gone_error(&error.into()),
+    }
 }
 
 async fn restore_keyboard_protocol(pane: &Pane) -> Result<KittyKeyboardProtocol> {

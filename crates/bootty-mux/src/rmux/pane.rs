@@ -599,9 +599,18 @@ impl TerminalRuntime for RmuxNativeTerminal {
     }
 
     fn copy_mode_active(&mut self) -> Result<bool> {
-        self.request("reporting copy mode", |done| {
+        if self.closed.load(Ordering::Relaxed) {
+            self.check_worker_error()?;
+            return Ok(false);
+        }
+        let result = self.request("reporting copy mode", |done| {
             RmuxTerminalCommand::CopyModeActive { done }
-        })
+        });
+        if result.is_err() && self.closed.load(Ordering::Relaxed) {
+            self.check_worker_error()?;
+            return Ok(false);
+        }
+        result
     }
 
     fn handle_copy_mode_action(
