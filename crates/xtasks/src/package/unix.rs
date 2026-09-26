@@ -145,9 +145,12 @@ fn dynamic_dependencies(binary: &Path) -> Result<Vec<String>> {
             let name = line.split_whitespace().next()?;
             if env::consts::OS == "macos" {
                 name.strip_prefix("@rpath/").filter(|name| {
-                    Path::new(name)
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
+                    // macOS 13+ provides this runtime in its dyld cache. The app's
+                    // Swift rpath resolves it; copying a toolchain runtime is incorrect.
+                    *name != "libswift_Concurrency.dylib"
+                        && Path::new(name)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
                 })
             } else {
                 name.starts_with("lib")

@@ -1129,7 +1129,19 @@ fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] 
     assert!(
         matches!(run("files.save",arguments),CommandOutcome::Failed{code,..} if code=="file_failed")
     );
-    assert_eq!(fs::read_to_string(path).unwrap(), "external");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+    let image = b"\x89PNG\r\n\x1a\n\0\xff";
+    fs::write(&path, image).unwrap();
+    let CommandOutcome::Success { value, .. } =
+        run("files.read", vec![path.to_string_lossy().into_owned()])
+    else {
+        panic!("read image")
+    };
+    let FileResponse::Media(snapshot) = serde_json::from_value(value).unwrap() else {
+        panic!("image");
+    };
+    assert_eq!(snapshot.len, u64::try_from(image.len()).unwrap());
+    assert_eq!(snapshot.kind, bootty_host::media::MediaKind::Image);
 }
 
 #[rstest]

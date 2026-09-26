@@ -5,7 +5,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_DAEMON_PROGRAM: &str = "bootty-daemon";
-pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "10";
+pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "12";
 pub fn remote_exec_program() -> &'static str {
     static PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(

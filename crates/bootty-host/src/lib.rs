@@ -4,6 +4,7 @@ pub mod file_watch;
 pub mod files;
 mod install;
 pub mod jobs;
+pub mod media;
 mod process;
 mod shell;
 pub mod ssh;

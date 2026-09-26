@@ -285,8 +285,10 @@ impl bootty_host::CommandRunner for &RemoteFiles {
             }
         };
         let mut response = request.execute()?;
-        if let FileResponse::Document(snapshot) = &mut response {
-            snapshot.path = original_path;
+        match &mut response {
+            FileResponse::Document(snapshot) => snapshot.path = original_path,
+            FileResponse::Media(descriptor) => descriptor.path = original_path,
+            _ => {}
         }
         Ok(bootty_host::CommandOutput {
             success: true,
@@ -294,6 +296,48 @@ impl bootty_host::CommandRunner for &RemoteFiles {
             stderr: String::new(),
         })
     }
+}
+
+#[rstest]
+#[case(b"\x89PNG\r\n\x1a\n\0\xff".as_slice())]
+#[case(b"\xff\xd8\xff\0".as_slice())]
+#[case(b"GIF87a\0\xff".as_slice())]
+#[case(b"GIF89a\0\xff".as_slice())]
+#[case(b"RIFF\0\0\0\0WEBP\xff".as_slice())]
+fn image_reads_preserve_host_bytes_without_requiring_a_filename_extension(#[case] bytes: &[u8]) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let local = directory.child("local");
+    local.write_str("local namesake").unwrap();
+    let remote = directory.child("remote");
+    remote.write_binary(bytes).unwrap();
+    let request = FileRequest::Read {
+        path: local.path().to_string_lossy().into_owned(),
+    };
+    let host = bootty_host::remote::RemoteHost::new(
+        bootty_config::config::SshRemoteConfig::for_host("fixture-host"),
+    );
+    let FileResponse::Media(snapshot) = request
+        .execute_remote(
+            &host,
+            &RemoteFiles {
+                remote: remote.path().to_owned(),
+            },
+        )
+        .unwrap()
+    else {
+        panic!("image response")
+    };
+    assert_eq!(snapshot.len, u64::try_from(bytes.len()).unwrap());
+    assert_eq!(snapshot.kind, bootty_host::media::MediaKind::Image);
+    assert_eq!(snapshot.path, local.path().to_string_lossy());
+    assert!(
+        serde_json::to_vec(&FileResponse::Media(snapshot))
+            .unwrap()
+            .len()
+            < bootty_host::files::FILE_WIRE_LIMIT
+    );
+    local.assert("local namesake");
+    assert_eq!(fs::read(remote.path()).unwrap(), bytes);
 }
 
 #[rstest]

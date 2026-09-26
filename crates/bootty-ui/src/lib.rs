@@ -29,6 +29,8 @@ mod gpui_settings;
 mod gpui_settings_catalog;
 mod gpui_terminal_panel;
 mod gpui_terminal_view;
+#[cfg(target_os = "macos")]
+mod gpui_video;
 mod gpui_workspace;
 pub mod i18n;
 pub mod input;

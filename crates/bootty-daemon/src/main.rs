@@ -31,6 +31,17 @@ fn run() -> Result<ExitCode> {
             command_runtime::run_remote_ping();
             Ok(ExitCode::SUCCESS)
         }
+        "media" => {
+            let [request] = arguments else {
+                bail!("media requires one descriptor");
+            };
+            bootty_host::media::serve(
+                request,
+                std::io::BufReader::new(std::io::stdin().lock()),
+                std::io::stdout().lock(),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
         "transfer" => {
             let [request] = arguments else {
                 bail!("transfer requires one request");

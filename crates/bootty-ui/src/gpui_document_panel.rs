@@ -10,6 +10,10 @@ use bootty_control::{
 use bootty_host::files::{
     FileResponse, FileSnapshot, can_format, decode_document, encode_document,
 };
+use bootty_host::{
+    media::{MediaCancellation, MediaDescriptor, MediaKind, MediaReader},
+    remote::RemoteHost,
+};
 use gpui_kit::component::{
     Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -20,8 +24,10 @@ use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, WeakEntity, Window, div, prelude::*,
 };
+use image::ImageDecoder as _;
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -35,6 +41,71 @@ gpui_kit::actions!(
     ]
 );
 pub struct DocumentClosed;
+
+enum MediaPreview {
+    Image(Arc<gpui_kit::RenderImage>),
+    #[cfg(target_os = "macos")]
+    Video(crate::gpui_video::Playback),
+}
+
+fn load_media(source: MediaReader, descriptor: &MediaDescriptor) -> anyhow::Result<MediaPreview> {
+    match descriptor.kind {
+        MediaKind::Image => decode_image(source).map(MediaPreview::Image),
+        MediaKind::Video => {
+            #[cfg(target_os = "macos")]
+            {
+                let content_type = if Path::new(&descriptor.name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mov"))
+                {
+                    "com.apple.quicktime-movie"
+                } else {
+                    "public.mpeg-4"
+                };
+                crate::gpui_video::Playback::open(source, content_type).map(MediaPreview::Video)
+            }
+            #[cfg(not(target_os = "macos"))]
+            anyhow::bail!("Video playback is not available on this platform")
+        }
+    }
+}
+
+enum ReadMode {
+    Refresh,
+    // Approval covers this draft, not edits made while the host read or decode is pending.
+    Reload { draft: Option<String> },
+}
+
+fn decode_image(source: MediaReader) -> anyhow::Result<Arc<gpui_kit::RenderImage>> {
+    let mut reader =
+        image::ImageReader::new(std::io::BufReader::new(source)).with_guessed_format()?;
+    // Keep decoded previews bounded; larger images need downsampling before allocation.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    anyhow::ensure!(
+        u64::from(width).saturating_mul(u64::from(height)) <= 16 * 1024 * 1024,
+        "image previews are limited to 16 megapixels"
+    );
+    // Preserve ImageReader::decode's allocation budget when accessing decoder metadata directly.
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    let orientation = decoder.orientation()?;
+    // Animated files show their first frame until the viewer owns bounded animation playback.
+    let mut image = image::DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    let mut pixels = image.into_rgba8();
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2); // GPUI textures use BGRA.
+    }
+    Ok(Arc::new(gpui_kit::RenderImage::new([image::Frame::new(
+        pixels,
+    )])))
+}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -80,9 +151,13 @@ pub struct DocumentPanel {
     sender: BoundAppCommandSender,
     focus: FocusHandle,
     editor: Option<Entity<FileEditor>>,
+    image: Option<Arc<gpui_kit::RenderImage>>,
+    #[cfg(target_os = "macos")]
+    video: Option<Entity<crate::gpui_video::VideoPreview>>,
+    media_load: Option<MediaCancellation>,
     digest: Option<String>,
     error: Option<String>,
-    external: Option<FileSnapshot>,
+    external: bool,
     pending: bool,
     formatting: bool,
     active: bool,
@@ -123,9 +198,13 @@ impl DocumentPanel {
             sender,
             focus: cx.focus_handle(),
             editor: None,
+            image: None,
+            #[cfg(target_os = "macos")]
+            video: None,
+            media_load: None,
             digest: None,
             error: None,
-            external: None,
+            external: false,
             pending: false,
             formatting: false,
             active: false,
@@ -236,8 +315,7 @@ impl DocumentPanel {
         let encoded = match encode_document(&source) {
             Ok(encoded) => encoded,
             Err(error) => {
-                self.error = Some(error.to_string());
-                cx.notify();
+                self.show_error("Could not format this file.", error, cx);
                 return;
             }
         };
@@ -253,8 +331,7 @@ impl DocumentPanel {
         ) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.error = Some(format!("Format unavailable: {error:?}"));
-                cx.notify();
+                self.show_error("Could not format this file.", format!("{error:?}"), cx);
                 return;
             }
         };
@@ -308,7 +385,7 @@ impl DocumentPanel {
                     self.error = Some(crate::i18n::t(cx, "document-changed-during-format"));
                 }
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => self.show_error("Could not format this file.", error, cx),
         }
         cx.notify();
     }
@@ -321,12 +398,13 @@ impl DocumentPanel {
     ) {
         self.line = line.saturating_sub(1);
         self.column = column.saturating_sub(1);
-        self.focus_handle(cx).focus(window, cx);
         if let Some(editor) = &self.editor {
             editor.update(cx, |editor, cx| {
                 editor.set_cursor_position(self.line, self.column, window, cx);
             });
         }
+        // Setting the cursor focuses the source editor; restore the visible presentation last.
+        self.focus_handle(cx).focus(window, cx);
         cx.emit(PanelEvent::LayoutChanged);
     }
 
@@ -339,6 +417,13 @@ impl DocumentPanel {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let read = if reload {
+            ReadMode::Reload {
+                draft: self.draft(cx),
+            }
+        } else {
+            ReadMode::Refresh
+        };
         let mut invocation = CommandInvocation::from_action(command, Caller::Internal);
         invocation.target = Some(self.context.target.clone());
         invocation.arguments = args;
@@ -367,7 +452,7 @@ impl DocumentPanel {
                 .spawn(async move { receiver.recv() })
                 .await;
             _ = weak.update_in(cx, |this, window, cx| {
-                this.receive_outcome(outcome, saved, reload, window, cx);
+                this.receive_outcome(outcome, saved, read, window, cx);
             });
         })
         .detach();
@@ -378,7 +463,7 @@ impl DocumentPanel {
         &mut self,
         outcome: Result<CommandOutcome, std::sync::mpsc::RecvError>,
         saved: Option<String>,
-        reload: bool,
+        read: ReadMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -393,7 +478,10 @@ impl DocumentPanel {
         };
         match response {
             Ok(FileResponse::Document(snapshot)) => {
-                self.receive(snapshot, reload, window, cx);
+                self.receive(snapshot, &read, window, cx);
+            }
+            Ok(FileResponse::Media(descriptor)) => {
+                self.receive_media(descriptor, read, window, cx);
             }
             Ok(FileResponse::Saved {
                 digest,
@@ -405,7 +493,7 @@ impl DocumentPanel {
                 };
                 self.digest = Some(digest);
                 self.error = None;
-                self.external = None;
+                self.external = false;
                 if let Some(editor) = &self.editor {
                     editor.update(cx, |editor, cx| {
                         editor.mark_saved(saved, durability_warning, cx);
@@ -435,13 +523,29 @@ impl DocumentPanel {
         cx.notify();
     }
 
+    fn show_error(
+        &mut self,
+        summary: &str,
+        details: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        eprintln!("File operation failed for {}: {details}", self.path);
+        self.error = Some(summary.to_owned());
+        cx.notify();
+    }
+
     fn fail(&mut self, error: String, saving: bool, cx: &mut Context<Self>) {
+        let summary = if saving {
+            "Could not save this file. Your changes are still here."
+        } else {
+            "Could not open this file."
+        };
+        self.show_error(summary, error, cx);
         if saving && let Some(editor) = &self.editor {
-            editor.update(cx, |editor, cx| editor.save_failed(error.clone(), cx));
+            editor.update(cx, |editor, cx| editor.save_failed(summary.to_owned(), cx));
+            self.error = None;
         }
         self.close_after_save = false;
-        self.error = (!saving).then_some(error);
-        cx.notify();
     }
 
     fn refresh(&mut self, reload: bool, window: &Window, cx: &mut Context<Self>) {
@@ -464,32 +568,50 @@ impl DocumentPanel {
         }
     }
 
+    fn draft(&self, cx: &App) -> Option<String> {
+        self.editor
+            .as_ref()
+            .map(|editor| editor.read(cx).contents(cx))
+    }
+
+    fn accepts_snapshot(&self, read: &ReadMode, cx: &App) -> bool {
+        match read {
+            ReadMode::Refresh => !self.needs_close_prompt(cx),
+            ReadMode::Reload { draft } => self.draft(cx).as_ref() == draft.as_ref(),
+        }
+    }
+
     fn receive(
         &mut self,
         snapshot: FileSnapshot,
-        reload: bool,
+        read: &ReadMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !reload && self.digest.as_ref() == Some(&snapshot.digest) {
-            self.external = None;
+        if matches!(read, ReadMode::Refresh) && self.digest.as_ref() == Some(&snapshot.digest) {
+            self.external = false;
             self.error = None;
             return;
         }
         let contents = match snapshot.contents() {
             Ok(contents) => contents,
             Err(error) => {
-                self.error = Some(error.to_string());
+                self.fail(error.to_string(), false, cx);
                 return;
             }
         };
-        if !reload && self.needs_close_prompt(cx) {
-            self.external = Some(snapshot);
+        if !self.accepts_snapshot(read, cx) {
+            self.external = true;
             return;
         }
         self.digest = Some(snapshot.digest);
         self.error = None;
-        self.external = None;
+        self.external = false;
+        self.image = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.video = None;
+        }
         if let Some(editor) = &self.editor {
             let (line, column) = editor.read(cx).cursor_position(cx);
             editor.update(cx, |editor, cx| {
@@ -509,6 +631,105 @@ impl DocumentPanel {
         } else {
             self.create_editor(contents, window, cx);
         }
+    }
+
+    fn receive_media(
+        &mut self,
+        descriptor: MediaDescriptor,
+        read: ReadMode,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
+        if matches!(read, ReadMode::Refresh) && self.digest.as_ref() == Some(&descriptor.revision) {
+            self.external = false;
+            self.error = None;
+            return;
+        }
+        if !self.accepts_snapshot(&read, cx) {
+            self.external = true;
+            return;
+        }
+        let remote = self.context.remote.clone().map(RemoteHost::new);
+        self.pending = true;
+        cx.spawn_in(window, async move |weak, cx| {
+            let opening = descriptor.clone();
+            let source = cx
+                .background_executor()
+                .spawn(async move { MediaReader::open(&opening, remote.as_ref()) })
+                .await;
+            let result = match source {
+                Ok(source) => {
+                    let cancellation = source.cancellation();
+                    let accepted = weak
+                        .update_in(cx, |this, _, cx| {
+                            if !this.accepts_snapshot(&read, cx) {
+                                this.external = true;
+                                this.pending = false;
+                                cx.notify();
+                                return false;
+                            }
+                            this.media_load = Some(cancellation);
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !accepted {
+                        return;
+                    }
+                    let media = descriptor.clone();
+                    cx.background_executor()
+                        .spawn(async move { load_media(source, &media) })
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            _ = weak.update_in(cx, |this, window, cx| {
+                this.media_load = None;
+                this.pending = false;
+                if !this.accepts_snapshot(&read, cx) {
+                    this.external = true;
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(preview) => {
+                        if this.focus_handle(cx).contains_focused(window, cx) {
+                            this.focus.focus(window, cx);
+                        }
+                        this.editor = None;
+                        this.image = None;
+                        #[cfg(target_os = "macos")]
+                        {
+                            this.video = None;
+                        }
+                        match preview {
+                            MediaPreview::Image(image) => this.image = Some(image),
+                            #[cfg(target_os = "macos")]
+                            MediaPreview::Video(playback) => {
+                                this.video =
+                                    Some(cx.new(|cx| {
+                                        crate::gpui_video::VideoPreview::new(playback, cx)
+                                    }));
+                            }
+                        }
+                        this.digest = Some(descriptor.revision);
+                        this.external = false;
+                        this.error = None;
+                    }
+                    Err(error) => this.show_error(
+                        if descriptor.kind == MediaKind::Video {
+                            "Could not play this video."
+                        } else {
+                            "Could not open this image."
+                        },
+                        error,
+                        cx,
+                    ),
+                }
+                cx.emit(PanelEvent::LayoutChanged);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn create_editor(&mut self, contents: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -531,10 +752,10 @@ impl DocumentPanel {
         editor.update(cx, |editor, cx| {
             editor.set_cursor_position(self.line, self.column, window, cx);
         });
-        if self.focus.is_focused(window) && self.active {
+        if self.focus.is_focused(window) && self.active && !self.preview {
             let focus = editor.read(cx).focus_handle(cx);
             focus.focus(window, cx);
-        } else if !self.active {
+        } else if !self.active || self.preview {
             if let Some(focus) = focus {
                 focus.focus(window, cx);
             } else {
@@ -583,12 +804,33 @@ impl DocumentPanel {
         self.subscriptions.push(subscription);
     }
 
-    pub(crate) const fn set_host_visible(&mut self, visible: bool) {
+    pub(crate) fn set_host_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.host_visible = visible;
+        if !visible {
+            self.pause_video(cx);
+        }
     }
 
-    pub(crate) const fn set_preview(&mut self, preview: bool) {
-        self.preview = preview;
+    fn pause_video(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(video) = &self.video {
+            video.update(cx, crate::gpui_video::VideoPreview::pause);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    pub(crate) fn set_preview(&mut self, preview: bool) {
+        self.preview = preview && self.is_markdown();
+    }
+
+    fn is_markdown(&self) -> bool {
+        Path::new(&self.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            })
     }
 
     fn request_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -671,10 +913,21 @@ impl DocumentPanel {
     }
 }
 
+impl Drop for DocumentPanel {
+    fn drop(&mut self) {
+        if let Some(load) = &self.media_load {
+            load.cancel();
+        }
+    }
+}
+
 impl EventEmitter<PanelEvent> for DocumentPanel {}
 impl EventEmitter<DocumentClosed> for DocumentPanel {}
 impl Focusable for DocumentPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.preview {
+            return self.focus.clone();
+        }
         self.editor.as_ref().map_or_else(
             || self.focus.clone(),
             |editor| editor.read(cx).focus_handle(cx),
@@ -693,12 +946,16 @@ impl BasePanel for DocumentPanel {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {
         self.group = Some(group);
     }
-    fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.pause_video(cx);
         self.group = None;
         self.active = false;
     }
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.active = active;
+        if !active {
+            self.pause_video(cx);
+        }
         if active {
             self.refresh(false, window, cx);
         }
@@ -804,39 +1061,98 @@ impl Render for DocumentPanel {
             .flex_col()
             .min_h_0()
             .min_w_0();
-        if let Some(error) = &self.error {
+        if let Some(error) = &self.error
+            && self.has_content()
+        {
             body = body.child(gpui_kit::component::alert::Alert::error(
                 "document-error",
                 error.clone(),
             ));
         }
-        if self.external.is_some() {
+        if self.external {
             body = body.child(self.external_change_banner(cx));
         }
         body.child(self.render_content(cx))
-            .child(self.render_status(cx))
+            .when(self.editor.is_some(), |body| {
+                body.child(self.render_status(cx))
+            })
     }
 }
 
 impl DocumentPanel {
+    const fn has_content(&self) -> bool {
+        let present = self.editor.is_some() || self.image.is_some();
+        #[cfg(target_os = "macos")]
+        let present = present || self.video.is_some();
+        present
+    }
+
     fn render_content(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        #[cfg(target_os = "macos")]
+        if let Some(video) = &self.video {
+            return video.clone().into_any_element();
+        }
+        if let Some(image) = &self.image {
+            return div()
+                .id("document-image")
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .p_4()
+                .child(
+                    gpui_kit::img(image.clone())
+                        .size_full()
+                        .object_fit(gpui_kit::ObjectFit::Contain),
+                )
+                .into_any_element();
+        }
         let Some(editor) = &self.editor else {
-            return if self.pending {
-                "Loading…"
-            } else {
-                "Document unavailable"
-            }
-            .into_any_element();
+            return div()
+                .flex_1()
+                .min_h_0()
+                .p_4()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_2()
+                .text_sm()
+                .child(if self.pending {
+                    "Opening…".to_owned()
+                } else {
+                    self.error
+                        .clone()
+                        .unwrap_or_else(|| "File unavailable".to_owned())
+                })
+                .when(!self.pending, |body| {
+                    body.child(
+                        Button::new("retry-file")
+                            .small()
+                            .ghost()
+                            .label("Retry")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.refresh(false, window, cx)),
+                            ),
+                    )
+                })
+                .into_any_element();
         };
         if self.preview {
             div()
                 .id("document-preview")
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .overflow_y_scroll()
-                .child(gpui_kit::component::text::markdown(
-                    editor.read(cx).contents(cx),
-                ))
+                .child(
+                    div().p_4().child(
+                        gpui_kit::component::text::TextView::markdown(
+                            "document-markdown",
+                            editor.read(cx).contents(cx),
+                        )
+                        .selectable(true)
+                        .scrollable(false),
+                    ),
+                )
                 .into_any_element()
         } else {
             div()
@@ -848,11 +1164,10 @@ impl DocumentPanel {
     }
 
     fn render_status(&self, cx: &Context<Self>) -> impl IntoElement {
-        let markdown = self.path.to_ascii_lowercase().ends_with(".md")
-            || self.path.to_ascii_lowercase().ends_with(".markdown");
         let position = self
             .editor
             .as_ref()
+            .filter(|_| !self.preview)
             .map(|editor| editor.read(cx).cursor_position(cx));
 
         div()
@@ -861,15 +1176,8 @@ impl DocumentPanel {
             .gap_2()
             .px_2()
             .py_1()
-            .text_sm()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("{} · {}", self.context.host, self.path)),
-            )
-            .when(markdown, |row| {
+            .text_xs()
+            .when(self.is_markdown() && self.editor.is_some(), |row| {
                 row.child(
                     Button::new("preview-document")
                         .label(crate::i18n::t(
@@ -882,8 +1190,9 @@ impl DocumentPanel {
                         ))
                         .ghost()
                         .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.preview = !this.preview;
+                            this.focus_handle(cx).focus(window, cx);
                             cx.emit(PanelEvent::LayoutChanged);
                             cx.notify();
                         })),

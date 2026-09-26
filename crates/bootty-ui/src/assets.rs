@@ -13,7 +13,11 @@ gpui_kit::assets::icon_assets!(
         TriangleAlert,
         Circle,
         Link,
-        ListFilter
+        ListFilter,
+        Play,
+        Pause,
+        Volume2,
+        VolumeX
     ]
 );
 

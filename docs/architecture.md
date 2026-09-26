@@ -445,13 +445,30 @@ key capture, while global application bindings remain available.
 revision-checked writes. Local callers and the `bootty-daemon file` endpoint
 execute the same typed request. Documents are UTF-8, at most 512 KiB; transport
 uses base64 so JSON escaping cannot overflow the control frame limit. The
-existing atomic-write owner preserves target permissions and symlinks. A save
+read sniffs a bounded header and returns metadata-only `MediaDescriptor` values
+for images and video containers. `bootty-host::media::MediaReader` owns a seekable
+local file or persistent SSH/WSL daemon channel. Encoded media has no document-size
+cap; each binary range and reader cache is bounded to 1 MiB. Open and range reads
+check an opaque file-metadata revision, separate from text-save SHA-256 revisions.
+Detected edits reject the source; metadata checks are not immutable snapshots.
+Remote reads have operation deadlines and explicit cancellation terminates their
+process tree. The UI decodes images off-thread with dimension and memory limits,
+applies EXIF orientation, fits the first frame, and retains host-bound refresh.
+Decoded pixel limits remain independent of the encoded media transport.
+On macOS, AVPlayer requests ranges from the same reader and owns video timing,
+decoding, orientation and audio. GPUI retains the current GPU frame. Hiding a
+preview pauses playback; closing it cancels its source. Other platforms retain
+image and Markdown previews.
+Markdown documents retain editable source and an optional selectable preview.
+The existing atomic-write owner preserves target permissions and symlinks. A save
 compares the loaded SHA-256 revision under the writer lease before replacement.
 Formatting runs a selected formatter on the host with the bounded draft on
 standard input and returns bounded output. It never writes the file.
 
-`bootty-ui` owns document drafts and Files/Document panel presentation. All I/O
-enters `files.*` through `CommandInvocation`, capturing a binding generation.
+`bootty-ui` owns document drafts and Files/Document panel presentation. Media discovery and document operations
+enter `files.*` through `CommandInvocation`, capturing a binding generation. Media
+readers use the resulting descriptor and captured remote configuration on a worker;
+large binary bodies never enter the control response.
 Document identity combines the host configuration digest with the absolute
 host path. Restore never silently adopts a different host. Dock persistence
 stores path, host identity, caret and preview mode, never document contents.

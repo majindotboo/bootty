@@ -670,6 +670,12 @@ filters loaded entries, shares Git decorations with Changes, and pages large
 directories. Refresh rereads the displayed directory; reopening a directory
 refreshes its children.
 
+PNG, JPEG, GIF, and WebP files open as read-only images fitted to the panel.
+Animated images show their first frame. Encoded media has no document-size cap;
+decoded images are limited to 8192 pixels per side and 16 megapixels.
+On macOS, video previews support playback, seeking, and audio through the same
+seekable media reader used for local, SSH, and WSL sources.
+
 Documents support Save (including Command/Ctrl-S), Reload, Markdown Preview, and
 Format Document (Alt/Option-Shift-F). Formatting uses `rustfmt` for Rust, `taplo`
 for TOML, and `prettier` for JavaScript, TypeScript, JSON/JSONC, Markdown,
@@ -685,8 +691,8 @@ Control-Alt-Up/Down on Windows to add cursors above or below.
 A dirty document's Close button offers Save, Discard, and Cancel. Closing a
 window or quitting with unsaved documents also asks; Save all keeps the window
 open so save errors remain visible. Saving over an external edit is rejected.
-Reload asks before replacing a draft. UTF-8 files up to 512 KiB are supported;
-binary files and larger documents report an explicit error.
+Reload asks before replacing a draft. UTF-8 files up to 512 KiB are editable;
+unsupported binary formats and larger text documents report an error.
 
 Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
 `files.save PATH EXPECTED_SHA256 CONTENT_BASE64` for the CLI and control socket.

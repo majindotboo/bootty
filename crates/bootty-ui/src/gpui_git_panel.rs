@@ -31,6 +31,7 @@ pub struct GitPanelContext {
     pub directory: String,
     pub host: String,
     pub host_identity: String,
+    pub remote: Option<bootty_config::config::RemoteConfig>,
 }
 
 #[expect(

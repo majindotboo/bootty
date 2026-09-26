@@ -471,6 +471,9 @@ impl WorkspaceDock {
         if self.restoring.is_some() || self.panels.context == context {
             return;
         }
+        for document in self.documents() {
+            document.update(cx, |document, cx| document.set_host_visible(false, cx));
+        }
         let saved = self.saved_layout(cx);
         let next = match self
             .retained_panels
@@ -741,7 +744,7 @@ impl WorkspaceDock {
     pub(crate) fn resume(&mut self, cx: &mut Context<Self>) {
         self.present = true;
         for document in self.documents() {
-            document.update(cx, |document, _| document.set_host_visible(true));
+            document.update(cx, |document, cx| document.set_host_visible(true, cx));
         }
         self.panels
             .changes

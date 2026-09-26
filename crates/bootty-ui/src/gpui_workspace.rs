@@ -937,6 +937,7 @@ impl GpuiWorkspace {
                     }),
                 host: remote.map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
                 host_identity,
+                remote: remote.cloned(),
             };
             self.set_workspace_context(scope, context, false, window, cx);
         }
@@ -1385,6 +1386,7 @@ impl GpuiWorkspace {
             directory,
             host,
             host_identity,
+            remote: remote.cloned(),
         };
         if !reuse {
             self.set_workspace_context(scope, context, false, window, cx);
@@ -1434,6 +1436,7 @@ impl GpuiWorkspace {
                 directory,
                 host,
                 host_identity,
+                remote: remote.cloned(),
             },
             true,
             window,

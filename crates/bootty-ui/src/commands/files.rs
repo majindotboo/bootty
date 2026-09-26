@@ -41,7 +41,7 @@ impl FileAction {
             id: id.to_owned(),
             title: title.to_owned(),
             description: format!(
-                "{title} on the target binding's host. Paths must be absolute; documents are UTF-8, up to 512 KiB."
+                "{title} on the target binding's host. Paths must be absolute; UTF-8 text documents are limited to 512 KiB. Image/video reads return seekable media metadata."
             ),
             arguments: CompactSchema { arguments },
             mutation,

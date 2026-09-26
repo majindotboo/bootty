@@ -1,6 +1,10 @@
 //! Bounded, host-local filesystem operations shared by the app and remote daemon.
 
-use std::{fs, io::Read as _, path::Path};
+use std::{
+    fs,
+    io::{Read as _, Seek as _, SeekFrom},
+    path::Path,
+};
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -69,6 +73,13 @@ pub struct FileSnapshot {
 }
 
 impl FileSnapshot {
+    /// Decode bounded text document bytes.
+    /// # Errors
+    /// Returns invalid base64 or file size errors.
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        decode_file_bytes(&self.content_base64)
+    }
+
     /// # Errors
     /// Returns an error for invalid base64, non-UTF-8 text, binary content, or an oversized document.
     pub fn contents(&self) -> Result<String> {
@@ -85,6 +96,7 @@ pub enum FileResponse {
     },
     Directory(DirectoryPage),
     Document(FileSnapshot),
+    Media(crate::media::MediaDescriptor),
     Saved {
         digest: String,
         durability_warning: Option<String>,
@@ -101,7 +113,7 @@ impl FileRequest {
         let response = match self {
             Self::Resolve { path, base } => resolve_location(path, base.as_deref())?,
             Self::List { path, offset } => FileResponse::Directory(list_directory(path, *offset)?),
-            Self::Read { path } => FileResponse::Document(read_document(path)?),
+            Self::Read { path } => read_document(path)?,
             Self::Save {
                 path,
                 expected_digest,
@@ -239,13 +251,21 @@ pub fn encode_document(contents: &str) -> Result<String> {
 /// # Errors
 /// Returns invalid base64, non-UTF-8, binary content, or document size errors.
 pub fn decode_document(encoded: &str) -> Result<String> {
-    if encoded.len() > MAX_DOCUMENT_BYTES.div_ceil(3).saturating_mul(4) {
-        bail!("documents are limited to 512 KiB");
-    }
-    let contents = String::from_utf8(STANDARD.decode(encoded).context("decode document bytes")?)
+    let contents = String::from_utf8(decode_file_bytes(encoded)?)
         .context("only UTF-8 documents can be edited")?;
     validate_document(&contents)?;
     Ok(contents)
+}
+
+fn decode_file_bytes(encoded: &str) -> Result<Vec<u8>> {
+    if encoded.len() > MAX_DOCUMENT_BYTES.div_ceil(3).saturating_mul(4) {
+        bail!("file previews are limited to 512 KiB");
+    }
+    let bytes = STANDARD.decode(encoded).context("decode file bytes")?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        bail!("file previews are limited to 512 KiB");
+    }
+    Ok(bytes)
 }
 
 fn validate_document(contents: &str) -> Result<()> {
@@ -272,29 +292,35 @@ fn path_string(path: &Path) -> Result<String> {
         .context("the file path is not UTF-8")
 }
 
-fn read_document(path: &str) -> Result<FileSnapshot> {
+fn read_document(path: &str) -> Result<FileResponse> {
     let file_path = require_absolute(path)?;
-    if !fs::metadata(file_path)?.is_file() {
-        bail!("only regular files can be edited");
+    let mut file = crate::media::open_file(path)?;
+    let mut header = Vec::with_capacity(32);
+    (&mut file).take(32).read_to_end(&mut header)?;
+    if let Some(kind) = crate::media::kind(&header) {
+        return Ok(FileResponse::Media(crate::media::describe(
+            path, &file, kind,
+        )?));
     }
-    let file = fs::File::open(file_path).with_context(|| format!("open {path}"))?;
-    if !file.metadata()?.is_file() {
-        bail!("only regular files can be edited");
-    }
+    file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     file.take(u64::try_from(MAX_DOCUMENT_BYTES + 1)?)
         .read_to_end(&mut bytes)?;
-    let contents = String::from_utf8(bytes).context("only UTF-8 documents can be edited")?;
-    Ok(FileSnapshot {
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        bail!("text documents are limited to 512 KiB");
+    }
+    validate_document(std::str::from_utf8(&bytes).context("only UTF-8 documents can be edited")?)?;
+    let snapshot = FileSnapshot {
         path: path.to_owned(),
         name: file_path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(path)
             .to_owned(),
-        digest: crate::install::checksum(contents.as_bytes()),
-        content_base64: encode_document(&contents)?,
-    })
+        digest: crate::install::checksum(&bytes),
+        content_base64: STANDARD.encode(bytes),
+    };
+    Ok(FileResponse::Document(snapshot))
 }
 
 fn list_directory(path: &str, offset: usize) -> Result<DirectoryPage> {
