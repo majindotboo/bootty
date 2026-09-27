@@ -173,6 +173,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # avplayer requires the macOS 26 SDK; Intel runners default to Xcode 16.
+      - name: Select Xcode 26
+        if: matrix.name == 'macos-x64'
+        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
