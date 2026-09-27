@@ -603,6 +603,7 @@ pub fn parse_keymap_sequence(source: &str) -> Result<KeymapSequence, KeymapSeque
     let (flags, source) = parse_sequence_flags(source)?;
     let triggers = source
         .split_ascii_whitespace()
+        .flat_map(split_legacy_triggers)
         .map(parse_legacy_trigger)
         .collect::<Result<Vec<_>, _>>()?;
     if triggers.is_empty() {
@@ -616,6 +617,23 @@ pub fn parse_keymap_sequence(source: &str) -> Result<KeymapSequence, KeymapSeque
         ));
     }
     Ok(KeymapSequence { triggers, flags })
+}
+
+fn split_legacy_triggers(source: &str) -> Vec<&str> {
+    let mut steps = Vec::new();
+    let mut start = 0;
+    for (index, _) in source.match_indices('>') {
+        let Some(step) = source.get(start..index) else {
+            continue;
+        };
+        // A literal `>` completes a key such as `alt+>`; only split after a complete trigger.
+        if parse_legacy_trigger(step).is_ok() {
+            steps.push(step);
+            start = index.saturating_add(1);
+        }
+    }
+    steps.extend(source.get(start..));
+    steps
 }
 
 fn parse_sequence_flags(
@@ -1299,8 +1317,7 @@ fn extend_legacy_bindings(
         let Some((trigger, action)) = split_keybind_entry(entry) else {
             continue;
         };
-        let normalized = trigger.split('>').collect::<Vec<_>>().join(" ");
-        let Ok(sequence) = parse_keymap_sequence(&normalized) else {
+        let Ok(sequence) = parse_keymap_sequence(trigger) else {
             continue;
         };
         snapshots.push(KeymapBindingSnapshot {

@@ -29,6 +29,18 @@ pub(super) struct NeutralWheelScrollState {
 }
 
 impl AppState {
+    pub(super) fn observe_modifier_sides(
+        &mut self,
+        sides: Option<ModifierSideState>,
+        focused: bool,
+    ) {
+        if !focused {
+            self.modifier_sides.clear();
+        } else if let Some(sides) = sides {
+            self.modifier_sides = sides;
+        }
+    }
+
     pub fn sidebar_focused(&self) -> bool {
         self.input_focus == InputFocus::Sidebar
     }
@@ -804,7 +816,7 @@ const fn should_encode_key(
 ) -> bool {
     is_control_key(key)
         || modifiers.control
-        || (modifiers.alt && option_alt_is_meta(macos_option_as_alt, modifier_sides))
+        || (modifiers.alt && modifier_sides.option_alt_is_meta(macos_option_as_alt))
 }
 
 const fn text_modifiers_are_suppressed(
@@ -814,19 +826,7 @@ const fn text_modifiers_are_suppressed(
 ) -> bool {
     modifiers.control
         || modifiers.platform
-        || (modifiers.alt && option_alt_is_meta(macos_option_as_alt, modifier_sides))
-}
-
-const fn option_alt_is_meta(
-    macos_option_as_alt: MacosOptionAsAlt,
-    modifier_sides: ModifierSideState,
-) -> bool {
-    match macos_option_as_alt {
-        MacosOptionAsAlt::None => false,
-        MacosOptionAsAlt::Both => true,
-        MacosOptionAsAlt::Left => modifier_sides.left_alt || !modifier_sides.right_alt,
-        MacosOptionAsAlt::Right => modifier_sides.right_alt || !modifier_sides.left_alt,
-    }
+        || (modifiers.alt && modifier_sides.option_alt_is_meta(macos_option_as_alt))
 }
 
 const fn is_control_key(key: bootty_terminal::terminal_input_model::TerminalKey) -> bool {

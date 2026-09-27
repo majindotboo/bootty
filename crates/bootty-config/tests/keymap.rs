@@ -7,6 +7,24 @@ use bootty_config::{
 };
 use pretty_assertions::assert_eq;
 
+#[rstest::rstest]
+#[case("alt+<", "alt+<")]
+#[case("alt+>", "alt+>")]
+#[case("alt->", "alt+>")]
+#[case(">", ">")]
+#[case("ctrl+k>alt+>", "ctrl+k alt+>")]
+#[case("alt+>>ctrl+k", "alt+> ctrl+k")]
+#[case("ctrl+->alt+>", "ctrl+- alt+>")]
+fn sequence_parser_distinguishes_greater_than_keys_from_chord_separators(
+    #[case] source: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(
+        parse_keymap_sequence(source).unwrap().format_entry(),
+        expected
+    );
+}
+
 fn binding(
     context: KeymapContext,
     keystrokes: &str,

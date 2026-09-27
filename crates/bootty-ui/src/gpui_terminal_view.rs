@@ -16,6 +16,7 @@ use crate::{
 use bootty_config::config::TerminalScrollbar;
 use bootty_terminal::geometry::{TerminalSurface, ViewTransform};
 use bootty_terminal::terminal_frame::RenderFrame;
+use bootty_terminal::terminal_input_model::MacosOptionAsAlt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode};
 use gpui_kit::{
     App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
@@ -114,6 +115,7 @@ pub struct GpuiTerminalView {
     metrics: RendererMetrics,
     frame_facts_dirty: bool,
     input: InputAccumulator,
+    option_as_alt: MacosOptionAsAlt,
     marked_text: String,
     window_focused: bool,
     input_handler_focused: bool,
@@ -128,6 +130,10 @@ pub struct GpuiTerminalView {
 }
 
 impl GpuiTerminalView {
+    pub(crate) const fn set_option_as_alt(&mut self, option_as_alt: MacosOptionAsAlt) {
+        self.option_as_alt = option_as_alt;
+    }
+
     pub(crate) fn set_background_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         if (self.background_opacity - opacity).abs() > f32::EPSILON {
             self.background_opacity = opacity;
@@ -164,6 +170,7 @@ impl GpuiTerminalView {
             metrics: RendererMetrics::default(),
             frame_facts_dirty: false,
             input: InputAccumulator::default(),
+            option_as_alt: MacosOptionAsAlt::default(),
             marked_text: String::new(),
             window_focused: true,
             input_handler_focused: false,
@@ -308,10 +315,11 @@ impl GpuiTerminalView {
     }
 
     fn emit_input(&mut self, cx: &mut Context<Self>) {
-        let input = self.input.drain_frame();
+        let mut input = self.input.drain_frame();
         if input.events.is_empty() && input.dropped_file_paths.is_empty() {
             return;
         }
+        input.modifier_sides = crate::window::modifier_sides();
         cx.emit(TerminalViewInput(input));
     }
 
@@ -327,7 +335,11 @@ impl GpuiTerminalView {
             self.input.key_down(event);
         }
         self.emit_input(cx);
-        if crate::gpui_input::terminal_owns_key_down(event) {
+        if crate::gpui_input::terminal_owns_key_down(
+            event,
+            self.option_as_alt,
+            crate::window::modifier_sides().unwrap_or_default(),
+        ) {
             cx.stop_propagation();
         }
     }

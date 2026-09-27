@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_terminal::{terminal_input::ModifierSideState, terminal_input_model::MacosOptionAsAlt};
 use bootty_ui::gpui as bootty_gpui;
 use bootty_ui::gpui::{InputAccumulator, InputEvent, Key};
 use gpui_kit::InputEvent as _;
@@ -14,6 +15,8 @@ struct InputProbe {
     focus: FocusHandle,
     received: Vec<InputEvent>,
     dropped_paths: Vec<std::path::PathBuf>,
+    option_as_alt: MacosOptionAsAlt,
+    modifier_sides: ModifierSideState,
 }
 
 impl Render for InputProbe {
@@ -35,6 +38,13 @@ impl Render for InputProbe {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.input.key_down(event);
+                if bootty_gpui::direct_input::terminal_owns_key_down(
+                    event,
+                    this.option_as_alt,
+                    this.modifier_sides,
+                ) {
+                    cx.stop_propagation();
+                }
                 cx.notify();
             }))
             .child(canvas(
@@ -54,6 +64,8 @@ fn input_probe(cx: &mut TestAppContext) -> gpui_kit::WindowHandle<InputProbe> {
                 focus: cx.focus_handle(),
                 received: Vec::new(),
                 dropped_paths: Vec::new(),
+                option_as_alt: MacosOptionAsAlt::None,
+                modifier_sides: ModifierSideState::default(),
             })
         })
         .expect("open input probe")
@@ -62,6 +74,80 @@ fn input_probe(cx: &mut TestAppContext) -> gpui_kit::WindowHandle<InputProbe> {
         .update(cx, |probe, window, cx| probe.focus.focus(window, cx))
         .expect("focus input probe");
     window
+}
+
+#[gpui_kit::test]
+fn only_the_configured_option_side_consumes_platform_text(cx: &mut TestAppContext) {
+    let window = input_probe(cx);
+    for (option, left_is_meta, right_is_meta) in [
+        (MacosOptionAsAlt::None, false, false),
+        (MacosOptionAsAlt::Left, true, false),
+        (MacosOptionAsAlt::Right, false, true),
+        (MacosOptionAsAlt::Both, true, true),
+    ] {
+        for (right_alt, is_meta) in [(false, left_is_meta), (true, right_is_meta)] {
+            window
+                .update(cx, |probe, _, _| {
+                    probe.option_as_alt = option;
+                    probe.modifier_sides = ModifierSideState {
+                        left_alt: !right_alt,
+                        right_alt,
+                        ..ModifierSideState::default()
+                    };
+                    probe.received.clear();
+                })
+                .unwrap();
+            cx.dispatch_keystroke(
+                *window,
+                gpui_kit::Keystroke {
+                    modifiers: gpui_kit::Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    key: "a".into(),
+                    key_char: Some("å".into()),
+                },
+            );
+            cx.simulate_input(*window, "a");
+            window
+                .update(cx, |probe, _, _| {
+                    let text = probe
+                        .received
+                        .iter()
+                        .filter_map(|event| match event {
+                            InputEvent::ImeCommit(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    assert_eq!(text, if is_meta { "a" } else { "åa" });
+                })
+                .unwrap();
+        }
+    }
+}
+
+#[rstest::rstest]
+fn option_dead_keys_are_consumed_before_composition(#[values("e", "u", "i", "n", "`")] key: &str) {
+    let event = KeyDownEvent {
+        keystroke: gpui_kit::Keystroke {
+            modifiers: gpui_kit::Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            key: key.to_owned(),
+            key_char: Some(String::new()),
+        },
+        is_held: false,
+        prefer_character_input: false,
+    };
+    assert!(bootty_gpui::direct_input::terminal_owns_key_down(
+        &event,
+        MacosOptionAsAlt::Left,
+        ModifierSideState {
+            left_alt: true,
+            ..Default::default()
+        },
+    ));
 }
 
 #[gpui_kit::test]

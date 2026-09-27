@@ -859,7 +859,12 @@ fn format_text_bytes(input: &str) -> String {
 }
 
 fn parse_trigger_sequence(input: &str) -> Result<Vec<BindingTrigger>, BindingParseError> {
-    input.split('>').map(parse_keymap_trigger).collect()
+    let (triggers, flags) = crate::keymap_runtime::parse_sequence_with_flags(input)
+        .map_err(|_| BindingParseError::InvalidFormat)?;
+    if flags != BindingFlags::default() {
+        return Err(BindingParseError::InvalidFormat);
+    }
+    Ok(triggers)
 }
 
 fn parse_keymap_trigger(input: &str) -> Result<BindingTrigger, BindingParseError> {

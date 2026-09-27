@@ -21,6 +21,21 @@ pub struct ModifierSideState {
 }
 
 impl ModifierSideState {
+    /// Select terminal Meta behavior; hosts without side information retain the aggregate fallback.
+    #[must_use]
+    pub const fn option_alt_is_meta(
+        self,
+        option_as_alt: crate::terminal_input_model::MacosOptionAsAlt,
+    ) -> bool {
+        use crate::terminal_input_model::MacosOptionAsAlt;
+        match option_as_alt {
+            MacosOptionAsAlt::None => false,
+            MacosOptionAsAlt::Both => true,
+            MacosOptionAsAlt::Left => self.left_alt || !self.right_alt,
+            MacosOptionAsAlt::Right => self.right_alt || !self.left_alt,
+        }
+    }
+
     /// Update one physical modifier using the terminal's framework-free key vocabulary.
     pub const fn update_key(&mut self, key: crate::terminal::TerminalKey, pressed: bool) {
         match key {

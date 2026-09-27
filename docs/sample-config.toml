@@ -279,7 +279,8 @@ hide-mouse-pointer-while-typing = true
 # Copy a completed mouse selection to the system clipboard.
 copy-on-select = false
 
-# macOS Option-as-Meta behavior. Values: none, left, right, both.
+# macOS Option-as-Meta terminal input. Values: none, left, right, both.
+# Application shortcuts are independent; use left_alt/right_alt for sided bindings.
 macos-option-as-alt = "both"
 
 # Optional backend-specific shards are appended only for the selected backend.

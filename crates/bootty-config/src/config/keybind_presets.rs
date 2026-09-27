@@ -1,42 +1,7 @@
-use super::model::{KeybindPreset, MacosOptionAsAltConfig};
+use super::model::KeybindPreset;
 
 pub(super) const BOOTTY_DEFAULT_PREFIX: &str = "ctrl+space";
 pub(super) const TMUX_DEFAULT_PREFIX: &str = "ctrl+b";
-
-pub(super) fn resolve_macos_option_alt_keybinds(
-    keybinds: Vec<String>,
-    macos_option_as_alt: MacosOptionAsAltConfig,
-) -> Vec<String> {
-    if !cfg!(target_os = "macos") {
-        return keybinds;
-    }
-    keybinds
-        .into_iter()
-        .flat_map(|entry| expand_macos_option_alt_keybind(entry, macos_option_as_alt))
-        .collect()
-}
-
-fn expand_macos_option_alt_keybind(
-    entry: String,
-    macos_option_as_alt: MacosOptionAsAltConfig,
-) -> Vec<String> {
-    let Some((trigger, action)) = split_keybind_entry(&entry) else {
-        return vec![entry];
-    };
-    if !trigger_has_replaceable_unsided_alt(trigger) {
-        return vec![entry];
-    }
-    let sides = match macos_option_as_alt {
-        MacosOptionAsAltConfig::None => return Vec::new(),
-        MacosOptionAsAltConfig::Left => &["left_alt"][..],
-        MacosOptionAsAltConfig::Right => &["right_alt"][..],
-        MacosOptionAsAltConfig::Both => &["left_alt", "right_alt"][..],
-    };
-    sides
-        .iter()
-        .map(|side| format!("{}={action}", replace_unsided_alt(trigger, side)))
-        .collect()
-}
 
 #[must_use]
 pub fn split_keybind_entry(entry: &str) -> Option<(&str, &str)> {
@@ -49,57 +14,6 @@ pub fn split_keybind_entry(entry: &str) -> Option<(&str, &str)> {
         return Some((trigger, action));
     }
     None
-}
-
-fn trigger_has_replaceable_unsided_alt(trigger: &str) -> bool {
-    trigger
-        .split('>')
-        .any(|step| !step_has_command_modifier(step) && step.split('+').any(is_unsided_alt_token))
-}
-
-fn replace_unsided_alt(trigger: &str, side: &str) -> String {
-    trigger
-        .split('>')
-        .map(|step| {
-            if step_has_command_modifier(step) {
-                return step.to_owned();
-            }
-            step.split('+')
-                .map(|part| {
-                    if is_unsided_alt_token(part) {
-                        side
-                    } else {
-                        part
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        })
-        .collect::<Vec<_>>()
-        .join(">")
-}
-
-fn step_has_command_modifier(step: &str) -> bool {
-    step.split('+').any(is_command_modifier_token)
-}
-
-fn is_unsided_alt_token(token: &str) -> bool {
-    matches!(token, "alt" | "opt" | "option")
-}
-
-fn is_command_modifier_token(token: &str) -> bool {
-    matches!(
-        token,
-        "cmd"
-            | "command"
-            | "super"
-            | "left_cmd"
-            | "left_command"
-            | "left_super"
-            | "right_cmd"
-            | "right_command"
-            | "right_super"
-    )
 }
 
 const fn common_keybinds() -> &'static [&'static str] {
@@ -379,10 +293,8 @@ pub(super) const fn navigation_keybinds() -> &'static [&'static str] {
         "alt+7=select_tab:7",
         "alt+8=select_tab:8",
         "alt+9=select_tab:9",
-        "left_alt+shift+,=move_tab:-1",
-        "right_alt+shift+,=move_tab:-1",
-        "left_alt+shift+.=move_tab:1",
-        "right_alt+shift+.=move_tab:1",
+        "alt+<=move_tab:-1",
+        "alt+>=move_tab:1",
         "alt+shift+h=select_pane:left",
         "alt+shift+j=select_pane:down",
         "alt+shift+k=select_pane:up",

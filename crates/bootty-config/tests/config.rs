@@ -1023,81 +1023,35 @@ fn keybind_entries_without_clear_layer_on_defaults() {
     );
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_option_as_alt_expands_unsided_alt_keybinds_to_configured_sides() {
-    let config = load_config_source(indoc! {r#"
-        version = 1
-
+#[rstest]
+fn option_as_meta_does_not_rewrite_shortcuts(
+    #[values("none", "left", "right", "both")] option: &str,
+    #[values(
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux,
+        MultiplexerBackendConfig::Herdr
+    )]
+    backend: MultiplexerBackendConfig,
+) {
+    let config = load_config_source(&format!(
+        r#"
         [input]
-        macos-option-as-alt = "right"
-        keybind = ["clear", "alt+n=next_tab", "left_alt+p=previous_tab"]
-    "#})
+        macos-option-as-alt = "{option}"
+        keybind = ["clear", "alt+n=next_tab", "left_alt+p=previous_tab",
+                   "cmd+k>alt+n=next_tab", "cmd+alt+n=new_window"]
+        [input.backend-keybind]
+        native = ["clear", "alt+>=move_tab:1"]
+        rmux = ["clear", "alt+>=move_tab:1"]
+        tmux = ["clear", "alt+>=move_tab:1"]
+        herdr = ["clear", "alt+>=move_tab:1"]
+    "#
+    ))
     .expect("valid config");
 
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
-
-    assert!(keybinds.iter().any(|entry| entry == "right_alt+n=next_tab"));
-    assert!(!keybinds.iter().any(|entry| entry == "left_alt+n=next_tab"));
-    assert!(
-        keybinds
-            .iter()
-            .any(|entry| entry == "left_alt+p=previous_tab")
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_option_as_alt_preserves_command_alt_app_keybinds() {
-    let config = load_config_source(indoc! {r#"
-        version = 1
-
-        [input]
-        macos-option-as-alt = "none"
-        keybind = ["clear", "cmd+alt+n=new_window", "cmd+alt+r=rename_session"]
-    "#})
-    .expect("valid config");
-
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
-
-    assert!(keybinds.iter().any(|entry| entry == "cmd+alt+n=new_window"));
-    assert!(
-        keybinds
-            .iter()
-            .any(|entry| entry == "cmd+alt+r=rename_session")
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_option_as_alt_expands_non_command_steps_in_chains() {
-    let config = load_config_source(indoc! {r#"
-        version = 1
-
-        [input]
-        macos-option-as-alt = "right"
-        keybind = ["clear", "cmd+k>alt+n=next_tab", "cmd+alt+p=previous_tab"]
-    "#})
-    .expect("valid config");
-
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
-
-    assert!(
-        keybinds
-            .iter()
-            .any(|entry| entry == "cmd+k>right_alt+n=next_tab")
-    );
-    assert!(
-        keybinds
-            .iter()
-            .any(|entry| entry == "cmd+alt+p=previous_tab")
-    );
+    let mut expected = config.input.keybind.clone();
+    expected.push("alt+>=move_tab:1".to_owned());
+    assert_eq!(config.input.keybinds_for_backend(backend), expected);
 }
 
 #[test]
@@ -1339,47 +1293,20 @@ fn bootty_preset_tab_navigation_defaults_use_left_alt_shift() {
     );
 }
 
-#[test]
-fn bootty_preset_move_tab_defaults_bind_both_option_sides() {
-    let config = load_config_source(indoc! {r#"
-        version = 1
-
-        [input]
-        preset = "bootty"
-    "#})
-    .expect("valid config");
-
-    for entry in [
-        "left_alt+shift+,=move_tab:-1",
-        "right_alt+shift+,=move_tab:-1",
-        "left_alt+shift+.=move_tab:1",
-        "right_alt+shift+.=move_tab:1",
-    ] {
-        assert!(
-            config.input.keybind.iter().any(|keybind| keybind == entry),
-            "missing raw keybind {entry}"
-        );
-    }
-    assert!(
-        !config
-            .input
-            .keybind
-            .iter()
-            .any(|entry| entry == "alt+shift+,=move_tab:-1")
-    );
-
-    let keybinds = config
+#[rstest]
+#[case("bootty")]
+#[case("tmux")]
+fn preset_move_tab_defaults_use_shifted_symbols(#[case] preset: &str) {
+    let config =
+        load_config_source(&format!("[input]\npreset = \"{preset}\"\n")).expect("valid config");
+    let moves = config
         .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
-    for entry in [
-        "left_alt+shift+,=move_tab:-1",
-        "right_alt+shift+,=move_tab:-1",
-    ] {
-        assert!(
-            keybinds.iter().any(|keybind| keybind == entry),
-            "missing resolved keybind {entry}"
-        );
-    }
+        .keybind
+        .iter()
+        .filter(|entry| entry.contains("=move_tab:"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(moves, ["alt+<=move_tab:-1", "alt+>=move_tab:1"]);
 }
 
 #[rstest]

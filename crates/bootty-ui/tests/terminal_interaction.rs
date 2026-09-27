@@ -29,7 +29,7 @@ use bootty_mux::{
     terminal::BackendPanePolicy,
 };
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalSurface, ViewTransform};
-use bootty_terminal::terminal_input::DirectKeyInput;
+use bootty_terminal::terminal_input::{DirectKeyInput, ModifierSideState};
 use bootty_terminal::terminal_input_model::{KeyInput, KeyMods, TerminalKey};
 use bootty_ui::gpui::{InputEvent, Key, Modifiers, Point, PointerButton};
 use bootty_ui::product_dialogs::terminal_find::{
@@ -831,6 +831,72 @@ fn terminal_tab_reaches_the_focused_shell_for_completion() {
         .expect("terminate shell input line");
 
     wait_for_pane_hex(&mut state, &pane, &["09"]);
+}
+
+#[rstest::rstest]
+#[case("none", false, false)]
+#[case("none", true, false)]
+#[case("left", false, true)]
+#[case("left", true, false)]
+#[case("right", false, false)]
+#[case("right", true, true)]
+#[case("both", false, true)]
+#[case("both", true, true)]
+fn option_side_reaches_terminal_encoding(
+    #[case] option: &str,
+    #[case] right_alt: bool,
+    #[case] is_meta: bool,
+) {
+    let (directory, mut state) = native_state_with_script(
+        None,
+        "#!/bin/sh\nprintf 'ready\\r\\n'\nwhile IFS= read -r line; do\n  printf '%s' \"$line\" | od -An -tx1\ndone\n",
+    );
+    directory.child("config.toml").write_str(&format!(
+        "[input]\nmacos-option-as-alt = \"{option}\"\n[multiplexer]\nbackend = \"native\"\n[session]\nshell = {:?}\n",
+        state.config().session.shell.as_ref().unwrap(),
+    )).unwrap();
+    assert!(state.reload_config(&mut Vec::new()));
+    let (_other, pane) = start_two_panes(&mut state);
+    wait_for_pane_text(&mut state, &pane, "ready");
+
+    let mut input = frames::frame(
+        Instant::now(),
+        vec![InputEvent::Key {
+            key: Key::Letter('e'),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+        }],
+    );
+    input.input.modifier_sides = Some(ModifierSideState {
+        left_alt: !right_alt,
+        right_alt,
+        ..Default::default()
+    });
+    state.update_frame(input);
+    // An unconsumed dead key composes text after Option is released.
+    let text = if is_meta { "e" } else { "é" };
+    let mut commit = frames::frame(Instant::now(), vec![InputEvent::ImeCommit(text.to_owned())]);
+    commit.input.modifier_sides = Some(ModifierSideState::default());
+    state.update_frame(commit);
+    state
+        .terminal_mut()
+        .focused_terminal_runtime(&pane)
+        .unwrap()
+        .write_input(b"\n")
+        .unwrap();
+    wait_for_pane_hex(
+        &mut state,
+        &pane,
+        if is_meta {
+            &["1b", "65", "65"]
+        } else {
+            &["c3", "a9"]
+        },
+    );
 }
 
 fn search_state(state: &mut AppState, pane_id: &str) -> (usize, bool) {

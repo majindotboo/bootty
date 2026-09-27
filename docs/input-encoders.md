@@ -14,6 +14,11 @@ report encoding failures through their normal terminal error channel.
 The workspace owns window-focus events. Terminal views observe that state for cursor and input
 cleanup without emitting another focus event for each rendered pane.
 
+On macOS the window adapter adds the current AppKit event's modifier sides to the
+input snapshot. The terminal view consumes the Option side selected by
+`macos-option-as-alt` before macOS can start accent composition. The other side
+continues through text input; the same side policy controls terminal key encoding.
+
 Configured application shortcuts do not pass through terminal input. `gpui_actions.rs` translates
 them into typed GPUI actions that submit the same `CommandInvocation` used by every other caller.
 

@@ -25,6 +25,29 @@ pub struct MacosScreenFacts {
     pub notch_span: Option<(f32, f32)>,
 }
 
+/// Read the event being dispatched, not global key state sampled after the event.
+#[cfg(target_os = "macos")]
+pub(crate) fn modifier_sides() -> Option<bootty_terminal::terminal_input::ModifierSideState> {
+    let event = NSApplication::sharedApplication(MainThreadMarker::new()?).currentEvent()?;
+    let flags = event.modifierFlags().bits();
+    // NX_DEVICE*KEYMASK from IOKit/hidsystem/IOLLEvent.h. Remove this bridge when GPUI exposes sides.
+    Some(bootty_terminal::terminal_input::ModifierSideState {
+        left_ctrl: flags & 0x0001 != 0,
+        left_shift: flags & 0x0002 != 0,
+        right_shift: flags & 0x0004 != 0,
+        left_command: flags & 0x0008 != 0,
+        right_command: flags & 0x0010 != 0,
+        left_alt: flags & 0x0020 != 0,
+        right_alt: flags & 0x0040 != 0,
+        right_ctrl: flags & 0x2000 != 0,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) const fn modifier_sides() -> Option<bootty_terminal::terminal_input::ModifierSideState> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn active_window(app: &NSApplication) -> Option<objc2::rc::Retained<NSWindow>> {
     app.keyWindow()

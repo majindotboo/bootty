@@ -2317,6 +2317,9 @@ impl GpuiWorkspace {
         view.update(cx, |view, cx| {
             view.set_window_focused(window.is_window_active(), cx);
             view.set_scrollbar_mode(config.session.scrollbar, cx);
+            view.set_option_as_alt(bootty_mux::terminal_config::terminal_macos_option_as_alt(
+                config.input.macos_option_as_alt,
+            ));
             view.set_background_opacity(config.window.background_opacity, cx);
         });
         GpuiTerminalView::publish(

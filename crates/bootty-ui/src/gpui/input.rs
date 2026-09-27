@@ -1,9 +1,8 @@
 //! Host-neutral input facts captured from GPUI.
 //!
-//! GPUI 0.2 exposes logical [`gpui_kit::Keystroke`] values, not platform scan codes. It also
-//! collapses the left and right instances of every modifier. This adapter therefore cannot
-//! identify a physical key or a modifier side; consumers must leave those values unknown rather
-//! than infer them from the logical key.
+//! GPUI exposes logical [`gpui_kit::Keystroke`] values, not platform scan codes or modifier
+//! sides. The window adapter may supplement a frame with native modifier sides; otherwise
+//! those remain unknown rather than inferred from the logical key.
 
 use std::{
     ops::Range,
@@ -143,6 +142,7 @@ pub struct FrameInputSnapshot {
     pub events: Vec<InputEvent>,
     pub dropped_file_paths: Vec<PathBuf>,
     pub modifiers: Modifiers,
+    pub modifier_sides: Option<bootty_terminal::terminal_input::ModifierSideState>,
     pub hover_position: Option<Point>,
     pub pressed_mouse_button: Option<PointerButton>,
     pub window_focused: bool,
@@ -341,6 +341,7 @@ impl InputAccumulator {
             events,
             dropped_file_paths: std::mem::take(&mut self.dropped_file_paths),
             modifiers: self.modifiers,
+            modifier_sides: None,
             hover_position: self.hover_position,
             pressed_mouse_button: self.pressed_mouse_button,
             window_focused: self.window_focused,

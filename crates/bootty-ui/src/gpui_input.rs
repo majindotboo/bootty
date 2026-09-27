@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use crate::gpui::{FrameInputSnapshot, InputAccumulator};
 use bootty_terminal::geometry::ViewTransform;
-use bootty_terminal::terminal_input::DirectKeyInput;
+use bootty_terminal::terminal_input::{DirectKeyInput, ModifierSideState};
+use bootty_terminal::terminal_input_model::MacosOptionAsAlt;
 use gpui_kit::KeyDownEvent;
 
 use crate::{FrameInputs, ViewportSnapshot, frame_facts::RendererMetrics};
@@ -40,8 +41,12 @@ pub fn drain_frame_inputs(input: &mut InputAccumulator, facts: GpuiFrameFacts) -
 }
 
 /// Return whether the terminal should stop GPUI propagation for this key.
-pub fn terminal_owns_key_down(event: &KeyDownEvent) -> bool {
-    crate::gpui::direct_input::terminal_owns_key_down(event)
+pub fn terminal_owns_key_down(
+    event: &KeyDownEvent,
+    option_as_alt: MacosOptionAsAlt,
+    modifier_sides: ModifierSideState,
+) -> bool {
+    crate::gpui::direct_input::terminal_owns_key_down(event, option_as_alt, modifier_sides)
 }
 
 /// Convert an unbound GPUI Command/Super key to the terminal's direct input command.

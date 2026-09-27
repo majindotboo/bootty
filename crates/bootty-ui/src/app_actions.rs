@@ -188,8 +188,7 @@ impl AppKeyBindings {
         for entry in keybinds {
             let (trigger, action) = split_keybind_entry(entry)
                 .ok_or_else(|| anyhow::anyhow!("invalid keybind {entry:?}"))?;
-            let normalized = trigger.split('>').collect::<Vec<_>>().join(" ");
-            let sequence = bootty_config::parse_keymap_sequence(&normalized)
+            let sequence = bootty_config::parse_keymap_sequence(trigger)
                 .map_err(|error| anyhow::anyhow!("invalid keybind {entry:?}: {error:?}"))?;
             let action = parse_action(action)
                 .map_err(|error| anyhow::anyhow!("invalid keybind {entry:?}: {error:?}"))?;

@@ -1,17 +1,21 @@
 use bootty_terminal::{
-    terminal_input::DirectKeyInput,
-    terminal_input_model::{KeyInput, KeyMods, TerminalKey},
+    terminal_input::{DirectKeyInput, ModifierSideState},
+    terminal_input_model::{KeyInput, KeyMods, MacosOptionAsAlt, TerminalKey},
 };
 use gpui_kit::KeyDownEvent;
 
 /// Whether the terminal owns a key before GPUI offers it to the platform text input system.
 ///
-/// Printable keys without Control, Command, or Function must propagate so keyboard layouts,
-/// dead keys, paste, and IMEs can commit their actual text. Terminal control keys and modified
+/// Printable keys without Control, Command, Function, or configured Option-as-Meta must propagate
+/// so keyboard layouts, dead keys, paste, and IMEs can commit their actual text. Control keys and modified
 /// shortcuts are already represented by the raw key event; allowing those through on macOS can
 /// dispatch the same key again through `doCommandBySelector`.
 #[must_use]
-pub fn terminal_owns_key_down(event: &KeyDownEvent) -> bool {
+pub fn terminal_owns_key_down(
+    event: &KeyDownEvent,
+    option_as_alt: MacosOptionAsAlt,
+    modifier_sides: ModifierSideState,
+) -> bool {
     let key = event.keystroke.key.to_ascii_lowercase();
     // Modifier keys do not make an unsupported physical key encodable.
     if terminal_key(&key).is_none() {
@@ -21,6 +25,7 @@ pub fn terminal_owns_key_down(event: &KeyDownEvent) -> bool {
     modifiers.control
         || modifiers.platform
         || modifiers.function
+        || (modifiers.alt && modifier_sides.option_alt_is_meta(option_as_alt))
         || matches!(
             key.as_str(),
             "down"

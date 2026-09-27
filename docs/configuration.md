@@ -307,6 +307,11 @@ Built-in theme source and license notes are tracked in
 
 ## Keymaps and keybindings
 
+`macos-option-as-alt` controls terminal input encoding, not application shortcuts.
+An `alt` shortcut accepts either Option key; use `left_alt` or `right_alt` for an
+explicit side constraint. The Bootty and tmux presets bind `alt+<` / `alt+>` to
+move tabs left / right.
+
 `keymap.json` is Bootty's preferred user override and editing path. It uses a
 Zed-compatible JSONC shape: the root is an ordered array of section objects,
 line and block comments are allowed, and trailing commas are allowed.

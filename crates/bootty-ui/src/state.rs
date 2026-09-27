@@ -1528,10 +1528,12 @@ impl AppState {
             events,
             dropped_file_paths,
             modifiers,
+            modifier_sides,
             hover_position,
             pressed_mouse_button,
             window_focused,
         } = input;
+        self.observe_modifier_sides(modifier_sides, window_focused);
         let mut effects = Vec::new();
 
         self.process_frame_commands(viewport, window_focused, &mut effects);

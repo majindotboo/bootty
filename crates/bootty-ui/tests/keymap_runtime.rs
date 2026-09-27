@@ -218,42 +218,6 @@ fn disabling_one_backend_context_keeps_global_defaults() {
     assert!(!disabled_native_effects.contains(&AppEffect::OpenWindow));
 }
 
-#[cfg(target_os = "macos")]
-#[rstest]
-fn effective_builtin_snapshots_preserve_macos_option_side_resolution() {
-    use bootty_config::config::MacosOptionAsAltConfig;
-
-    let directory = TempDir::new().expect("temporary config directory");
-    let config_path = directory.path().join("config.toml");
-    directory
-        .child("keymap.json")
-        .write_str("[]")
-        .expect("write keymap");
-    let mut config = BoottyConfig {
-        config_path,
-        ..BoottyConfig::default()
-    };
-    config.input.macos_option_as_alt = MacosOptionAsAltConfig::Right;
-    config.input.keybind = vec!["alt+n=next_tab".to_owned()];
-    config.input.backend_keybinds.native = vec!["alt+j=next_pane".to_owned()];
-    let state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
-
-    let snapshot = state.keymap_snapshot();
-    assert!(snapshot.effective_bindings.iter().any(|binding| {
-        binding.context == KeymapContext::Global && binding.keystrokes == "right_alt+n"
-    }));
-    assert!(snapshot.effective_bindings.iter().any(|binding| {
-        binding.context == KeymapContext::Native && binding.keystrokes == "right_alt+j"
-    }));
-    assert!(
-        !snapshot
-            .effective_bindings
-            .iter()
-            .any(|binding| binding.keystrokes.starts_with("left_alt"))
-    );
-}
-
 #[rstest]
 fn later_user_sections_win_and_backend_contexts_are_active_in_the_terminal() {
     let directory = TempDir::new().expect("temporary config directory");

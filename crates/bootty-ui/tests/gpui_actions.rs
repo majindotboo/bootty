@@ -267,6 +267,70 @@ fn shifted_brackets_dispatch_tab_navigation(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn preset_alt_symbols_dispatch_tab_moves(cx: &mut TestAppContext) {
+    use assert_fs::prelude::*;
+    use bootty_config::config::{MultiplexerBackendConfig, load_config_from_path};
+    use bootty_ui::{
+        commands::CommandCatalog,
+        gpui_actions::{key_bindings_for_snapshot, replace_workspace_key_bindings},
+        keymap_runtime::{KeymapFocus, KeymapRuntime},
+    };
+
+    let directory = assert_fs::TempDir::new().unwrap();
+    let config_file = directory.child("config.toml");
+    let catalog = std::sync::Arc::new(CommandCatalog::default());
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.update(|cx| {
+        let received = Rc::clone(&received);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            cx.new(|_| BindingProbe {
+                focus,
+                received,
+                key_context: WORKSPACE_KEY_CONTEXT.to_owned(),
+            })
+        })
+        .unwrap()
+    });
+
+    for preset in ["bootty", "tmux"] {
+        for option in ["none", "left", "right", "both"] {
+            config_file
+                .write_str(&format!(
+                    "[input]\npreset = \"{preset}\"\nmacos-option-as-alt = \"{option}\"\n"
+                ))
+                .unwrap();
+            let config = load_config_from_path(config_file.path()).unwrap();
+            let runtime = KeymapRuntime::new(&config, std::sync::Arc::clone(&catalog));
+            assert_eq!(runtime.snapshot().diagnostics, []);
+            for backend in [
+                MultiplexerBackendConfig::Native,
+                MultiplexerBackendConfig::Rmux,
+                MultiplexerBackendConfig::Tmux,
+                MultiplexerBackendConfig::Herdr,
+            ] {
+                cx.update(|cx| {
+                    replace_workspace_key_bindings(
+                        key_bindings_for_snapshot(
+                            runtime.snapshot(),
+                            KeymapFocus::Terminal,
+                            backend,
+                            &catalog,
+                        ),
+                        cx,
+                    )
+                    .unwrap();
+                });
+                received.borrow_mut().clear();
+                cx.simulate_keystrokes(*window, "alt-< alt->");
+                assert_eq!(received.borrow().as_slice(), ["move_tab:-1", "move_tab:1"]);
+            }
+        }
+    }
+}
+
+#[gpui_kit::test]
 fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
     let input = input(&["cmd+shift+,=move_session:-1", "cmd+shift+.=move_session:1"]);
     cx.update(|cx| cx.bind_keys(key_bindings(&input, cx).unwrap()));

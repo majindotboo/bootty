@@ -1,7 +1,7 @@
 use super::RemoteConfig;
 use super::keybind_presets::{
     owned_keybinds, preset_global_keybinds, preset_layout_keybinds, preset_tmux_backend_keybinds,
-    resolve_macos_option_alt_keybinds, sidebar_keybinds,
+    sidebar_keybinds,
 };
 use crate::FontFeature;
 use crate::color::Color;
@@ -893,7 +893,8 @@ impl InputConfig {
             MultiplexerBackendConfig::Tmux => &self.backend_keybinds.tmux,
         };
         keybinds.extend(backend_keybinds.iter().cloned());
-        resolve_macos_option_alt_keybinds(keybinds, self.macos_option_as_alt)
+        // Option-as-Meta controls terminal encoding, not application shortcuts.
+        keybinds
     }
 
     /// The leader trigger prefixed chords are recorded and built with; `None` when the active

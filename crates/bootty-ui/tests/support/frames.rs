@@ -9,6 +9,7 @@ pub fn frame(
             events,
             dropped_file_paths: Vec::new(),
             modifiers: bootty_gpui::Modifiers::default(),
+            modifier_sides: None,
             hover_position: None,
             pressed_mouse_button: None,
             window_focused: true,
