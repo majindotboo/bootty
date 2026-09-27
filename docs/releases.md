@@ -1,6 +1,8 @@
 # Releases and updates
 
-Bootty publishes static native bundles through GitHub Releases. Every release has Linux x86_64, macOS arm64/x86_64, and Windows x64 app assets. It also has small headless daemon binaries for those targets and Linux arm64, plus a `SHA256SUMS` file.
+Bootty publishes static native bundles through GitHub Releases. Every release has Linux x86_64, macOS arm64, and Windows x64 app assets. It also has small headless daemon binaries for those targets, Linux arm64, and macOS x86_64, plus a `SHA256SUMS` file.
+
+Intel Mac app builds are best-effort source builds, not official release assets or release gates. Intel Mac daemon binaries remain available for remote Spaces.
 
 ## Updates
 

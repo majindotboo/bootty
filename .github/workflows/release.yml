@@ -42,11 +42,6 @@ jobs:
             artifact: bootty-macos-arm64
             package-asset: Bootty-macos-arm64.app.zip
             release-asset: bootty-aarch64-apple-darwin.zip
-          - name: macos-x64
-            runner: macos-15-intel
-            artifact: bootty-macos-x64
-            package-asset: Bootty-macos-x86_64.app.zip
-            release-asset: bootty-x86_64-apple-darwin.zip
           - name: windows-x64
             runner: windows-2025
             artifact: bootty-windows-x64
@@ -68,11 +63,6 @@ jobs:
       - name: Verify release tag
         shell: bash
         run: mise run release:verify-tag -- "$RELEASE_TAG"
-
-      # avplayer requires the macOS 26 SDK; Intel runners default to Xcode 16.
-      - name: Select Xcode 26
-        if: matrix.name == 'macos-x64'
-        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
