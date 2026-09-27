@@ -811,6 +811,15 @@ impl DocumentPanel {
         }
     }
 
+    // Keep one lifecycle hook signature until video playback supports other platforms.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            clippy::unused_self,
+            clippy::missing_const_for_fn,
+            clippy::needless_pass_by_ref_mut
+        )
+    )]
     fn pause_video(&self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(video) = &self.video {
