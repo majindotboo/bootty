@@ -94,6 +94,7 @@ extra-bold = "auto"
 black = "auto"
 
 [chrome]
+tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
 panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text

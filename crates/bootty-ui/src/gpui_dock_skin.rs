@@ -2,6 +2,7 @@
 
 use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
 
+use gpui_kit::base::Tab;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -11,7 +12,6 @@ use gpui_kit::component::{
         TabGroupRenderer,
     },
     menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
-    tab::Tab,
 };
 use gpui_kit::{
     AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
@@ -561,6 +561,7 @@ impl WorkspaceTabGroup {
             .upgrade()
             .and_then(|area| group_placement(area.read(cx), group.node()));
         let tab_config = self.chrome.read(cx).dock_tabs_config();
+        let tab_accent = self.chrome.read(cx).tab_accent();
         let style = if matches!(placement, Some(DockPlacement::Left | DockPlacement::Right)) {
             self.chrome.read(cx).dock_presentation().2
         } else {
@@ -586,7 +587,9 @@ impl WorkspaceTabGroup {
                     id,
                     title: None,
                     focus: None,
-                    tab: Self::render_group_tab(group, ix, style, tab_config, window, cx)?,
+                    tab: Self::render_group_tab(
+                        group, ix, style, tab_config, tab_accent, window, cx,
+                    )?,
                 })
             })
             .collect();
@@ -617,11 +620,13 @@ impl WorkspaceTabGroup {
 }
 
 impl WorkspaceTabGroup {
+    #[allow(clippy::too_many_arguments)]
     fn render_group_tab(
         group: &TabGroupContext,
         ix: usize,
         style: bootty_config::config::PanelTabStyle,
         tab_config: bootty_config::config::TabConfig,
+        accent: gpui_kit::Hsla,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Tab> {
@@ -639,7 +644,7 @@ impl WorkspaceTabGroup {
                 .closable(cx)
                 .then(|| close_panel_tab(group, id, &label))
         });
-        let selected = ix == group.active_ix();
+        let selected = !group.is_collapsed() && ix == group.active_ix();
         let hover_group = SharedString::from(format!("panel-tab-hover-{id:?}"));
         let title = div()
             .id(SharedString::from(format!("panel-tab-{id:?}")))
@@ -653,28 +658,31 @@ impl WorkspaceTabGroup {
                 e.child(title)
             });
         let select = group.clone();
-        let tab = Tab::new()
-            .group(hover_group.clone())
-            .aria_label(label.clone())
-            .tooltip({
-                let label = label.clone();
-                move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
-                }
-            })
-            .child(crate::gpui::tabs::content(
-                title.into_any_element(),
-                suffix,
-                hover_group,
-                tab_config,
-                (selected
-                    && tab_config.appearance == bootty_config::config::TabAppearance::Segmented)
-                    .then_some(cx.theme().secondary_active),
-            ))
-            .selected(
-                !group.is_collapsed() && group.active_panel().is_some_and(|p| p.panel_id(cx) == id),
-            )
-            .on_click(move |_, window, cx| select.select_tab(ix, window, cx));
+        let tab = crate::gpui::tabs::tab(
+            hover_group.clone(),
+            tab_config.appearance,
+            selected,
+            accent,
+            cx,
+        )
+        .group(hover_group.clone())
+        .accessibility_label(label.clone())
+        .tooltip({
+            let label = label.clone();
+            move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+            }
+        })
+        .child(crate::gpui::tabs::content(
+            title.into_any_element(),
+            suffix,
+            hover_group,
+            tab_config,
+        ))
+        .selected(
+            !group.is_collapsed() && group.active_panel().is_some_and(|p| p.panel_id(cx) == id),
+        )
+        .on_click(move |_, window, cx| select.select_tab(ix, window, cx));
         let drag = (!terminal_panel && group.is_draggable())
             .then(|| group.drag_panel(ix, cx))
             .flatten();

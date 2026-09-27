@@ -122,8 +122,18 @@ fn fullscreen_tab_wrapping_is_configurable(#[case] wrap: bool) {
 }
 
 #[rstest]
+#[case(true)]
+#[case(false)]
+fn tabs_can_use_session_or_theme_color(#[case] enabled: bool) {
+    let config = load_config_source(&format!("[chrome]\ntabs-use-session-color = {enabled}\n"))
+        .expect("valid config");
+    assert_eq!(config.chrome.tabs_use_session_color, enabled);
+}
+
+#[rstest]
 fn terminal_tabs_default_to_pills_with_hover_close() {
     let config = load_config_source("").expect("valid config");
+    assert!(config.chrome.tabs_use_session_color);
     assert_eq!(config.chrome.terminal_tabs.appearance, TabAppearance::Pill);
     assert_eq!(
         config.chrome.terminal_tabs.close_position,

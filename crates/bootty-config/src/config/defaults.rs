@@ -102,6 +102,7 @@ impl Default for ChromeConfig {
             right_dock_toggle: true,
             panel_tab_style: super::model::PanelTabStyle::default(),
             panel_tabs: super::model::PanelTabs::default(),
+            tabs_use_session_color: true,
             dock_tabs: super::model::TabConfig {
                 appearance: super::model::TabAppearance::Segmented,
                 ..Default::default()

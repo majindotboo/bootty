@@ -362,8 +362,19 @@ fn dock_tabs_specs() -> [SettingSpec; 3] {
     ]
 }
 
-fn terminal_tabs_specs() -> [SettingSpec; 3] {
+fn terminal_tabs_specs() -> [SettingSpec; 4] {
     [
+        spec(
+            &["chrome", "tabs-use-session-color"],
+            "Use session color for tabs",
+            "Tint active tabs with the selected session's color. Turn off to use the theme accent.",
+            "panels",
+            "TERMINAL TABS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.chrome.tabs_use_session_color)
+            }),
+        ),
         spec(
             &["chrome", "terminal-tabs", "appearance"],
             "Tab style",

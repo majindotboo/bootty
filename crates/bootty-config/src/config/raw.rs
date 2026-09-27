@@ -99,6 +99,7 @@ pub(super) struct ChromePatch {
     pub(super) right_dock_toggle: Option<bool>,
     pub(super) panel_tab_style: Option<PanelTabStyle>,
     pub(super) panel_tabs: Option<PanelTabs>,
+    pub(super) tabs_use_session_color: Option<bool>,
     pub(super) dock_tabs: Option<TabPatch>,
     pub(super) terminal_tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,

@@ -44,6 +44,7 @@ fn palette() -> ChromePalette {
         subtext: color(180, 180, 190),
         muted: color(130, 130, 140),
         accent: color(100, 160, 240),
+        tab_accent: color(100, 160, 240),
     }
 }
 

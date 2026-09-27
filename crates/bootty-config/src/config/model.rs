@@ -400,6 +400,7 @@ pub struct ChromeConfig {
     pub right_dock_toggle: bool,
     pub panel_tab_style: PanelTabStyle,
     pub panel_tabs: PanelTabs,
+    pub tabs_use_session_color: bool,
     pub dock_tabs: TabConfig,
     pub terminal_tabs: TabConfig,
 

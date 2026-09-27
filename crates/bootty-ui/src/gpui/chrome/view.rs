@@ -220,6 +220,10 @@ impl GpuiChrome {
         )
     }
 
+    pub(crate) fn tab_accent(&self) -> gpui_kit::Hsla {
+        color(self.snapshot.palette.tab_accent)
+    }
+
     pub(crate) const fn dock_tabs_config(&self) -> bootty_config::config::TabConfig {
         self.snapshot.layout.dock_tabs
     }

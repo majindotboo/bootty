@@ -77,6 +77,7 @@ ui-size = 16
 fit-cell-height = true
 
 [chrome]
+tabs-use-session-color = true
 top-bar = true
 bottom-bar = false
 panel-tab-style = "icons"
@@ -507,6 +508,10 @@ then wait for the title to remain unchanged for one second before shrinking.
 Close buttons default to the left on macOS and the right elsewhere. Override
 `close-position = "left"` or `"right"` under `[chrome.terminal-tabs]` or
 `[chrome.dock-tabs]` independently.
+
+`chrome.tabs-use-session-color` defaults to `true`: active terminal and dock tabs
+use a muted tint of the selected session color. Set it to `false` to use the theme
+accent.
 
 ## Preference writeback
 

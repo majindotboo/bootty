@@ -418,6 +418,7 @@ fn hsl_hex(hue: f64, saturation: f64, lightness: f64) -> String {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn snapshot(
     state: &AppState,
     native: &NativeChrome,
@@ -425,7 +426,11 @@ pub fn snapshot(
     width: f32,
     height: f32,
 ) -> ChromeSnapshot {
-    let palette = chrome_palette(state.ui_theme().palette);
+    let mut palette = chrome_palette(state.ui_theme().palette);
+    if state.config().chrome.tabs_use_session_color {
+        palette.tab_accent =
+            parse_color(projection.mux.session_color.as_deref()).unwrap_or(palette.tab_accent);
+    }
     let config = state.config();
     let chrome = &config.chrome;
     let facts = state.window_chrome_facts();
@@ -542,6 +547,7 @@ const fn chrome_palette(theme: crate::gpui::UiPalette) -> ChromePalette {
         subtext: ui_color!(theme.subtext),
         muted: ui_color!(theme.muted),
         accent: ui_color!(theme.accent),
+        tab_accent: ui_color!(theme.accent),
     }
 }
 

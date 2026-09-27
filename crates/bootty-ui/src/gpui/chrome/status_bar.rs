@@ -1,3 +1,4 @@
+use gpui_kit::base::Tab;
 use num_traits::ToPrimitive as _;
 use std::{cmp::Ordering, rc::Rc, sync::OnceLock, time::Instant};
 
@@ -18,7 +19,6 @@ use gpui_kit::component::{
     ActiveTheme as _, ElementExt as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     menu::ContextMenuExt,
-    tab::Tab,
 };
 
 #[derive(Clone)]
@@ -641,48 +641,52 @@ fn render_tab(
         close,
         group.clone(),
         bar.tab_config,
-        (active && bar.tab_config.appearance == bootty_config::config::TabAppearance::Segmented)
-            .then_some(cx.theme().secondary_active),
     );
     let content = tab_content_gestures(content, source.as_ref(), tab_context.as_ref(), cx);
-    let tab = Tab::new()
-        .debug_selector({
-            let source_slot = segment.source_slot;
-            let key = key.to_owned();
-            let bar_key = bar.key.to_owned();
-            move || format!("status-tab-{bar_key}-{source_slot}-{key}")
-        })
-        .group(group)
-        .selected(active)
-        .aria_label(label)
-        .when(insertion_here, |element| {
-            element.border_l_2().border_color(color(colors.accent))
-        })
-        .when_some(tab_focus.clone(), |element, focus| {
-            element.track_focus(&focus).focusable().tab_index(0_isize)
-        })
-        .cursor_pointer()
-        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-            status_tab_key(
-                this,
-                event,
-                &navigation_ids_for_key,
-                &focus_id_for_key,
-                activation_for_key.as_ref(),
-                window,
-                cx,
-            );
+    let tab = crate::gpui::tabs::tab(
+        group.clone(),
+        bar.tab_config.appearance,
+        active,
+        color(colors.tab_accent),
+        cx,
+    )
+    .debug_selector({
+        let source_slot = segment.source_slot;
+        let key = key.to_owned();
+        let bar_key = bar.key.to_owned();
+        move || format!("status-tab-{bar_key}-{source_slot}-{key}")
+    })
+    .group(group)
+    .selected(active)
+    .accessibility_label(label)
+    .when(insertion_here, |element| {
+        element.border_l_2().border_color(color(colors.accent))
+    })
+    .when_some(tab_focus.clone(), |element, focus| {
+        element.track_focus(&focus).focusable().tab_index(0_isize)
+    })
+    .cursor_pointer()
+    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+        status_tab_key(
+            this,
+            event,
+            &navigation_ids_for_key,
+            &focus_id_for_key,
+            activation_for_key.as_ref(),
+            window,
+            cx,
+        );
+    }))
+    .when_some(activation, |element, intent| {
+        element.on_click(cx.listener(move |_, _, window, cx| {
+            if let Some(focus) = &tab_focus {
+                focus.focus(window, cx);
+            }
+            cx.emit(ChromeIntent::Status(intent.clone()));
         }))
-        .when_some(activation, |element, intent| {
-            element.on_click(cx.listener(move |_, _, window, cx| {
-                if let Some(focus) = &tab_focus {
-                    focus.focus(window, cx);
-                }
-                cx.emit(ChromeIntent::Status(intent.clone()));
-            }))
-        })
-        .map(|tab| tab_middle_close(tab, tab_context, cx))
-        .child(content);
+    })
+    .map(|tab| tab_middle_close(tab, tab_context, cx))
+    .child(content);
     measured_tab(tab, source, tab_bounds, cx)
 }
 

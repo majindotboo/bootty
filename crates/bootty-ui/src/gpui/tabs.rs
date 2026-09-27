@@ -1,13 +1,14 @@
 //! Shared tab appearance and close-affordance layout for dock and mux tabs.
 use bootty_config::config::{TabAppearance, TabCloseButton, TabClosePosition, TabConfig};
+use gpui_kit::base::{Tab, Tabs};
 use gpui_kit::component::{
-    ElementExt as _, IconName, Sizable as _, Size,
+    ActiveTheme as _, Colorize as _, ElementExt as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    tab::{Tab, TabBar, TabVariant},
 };
 use gpui_kit::{
     AnyElement, App, Context, Div, FocusHandle, Hsla, MouseButton, ParentElement, Pixels,
     RenderOnce, ScrollHandle, SharedString, Styled, Task, TextRun, Window, div, prelude::*, px,
+    relative,
 };
 use std::{
     cell::Cell,
@@ -16,35 +17,53 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const fn variant(appearance: TabAppearance) -> TabVariant {
-    match appearance {
-        TabAppearance::Classic => TabVariant::Tab,
-        TabAppearance::Underline => TabVariant::Underline,
-        TabAppearance::Pill => TabVariant::Pill,
-        TabAppearance::Outline => TabVariant::Outline,
-        TabAppearance::Segmented => TabVariant::Segmented,
-    }
-}
-
-/// Cover Kit's bar separator before it paints the tabs, preserving the active
-/// underline indicator and each variant's own tab background.
-pub fn blend_bar(bar: TabBar, appearance: TabAppearance, background: Hsla) -> TabBar {
-    bar.when(appearance != TabAppearance::Classic, |bar| {
-        bar.bg(background)
-            .prefix(div().absolute().inset_0().bg(background))
-    })
-}
-
-pub const fn size(appearance: TabAppearance) -> Size {
-    // These variants keep their own inset inside the 32px workspace row.
-    if matches!(
-        appearance,
-        TabAppearance::Underline | TabAppearance::Pill | TabAppearance::Outline
-    ) {
-        Size::Small
-    } else {
-        Size::Medium
-    }
+/// Keep tab fills quiet without changing primary buttons or other accent controls.
+pub fn tab(
+    id: SharedString,
+    appearance: TabAppearance,
+    selected: bool,
+    accent: Hsla,
+    cx: &App,
+) -> Tab {
+    let theme = cx.theme();
+    let fill = accent.mix_oklab(theme.secondary, 0.18);
+    let outline = accent.mix_oklab(theme.secondary, 0.6);
+    let hover = theme.secondary_hover;
+    let compact = matches!(appearance, TabAppearance::Pill | TabAppearance::Outline);
+    Tab::new(id)
+        .selected(selected)
+        .relative()
+        .flex_none()
+        .h(px(match appearance {
+            TabAppearance::Classic => 32.0,
+            TabAppearance::Underline => 30.0,
+            _ => 24.0,
+        }))
+        .line_height(relative(1.25))
+        .whitespace_nowrap()
+        .text_sm()
+        .text_color(theme.tab_foreground)
+        .when(compact, Styled::rounded_full)
+        .when(appearance == TabAppearance::Segmented, |tab| {
+            tab.rounded_sm()
+        })
+        .when(appearance == TabAppearance::Outline, |tab| {
+            tab.border_1().border_color(theme.border)
+        })
+        .when(appearance == TabAppearance::Underline, |tab| {
+            tab.border_b_2().border_color(theme.transparent)
+        })
+        .styles(|styles| {
+            styles.selected(|style| {
+                let style = style.text_color(theme.foreground);
+                match appearance {
+                    TabAppearance::Underline => style.border_color(outline),
+                    TabAppearance::Outline => style.border_color(outline).bg(fill),
+                    _ => style.bg(fill),
+                }
+            })
+        })
+        .hover(move |style| if selected { style } else { style.bg(hover) })
 }
 
 pub fn content(
@@ -52,10 +71,8 @@ pub fn content(
     close: Option<AnyElement>,
     hover_group: SharedString,
     config: TabConfig,
-    selected_background: Option<Hsla>,
 ) -> Div {
     let close = close.filter(|_| config.close_button != TabCloseButton::Hidden);
-    let underline = config.appearance == TabAppearance::Underline;
     div()
         .h_full()
         .flex_1()
@@ -64,25 +81,8 @@ pub fn content(
         .items_center()
         .justify_center()
         .min_w_0()
-        // Own one padding box, including the close target. Kit already adds 12px
-        // except for underline; cancel that inset rather than adding a close column.
-        .when(!underline, |row| {
-            row.mx(px(
-                if matches!(
-                    config.appearance,
-                    TabAppearance::Pill | TabAppearance::Outline
-                ) {
-                    -10.0
-                } else {
-                    -12.0
-                },
-            ))
-        })
         .px_3()
         .when(close.is_some(), gpui_kit::Styled::px_4)
-        .when_some(selected_background, |row, background| {
-            row.h_full().bg(background).rounded_sm()
-        })
         .child(content)
         .when_some(close, |row, close| {
             row.child(
@@ -146,7 +146,7 @@ impl NotchTabLayout {
         (count, (used - gap + 4.0).max(self.width))
     }
 
-    fn first_row(self, bar: TabBar) -> Div {
+    fn first_row(self, bar: Tabs) -> Div {
         div()
             .h(px(self.height))
             .w_full()
@@ -399,7 +399,7 @@ impl RenderOnce for ScrollableTabBar {
     }
 }
 
-// Match the pinned Kit tab variants; these gaps separate its logical scroll children.
+// Keep spacing stable across appearance changes; each tab is one logical scroll child.
 const fn tab_gap(appearance: TabAppearance) -> f32 {
     match appearance {
         TabAppearance::Classic => 0.0,
@@ -420,28 +420,33 @@ fn make_bar(
     scroll: Option<&ScrollHandle>,
     end: AnyElement,
     rem: f32,
-) -> TabBar {
-    blend_bar(
-        TabBar::new(id)
-            .with_variant(variant(config.appearance))
-            .with_size(size(config.appearance))
-            .w_full()
-            .min_w_0()
-            .max_width(px(rem * 15.0))
-            .when_some(scroll, TabBar::track_scroll)
-            .when_some(selected, TabBar::selected_index)
-            .children(tabs)
-            .suffix(gpui_kit::Empty)
-            .last_empty_space(end),
-        config.appearance,
-        background,
-    )
+) -> Tabs {
+    let count = tabs.len();
+    Tabs::new(id)
+        .flex()
+        .items_center()
+        .w_full()
+        .min_w_0()
+        .h_full()
+        .gap(px(tab_gap(config.appearance)))
+        .bg(background)
+        .overflow_x_scroll()
+        .when_some(scroll, gpui_kit::StatefulInteractiveElement::track_scroll)
+        .children(tabs.into_iter().enumerate().map(|(ix, tab)| {
+            tab.id(ix)
+                .set_position(ix.saturating_add(1), count)
+                .min_w_0()
+                .max_w(px(rem * 15.0))
+                .overflow_hidden()
+                .when_some(selected, |tab, selected| tab.selected(ix == selected))
+        }))
+        .child(end)
 }
 
 #[derive(IntoElement)]
 struct ScrollRow {
     id: SharedString,
-    bar: TabBar,
+    bar: Tabs,
     scroll: ScrollHandle,
     edges: Rc<Cell<(bool, bool, bool)>>,
     viewport_width: Rc<Cell<Pixels>>,

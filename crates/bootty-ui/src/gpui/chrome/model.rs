@@ -32,6 +32,7 @@ pub struct ChromePalette {
     pub subtext: Rgba,
     pub muted: Rgba,
     pub accent: Rgba,
+    pub tab_accent: Rgba,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
