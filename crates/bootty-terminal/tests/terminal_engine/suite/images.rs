@@ -1091,6 +1091,83 @@ fn native_kitty_image_survives_blank_reserved_rows_after_first_frame() {
         frame.images.placements
     );
 }
+#[rstest::rstest]
+#[case(8.4, 17.8, 30, 3, 32, 18)]
+#[case(17.8, 8.4, 3, 30, 18, 32)]
+fn native_kitty_image_keeps_fractional_cell_boundaries(
+    #[case] cell_width: f32,
+    #[case] cell_height: f32,
+    #[case] row: u16,
+    #[case] col: u16,
+    #[case] columns: u16,
+    #[case] rows: u16,
+) -> Result<()> {
+    let mut engine = image_terminal_engine(80, 60, 18, 36)?;
+    engine.set_display_scale(2.0);
+    engine.set_render_cell_metrics(CellMetrics::new(cell_width, cell_height));
+    let row = row.saturating_add(1);
+    let col = col.saturating_add(1);
+    let bottom = row.saturating_add(rows);
+    let right = col.saturating_add(columns);
+    engine.write_vt(format!("\x1b[{row};{col}H").as_bytes());
+    engine.write_vt(
+        raw_rgb_command_dimensions_with_options(
+            110,
+            1,
+            1,
+            1,
+            &format!("c={columns},r={rows},C=1,q=1"),
+        )?
+        .as_bytes(),
+    );
+    // Text touches each edge without entering the image's reserved cells.
+    for (y, x) in [
+        (row.saturating_sub(1), col),
+        (bottom, col),
+        (row, col.saturating_sub(1)),
+        (row, right),
+    ] {
+        engine.write_vt(format!("\x1b[{y};{x}HX").as_bytes());
+    }
+    assert_eq!(engine.extract_frame()?.images.placements.len(), 1);
+
+    // Real text overlap must still hide the image, and clearing it restores it.
+    let inside = format!(
+        "\x1b[{};{}H",
+        bottom.saturating_sub(1),
+        right.saturating_sub(1)
+    );
+    engine.write_vt(format!("{inside}X").as_bytes());
+    assert_eq!(engine.extract_frame()?.images.placements.len(), 0);
+    engine.write_vt(format!("{inside} ").as_bytes());
+    assert_eq!(engine.extract_frame()?.images.placements.len(), 1);
+
+    // A real one-pixel offset is not roundoff: it enters the adjacent text.
+    engine.write_vt(
+        format!("\x1b[{row};{col}H\x1b_Ga=p,i=110,p=1,c={columns},r={rows},X=1,Y=1,C=1,q=1\x1b\\")
+            .as_bytes(),
+    );
+    assert_eq!(engine.extract_frame()?.images.placements.len(), 0);
+    Ok(())
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+    #[test]
+    fn native_kitty_images_preserve_grid_aligned_edges(
+        cell_width in 6.0_f32..24.0,
+        cell_height in 12.0_f32..32.0,
+        row in 1_u16..30,
+        col in 1_u16..40,
+        columns in 1_u16..32,
+        rows in 1_u16..20,
+    ) {
+        native_kitty_image_keeps_fractional_cell_boundaries(
+            cell_width, cell_height, row, col, columns, rows,
+        ).expect("terminal image frame");
+    }
+}
+
 #[test]
 fn native_kitty_image_reappears_after_temporary_text_overlap() {
     let mut engine = image_terminal_engine(12, 4, 10, 20).expect("test operation succeeds");

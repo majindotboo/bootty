@@ -718,6 +718,19 @@ fn hyperlink_uri_at(
     }
 }
 
+fn image_cell_boundary(position: f32, cell_size: f32) -> f32 {
+    let cell = position.max(0.0) / cell_size;
+    let nearest = cell.round();
+    // Pixel rectangles accumulate f32 roundoff. Do not let a cell-aligned image
+    // spill into adjacent text when floor/ceil converts it back to grid bounds.
+    let tolerance = 4.0 * f32::EPSILON * cell.abs().max(1.0);
+    if (cell - nearest).abs() <= tolerance {
+        nearest
+    } else {
+        cell
+    }
+}
+
 fn placement_rows_overlap_content(
     placement: &KittyImagePlacement,
     surface: TerminalSurface,
@@ -737,23 +750,23 @@ fn placement_rows_overlap_content(
         return false;
     }
 
-    let start = (min_y.max(0.0) / surface.cell.height)
+    let start = image_cell_boundary(min_y, surface.cell.height)
         .floor()
         .max(0.0)
         .to_usize()
         .unwrap_or(usize::MAX);
-    let end = (max_y.max(0.0) / surface.cell.height)
+    let end = image_cell_boundary(max_y, surface.cell.height)
         .ceil()
         .max(0.0)
         .to_usize()
         .unwrap_or(usize::MAX);
     let end = end.saturating_sub(1).min(rows.len().saturating_sub(1));
-    let start_col = (min_x.max(0.0) / surface.cell.width)
+    let start_col = image_cell_boundary(min_x, surface.cell.width)
         .floor()
         .max(0.0)
         .to_u16()
         .unwrap_or(u16::MAX);
-    let end_col = (max_x.max(0.0) / surface.cell.width)
+    let end_col = image_cell_boundary(max_x, surface.cell.width)
         .ceil()
         .max(1.0)
         .max(0.0)
