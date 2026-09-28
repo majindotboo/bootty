@@ -80,6 +80,8 @@ fn tmux_transfers_keep_processes_and_reject_foreign_panes() -> Result<()> {
         "/bin/sh",
         "-i",
     ])?;
+    // Compare transfer effects, not tmux's asynchronous shell-title updates.
+    server.run_checked(&["set-option", "-gw", "automatic-rename", "off"])?;
     server.run_checked(&["split-window", "-h", "-t", "transfer", "/bin/sh", "-i"])?;
     server.run_checked(&["new-session", "-d", "-s", "foreign", "/bin/sh", "-i"])?;
     let before = server.processes()?;
