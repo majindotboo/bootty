@@ -2982,10 +2982,13 @@ impl GpuiWorkspace {
         if crate::menu::settings_requested(window.is_window_active()) {
             self.open_settings_window(window, cx);
         }
-        // Child-only paints (for example cursor blink) do not advance application work.
+        // Child-only paints (for example cursor blink) do not advance application work. Queued
+        // pointer input does: its handlers only notify, so otherwise wheel and motion input would
+        // wait for the next maintenance tick, up to a full idle repaint backoff.
         if std::mem::take(&mut self.frame_update_pending)
             || !self.pending_effects.is_empty()
             || self.state.commands.has_queued()
+            || self.input.has_queued()
         {
             self.advance_frame(window, cx);
         }

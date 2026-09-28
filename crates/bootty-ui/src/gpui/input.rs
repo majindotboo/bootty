@@ -335,6 +335,12 @@ impl InputAccumulator {
         self.dropped_file_paths.extend_from_slice(paths.paths());
     }
 
+    /// Whether the next [`Self::drain_frame`] has input to deliver.
+    #[must_use]
+    pub fn has_queued(&self) -> bool {
+        !self.dropped_file_paths.is_empty() || self.with_shared(|shared| !shared.events.is_empty())
+    }
+
     pub fn drain_frame(&mut self) -> FrameInputSnapshot {
         let events = self.with_shared(|shared| std::mem::take(&mut shared.events));
         FrameInputSnapshot {
