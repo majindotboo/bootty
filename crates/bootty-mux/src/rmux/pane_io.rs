@@ -337,8 +337,7 @@ async fn stream_pane_output(
     };
     for event in recovery.poll_once().await? {
         if let PaneRecoveryEvent::Rebase(mut rebase) = event {
-            append_kitty_keyboard_protocol(&mut rebase.keyframe, keyboard_protocol);
-            append_sgr_pixels_mouse_mode(&mut rebase.keyframe, sgr_pixels_mouse);
+            restore_input_modes(&mut rebase.keyframe, keyboard_protocol, sgr_pixels_mouse);
             if request
                 .output_tx
                 .send(RmuxPaneEvent::Rebase(rebase.keyframe))
@@ -785,6 +784,55 @@ fn append_kitty_keyboard_protocol(keyframe: &mut Vec<u8>, protocol: &KittyKeyboa
 fn append_sgr_pixels_mouse_mode(keyframe: &mut Vec<u8>, mode: &SgrPixelsMouseMode) {
     if mode.enabled {
         keyframe.extend_from_slice(b"\x1b[?1016h");
+    }
+}
+
+fn restore_input_modes(
+    keyframe: &mut Vec<u8>,
+    keyboard: &KittyKeyboardProtocol,
+    mouse: &SgrPixelsMouseMode,
+) {
+    let mut modes = Vec::new();
+    append_kitty_keyboard_protocol(&mut modes, keyboard);
+    append_sgr_pixels_mouse_mode(&mut modes, mouse);
+    if modes.is_empty() {
+        return;
+    }
+    // rmux 0.10 ends its keyframe with the parser's unfinished sequence. Never
+    // append our missing input modes inside it; insert at the last complete token.
+    let mut parser = anstyle_parse::Parser::<anstyle_parse::Utf8Parser>::default();
+    let mut boundary = RecoveryBoundary::default();
+    for byte in keyframe.iter().copied() {
+        boundary.offset = boundary.offset.saturating_add(1);
+        parser.advance(&mut boundary, byte);
+    }
+    keyframe.splice(boundary.complete..boundary.complete, modes);
+}
+
+#[derive(Default)]
+struct RecoveryBoundary {
+    offset: usize,
+    complete: usize,
+}
+
+impl anstyle_parse::Perform for RecoveryBoundary {
+    fn print(&mut self, _: char) {
+        self.complete = self.offset;
+    }
+
+    fn csi_dispatch(&mut self, _: &anstyle_parse::Params, _: &[u8], _: bool, _: u8) {
+        self.complete = self.offset;
+    }
+
+    fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {
+        self.complete = self.offset;
+    }
+
+    fn osc_dispatch(&mut self, _: &[&[u8]], bell_terminated: bool) {
+        // ESC starts the two-byte ST terminator; esc_dispatch finishes it.
+        if bell_terminated {
+            self.complete = self.offset;
+        }
     }
 }
 

@@ -1617,18 +1617,14 @@ impl TerminalEngine {
     /// notification the user has already seen. State the keyframe restores,
     /// such as the window title, is kept.
     pub fn write_vt_without_pty_responses(&mut self, bytes: &[u8]) {
-        // A keyframe is a complete epoch, so the streaming buffers are emptied on
-        // both sides of it. Whatever they held from the previous epoch would
-        // otherwise be spliced onto the front of the keyframe, and whatever the
-        // keyframe leaves behind would be flushed by the next live write with
-        // responses and side effects back on.
+        // Discard the old epoch's pending input, but keep the keyframe's tail:
+        // rmux appends its incomplete parser sequence for the next live bytes to finish.
         self.clear_streaming_writes();
         let previously_suppressed = self.pty_write_suppressed.replace(true);
         let side_effects = self.side_effects.mark();
         self.write_vt(bytes);
         self.pty_write_suppressed.set(previously_suppressed);
         self.side_effects.drop_replayed(side_effects);
-        self.clear_streaming_writes();
         self.side_effects.reset_clipboard_epoch();
     }
 

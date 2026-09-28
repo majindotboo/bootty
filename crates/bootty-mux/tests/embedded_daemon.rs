@@ -95,6 +95,7 @@ macro_rules! embedded_scenarios {
 }
 
 embedded_scenarios!(
+    recovery_keeps_pending_cursor_escape,
     session_lifecycle,
     pane_navigation_and_zoom,
     terminal_requests,
@@ -138,6 +139,38 @@ fn embedded_rmux_remote_pane_stream_child() -> Result<()> {
 mod scenario {
     use super::*;
     use pretty_assertions::{assert_eq, assert_ne};
+
+    pub fn recovery_keeps_pending_cursor_escape() -> Result<()> {
+        for (pending, continuation) in [
+            ("\\033", "[3;1H"),
+            ("\\033[3;", "1H"),
+            ("\\033]10;rgb:aa", "aa/bbbb/cccc\\033\\\\\\033[3;1H"),
+        ] {
+            let (mut backend, registry, session_id, window_id, pane) =
+                create_embedded_session(unscoped_tag())?;
+            let mut original = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+            prepare_pane(&mut original)?;
+            original.write_input(format!("printf '\\033[?1049h\\033[>5u\\033[2J\\033[1;1HOld compaction\\033[3;1HCursor Images\\033[1;1H{pending}'; read go; printf '{continuation}\\033[2K\\033[1;1H\\033[2KUpdated transcript'; read hold\r").as_bytes())?;
+            wait_for_terminal_text(&mut original, "Cursor Images")?;
+            let mut restored = open_terminal(registry, &pane, &window_id)?;
+            wait_for_terminal_text(&mut restored, "Cursor Images")?;
+            original.write_input(b"\r")?;
+            wait_for_terminal_text(&mut restored, "Updated transcript")?;
+            wait_for_terminal_text(&mut original, "Updated transcript")?;
+            let frame = restored.extract_frame()?;
+            let reference = original.extract_frame()?;
+            let text = frame.text.iter().collect::<String>();
+            ditch_session(&mut backend, &session_id)?;
+            anyhow::ensure!(
+                !text.contains("Cursor Images"),
+                "recovery left stale text: {text:?}"
+            );
+            assert_eq!(frame.text, reference.text);
+            assert_eq!(frame.colors.foreground, reference.colors.foreground);
+            assert_eq!(frame.colors.background, reference.colors.background);
+        }
+        Ok(())
+    }
 
     pub fn session_lifecycle() -> Result<()> {
         let tag = MuxSessionTag {

@@ -56,15 +56,16 @@ fn terminal_engine_does_not_repeat_side_effects_replayed_from_a_rebase() {
 }
 
 #[test]
-fn terminal_engine_does_not_carry_a_truncated_rebase_into_the_next_write() {
+fn terminal_engine_completes_a_pending_rebase_query_once() {
     let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
-    // The keyframe ends mid-OSC, so the streaming buffer holds the tail back.
+    // This query was incomplete at capture time; only its live completion answers it.
     engine.write_vt_without_pty_responses(b"\x1b]1337;ReportCellSize");
     assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b\\\x1b[c");
     assert_eq!(take_pty_output(&output), b"\x1b[?62;22;52c");
+    assert_eq!(engine.drain_side_effects().len(), 1);
     assert_eq!(
         engine.drain_side_effects(),
         Vec::<bootty_terminal::terminal_engine::TerminalSideEffect>::new()

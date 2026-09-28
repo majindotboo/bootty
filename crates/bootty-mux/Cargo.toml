@@ -14,6 +14,7 @@ terminal-runtime = [
 ]
 
 [dependencies]
+anstyle-parse.workspace = true
 bootty-git = { path = "../bootty-git" }
 bootty-config = { path = "../bootty-config" }
 bootty-host = { path = "../bootty-host" }
