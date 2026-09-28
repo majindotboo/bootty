@@ -12,10 +12,11 @@ use objc2::runtime::NSObjectProtocol;
 use objc2::{MainThreadMarker, sel};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSApplication, NSScreen, NSTitlebarSeparatorStyle, NSWindow, NSWindowButton, NSWindowStyleMask,
+    NSAccessibility, NSApplication, NSScreen, NSTitlebarSeparatorStyle, NSView, NSWindow,
+    NSWindowButton, NSWindowStyleMask,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::{NSNumber, NSString, ns_string};
 
 /// Notch geometry for one concrete display, in screen points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -65,43 +66,74 @@ fn with_active_window(action: impl FnOnce(&NSWindow)) {
     }
 }
 
+/// Run `action` on this GPUI window's `NSWindow`. A temporary unique title addresses this exact
+/// window through safe `AppKit` APIs, even with several workspaces open.
+#[cfg(target_os = "macos")]
+fn with_native_window(window: &mut gpui_kit::Window, action: impl FnOnce(&NSWindow)) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let title = window.window_title();
+    let lookup_title = format!("bootty-window-{:?}", window.window_handle().window_id());
+    window.set_window_title(&lookup_title);
+    let windows = NSApplication::sharedApplication(mtm).windows();
+    if let Some(native) = windows
+        .into_iter()
+        .find(|native| native.title().to_string() == lookup_title)
+    {
+        action(&native);
+    }
+    window.set_window_title(&title);
+}
+
 /// Restore native resizing before GPUI captures the window's style for simple fullscreen.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_enable_window_resizing(window: &mut gpui_kit::Window) {
     if window.is_fullscreen() || window.is_simple_fullscreen() {
         return;
     }
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
     // Remove this adapter once GPUI honors is_resizable with titlebar: None (0.3.4 does not).
-    // A temporary unique title addresses this exact window through safe AppKit APIs, even
-    // with several workspaces open.
-    let title = window.window_title();
-    let lookup_title = format!("bootty-window-{:?}", window.window_handle().window_id());
-    window.set_window_title(&lookup_title);
-    let windows = NSApplication::sharedApplication(mtm).windows();
-    for native in windows {
-        if native.title().to_string() == lookup_title {
-            let style = native.styleMask();
-            if !style.contains(NSWindowStyleMask::Resizable) {
-                native.setStyleMask(style | NSWindowStyleMask::Resizable);
-            }
-            // AppKit recreates the zoom button when restoring the window's fullscreen style.
-            if !style.contains(NSWindowStyleMask::Closable)
-                && let Some(button) = native.standardWindowButton(NSWindowButton::ZoomButton)
-                && !button.isHidden()
-            {
-                button.setHidden(true);
-            }
-            break;
+    with_native_window(window, |native| {
+        let style = native.styleMask();
+        if !style.contains(NSWindowStyleMask::Resizable) {
+            native.setStyleMask(style | NSWindowStyleMask::Resizable);
         }
-    }
-    window.set_window_title(&title);
+        // AppKit recreates the zoom button when restoring the window's fullscreen style.
+        if !style.contains(NSWindowStyleMask::Closable)
+            && let Some(button) = native.standardWindowButton(NSWindowButton::ZoomButton)
+            && !button.isHidden()
+        {
+            button.setHidden(true);
+        }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) const fn macos_enable_window_resizing(_window: &mut gpui_kit::Window) {}
+
+/// Report GPUI's view to Accessibility as a text area. Dictation apps such as Monologue only
+/// paste into a focused text role, and GPUI's macOS view exposes no role at all.
+///
+/// Role only: the terminal contents are not exposed. Add value and selection attributes when a
+/// screen reader or dictation client needs to read the terminal text.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_expose_text_target(window: &mut gpui_kit::Window) {
+    with_native_window(window, |native| {
+        // GPUI makes its single view first responder when it creates the window.
+        let Some(view) = native
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+        else {
+            return;
+        };
+        view.setAccessibilityElement(true);
+        // NSAccessibilityTextAreaRole; reading AppKit's extern static would need unsafe.
+        view.setAccessibilityRole(Some(ns_string!("AXTextArea")));
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) const fn macos_expose_text_target(_window: &mut gpui_kit::Window) {}
 
 /// Whether the active window's screen has a camera-housing notch.
 ///

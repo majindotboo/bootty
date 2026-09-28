@@ -298,6 +298,7 @@ impl GpuiWorkspace {
         )?;
         cx.open_window(options, move |window, cx| {
             crate::window::macos_enable_window_resizing(window);
+            crate::window::macos_expose_text_target(window);
             let workspace = cx.new(|cx| {
                 Self::new(
                     state,
