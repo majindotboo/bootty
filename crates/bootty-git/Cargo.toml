@@ -4,15 +4,20 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+base64.workspace = true
+image = { workspace = true, features = ["png", "webp", "ico"] }
 bootty-host = { path = "../bootty-host" }
 bootty-write = { path = "../bootty-write" }
 notify.workspace = true
+resvg.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true
+proptest.workspace = true
+proptest-derive.workspace = true
 rstest.workspace = true
 
 [lints]

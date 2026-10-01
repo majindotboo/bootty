@@ -34,6 +34,7 @@ const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// worktree identity; a cwd alone is not a safe remote identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitFacts {
+    pub project_icon: Option<Arc<crate::ProjectIcon>>,
     pub branch: Option<String>,
     pub branch_status: BranchStatus,
     pub diff_added: Option<u64>,
@@ -65,6 +66,7 @@ pub struct GitSessionFactsInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitSessionFacts {
     pub pane_pid: Option<u32>,
+    pub project_icon: Option<Arc<crate::ProjectIcon>>,
     pub branch: Option<String>,
     pub branch_status: BranchStatus,
     pub diff_added: Option<u64>,
@@ -88,6 +90,7 @@ struct CachedFacts {
     diff_revision: u64,
     diff_counted: bool,
     live_running: bool,
+    icon_revision: Option<u64>,
     diff_running: bool,
 }
 
@@ -108,6 +111,7 @@ impl CachedFacts {
             diff_revision: 0,
             diff_counted: false,
             live_running: false,
+            icon_revision: None,
             diff_running: false,
         }
     }
@@ -320,6 +324,7 @@ where
         let mut facts = self.refresh_with_identity(&cache_key, cwd, input.selected, now, &identity);
         GitSessionFacts {
             pane_pid: input.pane_pid,
+            project_icon: facts.project_icon.take(),
             branch: facts.branch.take(),
             branch_status: facts.branch_status,
             diff_added: facts.diff_added,
@@ -370,11 +375,27 @@ where
         let git = self.git.clone();
         let entries = Arc::clone(&self.entries);
         let retired = Arc::clone(&self.retired);
+        let local = self.revisions.watch_local;
         thread::spawn(move || {
             if retired.load(Ordering::Acquire) {
                 return;
             }
             let branch = git.head_branch(&cwd);
+            let icon_revision = entries.lock().ok().and_then(|entries| {
+                let entry = entries.get(&cache_key)?;
+                (entry.icon_revision != Some(entry.facts.worktree_revision))
+                    .then_some(entry.facts.worktree_revision)
+            });
+            let icon = icon_revision.map(|revision| {
+                let root = git.worktree_root(&cwd).unwrap_or_else(|| cwd.clone());
+                let icon = if local {
+                    crate::detect_project_icon(Path::new(&root))
+                } else {
+                    crate::project_icon::detect_project_icon_with_runner(&root, &git.runner)
+                }
+                .map(Arc::new);
+                (revision, icon)
+            });
             if retired.load(Ordering::Acquire) {
                 return;
             }
@@ -382,6 +403,10 @@ where
                 && let Some(entry) = entries.get_mut(&cache_key)
                 && Arc::ptr_eq(&entry.incarnation, &incarnation)
             {
+                if let Some((revision, icon)) = icon {
+                    entry.facts.project_icon = icon;
+                    entry.icon_revision = Some(revision);
+                }
                 if branch.is_some() {
                     entry.facts.branch = branch;
                     entry.facts.branch_status = BranchStatus::Current;

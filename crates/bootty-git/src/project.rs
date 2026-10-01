@@ -19,6 +19,7 @@ pub use crate::worktree::{
 pub struct ProjectPickerEntry {
     pub path: String,
     pub favorite: bool,
+    pub icon: Option<crate::ProjectIcon>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -90,7 +91,12 @@ fn push_project_entry(entries: &mut Vec<ProjectPickerEntry>, path: &Path, favori
     if let Some(existing) = entries.iter_mut().find(|entry| entry.path == path) {
         existing.favorite |= favorite;
     } else {
-        entries.push(ProjectPickerEntry { path, favorite });
+        let icon = crate::detect_project_icon(Path::new(&path));
+        entries.push(ProjectPickerEntry {
+            path,
+            favorite,
+            icon,
+        });
     }
 }
 
