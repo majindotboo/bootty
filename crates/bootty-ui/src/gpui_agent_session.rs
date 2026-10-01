@@ -11,6 +11,7 @@ use bootty_control::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    collapsible::Collapsible,
     input::{InputEvent, Textarea, TextareaState},
     scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
@@ -33,6 +34,7 @@ pub struct NativeAgentSessionView {
     sender: BoundAppCommandSender,
     composer: Entity<TextareaState>,
     transcript: BTreeMap<String, Entity<TextViewState>>,
+    tool_disclosures: BTreeMap<String, bool>,
     list: ListState,
     history: Vec<(String, String)>,
     show_history: bool,
@@ -72,6 +74,7 @@ impl NativeAgentSessionView {
             sender,
             composer,
             transcript: BTreeMap::new(),
+            tool_disclosures: BTreeMap::new(),
             // Overdraw represents the rendered viewport boundary, not product spacing.
             list: ListState::new(0, ListAlignment::Bottom, gpui_kit::px(256.)),
             history: Vec::new(),
@@ -89,6 +92,7 @@ impl NativeAgentSessionView {
         };
         this.sync_transcript(cx);
         this.sync_answers(window, cx);
+        this.sync_tool_disclosures();
         this
     }
 
@@ -114,6 +118,7 @@ impl NativeAgentSessionView {
             self.sync_transcript(cx);
         }
         self.sync_answers(window, cx);
+        self.sync_tool_disclosures();
         self.send_queued(window, cx);
         cx.notify();
     }
@@ -163,6 +168,37 @@ impl NativeAgentSessionView {
         }
         if follow {
             self.list.scroll_to_end();
+        }
+    }
+
+    fn sync_tool_disclosures(&mut self) {
+        self.tool_disclosures.retain(|id, _| {
+            self.record
+                .snapshot
+                .transcript
+                .iter()
+                .any(|item| &item.id == id && item.complete && is_tool_output(&item.role))
+        });
+        if is_busy(self.record.snapshot.status) {
+            return;
+        }
+        let follow = self.list.is_scrolled_to_end().unwrap_or(true);
+        let mut changed = false;
+        for item in &self.record.snapshot.transcript {
+            if item.complete
+                && is_tool_output(&item.role)
+                && let std::collections::btree_map::Entry::Vacant(entry) =
+                    self.tool_disclosures.entry(item.id.clone())
+            {
+                entry.insert(false);
+                changed = true;
+            }
+        }
+        if changed {
+            self.list.remeasure();
+            if follow {
+                self.list.scroll_to_end();
+            }
         }
     }
 
@@ -310,6 +346,7 @@ impl NativeAgentSessionView {
                 self.sync_transcript(cx);
             }
             self.sync_answers(window, cx);
+            self.sync_tool_disclosures();
         }
     }
 
@@ -442,10 +479,62 @@ impl NativeAgentSessionView {
             )
     }
 
-    fn render_message(&self, ix: usize, cx: &App) -> gpui_kit::AnyElement {
+    fn render_message(
+        &self,
+        ix: usize,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
         let Some(item) = self.record.snapshot.transcript.get(ix) else {
             return div().into_any_element();
         };
+        if item.complete && is_tool_output(&item.role) {
+            let open = self.tool_disclosures.get(&item.id).copied().unwrap_or(true);
+            let id = item.id.clone();
+            let lines = item.text.lines().count().max(1);
+            return div()
+                .id(gpui_kit::SharedString::from(format!(
+                    "message:{}:{id}",
+                    self.record.id
+                )))
+                .px_4()
+                .py_2()
+                .min_w_0()
+                .child(
+                    Collapsible::new()
+                        .open(open)
+                        .child(
+                            Button::new(gpui_kit::SharedString::from(format!("tool-output:{id}")))
+                                .label(format!(
+                                    "Tool output · {lines} {}",
+                                    if lines == 1 { "line" } else { "lines" }
+                                ))
+                                .icon(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .small()
+                                .ghost()
+                                .accessibility_label(if open {
+                                    "Hide tool output"
+                                } else {
+                                    "Show tool output"
+                                })
+                                .on_click(move |_, _, cx| {
+                                    _ = owner.update(cx, |this, cx| {
+                                        this.tool_disclosures.insert(id.clone(), !open);
+                                        this.list.remeasure();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .when_some(self.transcript.get(&item.id), |body, state| {
+                            body.content(TextView::new(state).selectable(true))
+                        }),
+                )
+                .into_any_element();
+        }
         let title = match item.role.as_str() {
             "user" => "You",
             "assistant" => provider_name(self.record.config.provider),
@@ -547,7 +636,9 @@ impl Render for NativeAgentSessionView {
                             list(self.list.clone(), move |ix, _, cx| {
                                 owner.upgrade().map_or_else(
                                     || div().into_any_element(),
-                                    |owner| owner.read(cx).render_message(ix, cx),
+                                    |owner| {
+                                        owner.read(cx).render_message(ix, owner.downgrade(), cx)
+                                    },
                                 )
                             })
                             .size_full(),
@@ -557,6 +648,10 @@ impl Render for NativeAgentSessionView {
             .child(self.render_requests(cx))
             .child(self.render_composer(cx))
     }
+}
+
+fn is_tool_output(role: &str) -> bool {
+    matches!(role, "tool" | "toolResult")
 }
 
 const fn provider_icon(provider: AgentKind) -> &'static str {
