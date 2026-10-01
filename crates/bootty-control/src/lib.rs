@@ -5,6 +5,7 @@ mod events;
 mod lease;
 mod plane;
 mod protocol;
+mod remote;
 mod server;
 mod state;
 mod wait;
@@ -25,6 +26,7 @@ pub use events::{
 pub use lease::InstanceDescriptor;
 pub use plane::ControlPlane;
 pub use protocol::{RpcError, RpcResponse};
+pub use remote::RemoteControlServer;
 pub use server::ControlServer;
 
 pub use wait::{WaitOutcome, WaitRequest, wait_for_command};
