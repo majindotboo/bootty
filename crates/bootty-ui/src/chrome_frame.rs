@@ -1103,8 +1103,13 @@ fn sidebar_footer(
     let mut error = None;
     for (provider, usage) in UsageProvider::ALL.into_iter().zip(native.usage.current()) {
         error = error.or(usage.error.as_deref());
+        let provider_color = match provider {
+            UsageProvider::Codex => theme.accent,
+            UsageProvider::Claude => theme.warning,
+        };
         let tone_color = |tone| match tone {
-            QuotaTone::Provider | QuotaTone::Muted => theme.muted,
+            QuotaTone::Provider => provider_color,
+            QuotaTone::Muted => theme.muted,
             QuotaTone::Success => theme.success,
             QuotaTone::Warning => theme.warning,
             QuotaTone::Critical => theme.destructive,
@@ -1121,7 +1126,7 @@ fn sidebar_footer(
                     }
                     .to_owned(),
                 ),
-                color: theme.text,
+                color: provider_color,
                 meter: Some(UsageMeterSnapshot {
                     provider,
                     label: format!("{} {:.0}% left", window.label, meter.remaining_percent),

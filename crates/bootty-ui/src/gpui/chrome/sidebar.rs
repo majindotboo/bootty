@@ -3,6 +3,7 @@ use num_traits::ToPrimitive as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
+    fmt::Write as _,
     rc::Rc,
     sync::OnceLock,
     time::Instant,
@@ -1012,13 +1013,16 @@ fn usage_meter(
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
 ) -> gpui_kit::AnyElement {
-    let fill_width = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
-        .to_f32()
-        .unwrap_or(0.0);
-    let details = format!(
-        "{} · {} · {}",
-        snapshot.label, snapshot.meter.pace, snapshot.meter.reset
-    );
+    let mut details = format!("{} · {}", snapshot.provider.id(), snapshot.label);
+    if let Some(expected) = snapshot.meter.expected_remaining_percent {
+        _ = write!(details, " · {expected:.0}% expected for time left");
+    }
+    if !snapshot.meter.pace.is_empty() {
+        _ = write!(details, " · {} vs pace", snapshot.meter.pace);
+    }
+    if !snapshot.meter.reset.is_empty() {
+        _ = write!(details, " · resets in {}", snapshot.meter.reset);
+    }
     div()
         .id(SharedString::from(format!("usage-{}", item.key)))
         .w_full()
@@ -1035,7 +1039,7 @@ fn usage_meter(
             element.child(crate::gpui::sized_icon(
                 icon,
                 crate::gpui::IconSize::Small,
-                color(colors.muted),
+                color(item.color),
             ))
         })
         .child(
@@ -1049,24 +1053,59 @@ fn usage_meter(
                 .truncate()
                 .child(snapshot.label.clone()),
         )
+        .when(!snapshot.meter.pace.is_empty(), |element| {
+            element.child(
+                div()
+                    .debug_selector({
+                        let key = item.key.clone();
+                        move || format!("sidebar-footer-{key}-pace")
+                    })
+                    .flex_none()
+                    .text_color(color(snapshot.pace))
+                    .child(snapshot.meter.pace.clone()),
+            )
+        })
+        .child(usage_track(snapshot, &item.key))
+        .into_any_element()
+}
+
+fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::AnyElement {
+    let fill = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
+        .to_f32()
+        .unwrap_or(0.0);
+    let marker = snapshot
+        .meter
+        .expected_remaining_percent
+        .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
+    let track_selector = format!("sidebar-footer-{key}-track");
+    let marker_selector = format!("sidebar-footer-{key}-expected");
+    div()
+        .debug_selector(move || track_selector)
+        .relative()
+        .flex_none()
+        .w_10()
+        .h_0p5()
+        .rounded_full()
+        .bg(color(snapshot.track))
         .child(
             div()
-                .debug_selector({
-                    let key = item.key.clone();
-                    move || format!("sidebar-footer-{key}-track")
-                })
-                .w_10()
-                .h_0p5()
+                .h_full()
+                .w(relative(fill))
                 .rounded_full()
-                .bg(color(snapshot.track))
-                .child(
-                    div()
-                        .h_full()
-                        .w(relative(fill_width))
-                        .rounded_full()
-                        .bg(color(snapshot.fill)),
-                ),
+                .bg(color(snapshot.fill)),
         )
+        .when_some(marker, |element, marker| {
+            element.child(
+                div()
+                    .debug_selector(move || marker_selector)
+                    .absolute()
+                    .left(relative(marker))
+                    .top_neg_0p5()
+                    .bottom_neg_0p5()
+                    .w_px()
+                    .bg(color(snapshot.marker)),
+            )
+        })
         .into_any_element()
 }
 

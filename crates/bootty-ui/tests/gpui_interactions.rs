@@ -625,16 +625,20 @@ fn quota_rows_keep_labels_beside_compact_meters(cx: &mut TestAppContext) {
             });
             cx.run_until_parked();
             let mut previous_bottom = px(0.0);
-            for (row, labels, track) in [
+            for (row, labels, track, pace_selector, expected_selector) in [
                 (
                     "sidebar-footer-codex:5h",
                     "sidebar-footer-codex:5h-labels",
                     "sidebar-footer-codex:5h-track",
+                    "sidebar-footer-codex:5h-pace",
+                    "sidebar-footer-codex:5h-expected",
                 ),
                 (
                     "sidebar-footer-codex:7d",
                     "sidebar-footer-codex:7d-labels",
                     "sidebar-footer-codex:7d-track",
+                    "sidebar-footer-codex:7d-pace",
+                    "sidebar-footer-codex:7d-expected",
                 ),
             ] {
                 let row = cx.debug_bounds(row).expect("quota row");
@@ -642,6 +646,15 @@ fn quota_rows_keep_labels_beside_compact_meters(cx: &mut TestAppContext) {
                 let track = cx.debug_bounds(track).expect("quota track");
                 assert!(labels.left() >= row.left());
                 assert!(labels.right() <= track.left(), "quota label overlaps meter");
+                let pace = cx
+                    .debug_bounds(pace_selector)
+                    .expect("visible quota pacing");
+                let expected = cx
+                    .debug_bounds(expected_selector)
+                    .expect("expected allowance marker");
+                assert!(labels.right() <= pace.left(), "quota label overlaps pacing");
+                assert!(pace.right() <= track.left(), "quota pacing overlaps meter");
+                assert!(expected.left() >= track.left() && expected.right() <= track.right());
                 assert!(track.right() <= row.right());
                 assert!(track.center().y >= labels.top());
                 assert!(track.center().y <= labels.bottom());
