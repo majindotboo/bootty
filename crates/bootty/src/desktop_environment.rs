@@ -1,8 +1,8 @@
-use std::process::Command;
+use std::{os::unix::process::CommandExt as _, process::Command};
 
 use anyhow::{Context as _, Result};
 
-/// Keep GPUI and GTK on the same X server, including XWayland in a Wayland session.
+/// Keep GPUI and GTK on the same X server, including `XWayland` in a Wayland session.
 /// Re-exec changes only the new process environment, before either toolkit is initialized.
 ///
 /// # Errors
@@ -16,7 +16,6 @@ pub fn initialize_browser_environment() -> Result<()> {
     if !has_wayland && std::env::var("GDK_BACKEND").ok().as_deref() == Some("x11") {
         return Ok(());
     }
-    use std::os::unix::process::CommandExt as _;
     let error = Command::new(std::env::current_exe().context("locate Bootty executable")?)
         .args(std::env::args_os().skip(1))
         .env_remove("WAYLAND_DISPLAY")
