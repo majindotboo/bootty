@@ -1132,7 +1132,13 @@ impl GpuiWorkspace {
 
     fn close_owned_services(&mut self, cx: &Context<Self>) -> gpui_kit::Task<()> {
         let forwards = self.state.take_link_forwards();
+        let native = self.state.native_agent_service();
         cx.background_executor().spawn(async move {
+            if let Some(native) = native
+                && let Err(error) = native.shutdown()
+            {
+                eprintln!("Native agent shutdown failed: {error}");
+            }
             let now = Instant::now();
             let runner = bootty_host::CancellableCommandRunner::with_deadline(
                 bootty_host::CommandCancellation::default(),
