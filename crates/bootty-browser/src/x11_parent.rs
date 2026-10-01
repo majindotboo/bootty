@@ -3,7 +3,7 @@ use wry::raw_window_handle::{
 };
 
 /// Borrows the same X11 window through the handle flavor accepted by Wry.
-pub(crate) struct X11Parent<'a>(pub(crate) WindowHandle<'a>);
+pub struct X11Parent<'a>(pub WindowHandle<'a>);
 
 impl HasWindowHandle for X11Parent<'_> {
     #[expect(
