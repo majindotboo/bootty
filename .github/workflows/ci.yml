@@ -178,6 +178,7 @@ jobs:
             libfontconfig1-dev \
             libfreetype6-dev \
             libgl1-mesa-dev \
+            libwebkit2gtk-4.1-dev \
             libwayland-dev \
             libx11-dev \
             libxcb-render0-dev \

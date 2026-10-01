@@ -135,6 +135,7 @@ embed-resource = "3.0.11"
 winsafe = { version = "0.0.29", default-features = false, features = ["kernel"] }
 winreg = "0.56"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+wry = "0.57"
 
 [profile.dev]
 debug = "limited"
