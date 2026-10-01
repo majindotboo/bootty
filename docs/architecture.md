@@ -27,6 +27,10 @@ This file describes the current production structure.
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
+| Native agent conversations and history | `bootty-agents::NativeAgentService` | Publishes only persisted session identities; bounded provider state stays process-owned. |
+| Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
+| Desktop capture and input | `bootty-computer` | User enabling and macOS permission checks precede every operation. |
+| Browser child views | `bootty-browser` | Wry owns navigation; host geometry and visibility arrive at the UI seam. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
 | Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
 | The installed remote Space catalog | `bootty-mux::remote_catalog::Catalog` | A backend-scoped lease serializes mutations; membership follows backend session tags. |
@@ -262,22 +266,17 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
 ## Agents
 
-`bootty-agents` owns the native Pi, Codex, and Claude providers: provider state,
-explicit event parsing, command forwarding, lifecycle generations, hook and
-integration file installation, and typed agent snapshots. Providers run in visible
-terminal panes. Pi reports events through its installed adapter; Codex and Claude
-report native command-hook events. The service accepts a narrow pane-scope resolver from the UI and a
-control event publisher; it does not import mux or GPUI.
+`bootty-agents` owns native Pi, Codex, and Claude subprocesses, their bounded JSON protocols, conversation histories, request replies, account operations, and lifecycle generations. Codex uses app-server, Pi uses RPC, and Claude uses streamed JSON. A native agent conversation is a session alongside terminal sessions in the Sessions sidebar; it is not a backend pane. Mux backends continue to own all terminal processes and topology.
 
-`bootty-ui` composes one agent service per desktop owner, exposes its descriptors
-through the desktop command catalog, and projects typed agent facts into chrome
-and panels. Agent workers and event publication remain asynchronous and are
-retired before a replacement can publish stale state.
+`NativeAgentService` persists a per-window registry before publishing new sessions. Restored conversations remain stopped until explicitly resumed. Targets contain the Bootty session identity and generation, independently of provider thread IDs. Provider callbacks request a repaint; the UI never waits for protocol reads or process exit.
 
-Bootty does not infer agent state from process names, terminal output, screen
-contents, or transcripts. The service persists what agents reported to a
-per-window private file injected by `bootty-ui` and restores it, marked
-`restored`, on the next start.
+`OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
+
+`bootty-ui` composes these owners and routes the palette, keybindings, CLI, socket, and agent commands through one catalog and invocation path. Native panels have fixed homes: Sessions on the left and tools on the right. The center displays the selected terminal or native agent session.
+
+`bootty-computer` owns the macOS desktop helper and rechecks OS permissions and secure input before capture or input. `computer-use` must be enabled by a user action; agents cannot enable it or request permission. Capture metadata remains bounded and images use private files. `bootty-browser` owns Wry child-view lifetime, navigation events, and host geometry; the shell hides native views beneath GPUI dialogs and sheets.
+
+Existing custom integrations remain unsupported and preserved. Native sessions require no installed hooks. The prior pane event service remains available for explicitly configured terminal adapters; it does not own native conversation state.
 
 ## Crates
 
@@ -299,8 +298,9 @@ per-window private file injected by `bootty-ui` and restores it, marked
 - `bootty-daemon` owns the installed headless executable entrypoint, argv and
   identity parsing, endpoint lifetime, and protocol serving. It composes
   `bootty-host` and the mux catalog; it does not duplicate their policy.
-- `bootty-agents` owns native Pi, Codex, and Claude provider state, explicit
-  event parsing, command forwarding, lifecycle, and integration files/assets.
+- `bootty-agents` owns native conversations, provider protocols, accounts, history, and orchestration.
+- `bootty-computer` owns native desktop capture and input.
+- `bootty-browser` owns embedded Wry browser views.
 - `bootty-host` owns host identity/path interpretation, local, SSH, and WSL process
   execution, shell quoting, daemon installation/bootstrap, and generic remote
   framing/forwarding.
@@ -430,10 +430,10 @@ surface's tab appearance and close-button side and visibility.
 Dock visibility and dimensions belong to the saved layout. Legacy sidebar config
 values only seed unsaved or migrated layouts; live config reload does not show or
 hide Sessions. Legacy sidebar commands submit dock requests.
-`gpui_sidebar_panel` owns Sessions and its Space switcher. `gpui_agents_panel`
-owns the Agents view and usage section; the existing chrome projection retains
-usage data and Space actions. Layout version 7 merges the former standalone
-navigation panels while preserving the destination panels and unrelated geometry. Panel labels and
+`gpui_sidebar_panel` owns Sessions, agent rows, account usage and its Space switcher.
+Agents belong to sessions; there is no separate Agents panel. Layout version 9 fixes Sessions on the left and tools on the right. Panels cannot
+be dragged or dropped into another region. Previous custom layouts start from
+the fixed layout. Panel labels and
 dock-button visibility come from typed chrome settings. Each group can override
 automatic tab visibility with always-show or always-hide, including command-only
 switching.

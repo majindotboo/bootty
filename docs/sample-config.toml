@@ -442,24 +442,22 @@ palette = [
   # "#cba6f7",
 ]
 
-# Tool panel defaults. Dock: left/right/bottom. Button: none/top/bottom.
+# Panels have fixed homes: Sessions left, tools right. Button: none/top/bottom.
 
 [panels.sessions]
-dock = "left"
 button = "none"
 
 [panels.files]
-dock = "right"
 button = "none"
 
 [panels.changes]
-dock = "right"
 button = "none"
 
 [panels.diff]
-dock = "right"
 button = "none"
 
-[panels.agents]
-dock = "right"
+[panels.browser]
+button = "top"
+
+[panels.coordination]
 button = "none"

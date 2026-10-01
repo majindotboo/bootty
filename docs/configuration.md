@@ -585,8 +585,8 @@ Connection tests report results for both saved profiles and unsaved drafts.
 
 `toggle_left_dock` and `toggle_right_dock` show or hide their respective docks.
 The palette, keybinding editor, CLI and socket expose the same commands as the
-header buttons. Panel commands are `show_sidebar`, `show_files`, `show_changes`,
-and `show_agents`.
+header buttons. Panel commands include `show_sidebar`, `show_files`, `show_changes`,
+`show_diff`, and `show_coordination`.
 For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
 
 Right-click a tab or empty group header and choose **Add panel** to open or move a
@@ -610,8 +610,8 @@ window, shared across Spaces. `toggle_hidden_tabs` toggles the per-group hidden 
 ## Panel controls
 
 Every tool panel has a `toggle_<name>_panel` command, available in the palette,
-keymap, CLI, and control socket. Names are `sessions`, `files`, `changes`, `diff`,
-`agents`, `jobs`, `transfers`, `recovery`, and `shell`. A toggle closes an active,
+keymap, CLI, and control socket. Names include `sessions`, `files`, `changes`, `diff`,
+and `coordination`. A toggle closes an active,
 visible panel; otherwise it opens and selects that panel. Terminal topology and
 contextual document tabs retain their own close and navigation commands.
 
@@ -620,23 +620,34 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Settings → Panels offers a dock dropdown (left, right, bottom) and a status bar
-button dropdown (none, top, bottom) for each tool panel. For example:
+Coordination creates persistent runs and tasks, attaches existing native agent
+sessions as workers, and dispatches prompts through the same command path.
+Task completion requires a report from the exact dispatched session and generation.
+Restarted work is marked interrupted and resumes only after an explicit retry.
+
+Sessions stays on the left and tools stay on the right. Panel resizing and
+visibility are retained, but panels cannot be moved, split, or floated.
+Settings → Panels chooses an optional status bar button for each tool:
 
 ```toml
-[panels.sessions]
-dock = "left"
-button = "top"
-
-[panels.agents]
-dock = "right"
+[panels.changes]
 button = "bottom"
 ```
 
-Sessions defaults to the left dock and the other tool panels to the right, with
-no status buttons. Selecting a dock moves an open panel there; hidden panels use
-that dock when reopened. Dragging can override placement for the current workspace; explicit dock
-settings apply again when reopening it. Status buttons also make their chosen bar visible.
+Agent status, attention and account usage appear in Sessions.
+
+The Browser panel opens with **Open Browser** (`browser.show`). It hosts native
+webviews with separate tabs, back and forward history, reload, and an address
+bar. Bare localhost and loopback addresses use HTTP; other bare hosts use HTTPS.
+Cmd/Ctrl+L focuses the address, Cmd/Ctrl+R reloads, Cmd/Ctrl+T opens a tab,
+Cmd/Ctrl+W closes a tab, and Cmd/Ctrl+K opens the command palette while a page has
+focus. Tabs use temporary browser storage and do not retain website accounts
+after closing the app. Browser previews cannot grant device permissions or save
+downloads; use **Open in default browser** for those actions. Native browser
+embedding works on macOS and Windows. On Linux, the current GPUI backend exposes
+Xcb or Wayland handles, while the webview's child API accepts only Xlib. Bootty
+reports this unsupported backend explicitly; embedded Linux browsing can be
+enabled when a compatible safe child-view API is available.
 
 The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
 underline, pill, outline, or segmented tabs; close-button side (left/right); and
