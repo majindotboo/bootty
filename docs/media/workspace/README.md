@@ -7,7 +7,7 @@ terminals, including their normal tabs and splits.
 
 - [Project setup](project-setup.mp4), 17 seconds: project artwork, checkout, and session choices.
 - [Agent terminals](agent-launch.mp4), 16 seconds: colored provider TUI, a new terminal tab, and splits.
-- [Browser](browser.mp4): local preview interaction and Cmd+K overlay visibility.
+- [Browser](browser.mp4): top-level, closable page tabs, compact navigation, native input and Cmd+K overlay visibility.
 - [Tools](tools.mp4), 14 seconds: grouped changes, tracked diff, and Files navigation.
 - [Linux X11](linux-x11.mp4), 12 seconds, and [XWayland](linux-xwayland.mp4),
   12 seconds: native browser input, navigation, resize, and palette restoration.
