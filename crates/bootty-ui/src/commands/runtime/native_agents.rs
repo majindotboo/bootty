@@ -4,9 +4,7 @@ use std::{
     time::Instant,
 };
 
-use bootty_agents::{
-    AgentCommandExecutor, AgentKind, NativeAgentService, NativeSessionConfig, NativeSessionRecord,
-};
+use bootty_agents::{AgentCommandExecutor, AgentKind, NativeAgentService, NativeSessionConfig};
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
 };
@@ -250,7 +248,9 @@ fn execute(
             service.stop(target)?;
             return Ok(Value::Null);
         }
-        "fork" => return fork(service, &record),
+        "fork" => {
+            return serde_json::to_value(service.fork(target)?).map_err(|error| error.to_string());
+        }
         "history" if service.resolve(target).is_err() => {
             return serde_json::to_value(record.snapshot).map_err(|error| error.to_string());
         }
@@ -322,40 +322,6 @@ fn start(
         .map_err(|error| error.to_string())
 }
 
-fn fork(service: &NativeAgentService, record: &NativeSessionRecord) -> Result<Value, String> {
-    let mut config = record.config.clone();
-    match config.provider {
-        AgentKind::Codex => {
-            let session = service.resolve(&record.target())?;
-            let reply = session.rpc(
-                "thread/fork",
-                json!({"threadId":record.snapshot.session_id}),
-            )?;
-            config.session_id = reply
-                .get("thread")
-                .and_then(|thread| thread.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if config.session_id.is_none() {
-                return Err("Provider fork returned no thread identity".to_owned());
-            }
-        }
-        AgentKind::Pi => {
-            let session = config
-                .session_id
-                .take()
-                .ok_or("Provider has no resumable session")?;
-            config.arguments.extend(["--fork".to_owned(), session]);
-        }
-        AgentKind::Claude => config.arguments.push("--fork-session".to_owned()),
-    }
-    serde_json::to_value(service.create(
-        &record.binding_id,
-        &format!("{} fork", record.title),
-        config,
-    )?)
-    .map_err(|error| error.to_string())
-}
 pub(super) fn native_agent_overview(
     service: Option<&NativeAgentService>,
 ) -> Vec<crate::state::agent_attention::AgentOverview> {

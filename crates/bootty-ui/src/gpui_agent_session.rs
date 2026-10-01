@@ -475,22 +475,10 @@ impl NativeAgentSessionView {
             .child(
                 Button::new("native-fork")
                     .label("Fork")
-                    .tooltip(
-                        if self.record.config.provider == AgentKind::Codex
-                            && self.record.snapshot.status == NativeSessionStatus::Stopped
-                        {
-                            "Resume this session before forking it"
-                        } else {
-                            "Start another session from this conversation"
-                        },
-                    )
+                    .tooltip("Start another session from this conversation")
                     .small()
                     .ghost()
-                    .disabled(
-                        busy || self.record.snapshot.session_id.is_none()
-                            || (self.record.config.provider == AgentKind::Codex
-                                && self.record.snapshot.status == NativeSessionStatus::Stopped),
-                    )
+                    .disabled(busy || self.record.snapshot.session_id.is_none())
                     .on_click(
                         cx.listener(|this, _, window, cx| this.command("fork", vec![], window, cx)),
                     ),

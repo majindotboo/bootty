@@ -33,6 +33,9 @@ pub struct NativeSessionConfig {
     pub cwd: PathBuf,
     pub arguments: Vec<String>,
     pub session_id: Option<String>,
+    /// One-shot source selector; the durable session resumes the resulting identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_session_id: Option<String>,
     pub model: Option<String>,
 }
 
@@ -45,6 +48,7 @@ impl NativeSessionConfig {
             cwd: cwd.into(),
             arguments: Vec::new(),
             session_id: None,
+            fork_session_id: None,
             model: None,
         }
     }
@@ -173,20 +177,24 @@ impl NativeAgentSession {
             AgentKind::Codex => {
                 self.rpc("initialize", json!({"clientInfo":{"name":"bootty","title":"Bootty","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
                 self.write(&json!({"method":"initialized"}))?;
-                let params = self.config.session_id.as_ref().map_or_else(
+                let (method, selector) = match (
+                    self.config.fork_session_id.as_ref(),
+                    self.config.session_id.as_ref(),
+                ) {
+                    (Some(id), _) => ("thread/fork", Some(id)),
+                    (_, Some(id)) => ("thread/resume", Some(id)),
+                    (None, None) => ("thread/start", None),
+                };
+                let params = selector.map_or_else(
                     || json!({"cwd":self.config.cwd,"model":self.config.model}),
                     |id| json!({"threadId":id,"cwd":self.config.cwd,"model":self.config.model}),
                 );
-                let result = self.rpc(
-                    if self.config.session_id.is_some() {
-                        "thread/resume"
-                    } else {
-                        "thread/start"
-                    },
-                    params,
-                )?;
+                // Fork in the destination owner: a second server cannot resume its active writer.
+                let result = self.rpc(method, params)?;
+                let id = string(field(field(&result, "thread"), "id"))
+                    .ok_or("Provider returned no thread identity")?;
                 let mut snapshot = lock(&self.snapshot);
-                snapshot.session_id = string(field(field(&result, "thread"), "id"));
+                snapshot.session_id = Some(id);
                 if let Some(turns) = field(field(&result, "thread"), "turns").as_array() {
                     for turn in turns {
                         for item in field(turn, "items").as_array().into_iter().flatten() {
@@ -700,10 +708,21 @@ fn native_command(config: &NativeSessionConfig) -> Result<Command, String> {
     if !config.cwd.is_absolute() {
         return Err("Native agent directory must be absolute".to_owned());
     }
-    if config.session_id.as_ref().is_some_and(|id| {
-        id.is_empty() || id.starts_with('-') || id.len() > 8192 || id.chars().any(char::is_control)
-    }) {
+    if config
+        .session_id
+        .iter()
+        .chain(&config.fork_session_id)
+        .any(|id| {
+            id.is_empty()
+                || id.starts_with('-')
+                || id.len() > 8192
+                || id.chars().any(char::is_control)
+        })
+    {
         return Err("Invalid native agent session selector".to_owned());
+    }
+    if config.session_id.is_some() && config.fork_session_id.is_some() {
+        return Err("Native session cannot resume and fork simultaneously".to_owned());
     }
     let mut command = Command::new(&config.program);
     command
@@ -734,7 +753,9 @@ fn native_command(config: &NativeSessionConfig) -> Result<Command, String> {
                 "--settings",
                 "{\"disableAllHooks\":true}",
             ]);
-            if let Some(id) = &config.session_id {
+            if let Some(id) = &config.fork_session_id {
+                command.args(["--resume", id, "--fork-session"]);
+            } else if let Some(id) = &config.session_id {
                 command.args(["--resume", id]);
             }
             if let Some(model) = &config.model {
@@ -743,7 +764,9 @@ fn native_command(config: &NativeSessionConfig) -> Result<Command, String> {
         }
         AgentKind::Pi => {
             command.args(["--mode", "rpc"]);
-            if let Some(id) = &config.session_id {
+            if let Some(id) = &config.fork_session_id {
+                command.args(["--fork", id]);
+            } else if let Some(id) = &config.session_id {
                 command.args(["--session", id]);
             }
             if let Some(model) = &config.model {

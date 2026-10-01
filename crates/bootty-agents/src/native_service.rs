@@ -193,6 +193,34 @@ impl NativeAgentService {
         Ok(snapshot)
     }
 
+    /// Fork captured provider history in a new process; the source remains owned and unchanged.
+    /// # Errors
+    /// Returns stale targets, missing provider history, persistence or provider fork errors.
+    pub fn fork(&self, target: &CommandTarget) -> Result<NativeSessionRecord, String> {
+        let record = self
+            .sessions()
+            .into_iter()
+            .find(|record| record.target() == *target)
+            .ok_or("Native session target is unknown or stale")?;
+        let mut config = record.config;
+        let selector = record
+            .snapshot
+            .session_file
+            .as_ref()
+            .or(record.snapshot.session_id.as_ref())
+            .cloned()
+            .or_else(|| config.session_id.take())
+            .ok_or("Provider has no resumable session")?;
+        config.session_id = None;
+        config.fork_session_id = Some(selector);
+        self.create_with_history(
+            &record.binding_id,
+            &format!("{} fork", record.title),
+            config,
+            Some(&record.snapshot),
+        )
+    }
+
     /// Reserve identity durably before spawning the child. The returned target is independent
     /// from the provider's thread id and belongs to the captured local binding.
     /// # Errors
@@ -201,7 +229,17 @@ impl NativeAgentService {
         &self,
         binding_id: &str,
         title: &str,
+        config: NativeSessionConfig,
+    ) -> Result<NativeSessionRecord, String> {
+        self.create_with_history(binding_id, title, config, None)
+    }
+
+    fn create_with_history(
+        &self,
+        binding_id: &str,
+        title: &str,
         mut config: NativeSessionConfig,
+        history: Option<&NativeSessionSnapshot>,
     ) -> Result<NativeSessionRecord, String> {
         if binding_id.is_empty() || binding_id.len() > 8192 || title.is_empty() || title.len() > 256
         {
@@ -230,12 +268,17 @@ impl NativeAgentService {
         }
         .retained(config.provider);
         config.arguments = retained.arguments;
+        let mut snapshot = NativeSessionSnapshot::new(config.provider);
+        if let Some(history) = history {
+            // Providers without handshake history retain the bounded source transcript.
+            snapshot.transcript.clone_from(&history.transcript);
+        }
         let record = NativeSessionRecord {
             id: format!("native:{}:{}", config.provider, uuid::Uuid::new_v4()),
             binding_id: binding_id.to_owned(),
             title: title.to_owned(),
             generation,
-            snapshot: NativeSessionSnapshot::new(config.provider),
+            snapshot,
             config,
         };
         candidate.records.push(record.clone());
@@ -281,6 +324,7 @@ impl NativeAgentService {
                     .iter_mut()
                     .find(|record| record.id == id)
                     .ok_or("Native agent reservation disappeared")?;
+                record.config.fork_session_id = None;
                 record.config.session_id = snapshot
                     .session_file
                     .clone()

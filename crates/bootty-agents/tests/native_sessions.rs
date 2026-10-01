@@ -14,8 +14,17 @@ fn fixture(root: &Path) -> std::io::Result<String> {
     fs::write(
         &path,
         r"#!/usr/bin/env python3
-import json,sys
+import fcntl,json,os,sys
+writers=[]
 provider = 'codex' if 'app-server' in sys.argv else 'claude' if '--input-format' in sys.argv else 'pi'
+session='native-thread'
+if provider == 'claude':
+ if '--session-id' in sys.argv: session=sys.argv[sys.argv.index('--session-id')+1]
+ elif '--fork-session' in sys.argv: session='native-thread-fork-'+str(os.getpid())
+ elif '--resume' in sys.argv: session=sys.argv[sys.argv.index('--resume')+1]
+elif provider == 'pi':
+ if '--fork' in sys.argv: session='native-thread-fork-'+str(os.getpid())
+ elif '--session' in sys.argv: session=os.path.basename(sys.argv[sys.argv.index('--session')+1]).removesuffix('.jsonl')
 turn = 0
 def emit(value): print(json.dumps(value),flush=True)
 for line in sys.stdin:
@@ -25,7 +34,16 @@ for line in sys.stdin:
   ident=value.get('id')
   if ident is None: continue
   if operation == 'initialize': result={}
-  elif operation in ['thread/start','thread/resume']: result={'thread':{'id':value.get('params',{}).get('threadId','native-thread'),'turns':[]}}
+  elif operation in ['thread/start','thread/resume','thread/fork']:
+   source=value.get('params',{}).get('threadId','native-thread')
+   thread=source+'-fork-'+str(os.getpid()) if operation == 'thread/fork' else source
+   writer=open(thread+'.writer','a+')
+   try: fcntl.flock(writer,fcntl.LOCK_EX|fcntl.LOCK_NB)
+   except BlockingIOError:
+    emit({'id':ident,'error':{'code':-32600,'message':'thread has an active writer'}})
+    continue
+   writers.append(writer)
+   result={'thread':{'id':thread,'turns':[]}}
   elif operation == 'turn/start':
    turn += 1
    user={'id':'provider-user-'+str(turn),'type':'userMessage','content':value['params']['input']}
@@ -40,15 +58,15 @@ for line in sys.stdin:
   else: result={}
   emit({'id':ident,'result':result})
  elif provider == 'claude':
-  if operation == 'control_request': emit({'type':'control_response','response':{'request_id':value['request_id'],'subtype':'success','response':{'session_id':'native-thread'}}})
+  if operation == 'control_request': emit({'type':'control_response','response':{'request_id':value['request_id'],'subtype':'success','response':{'session_id':session}}})
   elif operation == 'user':
-   emit({'type':'assistant','session_id':'native-thread','message':{'id':'answer','content':[{'type':'text','text':'hello'}]}})
-   emit({'type':'result','session_id':'native-thread','is_error':False,'usage':{}})
+   emit({'type':'assistant','session_id':session,'message':{'id':'answer','content':[{'type':'text','text':'hello'}]}})
+   emit({'type':'result','session_id':session,'is_error':False,'usage':{}})
  elif provider == 'pi':
   if operation == 'prompt':
    emit({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'hello'}]}})
    emit({'type':'agent_end'})
-  elif operation == 'get_state': emit({'id':value['id'],'type':'response','success':True,'data':{'sessionId':'native-thread','sessionFile':str(__file__)}})
+  elif operation == 'get_state': emit({'id':value['id'],'type':'response','success':True,'data':{'sessionId':session,'sessionFile':os.path.join(os.getcwd(),session+'.jsonl')}})
   else: emit({'id':value.get('id'),'type':'response','success':True,'data':{'messages':[]}})
 ",
     )?;
@@ -158,6 +176,52 @@ fn registry_persists_identity_and_rejects_retired_process_generations() {
 }
 
 #[rstest]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Claude)]
+#[case(AgentKind::Pi)]
+fn native_fork_owns_its_writer_and_resumes_without_forking_again(#[case] provider: AgentKind) {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let original = service
+        .create(
+            "binding",
+            "Original",
+            config(provider, root.path()).unwrap(),
+        )
+        .unwrap();
+    await_turn(&service.resolve(&original.target()).unwrap()).unwrap();
+    let source_history = service
+        .resolve(&original.target())
+        .unwrap()
+        .snapshot()
+        .transcript;
+    let fork = service.fork(&original.target()).unwrap();
+    assert_eq!(fork.snapshot.transcript, source_history);
+    assert_ne!(fork.snapshot.session_id, original.snapshot.session_id);
+    assert_eq!(fork.binding_id, original.binding_id);
+    assert_eq!(fork.config.fork_session_id, None);
+    service
+        .prompt(&original.target(), "Original remains writable")
+        .unwrap();
+    service
+        .prompt(&fork.target(), "Fork remains writable")
+        .unwrap();
+    service.stop(&fork.target()).unwrap();
+    let resumed = service.resume(&fork.target()).unwrap();
+    assert_eq!(resumed.snapshot.session_id, fork.snapshot.session_id);
+    service.stop(&original.target()).unwrap();
+    let historical_fork = service.fork(&original.target()).unwrap();
+    assert_ne!(
+        historical_fork.snapshot.session_id,
+        original.snapshot.session_id
+    );
+    assert!(
+        service.fork(&fork.target()).is_err(),
+        "Retired generations cannot fork history"
+    );
+}
+
+#[rstest]
 #[case(true)]
 #[case(false)]
 fn pi_information_never_becomes_an_approval_and_confirm_uses_native_boolean(#[case] allow: bool) {
@@ -231,9 +295,9 @@ fn native_host_shutdown_reaps_process_and_saves_before_return(#[case] explicit: 
     fs::write(
         &executable,
         source.replace(
-            "import json,sys",
+            "import fcntl,json,os,sys",
             &format!(
-                "import json,sys,os\nwith open({},'w') as output: output.write(str(os.getpid()))",
+                "import fcntl,json,os,sys\nwith open({},'w') as output: output.write(str(os.getpid()))",
                 serde_json::to_string(&pid_file.to_string_lossy()).unwrap()
             ),
         ),
@@ -378,33 +442,111 @@ fn installed_native_provider_completes_a_real_turn(#[case] provider: AgentKind) 
 }
 
 #[rstest]
+#[ignore = "Uses the installed Codex account to verify independent native fork writers"]
+fn installed_codex_fork_keeps_both_threads_writable_and_resumable() {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let original = service
+        .create(
+            "binding",
+            "Original",
+            NativeSessionConfig::new(AgentKind::Codex, root.path()),
+        )
+        .unwrap();
+    let source = service.resolve(&original.target()).unwrap();
+    await_turn(&source).unwrap();
+    let source_count = source.snapshot().transcript.len();
+    assert!(source_count > 0);
+    let mut destination = NativeSessionConfig::new(AgentKind::Codex, root.path());
+    destination.fork_session_id = source.snapshot().session_id;
+    let direct_fork = NativeAgentSession::spawn(destination).unwrap();
+    let provider_history_count = direct_fork.snapshot().transcript.len();
+    assert!(
+        provider_history_count >= source_count,
+        "Provider fork handshake must return stored source history"
+    );
+    drop(direct_fork);
+    println!(
+        "Codex provider fork history: source {source_count} items, direct handshake {provider_history_count} items"
+    );
+    let fork = service.fork(&original.target()).unwrap();
+    assert!(
+        fork.snapshot.transcript.len() >= source_count,
+        "Fork must open with its source history"
+    );
+    println!(
+        "Codex fork history: source {source_count} items, fork {} items",
+        fork.snapshot.transcript.len()
+    );
+    assert_ne!(fork.snapshot.session_id, original.snapshot.session_id);
+    let fork_session = service.resolve(&fork.target()).unwrap();
+    await_turn(&fork_session).unwrap();
+    await_turn(&source).unwrap();
+    service.stop(&fork.target()).unwrap();
+    let resumed = service.resume(&fork.target()).unwrap();
+    assert_eq!(resumed.snapshot.session_id, fork.snapshot.session_id);
+    await_turn(&service.resolve(&resumed.target()).unwrap()).unwrap();
+    service.stop(&original.target()).unwrap();
+    let historical_fork = service.fork(&original.target()).unwrap();
+    assert_ne!(
+        historical_fork.snapshot.session_id,
+        original.snapshot.session_id
+    );
+    println!(
+        "Codex: independent source and fork turns, same-identity resume, stopped-history fork verified"
+    );
+}
+
+#[rstest]
 #[ignore = "Exercises installed Claude resume/fork; turns may require account sign-in"]
 fn installed_claude_fork_gets_a_distinct_native_identity() {
     let root = TempDir::new().unwrap();
-    let original =
-        NativeAgentSession::spawn(NativeSessionConfig::new(AgentKind::Claude, root.path()))
-            .unwrap();
-    let original_result = await_turn(&original);
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let original = service
+        .create(
+            "binding",
+            "Original",
+            NativeSessionConfig::new(AgentKind::Claude, root.path()),
+        )
+        .unwrap();
+    let original_session = service.resolve(&original.target()).unwrap();
+    let original_result = await_turn(&original_session);
     if let Err(error) = &original_result {
         assert!(error.contains("Not logged in"), "{error}");
     }
-    let original_id = original
+    let original_id = original_session
         .snapshot()
         .session_id
         .expect("original session identity");
-    original.stop();
-    let mut config = NativeSessionConfig::new(AgentKind::Claude, root.path());
-    config.session_id = Some(original_id.clone());
-    config.arguments.push("--fork-session".to_owned());
-    let fork = NativeAgentSession::spawn(config).unwrap();
-    let fork_result = await_turn(&fork);
+    service.stop(&original.target()).unwrap();
+    let fork = service.fork(&original.target()).unwrap();
+    let fork_session = service.resolve(&fork.target()).unwrap();
+    let fork_result = await_turn(&fork_session);
     if let Err(error) = &fork_result {
         assert!(error.contains("Not logged in"), "{error}");
     }
-    let fork_id = fork.snapshot().session_id.expect("fork session identity");
+    let fork_id = fork_session
+        .snapshot()
+        .session_id
+        .expect("fork session identity");
     assert_ne!(fork_id, original_id);
+    assert_eq!(fork.snapshot.session_id.as_deref(), Some(fork_id.as_str()));
+    service.stop(&fork.target()).unwrap();
+    let resumed = service.resume(&fork.target()).unwrap();
+    assert_eq!(
+        resumed.snapshot.session_id.as_deref(),
+        Some(fork_id.as_str())
+    );
+    let resumed_session = service.resolve(&resumed.target()).unwrap();
+    if let Err(error) = await_turn(&resumed_session) {
+        assert!(error.contains("Not logged in"), "{error}");
+    }
+    assert_eq!(
+        resumed_session.snapshot().session_id.as_deref(),
+        Some(fork_id.as_str())
+    );
     println!(
-        "Claude fork has a distinct observed session identity; authenticated turns: {}",
+        "Claude fork has a distinct observed session identity and resumes the same identity; authenticated turns: {}",
         original_result.is_ok() && fork_result.is_ok()
     );
 }
