@@ -105,6 +105,12 @@ impl NativeAgentSessionView {
         if self.record.id != record.id {
             return;
         }
+        if self.record.generation != record.generation {
+            // Replies from the retired generation are ignored; retire their pending UI too.
+            self.pending = None;
+            self.sending_queued = None;
+            self.error = None;
+        }
         if self.record.snapshot.revision == record.snapshot.revision
             && self.record.generation == record.generation
             && self.record.snapshot.status == record.snapshot.status
@@ -469,10 +475,22 @@ impl NativeAgentSessionView {
             .child(
                 Button::new("native-fork")
                     .label("Fork")
-                    .tooltip("Start another session from this conversation")
+                    .tooltip(
+                        if self.record.config.provider == AgentKind::Codex
+                            && self.record.snapshot.status == NativeSessionStatus::Stopped
+                        {
+                            "Resume this session before forking it"
+                        } else {
+                            "Start another session from this conversation"
+                        },
+                    )
                     .small()
                     .ghost()
-                    .disabled(busy || self.record.snapshot.session_id.is_none())
+                    .disabled(
+                        busy || self.record.snapshot.session_id.is_none()
+                            || (self.record.config.provider == AgentKind::Codex
+                                && self.record.snapshot.status == NativeSessionStatus::Stopped),
+                    )
                     .on_click(
                         cx.listener(|this, _, window, cx| this.command("fork", vec![], window, cx)),
                     ),
