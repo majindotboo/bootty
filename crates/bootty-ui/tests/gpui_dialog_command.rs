@@ -1037,58 +1037,69 @@ fn prompt_fields_edit_without_resetting_sibling_values(cx: &TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn setup_choices_keep_keyboard_confirmation_when_the_query_is_removed(cx: &TestAppContext) {
-    let (probe, mut cx) = rooted_probe(
-        cx,
-        DialogSpec::searchable(
+fn setup_choices_start_at_terminal_after_any_checkout_selection(cx: &TestAppContext) {
+    for (navigation, searchable) in [
+        ("down enter", false),
+        ("down down down enter", false),
+        ("down enter", true),
+        ("down down down enter", true),
+    ] {
+        let (probe, mut cx) = rooted_probe(
+            cx,
+            DialogSpec::searchable(
+                "new-session",
+                "Choose checkout",
+                "",
+                (0..4)
+                    .map(|index| {
+                        DialogRow::action(
+                            format!("checkout-{index}"),
+                            format!("Checkout {index}"),
+                            DialogAction::new("pick"),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        cx.simulate_keystrokes(navigation);
+        cx.run_until_parked();
+        probe.update(&mut cx, |probe, _| probe.intents.borrow_mut().clear());
+        let mut launch = DialogSpec::searchable(
             "new-session",
-            "Choose checkout",
+            "Start session",
             "",
-            vec![
-                DialogRow::action("new-worktree", "New worktree", DialogAction::new("pick")),
-                DialogRow::action("checkout", "Existing checkout", DialogAction::new("pick")),
-            ],
-        ),
-    );
-    cx.simulate_keystrokes("down enter");
-    cx.run_until_parked();
-    probe.update(&mut cx, |probe, _| probe.intents.borrow_mut().clear());
-    let mut launch = DialogSpec::searchable(
-        "new-session",
-        "Start session",
-        "",
-        vec![
-            DialogRow::action("terminal", "Terminal", DialogAction::new("pick")),
-            DialogRow::action("codex", "Codex", DialogAction::new("pick")),
-        ],
-    );
-    launch.text = None;
-    cx.update(|window, app| {
-        let dialog = probe.read(app).dialog.clone();
-        dialog.update(app, |dialog, cx| dialog.present(Some(launch), window, cx));
-    });
-    cx.run_until_parked();
-    cx.refresh().expect("render launch choices");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    probe.update(&mut cx, |probe, _| {
-        let intents = probe.intents.borrow();
-        assert_eq!(
-            intents
+            ["terminal", "codex", "claude", "pi"]
+                .map(|id| DialogRow::action(id, id, DialogAction::new("pick")))
+                .to_vec(),
+        );
+        if !searchable {
+            launch.text = None;
+        }
+        cx.update(|window, app| {
+            let dialog = probe.read(app).dialog.clone();
+            dialog.update(app, |dialog, cx| dialog.present(Some(launch), window, cx));
+        });
+        cx.refresh().expect("render launch choices");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        probe.update(&mut cx, |probe, _| {
+            let activations = probe
+                .intents
+                .borrow()
                 .iter()
                 .filter(|intent| matches!(intent, DialogIntent::Activate { .. }))
-                .count(),
-            1,
-            "{intents:?}",
-        );
-        assert!(
-            intents.contains(&DialogIntent::Activate {
-                dialog: DialogId::new("new-session"),
-                row: RowId::new("codex"),
-                action: ActionId::new("pick"),
-                payload: DialogPayload::default(),
-            }),
-            "{intents:?}"
-        );
-    });
+                .cloned()
+                .collect::<Vec<_>>();
+            pretty_assertions::assert_eq!(
+                activations,
+                vec![DialogIntent::Activate {
+                    dialog: DialogId::new("new-session"),
+                    row: RowId::new("terminal"),
+                    action: ActionId::new("pick"),
+                    payload: DialogPayload::default(),
+                }],
+                "previous checkout navigation: {navigation}",
+            );
+        });
+    }
 }
