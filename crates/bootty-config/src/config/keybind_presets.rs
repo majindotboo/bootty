@@ -497,7 +497,6 @@ pub(super) const fn tmux_keybinds() -> &'static [&'static str] {
         "cmd+i=csi:90;9~",
         "cmd+l=csi:90;10~",
         "cmd+shift+i=csi:90;11~",
-        "cmd+k=csi:90;12~",
         "cmd+alt+v=csi:90;13~",
         "cmd+d=csi:90;14~",
         "cmd+shift+d=csi:90;15~",
@@ -557,6 +556,11 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
         }
         KeybindPreset::Ghostty => owned_keybinds(ghostty_common_keybinds()),
     };
+    keybinds.push(if cfg!(target_os = "macos") {
+        "cmd+k=command_palette".to_owned()
+    } else {
+        "ctrl+shift+k=command_palette".to_owned()
+    });
     keybinds.push(if cfg!(target_os = "macos") {
         "cmd+alt+b=toggle_right_dock".to_owned()
     } else {
