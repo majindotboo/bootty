@@ -27,10 +27,10 @@ terminals, including their normal tabs and splits.
 ![Linux X11 browser](linux-x11.png)
 ![Linux XWayland browser](linux-xwayland.png)
 
-The current screenshots and browser-tabs recording show bottom icon-only Spaces
-with tooltip names, usage reset time and pacing, and the same tab appearance
-setting in both tab rows. The other short recordings demonstrate individual
-interactions before these spacing and footer refinements.
+The sessions, shared-tab, browser, computer-use and coordination screenshots,
+and the browser-tabs recording, show bottom icon-only Spaces with tooltip names,
+usage reset time and pacing, and the same tab appearance setting in both tab rows.
+The other demonstrations predate these spacing and footer refinements.
 
 Computer use is disabled and the current development identity reports Screen
 Recording and Accessibility as not granted. The native helper was separately
