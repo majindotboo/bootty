@@ -20,6 +20,7 @@ and orchestration completion came from a live native agent session.
 ![Local browser preview](browser.png)
 ![Computer setup](computer.png)
 ![Observed orchestration completion](orchestration.png)
+![Retained history and settled tool output](settled-tools.png)
 
 Computer use remains disabled in the captured setup window. Screen Recording
 and Accessibility were already granted on this test machine. The native helper
