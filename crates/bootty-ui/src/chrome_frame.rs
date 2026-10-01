@@ -543,8 +543,7 @@ pub fn snapshot(
         layout: ChromeLayout {
             left_dock_toggle: chrome.left_dock_toggle,
             right_dock_toggle: chrome.right_dock_toggle,
-            dock_tabs: chrome.dock_tabs,
-            terminal_tabs: chrome.terminal_tabs,
+            tabs: chrome.tabs,
 
             width,
             height,

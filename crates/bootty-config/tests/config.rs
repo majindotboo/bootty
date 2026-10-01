@@ -131,22 +131,15 @@ fn tabs_can_use_session_or_theme_color(#[case] enabled: bool) {
 }
 
 #[rstest]
-fn terminal_tabs_default_to_pills_with_hover_close() {
+fn shared_tabs_default_to_segments_with_visible_close() {
     let config = load_config_source("").expect("valid config");
     assert!(config.chrome.tabs_use_session_color);
-    assert_eq!(config.chrome.terminal_tabs.appearance, TabAppearance::Pill);
+    assert_eq!(config.chrome.tabs.appearance, TabAppearance::Segmented);
     assert_eq!(
-        config.chrome.terminal_tabs.close_position,
-        if cfg!(target_os = "macos") {
-            bootty_config::config::TabClosePosition::Left
-        } else {
-            bootty_config::config::TabClosePosition::Right
-        }
+        config.chrome.tabs.close_position,
+        bootty_config::config::TabClosePosition::Right
     );
-    assert_eq!(
-        config.chrome.terminal_tabs.close_button,
-        TabCloseButton::Hover
-    );
+    assert_eq!(config.chrome.tabs.close_button, TabCloseButton::Always);
 }
 
 #[rstest]

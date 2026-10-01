@@ -90,8 +90,7 @@ fn sidebar_width_respects_bounds_without_starving_the_center(
     let layout = ChromeLayout {
         left_dock_toggle: true,
         right_dock_toggle: true,
-        dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
-        terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
+        tabs: bootty_config::config::ChromeConfig::default().tabs,
         width: window_width,
         height: 800.0,
         sidebar_position: SidebarPosition::Left,

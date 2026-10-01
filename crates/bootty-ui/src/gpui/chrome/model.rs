@@ -92,8 +92,7 @@ pub enum SidebarPosition {
 pub struct ChromeLayout {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
-    pub dock_tabs: bootty_config::config::TabConfig,
-    pub terminal_tabs: bootty_config::config::TabConfig,
+    pub tabs: bootty_config::config::TabConfig,
     pub width: f32,
     pub height: f32,
     pub sidebar_position: SidebarPosition,

@@ -100,8 +100,7 @@ fn chrome_layout() -> ChromeLayout {
     ChromeLayout {
         left_dock_toggle: true,
         right_dock_toggle: true,
-        dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
-        terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
+        tabs: bootty_config::config::ChromeConfig::default().tabs,
         width: 900.0,
         height: 600.0,
         sidebar_position: SidebarPosition::Left,
@@ -1723,7 +1722,7 @@ fn terminal_tab_variants_keep_close_buttons_in_padding(cx: &mut TestAppContext) 
                 TabCloseButton::Hidden,
             ] {
                 let mut snapshot = chrome_snapshot();
-                snapshot.layout.terminal_tabs = TabConfig {
+                snapshot.layout.tabs = TabConfig {
                     appearance,
                     close_position,
                     close_button,
@@ -1786,7 +1785,7 @@ fn terminal_tab_progress_stays_below_label(cx: &mut TestAppContext) {
         TabAppearance::Segmented,
     ] {
         let mut snapshot = chrome_snapshot();
-        snapshot.layout.terminal_tabs.appearance = appearance;
+        snapshot.layout.tabs.appearance = appearance;
         let item = snapshot
             .top_status
             .as_mut()

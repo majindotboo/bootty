@@ -97,8 +97,7 @@ pub(super) struct ChromePatch {
     pub(super) left_dock_toggle: Option<bool>,
     pub(super) right_dock_toggle: Option<bool>,
     pub(super) tabs_use_session_color: Option<bool>,
-    pub(super) dock_tabs: Option<TabPatch>,
-    pub(super) terminal_tabs: Option<TabPatch>,
+    pub(super) tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
     #[serde(alias = "status-bar")]
     pub(super) top_bar: Option<bool>,

@@ -192,17 +192,13 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         right_dock_toggle,
         tabs_use_session_color,
     );
-    for (tabs, patch) in [
-        (&mut chrome.dock_tabs, partial.dock_tabs),
-        (&mut chrome.terminal_tabs, partial.terminal_tabs),
-    ] {
-        if let Some(patch) = patch {
-            apply_fields!(tabs, patch;
-                appearance,
-                close_position,
-                close_button,
-            );
-        }
+    if let Some(patch) = partial.tabs {
+        let tabs = &mut chrome.tabs;
+        apply_fields!(tabs, patch;
+            appearance,
+            close_position,
+            close_button,
+        );
     }
 
     apply_fields!(chrome, partial;

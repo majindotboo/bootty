@@ -33,11 +33,18 @@ impl WorkspaceDockSkin {
         chrome: Entity<GpuiChrome>,
         cx: &mut Context<DockArea>,
     ) -> Rc<Self> {
-        let mut bottom_height = chrome.read(cx).dock_bottom_height();
+        let presentation = |chrome: &GpuiChrome| {
+            (
+                chrome.dock_bottom_height(),
+                chrome.tabs_config(),
+                chrome.tab_accent(),
+            )
+        };
+        let mut previous = presentation(chrome.read(cx));
         cx.observe(&chrome, move |_, chrome, cx| {
-            let height = chrome.read(cx).dock_bottom_height();
-            if height != bottom_height {
-                bottom_height = height;
+            let current = presentation(chrome.read(cx));
+            if current != previous {
+                previous = current;
                 cx.notify();
             }
         })
@@ -535,12 +542,8 @@ impl WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        use bootty_config::config::{TabCloseButton, TabClosePosition, TabConfig};
-        let config = TabConfig {
-            close_button: TabCloseButton::Always,
-            close_position: TabClosePosition::Right,
-            ..TabConfig::default()
-        };
+        let config = self.chrome.read(cx).tabs_config();
+        let accent = self.chrome.read(cx).tab_accent();
         let browser = self
             .owner
             .upgrade()
@@ -564,6 +567,7 @@ impl WorkspaceTabGroup {
                             group,
                             ix,
                             config,
+                            accent,
                             cx,
                         ));
                     }
@@ -625,6 +629,7 @@ impl WorkspaceTabGroup {
         group: &TabGroupContext,
         ix: usize,
         config: bootty_config::config::TabConfig,
+        accent: gpui_kit::Hsla,
         cx: &App,
     ) -> crate::gpui::tabs::ScrollableTab {
         let (id, label) = page;
@@ -645,31 +650,27 @@ impl WorkspaceTabGroup {
                 close_browser.update(cx, |browser, cx| browser.close_tab(id, window, cx));
             })
             .into_any_element();
-        let tab = crate::gpui::tabs::tab(
-            tab_id.clone().into(),
-            config.appearance,
-            active,
-            cx.theme().primary,
-            cx,
-        )
-        .accessibility_label(label.to_owned())
-        .child(crate::gpui::tabs::content(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .child(Icon::new(IconName::Globe).small())
-                .child(div().max_w_40().truncate().child(label.to_owned()))
-                .into_any_element(),
-            Some(close),
-            tab_id.clone().into(),
-            config,
-        ))
-        .on_click(move |_, window, cx| {
-            select_browser.update(cx, |browser, cx| browser.select_tab(id, window, cx));
-            select.select_tab(ix, window, cx);
-        });
+        let tab =
+            crate::gpui::tabs::tab(tab_id.clone().into(), config.appearance, active, accent, cx)
+                .group(SharedString::from(tab_id.clone()))
+                .accessibility_label(label.to_owned())
+                .child(crate::gpui::tabs::content(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_w_0()
+                        .child(Icon::new(IconName::Globe).small())
+                        .child(div().max_w_40().truncate().child(label.to_owned()))
+                        .into_any_element(),
+                    Some(close),
+                    tab_id.clone().into(),
+                    config,
+                ))
+                .on_click(move |_, window, cx| {
+                    select_browser.update(cx, |browser, cx| browser.select_tab(id, window, cx));
+                    select.select_tab(ix, window, cx);
+                });
         crate::gpui::tabs::ScrollableTab {
             id: tab_id,
             title: None,
@@ -723,15 +724,16 @@ impl WorkspaceTabGroup {
                 tab_id.clone(),
                 config.appearance,
                 ix == group.active_ix(),
-                cx.theme().primary,
+                self.chrome.read(cx).tab_accent(),
                 cx,
             )
+            .group(tab_id.clone())
             .accessibility_label(label)
             .child(crate::gpui::tabs::content(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .min_w_0()
                     .child(Icon::new(icon).small())
                     .child(title)
@@ -757,7 +759,7 @@ impl WorkspaceTabGroup {
         if placement == Some(DockPlacement::Right) {
             return self.render_tool_navigation(group, window, cx);
         }
-        let tab_config = self.chrome.read(cx).dock_tabs_config();
+        let tab_config = self.chrome.read(cx).tabs_config();
         let tab_accent = self.chrome.read(cx).tab_accent();
         let visible = group
             .panels()
@@ -830,7 +832,7 @@ impl WorkspaceTabGroup {
             .id(SharedString::from(format!("panel-tab-{id:?}")))
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
             .child(title);
         let select = group.clone();
@@ -918,7 +920,7 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         {
             return tabs;
         }
-        let classic = self.chrome.read(cx).dock_tabs_config().appearance
+        let classic = self.chrome.read(cx).tabs_config().appearance
             == bootty_config::config::TabAppearance::Classic;
         div()
             .id("workspace-header")

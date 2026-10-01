@@ -395,7 +395,7 @@ pub(super) fn dock_tabs(
         segment,
         chrome.snapshot.palette,
         StatusBarStyle {
-            tab_config: chrome.snapshot.layout.terminal_tabs,
+            tab_config: chrome.snapshot.layout.tabs,
             key: &snapshot.key,
             background: snapshot.background,
             segmented: false,
@@ -917,7 +917,7 @@ fn render_item(
         .items_center()
         .gap_1()
         .overflow_hidden()
-        .text_xs()
+        .when(!tab, gpui_kit::Styled::text_xs)
         .when(!tab, |element| element.text_color(color(foreground)))
         .when(!tab, |element| {
             element.bg(if bar.segmented && item.background.is_none() {

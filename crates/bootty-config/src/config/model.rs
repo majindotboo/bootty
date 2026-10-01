@@ -375,8 +375,7 @@ pub struct ChromeConfig {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
     pub tabs_use_session_color: bool,
-    pub dock_tabs: TabConfig,
-    pub terminal_tabs: TabConfig,
+    pub tabs: TabConfig,
 
     pub sidebar: bool,
     /// Whether to show the module bar above the terminal.

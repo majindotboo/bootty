@@ -101,13 +101,10 @@ impl Default for ChromeConfig {
             left_dock_toggle: true,
             right_dock_toggle: true,
             tabs_use_session_color: true,
-            dock_tabs: super::model::TabConfig {
+            tabs: super::model::TabConfig {
                 appearance: super::model::TabAppearance::Segmented,
-                ..Default::default()
-            },
-            terminal_tabs: super::model::TabConfig {
-                appearance: super::model::TabAppearance::Pill,
-                ..Default::default()
+                close_position: super::model::TabClosePosition::Right,
+                close_button: super::model::TabCloseButton::Always,
             },
             sidebar: true,
             top_bar: true,

@@ -122,7 +122,7 @@ impl GpuiChrome {
             .retain(|segment| segment.surface != "windows");
         Some(status_bar::render(
             status_bar::RenderParams {
-                tab_config: self.snapshot.layout.terminal_tabs,
+                tab_config: self.snapshot.layout.tabs,
                 snapshot: &status,
                 row_height: self
                     .snapshot
@@ -212,8 +212,8 @@ impl GpuiChrome {
         color(self.snapshot.palette.tab_accent)
     }
 
-    pub(crate) const fn dock_tabs_config(&self) -> bootty_config::config::TabConfig {
-        self.snapshot.layout.dock_tabs
+    pub(crate) const fn tabs_config(&self) -> bootty_config::config::TabConfig {
+        self.snapshot.layout.tabs
     }
 
     pub(crate) fn sidebar_defaults(&self) -> (SidebarPosition, f32, bool) {
@@ -462,7 +462,7 @@ impl GpuiChrome {
                 |element, status| {
                     element.child(status_bar::render(
                         status_bar::RenderParams {
-                            tab_config: self.snapshot.layout.terminal_tabs,
+                            tab_config: self.snapshot.layout.tabs,
                             snapshot: &status,
                             row_height: layout.status_height,
                             top_padding: layout.top_inset,
@@ -493,7 +493,7 @@ impl GpuiChrome {
             .when_some(bottom_status, |element, status| {
                 element.child(status_bar::render(
                     status_bar::RenderParams {
-                        tab_config: self.snapshot.layout.terminal_tabs,
+                        tab_config: self.snapshot.layout.tabs,
                         snapshot: &status,
                         row_height: layout.status_height,
                         top_padding: 0.0,
