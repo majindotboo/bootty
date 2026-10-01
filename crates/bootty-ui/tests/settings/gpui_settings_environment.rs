@@ -7,20 +7,17 @@ use bootty_ui::gpui::{
 use gpui_kit::{Context, Modifiers, MouseButton, MouseUpEvent, TestAppContext, point, px};
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as EnvironmentProbe;
 
-impl EnvironmentProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<EnvironmentProbe>) -> EnvironmentProbe {
+    EnvironmentProbe::with_snapshot(snapshot(), cx)
 }
 
 #[gpui_kit::test]
 fn environment_uses_distinct_name_and_value_fields_and_typed_add(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| EnvironmentProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
 
     assert!(
         cx.debug_bounds("settings-environment-session.env-0-name")
@@ -55,7 +52,7 @@ fn environment_uses_distinct_name_and_value_fields_and_typed_add(cx: &mut TestAp
 #[gpui_kit::test]
 fn environment_inputs_emit_typed_edits_without_an_activation_shell(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| EnvironmentProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let command = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -94,7 +91,7 @@ fn environment_inputs_emit_typed_edits_without_an_activation_shell(cx: &mut Test
 #[gpui_kit::test]
 fn environment_reorder_controls_have_accessible_names(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (_, cx) = cx.add_window_view(|_, cx| EnvironmentProbe::new(cx));
+    let (_, cx) = cx.add_window_view(|_, cx| new_probe(cx));
 
     for selector in [
         "settings-environment-session.env-0-drag-handle",
@@ -122,7 +119,7 @@ fn environment_reorder_controls_have_accessible_names(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn environment_end_drop_uses_shared_drag_target_once(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| EnvironmentProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let source = cx
         .debug_bounds("settings-environment-session.env-0-drag-handle")
         .expect("first environment drag handle");
@@ -158,7 +155,7 @@ fn environment_end_drop_uses_shared_drag_target_once(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn environment_drop_after_snapshot_shrink_is_ignored(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| EnvironmentProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let source = cx
         .debug_bounds("settings-environment-session.env-2-drag-handle")
         .expect("third environment drag handle");

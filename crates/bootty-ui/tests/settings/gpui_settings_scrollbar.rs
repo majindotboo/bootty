@@ -1,12 +1,11 @@
 #![cfg(test)]
 
-use settings_support::{GpuiSettingsSnapshot, SettingsProbe as ScrollbarProbe};
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsPage, SettingsPageItem, SettingsRow,
     UiPalette, init_theme,
 };
+use settings_support::{GpuiSettingsSnapshot, SettingsProbe as ScrollbarProbe};
 
 fn init_zed_ui(cx: &TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));

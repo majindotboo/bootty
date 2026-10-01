@@ -12,14 +12,11 @@ fn init_zed_ui(cx: &TestAppContext) {
 }
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as ChoiceProbe;
 
-impl ChoiceProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(choice_snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<ChoiceProbe>) -> ChoiceProbe {
+    ChoiceProbe::with_snapshot(choice_snapshot(), cx)
 }
 
 fn choice_snapshot() -> GpuiSettingsSnapshot {
@@ -120,7 +117,7 @@ fn modifier_remap_snapshot() -> GpuiSettingsSnapshot {
 #[gpui_kit::test]
 fn short_choice_uses_component_select_and_emits_the_selected_token(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ChoiceProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let trigger = cx
         .debug_bounds("settings-choice-cursor.style")
         .expect("choice is rendered as a dropdown trigger");
@@ -414,7 +411,7 @@ fn empty_font_fallback_uses_a_real_searchable_trigger(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn choice_menu_dismisses_without_changing_the_setting(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ChoiceProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let trigger = cx
         .debug_bounds("settings-choice-cursor.style")
         .expect("choice trigger is rendered");
@@ -430,7 +427,7 @@ fn choice_menu_dismisses_without_changing_the_setting(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn choice_menu_dismisses_on_escape_without_changing_the_setting(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ChoiceProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let trigger = cx
         .debug_bounds("settings-choice-cursor.style")
         .expect("choice trigger is rendered");

@@ -8,14 +8,11 @@ use bootty_ui::gpui::{
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as IntegrationsProbe;
 
-impl IntegrationsProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<IntegrationsProbe>) -> IntegrationsProbe {
+    IntegrationsProbe::with_snapshot(snapshot(), cx)
 }
 
 #[gpui_kit::test]
@@ -23,7 +20,7 @@ fn native_integration_controls_preserve_install_intent_without_source_controls(
     cx: &mut TestAppContext,
 ) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| IntegrationsProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
 
     assert!(
         cx.debug_bounds("module-integration-agents.pi-extension")

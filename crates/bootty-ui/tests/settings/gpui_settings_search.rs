@@ -1,13 +1,12 @@
 #![cfg(test)]
 
-use settings_support::{GpuiSettingsSnapshot, SettingsProbe};
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsPage, SettingsPageItem, SettingsRow,
     UiPalette, init_theme,
 };
 use gpui_kit::{Modifiers, TestAppContext, point, px};
+use settings_support::{GpuiSettingsSnapshot, SettingsProbe};
 
 #[gpui_kit::test]
 fn retained_search_input_filters_settings_without_an_activation_shell(cx: &mut TestAppContext) {

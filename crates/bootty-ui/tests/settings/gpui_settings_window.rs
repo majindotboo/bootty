@@ -12,8 +12,7 @@ use gpui_kit::{
 };
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as SettingsWindowProbe;
 
 fn init_zed_ui(cx: &TestAppContext) {

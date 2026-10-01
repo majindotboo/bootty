@@ -101,6 +101,10 @@ rstest.workspace = true
 static_assertions.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
+[[test]]
+name = "settings"
+path = "tests/settings/main.rs"
+
 [[bench]]
 name = "pipeline_resources"
 harness = false

@@ -11,14 +11,11 @@ use bootty_ui::gpui::{
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{AppContext as _, Context, Modifiers, TestAppContext, point};
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as RemoteProbe;
 
-impl RemoteProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<RemoteProbe>) -> RemoteProbe {
+    RemoteProbe::with_snapshot(snapshot(), cx)
 }
 
 #[gpui_kit::test]
@@ -28,7 +25,7 @@ fn remote_text_fields_use_retained_inputs_and_restore_focus_after_editing(cx: &T
     let opened_probe = Rc::clone(&probe_slot);
     let window = cx.update(|cx| {
         cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
-            let probe = cx.new(RemoteProbe::new);
+            let probe = cx.new(new_probe);
             opened_probe.replace(Some(probe.clone()));
             cx.new(|cx| Root::new(probe, window, cx))
         })

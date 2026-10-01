@@ -8,14 +8,11 @@ use bootty_ui::gpui::{
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as StatusProbe;
 
-impl StatusProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<StatusProbe>) -> StatusProbe {
+    StatusProbe::with_snapshot(snapshot(), cx)
 }
 
 #[gpui_kit::test]
@@ -23,7 +20,7 @@ fn status_segments_render_structured_fields_preview_and_lifecycle_controls(
     cx: &mut TestAppContext,
 ) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| StatusProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
 
     for selector in [
         "settings-status-segments-chrome.top-segment-preview",
@@ -67,7 +64,7 @@ fn status_segments_render_structured_fields_preview_and_lifecycle_controls(
 #[gpui_kit::test]
 fn status_segment_color_picker_resets_through_a_typed_field_edit(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| StatusProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let reset = cx
         .debug_bounds("settings-status-segment-chrome.top-segment-0-Foreground-reset")
         .expect("configured foreground color has a reset control");

@@ -11,18 +11,15 @@ fn init_zed_ui(cx: &TestAppContext) {
 }
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as ToggleProbe;
 
-impl ToggleProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_enabled(true, cx)
-    }
+fn new_probe(cx: &mut Context<ToggleProbe>) -> ToggleProbe {
+    with_enabled(true, cx)
+}
 
-    fn with_enabled(enabled: bool, cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(toggle_snapshot(enabled), cx)
-    }
+fn with_enabled(enabled: bool, cx: &mut Context<ToggleProbe>) -> ToggleProbe {
+    ToggleProbe::with_snapshot(toggle_snapshot(enabled), cx)
 }
 
 fn toggle_snapshot(enabled: bool) -> GpuiSettingsSnapshot {
@@ -58,7 +55,7 @@ fn toggle_snapshot(enabled: bool) -> GpuiSettingsSnapshot {
 #[gpui_kit::test]
 fn boolean_setting_renders_as_a_switch_and_emits_a_boolean(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ToggleProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let bounds = cx
         .debug_bounds("settings-toggle-cursor.blink")
         .expect("boolean setting is rendered as a switch");
@@ -100,7 +97,7 @@ fn boolean_setting_space_activation_emits_once(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn disabled_boolean_setting_ignores_pointer_and_keyboard_activation(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ToggleProbe::with_enabled(false, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| with_enabled(false, cx));
     let bounds = cx
         .debug_bounds("settings-toggle-cursor.blink")
         .expect("disabled boolean setting remains visible");
@@ -118,7 +115,7 @@ fn disabled_boolean_setting_ignores_pointer_and_keyboard_activation(cx: &mut Tes
 
 fn assert_keyboard_activation_emits_once(cx: &mut TestAppContext, keystroke: &str) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ToggleProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let bounds = cx
         .debug_bounds("settings-toggle-cursor.blink")
         .expect("boolean setting is rendered as a switch");

@@ -15,20 +15,17 @@ use gpui_kit::{
     Bounds, Context, Modifiers, MouseButton, MouseUpEvent, Pixels, TestAppContext, point, px,
 };
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as NumberProbe;
 
-impl NumberProbe {
-    fn new(
-        enabled: bool,
-        value: f32,
-        range: RangeInclusive<f32>,
-        precision: usize,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::with_snapshot(number_snapshot(enabled, value, range, precision), cx)
-    }
+fn new_probe(
+    enabled: bool,
+    value: f32,
+    range: RangeInclusive<f32>,
+    precision: usize,
+    cx: &mut Context<NumberProbe>,
+) -> NumberProbe {
+    NumberProbe::with_snapshot(number_snapshot(enabled, value, range, precision), cx)
 }
 
 fn number_snapshot(
@@ -76,7 +73,7 @@ fn number_snapshot(
 #[gpui_kit::test]
 fn dragging_slider_commits_only_the_released_value(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| NumberProbe::new(true, 12.0, 8.0..=24.0, 0, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(true, 12.0, 8.0..=24.0, 0, cx));
     let bounds = cx
         .debug_bounds("settings-slider-text.font_size")
         .expect("slider");
@@ -108,8 +105,7 @@ fn dragging_slider_commits_only_the_released_value(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn slider_setting_uses_the_component_slider_and_number_input(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) =
-        cx.add_window_view(|_, cx| NumberProbe::new(true, 3.185_855_2, 0.0..=8.0, 7, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(true, 3.185_855_2, 0.0..=8.0, 7, cx));
     assert!(cx.debug_bounds("settings-slider-text.font_size").is_some());
     let input = cx
         .debug_bounds("settings-number-input-text.font_size")
@@ -130,7 +126,7 @@ fn slider_setting_uses_the_component_slider_and_number_input(cx: &mut TestAppCon
 #[gpui_kit::test]
 fn number_input_width_tracks_live_ui_font_scaling(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (_, cx) = cx.add_window_view(|_, cx| NumberProbe::new(true, 12.0, 8.0..=24.0, 0, cx));
+    let (_, cx) = cx.add_window_view(|_, cx| new_probe(true, 12.0, 8.0..=24.0, 0, cx));
     let initial = cx
         .debug_bounds("settings-number-input-text.font_size")
         .expect("number input is rendered");
@@ -150,7 +146,7 @@ fn number_input_width_tracks_live_ui_font_scaling(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn number_input_keeps_room_for_value_and_suffix_at_large_ui_font(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (_, cx) = cx.add_window_view(|_, cx| NumberProbe::new(true, 25.0, 0.0..=100.0, 0, cx));
+    let (_, cx) = cx.add_window_view(|_, cx| new_probe(true, 25.0, 0.0..=100.0, 0, cx));
 
     cx.update(|_, cx| update_ui_font(&[], 32.0, cx));
     cx.refresh().expect("render the large live UI font size");
@@ -164,7 +160,7 @@ fn number_input_keeps_room_for_value_and_suffix_at_large_ui_font(cx: &mut TestAp
 #[gpui_kit::test]
 fn slider_accepts_ranges_above_the_component_default_maximum(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (_, cx) = cx.add_window_view(|_, cx| NumberProbe::new(true, 274.0, 120.0..=600.0, 0, cx));
+    let (_, cx) = cx.add_window_view(|_, cx| new_probe(true, 274.0, 120.0..=600.0, 0, cx));
 
     assert!(cx.debug_bounds("settings-slider-text.font_size").is_some());
     assert!(
@@ -176,7 +172,7 @@ fn slider_accepts_ranges_above_the_component_default_maximum(cx: &mut TestAppCon
 #[gpui_kit::test]
 fn number_stepper_reaches_the_exact_lower_bound(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| NumberProbe::new(true, 0.01, 0.0..=8.0, 2, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(true, 0.01, 0.0..=8.0, 2, cx));
     let input = cx
         .debug_bounds("settings-number-input-text.font_size")
         .expect("number setting has a component number input");
@@ -196,7 +192,7 @@ fn number_stepper_reaches_the_exact_lower_bound(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn disabled_number_input_does_not_emit_changes(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| NumberProbe::new(false, 12.0, 8.0..=24.0, 0, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(false, 12.0, 8.0..=24.0, 0, cx));
     let input = cx
         .debug_bounds("settings-number-input-text.font_size")
         .expect("disabled number control remains visible");

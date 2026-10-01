@@ -149,6 +149,10 @@ debug = "limited"
 # leaves the directory bounded.
 split-debuginfo = "packed"
 
+[profile.test]
+# Routine tests do not need per-executable debug bundles. Dev and profiling keep symbols.
+debug = 0
+
 [profile.profiling]
 inherits = "release"
 debug = "full"

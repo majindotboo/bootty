@@ -1,13 +1,12 @@
 #![cfg(test)]
 
-use settings_support::{GpuiSettingsSnapshot, SettingsProbe as DependentProbe};
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsPage, SettingsPageItem, SettingsRow,
     UiPalette, init_theme,
 };
 use gpui_kit::TestAppContext;
+use settings_support::{GpuiSettingsSnapshot, SettingsProbe as DependentProbe};
 
 #[gpui_kit::test]
 fn dependent_rows_keep_zeds_parent_and_indented_child_group(cx: &mut TestAppContext) {

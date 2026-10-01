@@ -13,19 +13,16 @@ use gpui_kit::{
     Subscription, TestAppContext, Window, point, px,
 };
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as ColorProbe;
 
-impl ColorProbe {
-    fn new(enabled: bool, cx: &mut Context<Self>) -> Self {
-        let mut draft = settings_support::draft();
-        assert!(draft.set_custom_value(
-            "appearance.dark.colors.background",
-            &ScalarValue::Text("#336699".to_owned())
-        ));
-        Self::with_draft(color_snapshot(enabled), draft, cx)
-    }
+fn new_probe(enabled: bool, cx: &mut Context<ColorProbe>) -> ColorProbe {
+    let mut draft = settings_support::draft();
+    assert!(draft.set_custom_value(
+        "appearance.dark.colors.background",
+        &ScalarValue::Text("#336699".to_owned())
+    ));
+    ColorProbe::with_draft(color_snapshot(enabled), draft, cx)
 }
 
 #[gpui_kit::test]
@@ -68,7 +65,7 @@ fn actual_color_picker_accepts_every_hex_width_and_preserves_alpha(cx: &mut Test
 #[gpui_kit::test]
 fn color_picker_resets_through_the_typed_settings_intent(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ColorProbe::new(true, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(true, cx));
     assert!(
         cx.debug_bounds("settings-color-control-appearance.dark.colors.background-reset")
             .is_some(),
@@ -90,7 +87,7 @@ fn color_picker_resets_through_the_typed_settings_intent(cx: &mut TestAppContext
 #[gpui_kit::test]
 fn disabled_color_picker_is_not_an_interactive_trigger(cx: &mut TestAppContext) {
     init_zed_ui(cx);
-    let (probe, cx) = cx.add_window_view(|_, cx| ColorProbe::new(false, cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(false, cx));
     let disabled = cx
         .debug_bounds("settings-color-control-appearance.dark.colors.background-component")
         .expect("disabled color has a truthful disabled representation");

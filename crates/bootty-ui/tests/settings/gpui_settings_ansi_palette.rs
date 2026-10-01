@@ -7,25 +7,22 @@ use bootty_ui::gpui::{
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as PaletteProbe;
 
-impl PaletteProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        let mut draft = settings_support::draft();
-        assert!(draft.set_ansi_palette(
-            "appearance.dark.colors.palette",
-            &["#102030".to_owned(), "#abcdef".to_owned()]
-        ));
-        Self::with_draft(snapshot(), draft, cx)
-    }
+fn new_probe(cx: &mut Context<PaletteProbe>) -> PaletteProbe {
+    let mut draft = settings_support::draft();
+    assert!(draft.set_ansi_palette(
+        "appearance.dark.colors.palette",
+        &["#102030".to_owned(), "#abcdef".to_owned()]
+    ));
+    PaletteProbe::with_draft(snapshot(), draft, cx)
 }
 
 #[gpui_kit::test]
 fn ansi_palette_renders_indexed_controls_and_emits_typed_preset(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| PaletteProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     open_palette(cx);
     let preset = cx
         .debug_bounds("settings-ansi-palette-appearance.dark.colors.palette-preset-0")
@@ -52,7 +49,7 @@ fn ansi_palette_renders_indexed_controls_and_emits_typed_preset(cx: &mut TestApp
 #[gpui_kit::test]
 fn ansi_palette_reset_is_explicitly_palette_wide(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| PaletteProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     open_palette(cx);
 
     assert!(

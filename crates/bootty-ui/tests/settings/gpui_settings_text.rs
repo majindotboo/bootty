@@ -7,14 +7,11 @@ use bootty_ui::gpui::{
 use gpui_kit::{Context, Modifiers, TestAppContext, point};
 use settings_support::GpuiSettingsSnapshot;
 
-#[path = "support/settings.rs"]
-mod settings_support;
+use super::settings_support;
 use settings_support::SettingsProbe as TextProbe;
 
-impl TextProbe {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot(), cx)
-    }
+fn new_probe(cx: &mut Context<TextProbe>) -> TextProbe {
+    TextProbe::with_snapshot(snapshot(), cx)
 }
 
 #[gpui_kit::test]
@@ -22,7 +19,7 @@ fn scalar_text_setting_uses_retained_component_input_and_emits_typed_writeback(
     cx: &mut TestAppContext,
 ) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let (probe, cx) = cx.add_window_view(|_, cx| TextProbe::new(cx));
+    let (probe, cx) = cx.add_window_view(|_, cx| new_probe(cx));
     let input = cx
         .debug_bounds("settings-input-terminal.shell.program")
         .expect("scalar text input");
