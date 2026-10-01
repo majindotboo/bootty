@@ -7,6 +7,8 @@
 
 version = 1
 locale = "en"
+# Enable native desktop control only after granting OS permissions.
+computer-use = false
 
 # Application lifecycle. These names and defaults follow Zed; the restored unit is a Bootty Space.
 restore_on_startup = "last_session" # last_session, last_workspace, none

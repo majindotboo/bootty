@@ -69,6 +69,7 @@ impl ConfigResolver<'_> {
             when_closing_with_no_tabs,
             on_last_window_closed,
             locale,
+            computer_use,
         );
         config.appearance = resolve_appearance(
             raw.appearance,

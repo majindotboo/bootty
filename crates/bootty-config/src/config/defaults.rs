@@ -225,6 +225,7 @@ impl Default for BoottyConfig {
         Self {
             version: 1,
             locale: "en".to_owned(),
+            computer_use: false,
             restore_on_startup: RestoreOnStartup::default(),
             cli_default_open_behavior: OpenBehavior::default(),
             default_open_behavior: OpenBehavior::default(),

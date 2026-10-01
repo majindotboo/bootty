@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct RawConfig {
     pub(super) locale: Option<String>,
+    pub(super) computer_use: Option<bool>,
     pub(super) version: Option<u32>,
     #[serde(rename = "restore_on_startup")]
     pub(super) restore_on_startup: Option<RestoreOnStartup>,

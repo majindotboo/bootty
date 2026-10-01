@@ -803,3 +803,5 @@ and **Copy setting link**. macOS packages register links such as `bootty://setti
 at that configuration path. The equivalent CLI command is `bootty command open_setting font.size`. Development packages use their own namespace as the
 URL scheme. Fractional number controls use two decimal places; integer controls
 remain integral.
+
+`computer-use = false` is the default. Enable it in Settings or the native computer setup before agents can capture or control the desktop. Screen Recording and Accessibility permissions remain separate macOS grants.

@@ -123,6 +123,7 @@ impl MultiplexerConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoottyConfig {
     pub locale: String,
+    pub computer_use: bool,
     pub version: u32,
     pub restore_on_startup: RestoreOnStartup,
     pub cli_default_open_behavior: OpenBehavior,

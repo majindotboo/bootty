@@ -145,6 +145,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
     specs.extend(panel_specs());
+    specs.push(spec(&["computer-use"], "Computer use", "Allow native agent commands to capture and control this computer after macOS permissions are granted.", "general", "Computer", SettingKind::Bool, SettingDefault::Field(|config| SettingValue::Bool(config.computer_use))));
     specs
 }
 

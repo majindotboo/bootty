@@ -223,6 +223,7 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
         &binary,
     )?;
     filesystem::copy_executable(host_daemon, &macos.join(DAEMON))?;
+    bootty_computer::install_helper(&macos.join("bootty-computer"))?;
     copy_bundled_daemons(layout, &resources.join("daemons"))?;
     if layout.linkage == Linkage::Dynamic {
         copy_dynamic_libraries(&binary, &contents.join("Frameworks"), layout)?;
@@ -375,6 +376,11 @@ fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Pa
         Command::new("codesign")
             .args(["--force", "--sign", &identity])
             .arg(macos.join(DAEMON)),
+    )?;
+    command::run(
+        Command::new("codesign")
+            .args(["--force", "--sign", &identity])
+            .arg(macos.join("bootty-computer")),
     )?;
     let mut sign = Command::new("codesign");
     sign.args(["--force", "--sign", &identity]);
