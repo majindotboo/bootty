@@ -3,7 +3,7 @@ void bootty_mobile_register(void);
 void bootty_mobile_reload(void);
 void bootty_mobile_disconnect(void);
 void bootty_mobile_active(bool active);
-void bootty_mobile_appearance(bool dark, float text_size);
+void bootty_mobile_appearance(float text_size);
 void gpui_ios_run_demo(void);
 void gpui_ios_set_embedded(void);
 void *gpui_ios_get_window(void);

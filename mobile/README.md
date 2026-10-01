@@ -21,7 +21,7 @@ starts disabled and is not persisted across desktop restarts.
 Choose a session to read its live terminal output and send text with Enter.
 Esc, Tab, Ctrl+C, and arrow controls send terminal keys. Root-issued tabs and
 pane controls let you choose a terminal, create a tab, or split a pane when the
-backend supports it. While typing, **Tabs** dismisses the keyboard and restores
+backend supports it. While typing, **Done** dismisses the keyboard and restores
 the topology controls. **New session** creates a shell or starts a Codex, Claude, or Pi terminal in
 an absolute project directory. **Close…** requires explicit confirmation.
 Unavailable backend operations remain disabled.
@@ -98,9 +98,16 @@ layout, rotation, large text, and themes in the actual simulator.
 
 ## Simulator evidence
 
-The original iPhone 17 / iOS 27 recordings show a paired, isolated Development
-desktop. Clips are trimmed and resized without changing their timing; durations below
-are rounded to the nearest second.
+The iPhone 17 / iOS 27 captures show Bootty’s dark mobile chrome paired over
+loopback to an isolated Development desktop:
+
+- [Spaces and live sessions](media/sessions.png)
+- [Project directory and explicit agent provider picker](media/new-session.png)
+- [Live terminal output, tabs, panes, and input strip](media/live-terminal.png)
+- [Terminal chrome and navigation, 20 seconds](media/workspace-control.mp4)
+
+The earlier control recordings cover Unicode input, native/tmux tabs and splits,
+and an interactive Claude terminal. They precede the visual update:
 
 - [Unicode input and colored live output, 14 seconds](media/live-input.mp4)
 - [Native tab and pane creation, 19 seconds](media/native-topology.mp4)
@@ -108,14 +115,13 @@ are rounded to the nearest second.
 - [Claude terminal help interaction, 18 seconds](media/agent-control.mp4)
 - [Revocation disables phone controls](media/revoked.png)
 
-Real-window checks also covered rmux creation, tabs, splits and input; software
-keyboard layout; touch scrolling; foreground reconnect; portrait/landscape;
-light/dark appearance; and an increased Dynamic Type size. Disposable sessions
-were closed through confirmation, the listener revoked, and the phone
-credential disconnected. Existing sessions and provider transcripts were kept.
-Claude reached its interactive terminal. Pi launched but its installed model
-and extension configuration reported errors; successful Pi operation is not
-established. No model prompt was submitted during these checks.
+The visual pass verified readable portrait and landscape layouts, increased
+Dynamic Type, provider icons, real terminal glyphs, and live tab/split creation.
+The disposable session was closed, the listener revoked, and the phone credential
+removed. The existing 9 native and 2 rmux sessions retained their exact targets
+and order. The software keyboard did not appear in this Device Hub pass, so this
+pass does not establish its layout. Earlier software keyboard checks remain
+separate evidence. No model prompt was submitted.
 
 ## Platform limits
 
@@ -127,7 +133,12 @@ them unconditionally. The app requests neither permission.
 UIKit owns navigation, safe areas, keyboard geometry, pairing, and frame
 delivery. The upstream embedding bridge hosts one GPUI view for the process
 lifetime. Demand-driven frames pause when GPUI has no work and stop while hidden.
-UIKit forwards appearance and Dynamic Type into the theme. The host bridges
+The mobile shell uses Bootty’s dark charcoal surfaces and purple accent. UIKit
+forwards Dynamic Type into the theme; controls keep at least a 44-point touch
+target. Provider outlines come from the desktop’s icon catalog; common icons
+come from GPUI Kit. SVG data is embedded through the public `Icon.data` API
+because the pinned embedding bridge cannot install an asset source. Licenses
+are in `assets/LICENSE.md`. The host bridges
 input focus to public keyboard APIs, disables smart punctuation, and commits
 native paste after editing without committing marked IME text. The pointer-free
 Rust exports have local symbol-attribute lint exceptions, without unsafe Rust

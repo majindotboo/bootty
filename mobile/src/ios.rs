@@ -1,7 +1,6 @@
 use std::{cell::RefCell, io::Read};
 
-use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, AppContext, AsyncApp, WeakEntity, WindowOptions, px};
+use gpui_kit::{App, AppContext, AsyncApp, WeakEntity, WindowOptions};
 
 use crate::{Connection, WorkspaceView};
 
@@ -18,6 +17,7 @@ thread_local! {
 pub extern "C" fn bootty_mobile_register() {
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         gpui_kit::init(cx);
+        crate::theme::apply(17., cx);
         match gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
             cx.new(|cx| WorkspaceView::new(window, cx))
         }) {
@@ -66,23 +66,14 @@ pub extern "C" fn bootty_mobile_reload() {
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn bootty_mobile_appearance(dark: bool, text_size: f32) {
+pub extern "C" fn bootty_mobile_appearance(text_size: f32) {
     if !text_size.is_finite() || text_size <= 0.0 {
         return;
     }
     VIEW.with(|slot| {
         if let Some((_, cx)) = slot.borrow().as_ref() {
             cx.update(|cx| {
-                Theme::change(
-                    if dark {
-                        ThemeMode::Dark
-                    } else {
-                        ThemeMode::Light
-                    },
-                    None,
-                    cx,
-                );
-                Theme::update(cx, |theme| theme.font_size = px(text_size));
+                crate::theme::apply(text_size, cx);
             });
         }
     });

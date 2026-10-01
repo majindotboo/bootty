@@ -19,6 +19,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
+        window.overrideUserInterfaceStyle = .dark
         window.rootViewController = UINavigationController(rootViewController: WorkspaceController())
         window.makeKeyAndVisible()
         self.window = window
@@ -128,11 +129,20 @@ final class WorkspaceController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Bootty"
-        view.backgroundColor = .systemBackground
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Connect", style: .plain,
-                                                            target: self, action: #selector(showConnectionDialog))
-        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Disconnect", style: .plain,
-                                                           target: self, action: #selector(disconnect))
+        view.backgroundColor = UIColor(red: 0.075, green: 0.082, blue: 0.094, alpha: 1)
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = view.backgroundColor
+        appearance.shadowColor = UIColor(red: 0.216, green: 0.231, blue: 0.263, alpha: 1)
+        appearance.titleTextAttributes = [.foregroundColor: UIColor(white: 0.94, alpha: 1),
+                                         .font: UIFont.systemFont(ofSize: 17, weight: .semibold)]
+        navigationController?.navigationBar.standardAppearance = appearance
+        navigationController?.navigationBar.scrollEdgeAppearance = appearance
+        navigationController?.navigationBar.compactAppearance = appearance
+        navigationItem.rightBarButtonItem = navigationButton("Connect", symbol: "link",
+                                                             action: #selector(showConnectionDialog))
+        navigationItem.leftBarButtonItem = navigationButton("Disconnect", symbol: "personalhotspot.slash",
+                                                            action: #selector(disconnect))
         status.text = nil
         status.font = .preferredFont(forTextStyle: .footnote)
         status.adjustsFontForContentSizeCategory = true
@@ -145,15 +155,28 @@ final class WorkspaceController: UIViewController {
         view.addSubview(surface)
         surface.attach(to: self)
         NSLayoutConstraint.activate([
-            status.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            status.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             status.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
             status.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
-            surface.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 8),
+            surface.topAnchor.constraint(equalTo: status.bottomAnchor),
             surface.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             surface.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ])
         if let code = savedPairingCode() { connect(code) }
+    }
+
+    private func navigationButton(_ label: String, symbol: String, action: Selector) -> UIBarButtonItem {
+        let button = UIButton(type: .system)
+        button.setImage(UIImage(systemName: symbol), for: .normal)
+        button.tintColor = UIColor(red: 0.706, green: 0.631, blue: 0.910, alpha: 1)
+        button.accessibilityLabel = label
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        let item = UIBarButtonItem(customView: button)
+        if #available(iOS 26.0, *) { item.hidesSharedBackground = true }
+        return item
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -169,8 +192,7 @@ final class WorkspaceController: UIViewController {
     }
 
     private func updateAppearance() {
-        bootty_mobile_appearance(traitCollection.userInterfaceStyle == .dark,
-                                Float(UIFont.preferredFont(forTextStyle: .body).pointSize))
+        bootty_mobile_appearance(Float(UIFont.preferredFont(forTextStyle: .body).pointSize))
         surface.wake()
     }
 

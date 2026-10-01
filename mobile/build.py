@@ -69,7 +69,7 @@ def main():
             "CFBundleExecutable": "BoottyMobile", "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "1",
             "MinimumOSVersion": "16.0", "LSRequiresIPhoneOS": True,
-            "UIDeviceFamily": [1, 2], "UILaunchScreen": {},
+            "UIDeviceFamily": [1, 2], "UILaunchScreen": {}, "UIUserInterfaceStyle": "Dark",
             "NSLocalNetworkUsageDescription": "Connect to your paired Bootty computer and control its terminals.",
             "UIApplicationSceneManifest": {"UIApplicationSupportsMultipleScenes": False},
             "UISupportedInterfaceOrientations": ["UIInterfaceOrientationPortrait",

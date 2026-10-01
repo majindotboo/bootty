@@ -1,15 +1,16 @@
 use std::time::Duration;
 
+use gpui_kit::base::StyledExt;
 use gpui_kit::{
     AppContext, Context, Entity, Focusable, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, StyledText, Subscription, Task, Window,
     component::{
-        ActiveTheme, Disableable, Selectable, Sizable,
+        ActiveTheme, Disableable, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         input::{Input, InputEvent, InputState},
         tab::{Tab, TabBar},
     },
-    div,
+    div, px,
 };
 use serde_json::Value;
 
@@ -18,6 +19,8 @@ use crate::{
     connection::{CommandResult, Connection, Invocation, Target},
     workspace::{LiveWorkspace, Session, Space},
 };
+
+// iOS controls retain a 44pt minimum hit target; typography and padding follow Dynamic Type.
 
 /// Owns the phone connection and transient view selection. Desktop owns every resource/mutation.
 pub struct WorkspaceView {
@@ -177,7 +180,7 @@ impl WorkspaceView {
                     .update(cx, |this, cx| {
                         match result {
                             Ok(live) => {
-                                this.connected = live.capture_error.is_none();
+                                this.connected = true;
                                 this.error = live.capture_error;
                                 this.spaces = live.spaces;
                                 this.select_created();
@@ -440,7 +443,7 @@ impl WorkspaceView {
     }
 
     fn render_spaces(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        let mut content = div().flex().flex_col().gap_4();
+        let mut content = div().flex().flex_col().gap_5();
         if self.spaces.is_empty() {
             return content.child("No Spaces are open on this computer");
         }
@@ -449,8 +452,19 @@ impl WorkspaceView {
             let mut group = div()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(div().text_lg().child(space.name.clone()))
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Icon::default()
+                                .data(include_bytes!("../assets/folder.svg"))
+                                .text_color(cx.theme().primary),
+                        )
+                        .child(div().font_semibold().child(space.name.clone())),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -462,17 +476,47 @@ impl WorkspaceView {
                 let scope = scope.clone();
                 group = group.child(
                     Button::new(gpui_kit::SharedString::from(session.target.handle.clone()))
-                        .large()
-                        .outline()
+                        .ghost()
                         .w_full()
-                        .min_h_12()
+                        .justify_start()
+                        .min_h(px(44.))
                         .h_auto()
                         .accessibility_label(session.name.clone())
                         .child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
                                 .w_full()
-                                .whitespace_normal()
-                                .child(session.name.clone()),
+                                .min_w_0()
+                                .child(
+                                    Icon::default()
+                                        .data(include_bytes!("../assets/terminal.svg"))
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div().whitespace_normal().child(session.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .whitespace_normal()
+                                                .child(session.cwd.clone().unwrap_or_default()),
+                                        ),
+                                )
+                                .child(
+                                    Icon::default()
+                                        .data(include_bytes!("../assets/chevron-right.svg"))
+                                        .small()
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
                         )
                         .disabled(!self.connected)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -483,10 +527,10 @@ impl WorkspaceView {
             }
             group = group.child(
                 Button::new(gpui_kit::SharedString::from(format!("create-{scope}")))
-                    .large()
-                    .outline()
+                    .ghost()
+                    .icon(Icon::default().data(include_bytes!("../assets/plus.svg")))
                     .label("New session…")
-                    .min_h_12()
+                    .min_h(px(44.))
                     .disabled(!self.connected || self.pending)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         window.blur(cx);
@@ -515,9 +559,8 @@ impl WorkspaceView {
             .child(
                 Button::new("cancel-create")
                     .ghost()
-                    .large()
                     .label("Back to Spaces")
-                    .min_h_12()
+                    .min_h(px(44.))
                     .on_click(cx.listener(|this, _, window, cx| {
                         window.blur(cx);
                         this.create_space = None;
@@ -526,15 +569,14 @@ impl WorkspaceView {
             )
             .child(div().text_lg().child(title))
             .child("Project directory on the computer")
-            .child(Input::new(&self.cwd).large())
+            .child(Input::new(&self.cwd).large().min_h(px(44.)))
             .child("Session name")
-            .child(Input::new(&self.name).large())
+            .child(Input::new(&self.name).large().min_h(px(44.)))
             .child(
                 Button::new("create-shell")
-                    .large()
                     .primary()
                     .label("Create shell")
-                    .min_h_12()
+                    .min_h(px(44.))
                     .disabled(self.pending || !self.connected)
                     .on_click(cx.listener(|this, _, window, cx| this.create(None, window, cx))),
             )
@@ -542,13 +584,14 @@ impl WorkspaceView {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         Button::new("start-codex")
-                            .large()
-                            .outline()
+                            .ghost()
+                            .icon(Icon::default().data(include_bytes!("../assets/codex.svg")))
                             .label("Codex")
-                            .min_h_12()
+                            .min_h(px(44.))
                             .disabled(self.pending || !self.connected)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create(Some("codex"), window, cx);
@@ -556,10 +599,10 @@ impl WorkspaceView {
                     )
                     .child(
                         Button::new("start-claude")
-                            .large()
-                            .outline()
+                            .ghost()
+                            .icon(Icon::default().data(include_bytes!("../assets/claude.svg")))
                             .label("Claude")
-                            .min_h_12()
+                            .min_h(px(44.))
                             .disabled(self.pending || !self.connected)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create(Some("claude"), window, cx);
@@ -567,10 +610,10 @@ impl WorkspaceView {
                     )
                     .child(
                         Button::new("start-pi")
-                            .large()
-                            .outline()
+                            .ghost()
+                            .icon(Icon::default().data(include_bytes!("../assets/pi.svg")))
                             .label("Pi")
-                            .min_h_12()
+                            .min_h(px(44.))
                             .disabled(self.pending || !self.connected)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create(Some("pi"), window, cx);
@@ -602,9 +645,9 @@ impl WorkspaceView {
             .child(
                 Button::new("back-to-spaces")
                     .ghost()
-                    .large()
+                    .icon(Icon::default().data(include_bytes!("../assets/chevron-left.svg")))
                     .label("Spaces")
-                    .min_h_12()
+                    .min_h(px(44.))
                     .on_click(cx.listener(|this, _, window, cx| {
                         window.blur(cx);
                         this.selected = None;
@@ -621,16 +664,15 @@ impl WorkspaceView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_lg()
-                    .truncate()
+                    .font_semibold()
+                    .whitespace_normal()
                     .child(session.name.clone()),
             )
             .child(
                 Button::new("close-session")
                     .ghost()
-                    .large()
-                    .label(if typing { "Tabs" } else { "Close…" })
-                    .min_h_12()
+                    .label(if typing { "Done" } else { "Close…" })
+                    .min_h(px(44.))
                     .disabled(self.pending || !self.connected)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         window.blur(cx);
@@ -663,7 +705,7 @@ impl WorkspaceView {
                     .any(|pane| Some(&pane.terminal_target) == self.selected_terminal.as_ref())
             })
             .unwrap_or(0);
-        let mut content = div().flex().flex_col().gap_2();
+        let mut content = div().flex().flex_col().gap_0();
         if !session.windows.is_empty() {
             let tabs = session
                 .windows
@@ -671,6 +713,7 @@ impl WorkspaceView {
                 .map(|tab| {
                     let pane = tab.panes.first().cloned();
                     Tab::new()
+                        .min_h(px(44.))
                         .label(tab.name.clone())
                         .aria_label(format!("Terminal tab {}", tab.name))
                         .disabled(disabled)
@@ -683,7 +726,7 @@ impl WorkspaceView {
                 .collect::<Vec<_>>();
             content = content.child(
                 TabBar::new("terminal-tabs")
-                    .large()
+                    .underline()
                     .selected_index(selected_tab)
                     .children(tabs),
             );
@@ -693,15 +736,20 @@ impl WorkspaceView {
             .get(selected_tab)
             .filter(|tab| tab.panes.len() > 1)
         {
-            let mut panes = div().flex().flex_wrap().gap_2();
+            let mut panes = div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .px_2()
+                .border_b_1()
+                .border_color(cx.theme().border);
             for (ix, pane) in tab.panes.iter().enumerate() {
                 let pane = pane.clone();
                 panes = panes.child(
                     Button::new(gpui_kit::SharedString::from(pane.target.handle.clone()))
-                        .large()
-                        .outline()
+                        .ghost()
                         .label(format!("Pane {}", ix + 1))
-                        .min_h_12()
+                        .min_h(px(44.))
                         .selected(self.selected_terminal.as_ref() == Some(&pane.terminal_target))
                         .disabled(disabled)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -715,7 +763,7 @@ impl WorkspaceView {
     }
 
     fn render_topology(&self, session: &Session, cx: &Context<Self>) -> gpui_kit::Div {
-        let mut content = div().flex().gap_2();
+        let mut content = div().flex().flex_wrap().gap_1().px_2();
         for (command, label) in [
             ("new_tab", "New tab"),
             ("split_right", "Split right"),
@@ -723,10 +771,9 @@ impl WorkspaceView {
         ] {
             content = content.child(
                 Button::new(command)
-                    .large()
-                    .outline()
+                    .ghost()
                     .label(label)
-                    .min_h_12()
+                    .min_h(px(44.))
                     .disabled(
                         !self.connected
                             || self.pending
@@ -743,7 +790,7 @@ impl WorkspaceView {
 
     fn render_terminal_input(&self, cx: &Context<Self>) -> gpui_kit::Div {
         let disabled = self.pending || !self.connected;
-        let mut keys = div().id("terminal-keys").flex().overflow_x_scroll().gap_2();
+        let mut keys = div().id("terminal-keys").flex().overflow_x_scroll().gap_0();
         for (id, label, bytes) in [
             ("escape", "Esc", "\u{1b}"),
             ("tab", "Tab", "\t"),
@@ -755,13 +802,12 @@ impl WorkspaceView {
         ] {
             keys = keys.child(
                 Button::new(id)
-                    .large()
-                    .outline()
+                    .ghost()
                     .label(label)
                     .accessibility_label(format!("Terminal {id} key"))
                     .flex_shrink_0()
-                    .min_h_12()
-                    .min_w_12()
+                    .min_h(px(44.))
+                    .min_w(px(44.))
                     .disabled(disabled)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.key(bytes, window, cx);
@@ -771,25 +817,32 @@ impl WorkspaceView {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .bg(cx.theme().title_bar)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .px_2()
+            .py_1()
+            .gap_1()
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .items_center()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.input).large().disabled(disabled)),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.input)
+                                .large()
+                                .min_h(px(44.))
+                                .disabled(disabled),
+                        ),
                     )
                     .child(
                         Button::new("send-input")
-                            .large()
                             .primary()
-                            .label("Send ↵")
+                            .label("↵")
                             .accessibility_label("Send terminal input and Enter")
-                            .min_h_12()
+                            .min_h(px(44.))
+                            .min_w(px(44.))
                             .disabled(disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.send_input(window, cx);
@@ -810,9 +863,9 @@ impl WorkspaceView {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .gap_2()
+            .gap_0()
             .child(self.render_terminal_header(session, typing, cx));
-        // Give output room while typing; Tabs dismisses input and restores topology.
+        // Give output room while typing; Done dismisses input and restores topology.
         if !typing {
             content = content
                 .child(self.render_tabs(session, cx))
@@ -825,10 +878,13 @@ impl WorkspaceView {
                 .min_h_0()
                 .overflow_y_scroll()
                 .overflow_x_scroll()
+                .bg(cx.theme().background)
+                .px_3()
+                .py_2()
                 .child(
                     div()
                         .font_family("Menlo")
-                        .text_sm()
+                        .text_size(cx.theme().mono_font_size)
                         .whitespace_nowrap()
                         .child(
                             StyledText::new(if self.terminal.text.is_empty() {
@@ -846,6 +902,48 @@ impl WorkspaceView {
             content.child(self.render_terminal_input(cx))
         }
     }
+    fn render_close_confirmation(
+        &self,
+        invocation: &Invocation,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        let invocation = invocation.clone();
+        div()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.selected.as_ref().map_or_else(
+                || "Close this session and its running processes?".to_owned(),
+                |(_, session)| format!("Close “{}” and its running processes?", session.name),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-close")
+                            .ghost()
+                            .label("Cancel")
+                            .min_h(px(44.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirmation = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("confirm-close")
+                            .danger()
+                            .label("Close session")
+                            .min_h(px(44.))
+                            .disabled(!self.connected || self.pending)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run(vec![invocation.clone()], false, window, cx);
+                            })),
+                    ),
+            )
+    }
 }
 
 impl Render for WorkspaceView {
@@ -853,23 +951,43 @@ impl Render for WorkspaceView {
         let theme = cx.theme();
         let terminal_mode =
             self.selected.is_some() && self.create_space.is_none() && self.confirmation.is_none();
-        let mut content = div().flex().flex_col().gap_4().p_4().w_full().min_w_0();
+        let mut content = div().flex().flex_col().gap_0().w_full().min_w_0();
         if let Some(connection) = &self.connection {
-            content = content.child(div().text_sm().text_color(theme.muted_foreground).child(
-                format!(
-                    "{} · {}",
-                    if self.connected {
-                        "Live"
-                    } else {
-                        "Connecting…"
-                    },
-                    connection.address()
-                ),
-            ));
+            content = content.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .bg(theme.title_bar)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{} · {}",
+                        if self.connected {
+                            "Live"
+                        } else {
+                            "Connecting…"
+                        },
+                        connection.address()
+                    )),
+            );
         } else {
-            content = content
-                .child(div().text_lg().child("Control Bootty on your computer"))
-                .child("Enable remote control in Bootty, copy its pairing code, then tap Connect.");
+            content = content.child(
+                div()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child("Control Bootty on your computer"),
+                    )
+                    .child(div().text_color(theme.muted_foreground).child(
+                        "Enable remote control in Bootty, copy its pairing code, then tap Connect.",
+                    )),
+            );
         }
         if let Some(error) = &self.error {
             content = content.child(div().text_color(theme.danger).child(error.clone()));
@@ -881,41 +999,9 @@ impl Render for WorkspaceView {
             content = content.child("Sending command…");
         }
         if let Some(invocation) = &self.confirmation {
-            let invocation = invocation.clone();
-            content = content
-                .child(self.selected.as_ref().map_or_else(
-                    || "Close this session and its running processes?".to_owned(),
-                    |(_, session)| format!("Close “{}” and its running processes?", session.name),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            Button::new("cancel-close")
-                                .large()
-                                .outline()
-                                .label("Cancel")
-                                .min_h_12()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.confirmation = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("confirm-close")
-                                .large()
-                                .danger()
-                                .label("Close session")
-                                .min_h_12()
-                                .disabled(!self.connected || self.pending)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.run(vec![invocation.clone()], false, window, cx);
-                                })),
-                        ),
-                );
+            content = content.child(self.render_close_confirmation(invocation, cx));
         } else if self.create_space.is_some() {
-            content = content.child(self.render_create(cx));
+            content = content.child(div().p_3().child(self.render_create(cx)));
         } else if let Some((_, session)) = &self.selected {
             content = content.child(self.render_terminal(
                 session,
@@ -923,7 +1009,7 @@ impl Render for WorkspaceView {
                 cx,
             ));
         } else if self.connection.is_some() {
-            content = content.child(self.render_spaces(cx));
+            content = content.child(div().p_3().child(self.render_spaces(cx)));
         }
         if terminal_mode {
             content = content.h_full().min_h_0();
@@ -932,6 +1018,8 @@ impl Render for WorkspaceView {
             .id("workspace-scroll")
             .size_full()
             .bg(theme.background)
+            .font_family(theme.font_family.clone())
+            .text_size(theme.font_size)
             .text_color(theme.foreground);
         if terminal_mode {
             root.child(content)
