@@ -1,4 +1,4 @@
-use std::{env, path::Path, thread};
+use std::{env, ffi::OsString, path::Path, thread};
 
 #[cfg(target_os = "macos")]
 use std::process::Command as ProcessCommand;
@@ -89,7 +89,7 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
         .map(|(_, value)| value.clone())
         .or_else(|| std::env::var("ZDOTDIR").ok())
         .filter(|_| !config.env_remove.iter().any(|name| name == "ZDOTDIR"));
-    let integration = if config.shell_integration {
+    let integration = if config.shell_integration && config.command.is_empty() {
         crate::shell_integration::ShellIntegration::prepare(
             &shell,
             &config.args,
@@ -98,14 +98,25 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
     } else {
         None
     };
-    let mut command = CommandBuilder::new(shell);
-    command.args(
-        integration
-            .as_ref()
-            .map_or(config.args.as_slice(), |integration| {
-                integration.args.as_slice()
-            }),
-    );
+    let mut command = match config.command.as_slice() {
+        [] => {
+            let mut command = CommandBuilder::new(shell);
+            command.args(
+                integration
+                    .as_ref()
+                    .map_or(config.args.as_slice(), |integration| {
+                        integration.args.as_slice()
+                    }),
+            );
+            command
+        }
+        [line] => {
+            let mut command = CommandBuilder::new(shell);
+            command.args(["-c", line.as_str()]);
+            command
+        }
+        argv => CommandBuilder::from_argv(argv.iter().map(OsString::from).collect()),
+    };
     for (name, value) in locale_env_entries() {
         command.env(name, value);
     }

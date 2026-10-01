@@ -9,7 +9,7 @@ use std::{collections::HashMap, process::Command, sync::mpsc, thread};
 #[cfg(feature = "terminal-runtime")]
 use super::control::TmuxControlRunner;
 use crate::{
-    backend::MuxBackend,
+    backend::{MuxBackend, PaneCapture, PaneInput, PaneText, private_paste_buffer},
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     snapshot::{
         MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow, MuxWindowProgress,
@@ -435,6 +435,49 @@ impl<R: CommandRunner> TmuxBackend<R> {
         require_success(&self.program, args, output).map(|_| ())
     }
 
+    /// Create a detached session, stamped in the same tmux invocation so it is never visible in
+    /// an untagged state that another Space could claim.
+    ///
+    /// tmux refuses a `new-session` whose name exists and skips the rest of the chain, so an
+    /// existing session is never adopted or re-stamped. A non-empty `argv` starts the first pane:
+    /// tmux (3.0 and later) runs one element through its `default-shell` and execs more directly.
+    fn create_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        tag: &MuxSessionTag,
+        argv: &[String],
+    ) -> Result<()> {
+        let mut invocation = vec![
+            "new-session".to_owned(),
+            "-d".to_owned(),
+            "-s".to_owned(),
+            tmux_argument(session_id),
+            "-c".to_owned(),
+            tmux_argument(cwd),
+        ];
+        if !argv.is_empty() {
+            // Ends option parsing, so a program named like a flag stays the program.
+            invocation.push("--".to_owned());
+            invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+        }
+        if let Some(identity) = &tag.identity {
+            invocation.extend(set_session_option_args(
+                session_id,
+                SESSION_IDENTITY_OPTION,
+                identity,
+            ));
+        }
+        if let Some(space) = &tag.space {
+            invocation.extend(set_session_option_args(
+                session_id,
+                SESSION_SPACE_OPTION,
+                space,
+            ));
+        }
+        self.run_disowned_owned(&invocation)
+    }
+
     fn move_window(&self, window_id: String, delta: i32) -> Result<()> {
         if delta != 0 {
             self.run_owned(&["select-window".into(), "-t".into(), window_id])?;
@@ -494,37 +537,16 @@ impl<R: CommandRunner> TmuxBackend<R> {
                 session_id,
                 cwd,
                 tag,
+                argv,
+            } => {
+                self.create_session(&session_id, &cwd, &tag, argv.as_deref().unwrap_or_default())?;
             }
-            | MuxCommand::CreateWorktreeSession {
+            MuxCommand::CreateWorktreeSession {
                 session_id,
                 cwd,
                 tag,
             } => {
-                // The stamps ride along in the same tmux invocation as the create, so the session
-                // is never visible in an untagged state that another Space could claim.
-                let mut args = vec![
-                    "new-session".to_owned(),
-                    "-d".to_owned(),
-                    "-s".to_owned(),
-                    session_id.clone(),
-                    "-c".to_owned(),
-                    cwd,
-                ];
-                if let Some(identity) = &tag.identity {
-                    args.extend(set_session_option_args(
-                        &session_id,
-                        SESSION_IDENTITY_OPTION,
-                        identity,
-                    ));
-                }
-                if let Some(space) = &tag.space {
-                    args.extend(set_session_option_args(
-                        &session_id,
-                        SESSION_SPACE_OPTION,
-                        space,
-                    ));
-                }
-                self.run_disowned_owned(&args)?;
+                self.create_session(&session_id, &cwd, &tag, &[])?;
             }
             MuxCommand::StampSession { session_id, tag } => {
                 self.run_owned(&stamp_session_args(&session_id, &tag))?;
@@ -777,6 +799,75 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         Self::execute(self, command)
     }
+
+    // Every pane operation addresses the stable `%id`, so the session's current window and pane
+    // selection stay where the user left them.
+    fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        match input {
+            PaneInput::Write(bytes) if bytes.is_empty() => Ok(()),
+            // `-H` sends each byte literally instead of parsing tmux key names.
+            PaneInput::Write(bytes) => self.run_owned(
+                &["send-keys", "-H", "-t", pane_id]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(bytes.iter().map(|byte| format!("{byte:02x}")))
+                    .collect::<Vec<_>>(),
+            ),
+            PaneInput::Paste(text) if text.is_empty() => Ok(()),
+            PaneInput::Paste(text) => {
+                // A private buffer keeps concurrent pastes apart. `-p` brackets the text only when
+                // the application enabled bracketed paste, and `-d` deletes the buffer afterwards.
+                let buffer = private_paste_buffer();
+                let load = ["load-buffer", "-b", &buffer, "-"].map(str::to_owned);
+                let output =
+                    self.runner
+                        .run_with_input(&self.program, &load, text.as_bytes().to_vec())?;
+                require_success(&self.program, &load, output)?;
+                let pasted = self.run(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane_id]);
+                if pasted.is_err() {
+                    // `-d` only deletes after a paste; never leave the text behind in the server.
+                    let _ = self.run(&["delete-buffer", "-b", &buffer]);
+                }
+                pasted
+            }
+            PaneInput::Submit => self.run(&["send-keys", "-t", pane_id, "Enter"]),
+        }
+    }
+
+    fn capture_pane(&self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        let geometry = self.run_snapshot(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{history_size} #{pane_height}",
+        ])?;
+        let (history, height) = geometry
+            .as_deref()
+            .and_then(|line| line.trim().split_once(' '))
+            .and_then(|(history, height)| {
+                Some((history.parse::<u64>().ok()?, height.parse::<u64>().ok()?))
+            })
+            .with_context(|| format!("tmux did not report the size of pane {pane_id}"))?;
+        let rows = capture.rows(history, height);
+        let (first, last) = (rows.first.to_string(), rows.last.to_string());
+        let mut args = vec![
+            "capture-pane",
+            "-p",
+            "-t",
+            pane_id,
+            "-S",
+            &first,
+            "-E",
+            &last,
+        ];
+        if capture.ansi {
+            args.push("-e");
+        }
+        let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let output = self.run_recovering(&args)?;
+        Ok(rows.text(require_success(&self.program, &args, output)?))
+    }
 }
 
 #[cfg(feature = "terminal-runtime")]
@@ -844,6 +935,34 @@ pub fn clear_dead_socket(path: &std::path::Path) -> bool {
 /// tmux's default socket: `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default`.
 #[cfg(unix)]
 fn default_socket_path() -> Option<std::path::PathBuf> {
+    socket_path("default")
+}
+
+/// The socket of the local tmux server `identity` uses (see [`local_server_args`]). tmux resolves
+/// symlinks in its directory, so its panes may name the same socket through another path.
+#[cfg(all(unix, feature = "terminal-runtime"))]
+#[must_use]
+pub fn local_socket_path(
+    identity: bootty_config::ApplicationIdentity,
+) -> Option<std::path::PathBuf> {
+    socket_path(match identity {
+        bootty_config::ApplicationIdentity::Production => "default",
+        bootty_config::ApplicationIdentity::Development => identity.namespace(),
+    })
+}
+
+/// No unix socket names a Windows tmux server.
+#[cfg(all(not(unix), feature = "terminal-runtime"))]
+#[must_use]
+pub fn local_socket_path(
+    _identity: bootty_config::ApplicationIdentity,
+) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/<label>`, where tmux keeps the socket `-L label` names.
+#[cfg(unix)]
+fn socket_path(label: &str) -> Option<std::path::PathBuf> {
     let directory = std::env::var_os("TMUX_TMPDIR").map_or_else(
         || std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from,
@@ -853,7 +972,7 @@ fn default_socket_path() -> Option<std::path::PathBuf> {
     let uid = std::os::unix::fs::MetadataExt::uid(
         &std::fs::metadata(std::env::var_os("HOME").map(std::path::PathBuf::from)?).ok()?,
     );
-    let path = directory.join(format!("tmux-{uid}")).join("default");
+    let path = directory.join(format!("tmux-{uid}")).join(label);
     Some(path)
 }
 
@@ -930,10 +1049,21 @@ fn set_session_option_args(session_id: &str, option: &str, value: &str) -> Vec<S
         ";".to_owned(),
         "set-option".to_owned(),
         "-t".to_owned(),
-        session_id.to_owned(),
+        tmux_argument(session_id),
         option.to_owned(),
-        value.to_owned(),
+        tmux_argument(value),
     ]
+}
+
+/// One value exactly as tmux should receive it inside a chained invocation.
+///
+/// tmux ends a command at any argument that ends in `;` and reads a trailing `\;` as a literal
+/// `;` (`cmd_parse_from_arguments`). Escaping only that final semicolon keeps every other byte,
+/// backslashes included, as given.
+fn tmux_argument(value: &str) -> String {
+    value
+        .strip_suffix(';')
+        .map_or_else(|| value.to_owned(), |head| format!("{head}\\;"))
 }
 
 /// The one tmux invocation that writes a whole tag onto an existing session.
@@ -966,7 +1096,7 @@ fn unset_session_option_args(session_id: &str, option: &str) -> Vec<String> {
         "set-option".to_owned(),
         "-u".to_owned(),
         "-t".to_owned(),
-        session_id.to_owned(),
+        tmux_argument(session_id),
         option.to_owned(),
     ]
 }

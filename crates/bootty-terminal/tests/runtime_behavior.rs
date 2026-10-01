@@ -38,6 +38,8 @@ use bootty_terminal::{
 use pretty_assertions::{assert_eq, assert_ne};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
+#[cfg(unix)]
+use rstest::rstest;
 
 #[derive(Arbitrary, Debug)]
 struct BacklogCase {
@@ -582,6 +584,47 @@ fn frames_never_show_the_cursor_between_writes_of_one_redraw(
     );
 }
 
+/// One element is a command line the shell runs; more are a program found on `PATH` and its
+/// arguments, passed through without the shell reading them.
+#[cfg(unix)]
+#[rstest]
+#[case::shell_line(&["a='shell line'; printf '%s|' \"$a\""], "shell line|")]
+#[case::direct_argv(&["printf", "%s|", "a  b", "$HOME;"], "a  b|$HOME;|")]
+fn a_launch_command_runs_in_place_of_the_shell(#[case] command: &[&str], #[case] expected: &str) {
+    let config = TerminalSessionConfig {
+        launch: SessionLaunchConfig {
+            shell: Some("/bin/sh".to_owned()),
+            command: command
+                .iter()
+                .map(|&argument| argument.to_owned())
+                .collect(),
+            ..SessionLaunchConfig::default()
+        },
+        ..TerminalSessionConfig::default()
+    };
+    let mut session = TerminalSession::new_with_config(geometry(40, 4), config, Arc::new(|| {}))
+        .expect("terminal starts");
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(2))
+        .expect("test deadline");
+    let rows = loop {
+        let rows = session
+            .extract_frame()
+            .expect("frame reads")
+            .text_rows()
+            .into_iter()
+            .filter(|row| !row.is_empty())
+            .collect::<Vec<_>>();
+        if rows == [expected.to_owned()] || Instant::now() > deadline {
+            break rows;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(rows, [expected.to_owned()]);
+}
+
 #[cfg(unix)]
 #[test]
 fn carriage_return_rewrite_publishes_a_single_row() {
@@ -1051,24 +1094,38 @@ fn terminal_worker_response_operations_preserve_public_results() {
         .expect("pending output discard completes");
 }
 
+/// A shell and a command that runs in its place get the same environment and process policy.
 #[cfg(unix)]
-#[test]
-fn terminal_launch_applies_one_managed_environment_and_process_policy() {
+#[rstest]
+#[case::shell(false)]
+#[case::command(true)]
+fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as_command: bool) {
     let directory = assert_fs::TempDir::new().expect("launch directory");
     let working_directory = directory.path().join("working");
     fs::create_dir(&working_directory).expect("working directory");
     let output_path = directory.path().join("launch.txt");
+    let script = vec![
+        "-c".to_owned(),
+        "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
+            .to_owned(),
+        "bootty-runtime-test".to_owned(),
+        "argument".to_owned(),
+    ];
+    let (shell, args, command) = if as_command {
+        // The shell never runs: a launch that used it would write nothing.
+        let command = std::iter::once("/bin/sh".to_owned())
+            .chain(script)
+            .collect();
+        ("/usr/bin/false", Vec::new(), command)
+    } else {
+        ("/bin/sh", script, Vec::new())
+    };
     let config = TerminalSessionConfig {
         launch: SessionLaunchConfig {
             shell_integration: false,
-            shell: Some("/bin/sh".to_owned()),
-            args: vec![
-                "-c".to_owned(),
-                "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
-                    .to_owned(),
-                "bootty-runtime-test".to_owned(),
-                "argument".to_owned(),
-            ],
+            shell: Some(shell.to_owned()),
+            args,
+            command,
             working_directory: Some(working_directory.clone()),
             pane_id: Some("%7".to_owned()),
             env: vec![

@@ -110,7 +110,12 @@ impl Operation {
             ],
             Self::Prompt | Self::Steer | Self::FollowUp => &[("message", true)],
             Self::State => &[("pane", false)],
-            Self::Ingest => &[("event", true), ("pane", false), ("launch", false)],
+            Self::Ingest => &[
+                ("event", true),
+                ("pane", false),
+                ("launch", false),
+                ("server", false),
+            ],
             Self::Acknowledge => &[("sequence", true)],
             Self::Abort | Self::Interrupt | Self::Stop => &[],
         }
@@ -132,7 +137,7 @@ impl AgentCommand {
             _ => MutationClass::Write,
         };
         let target = match operation {
-            Operation::State | Operation::Ingest => None,
+            Operation::Ingest => None,
             Operation::Stop => Some(ResourceKind::Pane),
             _ => Some(ResourceKind::Terminal),
         };

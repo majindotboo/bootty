@@ -19,6 +19,27 @@ Each adapter reads `${TMUX_PANE:-${BOOTTY_PANE:-}}` and passes it as the
 second argument of its `ingest` command. An event with no pane lands on no
 session row.
 
+Pane ids are only unique on one server: local tmux and local rmux can both have
+a `%1`. So each adapter also passes the server its pane runs on as the fourth
+argument: tmux's `$TMUX`, or the `$RMUX` Bootty's rmux panes set while leaving
+`$TMUX` empty (`socket,pid,session`). Bootty derives each local binding's socket
+from its configuration and compares resolved paths, since tmux names its socket
+through a resolved directory such as macOS's `/private/tmp`. Among the Spaces
+listing the pane, only those on the reported server decide. A hook reaches the
+app only through the local `bootty`, so a server no local Space names, such as
+a remote host's, resolves to no Space. Adapters installed before this argument
+existed omit it and resolve by pane id alone, as before.
+
+A pane id belongs to the Space whose own sessions contain it. Spaces bound to
+one tmux server all list every session on that server, so ownership decides. A
+pane that still matches several Spaces lands on no session row.
+
+A record follows its pane. Each keeps the server its hook reported, and whenever
+pane ownership changes Bootty moves records to the Space that owns their pane
+now: after a session moves to another Space, or once a pane whose hook arrived
+before Bootty listed it is discovered. A record is dropped only when its pane is
+gone from its server's listing, or its Space closes.
+
 State mutations claim pending requests under the state lock after scope resolution.
 Cancellation before that claim leaves state unchanged; event publication failure
 after the mutation returns the committed snapshot with a warning.
@@ -50,7 +71,16 @@ bootty command agents.pi.stop --yes
 
 With an explicit target, `start` launches in that visible terminal. Without a
 target, it creates a new visible tab first. `prompt`, `steer`, `follow_up`, and
-`abort` operate on their selected visible terminal.
+`abort` operate on the selected terminal, or on an explicit target in any Space
+without moving focus. `abort` sends Escape to Claude Code, which interrupts the
+turn, and Ctrl-C to Pi and Codex.
+
+A script can also start an agent in a session of its own, in any Space, without
+moving focus: `spaces.list` returns each Space's Binding target, and
+`session.create NAME CWD '["claude","..."]' --target BINDING` returns the new
+pane's `terminal` target for `terminal.capture` and
+`agents.<provider>.prompt --target`. See
+[architecture](architecture.md#scripted-sessions).
 
 Install the Pi extension from the `agents.pi` module in Settings to publish
 native events from existing interactive Pi sessions.
@@ -58,7 +88,7 @@ native events from existing interactive Pi sessions.
 A project can use `.pi/extensions/bootty.ts` after Pi trusts that project.
 
 The adapter calls `agents.pi.ingest` through the live Bootty owner, with the
-pane Pi runs in as the second argument.
+pane Pi runs in as the second argument and its server as the fourth.
 
 The adapter uses one active publisher and a bounded event queue.
 
@@ -92,7 +122,7 @@ owns both the hook script and the native hook configuration Bootty merges.
 The hook reads one native hook JSON object from stdin.
 
 The hook calls `agents.codex.ingest` through the live Bootty owner, with the
-pane it ran in as the second argument.
+pane it ran in as the second argument and its server as the fourth.
 
 ## Claude Code
 
@@ -114,7 +144,11 @@ merges.
 The hook reads one native hook JSON object from stdin and calls
 `agents.claude.ingest` through the live Bootty owner.
 
-`Notification` is what tells Bootty that Claude Code is waiting on the person.
+A permission or question `Notification` is what tells Bootty that Claude Code is
+waiting on the person. Claude Code also notifies when an idle session has waited
+for input (`idle_prompt`); that reports idle, not waiting. `Stop` records the
+turn's final text from `last_assistant_message`, and every event records the
+transcript path.
 
 ## Resume, fork, and launch context
 
@@ -156,6 +190,21 @@ The Agents Dock panel lists reported sessions across live local, SSH and WSL
 bindings. Focus, resume, fork and mark-read actions use the same command path as
 `agents.list`, `agents.focus`, `agents.next` and `agents.<provider>.acknowledge`.
 Targets include a pane generation; closed or replaced panes fail as stale.
+Entries also carry `source` (`existing`, or `restored` after a restart), the
+provider `session_id`, its transcript or session file
+(`session_file`), `last_event`, the start of the last turn's final text
+(`last_message`, at most 1 KiB, with `last_message_truncated` when cut) and when
+that turn ended (`turn_ended_at`, Unix milliseconds as a string). The listing is
+one control response, so `agents.<provider>.state` on an entry's target returns
+that pane's whole state, including the full final text (up to 64 KiB).
+
+Reported state survives a restart. Each window keeps it in a private
+`agent-state-<window>.json` beside the workspace database, written at most once
+a second and on shutdown. Restored entries report `source: restored` until
+their pane reports again, because the agent may have moved on while Bootty was
+down. A restored entry names the pane id it was reported for; if the backend
+reuses that id after its own server restarts, the entry shows until the new
+occupant reports or the pane closes.
 Resume and fork first focus the captured host, then create the new tab there.
 
 Completion, input requests and errors receive monotonically increasing attention

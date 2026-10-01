@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use crate::assets::BoottyAssets;
 use anyhow::{Context as _, Result, anyhow};
@@ -121,6 +121,19 @@ pub fn run(
             cx.quit();
         }
         app_launch_result.replace(Some(result));
+        // Agent state writes happen off the UI thread; quitting waits briefly for the newest to
+        // land. The app owns this, since the last window may close before the app quits. GPUI
+        // stops waiting for quit work after SHUTDOWN_TIMEOUT, so the flush ends sooner and leaves
+        // room to report a failure.
+        cx.on_app_quit(|cx| {
+            let limit = gpui_kit::SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
+            cx.background_executor().spawn(async move {
+                if let Err(error) = bootty_agents::flush_agent_state(limit) {
+                    eprintln!("Agent state was not saved before quitting: {error}");
+                }
+            })
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_receiver.recv().await {
                 cx.update(|cx| {

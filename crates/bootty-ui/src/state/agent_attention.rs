@@ -19,6 +19,35 @@ pub struct AgentOverview {
     pub attention_sequence: String,
     pub can_resume: bool,
     pub cwd: Option<String>,
+    /// `existing` once the pane reported to this process; `restored` while it shows what it
+    /// reported before a restart.
+    pub source: String,
+    pub session_id: Option<String>,
+    /// Provider transcript or session file (Claude's `transcript_path`).
+    pub session_file: Option<String>,
+    pub last_event: Option<String>,
+    /// The start of the last turn's final text, at most [`LAST_MESSAGE_PREVIEW`] bytes.
+    pub last_message: Option<String>,
+    /// Whether `last_message` was cut; `agents.<provider>.state` on `target` has all of it.
+    pub last_message_truncated: bool,
+    /// Unix milliseconds, as a decimal string like other sequence values.
+    pub turn_ended_at: Option<String>,
+}
+
+/// Deliberate limit: `agents.list` answers in one control response of at most 1 MiB, so each entry
+/// carries only this much of its final message. Paginate the listing before raising it, or once a
+/// workspace runs several hundred agents.
+const LAST_MESSAGE_PREVIEW: usize = 1024;
+
+/// The first [`LAST_MESSAGE_PREVIEW`] bytes of `message`, and whether anything was cut.
+fn message_preview(message: Option<&str>) -> (Option<String>, bool) {
+    let Some(message) = message else {
+        return (None, false);
+    };
+    let preview = message
+        .get(..message.floor_char_boundary(LAST_MESSAGE_PREVIEW))
+        .unwrap_or_default();
+    (Some(preview.to_owned()), preview.len() < message.len())
 }
 
 #[derive(Default)]
@@ -42,7 +71,7 @@ impl AppState {
                 else {
                     continue;
                 };
-                for session in binding.mux().all_sessions() {
+                for session in binding.member_sessions() {
                     for window in &session.windows {
                         if !std::iter::once(&window.anchor)
                             .chain(&window.panes)
@@ -72,6 +101,8 @@ impl AppState {
                             .to_string(),
                             generation,
                         };
+                        let (last_message, last_message_truncated) =
+                            message_preview(state.last_message.as_deref());
                         result.push(AgentOverview {
                             provider,
                             target,
@@ -93,6 +124,13 @@ impl AppState {
                                 || state.session_file.is_some())
                                 && !state.launch.as_ref().is_some_and(|launch| launch.ephemeral),
                             cwd: state.cwd.clone(),
+                            source: state.source.as_str().to_owned(),
+                            session_id: state.session_id.clone(),
+                            session_file: state.session_file.clone(),
+                            last_event: state.last_event.clone(),
+                            last_message,
+                            last_message_truncated,
+                            turn_ended_at: state.turn_ended_at.map(|at| at.to_string()),
                         });
                     }
                 }

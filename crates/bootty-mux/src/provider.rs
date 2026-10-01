@@ -111,6 +111,14 @@ pub trait MuxAppBackendProvider: MuxBackendProvider {
     fn app_policy(&self) -> MuxAppBackendPolicy;
 
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor;
+
+    /// The socket of the server on this machine that runs the binding's panes, the path its panes
+    /// see first in `$TMUX` or `$RMUX`. Pane ids are only unique on one server, so this is how a
+    /// hook's report names the right one. `None` when the server is remote or Bootty runs the
+    /// panes itself.
+    fn local_server_socket(&self, _config: &MuxBindingConfig) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone)]

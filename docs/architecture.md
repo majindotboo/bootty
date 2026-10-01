@@ -245,7 +245,10 @@ result mapping.
 The command palette, keybindings, CLI, local socket, and native agent
 integrations submit the same `CommandInvocation`. CLI and socket callers use
 control transport; UI callers may invoke the same owner executor directly when
-transport would add no value.
+transport would add no value. A caller with a response channel receives its
+failure, including one that lands after dispatch, and the window shows no error
+notice for it. `bootty-ui` decides that: a binding's controller never records an
+authoritative command's failure as its own error.
 
 `bootty-control` owns the local transport, read-only `ControlCatalog` metadata,
 detached task and subscription state, and the singleton lease.
@@ -272,7 +275,9 @@ and panels. Agent workers and event publication remain asynchronous and are
 retired before a replacement can publish stale state.
 
 Bootty does not infer agent state from process names, terminal output, screen
-contents, or transcripts.
+contents, or transcripts. The service persists what agents reported to a
+per-window private file injected by `bootty-ui` and restores it, marked
+`restored`, on the next start.
 
 ## Crates
 
@@ -577,9 +582,34 @@ Formats are `plain`, `ansi` and `html`; scope is `screen` (active screen) or
 `history` (latest retained rows including the screen). Defaults are plain,
 screen and 10000 rows. Captures report omitted physical rows, dimensions,
 alternate-screen state, the exact target and the host/backend source. Native
-and rmux captures represent a pane. tmux and Herdr captures represent the
+and rmux captures represent a pane. A tmux or Herdr pane on screen captures the
 attached client's VT state, not backend-owned inner pane history or original
-PTY bytes. Unattached targets fail without changing focus.
+PTY bytes. A backend pane Bootty has no render state for, in any Space, is read
+by the backend: a tmux pane off screen (`capture-pane`), or an rmux pane nothing
+has shown yet (the SDK's capture). That source is `backend_pane`, reports only
+its text and line counts, and does not support `html`. Captures never change
+focus.
+
+`terminal.write`, `terminal.paste` and `terminal.submit` with an explicit target
+reach that pane in any Space without selecting its window or moving focus.
+A pane with a terminal runtime, native or rmux, takes the input there, so keys
+are encoded for its keyboard mode. Other backend panes are addressed by stable
+pane id: tmux with `send-keys`, and `load-buffer` plus `paste-buffer -p`; rmux,
+for a session never shown, with the SDK's pane input and a private buffer pasted
+with `bracketed` set. Either way a paste is bracketed only when the application
+asked for it. Without a target they write to the focused terminal. The mux
+completes the command only after the backend acted. Backend input and capture
+run on a worker and claim the binding's command-config fence right before
+acting: work for a Space closed or moved to another backend in the meantime
+fails as stale.
+
+Catalog-backed remote Spaces and remote rmux run the same pane operations in
+the remote daemon with its own backend implementation. The request travels on
+the daemon's stdin, since a paste can exceed a remote command line, and the
+catalog refuses a pane whose session does not carry the Space's tag. Remote
+daemon protocol 14 carries these operations and explicit-create argv. The
+daemon executable path is versioned by that protocol, so a client never reaches
+an older daemon that would drop a field it does not know.
 
 `terminal.export <local-path> [format] [scope] [max_lines]` atomically publishes
 a new private file. The destination must be an absolute local path. It never
@@ -591,6 +621,47 @@ physical rows; capture responses allow 128 KiB of formatted text to leave room
 for JSON escaping, and local exports allow 2 MiB. Oversized output fails with
 its required size so callers can request fewer rows; it never cuts UTF-8 or
 style sequences in half.
+
+### Scripted sessions
+
+`session.create NAME CWD [ARGV]` creates a detached backend session in the target
+Binding's Space, which need not be active. It never changes the selected session,
+the selected window or the active Space: it is submitted with
+`CommandSelection::Preserve`, which keeps whatever the binding has selected when
+the result lands. `bootty-mux::workspace` validates the request and journals the
+Space's membership under the caller's name, so generated-name reconciliation never
+renames the session. The name must be free on the binding's server; the create
+fails rather than adopt an existing session, locally and in a remote Space. ARGV is a JSON array of strings for
+the first pane: absent or empty starts the default shell, one element runs through
+the backend's default shell, and more elements run directly. It is bounded to 64
+elements and 12 KiB, because tmux carries one client command in about 16 KiB. The
+result carries the `created` Session target and the first pane's `terminal`
+target.
+
+tmux passes ARGV after `--` in the same `new-session` invocation as the stamps,
+escaping a trailing `;` so tmux does not end the command there. rmux uses a
+create-only `EnsureSession` with the SDK command vector. A native pane otherwise
+starts its shell the first time it is shown, so once a native create lands the
+workspace starts the first pane with ARGV at once, hidden, in the terminal owner
+that will show it: the active binding's shared native owner, or the parked one
+while another backend's Space is active. Before any native Space has been active
+nothing is parked, so that start parks the target binding's own owner and the first
+native activation adopts it. The pane starts within the create's dispatch, so no
+frame can show the pane with a shell first; showing it presents that runtime. The
+command answers once the pane's process has started. A program that cannot start,
+such as one missing from `PATH`, fails the command and closes the session through
+`session.close`, so the name is free again. A native cwd must be an existing
+directory: the PTY layer would otherwise start in the home directory. ARGV is never
+persisted or replayed: a restored native pane starts the default shell.
+
+`session.close` is destructive and kills a session its Space holds, in any Space,
+without Git cleanup and without changing selection. `spaces.list` returns every
+Space with its backend, host, Binding target and the sessions it holds, each with
+its Session target. `pane.close` is destructive and closes one pane by its
+Terminal target, in any Space, without changing selection: tmux and rmux kill
+the backend pane; native closes it in the local topology and then ends its
+runtime wherever it lives, hidden or shown. A window's last pane takes the
+window with it.
 
 ### Theme authoring
 

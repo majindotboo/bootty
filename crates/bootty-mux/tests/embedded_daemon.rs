@@ -16,6 +16,7 @@ use bootty_mux::rmux::{
 };
 use bootty_mux::{MuxBackendKind, MuxBindingConfig};
 use bootty_mux::{
+    backend::{MuxBackend as _, PaneCapture, PaneInput, PaneText},
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     provider::MuxBackendRegistry,
     snapshot::{MuxSessionTag, new_session_identity},
@@ -97,6 +98,8 @@ macro_rules! embedded_scenarios {
 embedded_scenarios!(
     recovery_keeps_pending_cursor_escape,
     session_lifecycle,
+    explicit_create_runs_argv_and_never_reuses_a_name,
+    a_hidden_session_takes_pane_io_through_the_backend,
     pane_navigation_and_zoom,
     terminal_requests,
     kitty_keyboard_protocol_reports_command_alt_key,
@@ -170,6 +173,163 @@ mod scenario {
             assert_eq!(frame.colors.background, reference.colors.background);
         }
         Ok(())
+    }
+
+    /// An explicit create hands its argv to the first pane untouched and refuses a taken name
+    /// without re-stamping the session that has it.
+    pub fn explicit_create_runs_argv_and_never_reuses_a_name() -> Result<()> {
+        start_embedded_rmux_daemon_for_tests()?;
+        let directory = std::env::var_os("RMUX_TMPDIR").context("isolated scenario directory")?;
+        let output = std::path::Path::new(&directory).join("argv");
+        let arguments = ["a;", "multi\nline 'single' \"double\" $HOME", "", "-x"]
+            .map(str::to_owned)
+            .to_vec();
+        let argv = [
+            POSIX_SHELL.to_owned(),
+            "-c".to_owned(),
+            "printf '%s\\0' \"$@\" > \"$0\"; exec sleep 600".to_owned(),
+            output.to_string_lossy().into_owned(),
+        ]
+        .into_iter()
+        .chain(arguments.iter().cloned())
+        .collect();
+        let session_id = format!("bootty-mux-argv-{}", std::process::id());
+        let tag = unscoped_tag();
+        let mut backend = RmuxBackend::new();
+        backend.execute(MuxCommand::CreateProjectSession {
+            session_id: session_id.clone(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            tag: tag.clone(),
+            argv: Some(argv),
+        })?;
+
+        let fields = |text: &str| -> Vec<String> {
+            text.strip_suffix('\0')
+                .unwrap_or(text)
+                .split('\0')
+                .map(str::to_owned)
+                .collect()
+        };
+        let read = || std::fs::read_to_string(&output).unwrap_or_default();
+        let started = std::time::Instant::now();
+        while started.elapsed() < PANE_TIMEOUT {
+            let text = read();
+            if text.ends_with('\0') && fields(&text).len() == arguments.len() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(fields(&read()), arguments);
+
+        let duplicate = backend.execute(MuxCommand::CreateProjectSession {
+            session_id: session_id.clone(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            tag: unscoped_tag(),
+            argv: Some(Vec::new()),
+        });
+        anyhow::ensure!(duplicate.is_err(), "a taken name must be refused");
+        let tags = backend
+            .snapshot()?
+            .sessions
+            .into_iter()
+            .filter(|session| session.id == session_id)
+            .map(|session| session.tag)
+            .collect::<Vec<_>>();
+        assert_eq!(tags, [tag], "the existing session keeps its stamp");
+        ditch_session(&mut backend, &session_id)
+    }
+
+    /// A detached session nothing ever attached takes input and capture through the backend by
+    /// its pane id, locally and through the remote daemon's entry point. A paste is bracketed
+    /// because the program asked for it, with each LF sent as CR, like tmux's `paste-buffer -p`.
+    pub fn a_hidden_session_takes_pane_io_through_the_backend() -> Result<()> {
+        start_embedded_rmux_daemon_for_tests()?;
+        let directory = std::env::var_os("RMUX_TMPDIR").context("isolated scenario directory")?;
+        let received = std::path::Path::new(&directory).join("received");
+        let session_id = format!("bootty-mux-hidden-{}", std::process::id());
+        let mut backend = RmuxBackend::new();
+        backend.execute(MuxCommand::CreateProjectSession {
+            session_id: session_id.clone(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            tag: unscoped_tag(),
+            argv: Some(vec![
+                POSIX_SHELL.to_owned(),
+                "-c".to_owned(),
+                "printf '\\033[?2004hhidden-ready'; exec cat > \"$0\"".to_owned(),
+                received.to_string_lossy().into_owned(),
+            ]),
+        })?;
+        let pane = backend
+            .snapshot()?
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.windows.first()?.panes.first()?.pane_id.clone())
+            .context("the hidden session's pane")?;
+        let screen = PaneCapture {
+            history: false,
+            max_lines: 100,
+            ansi: false,
+        };
+        let started = std::time::Instant::now();
+        let ready = loop {
+            let capture = backend.capture_pane(&pane, screen)?;
+            if capture.text.contains("hidden-ready") || started.elapsed() > PANE_TIMEOUT {
+                break capture;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        };
+        anyhow::ensure!(ready.text.contains("hidden-ready"), "{ready:?}");
+        assert_eq!((ready.captured_lines, ready.omitted_lines), (24, 0));
+        let last_row = backend.capture_pane(
+            &pane,
+            PaneCapture {
+                max_lines: 1,
+                ..screen
+            },
+        )?;
+        assert_eq!((last_row.captured_lines, last_row.omitted_lines), (1, 23));
+
+        for input in [
+            PaneInput::Paste("one\ntwo".to_owned()),
+            PaneInput::Write(b" three".to_vec()),
+            PaneInput::Submit,
+        ] {
+            backend.send_pane_input(&pane, &input)?;
+        }
+        let expected = "\u{1b}[200~one\ntwo\u{1b}[201~ three\n";
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(&received).unwrap_or_default() != expected
+            && started.elapsed() < PANE_TIMEOUT
+        {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_to_string(&received)?, expected);
+
+        // The remote daemon reads the same request from stdin and runs it with this backend.
+        let request = bootty_mux::remote_space::PaneRequest::Capture {
+            pane,
+            capture: screen,
+        };
+        let mut child = Command::new(std::env::current_exe()?)
+            .args(["--exact", REMOTE_STREAM_CHILD_TEST, "--nocapture"])
+            .env(REMOTE_STREAM_PAYLOAD_ENV, RemoteRmuxRequest::Pane.encode()?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        std::io::Write::write_all(
+            &mut child.stdin.take().context("remote request stdin")?,
+            &serde_json::to_vec(&request)?,
+        )?;
+        let output = child.wait_with_output()?;
+        anyhow::ensure!(output.status.success(), "remote pane request failed");
+        let remote = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| serde_json::from_str::<PaneText>(line).ok())
+            .context("the remote daemon answered the capture")?;
+        anyhow::ensure!(remote.text.contains("hidden-ready"), "{remote:?}");
+        ditch_session(&mut backend, &session_id)
     }
 
     pub fn session_lifecycle() -> Result<()> {
@@ -1064,6 +1224,7 @@ fn create_embedded_session(
         session_id: session_id.clone(),
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         tag,
+        argv: None,
     })?;
 
     let snapshot = backend.snapshot()?;

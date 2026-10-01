@@ -11,7 +11,9 @@ mod git;
 mod jobs;
 mod links;
 mod mux;
+mod pane_input;
 mod recovery;
+mod sessions;
 mod shell;
 mod wsl;
 
@@ -46,7 +48,7 @@ use bootty_mux::{
     controller::{MuxCommandError, MuxCommandResult, SpaceId},
     executor,
     provider::PaneTopology,
-    workspace::WorkspaceRuntime,
+    workspace::{StartingSession, WorkspaceRuntime},
 };
 use bootty_terminal::terminal::{KeyInput, KeyMods, TerminalKey};
 use bootty_terminal::terminal_input::TerminalInputCommand;
@@ -148,6 +150,12 @@ pub enum PendingCommandResult {
         result: mpsc::Receiver<MuxCommandResult>,
     },
     Outcome(mpsc::Receiver<CommandOutcome>),
+    /// An explicit create that succeeded, held until the first pane Bootty started for it runs.
+    SessionStart {
+        starting: StartingSession,
+        name: String,
+        outcome: CommandOutcome,
+    },
 }
 
 pub enum CommandDispatch {
@@ -220,17 +228,24 @@ impl CommandRuntime {
         Self::from_channel(sender, receiver, None, None, None)
     }
 
-    pub(crate) fn new_with_agents(repaint: RepaintHandle, events: ControlEventSender) -> Self {
+    pub(crate) fn new_with_agents(
+        repaint: RepaintHandle,
+        events: ControlEventSender,
+        agent_state: &std::path::Path,
+    ) -> Self {
         let (sender, receiver) = app_command_channel(64, repaint);
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
             sender: sender.clone(),
         });
-        let agents = Arc::new(AgentService::with_control_and_resolver(
-            nested_commands,
-            events.clone(),
-            scope_index.clone(),
-        ));
+        let agents = Arc::new(
+            AgentService::with_control_and_resolver(
+                nested_commands,
+                events.clone(),
+                scope_index.clone(),
+            )
+            .persisted_at(agent_state),
+        );
         Self::from_channel(
             sender,
             receiver,
@@ -273,8 +288,17 @@ impl CommandRuntime {
     }
 
     pub(crate) fn refresh_agent_scopes(&self, workspace: &WorkspaceRuntime) {
-        if let Some(index) = &self.agent_scope_index {
-            index.refresh(workspace);
+        let owners_changed = self
+            .agent_scope_index
+            .as_ref()
+            .is_some_and(|index| index.refresh(workspace));
+        if let Some(agents) = &self.agent_service {
+            // Records follow their panes to their owners before anything unowned is pruned.
+            if owners_changed {
+                agents.reattribute();
+            }
+            let (spaces, live) = agents::live_panes(workspace);
+            agents.retain_live_panes(&spaces, &live);
         }
     }
 
@@ -392,12 +416,18 @@ impl AppState {
                 let _ = request.cancellation.cancel();
                 CommandDispatch::Complete(CommandOutcome::deadline_exceeded())
             } else {
-                self.dispatch_command_with_execution(
+                // Like a pending result with a response channel, a mailbox caller receives its
+                // failure and reports it; it must not also raise a window notification the person
+                // at the window never asked for.
+                let previous_error = self.last_error.clone();
+                let dispatch = self.dispatch_command_with_execution(
                     request.invocation,
                     viewport,
                     effects,
                     Some((request.deadline, request.cancellation.clone())),
-                )
+                );
+                self.last_error = previous_error;
+                dispatch
             };
             match dispatch {
                 CommandDispatch::Complete(outcome) => {
@@ -426,7 +456,14 @@ impl AppState {
                 .is_some_and(|binding| binding.mux().binding_generation() == *generation)
         });
         for mut pending in std::mem::take(&mut self.commands.pending) {
-            match self.poll_pending_app_command(&mut pending, now, effects) {
+            // A caller with a response channel reports its own failure, including one that
+            // completes later; converting its result must not leave a window notification.
+            let previous_error = pending.response.is_some().then(|| self.last_error.clone());
+            let polled = self.poll_pending_app_command(&mut pending, now, effects);
+            if let Some(previous_error) = previous_error {
+                self.last_error = previous_error;
+            }
+            match polled {
                 Poll::Pending => self.commands.pending.push(pending),
                 Poll::Ready(None) => {}
                 Poll::Ready(Some(outcome)) => {
@@ -520,26 +557,13 @@ impl AppState {
                 membership,
                 result,
                 layout,
-            } => {
-                if let Ok(result) = ready!(poll_command_result(result)) {
-                    self.command_outcome_for_mux_result(
-                        *scope,
-                        command,
-                        membership.as_deref(),
-                        result,
-                        layout.as_ref(),
-                    )
-                } else {
-                    if membership.is_some() {
-                        self.workspace
-                            .defer_binding_membership_reconciliation(*scope);
-                    }
-                    CommandOutcome::Failed {
-                        code: "backend_worker_stopped".to_owned(),
-                        message: ErrorNotice::MuxCommandWorkerStopped.to_string(),
-                    }
-                }
-            }
+            } => ready!(self.poll_pending_mux(
+                *scope,
+                command,
+                membership.as_deref(),
+                layout.as_ref(),
+                result
+            )),
             PendingCommandResult::Outcome(result) => match ready!(poll_command_result(result)) {
                 Ok(outcome) => outcome,
                 Err(mpsc::RecvError) => CommandOutcome::Failed {
@@ -547,8 +571,35 @@ impl AppState {
                     message: ErrorNotice::CommandWorkerStopped.to_string(),
                 },
             },
+            PendingCommandResult::SessionStart {
+                starting,
+                name,
+                outcome,
+            } => ready!(self.poll_session_start(starting, name, outcome)),
         };
         Poll::Ready(Some(outcome))
+    }
+
+    /// The outcome of a mux command still running on its backend's worker.
+    fn poll_pending_mux(
+        &mut self,
+        scope: SpaceId,
+        command: &MuxCommand,
+        membership: Option<&BindingMembershipMutation>,
+        layout: Option<&bootty_mux::workspace::PreparedPaneArrangement>,
+        result: &mpsc::Receiver<MuxCommandResult>,
+    ) -> Poll<CommandOutcome> {
+        let Ok(result) = ready!(poll_command_result(result)) else {
+            if membership.is_some() {
+                self.workspace
+                    .defer_binding_membership_reconciliation(scope);
+            }
+            return Poll::Ready(CommandOutcome::Failed {
+                code: "backend_worker_stopped".to_owned(),
+                message: ErrorNotice::MuxCommandWorkerStopped.to_string(),
+            });
+        };
+        Poll::Ready(self.command_outcome_for_mux_result(scope, command, membership, result, layout))
     }
 
     pub(crate) fn dispatch_command(
@@ -580,6 +631,7 @@ impl AppState {
                 "terminal.capture" | "terminal.export"
             )
             || invocation.command.starts_with("pane.")
+            || invocation.command.starts_with("session.")
             || invocation.command == "link.open";
         let (deadline, cancellation) = executor::command_execution(None);
         let execution = asynchronous.then(|| (deadline, cancellation.clone()));
@@ -623,15 +675,19 @@ impl AppState {
             Err(outcome) => return self.reject_command(outcome),
         };
         resolved.invocation.target = target;
-        let planned_mux_command = match self.preflight_resolved_invocation(
-            &resolved,
-            exact_target.as_ref(),
-            target_supplied,
-            effects,
-        ) {
-            Ok(command) => command,
-            Err(outcome) => return self.reject_command(outcome),
-        };
+        // A terminal command naming its own target writes to that pane through the mux, in any
+        // Space, and leaves selection and focus alone.
+        if target_supplied
+            && let Some(input) = pane_input::targeted_pane_input(&resolved.executor)
+            && let Some(exact) = exact_target.as_ref()
+        {
+            return self.dispatch_pane_input(exact, input, execution);
+        }
+        let planned_mux_command =
+            match self.preflight_resolved_invocation(&resolved, exact_target.as_ref(), effects) {
+                Ok(command) => command,
+                Err(outcome) => return self.reject_command(outcome),
+            };
         let context = ResolvedCommandContext {
             invocation: resolved.invocation,
             exact_target,
@@ -672,9 +728,8 @@ impl AppState {
             planned_mux_command,
             ..
         } = context;
-        let scope = exact_target
-            .as_ref()
-            .map_or_else(|| self.mux_scope(), ExactMuxTarget::scope);
+        let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
+        let scope = target_scope.unwrap_or_else(|| self.mux_scope());
         let caller = invocation.caller;
         match executor {
             CoreCommandExecutor::Recovery(action, arguments) => {
@@ -688,18 +743,12 @@ impl AppState {
                 },
                 |exact| self.dispatch_shell_prompt(&exact, action, &arguments, execution),
             ),
-            CoreCommandExecutor::Forward(action, arguments) => self.dispatch_forward(
-                action,
-                &arguments,
-                exact_target.as_ref().map(ExactMuxTarget::scope),
-                execution,
-            ),
-            CoreCommandExecutor::Job(action, arguments) => self.dispatch_job_command(
-                action,
-                arguments,
-                exact_target.as_ref().map(ExactMuxTarget::scope),
-                execution,
-            ),
+            CoreCommandExecutor::Forward(action, arguments) => {
+                self.dispatch_forward(action, &arguments, target_scope, execution)
+            }
+            CoreCommandExecutor::Job(action, arguments) => {
+                self.dispatch_job_command(action, arguments, target_scope, execution)
+            }
             CoreCommandExecutor::AgentWorkspace(action) => {
                 self.dispatch_agent_workspace_command(action, exact_target.as_ref(), effects)
             }
@@ -733,6 +782,9 @@ impl AppState {
             }
             CoreCommandExecutor::Pane(action, arguments) => {
                 self.dispatch_pane_command(action, &arguments, exact_target, execution)
+            }
+            CoreCommandExecutor::Session(action, arguments) => {
+                self.dispatch_session_command(action, &arguments, exact_target, execution)
             }
             CoreCommandExecutor::File(action, arguments) => self.dispatch_file_action(
                 scope,
@@ -787,7 +839,6 @@ impl AppState {
         &mut self,
         resolved: &crate::commands::ResolvedCommandInvocation,
         exact_target: Option<&ExactMuxTarget>,
-        target_supplied: bool,
         effects: &mut Vec<AppEffect>,
     ) -> Result<Option<MuxCommand>, CommandOutcome> {
         if resolved.descriptor.mutation == MutationClass::Destructive
@@ -827,22 +878,6 @@ impl AppState {
         }
         if let Some(command) = planned_mux_command.as_ref()
             && let Some(outcome) = self.preflight_mux_command(command)
-        {
-            return Err(outcome);
-        }
-        if target_supplied
-            && matches!(
-                &resolved.executor,
-                CommandExecutor::Core(
-                    CoreCommandExecutor::Keybind(KeybindAction::Write(_))
-                        | CoreCommandExecutor::Synchronous(
-                            SynchronousCommand::PasteTerminal(_)
-                                | SynchronousCommand::SubmitTerminal
-                        )
-                )
-            )
-            && let Some(exact_target) = exact_target
-            && let Err(outcome) = self.activate_terminal_target(exact_target)
         {
             return Err(outcome);
         }

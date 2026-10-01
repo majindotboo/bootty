@@ -89,6 +89,13 @@ impl MuxAppBackendProvider for TmuxProvider {
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
         tmux_capabilities(scope)
     }
+
+    fn local_server_socket(&self, config: &MuxBindingConfig) -> Option<std::path::PathBuf> {
+        if config.remote.is_some() {
+            return None;
+        }
+        super::backend::local_socket_path(bootty_config::ApplicationIdentity::for_process())
+    }
 }
 
 crate::register_mux_backend!(TmuxProvider);

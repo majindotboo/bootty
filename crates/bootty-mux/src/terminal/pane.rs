@@ -23,6 +23,7 @@ use bootty_terminal::{
     terminal_engine::{
         TerminalCopyModeAction, TerminalCopyModeOutcome, TerminalLiveConfig,
         TerminalSearchDirection, TerminalSelectionEvent, TerminalSelectionFormat,
+        TerminalSideEffectEvent,
     },
     terminal_input_model::{KeyInput, MouseInput},
 };
@@ -145,6 +146,13 @@ pub trait TerminalRuntime: TerminalFrameSource + Send {
     /// # Errors
     /// Returns an error if the process or terminal worker cannot report its status.
     fn child_exited(&mut self) -> Result<bool>;
+    /// Whether this runtime's process has started: `Ok(false)` while it still starts in the
+    /// background. A runtime that starts synchronously has started by the time it exists.
+    /// # Errors
+    /// Returns why the process could not start.
+    fn started(&mut self) -> Result<bool> {
+        Ok(true)
+    }
     fn tty_name(&self) -> Option<&str>;
     /// # Errors
     /// Returns terminal worker or engine errors while discarding pending output.
@@ -627,8 +635,77 @@ impl BackendPaneTerminal {
         Ok(())
     }
 
+    /// An owner with no panes, this one's terminal settings, and its own side-effect channel.
+    /// # Errors
+    /// Returns an error when the configured backend has no app provider.
+    pub fn empty_like(
+        &self,
+        config: &MuxBindingConfig,
+        side_effect_tx: &std::sync::mpsc::Sender<TerminalSideEffectEvent>,
+    ) -> Result<Self> {
+        let mut terminal_config = self.terminal_config.clone();
+        terminal_config.side_effect_tx = Some(side_effect_tx.clone());
+        Self::new(
+            self.geometry,
+            Arc::clone(&self.registry),
+            config,
+            terminal_config,
+            Arc::clone(&self.repaint_wakeup),
+        )
+    }
+
     pub fn set_terminal_config(&mut self, terminal_config: TerminalSessionConfig) {
         self.terminal_config = terminal_config;
+    }
+
+    /// Start a pane now, running `command` in place of the shell, before anything shows it. It
+    /// stays parked, running and drained like any hidden pane, and the sync that first shows the
+    /// pane presents this runtime.
+    /// # Errors
+    /// Returns an error when this backend cannot keep a hidden pane, when the pane already has a
+    /// runtime, or when its terminal cannot start.
+    pub fn start_scoped_native_command(
+        &mut self,
+        scope: SpaceId,
+        pane: MuxPaneAnchor,
+        command: Vec<String>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.behavior.topology == PaneTopology::ProcessLocal && self.behavior.cache_terminals,
+            "this backend cannot start a pane before it is shown"
+        );
+        let target = ScopedMuxPaneTarget::from_anchor(Some(scope), pane);
+        anyhow::ensure!(
+            target.pane_id().is_some(),
+            "the session has no pane to start"
+        );
+        let started = self.active_target.as_ref() == Some(&target)
+            || self.native_terminals.contains_key(&target);
+        if started && command.is_empty() {
+            // The default shell is what showing the pane started; nothing is missing.
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !started,
+            "pane {} already started without the command",
+            target.input_selector()
+        );
+        let mut terminal_config = self.terminal_config.clone();
+        terminal_config.launch.command = command;
+        let runtime = self
+            .policy
+            .start_terminal(PaneStartRequest {
+                target: &target,
+                geometry: self.geometry,
+                spawn_geometry: self.native_window_spawn_geometry.unwrap_or(self.geometry),
+                display_scale: self.display_scale,
+                render_cell: self.render_cell,
+                terminal_config: &terminal_config,
+                repaint_wakeup: &self.repaint_wakeup,
+            })?
+            .ok_or_else(|| anyhow::anyhow!("the backend started no terminal for the pane"))?;
+        self.native_terminals.insert(target, runtime);
+        Ok(())
     }
 
     /// # Errors
@@ -1087,6 +1164,29 @@ impl BackendPaneTerminal {
         }
     }
 
+    /// Drop one Space's pane runtime, focused, rendered alongside, or hidden, killing its PTY.
+    /// Native pane ids repeat across Spaces, so the Space decides which runtime goes.
+    pub fn discard_scoped_pane(&mut self, scope: SpaceId, pane_id: &str) {
+        let matches = |target: &ScopedMuxPaneTarget| {
+            target.scope == Some(scope) && target.pane_id() == Some(pane_id)
+        };
+        let target = self
+            .active_target
+            .as_ref()
+            .filter(|target| matches(target))
+            .cloned()
+            .or_else(|| {
+                self.native_terminals
+                    .keys()
+                    .find(|target| matches(target))
+                    .cloned()
+            });
+        if let Some(target) = target {
+            self.native_runtime_restarts.remove(&target);
+            self.discard_target(&target);
+        }
+    }
+
     /// Drain the focused terminal and every cached runtime, including inactive scoped workspaces,
     /// so background PTYs cannot stall while another Space is selected.
     pub fn drain_native_window(&mut self) -> DrainStats {
@@ -1228,6 +1328,10 @@ impl TerminalFrameSource for BackendPaneTerminal {
 impl TerminalRuntime for BackendPaneTerminal {
     fn drain_pty(&mut self) -> DrainStats {
         self.drain_native_window()
+    }
+
+    fn started(&mut self) -> Result<bool> {
+        self.terminal.started()
     }
 
     fn pending_pty_len(&self) -> usize {

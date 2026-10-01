@@ -27,10 +27,10 @@ use bootty_mux::repository::{
 use bootty_mux::workspace::ScopedSessionTarget;
 use bootty_mux::{
     MuxBackendKind, MuxBindingConfig,
-    backend::MuxBackend,
+    backend::{MuxBackend, PaneCapture, PaneInput, PaneText},
     capability::{BindingCapabilityDescriptor, BindingOperation},
     command::MuxCommand,
-    controller::SpaceId,
+    controller::{CommandSelection, SpaceId},
     provider::{
         GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
         MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
@@ -67,10 +67,15 @@ fn create_space(
         .expect("valid Space")
 }
 
+type PaneInputs = Arc<Mutex<Vec<(String, PaneInput)>>>;
+
 struct RestoreBackend {
     sessions: Arc<Mutex<Vec<MuxSession>>>,
     create_calls: Arc<AtomicUsize>,
     release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
+    fail_commands: bool,
+    created_panes: bool,
+    pane_inputs: PaneInputs,
 }
 
 impl MuxBackend for RestoreBackend {
@@ -88,17 +93,32 @@ impl MuxBackend for RestoreBackend {
     }
 
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
+        if self.fail_commands {
+            // Held until released, so the failure lands after the command was dispatched.
+            if let Some(release) = &self.release {
+                let _ = release.lock().expect("restore backend release lock").recv();
+            }
+            anyhow::bail!("the scripted backend refused the command");
+        }
         match command {
             MuxCommand::CreateProjectSession {
                 session_id,
                 cwd,
                 tag,
+                ..
             } => {
                 self.create_calls.fetch_add(1, Ordering::SeqCst);
-                self.sessions
-                    .lock()
-                    .expect("restore backend sessions lock")
-                    .push(mux_session(&session_id, cwd, tag, true));
+                let mut sessions = self.sessions.lock().expect("restore backend sessions lock");
+                let session = if self.created_panes {
+                    let pane = format!("%{}", sessions.len().saturating_add(1));
+                    MuxSession {
+                        tag,
+                        ..session_on_pane(&session_id, &pane, Some(cwd))
+                    }
+                } else {
+                    mux_session(&session_id, cwd, tag, true)
+                };
+                sessions.push(session);
             }
             MuxCommand::DitchSession { session_id } => {
                 if let Some(release) = &self.release {
@@ -128,6 +148,22 @@ impl MuxBackend for RestoreBackend {
         }
         Ok(())
     }
+
+    fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        self.pane_inputs
+            .lock()
+            .expect("pane inputs lock")
+            .push((pane_id.to_owned(), input.clone()));
+        Ok(())
+    }
+
+    fn capture_pane(&self, pane_id: &str, _capture: PaneCapture) -> Result<PaneText> {
+        Ok(PaneText {
+            text: format!("{pane_id} read by its backend"),
+            captured_lines: 1,
+            omitted_lines: 0,
+        })
+    }
 }
 
 struct RestoreProvider {
@@ -136,9 +172,13 @@ struct RestoreProvider {
     sessions: Arc<Mutex<Vec<MuxSession>>>,
     create_calls: Arc<AtomicUsize>,
     release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
-    native_panes: bool,
+    topology: PaneTopology,
     selection_publication: SelectionPublicationPolicy,
     stamp_sessions: bool,
+    server_socket: Option<std::path::PathBuf>,
+    fail_commands: bool,
+    created_panes: bool,
+    pane_inputs: PaneInputs,
 }
 
 fn restore_provider(
@@ -152,9 +192,13 @@ fn restore_provider(
         sessions,
         create_calls,
         release: None,
-        native_panes: false,
+        topology: PaneTopology::Attach,
         selection_publication: SelectionPublicationPolicy::Direct,
         stamp_sessions: true,
+        server_socket: None,
+        fail_commands: false,
+        created_panes: false,
+        pane_inputs: PaneInputs::default(),
     }
 }
 
@@ -230,6 +274,9 @@ impl MuxBackendProvider for RestoreProvider {
             sessions: Arc::clone(&self.sessions),
             create_calls: Arc::clone(&self.create_calls),
             release: self.release.clone(),
+            fail_commands: self.fail_commands,
+            created_panes: self.created_panes,
+            pane_inputs: Arc::clone(&self.pane_inputs),
         })
     }
 }
@@ -237,18 +284,14 @@ impl MuxBackendProvider for RestoreProvider {
 impl MuxAppBackendProvider for RestoreProvider {
     fn build_pane_policy(&self, _config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
         Box::new(TestPanePolicy {
-            fail_start: self.native_panes,
+            fail_start: self.topology == PaneTopology::ProcessLocal,
         })
     }
 
     fn app_policy(&self) -> MuxAppBackendPolicy {
         MuxAppBackendPolicy {
             panes: PaneBehavior {
-                topology: if self.native_panes {
-                    PaneTopology::ProcessLocal
-                } else {
-                    PaneTopology::Attach
-                },
+                topology: self.topology,
                 cache_terminals: false,
                 resize_cached_terminals: false,
             },
@@ -262,6 +305,10 @@ impl MuxAppBackendProvider for RestoreProvider {
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: self.selection_publication,
         }
+    }
+
+    fn local_server_socket(&self, _config: &MuxBindingConfig) -> Option<std::path::PathBuf> {
+        self.server_socket.clone()
     }
 
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
@@ -431,9 +478,14 @@ fn moving_a_session_publishes_the_new_order_immediately(directory: assert_fs::Te
 }
 
 fn session_with_pane(id: &str) -> MuxSession {
+    session_on_pane(id, &format!("{id}-pane"), None)
+}
+
+fn session_on_pane(id: &str, pane_id: &str, cwd: Option<String>) -> MuxSession {
     let pane = MuxPaneAnchor {
         session_id: id.to_owned(),
-        pane_id: Some(format!("{id}-pane")),
+        pane_id: Some(pane_id.to_owned()),
+        cwd,
         ..MuxPaneAnchor::default()
     };
     MuxSession {
@@ -480,23 +532,25 @@ fn submit_command(
                     .checked_add(Duration::from_millis(tick))
                     .expect("test timestamp fits"),
             ));
-            outcomes.try_recv().ok()
+            // A native create answers once its pane's process has started.
+            outcomes.recv_timeout(Duration::from_millis(5)).ok()
         })
         .expect("command completes")
 }
 
+/// A following create selects the new session; a preserving one keeps whatever is selected when
+/// its result lands, including a switch the user made while it ran.
 #[rstest]
-#[case(MuxCommandDispatch::CallerThread)]
-#[case(MuxCommandDispatch::WorkerThread)]
 fn detached_session_creation_preserves_the_requested_selection(
-    #[case] dispatch: MuxCommandDispatch,
+    #[values(MuxCommandDispatch::CallerThread, MuxCommandDispatch::WorkerThread)]
+    dispatch: MuxCommandDispatch,
+    #[values(CommandSelection::Follow, CommandSelection::Preserve)] selection: CommandSelection,
 ) {
-    let sessions = Arc::new(Mutex::new(vec![mux_session(
-        "old",
-        String::new(),
-        MuxSessionTag::default(),
-        true,
-    )]));
+    let sessions = Arc::new(Mutex::new(
+        ["old", "other"]
+            .map(|name| mux_session(name, String::new(), MuxSessionTag::default(), true))
+            .to_vec(),
+    ));
     let backends = registry(
         [Arc::new(RestoreProvider {
             dispatch,
@@ -515,6 +569,7 @@ fn detached_session_creation_preserves_the_requested_selection(
         ..MuxBindingConfig::default()
     };
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
+    mux.activate_session("old");
     let response = mux.execute_command_authoritatively(
         &repaint,
         &config,
@@ -522,20 +577,27 @@ fn detached_session_creation_preserves_the_requested_selection(
             session_id: "new".to_owned(),
             cwd: String::new(),
             tag: MuxSessionTag::default(),
+            argv: None,
         },
+        selection,
         Instant::now()
             .checked_add(Duration::from_secs(10))
             .expect("command deadline"),
         CommandCancellation::new(),
     );
+    mux.activate_session("other");
     let result = response
         .recv_timeout(Duration::from_secs(10))
         .expect("command completion");
     let completion = mux
         .complete_authoritative_command(result, &config)
         .expect("session created");
-    assert_eq!(completion.selected_session.as_deref(), Some("new"));
-    assert_eq!(mux.selected_session(), Some("new"));
+    let (requested, selected) = match selection {
+        CommandSelection::Follow => (Some("new"), "new"),
+        CommandSelection::Preserve => (None, "other"),
+    };
+    assert_eq!(completion.selected_session.as_deref(), requested);
+    assert_eq!(mux.selected_session(), Some(selected));
 }
 
 #[rstest]
@@ -579,7 +641,7 @@ fn native_pane_publication_error_is_preserved_on_successful_command(directory: a
     let config = test_config::config(config_path, MultiplexerBackendConfig::Tmux);
     let backends = registry(
         [Arc::new(RestoreProvider {
-            native_panes: true,
+            topology: PaneTopology::ProcessLocal,
             ..restore_provider(
                 MuxBackendKind::Tmux,
                 Arc::new(Mutex::new(vec![session_with_pane("first")])),
@@ -1904,4 +1966,1013 @@ fn closing_active_space_selects_the_neighbor_and_preserves_the_last_space(
     let (_, reopened) = WorkspaceRepository::open(&config_path).unwrap();
     assert_eq!(reopened.selected_space("close-test"), Some(last));
     assert_eq!(reopened.spaces().len(), 1);
+}
+
+/// Either the real native provider or the scripted one, so one workspace can hold both.
+enum MixedProvider {
+    Native(bootty_mux::native::NativeProvider),
+    Scripted(RestoreProvider),
+}
+
+impl MixedProvider {
+    fn provider(&self) -> &dyn MuxAppBackendProvider {
+        match self {
+            Self::Native(provider) => provider,
+            Self::Scripted(provider) => provider,
+        }
+    }
+}
+
+impl MuxBackendProvider for MixedProvider {
+    fn kind(&self) -> MuxBackendKind {
+        self.provider().kind()
+    }
+
+    fn command_dispatch(&self) -> MuxCommandDispatch {
+        self.provider().command_dispatch()
+    }
+
+    fn build_backend(
+        &self,
+        config: &MuxBindingConfig,
+        workspace: Option<&Path>,
+    ) -> Box<dyn MuxBackend> {
+        self.provider().build_backend(config, workspace)
+    }
+}
+
+impl MuxAppBackendProvider for MixedProvider {
+    fn build_pane_policy(&self, config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
+        self.provider().build_pane_policy(config)
+    }
+
+    fn app_policy(&self) -> MuxAppBackendPolicy {
+        self.provider().app_policy()
+    }
+
+    fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
+        self.provider().capabilities(scope)
+    }
+}
+
+/// Run frames until `ready` answers, bounded for real process startup.
+fn wait_until<T>(
+    state: &mut AppState,
+    what: &str,
+    mut ready: impl FnMut(&mut AppState) -> Option<T>,
+) -> T {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("test deadline");
+    loop {
+        state.update_frame(frames::idle_frame(Instant::now()));
+        if let Some(value) = ready(state) {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn targeted(command: &str, arguments: Vec<String>, target: serde_json::Value) -> CommandInvocation {
+    CommandInvocation {
+        target: Some(serde_json::from_value(target).expect("command target")),
+        ..CommandInvocation::new(command, arguments, Caller::Socket)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TargetSpace {
+    /// The active Space, which has no session yet and so shows the new one at once.
+    EmptyActive,
+    /// The active Space, which keeps showing the session it already has.
+    Active,
+    /// A native Space that is not active.
+    Inactive,
+}
+
+/// A native session's command runs from the moment the session is created, whether or not its
+/// pane is shown, and showing the pane later presents that same process: in the active Space, in
+/// an inactive one, and while another backend's Space is active and no native Space has been shown.
+#[rstest]
+#[case::in_an_empty_active_space(MultiplexerBackendConfig::Native, TargetSpace::EmptyActive)]
+#[case::in_the_active_space(MultiplexerBackendConfig::Native, TargetSpace::Active)]
+#[case::in_an_inactive_space(MultiplexerBackendConfig::Native, TargetSpace::Inactive)]
+#[case::while_another_backend_is_active(MultiplexerBackendConfig::Tmux, TargetSpace::Inactive)]
+fn a_native_session_command_starts_at_once_and_is_the_process_shown_later(
+    directory: assert_fs::TempDir,
+    #[case] home_backend: MultiplexerBackendConfig,
+    #[case] created_in: TargetSpace,
+) {
+    let config_path = directory.path().join("config.toml");
+    let (mut repository, _) = WorkspaceRepository::open(&config_path).expect("workspace");
+    let native = SpaceMuxOverride {
+        backend: Some(MultiplexerBackendConfig::Native),
+        remote: SpaceRemoteOverride::Local,
+    };
+    let scripts = create_space(&mut repository, "Scripts", "2", [2; 3], native.clone()).id();
+    let other = create_space(&mut repository, "Other", "3", [3; 3], native).id();
+    drop(repository);
+    let scripted = restore_provider(MuxBackendKind::Tmux, Arc::default(), Arc::default());
+    let backends = Arc::new(
+        MuxBackendRegistry::from_app_providers(
+            [
+                Arc::new(MixedProvider::Native(bootty_mux::native::NativeProvider)),
+                Arc::new(MixedProvider::Scripted(scripted)),
+            ],
+            [MuxBackendKind::Native, MuxBackendKind::Tmux],
+        )
+        .expect("mixed backend registry"),
+    );
+    let mut state = app_state(test_config::config(config_path, home_backend), backends);
+    let home = state.active_space_id();
+    let space_target = |state: &mut AppState, name: &str| {
+        let outcome = submit_command(
+            state,
+            CommandInvocation::new("spaces.list", Vec::new(), Caller::Socket),
+            Instant::now(),
+        );
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("spaces.list failed: {outcome:?}");
+        };
+        value
+            .as_array()
+            .expect("a list of Spaces")
+            .iter()
+            .find(|space| space["name"] == name || (name.is_empty() && space["active"] == true))
+            .map(|space| space["target"].clone())
+            .expect("the Space is listed")
+    };
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).expect("project directory");
+    let cwd = project.to_string_lossy().into_owned();
+    let home_target = space_target(&mut state, "");
+    if created_in != TargetSpace::EmptyActive {
+        let outcome = submit_command(
+            &mut state,
+            targeted(
+                "session.create",
+                vec!["project".to_owned(), cwd.clone()],
+                home_target.clone(),
+            ),
+            Instant::now(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    }
+    let selection = |state: &AppState| {
+        (
+            state.mux().selected_session().map(str::to_owned),
+            state.mux().selected_window().map(str::to_owned),
+        )
+    };
+    let before = selection(&state);
+
+    let marker = directory.path().join("started");
+    let received = directory.path().join("received");
+    let argv = [
+        "/bin/sh",
+        "-c",
+        "printf '%s|%s\\n' \"$BOOTTY_PANE\" \"$(pwd -P)\" >> \"$1\"; printf eager-token; exec cat >> \"$2\"",
+        "agent",
+        &marker.to_string_lossy(),
+        &received.to_string_lossy(),
+    ];
+    let target = if created_in == TargetSpace::Inactive {
+        space_target(&mut state, "Scripts")
+    } else {
+        home_target
+    };
+    let outcome = submit_command(
+        &mut state,
+        targeted(
+            "session.create",
+            vec![
+                "agent".to_owned(),
+                cwd,
+                serde_json::to_string(&argv).expect("encode argv"),
+            ],
+            target,
+        ),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("session.create failed: {outcome:?}");
+    };
+    let terminal = value["terminal"].clone();
+
+    wait_until(
+        &mut state,
+        "the command starts when the session is created",
+        |_| {
+            std::fs::read_to_string(&marker)
+                .ok()
+                .filter(|text| text.ends_with('\n'))
+        },
+    );
+    match created_in {
+        // An empty Space shows the first session it gets, so this pane is on screen at once.
+        TargetSpace::EmptyActive => {
+            assert_eq!(selection(&state).0.as_deref(), Some("agent"));
+        }
+        TargetSpace::Active | TargetSpace::Inactive => {
+            assert_eq!(selection(&state), before);
+        }
+    }
+    assert_eq!(state.active_space_id(), home);
+
+    let shows_token = |state: &mut AppState| {
+        let outcome = submit_command(
+            state,
+            targeted("terminal.capture", Vec::new(), terminal.clone()),
+            Instant::now(),
+        );
+        let CommandOutcome::Success { value, .. } = outcome else {
+            return None;
+        };
+        value["capture"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("eager-token"))
+            .then_some(())
+    };
+    // Before anything shows it, even in an inactive Space, the pane is readable and takes input.
+    wait_until(&mut state, "the hidden pane is readable", shows_token);
+    for (command, arguments) in [
+        ("terminal.paste", vec!["hidden-input".to_owned()]),
+        ("terminal.submit", Vec::new()),
+    ] {
+        let outcome = submit_command(
+            &mut state,
+            targeted(command, arguments, terminal.clone()),
+            Instant::now(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{command}: {outcome:?}"
+        );
+    }
+    wait_until(
+        &mut state,
+        "input reaches the hidden pane's process",
+        |_| {
+            std::fs::read_to_string(&received)
+                .ok()
+                .filter(|text| text.contains("hidden-input"))
+        },
+    );
+    assert_eq!(state.active_space_id(), home);
+
+    if created_in == TargetSpace::Inactive {
+        // Pass through another native Space first: the pane has to follow its owner each time.
+        assert!(state.activate_space_from_ui(other));
+        state.update_frame(frames::idle_frame(Instant::now()));
+        assert!(state.activate_space_from_ui(scripts));
+    }
+    state.activate_session_from_ui("agent");
+    wait_until(
+        &mut state,
+        "the shown pane is the process the create started",
+        shows_token,
+    );
+    let pane = state
+        .mux()
+        .backend_session_by_id_or_name("agent")
+        .and_then(|session| session.windows.first()?.panes.first()?.pane_id.clone())
+        .expect("the session's pane");
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("marker"),
+        format!(
+            "{pane}|{}\n",
+            project.canonicalize().expect("canonical cwd").display()
+        ),
+        "the command ran once, in its cwd, as the pane Bootty shows"
+    );
+}
+
+/// `pane.close` and `session.close` end a hidden native pane's process and drop the pane, leaving
+/// selection alone. Closing a session's only pane ends the session, as in tmux and rmux.
+#[rstest]
+#[case::pane("pane.close")]
+#[case::session("session.close")]
+fn closing_ends_a_hidden_native_pane_without_moving_selection(
+    directory: assert_fs::TempDir,
+    #[case] close_command: &str,
+) {
+    let config_path = directory.path().join("config.toml");
+    let backends = Arc::new(
+        MuxBackendRegistry::from_app_providers(
+            [Arc::new(MixedProvider::Native(
+                bootty_mux::native::NativeProvider,
+            ))],
+            [MuxBackendKind::Native],
+        )
+        .expect("native backend registry"),
+    );
+    let mut state = app_state(
+        test_config::config(config_path, MultiplexerBackendConfig::Native),
+        backends,
+    );
+    let outcome = submit_command(
+        &mut state,
+        CommandInvocation::new("spaces.list", Vec::new(), Caller::Socket),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("spaces.list failed: {outcome:?}");
+    };
+    let home = value[0]["target"].clone();
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let pid_file = directory.path().join("pid");
+    for (name, argv) in [
+        ("shown", None),
+        (
+            "agent",
+            Some(serde_json::json!([
+                "/bin/sh",
+                "-c",
+                "echo $$ > \"$1\"; exec sleep 60",
+                "agent",
+                pid_file.to_string_lossy()
+            ])),
+        ),
+    ] {
+        let mut arguments = vec![name.to_owned(), cwd.clone()];
+        arguments.extend(argv.map(|argv| argv.to_string()));
+        let outcome = submit_command(
+            &mut state,
+            targeted("session.create", arguments, home.clone()),
+            Instant::now(),
+        );
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("session.create {name} failed: {outcome:?}");
+        };
+        if name == "agent" {
+            let terminal = value["terminal"].clone();
+            let pid = wait_until(&mut state, "the hidden pane's process starts", |_| {
+                std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+            });
+            let selected = state.mux().selected_session().map(str::to_owned);
+
+            let close_target = if close_command == "pane.close" {
+                terminal.clone()
+            } else {
+                value["created"].clone()
+            };
+            let mut close = targeted(close_command, Vec::new(), close_target);
+            let outcome = submit_command(&mut state, close.clone(), Instant::now());
+            let CommandOutcome::ConfirmationRequired { confirmation } = outcome else {
+                panic!("expected close confirmation: {outcome:?}");
+            };
+            close.confirmation = Some(*confirmation);
+            let outcome = submit_command(&mut state, close, Instant::now());
+            assert!(
+                matches!(outcome, CommandOutcome::Success { .. }),
+                "{outcome:?}"
+            );
+            wait_until(&mut state, "the closed pane's process exits", |_| {
+                let alive = std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .is_ok_and(|status| status.success());
+                (!alive).then_some(())
+            });
+            let pane = terminal["handle"]
+                .as_str()
+                .and_then(|handle| serde_json::from_str::<Vec<String>>(handle).ok())
+                .and_then(|path| path.last().cloned())
+                .expect("terminal target names its pane");
+            assert!(
+                !state
+                    .mux()
+                    .all_sessions()
+                    .iter()
+                    .flat_map(|session| &session.windows)
+                    .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+                    .any(|anchor| anchor.pane_id.as_deref() == Some(pane.as_str())),
+                "the closed pane is gone from the snapshot"
+            );
+            assert_eq!(state.mux().selected_session().map(str::to_owned), selected);
+            // The session ended with its only pane, so its name is free again.
+            assert!(
+                !state
+                    .mux()
+                    .all_sessions()
+                    .iter()
+                    .any(|session| session.name == "agent"),
+                "the session ends with its last pane"
+            );
+            let reused = submit_command(
+                &mut state,
+                targeted(
+                    "session.create",
+                    vec!["agent".to_owned(), cwd.clone()],
+                    home.clone(),
+                ),
+                Instant::now(),
+            );
+            assert!(
+                matches!(reused, CommandOutcome::Success { .. }),
+                "{reused:?}"
+            );
+        }
+    }
+}
+
+/// Every Space in `spaces.list` order: its name, scope, and Binding target.
+fn listed_spaces(state: &mut AppState) -> Vec<(String, String, serde_json::Value)> {
+    let outcome = submit_command(
+        state,
+        CommandInvocation::new("spaces.list", Vec::new(), Caller::Socket),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("spaces.list failed: {outcome:?}");
+    };
+    value
+        .as_array()
+        .expect("a list of Spaces")
+        .iter()
+        .map(|space| {
+            (
+                space["name"].as_str().expect("Space name").to_owned(),
+                space["scope"].as_str().expect("Space scope").to_owned(),
+                space["target"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// Submit through the socket mailbox and run frames in real time until the command answers.
+fn submit_and_wait(state: &mut AppState, invocation: CommandInvocation) -> CommandOutcome {
+    let (response, outcomes) = mpsc::channel();
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("test deadline");
+    state
+        .app_command_sender(Caller::Socket)
+        .try_send(AppCommandRequest {
+            invocation,
+            deadline,
+            cancellation: CommandCancellation::new(),
+            response,
+        })
+        .expect("submit command");
+    wait_until(state, "the command answers", |_| outcomes.try_recv().ok())
+}
+
+/// An rmux-style pane Bootty has no runtime for, such as one in a session created behind the
+/// selected one, takes targeted input and capture through its backend.
+#[rstest]
+fn a_backend_pane_without_a_runtime_takes_input_and_capture_through_its_backend(
+    directory: assert_fs::TempDir,
+) {
+    let provider = RestoreProvider {
+        topology: PaneTopology::BackendReconciled,
+        created_panes: true,
+        ..restore_provider(MuxBackendKind::Rmux, Arc::default(), Arc::default())
+    };
+    let inputs = Arc::clone(&provider.pane_inputs);
+    let backends = registry([Arc::new(provider)], [MuxBackendKind::Rmux]);
+    let config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Rmux,
+    );
+    let mut state = app_state(config, backends);
+    let (_, _, home) = listed_spaces(&mut state).remove(0);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let mut terminal = serde_json::Value::Null;
+    for name in ["shown", "hidden"] {
+        let outcome = submit_command(
+            &mut state,
+            targeted(
+                "session.create",
+                vec![name.to_owned(), cwd.clone()],
+                home.clone(),
+            ),
+            Instant::now(),
+        );
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("session.create {name} failed: {outcome:?}");
+        };
+        terminal = value["terminal"].clone();
+    }
+    assert_eq!(state.mux().selected_session(), Some("shown"));
+
+    for (command, arguments) in [
+        ("terminal.paste", vec!["hidden input".to_owned()]),
+        ("terminal.submit", Vec::new()),
+    ] {
+        let outcome = submit_command(
+            &mut state,
+            targeted(command, arguments, terminal.clone()),
+            Instant::now(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{command}: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        *inputs.lock().expect("pane inputs lock"),
+        [
+            ("%2".to_owned(), PaneInput::Paste("hidden input".to_owned())),
+            ("%2".to_owned(), PaneInput::Submit),
+        ]
+    );
+    let outcome = submit_command(
+        &mut state,
+        targeted("terminal.capture", Vec::new(), terminal),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("terminal.capture failed: {outcome:?}");
+    };
+    assert_eq!(
+        (&value["capture"]["text"], &value["source"]["kind"]),
+        (
+            &serde_json::json!("%2 read by its backend"),
+            &serde_json::json!("backend_pane")
+        )
+    );
+    assert_eq!(state.mux().selected_session(), Some("shown"));
+}
+
+/// An agent record follows its pane. A hook that arrives before Bootty lists its pane shows once
+/// the pane is discovered, and moving the session to another Space on the same server moves the
+/// record with its final message once that Space lists it, leaving one entry.
+#[cfg(unix)]
+#[rstest]
+fn an_agent_record_follows_its_pane_to_the_space_that_owns_it(directory: assert_fs::TempDir) {
+    let socket = directory.path().join("tmux.sock");
+    std::fs::write(&socket, "").expect("socket stand-in");
+    let config_path = directory.path().join("config.toml");
+    let (mut repository, _) = WorkspaceRepository::open(&config_path).expect("workspace");
+    let other = create_space(
+        &mut repository,
+        "Other",
+        "2",
+        [2; 3],
+        SpaceMuxOverride::default(),
+    )
+    .id();
+    drop(repository);
+    let backends = registry(
+        [Arc::new(RestoreProvider {
+            created_panes: true,
+            server_socket: Some(socket.clone()),
+            ..restore_provider(MuxBackendKind::Tmux, Arc::default(), Arc::default())
+        })],
+        [MuxBackendKind::Tmux],
+    );
+    let (events, received) = bootty_control::event_queue();
+    drop(received);
+    let mut state = AppState::new_for_window_with_agents(
+        test_config::config(config_path, MultiplexerBackendConfig::Tmux),
+        "main".to_owned(),
+        backends,
+        Arc::new(|| {}),
+        None,
+        None,
+        Some(events),
+    )
+    .expect("app state with agents");
+    let (_, home_scope, home) = listed_spaces(&mut state).remove(0);
+    let listed = |state: &mut AppState| {
+        state.update_frame(frames::idle_frame(Instant::now()));
+        state
+            .agent_overview()
+            .into_iter()
+            .map(|entry| (entry.scope, entry.title, entry.last_message))
+            .collect::<Vec<_>>()
+    };
+    let entry = |scope: String| vec![(scope, "agent".to_owned(), Some("Done.".to_owned()))];
+
+    let reported = submit_and_wait(
+        &mut state,
+        CommandInvocation::new(
+            "agents.claude.ingest",
+            vec![
+                r#"{"hook_event_name":"Stop","last_assistant_message":"Done."}"#.to_owned(),
+                "%1".to_owned(),
+                String::new(),
+                format!("{},4242,0", socket.display()),
+            ],
+            Caller::Socket,
+        ),
+    );
+    assert!(
+        matches!(reported, CommandOutcome::Success { .. }),
+        "{reported:?}"
+    );
+    assert_eq!(listed(&mut state), []);
+
+    let created = submit_command(
+        &mut state,
+        targeted(
+            "session.create",
+            vec![
+                "agent".to_owned(),
+                directory.path().to_string_lossy().into_owned(),
+            ],
+            home,
+        ),
+        Instant::now(),
+    );
+    assert!(
+        matches!(created, CommandOutcome::Success { .. }),
+        "{created:?}"
+    );
+    assert_eq!(listed(&mut state), entry(home_scope.clone()));
+
+    let session = state
+        .mux()
+        .backend_session_by_id_or_name("agent")
+        .expect("created session")
+        .id
+        .clone();
+    let home_id = SpaceId::from_persistence(home_scope.parse().expect("numeric scope"));
+    assert!(state.move_scoped_session_to_space(&ScopedSessionTarget::new(home_id, session), other));
+    // Until the other Space lists the session, the record waits rather than showing in the old one.
+    assert_eq!(listed(&mut state), []);
+    assert!(state.activate_space_from_ui(other));
+    assert_eq!(
+        listed(&mut state),
+        entry(other.persistence_value().to_string())
+    );
+}
+
+/// Pane ids repeat across servers. A hook that names its server lands on the Space bound to that
+/// server, even when tmux reports the socket through a resolved path; a hook from an adapter that
+/// names no server still lands nowhere while two Spaces list its pane. A server no Space names
+/// lands nowhere either, even beside a Space whose server Bootty cannot name, such as a remote one.
+#[cfg(unix)]
+#[rstest]
+#[case::both_local(true)]
+#[case::one_unnamed(false)]
+fn hooks_with_colliding_pane_ids_land_on_the_space_of_their_server(
+    directory: assert_fs::TempDir,
+    #[case] rmux_named: bool,
+) {
+    let sockets = directory.path().join("sockets");
+    std::fs::create_dir(&sockets).expect("socket directory");
+    for socket in ["tmux.sock", "rmux.sock"] {
+        std::fs::write(sockets.join(socket), "").expect("socket stand-in");
+    }
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&sockets, &link).expect("symlinked socket directory");
+    let config_path = directory.path().join("config.toml");
+    let (mut repository, _) = WorkspaceRepository::open(&config_path).expect("workspace");
+    create_space(
+        &mut repository,
+        "Rmux",
+        "2",
+        [2; 3],
+        SpaceMuxOverride {
+            backend: Some(MultiplexerBackendConfig::Rmux),
+            remote: SpaceRemoteOverride::Local,
+        },
+    );
+    drop(repository);
+    let provider = |kind, server_socket| {
+        Arc::new(RestoreProvider {
+            created_panes: true,
+            server_socket,
+            ..restore_provider(kind, Arc::default(), Arc::default())
+        })
+    };
+    let backends = registry(
+        [
+            provider(MuxBackendKind::Tmux, Some(link.join("tmux.sock"))),
+            provider(
+                MuxBackendKind::Rmux,
+                rmux_named.then(|| sockets.join("rmux.sock")),
+            ),
+        ],
+        [MuxBackendKind::Tmux, MuxBackendKind::Rmux],
+    );
+    let (events, received) = bootty_control::event_queue();
+    drop(received);
+    let mut state = AppState::new_for_window_with_agents(
+        test_config::config(config_path, MultiplexerBackendConfig::Tmux),
+        "main".to_owned(),
+        backends,
+        Arc::new(|| {}),
+        None,
+        None,
+        Some(events),
+    )
+    .expect("app state with agents");
+    let spaces = listed_spaces(&mut state);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    for ((_, _, target), session) in spaces.iter().zip(["tmux-agent", "rmux-agent"]) {
+        let outcome = submit_command(
+            &mut state,
+            targeted(
+                "session.create",
+                vec![session.to_owned(), cwd.clone()],
+                target.clone(),
+            ),
+            Instant::now(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    }
+    let resolved = sockets.canonicalize().expect("resolved socket directory");
+    let report = |state: &mut AppState, server: String| {
+        let outcome = submit_and_wait(
+            state,
+            CommandInvocation::new(
+                "agents.claude.ingest",
+                vec![
+                    r#"{"hook_event_name":"SessionStart"}"#.to_owned(),
+                    "%1".to_owned(),
+                    String::new(),
+                    server,
+                ],
+                Caller::Socket,
+            ),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+        state.update_frame(frames::idle_frame(Instant::now()));
+        let mut listed = state
+            .agent_overview()
+            .into_iter()
+            .map(|entry| (entry.scope, entry.title))
+            .collect::<Vec<_>>();
+        listed.sort();
+        listed
+    };
+    assert_eq!(report(&mut state, String::new()), []);
+    let (tmux_scope, rmux_scope) = (spaces[0].1.clone(), spaces[1].1.clone());
+    let tmux = (tmux_scope, "tmux-agent".to_owned());
+    let rmux = (rmux_scope, "rmux-agent".to_owned());
+    assert_eq!(
+        report(
+            &mut state,
+            format!("{},4141,0", resolved.join("other.sock").display())
+        ),
+        []
+    );
+    assert_eq!(
+        report(
+            &mut state,
+            format!("{},4242,0", resolved.join("tmux.sock").display())
+        ),
+        std::slice::from_ref(&tmux)
+    );
+    let mut expected = vec![tmux];
+    if rmux_named {
+        expected.push(rmux);
+        expected.sort();
+    }
+    assert_eq!(
+        report(
+            &mut state,
+            format!("{},4343,1", resolved.join("rmux.sock").display())
+        ),
+        expected
+    );
+}
+
+/// A native create whose first pane cannot start fails instead of reporting a dead pane as
+/// created, and the session it made is closed so the name is free again. A cwd that is not a
+/// directory fails before anything is created.
+#[rstest]
+fn a_native_session_that_cannot_start_fails_its_create_and_frees_its_name(
+    directory: assert_fs::TempDir,
+) {
+    let backends = Arc::new(
+        MuxBackendRegistry::from_app_providers(
+            [Arc::new(MixedProvider::Native(
+                bootty_mux::native::NativeProvider,
+            ))],
+            [MuxBackendKind::Native],
+        )
+        .expect("native backend registry"),
+    );
+    let mut state = app_state(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        backends,
+    );
+    let (_, _, home) = listed_spaces(&mut state).remove(0);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let create = |cwd: &str, argv: serde_json::Value| {
+        targeted(
+            "session.create",
+            vec!["agent".to_owned(), cwd.to_owned(), argv.to_string()],
+            home.clone(),
+        )
+    };
+    let has_agent = |state: &AppState| {
+        state
+            .mux()
+            .all_sessions()
+            .iter()
+            .any(|session| session.name == "agent")
+    };
+
+    let missing = submit_and_wait(
+        &mut state,
+        create(
+            &cwd,
+            serde_json::json!(["bootty-no-such-program", "--flag"]),
+        ),
+    );
+    assert!(
+        matches!(&missing, CommandOutcome::Failed { code, message }
+            if code == "session_start_failed" && message.contains("bootty-no-such-program")),
+        "{missing:?}"
+    );
+    assert!(!has_agent(&state), "the failed session is closed");
+
+    let not_a_directory = directory.path().join("file");
+    std::fs::write(&not_a_directory, "").expect("plain file");
+    let invalid = submit_and_wait(
+        &mut state,
+        create(
+            &not_a_directory.to_string_lossy(),
+            serde_json::json!(["/bin/sh", "-c", "exit 0"]),
+        ),
+    );
+    assert!(
+        matches!(&invalid, CommandOutcome::Failed { code, .. } if code == "invalid_arguments"),
+        "{invalid:?}"
+    );
+    assert!(!has_agent(&state), "nothing was created");
+
+    let started = submit_and_wait(
+        &mut state,
+        create(&cwd, serde_json::json!(["/bin/sh", "-c", "exec sleep 60"])),
+    );
+    assert!(
+        matches!(started, CommandOutcome::Success { .. }),
+        "{started:?}"
+    );
+    assert!(has_agent(&state));
+}
+
+/// A native create still starting when its session is closed and a new one takes the name
+/// answers for its own session only: it fails, and the new session keeps running.
+#[rstest]
+fn a_starting_native_create_never_answers_for_or_closes_a_recreated_session(
+    directory: assert_fs::TempDir,
+) {
+    let backends = Arc::new(
+        MuxBackendRegistry::from_app_providers(
+            [Arc::new(MixedProvider::Native(
+                bootty_mux::native::NativeProvider,
+            ))],
+            [MuxBackendKind::Native],
+        )
+        .expect("native backend registry"),
+    );
+    let mut state = app_state(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        backends,
+    );
+    let (_, _, home) = listed_spaces(&mut state).remove(0);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("test deadline");
+    // Queued together, so the first create is still starting when the others run.
+    let queue = |invocation| {
+        let (response, outcome) = mpsc::channel();
+        state
+            .app_command_sender(Caller::Socket)
+            .try_send(AppCommandRequest {
+                invocation,
+                deadline,
+                cancellation: CommandCancellation::new(),
+                response,
+            })
+            .expect("submit command");
+        outcome
+    };
+    let create = |argv: serde_json::Value| {
+        targeted(
+            "session.create",
+            vec!["agent".to_owned(), cwd.clone(), argv.to_string()],
+            home.clone(),
+        )
+    };
+    let session = serde_json::json!({
+        "kind": "session",
+        "handle": serde_json::to_string(&[home["handle"].as_str().expect("Space handle"), "agent"])
+            .expect("session handle"),
+        "generation": home["generation"],
+    });
+    let mut close = targeted("session.close", Vec::new(), session);
+    close.confirmation = Some(close.confirmation());
+
+    let first = queue(create(serde_json::json!([
+        "bootty-no-such-program",
+        "--flag"
+    ])));
+    let closed = queue(close);
+    let second = queue(create(serde_json::json!([
+        "/bin/sh",
+        "-c",
+        "exec sleep 60"
+    ])));
+
+    let first = wait_until(&mut state, "the first create answers", |_| {
+        first.try_recv().ok()
+    });
+    // Normally the close finds the first create still starting. If its program fails first, the
+    // create closes its own session and this close finds nothing; either way the rest holds.
+    wait_until(&mut state, "the close answers", |_| closed.try_recv().ok());
+    let second = wait_until(&mut state, "the second create answers", |_| {
+        second.try_recv().ok()
+    });
+    assert!(
+        matches!(&first, CommandOutcome::Failed { code, .. } if code == "session_start_failed"),
+        "{first:?}"
+    );
+    assert!(
+        matches!(second, CommandOutcome::Success { .. }),
+        "{second:?}"
+    );
+    assert!(
+        state
+            .mux()
+            .all_sessions()
+            .iter()
+            .any(|session| session.name == "agent"),
+        "the recreated session keeps running"
+    );
+}
+
+/// A mux command that fails on the backend's worker after its dispatch answers its socket caller
+/// with the failure and leaves the window without an error notice nobody at the window asked for.
+#[rstest]
+fn an_asynchronous_mux_failure_answers_a_socket_caller_without_a_window_notice(
+    directory: assert_fs::TempDir,
+) {
+    let (release_tx, release_rx) = mpsc::channel();
+    let backends = registry(
+        [Arc::new(RestoreProvider {
+            dispatch: MuxCommandDispatch::WorkerThread,
+            fail_commands: true,
+            release: Some(Arc::new(Mutex::new(release_rx))),
+            ..restore_provider(MuxBackendKind::Tmux, Arc::default(), Arc::default())
+        })],
+        [MuxBackendKind::Tmux],
+    );
+    let mut state = app_state(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Tmux,
+        ),
+        backends,
+    );
+    let (_, _, home) = listed_spaces(&mut state).remove(0);
+    let (response, outcomes) = mpsc::channel();
+    state
+        .app_command_sender(Caller::Socket)
+        .try_send(AppCommandRequest {
+            invocation: targeted(
+                "session.create",
+                vec![
+                    "agent".to_owned(),
+                    directory.path().to_string_lossy().into_owned(),
+                ],
+                home,
+            ),
+            deadline: Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("test deadline"),
+            cancellation: CommandCancellation::new(),
+            response,
+        })
+        .expect("submit command");
+    state.update_frame(frames::idle_frame(Instant::now()));
+    assert!(
+        outcomes.try_recv().is_err(),
+        "the failure must land after dispatch"
+    );
+    release_tx.send(()).expect("release the backend");
+    let outcome = wait_until(&mut state, "the failure answers", |_| {
+        outcomes.try_recv().ok()
+    });
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.last_error(), None);
 }

@@ -25,8 +25,12 @@ use super::bridge::rmux_execute;
 use super::pane_io::{RMUX_OUTPUT_CHANNEL_CAPACITY, RmuxPaneIo};
 use super::pane_io::{RmuxPaneEvent, RmuxPaneTarget, open_rmux_pane_io, resize_rmux_pane};
 use crate::command::MuxCommand;
+use crate::remote_space::PaneRequest;
 #[cfg(feature = "terminal-runtime")]
-use crate::{backend::MuxBackend, snapshot::MuxSnapshot};
+use crate::{
+    backend::{MuxBackend, PaneCapture, PaneInput, PaneText},
+    snapshot::MuxSnapshot,
+};
 #[cfg(feature = "terminal-runtime")]
 use bootty_host::remote::{RemoteHost, remote_daemon_failure};
 
@@ -59,6 +63,8 @@ pub enum RemoteRmuxRequest {
         cols: u16,
         rows: u16,
     },
+    /// Run the [`PaneRequest`] that follows on stdin with the daemon's rmux backend.
+    Pane,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -117,9 +123,40 @@ impl MuxBackend for RemoteRmuxBackend {
         serde_json::from_str(&output.stdout).context("decode remote Space snapshot")
     }
 
+    // An explicit create's `argv` needs daemon protocol 14. The daemon path is versioned by that
+    // protocol, so this client never reaches an older daemon that would drop the field.
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         self.run(&RemoteRmuxRequest::Execute { command })?;
         Ok(())
+    }
+
+    fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        self.pane(&PaneRequest::Input {
+            pane: pane_id.to_owned(),
+            input: input.clone(),
+        })
+        .map(|_| ())
+    }
+
+    fn capture_pane(&self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        self.pane(&PaneRequest::Capture {
+            pane: pane_id.to_owned(),
+            capture,
+        })?
+        .context("the remote daemon returned no capture")
+    }
+}
+
+#[cfg(feature = "terminal-runtime")]
+impl RemoteRmuxBackend {
+    fn pane(&self, request: &PaneRequest) -> Result<Option<PaneText>> {
+        request.send(
+            &self.remote,
+            &[
+                REMOTE_RMUX_SUBCOMMAND.to_owned(),
+                RemoteRmuxRequest::Pane.encode()?,
+            ],
+        )
     }
 }
 
@@ -225,6 +262,13 @@ pub fn run_remote_rmux_command(payload: &str) -> Result<i32> {
         )?,
         RemoteRmuxRequest::ResizeWindow { window, cols, rows } => {
             super::backend::resize_bootty_rmux_window(&window, cols, rows)?;
+        }
+        RemoteRmuxRequest::Pane => {
+            let request = PaneRequest::read(std::io::stdin().lock())?;
+            println!(
+                "{}",
+                serde_json::to_string(&request.run(&RmuxBackend::new())?)?
+            );
         }
     }
     Ok(0)

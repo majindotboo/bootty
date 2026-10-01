@@ -58,7 +58,7 @@ impl WorkspaceRuntime {
         let mut groups = Vec::new();
         for (_, space_name, bindings) in &spaces {
             for binding in bindings {
-                let sessions = if binding.tracks_session_membership() {
+                if binding.tracks_session_membership() {
                     claimed.extend(
                         binding
                             .sessions
@@ -66,20 +66,12 @@ impl WorkspaceRuntime {
                             .iter()
                             .map(|session| session.identity.clone()),
                     );
-                    binding
-                        .sessions
-                        .sessions()
-                        .iter()
-                        .filter_map(|claimed_session| {
-                            binding.mux.all_sessions().iter().find(|session| {
-                                session.tag.identity.as_deref() == Some(&claimed_session.identity)
-                            })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                } else {
-                    binding.mux.all_sessions().to_vec()
-                };
+                }
+                let sessions = binding
+                    .member_sessions()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 if sessions.is_empty() {
                     continue;
                 }

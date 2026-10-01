@@ -106,6 +106,7 @@ fn rmux_backend_forwards_every_control_command_unchanged() {
             session_id: "project".to_owned(),
             cwd: "/repo".to_owned(),
             tag: MuxSessionTag::default(),
+            argv: None,
         },
         MuxCommand::CreateWorktreeSession {
             session_id: "worktree".to_owned(),

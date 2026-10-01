@@ -17,7 +17,10 @@ use bootty_control::{
     AppCommandRequest, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
     CommandTarget, MutationClass, ResourceKind, ValueType,
 };
-use bootty_mux::repository::WorkspaceRepository;
+use bootty_mux::repository::{SpaceMuxOverride, WorkspaceRepository};
+use bootty_mux::workspace::{
+    SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES,
+};
 use bootty_terminal::geometry::SurfaceRect;
 use bootty_ui::commands::{CommandCatalog, CommandExecutor};
 use bootty_ui::{
@@ -775,7 +778,28 @@ fn native_window_actions_use_the_binding_owned_plan() {
         matches!(outcome, CommandOutcome::Success { .. }),
         "{outcome:?}"
     );
-    assert_eq!(state.mux().selected_window(), Some(first_window.as_str()));
+    // A targeted write reaches its pane's own terminal and leaves the selection alone.
+    assert_eq!(state.mux().selected_window(), Some(second_window.as_str()));
+}
+
+#[test]
+fn a_failed_socket_command_reaches_its_caller_not_the_window() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let started = Instant::now();
+    let mut state = native_state(directory.path());
+    open_native_session(&mut state, directory.path(), started);
+    let mut paste = CommandInvocation::new("terminal.paste", vec!["hi".to_owned()], Caller::Socket);
+    paste.target = Some(CommandTarget {
+        kind: ResourceKind::Terminal,
+        handle: r#"["gone","$9","@9","%9"]"#.to_owned(),
+        generation: 1,
+    });
+    let outcome = submit_command(&mut state, paste, started);
+    assert!(
+        matches!(outcome, CommandOutcome::StaleTarget { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.last_error(), None);
 }
 
 #[rstest]
@@ -878,7 +902,8 @@ fn submit_command(
                     .checked_add(Duration::from_millis(tick))
                     .expect("test timestamp fits"),
             ));
-            outcomes.try_recv().ok()
+            // A native create answers once its pane's process has started.
+            outcomes.recv_timeout(Duration::from_millis(5)).ok()
         })
         .expect("command outcome")
 }
@@ -1563,6 +1588,87 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     }
 }
 
+/// `agents.list` answers every agent in one bounded response, so a long final message is cut in
+/// the listing and read whole through the provider's `state` command, by the entry's target or by
+/// its pane id alone, from a Space that is not active and without activating it.
+#[rstest]
+fn a_long_final_message_is_previewed_in_the_listing_and_whole_in_state() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let elsewhere = WorkspaceRepository::open(&directory.path().join("config.toml"))
+        .expect("workspace")
+        .0
+        .create_space(
+            "Elsewhere",
+            "2",
+            [1, 2, 3],
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .expect("create Space")
+        .expect("valid Space")
+        .id();
+    let (wake, wakes) = mpsc::channel();
+    let (events, receiver) = bootty_control::event_queue();
+    drop(receiver);
+    let mut state = AppState::new_for_window_with_agents(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        "main".to_owned(),
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+        Some(events),
+    )
+    .unwrap();
+    let now = Instant::now();
+    open_native_session(&mut state, directory.path(), now);
+    let pane = state.focused_pane().unwrap();
+    let message = "é".repeat(8 * 1024);
+    let outcome = state.agent_service().unwrap().ingest(
+        bootty_agents::AgentKind::Claude,
+        Some(&pane),
+        serde_json::json!({"hook_event_name": "Stop", "last_assistant_message": message}),
+        now.checked_add(Duration::from_secs(1))
+            .expect("test timestamp fits"),
+        &CommandCancellation::new(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+
+    let entries = state.agent_overview();
+    let [entry] = entries.as_slice() else {
+        panic!("one agent entry: {entries:?}");
+    };
+    let preview = entry.last_message.as_deref().unwrap_or_default();
+    assert!(
+        entry.last_message_truncated
+            && !preview.is_empty()
+            && preview.len() < message.len()
+            && message.starts_with(preview),
+        "{entry:?}"
+    );
+    assert!(state.activate_space_from_ui(elsewhere));
+    let mut by_target = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
+    by_target.target = Some(entry.target.clone());
+    let by_pane = CommandInvocation::new("agents.claude.state", vec![pane], Caller::Socket);
+    for read in [by_target, by_pane] {
+        let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now);
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("agents.claude.state failed: {outcome:?}");
+        };
+        assert_eq!(value["last_message"].as_str(), Some(message.as_str()));
+        assert_eq!(state.active_space_id(), elsewhere);
+    }
+}
+
 #[rstest]
 #[case(bootty_config::config::NotificationPolicy::Never, true, 0)]
 #[case(bootty_config::config::NotificationPolicy::Unfocused, true, 0)]
@@ -2175,4 +2281,234 @@ fn returning_from_sidebar_requests_native_terminal_focus(#[case] command: &str) 
     let effects = state.update_frame(frames::idle_frame(now));
     assert!(state.terminal_focused());
     assert!(effects.contains(&bootty_ui::AppEffect::FocusTerminal));
+}
+
+fn owned(arguments: &[&str]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect()
+}
+
+fn json_argv(argv: &[String]) -> String {
+    serde_json::to_string(argv).expect("encode argv")
+}
+
+/// The outcome's failure class: its code when it failed, else its variant.
+fn failure_kind(outcome: &CommandOutcome) -> &str {
+    match outcome {
+        CommandOutcome::Failed { code, .. } => code,
+        CommandOutcome::Unsupported { .. } => "unsupported",
+        CommandOutcome::Unavailable { .. } => "unavailable",
+        CommandOutcome::StaleTarget { .. } => "stale_target",
+        CommandOutcome::Denied { .. } => "denied",
+        CommandOutcome::ConfirmationRequired { .. } => "confirmation_required",
+        CommandOutcome::Success { .. } => "success",
+    }
+}
+
+#[rstest]
+#[case::missing_cwd(owned(&["agent"]), "invalid_arguments")]
+#[case::empty_name(owned(&["", "/tmp"]), "invalid_arguments")]
+#[case::name_tmux_rewrites(owned(&["crash:12", "/tmp"]), "invalid_arguments")]
+#[case::name_with_dot(owned(&["v1.2", "/tmp"]), "invalid_arguments")]
+#[case::name_like_a_flag(owned(&["-w", "/tmp"]), "invalid_arguments")]
+#[case::name_like_a_session_id(owned(&["$1", "/tmp"]), "invalid_arguments")]
+#[case::name_with_control_character(owned(&["crash\t12", "/tmp"]), "invalid_arguments")]
+#[case::name_with_format(owned(&["#{host}", "/tmp"]), "invalid_arguments")]
+#[case::name_too_long(vec!["n".repeat(SESSION_NAME_MAX_BYTES + 1), "/tmp".to_owned()], "invalid_arguments")]
+#[case::relative_cwd(owned(&["agent", "src/arc"]), "invalid_arguments")]
+#[case::argv_not_json(owned(&["agent", "/tmp", "claude -w agent"]), "invalid_arguments")]
+#[case::argv_not_strings(owned(&["agent", "/tmp", "[\"claude\", 1]"]), "invalid_arguments")]
+#[case::argv_with_nul(owned(&["agent", "/tmp", "[\"a\\u0000b\"]"]), "invalid_arguments")]
+#[case::argv_empty_program(owned(&["agent", "/tmp", "[\"\"]"]), "invalid_arguments")]
+#[case::argv_too_many(
+    owned(&["agent", "/tmp", &json_argv(&vec!["a".to_owned(); SESSION_ARGV_MAX_ELEMENTS + 1])]),
+    "invalid_arguments"
+)]
+#[case::argv_too_large(
+    owned(&["agent", "/tmp", &json_argv(&["a".repeat(SESSION_ARGV_MAX_BYTES)])]),
+    "invalid_arguments"
+)]
+fn session_create_refuses_a_bad_request_before_the_backend(
+    #[case] arguments: Vec<String>,
+    #[case] expected: &str,
+) {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let mut state = native_state(directory.path());
+    let outcome = submit_command(
+        &mut state,
+        CommandInvocation::new("session.create", arguments, Caller::Socket),
+        Instant::now(),
+    );
+    assert_eq!(failure_kind(&outcome), expected, "{outcome:?}");
+    assert!(
+        spaces_listing(&mut state)
+            .iter()
+            .all(|space| space["sessions"] == serde_json::json!([])),
+        "a refused request creates nothing"
+    );
+    assert_eq!(
+        state.last_error(),
+        None,
+        "a socket failure stays with its caller"
+    );
+}
+
+fn selection(state: &AppState) -> (Option<String>, Option<String>) {
+    (
+        state.mux().selected_session().map(str::to_owned),
+        state.mux().selected_window().map(str::to_owned),
+    )
+}
+
+fn spaces_listing(state: &mut AppState) -> Vec<serde_json::Value> {
+    let outcome = submit_command(
+        state,
+        CommandInvocation::new("spaces.list", Vec::new(), Caller::Socket),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("spaces.list failed: {outcome:?}");
+    };
+    value.as_array().expect("a list of Spaces").clone()
+}
+
+fn listed_space(state: &mut AppState, name: &str) -> serde_json::Value {
+    spaces_listing(state)
+        .into_iter()
+        .find(|space| space["name"] == name)
+        .unwrap_or_else(|| panic!("Space {name} is listed"))
+}
+
+fn listed_session_names(space: &serde_json::Value) -> Vec<&str> {
+    space["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .map(|session| session["name"].as_str().expect("session name"))
+        .collect()
+}
+
+fn session_request(
+    command: &str,
+    arguments: Vec<String>,
+    target: serde_json::Value,
+) -> CommandInvocation {
+    CommandInvocation {
+        target: Some(serde_json::from_value(target).expect("command target")),
+        ..CommandInvocation::new(command, arguments, Caller::Socket)
+    }
+}
+
+/// Scripts create and close sessions in the active Space and in another one; neither moves the
+/// selection, the focused window or the active Space, and membership persists before publication.
+#[rstest]
+fn session_requests_leave_selection_and_the_active_space_alone() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let config_path = directory.path().join("config.toml");
+    WorkspaceRepository::open(&config_path)
+        .expect("workspace")
+        .0
+        .create_space(
+            "Scripts",
+            "2",
+            [1, 2, 3],
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .expect("create Space")
+        .expect("valid Space");
+    let mut state = native_state(directory.path());
+    let started = Instant::now();
+    let project = directory.path().join("project");
+    fs::create_dir(&project).expect("project directory");
+    open_native_session(&mut state, &project, started);
+    let before = selection(&state);
+    assert_eq!(before.0.as_deref(), Some("project"));
+    let home = spaces_listing(&mut state)
+        .into_iter()
+        .find(|space| space["active"] == true)
+        .expect("active Space");
+    let scripts = listed_space(&mut state, "Scripts");
+    assert_eq!(scripts["active"], false);
+    let unchanged = |state: &mut AppState| {
+        for tick in 500..505 {
+            state.update_frame(frames::idle_frame(
+                started
+                    .checked_add(Duration::from_millis(tick))
+                    .expect("test timestamp fits"),
+            ));
+        }
+        assert_eq!(selection(state), before);
+        assert_eq!(listed_space(state, "Scripts")["active"], false);
+    };
+
+    let cwd = project.to_string_lossy().into_owned();
+    let mut created = Vec::new();
+    for (name, space) in [("here", &home), ("there", &scripts)] {
+        let outcome = submit_command(
+            &mut state,
+            session_request(
+                "session.create",
+                owned(&[name, &cwd]),
+                space["target"].clone(),
+            ),
+            started,
+        );
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("session.create {name} failed: {outcome:?}");
+        };
+        assert_eq!(value.get("focused"), None, "{value}");
+        let terminal: CommandTarget =
+            serde_json::from_value(value["terminal"].clone()).expect("terminal target");
+        assert_eq!(terminal.kind, ResourceKind::Terminal);
+        created.push(value["created"].clone());
+        unchanged(&mut state);
+    }
+    assert_eq!(
+        listed_session_names(&listed_space(&mut state, "Scripts")),
+        ["there"]
+    );
+    let (_, persisted) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
+    let persisted_names = persisted
+        .spaces()
+        .iter()
+        .map(|space| space.binding().sessions().backend_names())
+        .collect::<Vec<_>>();
+    assert!(
+        persisted_names.contains(&vec!["there".to_owned()]),
+        "{persisted_names:?}"
+    );
+
+    let taken = submit_command(
+        &mut state,
+        session_request(
+            "session.create",
+            owned(&["here", &cwd]),
+            home["target"].clone(),
+        ),
+        started,
+    );
+    assert_eq!(failure_kind(&taken), "session_exists", "{taken:?}");
+
+    for target in created {
+        let mut close = session_request("session.close", Vec::new(), target);
+        let unconfirmed = submit_command(&mut state, close.clone(), started);
+        assert_eq!(failure_kind(&unconfirmed), "confirmation_required");
+        close.confirmation = Some(close.confirmation());
+        let closed = submit_command(&mut state, close, started);
+        assert_eq!(failure_kind(&closed), "success", "{closed:?}");
+        unchanged(&mut state);
+    }
+    assert_eq!(
+        listed_session_names(&listed_space(&mut state, "Scripts")),
+        Vec::<&str>::new()
+    );
+    let home_name = home["name"].as_str().expect("Space name").to_owned();
+    assert_eq!(
+        listed_session_names(&listed_space(&mut state, &home_name)),
+        ["project"]
+    );
 }

@@ -243,6 +243,26 @@ impl Cli {
         self.start
     }
 
+    /// Whether this invocation may spawn user processes and so needs the login shell's
+    /// environment. Control clients only talk to a running instance, which hydrated itself; an
+    /// instance they start is its own process and hydrates at its own startup. Agent hooks run a
+    /// client per event, so skipping the login shell keeps them inside their timeout.
+    #[must_use]
+    pub const fn needs_login_environment(&self) -> bool {
+        !matches!(
+            self.command,
+            Some(
+                Command::Commands
+                    | Command::Describe { .. }
+                    | Command::Invoke { .. }
+                    | Command::Task(_)
+                    | Command::Events(_)
+                    | Command::Wait(_)
+                    | Command::Dynamic(_)
+            )
+        )
+    }
+
     fn app_args(&self) -> AppArgs {
         match self.command.as_ref() {
             Some(Command::App(args)) => (**args).clone(),

@@ -208,6 +208,7 @@ impl WorkspaceRuntime {
             session_id,
             cwd,
             tag: self.active.binding.new_session_tag(),
+            argv: None,
         }
     }
 
@@ -223,6 +224,7 @@ impl WorkspaceRuntime {
             session_id,
             cwd,
             tag,
+            argv: None,
         } = command
         else {
             return Err(WorkspacePersistenceError::operation(

@@ -95,10 +95,23 @@ impl std::fmt::Display for MuxCommandError {
 
 pub type MuxCommandResult = std::result::Result<MuxCommandCompletion, MuxCommandError>;
 
+/// Which selection an authoritative command publishes when its result lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandSelection {
+    /// Select the command's session, and the window it moved to.
+    Follow,
+    /// Keep whatever the binding has selected when the result lands. Work done on a caller's
+    /// behalf in the background, such as creating or closing another session, must not move the
+    /// user's focus. A selected session that no longer exists still falls back as usual.
+    Preserve,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MuxCommandCompletion {
+    /// The selection the command asked for. Both are `None` for a command that preserves it.
     pub selected_session: Option<String>,
     pub selected_window: Option<String>,
+    preserve_selection: bool,
     snapshot: Option<(MuxBindingConfig, MuxSnapshot)>,
 }
 
@@ -114,11 +127,27 @@ impl MuxCommandCompletion {
         Self {
             selected_session,
             selected_window,
+            preserve_selection: false,
+            snapshot: None,
+        }
+    }
+
+    const fn preserving_selection() -> Self {
+        Self {
+            selected_session: None,
+            selected_window: None,
+            preserve_selection: true,
             snapshot: None,
         }
     }
 
     fn with_snapshot(self, config: MuxBindingConfig, snapshot: MuxSnapshot) -> Self {
+        if self.preserve_selection {
+            return Self {
+                snapshot: Some((config, snapshot)),
+                ..self
+            };
+        }
         // Detached creation need not change the backend's active session.
         let requested = self.selected_session.filter(|selected| {
             snapshot
@@ -139,14 +168,43 @@ impl MuxCommandCompletion {
         Self {
             selected_session,
             selected_window,
+            preserve_selection: false,
             snapshot: Some((config, snapshot)),
         }
     }
 }
+
+/// The backend configuration a controller's queued work was checked against. The generation
+/// moves whenever that configuration changes and when the controller is dropped, so work claimed
+/// later fails as stale instead of acting on a closed or reconfigured binding's backend.
 #[derive(Default)]
 struct CommandConfigState {
     config: Option<MuxBindingConfig>,
     generation: u64,
+}
+
+/// A ticket for work a binding hands to another thread, taken when the work is dispatched.
+pub(crate) struct CommandFence {
+    state: Arc<Mutex<CommandConfigState>>,
+    generation: u64,
+}
+
+impl CommandFence {
+    /// Check, right before acting, that the binding still lives with the backend configuration
+    /// it had at dispatch.
+    /// # Errors
+    /// Returns `Stale` once the binding was closed or replaced, or its configuration changed.
+    pub(crate) fn claim(&self) -> Result<(), MuxCommandError> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.generation == self.generation {
+            Ok(())
+        } else {
+            Err(MuxCommandError::Stale)
+        }
+    }
 }
 
 struct MuxCommandJob {
@@ -398,6 +456,19 @@ pub struct MuxController {
     command_config: Arc<Mutex<CommandConfigState>>,
 }
 
+impl Drop for MuxController {
+    // A dropped controller's binding was closed or replaced. Retiring its configuration makes
+    // queued commands and pending pane work fail as stale rather than reach the old backend.
+    fn drop(&mut self) {
+        let mut state = self
+            .command_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.config = None;
+        state.generation = state.generation.wrapping_add(1);
+    }
+}
+
 impl MuxController {
     #[must_use]
     pub fn new(
@@ -559,9 +630,21 @@ impl MuxController {
         self.observed_resources = current;
     }
 
+    pub(crate) fn workspace_path(&self) -> Option<&std::path::Path> {
+        self.workspace.as_deref()
+    }
+
     fn build_backend(&self, config: &MuxBindingConfig) -> anyhow::Result<Box<dyn MuxBackend>> {
         self.registry
             .build_backend(config, self.workspace.as_deref())
+    }
+
+    /// A fence for work dispatched now against `config`; see [`CommandFence::claim`].
+    pub(crate) fn command_fence(&self, config: &MuxBindingConfig) -> CommandFence {
+        CommandFence {
+            state: Arc::clone(&self.command_config),
+            generation: self.observe_command_config(config),
+        }
     }
 
     fn observe_command_config(&self, config: &MuxBindingConfig) -> u64 {
@@ -866,8 +949,11 @@ impl MuxController {
         config: &MuxBindingConfig,
     ) -> MuxCommandResult {
         let result = self.complete_authoritative_command_inner(result, Some(config));
-        self.last_error = result.as_ref().err().map(ToString::to_string);
+        // A failure goes back to whoever asked, and only the host knows whether that is the person
+        // at the window or a socket client, so it is not this binding's error to show. Success
+        // still clears one this binding reported.
         if result.is_ok() {
+            self.last_error = None;
             self.record_resource_snapshot();
         }
         result
@@ -884,11 +970,21 @@ impl MuxController {
                     if active_config.is_some_and(|active| active != config) {
                         return Err(MuxCommandError::Stale);
                     }
+                    // A preserving command reads the selection now, not when it was submitted, so
+                    // a switch made while it ran is kept.
+                    let (session, window) = if completion.preserve_selection {
+                        (self.selected_session.clone(), self.selected_window.clone())
+                    } else {
+                        (
+                            completion.selected_session.clone(),
+                            completion.selected_window.clone(),
+                        )
+                    };
                     self.apply_snapshot(
                         self.registry.selected_kind(config),
                         snapshot.clone(),
-                        completion.selected_session.clone(),
-                        completion.selected_window.clone(),
+                        session,
+                        window,
                     );
                 } else {
                     match (&completion.selected_session, &completion.selected_window) {
@@ -1086,6 +1182,7 @@ impl MuxController {
             session_id: request.session_id.clone(),
             cwd: request.cwd,
             tag: request.tag,
+            argv: None,
         };
         self.expected_session = Some(request.session_id.clone());
         if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
@@ -1153,6 +1250,7 @@ impl MuxController {
         repaint: &RepaintHandle,
         config: &MuxBindingConfig,
         command: MuxCommand,
+        selection: CommandSelection,
         deadline: Instant,
         cancellation: CommandCancellation,
     ) -> mpsc::Receiver<MuxCommandResult> {
@@ -1161,8 +1259,13 @@ impl MuxController {
             let _ = response_tx.send(Err(MuxCommandError::Unavailable));
             return response_rx;
         }
-        let (selected_session, selected_window) = self.command_completion(&command);
-        let completion = MuxCommandCompletion::requested(selected_session, selected_window);
+        let completion = match selection {
+            CommandSelection::Follow => {
+                let (selected_session, selected_window) = self.command_completion(&command);
+                MuxCommandCompletion::requested(selected_session, selected_window)
+            }
+            CommandSelection::Preserve => MuxCommandCompletion::preserving_selection(),
+        };
         if cancellation.is_cancelled() {
             let _ = response_tx.send(Err(MuxCommandError::Cancelled));
             return response_rx;

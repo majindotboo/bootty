@@ -47,6 +47,7 @@ fn backend() -> Result<(TempDir, NativeBackend)> {
                 session_id: name.into(),
                 cwd: "/source".into(),
                 tag: MuxSessionTag::default(),
+                argv: None,
             })
             .context("create session")?;
     }

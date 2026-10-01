@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -112,6 +112,8 @@ pub enum AgentSource {
     #[default]
     None,
     Existing,
+    /// Reported to a previous Bootty process; current once the pane reports again.
+    Restored,
 }
 
 impl AgentSource {
@@ -120,6 +122,7 @@ impl AgentSource {
         match self {
             Self::None => "none",
             Self::Existing => "existing",
+            Self::Restored => "restored",
         }
     }
 }
@@ -155,9 +158,22 @@ impl AgentStatus {
             Self::Error => "error".to_owned(),
         }
     }
+
+    /// The status [`Self::as_str`] names.
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "stopped" => Self::Stopped,
+            "idle" => Self::Idle,
+            "working" => Self::Working,
+            "waiting" => Self::Waiting,
+            "error" => Self::Error,
+            _ => Self::Tool(label.strip_prefix("tool:")?.to_owned()),
+        })
+    }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentAttention {
     Complete,
@@ -180,9 +196,17 @@ pub struct AgentState {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub last_event: Option<String>,
+    /// Final assistant text of the last finished turn, when the provider reports it. Shared, so
+    /// copying state for persistence or a listing does not copy the text.
+    pub last_message: Option<Arc<str>>,
+    /// Unix milliseconds when the last turn finished (working or tool use became idle or error).
+    pub turn_ended_at: Option<u64>,
     pub error: Option<String>,
     pub cwd: Option<String>,
     pub launch: Option<crate::AgentLaunch>,
+    /// The backend server the pane runs on, as its hook last reported it (`$TMUX` or `$RMUX`).
+    /// Lets the record follow its pane to whichever Space owns it later.
+    pub server: Option<String>,
 }
 
 impl AgentState {
@@ -201,9 +225,12 @@ impl AgentState {
             thread_id: None,
             turn_id: None,
             last_event: None,
+            last_message: None,
+            turn_ended_at: None,
             error: None,
             cwd: None,
             launch: None,
+            server: None,
         }
     }
 
@@ -264,6 +291,10 @@ impl AgentState {
         insert_optional(&mut value, "thread_id", self.thread_id.as_deref());
         insert_optional(&mut value, "turn_id", self.turn_id.as_deref());
         insert_optional(&mut value, "last_event", self.last_event.as_deref());
+        insert_optional(&mut value, "last_message", self.last_message.as_deref());
+        if let Some(turn_ended_at) = self.turn_ended_at {
+            value.insert("turn_ended_at".to_owned(), turn_ended_at.to_string().into());
+        }
         insert_optional(&mut value, "error", self.error.as_deref());
         insert_optional(&mut value, "cwd", self.cwd.as_deref());
         if let Some(launch) = &self.launch {

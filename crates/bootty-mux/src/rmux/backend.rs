@@ -8,10 +8,10 @@ use rmux_proto::{
 use rmux_sdk::{Rmux, SessionName};
 
 use super::bridge::resize_rmux_window;
-use super::bridge::{rmux_execute, rmux_snapshot};
+use super::bridge::{rmux_capture_pane, rmux_execute, rmux_send_pane_input, rmux_snapshot};
 
 use crate::{
-    backend::MuxBackend,
+    backend::{MuxBackend, PaneCapture, PaneInput, PaneText},
     command::MuxCommand,
     snapshot::{
         MuxPaneAnchor, MuxPaneLayout, MuxSession, MuxSessionTag, MuxSnapshot,
@@ -92,6 +92,14 @@ impl<C: MuxBackend> MuxBackend for RmuxBackend<C> {
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         Self::execute(self, command)
     }
+
+    fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        self.control.send_pane_input(pane_id, input)
+    }
+
+    fn capture_pane(&self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        self.control.capture_pane(pane_id, capture)
+    }
 }
 
 #[cfg(feature = "terminal-runtime")]
@@ -132,6 +140,16 @@ impl MuxBackend for RmuxControl {
 
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         rmux_execute(command)
+    }
+
+    // Both address the pane by its stable id, so neither needs a local attachment nor moves the
+    // session's selection.
+    fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        rmux_send_pane_input(pane_id, input.clone())
+    }
+
+    fn capture_pane(&self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        rmux_capture_pane(pane_id, capture)
     }
 }
 

@@ -822,12 +822,26 @@ impl NativeMuxState {
                 );
             }
 
+            // An explicit create (`argv` set) refuses a taken name. Its argv stays out of this state:
+            // the workspace starts the first pane with it once the session exists, so a restore or a
+            // reopened window never replays it.
             MuxCommand::CreateProjectSession {
                 session_id,
                 cwd,
                 tag,
+                argv,
+            } => {
+                if argv.is_some()
+                    && self
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == session_id || session.name == session_id)
+                {
+                    bail!("duplicate session: {session_id}")
+                }
+                self.ensure_session(&session_id, cwd, tag)?;
             }
-            | MuxCommand::CreateWorktreeSession {
+            MuxCommand::CreateWorktreeSession {
                 session_id,
                 cwd,
                 tag,
@@ -946,6 +960,12 @@ impl BackendPanePolicy for NativePanePolicy {
             request.target.cwd().map(Path::new).map(Path::to_path_buf);
         config.launch.pane_id = request.target.pane_id().map(str::to_owned);
         config.side_effect_pane_id = request.target.side_effect_pane_id();
+        // A tmux or rmux the app itself was started under is not this pane's server. Agent hooks
+        // read `$TMUX_PANE` before `$BOOTTY_PANE`, so its pane and socket must not leak in.
+        config
+            .launch
+            .env_remove
+            .extend(["TMUX", "TMUX_PANE", "RMUX"].map(str::to_owned));
         Ok(Some(Box::new(StartingNativeTerminal::spawn(
             request.spawn_geometry,
             request.display_scale,

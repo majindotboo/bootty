@@ -39,6 +39,7 @@ mod git;
 mod jobs;
 mod panes;
 pub(crate) mod runtime;
+mod sessions;
 mod themes;
 
 pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
@@ -46,6 +47,7 @@ pub use files::FileAction;
 pub use git::GitAction;
 pub use jobs::JobAction;
 pub use panes::PaneAction;
+pub use sessions::SessionAction;
 pub use themes::ThemeAction;
 
 pub(crate) use runtime::{CommandRuntime, command_outcome_message};
@@ -79,6 +81,7 @@ pub enum CoreCommandExecutor {
     Theme(ThemeAction, Vec<String>),
     File(FileAction, Vec<String>),
     Pane(PaneAction, Vec<String>),
+    Session(SessionAction, Vec<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +138,7 @@ enum CommandExecutorResolver {
     Theme(ThemeAction),
     File(FileAction),
     Pane(PaneAction),
+    Session(SessionAction),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -191,6 +195,7 @@ impl CommandRegistry {
             message: format!("Invalid arguments for {}", invocation.command),
         };
         let first_argument = || invocation.arguments.first().ok_or_else(invalid_arguments);
+        let arguments = || invocation.arguments.clone();
         let executor = match registered.executor {
             CommandExecutorResolver::Dock(action) => CoreCommandExecutor::Dock(
                 action,
@@ -216,29 +221,24 @@ impl CommandRegistry {
             CommandExecutorResolver::PasteTerminal => CoreCommandExecutor::Synchronous(
                 SynchronousCommand::PasteTerminal(first_argument()?.clone()),
             ),
-            CommandExecutorResolver::Pane(action) => {
-                CoreCommandExecutor::Pane(action, invocation.arguments.clone())
+            CommandExecutorResolver::Pane(action) => CoreCommandExecutor::Pane(action, arguments()),
+            CommandExecutorResolver::Session(action) => {
+                CoreCommandExecutor::Session(action, arguments())
             }
-            CommandExecutorResolver::File(action) => {
-                CoreCommandExecutor::File(action, invocation.arguments.clone())
-            }
+            CommandExecutorResolver::File(action) => CoreCommandExecutor::File(action, arguments()),
             CommandExecutorResolver::Theme(action) => {
-                CoreCommandExecutor::Theme(action, invocation.arguments.clone())
+                CoreCommandExecutor::Theme(action, arguments())
             }
-            CommandExecutorResolver::Git(action) => {
-                CoreCommandExecutor::Git(action, invocation.arguments.clone())
-            }
+            CommandExecutorResolver::Git(action) => CoreCommandExecutor::Git(action, arguments()),
             CommandExecutorResolver::ShellPrompt(action) => {
-                CoreCommandExecutor::ShellPrompt(action, invocation.arguments.clone())
+                CoreCommandExecutor::ShellPrompt(action, arguments())
             }
             CommandExecutorResolver::Forward(action) => {
-                CoreCommandExecutor::Forward(action, invocation.arguments.clone())
+                CoreCommandExecutor::Forward(action, arguments())
             }
-            CommandExecutorResolver::Job(action) => {
-                CoreCommandExecutor::Job(action, invocation.arguments.clone())
-            }
+            CommandExecutorResolver::Job(action) => CoreCommandExecutor::Job(action, arguments()),
             CommandExecutorResolver::Recovery(action) => {
-                CoreCommandExecutor::Recovery(action, invocation.arguments.clone())
+                CoreCommandExecutor::Recovery(action, arguments())
             }
             CommandExecutorResolver::Doctor => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Doctor)
@@ -246,18 +246,16 @@ impl CommandRegistry {
             CommandExecutorResolver::AgentWorkspace(action) => {
                 CoreCommandExecutor::AgentWorkspace(action)
             }
-            CommandExecutorResolver::OpenLink => {
-                CoreCommandExecutor::OpenLink(invocation.arguments.clone())
-            }
+            CommandExecutorResolver::OpenLink => CoreCommandExecutor::OpenLink(arguments()),
             CommandExecutorResolver::ShellIntegration => CoreCommandExecutor::Synchronous(
                 SynchronousCommand::ShellIntegration(first_argument()?.clone()),
             ),
             CommandExecutorResolver::WslList => CoreCommandExecutor::WslList,
-            CommandExecutorResolver::WslSpace => CoreCommandExecutor::Synchronous(
-                SynchronousCommand::WslSpace(invocation.arguments.clone()),
-            ),
+            CommandExecutorResolver::WslSpace => {
+                CoreCommandExecutor::Synchronous(SynchronousCommand::WslSpace(arguments()))
+            }
             CommandExecutorResolver::CaptureTerminal(export) => {
-                CoreCommandExecutor::CaptureTerminal(invocation.arguments.clone(), export)
+                CoreCommandExecutor::CaptureTerminal(arguments(), export)
             }
             CommandExecutorResolver::ReadTerminal => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::ReadTerminal)
@@ -710,6 +708,16 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             RegisteredCommand {
                 descriptor,
                 executor: CommandExecutorResolver::Pane(action),
+            },
+        );
+    }
+    for action in SessionAction::ALL {
+        let descriptor = action.descriptor();
+        commands.insert(
+            descriptor.id.clone(),
+            RegisteredCommand {
+                descriptor,
+                executor: CommandExecutorResolver::Session(action),
             },
         );
     }

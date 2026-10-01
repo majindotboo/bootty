@@ -80,6 +80,13 @@ impl MuxAppBackendProvider for RmuxProvider {
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
         rmux_capabilities(scope)
     }
+
+    fn local_server_socket(&self, config: &MuxBindingConfig) -> Option<std::path::PathBuf> {
+        if config.remote.is_some() {
+            return None;
+        }
+        super::local::endpoint_path().ok()
+    }
 }
 
 crate::register_mux_backend!(RmuxProvider);

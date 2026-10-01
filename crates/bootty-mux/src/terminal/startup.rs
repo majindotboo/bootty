@@ -72,7 +72,7 @@ impl StartingNativeTerminal {
                 config,
                 Arc::clone(&repaint_wakeup),
             )
-            .map_err(|error| error.to_string());
+            .map_err(|error| format!("{error:#}"));
             let _ = tx.send(result);
             repaint_wakeup();
         });
@@ -234,6 +234,10 @@ impl TerminalRuntime for StartingNativeTerminal {
 
     fn child_exited(&mut self) -> Result<bool> {
         self.with_terminal(false, TerminalSession::child_exited)
+    }
+
+    fn started(&mut self) -> Result<bool> {
+        Ok(self.ready_terminal()?.is_some())
     }
 
     fn tty_name(&self) -> Option<&str> {

@@ -13,9 +13,19 @@ use rstest::rstest;
 )]
 #[case("command deadline expired", "The command took too long. Try again.")]
 #[case(
-    "unknown variant `video`, expected `media`",
-    "The operation could not be completed."
+    "the Terminal target is stale",
+    "That pane or session no longer exists."
 )]
+// Unrecognized failures keep their reason rather than a sentence that explains nothing.
+#[case(
+    "unknown variant `video`, expected `media`",
+    "Unknown variant `video`, expected `media`."
+)]
+#[case(
+    "pane %47 has no running terminal\ncaused by: gone",
+    "Pane %47 has no running terminal."
+)]
+#[case("", "The operation failed without a reason.")]
 fn technical_errors_have_useful_window_messages(#[case] raw: &str, #[case] message: &str) {
     let notice = ErrorNotice::from_text(raw);
     assert_eq!(notice.to_string(), message);

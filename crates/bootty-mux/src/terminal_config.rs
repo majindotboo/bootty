@@ -30,6 +30,8 @@ pub fn terminal_session_config_with_side_effects(
             shell_integration: config.session.shell_integration,
             shell: config.session.shell.clone(),
             args: Vec::new(),
+            // Filled in for one pane by a caller that starts it with its own command.
+            command: Vec::new(),
             working_directory: config
                 .session
                 .working_directory

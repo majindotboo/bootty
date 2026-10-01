@@ -113,6 +113,9 @@ export function publishToBootty(
   // The pane Pi runs in, so Bootty can show the event on the session hosting it. tmux names its
   // own panes; Bootty names the panes it spawns itself.
   const pane = process.env.TMUX_PANE ?? process.env.BOOTTY_PANE ?? "";
+  // Pane ids repeat across servers. tmux names its server's socket in TMUX; Bootty's rmux panes
+  // leave TMUX empty and name theirs in RMUX.
+  const server = process.env.TMUX || process.env.RMUX || "";
   return new Promise((resolve) => {
     let finished = false;
     const child = spawnBootty(
@@ -125,7 +128,7 @@ export function publishToBootty(
     child.stdin?.once("error", () => {});
     // Keep event data out of argv: a Pi tool result can be much larger than macOS's execve limit.
     // Command arguments are strings, so the event travels as encoded JSON text.
-    child.stdin?.end(JSON.stringify([JSON.stringify(event), pane]));
+    child.stdin?.end(JSON.stringify([JSON.stringify(event), pane, "", server]));
     const finish = (): void => {
       if (finished) {
         return;

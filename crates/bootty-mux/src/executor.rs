@@ -9,7 +9,7 @@ use crate::{
     RepaintHandle,
     capability::BindingOperationOutcome,
     command::MuxCommand,
-    controller::{MuxCommandError, MuxCommandResult, SpaceId},
+    controller::{CommandSelection, MuxCommandError, MuxCommandResult, SpaceId},
     repository::{BindingMembershipMutation, WorkspacePersistenceError},
     workspace::{BindingRuntime, WorkspaceRuntime},
 };
@@ -52,14 +52,21 @@ pub fn preflight_command(
     workspace: &WorkspaceRuntime,
     command: &MuxCommand,
 ) -> Result<(), MuxCommandError> {
-    if let Some(message) = workspace.active.binding.mux().unavailable_reason() {
+    preflight_binding_command(&workspace.active.binding, command)
+}
+
+/// # Errors
+/// Returns the binding's backend failure or its unsupported, unavailable, or stale operation status.
+pub fn preflight_binding_command(
+    binding: &BindingRuntime,
+    command: &MuxCommand,
+) -> Result<(), MuxCommandError> {
+    if let Some(message) = binding.mux().unavailable_reason() {
         return Err(MuxCommandError::Failed(message.to_owned()));
     }
-    match workspace
-        .active
-        .binding
+    match binding
         .mux()
-        .operation_outcome(workspace.active.binding.multiplexer(), command.operation())
+        .operation_outcome(binding.multiplexer(), command.operation())
     {
         BindingOperationOutcome::Supported(()) => Ok(()),
         BindingOperationOutcome::Unsupported => Err(MuxCommandError::Unsupported),
@@ -104,6 +111,7 @@ pub fn submit_authoritative_command(
         command,
         membership,
         execution,
+        CommandSelection::Follow,
     )
 }
 
@@ -118,10 +126,11 @@ pub fn submit_authoritative_command_for_scope(
     command: MuxCommand,
     membership: Option<Box<BindingMembershipMutation>>,
     execution: Option<(Instant, CommandCancellation)>,
+    selection: CommandSelection,
 ) -> Option<PendingMuxCommand> {
     let binding = workspace.binding_mut(scope)?;
     Some(submit_binding_command(
-        binding, repaint, scope, command, membership, execution,
+        binding, repaint, scope, command, membership, execution, selection,
     ))
 }
 
@@ -132,6 +141,7 @@ fn submit_binding_command(
     command: MuxCommand,
     membership: Option<Box<BindingMembershipMutation>>,
     execution: Option<(Instant, CommandCancellation)>,
+    selection: CommandSelection,
 ) -> PendingMuxCommand {
     let config = binding.multiplexer().clone();
     let (deadline, cancellation) = command_execution(execution);
@@ -140,6 +150,7 @@ fn submit_binding_command(
         repaint,
         &config,
         command.clone(),
+        selection,
         deadline,
         cancellation.clone(),
     );
@@ -183,10 +194,11 @@ pub fn execute_local_command(
 pub fn complete_authoritative_command(
     workspace: &mut WorkspaceRuntime,
     scope: SpaceId,
+    command: &MuxCommand,
     membership: Option<&BindingMembershipMutation>,
     result: MuxCommandResult,
     layout: Option<&crate::workspace::PreparedPaneArrangement>,
 ) -> Result<(MuxCommandResult, Option<String>), WorkspacePersistenceError> {
     workspace.complete_binding_membership_command(scope, membership, &result)?;
-    Ok(workspace.complete_authoritative_command(scope, result, layout))
+    Ok(workspace.complete_authoritative_command(scope, command, result, layout))
 }

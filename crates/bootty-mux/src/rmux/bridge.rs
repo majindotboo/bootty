@@ -31,8 +31,11 @@ use super::backend::{
     RmuxPaneRow, RmuxWindowRow, list_pane_rows, list_session_tags, list_window_rows,
     rmux_request_checked, session_from_rows, stamp_session_tag,
 };
-use super::pane_io::{RmuxPaneTarget, pane_for_target};
+use super::pane_io::{
+    RmuxPaneTarget, capture_rmux_backend_pane, pane_for_target, send_rmux_backend_pane_input,
+};
 use crate::{
+    backend::{PaneCapture, PaneInput, PaneText},
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
     snapshot::{MuxSessionTag, MuxSnapshot, MuxSnapshotDisposition},
 };
@@ -132,6 +135,16 @@ enum RmuxControlRequest {
         rows: u16,
         result_tx: mpsc::Sender<std::result::Result<(), String>>,
     },
+    PaneInput {
+        pane_id: String,
+        input: PaneInput,
+        result_tx: mpsc::Sender<std::result::Result<(), String>>,
+    },
+    CapturePane {
+        pane_id: String,
+        capture: PaneCapture,
+        result_tx: mpsc::Sender<std::result::Result<PaneText, String>>,
+    },
 }
 
 struct RmuxBridgeState {
@@ -157,6 +170,24 @@ pub fn resize_rmux_window(window_id: &str, cols: u16, rows: u16) -> Result<()> {
         window_id,
         cols,
         rows,
+        result_tx,
+    })
+}
+
+pub fn rmux_send_pane_input(pane_id: &str, input: PaneInput) -> Result<()> {
+    let pane_id = pane_id.to_owned();
+    request_control_sync(|result_tx| RmuxControlRequest::PaneInput {
+        pane_id,
+        input,
+        result_tx,
+    })
+}
+
+pub fn rmux_capture_pane(pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+    let pane_id = pane_id.to_owned();
+    request_control_sync(|result_tx| RmuxControlRequest::CapturePane {
+        pane_id,
+        capture,
         result_tx,
     })
 }
@@ -425,6 +456,30 @@ fn run_control_worker(request_rx: mpsc::Receiver<RmuxControlRequest>) {
                 });
                 let _ = result_tx.send(result);
             }
+            RmuxControlRequest::PaneInput {
+                pane_id,
+                input,
+                result_tx,
+            } => {
+                let result = runtime.as_ref().map_err(Clone::clone).and_then(|runtime| {
+                    runtime
+                        .block_on(state.send_pane_input(&pane_id, &input))
+                        .map_err(|error| error.to_string())
+                });
+                let _ = result_tx.send(result);
+            }
+            RmuxControlRequest::CapturePane {
+                pane_id,
+                capture,
+                result_tx,
+            } => {
+                let result = runtime.as_ref().map_err(Clone::clone).and_then(|runtime| {
+                    runtime
+                        .block_on(state.capture_pane(&pane_id, capture))
+                        .map_err(|error| error.to_string())
+                });
+                let _ = result_tx.send(result);
+            }
         }
     }
 }
@@ -512,12 +567,13 @@ impl RmuxBridgeState {
                 session_id,
                 cwd,
                 tag,
-            }
-            | MuxCommand::CreateWorktreeSession {
+                argv,
+            } => self.ensure_session(&session_id, &cwd, &tag, argv).await,
+            MuxCommand::CreateWorktreeSession {
                 session_id,
                 cwd,
                 tag,
-            } => self.ensure_session(&session_id, &cwd, &tag).await,
+            } => self.ensure_session(&session_id, &cwd, &tag, None).await,
             MuxCommand::RenameSession { session_id, name } => {
                 self.rename_session(&session_id, &name).await
             }
@@ -623,23 +679,32 @@ impl RmuxBridgeState {
         }
     }
 
+    /// Create or reuse a project session, or, given `argv`, create one that must not exist yet.
     async fn ensure_session(
         &mut self,
         session_name: &str,
         cwd: &str,
         tag: &MuxSessionTag,
+        argv: Option<Vec<String>>,
     ) -> Result<()> {
         let rmux = self.rmux().await?;
         let name = SessionName::new(session_name).context("invalid rmux session name")?;
-        rmux.ensure_session(
-            EnsureSession::named(name.clone())
-                .policy(EnsureSessionPolicy::CreateOrReuse)
-                .detached(true)
-                .working_directory(cwd)
-                .size(TerminalSizeSpec::new(80, 24))
-                .environment(bootty_rmux_process_environment()),
-        )
-        .await?;
+        let policy = if argv.is_some() {
+            EnsureSessionPolicy::CreateOnly
+        } else {
+            EnsureSessionPolicy::CreateOrReuse
+        };
+        let mut request = EnsureSession::named(name.clone())
+            .policy(policy)
+            .detached(true)
+            .working_directory(cwd)
+            .size(TerminalSizeSpec::new(80, 24))
+            .environment(bootty_rmux_process_environment());
+        if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
+            // The command vector keeps tmux's rule: one element is shell text, more run directly.
+            request = request.command(argv);
+        }
+        rmux.ensure_session(request).await?;
         // rmux has no way to set options as part of the create, so there is a window where the
         // session exists untagged. A snapshot taken inside it reads the session as unclaimed,
         // which the next one corrects.
@@ -932,6 +997,35 @@ impl RmuxBridgeState {
         let windows = list_window_rows(rmux, &name).await?;
         let panes = list_pane_rows(rmux, &name).await?;
         Ok((name, windows, panes))
+    }
+
+    /// Input is not repeatable: a second attempt after a transport error could type it twice, so
+    /// only a connection that never opened is retried.
+    async fn send_pane_input(&mut self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        retry_rmux_operation!(
+            self,
+            rmux_connect_failed,
+            self.send_pane_input_once(pane_id, input),
+            self.send_pane_input_once(pane_id, input)
+        )
+    }
+
+    async fn send_pane_input_once(&mut self, pane_id: &str, input: &PaneInput) -> Result<()> {
+        let rmux = self.rmux().await?;
+        send_rmux_backend_pane_input(rmux, pane_id, input).await
+    }
+
+    async fn capture_pane(&mut self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        retry_rmux_operation!(
+            self,
+            self.capture_pane_once(pane_id, capture),
+            self.capture_pane_once(pane_id, capture)
+        )
+    }
+
+    async fn capture_pane_once(&mut self, pane_id: &str, capture: PaneCapture) -> Result<PaneText> {
+        let rmux = self.rmux().await?;
+        capture_rmux_backend_pane(rmux, pane_id, capture).await
     }
 
     async fn resize_window(&mut self, window_id: &str, cols: u16, rows: u16) -> Result<()> {

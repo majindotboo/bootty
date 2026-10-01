@@ -93,6 +93,7 @@ fn creating_a_session_stamps_it_in_the_same_invocation() {
             session_id: "work".to_owned(),
             cwd: "/repo".to_owned(),
             tag: tag(Some("space-7")),
+            argv: None,
         })
         .expect("create the session");
 

@@ -97,6 +97,10 @@ pub struct SessionLaunchConfig {
     pub shell_integration: bool,
     pub shell: Option<String>,
     pub args: Vec<String>,
+    /// What the pane runs instead of an interactive shell. Empty runs the shell. One element is a
+    /// command line for the shell to run with `-c`; more are a program, found on the child's
+    /// `PATH`, and its arguments, run directly. Shell integration applies only to the shell.
+    pub command: Vec<String>,
     pub working_directory: Option<PathBuf>,
     /// The mux pane this terminal is the front end for, exported as `BOOTTY_PANE`. Only backends
     /// that spawn the pane's own PTY know it, so it stays unset for a tmux attach, where tmux
@@ -115,6 +119,7 @@ impl Default for SessionLaunchConfig {
             shell_integration: false,
             shell: None,
             args: Vec::new(),
+            command: Vec::new(),
             working_directory: None,
             pane_id: None,
             env: Vec::new(),

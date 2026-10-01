@@ -196,6 +196,7 @@ fn round_trip_session(
             identity: Some(session_identity.clone()),
             space: Some(space_id.to_owned()),
         },
+        argv: None,
     })?;
     remote_space(
         "execute",

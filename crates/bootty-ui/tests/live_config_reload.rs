@@ -590,7 +590,10 @@ fn a_dead_terminal_warns_after_acceptance_and_new_panes_use_the_accepted_config(
         )
         .expect("start failing pane");
     let failure = wait_for_startup_result(&mut state, "%1").expect_err("startup must fail");
-    assert_eq!(failure, "spawn shell in PTY");
+    assert!(
+        failure.starts_with("spawn shell in PTY: ") && failure.contains("/bootty/missing-shell"),
+        "the startup failure names the step and its cause: {failure}"
+    );
 
     config_file
         .write_str(

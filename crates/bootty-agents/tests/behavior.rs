@@ -482,12 +482,22 @@ fn integration_json_merges_preserve_symlink_targets() {
     pretty_assertions::assert_eq!(removed, json!({"user_setting": true}));
 }
 
+/// The hook passes the server its pane belongs to last: tmux's `$TMUX`, else the `$RMUX` Bootty's
+/// rmux panes set while leaving `$TMUX` empty, else nothing.
 #[cfg(unix)]
 #[rstest::rstest]
-#[case(AgentKind::Codex)]
-#[case(AgentKind::Claude)]
+#[case::tmux(
+    AgentKind::Codex,
+    (Some("/private/tmp/tmux-501/default,41,0"), None, "/private/tmp/tmux-501/default,41,0")
+)]
+#[case::rmux(
+    AgentKind::Claude,
+    (Some(""), Some("/tmp/rmux/bootty-wire3,42,1"), "/tmp/rmux/bootty-wire3,42,1")
+)]
+#[case::native(AgentKind::Claude, (None, None, ""))]
 fn installed_hooks_execute_from_paths_with_spaces_and_shell_metacharacters(
     #[case] provider: AgentKind,
+    #[case] server: (Option<&str>, Option<&str>, &str),
 ) {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -506,20 +516,25 @@ fn installed_hooks_execute_from_paths_with_spaces_and_shell_metacharacters(
     let command = declaration.merge[0].value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();
-    let output = std::process::Command::new("/bin/sh")
-        .args(["-c", command])
+    let (tmux, rmux, expected_server) = server;
+    let mut hook = std::process::Command::new("/bin/sh");
+    hook.args(["-c", command])
         .env("PATH", format!("{}:/usr/bin:/bin", root.path().display()))
         .env("BOOTTY_HOOK_ARGUMENTS", &recorded)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
+        .env_remove("TMUX")
+        .env_remove("RMUX")
+        .stdin(std::process::Stdio::null());
+    for (name, value) in [("TMUX", tmux), ("RMUX", rmux)] {
+        if let Some(value) = value {
+            hook.env(name, value);
+        }
+    }
+    let output = hook.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"{}\n");
-    assert!(
-        fs::read_to_string(recorded)
-            .unwrap()
-            .contains(&format!("agents.{provider}.ingest"))
-    );
+    let arguments = fs::read_to_string(recorded).unwrap();
+    assert!(arguments.contains(&format!("agents.{provider}.ingest")));
+    assert_eq!(arguments.lines().last(), Some(expected_server));
 }
 
 #[rstest::rstest]
@@ -716,4 +731,338 @@ fn committed_agent_state_survives_subscriber_failure_and_late_cancellation(
     pretty_assertions::assert_eq!(warnings.first().unwrap().code, "event_publish_failed");
     pretty_assertions::assert_eq!(*events.0.lock().unwrap(), vec![false]);
     assert!(!cancellation.is_cancelled());
+}
+
+fn claude_after(events: &[Value]) -> bootty_agents::AgentState {
+    let service = service(
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Events::default()),
+    );
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    for event in events {
+        let outcome = service.ingest(
+            AgentKind::Claude,
+            Some("%claude"),
+            event.clone(),
+            deadline,
+            &CommandCancellation::new(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    }
+    service.snapshot(AgentKind::Claude, Some("%claude"))
+}
+
+#[rstest::rstest]
+#[case::permission("permission_prompt", AgentStatus::Waiting)]
+#[case::question("elicitation_dialog", AgentStatus::Waiting)]
+#[case::idle("idle_prompt", AgentStatus::Idle)]
+#[case::informational("auth_success", AgentStatus::Working)]
+fn claude_waits_only_on_prompts_the_user_must_answer(
+    #[case] notification_type: &str,
+    #[case] expected: AgentStatus,
+) {
+    let state = claude_after(&[
+        json!({"hook_event_name": "UserPromptSubmit"}),
+        json!({"hook_event_name": "Notification", "notification_type": notification_type}),
+    ]);
+    pretty_assertions::assert_eq!(state.status, expected);
+}
+
+#[rstest::rstest]
+#[case::short("Done: fixed the test.".to_owned(), "Done: fixed the test.".len())]
+// Multi-byte text past the retained limit keeps a whole-character prefix.
+#[case::oversized("é".repeat(40 * 1024), 64 * 1024)]
+fn claude_stop_reports_the_finished_turn(#[case] message: String, #[case] retained: usize) {
+    let transcript = "/Users/me/.claude/projects/p/session.jsonl";
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis();
+    let state = claude_after(&[
+        json!({"hook_event_name": "UserPromptSubmit", "transcript_path": transcript}),
+        json!({"hook_event_name": "Stop", "last_assistant_message": message}),
+    ]);
+    pretty_assertions::assert_eq!(state.status, AgentStatus::Idle);
+    pretty_assertions::assert_eq!(state.session_file.as_deref(), Some(transcript));
+    pretty_assertions::assert_eq!(state.last_message.as_deref(), message.get(..retained));
+    let ended = state.turn_ended_at.map(u128::from);
+    assert!(
+        ended.is_some_and(|ended| ended >= before),
+        "turn end {ended:?} is missing or precedes the test start {before}"
+    );
+}
+
+/// The Space that owns one pane, which a test moves.
+struct MovableOwner(Mutex<&'static str>);
+
+impl AgentPaneResolver for MovableOwner {
+    fn scope_for_pane(&self, _pane: &str) -> Option<String> {
+        self.0.lock().ok().map(|owner| (*owner).to_owned())
+    }
+}
+
+/// A hook that arrives after its pane moved to another Space, before anything else noticed the
+/// move, carries the pane's record there: one record, with the final message it already had.
+#[test]
+fn a_hook_after_its_pane_moved_takes_its_record_along() {
+    let executor: Arc<dyn AgentCommandExecutor> =
+        Arc::new(|_invocation: CommandInvocation, _deadline, _cancellation| {
+            CommandOutcome::success()
+        });
+    let owner = Arc::new(MovableOwner(Mutex::new("space-a")));
+    let resolver: Arc<dyn AgentPaneResolver> = owner.clone();
+    let service = AgentService::new_with_resolver(executor, Arc::new(Events::default()), resolver);
+    let report = |event: Value| {
+        let outcome = service.ingest(
+            AgentKind::Claude,
+            Some("%7"),
+            event,
+            Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+            &CommandCancellation::new(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    };
+    report(json!({"hook_event_name": "Stop", "last_assistant_message": "Done."}));
+    *owner.0.lock().expect("owner") = "space-b";
+    report(json!({"hook_event_name": "UserPromptSubmit"}));
+
+    let records = service
+        .pane_states(AgentKind::Claude)
+        .into_iter()
+        .map(|(key, state)| {
+            (
+                key.scope,
+                state.status.as_str(),
+                state.last_message.as_deref().map(str::to_owned),
+            )
+        })
+        .collect::<Vec<_>>();
+    pretty_assertions::assert_eq!(
+        records,
+        [(
+            "space-b".to_owned(),
+            "working".to_owned(),
+            Some("Done.".to_owned())
+        )]
+    );
+}
+
+/// A state file that could not be written is retried, and a shutdown flush waits for a fresh try
+/// rather than reporting the earlier failure once the disk accepts it again.
+#[test]
+fn a_shutdown_flush_retries_a_failed_write() {
+    let directory = assert_fs::TempDir::new().expect("state directory");
+    let blocked = directory.path().join("state");
+    fs::write(&blocked, b"").expect("a file where the state directory belongs");
+    let executor: Arc<dyn AgentCommandExecutor> =
+        Arc::new(|_invocation: CommandInvocation, _deadline, _cancellation| {
+            CommandOutcome::success()
+        });
+    let service = AgentService::new_with_resolver(
+        executor,
+        Arc::new(Events::default()),
+        Arc::new(ScopeResolver),
+    )
+    .persisted_at(&blocked.join("agent-state.json"));
+    let outcome = service.ingest(
+        AgentKind::Claude,
+        Some("%7"),
+        json!({"hook_event_name": "Stop", "last_assistant_message": "Kept."}),
+        Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now),
+        &CommandCancellation::new(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+
+    let failed = bootty_agents::flush_agent_state(Duration::from_secs(5));
+    assert!(failed.is_err(), "{failed:?}");
+    fs::remove_file(&blocked).expect("free the state directory");
+    bootty_agents::flush_agent_state(Duration::from_secs(5)).expect("the retry reaches disk");
+    let saved = fs::read_to_string(blocked.join("agent-state.json")).expect("saved state");
+    assert!(saved.contains("Kept."), "{saved}");
+}
+
+#[test]
+fn reported_state_survives_a_restart_until_the_pane_reports_again() {
+    let directory = assert_fs::TempDir::new().expect("state directory");
+    let path = directory.path().join("agent-state.json");
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    let persisted = || {
+        let executor: Arc<dyn AgentCommandExecutor> =
+            Arc::new(|_invocation: CommandInvocation, _deadline, _cancellation| {
+                CommandOutcome::success()
+            });
+        AgentService::new_with_resolver(
+            executor,
+            Arc::new(Events::default()),
+            Arc::new(ScopeResolver),
+        )
+        .persisted_at(&path)
+    };
+    let report = |service: &AgentService, event: Value| {
+        let outcome = service.ingest(
+            AgentKind::Claude,
+            Some("%7"),
+            event,
+            deadline,
+            &CommandCancellation::new(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    };
+    // A file others could read is tightened once state is written to it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::write(&path, b"{}").expect("existing state file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("public mode");
+    }
+    let first = persisted();
+    report(
+        &first,
+        json!({"hook_event_name": "UserPromptSubmit", "transcript_path": "/t/s.jsonl"}),
+    );
+    report(
+        &first,
+        json!({"hook_event_name": "Stop", "last_assistant_message": "Fixed it."}),
+    );
+    // A window reopened before the old one retires restores the newest state, flushed or not.
+    let reopened = persisted();
+    pretty_assertions::assert_eq!(
+        reopened
+            .snapshot(AgentKind::Claude, Some("%7"))
+            .last_message
+            .as_deref(),
+        Some("Fixed it.")
+    );
+    // Its newer state is what reaches disk, whenever the old window lets go.
+    report(
+        &reopened,
+        json!({"hook_event_name": "Stop", "last_assistant_message": "Checked again."}),
+    );
+    drop(first);
+    drop(reopened);
+    bootty_agents::flush_agent_state(Duration::from_secs(5)).expect("state reaches disk");
+    let saved = fs::read_to_string(&path).expect("saved state");
+    assert!(
+        saved.contains("Checked again.") && !saved.contains("Fixed it."),
+        "the older window's state overwrote the newer one: {saved}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(&path)
+            .expect("saved state")
+            .permissions()
+            .mode();
+        pretty_assertions::assert_eq!(mode & 0o077, 0, "agent state must be private");
+    }
+
+    let restarted = persisted();
+    let restored = restarted.snapshot(AgentKind::Claude, Some("%7"));
+    pretty_assertions::assert_eq!(restored.source, AgentSource::Restored);
+    pretty_assertions::assert_eq!(restored.status, AgentStatus::Idle);
+    pretty_assertions::assert_eq!(restored.last_message.as_deref(), Some("Checked again."));
+    pretty_assertions::assert_eq!(restored.session_file.as_deref(), Some("/t/s.jsonl"));
+    assert!(restored.turn_ended_at.is_some(), "{restored:?}");
+
+    report(&restarted, json!({"hook_event_name": "UserPromptSubmit"}));
+    let current = restarted.snapshot(AgentKind::Claude, Some("%7"));
+    pretty_assertions::assert_eq!(current.source, AgentSource::Existing);
+    pretty_assertions::assert_eq!(current.last_message.as_deref(), Some("Checked again."));
+}
+
+#[test]
+fn only_panes_a_complete_listing_proves_gone_are_forgotten() {
+    let directory = assert_fs::TempDir::new().expect("state directory");
+    let path = directory.path().join("agent-state.json");
+    let executor: Arc<dyn AgentCommandExecutor> =
+        Arc::new(|_invocation: CommandInvocation, _deadline, _cancellation| {
+            CommandOutcome::success()
+        });
+    let service = AgentService::new_with_resolver(
+        executor,
+        Arc::new(Events::default()),
+        Arc::new(ScopeResolver),
+    )
+    .persisted_at(&path);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    for pane in ["%1", "%2"] {
+        let outcome = service.ingest(
+            AgentKind::Claude,
+            Some(pane),
+            json!({"hook_event_name": "SessionStart"}),
+            deadline,
+            &CommandCancellation::new(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    }
+    let open = std::collections::BTreeSet::from(["space-a".to_owned()]);
+    // A live Space without a complete listing proves nothing.
+    service.retain_live_panes(&open, &std::collections::BTreeMap::new());
+    pretty_assertions::assert_eq!(service.pane_states(AgentKind::Claude).len(), 2);
+
+    service.retain_live_panes(
+        &open,
+        &std::collections::BTreeMap::from([(
+            "space-a".to_owned(),
+            std::collections::BTreeSet::from(["%1".to_owned()]),
+        )]),
+    );
+    let panes = |service: &AgentService| {
+        service
+            .pane_states(AgentKind::Claude)
+            .into_iter()
+            .map(|(key, _)| key.pane)
+            .collect::<Vec<_>>()
+    };
+    pretty_assertions::assert_eq!(panes(&service), vec!["%1".to_owned()]);
+    drop(service);
+    let executor: Arc<dyn AgentCommandExecutor> =
+        Arc::new(|_invocation: CommandInvocation, _deadline, _cancellation| {
+            CommandOutcome::success()
+        });
+    let restarted = AgentService::new_with_resolver(
+        executor,
+        Arc::new(Events::default()),
+        Arc::new(ScopeResolver),
+    )
+    .persisted_at(&path);
+    pretty_assertions::assert_eq!(panes(&restarted), vec!["%1".to_owned()]);
+    // Closing the Space retires its records, listing or not.
+    restarted.retain_live_panes(
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeMap::new(),
+    );
+    pretty_assertions::assert_eq!(panes(&restarted), Vec::<String>::new());
+}
+
+#[test]
+fn a_stop_counts_as_a_finished_turn_even_when_its_start_was_missed() {
+    let state =
+        claude_after(&[json!({"hook_event_name": "Stop", "last_assistant_message": "Done."})]);
+    assert!(state.turn_ended_at.is_some(), "{state:?}");
 }

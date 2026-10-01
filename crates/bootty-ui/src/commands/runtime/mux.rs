@@ -8,7 +8,9 @@ use crate::{commands::ExactMuxTarget, error_catalog::ErrorNotice, state::AppStat
 use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget, ResourceKind};
 use bootty_mux::{
     command::MuxCommand,
-    controller::{MuxCommandCompletion, MuxCommandError, MuxCommandResult, SpaceId},
+    controller::{
+        CommandSelection, MuxCommandCompletion, MuxCommandError, MuxCommandResult, SpaceId,
+    },
     executor,
     repository::BindingMembershipMutation,
 };
@@ -57,6 +59,7 @@ impl AppState {
             command.clone(),
             membership.take(),
             Some(execution),
+            CommandSelection::Follow,
         ) else {
             self.workspace
                 .defer_binding_membership_reconciliation(scope);
@@ -102,6 +105,7 @@ impl AppState {
             command,
             None,
             execution,
+            CommandSelection::Follow,
         ) else {
             return self.reject_command(CommandOutcome::StaleTarget {
                 message: "Pane binding was closed".to_owned(),
@@ -176,27 +180,7 @@ impl AppState {
     ) -> Result<(SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>), CommandOutcome> {
         let command = MuxCommand::DitchSession { session_id };
         let scope = self.workspace.active.binding.scope();
-        if self
-            .commands
-            .pending
-            .iter()
-            .any(|pending| match &pending.result {
-                PendingCommandResult::DitchCleanup {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                }
-                | PendingCommandResult::Mux {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                } => *pending_scope == scope && *pending_command == command,
-                PendingCommandResult::Outcome(_)
-                | PendingCommandResult::Forward { .. }
-                | PendingCommandResult::Clipboard { .. }
-                | PendingCommandResult::Link { .. } => false,
-            })
-        {
+        if self.mux_command_pending(scope, &command) {
             let outcome = CommandOutcome::Unavailable {
                 message: "This session is already being closed".to_owned(),
             };
@@ -211,6 +195,31 @@ impl AppState {
         }
         let membership = self.begin_authoritative_membership(&command)?;
         Ok((scope, command, membership))
+    }
+
+    /// Whether `command` is already in flight against the binding at `scope`.
+    pub(super) fn mux_command_pending(&self, scope: SpaceId, command: &MuxCommand) -> bool {
+        self.commands
+            .pending
+            .iter()
+            .any(|pending| match &pending.result {
+                PendingCommandResult::DitchCleanup {
+                    scope: pending_scope,
+                    command: pending_command,
+                    ..
+                }
+                | PendingCommandResult::Mux {
+                    scope: pending_scope,
+                    command: pending_command,
+                    ..
+                } => *pending_scope == scope && pending_command == command,
+                // Its create already landed; only its pane is still starting.
+                PendingCommandResult::SessionStart { .. }
+                | PendingCommandResult::Outcome(_)
+                | PendingCommandResult::Forward { .. }
+                | PendingCommandResult::Clipboard { .. }
+                | PendingCommandResult::Link { .. } => false,
+            })
     }
 
     pub(crate) fn submit_prepared_ditch_session_command(
@@ -279,6 +288,7 @@ impl AppState {
         let completion = match executor::complete_authoritative_command(
             &mut self.workspace,
             scope,
+            command,
             membership,
             result,
             layout,
@@ -337,6 +347,9 @@ impl AppState {
                 "created".to_owned(),
                 self.mux_resource_target(scope, ResourceKind::Session, session_id, None)?,
             );
+            if let Some(terminal) = self.session_terminal_target(scope, session_id) {
+                value.insert("terminal".to_owned(), terminal);
+            }
         }
         if let (Some(session_id), Some(window_id)) = (
             completion.selected_session.as_deref(),

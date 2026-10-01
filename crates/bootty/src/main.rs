@@ -31,10 +31,13 @@ fn run() -> Result<ExitCode> {
         return Ok(process_exit_code(code));
     }
     let backends = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
+    let cli = Cli::parse();
     // Correct a stale `$SHELL` to the OS login shell before any child inherits
     // it; tmux otherwise bakes the wrong shell into the server's default-shell.
     // Finder launches need the account login environment before any service starts.
-    if let Some(code) = bootty::shell_env::initialize_shell_environment()? {
+    if cli.needs_login_environment()
+        && let Some(code) = bootty::shell_env::initialize_shell_environment()?
+    {
         return Ok(process_exit_code(code));
     }
     #[cfg(target_os = "macos")]
@@ -42,7 +45,7 @@ fn run() -> Result<ExitCode> {
         eprintln!("Could not install the Bootty command: {error}");
     }
 
-    run_command(&Cli::parse(), backends)
+    run_command(&cli, backends)
 }
 
 fn run_command(

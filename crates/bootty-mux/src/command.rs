@@ -123,6 +123,15 @@ pub enum MuxCommand {
         /// What to stamp onto the new session. Bootty mints the identity rather than the backend
         /// so a create whose result never came back can be settled by looking for this id.
         tag: MuxSessionTag,
+        /// `None` creates a project session under a name Bootty minted; a backend may adopt a
+        /// session that already has that name, so a retry after a lost reply is safe.
+        ///
+        /// `Some` is an explicit create: it fails rather than adopt an existing session, and is
+        /// never retried after an ambiguous result. Its argv starts the first pane: empty starts
+        /// the default shell, one element runs through the backend's default shell, and more
+        /// elements run directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        argv: Option<Vec<String>>,
     },
     CreateWorktreeSession {
         session_id: String,
@@ -198,8 +207,9 @@ impl MuxCommand {
                 | Self::RenameSession { .. }
                 | Self::StampSession { .. }
                 // Both create-or-reuse a session under a name Bootty minted, so
-                // a second attempt adopts what the first one made.
-                | Self::CreateProjectSession { .. }
+                // a second attempt adopts what the first one made. An explicit
+                // create refuses an existing name, so it cannot repeat.
+                | Self::CreateProjectSession { argv: None, .. }
                 | Self::CreateWorktreeSession { .. }
         )
     }

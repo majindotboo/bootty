@@ -279,6 +279,25 @@ impl AppState {
         .command_target(ResourceKind::Terminal, binding_runtime.mux(), &binding)
     }
 
+    /// The Terminal target of a session's active pane in the binding's latest snapshot.
+    pub(super) fn session_terminal_target(
+        &self,
+        scope: SpaceId,
+        session_key: &str,
+    ) -> Option<CommandTarget> {
+        let session = self
+            .workspace
+            .binding(scope)?
+            .mux()
+            .backend_session_by_id_or_name(session_key)?;
+        let window = session
+            .active_window_id
+            .as_deref()
+            .and_then(|active| session.windows.iter().find(|window| window.id == active))
+            .or_else(|| session.windows.first())?;
+        self.mux_terminal_target(scope, &session.id, &window.id)
+    }
+
     pub(crate) fn binding_target_handle(&self, scope: SpaceId, generation: u64) -> String {
         let (process, _, window_generation) = self.commands.target_identity();
         serde_json::Value::Array(vec![
@@ -300,12 +319,37 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                 || command.starts_with("files.")
                 || matches!(
                     command,
-                    "jobs.start" | "transfers.start" | "forwards.open" | "history.search"
+                    "jobs.start"
+                        | "transfers.start"
+                        | "forwards.open"
+                        | "history.search"
+                        | "session.create"
                 )
         }
-        ResourceKind::Session => command.starts_with("pane."),
+        ResourceKind::Session => command.starts_with("pane.") || command == "session.close",
+        // Terminal input and capture address the pane through the mux and never select it.
         ResourceKind::Terminal => {
-            matches!(command, "link.open" | "agents.focus") || command.ends_with(".acknowledge")
+            matches!(
+                command,
+                "link.open"
+                    | "agents.focus"
+                    | "terminal.write"
+                    | "terminal.paste"
+                    | "terminal.submit"
+                    | "terminal.capture"
+                    | "pane.close"
+            ) || command.ends_with(".acknowledge")
+                || (command.starts_with("agents.")
+                    && [
+                        ".prompt",
+                        ".follow_up",
+                        ".steer",
+                        ".abort",
+                        ".interrupt",
+                        ".state",
+                    ]
+                    .iter()
+                    .any(|operation| command.ends_with(operation)))
         }
         _ => false,
     }

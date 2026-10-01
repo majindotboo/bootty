@@ -144,5 +144,31 @@ fn technical_summary(message: &str) -> String {
     if lower.contains("ssh") || lower.contains("connection") {
         return "Could not reach the remote workspace.".to_owned();
     }
-    "The operation could not be completed.".to_owned()
+    if lower.contains("target is stale") {
+        return "That pane or session no longer exists.".to_owned();
+    }
+    // An unrecognized failure shows its own first line: a generic sentence would hide the only
+    // clue to what failed.
+    first_sentence(message)
+}
+
+/// The message's first line as a bounded sentence.
+fn first_sentence(message: &str) -> String {
+    const LIMIT: usize = 200;
+    let line = message.lines().next().unwrap_or_default().trim();
+    let mut chars = line.chars();
+    let Some(first) = chars.next() else {
+        return "The operation failed without a reason.".to_owned();
+    };
+    let mut sentence = first.to_uppercase().chain(chars).collect::<String>();
+    if sentence.chars().count() > LIMIT {
+        sentence = sentence
+            .chars()
+            .take(LIMIT)
+            .chain(std::iter::once('…'))
+            .collect();
+    } else if !sentence.ends_with(['.', '!', '?']) {
+        sentence.push('.');
+    }
+    sentence
 }

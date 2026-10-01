@@ -69,6 +69,15 @@ pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()>
             let command = bootty_mux::remote_space::decode_command(&payload)?;
             catalog.execute(&id, backend, command)?;
         }
+        "pane" => {
+            let id = required_option(arguments, "--id")?;
+            let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
+            let request = bootty_mux::remote_space::PaneRequest::read(std::io::stdin().lock())?;
+            println!(
+                "{}",
+                serde_json::to_string(&catalog.pane(&id, backend, &request)?)?
+            );
+        }
         _ => bail!("unknown remote-space command {command:?}"),
     }
     Ok(())

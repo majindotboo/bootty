@@ -271,6 +271,7 @@ fn run_child_acceptance() -> Result<()> {
             identity: Some(new_session_identity()),
             space: None,
         },
+        argv: None,
     })?;
 
     let snapshot = backend.snapshot()?;

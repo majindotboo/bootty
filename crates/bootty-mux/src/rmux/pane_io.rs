@@ -11,6 +11,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use super::backend::{list_pane_rows, list_window_rows, rmux_request};
 use super::bridge::{connect_bootty_rmux, rmux_missing_target_text, rmux_stale_target_text};
+use crate::backend::{PaneCapture, PaneInput, PaneText};
 
 pub const RMUX_OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const RMUX_OUTPUT_EVENT_MAX_BYTES: usize = 16 * 1024;
@@ -950,6 +951,119 @@ async fn pane_input_target(rmux: &Rmux, target: &RmuxPaneTarget) -> Result<PaneT
         window_index,
         pane.index,
     ))
+}
+
+/// Deliver input to one pane by its id, whether or not anything shows it, the way tmux's
+/// `send-keys` and `paste-buffer -p` do.
+pub(super) async fn send_rmux_backend_pane_input(
+    rmux: &Rmux,
+    pane_id: &str,
+    input: &PaneInput,
+) -> Result<()> {
+    let (target, facts) = locate_rmux_pane(rmux, pane_id).await?;
+    match input {
+        PaneInput::Write(bytes) if bytes.is_empty() => Ok(()),
+        PaneInput::Write(bytes) => {
+            let pane = pane_for_target(rmux, &target).await?;
+            send_rmux_pane_input(rmux, &pane, &target, bytes).await
+        }
+        PaneInput::Paste(text) if text.is_empty() => Ok(()),
+        PaneInput::Paste(text) => paste_rmux_pane(rmux, &target, facts.bracketed_paste, text).await,
+        PaneInput::Submit => Ok(pane_for_target(rmux, &target)
+            .await?
+            .send_key("Enter")
+            .await?),
+    }
+}
+
+/// Read one pane's text by its id, whether or not anything shows it.
+pub(super) async fn capture_rmux_backend_pane(
+    rmux: &Rmux,
+    pane_id: &str,
+    capture: PaneCapture,
+) -> Result<PaneText> {
+    let (target, facts) = locate_rmux_pane(rmux, pane_id).await?;
+    let rows = capture.rows(facts.history, facts.height);
+    let captured = pane_for_target(rmux, &target)
+        .await?
+        .capture_pane()
+        .start(rows.first)
+        .end(rows.last)
+        .escape_ansi(capture.ansi)
+        .await?;
+    Ok(rows.text(String::from_utf8_lossy(&captured.stdout).into_owned()))
+}
+
+const RMUX_PANE_FACTS_FORMAT: &str =
+    "#{pane_id}\u{1f}#{history_size}\u{1f}#{pane_height}\u{1f}#{bracket_paste_flag}";
+
+/// What a pane reports about itself: scrollback and screen heights, and whether its application
+/// enabled bracketed paste.
+struct RmuxPaneFacts {
+    history: u64,
+    height: u64,
+    bracketed_paste: bool,
+}
+
+/// The session holding `pane_id`, and the pane's facts. rmux pane ids are unique on the server,
+/// but every SDK pane handle is scoped by its session.
+async fn locate_rmux_pane(rmux: &Rmux, pane_id: &str) -> Result<(RmuxPaneTarget, RmuxPaneFacts)> {
+    for session in rmux.list_sessions().await? {
+        let response = rmux_request(Request::ListPanes(Box::new(rmux_proto::ListPanesRequest {
+            target: session.clone(),
+            target_window_index: None,
+            format: Some(RMUX_PANE_FACTS_FORMAT.to_owned()),
+            filter: None,
+            sort_order: None,
+            reversed: false,
+        })))
+        .await?;
+        let Response::ListPanes(response) = response else {
+            anyhow::bail!("rmux returned an unexpected list-panes response");
+        };
+        let listing = String::from_utf8_lossy(&response.output.stdout).into_owned();
+        let Some(facts) = listing.lines().find_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            (fields.next() == Some(pane_id)).then(|| {
+                let mut number = || fields.next().and_then(|field| field.parse::<u64>().ok());
+                Some(RmuxPaneFacts {
+                    history: number()?,
+                    height: number()?,
+                    bracketed_paste: number()? == 1,
+                })
+            })
+        }) else {
+            continue;
+        };
+        let facts =
+            facts.with_context(|| format!("rmux did not report the state of pane {pane_id}"))?;
+        let target = RmuxPaneTarget::new(session.to_string(), Some(pane_id.to_owned()));
+        return Ok((target, facts));
+    }
+    anyhow::bail!("{RMUX_PANE_NOT_LISTED}: {pane_id}")
+}
+
+/// Paste by stable pane id, so a pane reshuffled mid-request can never receive another pane's
+/// text (rmux's paste-buffer addresses panes only by window and pane index). Like tmux's
+/// `paste-buffer -p`, each LF becomes CR and the text is bracketed only when the pane's
+/// application enabled bracketed paste.
+async fn paste_rmux_pane(
+    rmux: &Rmux,
+    target: &RmuxPaneTarget,
+    bracketed: bool,
+    text: &str,
+) -> Result<()> {
+    let body = text.replace('\n', "\r");
+    let payload = if bracketed {
+        format!("\x1b[200~{body}\x1b[201~")
+    } else {
+        body
+    };
+    pane_for_target(rmux, target)
+        .await?
+        .send_text(&payload)
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn pane_for_target(rmux: &Rmux, target: &RmuxPaneTarget) -> Result<Pane> {

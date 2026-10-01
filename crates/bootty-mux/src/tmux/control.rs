@@ -120,6 +120,17 @@ impl CommandRunner for TmuxControlRunner {
         let (program, args) = self.spawned(program, args);
         SystemCommandRunner.run_disowned(&program, &args)
     }
+
+    // Streamed input always gets its own process: the control client has no stdin per command.
+    fn run_with_input(
+        &self,
+        program: &str,
+        args: &[String],
+        input: Vec<u8>,
+    ) -> Result<CommandOutput> {
+        let (program, args) = self.spawned(program, args);
+        SystemCommandRunner.run_with_input(&program, &args, input)
+    }
 }
 
 struct Reply {

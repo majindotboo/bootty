@@ -32,6 +32,7 @@ use bootty_terminal::terminal_session::DrainStats;
 
 mod binding_panes;
 mod pane_arrangement;
+mod pane_io;
 pub use pane_arrangement::PreparedPaneArrangement;
 mod binding_session_names;
 mod binding_terminal_facts;
@@ -39,6 +40,7 @@ mod binding_windows;
 mod mux_config;
 mod remote_reconnect;
 mod session_navigation;
+mod session_requests;
 mod space_summary;
 mod workspace_sessions;
 
@@ -52,6 +54,10 @@ pub use binding_session_names::RenameSessionOutcome;
 pub use binding_terminal_facts::{TerminalProgress, TerminalProgressState};
 pub use binding_windows::terminal_cwd_for_mux_command;
 pub use session_navigation::{BindingSessionGroup, ScopedSessionTarget};
+pub use session_requests::{
+    PreparedSessionRequest, SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS,
+    SESSION_NAME_MAX_BYTES, SessionRequestError, StartingSession,
+};
 pub use space_summary::SpaceSummary;
 
 use crate::repository::{
@@ -182,6 +188,17 @@ impl NativeTerminalOwner {
         })
     }
 
+    /// An owner with no panes and this one's terminal settings, for a binding that gives its own
+    /// owner up.
+    fn empty_like(&self, config: &crate::MuxBindingConfig) -> Result<Self> {
+        let (terminal_side_effect_tx, terminal_side_effect_rx) = mpsc::channel();
+        Ok(Self {
+            terminal: Box::new(self.terminal.empty_like(config, &terminal_side_effect_tx)?),
+            terminal_side_effect_tx,
+            terminal_side_effect_rx,
+        })
+    }
+
     pub(super) const fn replace_binding(binding: &mut BindingRuntime, replacement: Self) -> Self {
         std::mem::replace(&mut binding.terminal_owner, replacement)
     }
@@ -252,6 +269,8 @@ pub struct BindingRuntime {
     backends: Arc<MuxBackendRegistry>,
     backend_policy: MuxAppBackendPolicy,
     capabilities: crate::capability::BindingCapabilityDescriptor,
+    /// See [`crate::provider::MuxAppBackendProvider::local_server_socket`].
+    server_socket: Option<std::path::PathBuf>,
     scope: SpaceId,
     label: String,
     placement: SpaceMuxOverride,
@@ -345,6 +364,7 @@ impl BindingRuntime {
         let provider = backends.app_provider(&realized.config)?;
         let backend_policy = provider.app_policy();
         let capabilities = provider.capabilities(scope);
+        let server_socket = provider.local_server_socket(&realized.config);
         let mut binding_config = config.clone();
         binding_config.multiplexer = realized.config.clone();
         let terminal_owner =
@@ -358,6 +378,7 @@ impl BindingRuntime {
             backends,
             backend_policy,
             capabilities,
+            server_socket,
             label: binding_label(&realized.config),
             placement,
             reconnect: BindingReconnect::default(),
@@ -523,6 +544,13 @@ impl BindingRuntime {
     /// A binding without session stamping is direct: its authoritative snapshot is already the
     /// complete session list for that binding, so projecting or persisting tag ownership would
     /// turn every real session into an impossible-to-adopt "unassigned" session.
+    /// The socket of the local server that runs this binding's panes, as the provider derives it
+    /// from the binding's configuration. `None` for a remote server or Bootty's own panes.
+    #[must_use]
+    pub fn server_socket(&self) -> Option<&std::path::Path> {
+        self.server_socket.as_deref()
+    }
+
     pub fn tracks_session_membership(&self) -> bool {
         self.capabilities.supports(BindingOperation::StampSession)
     }
@@ -689,6 +717,24 @@ impl BindingRuntime {
 
     pub(super) fn membership_completion_is_immediate(&self) -> bool {
         self.backends.command_dispatch(&self.multiplexer) == Some(MuxCommandDispatch::CallerThread)
+    }
+
+    /// Keep an inactive Space's snapshot current, from its first frame on, so its panes stay
+    /// addressable: agent state and command targets outside the active Space resolve against it.
+    /// Remote tmux polls through the same persistent control client as the active Space. Returns
+    /// the next poll wake.
+    fn refresh_inactive_sessions(&mut self, repaint: &RepaintHandle) -> Option<Duration> {
+        if self.backend_policy.panes.topology == PaneTopology::ProcessLocal {
+            return None;
+        }
+        let interval = mux_session_refresh_interval(false);
+        let refresh = self
+            .mux
+            .refresh_sessions(repaint, &self.multiplexer.clone(), interval);
+        if refresh.applied && self.tracks_session_membership() {
+            self.mux.apply_session_order(&self.sessions.backend_names());
+        }
+        Some(interval)
     }
 
     fn refresh_waiting_membership(&mut self, repaint: &RepaintHandle, window_focused: bool) {
@@ -1098,6 +1144,8 @@ impl WorkspaceRuntime {
             .min();
         for binding in self.bindings_mut().skip(1) {
             binding.refresh_waiting_membership(repaint, window_focused);
+            let inactive_wake = binding.refresh_inactive_sessions(repaint);
+            next_wake = [next_wake, inactive_wake].into_iter().flatten().min();
             binding.restore_persisted_sessions(repaint, false);
         }
 
@@ -1436,6 +1484,87 @@ impl WorkspaceRuntime {
             && let Some(mut native_terminal) = self.parked_native_terminal.take()
         {
             native_terminal.swap_with_binding(target);
+        }
+    }
+
+    /// The terminal owner that runs `scope`'s panes, whether or not its Space is active.
+    ///
+    /// Shared native terminals live with the active binding while a native Space is active, and
+    /// are parked otherwise. Until a native Space has been active nothing is parked, and each native
+    /// binding still holds an empty owner of its own. A pane started then must not stay in one of
+    /// those: whichever native Space is activated first would keep its own owner and strand the
+    /// pane. So the first request parks `scope`'s owner, and the first activation adopts it.
+    fn space_terminal_owner(&mut self, scope: SpaceId) -> Result<&mut NativeTerminalOwner> {
+        let binding = self
+            .binding(scope)
+            .ok_or_else(|| anyhow::anyhow!("the target Space was closed"))?;
+        let shared = |binding: &BindingRuntime| {
+            binding.backend_policy.terminal_residency == TerminalResidency::WorkspaceShared
+        };
+        if !shared(binding) || scope == self.active.binding.scope {
+            let binding = self
+                .binding_mut(scope)
+                .ok_or_else(|| anyhow::anyhow!("the target Space was closed"))?;
+            return Ok(&mut binding.terminal_owner);
+        }
+        if shared(&self.active.binding) {
+            return Ok(&mut self.active.binding.terminal_owner);
+        }
+        let parked = if let Some(parked) = self.parked_native_terminal.take() {
+            parked
+        } else {
+            let binding = self
+                .binding_mut(scope)
+                .ok_or_else(|| anyhow::anyhow!("the target Space was closed"))?;
+            let empty = binding.terminal_owner.empty_like(&binding.multiplexer)?;
+            NativeTerminalOwner::replace_binding(binding, empty)
+        };
+        Ok(self.parked_native_terminal.insert(parked))
+    }
+
+    /// The owner holding `scope`'s native panes right now (see [`Self::space_terminal_owner`]).
+    /// Looking up never parks or creates an owner.
+    fn current_space_terminal_owner(&mut self, scope: SpaceId) -> Option<&mut NativeTerminalOwner> {
+        let shared = |binding: &BindingRuntime| {
+            binding.backend_policy.terminal_residency == TerminalResidency::WorkspaceShared
+        };
+        let binding = self.binding(scope)?;
+        if !shared(binding) || scope == self.active.binding.scope {
+            Some(&mut self.binding_mut(scope)?.terminal_owner)
+        } else if shared(&self.active.binding) {
+            Some(&mut self.active.binding.terminal_owner)
+        } else {
+            self.parked_native_terminal.as_mut()
+        }
+    }
+
+    /// The running terminal for `pane` in `scope`, whether or not it is on screen.
+    pub fn space_terminal_runtime(
+        &mut self,
+        scope: SpaceId,
+        pane_id: &str,
+    ) -> Option<&mut (dyn crate::terminal::TerminalRuntime + '_)> {
+        self.current_space_terminal_owner(scope)?
+            .terminal
+            .scoped_terminal_runtime(scope, pane_id)
+    }
+
+    /// Forget a native pane the backend closed: kill its runtime wherever it lives and drop its
+    /// layout leaf. Only the active Space re-syncs its visible panes.
+    pub fn discard_space_pane(
+        &mut self,
+        scope: SpaceId,
+        session_id: &str,
+        window_id: &str,
+        pane_id: &str,
+    ) {
+        if let Some(owner) = self.current_space_terminal_owner(scope) {
+            owner.terminal.discard_scoped_pane(scope, pane_id);
+        }
+        let active = scope == self.active.binding.scope;
+        if let Some(binding) = self.binding_mut(scope) {
+            let window = binding.window_id(session_id.to_owned(), window_id.to_owned());
+            binding.remove_pane_from_layout(&window, pane_id, active);
         }
     }
 
@@ -1926,8 +2055,7 @@ impl WorkspaceRuntime {
         Ok(true)
     }
 
-    /// Journal what bootty is about to ask the backend for, keyed on the session's identity, so
-    /// an ambiguous answer is recoverable without guessing from names.
+    /// Journal what bootty is about to ask the active binding's backend for.
     /// # Errors
     /// Returns invalid mutation or journal write errors.
     pub fn begin_active_binding_membership_mutation(
@@ -1935,17 +2063,41 @@ impl WorkspaceRuntime {
         command: &MuxCommand,
         naming: Option<&PendingGeneratedName>,
     ) -> Result<Option<BindingMembershipMutation>, WorkspacePersistenceError> {
-        if !self.active.binding.tracks_session_membership() {
+        self.begin_binding_membership_mutation(self.active.binding.scope, command, naming)
+    }
+
+    /// Journal what bootty is about to ask the backend of the binding at `scope` for, keyed on
+    /// the session's identity, so an ambiguous answer is recoverable without guessing from names.
+    /// The binding need not be active. Without `naming`, a name counts as the caller's choice.
+    /// # Errors
+    /// Returns missing binding, invalid mutation, or journal write errors.
+    pub fn begin_binding_membership_mutation(
+        &mut self,
+        scope: SpaceId,
+        command: &MuxCommand,
+        naming: Option<&PendingGeneratedName>,
+    ) -> Result<Option<BindingMembershipMutation>, WorkspacePersistenceError> {
+        let binding = self.binding(scope).ok_or_else(|| {
+            WorkspacePersistenceError::operation("the Space's binding is no longer live")
+        })?;
+        if !binding.tracks_session_membership() {
             return Ok(None);
         }
         let display_name = |fallback: &str| {
             naming.map_or_else(|| fallback.to_owned(), |naming| naming.display_name.clone())
+        };
+        let backend_name = |identity: &str, fallback: &str| {
+            binding.sessions.get(identity).map_or_else(
+                || fallback.to_owned(),
+                |claimed| claimed.backend_name.clone(),
+            )
         };
         let mutation = match command {
             MuxCommand::CreateProjectSession {
                 session_id,
                 cwd,
                 tag,
+                ..
             }
             | MuxCommand::CreateWorktreeSession {
                 session_id,
@@ -1962,43 +2114,34 @@ impl WorkspaceRuntime {
                     cwd: cwd.clone(),
                 }),
             MuxCommand::RenameSession { session_id, name } => {
-                let identity = self.active_session_identity(session_id).ok_or_else(|| {
+                let identity = self.session_identity(scope, session_id).ok_or_else(|| {
                     WorkspacePersistenceError::operation(format!(
                         "rename session {session_id}: this Space does not hold it"
                     ))
                 })?;
-                let old_name = self.active.binding.sessions.get(&identity).map_or_else(
-                    || session_id.clone(),
-                    |claimed| claimed.backend_name.clone(),
-                );
                 Some(BindingMembershipMutation::Rename {
+                    old_name: backend_name(&identity, session_id),
                     identity,
-                    old_name,
                     new_name: name.clone(),
                     display_name: display_name(name),
                     explicit: naming.is_none_or(|naming| naming.explicit),
                 })
             }
             MuxCommand::DitchSession { session_id } => self
-                .active_session_identity(session_id)
+                .session_identity(scope, session_id)
                 .map(|identity| BindingMembershipMutation::Ditch {
-                    old_name: self
-                        .active
-                        .binding
-                        .sessions
-                        .get(&identity)
-                        .map_or_else(|| session_id.clone(), |c| c.backend_name.clone()),
+                    old_name: backend_name(&identity, session_id),
                     identity,
                 }),
             _ => None,
         };
         if let Some(mutation) = &mutation {
             self.repository
-                .begin_binding_membership_mutation(self.active.binding.scope, mutation)?;
-            self.active.binding.membership_reconciliation_ready = false;
-            self.active
-                .binding
-                .membership_reconciliation_waiting_for_refresh = false;
+                .begin_binding_membership_mutation(scope, mutation)?;
+            if let Some(binding) = self.binding_mut(scope) {
+                binding.membership_reconciliation_ready = false;
+                binding.membership_reconciliation_waiting_for_refresh = false;
+            }
         }
         Ok(mutation)
     }
@@ -2052,6 +2195,7 @@ impl WorkspaceRuntime {
     pub fn complete_authoritative_command(
         &mut self,
         scope: SpaceId,
+        command: &MuxCommand,
         result: MuxCommandResult,
         layout: Option<&PreparedPaneArrangement>,
     ) -> (MuxCommandResult, Option<String>) {
@@ -2068,6 +2212,11 @@ impl WorkspaceRuntime {
             }
             result
         };
+        // Before the sync below, which would otherwise start a shown pane with a shell.
+        let completion = completion.and_then(|completion| {
+            self.start_session_command(scope, command)
+                .map(|()| completion)
+        });
         let sync_error = if completion.is_ok()
             && self.active.binding.scope == scope
             && self.active.binding.uses_native_terminal_layout()

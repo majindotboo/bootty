@@ -13,9 +13,13 @@ use bootty_control::{
     AppCommandSendError, AppCommandSender, Caller, CommandCancellation, CommandInvocation,
     CommandOutcome, ResourceKind,
 };
-use bootty_mux::{executor, workspace::WorkspaceRuntime};
+use bootty_mux::{
+    executor,
+    workspace::{BindingRuntime, WorkspaceRuntime},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -78,53 +82,130 @@ impl AgentCommandExecutor for AppCommandAgentExecutor {
     }
 }
 
-/// Snapshot of backend pane labels to their unique Space binding. Hooks only carry the backend
-/// pane label, so an ambiguous label deliberately resolves to no scope instead of the active one.
+/// Snapshot of backend pane labels to the Spaces that list them, each with the socket of the local
+/// server running it. Current hook adapters report the pane label and that server; older ones only
+/// the label. A label that still matches several Spaces deliberately resolves to no scope instead
+/// of the active one.
 #[derive(Clone, Default)]
 pub(super) struct AgentScopeIndex {
-    scopes: Arc<Mutex<BTreeMap<String, Option<String>>>>,
+    panes: Arc<Mutex<PaneScopes>>,
 }
+
+/// Pane label, then the scope of each Space listing it, with that Space's server socket.
+type PaneScopes = BTreeMap<String, BTreeMap<String, Option<PathBuf>>>;
 
 impl AgentPaneResolver for AgentScopeIndex {
     fn scope_for_pane(&self, pane: &str) -> Option<String> {
-        self.scopes.lock().ok()?.get(pane).cloned().flatten()
+        self.scope_for_server_pane(None, pane)
+    }
+
+    fn scope_for_server_pane(&self, server: Option<&str>, pane: &str) -> Option<String> {
+        let candidates = self.panes.lock().ok()?.get(pane).cloned()?;
+        let Some(server) = server else {
+            return unique_scope(candidates.keys());
+        };
+        // tmux and rmux name their socket through its resolved path, which may differ from the
+        // path Bootty addresses it by (macOS `/tmp` is `/private/tmp`).
+        // A hook reaches this app only through the local `bootty`, so its server is a local one.
+        // A pane on a server no Space here names, such as a remote host's, is not ours.
+        let reported = canonical(reported_socket(server));
+        unique_scope(
+            candidates
+                .iter()
+                .filter(|(_, socket)| {
+                    socket
+                        .as_deref()
+                        .is_some_and(|socket| canonical(socket) == reported)
+                })
+                .map(|(scope, _)| scope),
+        )
     }
 }
 
 impl AgentScopeIndex {
-    pub(super) fn refresh(&self, workspace: &WorkspaceRuntime) {
-        let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    /// Rebuild from the workspace. Returns whether any pane's owner changed.
+    pub(super) fn refresh(&self, workspace: &WorkspaceRuntime) -> bool {
+        // Spaces bound to one backend server all list every session on it, so only membership
+        // decides: a Space claims the panes of the sessions it owns, found in its own snapshot.
+        // A pane no loaded Space owns resolves to no scope rather than to whichever Space listed it.
+        let mut panes = PaneScopes::new();
         for binding in workspace.all_bindings() {
             let scope = binding.scope().persistence_value().to_string();
+            let server = binding.server_socket().map(Path::to_path_buf);
+            for pane_id in owned_panes(binding) {
+                panes
+                    .entry(pane_id.to_owned())
+                    .or_default()
+                    .insert(scope.clone(), server.clone());
+            }
+        }
+        let Ok(mut current) = self.panes.lock() else {
+            return false;
+        };
+        let changed = *current != panes;
+        *current = panes;
+        changed
+    }
+}
+
+/// The pane ids in the sessions `binding` owns: its members when it tracks membership, otherwise
+/// everything its backend reports.
+fn owned_panes(binding: &BindingRuntime) -> impl Iterator<Item = &str> {
+    binding
+        .member_sessions()
+        .into_iter()
+        .flat_map(|session| &session.windows)
+        .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+        .filter_map(|pane| pane.pane_id.as_deref())
+}
+
+/// The socket in a pane's `$TMUX` or `$RMUX` value, `socket,pid,session`.
+fn reported_socket(server: &str) -> &Path {
+    let mut fields = server.rsplitn(3, ',');
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some(_), Some(_), Some(socket)) => Path::new(socket),
+        _ => Path::new(server),
+    }
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Every open Space's scope, and every pane id on each Space whose backend listing is
+/// authoritative. A Space without a complete listing is absent from the second, so nothing is
+/// pruned on its account. The listing is the whole server's, not only the Space's members: a pane
+/// whose session moved to a Space that has not listed it yet is alive, and its record waits for
+/// [`AgentService::reattribute`] to move it there.
+pub(super) fn live_panes(
+    workspace: &WorkspaceRuntime,
+) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
+    let spaces = workspace
+        .all_bindings()
+        .map(|binding| binding.scope().persistence_value().to_string())
+        .collect();
+    let live = workspace
+        .all_bindings()
+        .filter(|binding| binding.mux().has_session_snapshot())
+        .map(|binding| {
             let panes = binding
                 .mux()
                 .all_sessions()
                 .iter()
                 .flat_map(|session| &session.windows)
-                .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes));
-            for pane_id in panes.filter_map(|pane| pane.pane_id.as_ref()) {
-                candidates
-                    .entry(pane_id.clone())
-                    .or_default()
-                    .insert(scope.clone());
-            }
-        }
+                .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+                .filter_map(|pane| pane.pane_id.clone())
+                .collect();
+            (binding.scope().persistence_value().to_string(), panes)
+        })
+        .collect();
+    (spaces, live)
+}
 
-        let scopes = candidates
-            .into_iter()
-            .map(|(pane, candidates)| {
-                let scope = if candidates.len() == 1 {
-                    candidates.into_iter().next()
-                } else {
-                    None
-                };
-                (pane, scope)
-            })
-            .collect();
-        if let Ok(mut current) = self.scopes.lock() {
-            *current = scopes;
-        }
-    }
+fn unique_scope<'a>(scopes: impl IntoIterator<Item = &'a String>) -> Option<String> {
+    let mut scopes = scopes.into_iter();
+    let first = scopes.next()?;
+    scopes.all(|scope| scope == first).then(|| first.clone())
 }
 
 impl AppState {
@@ -142,7 +223,7 @@ impl AppState {
         {
             return CommandDispatch::Complete(command_outcome_for_mux_error(error));
         }
-        let scope = if resolves_backend_pane(&invocation) {
+        let scope = if resolves_backend_pane(&invocation, target_supplied) {
             // Hook and pane-specific state commands resolve their backend pane through
             // AgentScopeIndex. Never stamp them with whichever Space is active now.
             None
@@ -251,8 +332,12 @@ impl AppState {
     }
 }
 
-fn resolves_backend_pane(invocation: &CommandInvocation) -> bool {
+/// Whether the command names a backend pane by id for `AgentScopeIndex` to place: a hook, or a
+/// state read given a pane and no target. A state read's target may be the current terminal the
+/// command resolved by default, which says nothing about the pane asked for.
+fn resolves_backend_pane(invocation: &CommandInvocation, target_supplied: bool) -> bool {
     let pane_state = invocation.command.rsplit('.').next() == Some("state")
+        && !target_supplied
         && invocation
             .arguments
             .first()

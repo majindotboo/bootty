@@ -9,9 +9,10 @@ use std::{
 
 use crate::{
     MuxBackendKind, MuxBindingConfig, RemoteSpaceSummary,
-    backend::MuxBackend,
+    backend::{MuxBackend, PaneText},
     command::MuxCommand,
     provider::MuxBackendRegistry,
+    remote_space::PaneRequest,
     snapshot::{MuxSessionTag, MuxSnapshot, new_session_identity, session_matches},
 };
 use anyhow::{Context, Result, bail};
@@ -362,6 +363,50 @@ impl Catalog {
             }
         }
         backend.execute(command)
+    }
+
+    /// # Errors
+    /// Returns invalid Space, backend, or pane ownership errors, and the backend's own errors.
+    pub fn pane(
+        &mut self,
+        space_id: &str,
+        expected: Backend,
+        request: &PaneRequest,
+    ) -> Result<Option<PaneText>> {
+        let mut backend = self.backend(expected)?;
+        self.pane_with_backend(space_id, expected, request, backend.as_mut())
+    }
+
+    /// Run one pane request, but only on a pane of a session this Space holds: the session's own
+    /// tag answers, exactly as it does for [`Self::execute_with_backend`].
+    /// # Errors
+    /// Returns invalid Space, backend, or pane ownership errors, and the backend's own errors.
+    pub fn pane_with_backend(
+        &mut self,
+        space_id: &str,
+        expected: Backend,
+        request: &PaneRequest,
+        backend: &mut dyn MuxBackend,
+    ) -> Result<Option<PaneText>> {
+        let backend_kind = self.space_backend(space_id, expected)?;
+        let _lease = self.backend_lease(backend_kind)?;
+        let pane = request.pane();
+        let snapshot = backend.snapshot()?;
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|session| {
+                session
+                    .windows
+                    .iter()
+                    .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+                    .any(|anchor| anchor.pane_id.as_deref() == Some(pane))
+            })
+            .with_context(|| format!("pane {pane} is unavailable"))?;
+        if session.tag.space.as_deref() != Some(space_id) {
+            bail!("pane {pane} does not belong to remote Space {space_id}")
+        }
+        request.run(backend)
     }
 
     /// Stamp the sessions the old name-keyed table claims, then drop its rows. Runs once per
