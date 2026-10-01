@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// The longest session name a caller may choose, in bytes.
-pub const SESSION_NAME_MAX_BYTES: usize = 256;
+pub use crate::session_names::SESSION_NAME_MAX_BYTES;
 /// The most argv elements a caller may pass for a new session's first pane.
 pub const SESSION_ARGV_MAX_ELEMENTS: usize = 64;
 /// The most argv bytes a caller may pass, counting one terminator per element.

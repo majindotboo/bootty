@@ -1,5 +1,7 @@
 use std::{collections::HashSet, path::Path};
 
+pub const SESSION_NAME_MAX_BYTES: usize = 256;
+
 /// Derive the default session name for a local path.
 #[must_use]
 pub fn session_name_for_path(path: &str) -> String {
@@ -76,7 +78,7 @@ pub fn portable_session_name(label: &str) -> String {
     let label = rmux_proto::SessionName::new(label.to_owned())
         .map_or_else(|_| "bootty".to_owned(), rmux_proto::SessionName::into_inner);
     // unique_session_name uses u128 suffixes: reserve the dash and at most 39 decimal digits.
-    let limit = crate::workspace::SESSION_NAME_MAX_BYTES.saturating_sub(40);
+    let limit = SESSION_NAME_MAX_BYTES.saturating_sub(40);
     let mut name = String::new();
     for character in label.chars() {
         let character = if invalid_session_name_character(character) {
