@@ -181,18 +181,21 @@ async fn read_bounded(
 ///
 /// # Errors
 /// Returns unsupported-platform or filesystem errors.
+#[cfg(target_os = "macos")]
 pub fn install_helper(destination: &Path) -> Result<(), ComputerError> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bootty-computer"));
-        std::fs::write(destination, bytes)?;
-        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = destination;
-        Err(ComputerError::Unsupported)
-    }
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bootty-computer"));
+    std::fs::write(destination, bytes)?;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// Packaging installs this inside the app before code signing, giving permission checks
+/// and input actions the same stable identity. Runtime never writes an executable.
+///
+/// # Errors
+/// Returns unsupported-platform or filesystem errors.
+#[cfg(not(target_os = "macos"))]
+pub const fn install_helper(_: &Path) -> Result<(), ComputerError> {
+    Err(ComputerError::Unsupported)
 }
