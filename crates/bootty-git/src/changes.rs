@@ -1,5 +1,7 @@
 //! Repository changes and explicit index/commit operations, independent of presentation.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Git, runner::CommandRunner};
@@ -18,6 +20,15 @@ pub struct ChangedFile {
     pub previous_path: Option<String>,
     pub index: char,
     pub worktree: char,
+    pub staged_diff: Option<DiffStat>,
+    pub unstaged_diff: Option<DiffStat>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiffStat {
+    Text { added: u64, removed: u64 },
+    Binary,
 }
 
 impl ChangedFile {
@@ -85,7 +96,17 @@ impl<R: CommandRunner> Git<R> {
                 previous_path,
                 index,
                 worktree,
+                staged_diff: None,
+                unstaged_diff: None,
             });
+        }
+        if !files.is_empty() {
+            let mut staged = self.diff_stats(&root, true)?;
+            let mut unstaged = self.diff_stats(&root, false)?;
+            for file in &mut files {
+                file.staged_diff = staged.remove(&file.path);
+                file.unstaged_diff = unstaged.remove(&file.path);
+            }
         }
         Ok(RepositoryChanges {
             branch: self.head_branch(&root),
@@ -159,6 +180,41 @@ impl<R: CommandRunner> Git<R> {
             args.push("--amend");
         }
         self.checked_output(root, &args).map(|_| ())
+    }
+
+    fn diff_stats(&self, root: &str, staged: bool) -> Result<HashMap<String, DiffStat>, String> {
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z"];
+        if staged {
+            args.push("--cached");
+        }
+        let output = self.checked_output(root, &args)?;
+        let mut records = output.split_terminator('\0');
+        let mut stats = HashMap::new();
+        while let Some(record) = records.next() {
+            let mut fields = record.splitn(3, '\t');
+            let added = fields.next().ok_or("missing added-line count")?;
+            let removed = fields.next().ok_or("missing removed-line count")?;
+            let path = fields.next().ok_or("missing diff-stat path")?;
+            // -z represents a rename as an empty path, old path, then destination path.
+            let path = if path.is_empty() {
+                records.next().ok_or("missing diff-stat rename source")?;
+                records
+                    .next()
+                    .ok_or("missing diff-stat rename destination")?
+            } else {
+                path
+            };
+            let stat = if added == "-" && removed == "-" {
+                DiffStat::Binary
+            } else {
+                DiffStat::Text {
+                    added: added.parse().map_err(|_| "invalid added-line count")?,
+                    removed: removed.parse().map_err(|_| "invalid removed-line count")?,
+                }
+            };
+            stats.insert(path.to_owned(), stat);
+        }
+        Ok(stats)
     }
 
     fn current_file(&self, root: &str, path: &str) -> Result<(String, ChangedFile), String> {

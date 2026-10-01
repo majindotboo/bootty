@@ -124,3 +124,90 @@ fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Resu
     assert!(git.stage_file(root, "*").is_err());
     assert!(git.stage_file(root, "../outside").is_err());
 }
+
+#[rstest]
+fn changes_count_staged_and_unstaged_edits_independently(repository: anyhow::Result<TempDir>) {
+    use bootty_git::changes::DiffStat;
+    let repository = repository.expect("repository fixture");
+    let root = repository.path().to_str().unwrap();
+    let git = Git::new();
+    let path = "file [one]\twith\nlines.txt";
+    repository.child(path).write_str("first\nsecond\n").unwrap();
+    git.stage_file(root, path).unwrap();
+    git.commit_index(root, "initial", false).unwrap();
+    repository
+        .child(path)
+        .write_str("replacement\nsecond\n")
+        .unwrap();
+    git.stage_file(root, path).unwrap();
+    repository
+        .child(path)
+        .write_str("replacement\nsecond\nthird\n")
+        .unwrap();
+    let changes = git.changes(root).unwrap();
+    let file = changes.files.iter().find(|file| file.path == path).unwrap();
+    assert_eq!(
+        file.staged_diff,
+        Some(DiffStat::Text {
+            added: 1,
+            removed: 1
+        })
+    );
+    assert_eq!(
+        file.unstaged_diff,
+        Some(DiffStat::Text {
+            added: 1,
+            removed: 0
+        })
+    );
+}
+
+#[rstest]
+fn binary_changes_and_renames_keep_their_current_file_identity(
+    repository: anyhow::Result<TempDir>,
+) {
+    use bootty_git::changes::DiffStat;
+    let repository = repository.expect("repository fixture");
+    let root = repository.path().to_str().unwrap();
+    let git = Git::new();
+    repository
+        .child("original.txt")
+        .write_str("first\nsecond\n")
+        .unwrap();
+    repository
+        .child("binary.dat")
+        .write_binary(b"\0first")
+        .unwrap();
+    git.stage_file(root, "original.txt").unwrap();
+    git.stage_file(root, "binary.dat").unwrap();
+    git.commit_index(root, "initial", false).unwrap();
+    run(&repository, &["mv", "original.txt", "renamed.txt"]).unwrap();
+    repository
+        .child("renamed.txt")
+        .write_str("first\nsecond\nthird\n")
+        .unwrap();
+    git.stage_file(root, "renamed.txt").unwrap();
+    repository
+        .child("binary.dat")
+        .write_binary(b"\0changed")
+        .unwrap();
+    let changes = git.changes(root).unwrap();
+    let renamed = changes
+        .files
+        .iter()
+        .find(|file| file.path == "renamed.txt")
+        .unwrap();
+    assert_eq!(
+        renamed.staged_diff,
+        Some(DiffStat::Text {
+            added: 1,
+            removed: 0
+        })
+    );
+    let binary = changes
+        .files
+        .iter()
+        .find(|file| file.path == "binary.dat")
+        .unwrap();
+    assert_eq!(binary.unstaged_diff, Some(DiffStat::Binary));
+}
