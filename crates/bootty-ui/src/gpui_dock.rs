@@ -173,9 +173,6 @@ pub struct WorkspaceDock {
     coordination: Entity<crate::gpui_orchestration::OrchestrationPanel>,
     browser: Entity<BrowserPanel>,
     browser_occluded: bool,
-    native_sessions: BTreeMap<String, Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
-    native_subscriptions: BTreeMap<String, Subscription>,
-    selected_native_session: Option<String>,
     documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>>,
     document_factory: PanelFactory,
     present: bool,
@@ -185,7 +182,6 @@ pub struct WorkspaceDock {
 
 impl EventEmitter<DockFocusChanged> for WorkspaceDock {}
 impl EventEmitter<BrowserPaletteRequested> for WorkspaceDock {}
-impl EventEmitter<crate::gpui_agent_session::OpenNativeSession> for WorkspaceDock {}
 impl Focusable for WorkspaceDock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -290,9 +286,6 @@ impl WorkspaceDock {
             coordination,
             browser,
             browser_occluded: false,
-            native_sessions: BTreeMap::new(),
-            native_subscriptions: BTreeMap::new(),
-            selected_native_session: None,
             documents,
             document_factory,
             present: true,
@@ -875,125 +868,14 @@ impl WorkspaceDock {
         }
     }
 
-    pub(crate) fn open_native_history(&self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(view) = self
-            .selected_native_session
-            .as_ref()
-            .and_then(|id| self.native_sessions.get(id))
-        {
-            view.update(cx, |view, cx| view.open_history(window, cx));
-        }
-    }
-
-    pub(crate) fn native_session_focus(&self, cx: &App) -> Option<FocusHandle> {
-        self.native_sessions
-            .get(self.selected_native_session.as_ref()?)
-            .map(|view| Focusable::focus_handle(view, cx))
-    }
-
-    pub(crate) fn context_directory(&self) -> String {
-        self.panels.context.directory.clone()
-    }
-
-    pub(crate) fn selected_native_session(&self) -> Option<&str> {
-        self.selected_native_session.as_deref()
-    }
-
-    pub(crate) fn sync_native_sessions(
-        &mut self,
-        records: &[bootty_agents::NativeSessionRecord],
+    pub(crate) fn sync_agent_terminals(
+        &self,
+        workers: Vec<crate::gpui_orchestration::OrchestrationAgentSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let sessions = records
-            .iter()
-            .filter(|record| {
-                !matches!(
-                    record.snapshot.status,
-                    bootty_agents::NativeSessionStatus::Stopped
-                        | bootty_agents::NativeSessionStatus::Error
-                )
-            })
-            .map(
-                |record| crate::gpui_orchestration::OrchestrationAgentSession {
-                    name: record.title.clone(),
-                    provider: record.config.provider,
-                    target: record.target(),
-                },
-            )
-            .collect();
         self.coordination
-            .update(cx, |panel, cx| panel.set_sessions(sessions, window, cx));
-        self.native_sessions
-            .retain(|id, _| records.iter().any(|record| &record.id == id));
-        self.native_subscriptions
-            .retain(|id, _| self.native_sessions.contains_key(id));
-        for record in records {
-            if let Some(view) = self.native_sessions.get(&record.id) {
-                view.update(cx, |view, cx| {
-                    view.update_record(record.clone(), window, cx);
-                    view.set_history(records, cx);
-                });
-            }
-        }
-    }
-
-    pub(crate) fn show_native_session(
-        &mut self,
-        record: &bootty_agents::NativeSessionRecord,
-        records: &[bootty_agents::NativeSessionRecord],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = record.id.clone();
-        let view = if let Some(view) = self.native_sessions.get(&id) {
-            view.clone()
-        } else {
-            let view = cx.new(|cx| {
-                crate::gpui_agent_session::NativeAgentSessionView::new(
-                    record.clone(),
-                    self.sender.clone(),
-                    window,
-                    cx,
-                )
-            });
-            let subscription = cx.subscribe(
-                &view,
-                |_, _, event: &crate::gpui_agent_session::OpenNativeSession, cx| {
-                    cx.emit(event.clone());
-                },
-            );
-            self.native_subscriptions.insert(id.clone(), subscription);
-            self.native_sessions.insert(id.clone(), view.clone());
-            register(&self.area, view.clone(), cx);
-            view
-        };
-        view.update(cx, |view, cx| {
-            view.update_record(record.clone(), window, cx);
-            view.set_history(records, cx);
-        });
-        self.selected_native_session = Some(id);
-        self.empty_terminal = None;
-        self.terminal
-            .update(cx, |terminal, cx| terminal.set_visible(false, cx));
-        self.area.update(cx, |area, cx| {
-            area.set_center(
-                DockLayout::tabs().panel_view(panel_handle(view.clone()), cx),
-                window,
-                cx,
-            );
-        });
-        Focusable::focus_handle(&view, cx).focus(window, cx);
-        cx.notify();
-    }
-
-    pub(crate) fn show_terminal_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_native_session.take().is_some() {
-            self.area.update(cx, |area, cx| {
-                area.set_center(DockLayout::tabs(), window, cx);
-            });
-            cx.notify();
-        }
+            .update(cx, |panel, cx| panel.set_sessions(workers, window, cx));
     }
 
     pub(crate) fn terminal_panel(&self) -> Entity<crate::gpui_terminal_panel::TerminalPanel> {
@@ -1270,7 +1152,7 @@ impl WorkspaceDock {
     /// Layout edits before the saved layout has been read are startup noise (window frame
     /// restoration, first-frame measurements); persisting them would clobber the real save.
     fn layout_changed(&self, cx: &App) {
-        if self.restoring.is_some() || !self.present || self.selected_native_session.is_some() {
+        if self.restoring.is_some() || !self.present {
             return;
         }
         self.save_layout(cx);

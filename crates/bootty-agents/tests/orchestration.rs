@@ -39,7 +39,7 @@ fn request(command: &str, args: &[&str], target: Option<CommandTarget>) -> Agent
 fn target(kind: ResourceKind, generation: u64) -> CommandTarget {
     CommandTarget {
         kind,
-        handle: "native:codex:session-1".to_owned(),
+        handle: "opaque-terminal-1".to_owned(),
         generation,
     }
 }
@@ -92,9 +92,44 @@ fn setup(
 }
 
 #[rstest]
-#[case(ResourceKind::Session)]
+#[case(ResourceKind::Session, 9)]
+#[case(ResourceKind::Binding, 9)]
+#[case(ResourceKind::Pane, 9)]
+#[case(ResourceKind::Terminal, 0)]
+fn worker_attachment_requires_a_live_terminal_identity(
+    directory: Result<assert_fs::TempDir, String>,
+    #[case] kind: ResourceKind,
+    #[case] generation: u64,
+) {
+    let directory = directory.unwrap();
+    let path = directory.path().join("coordination.json");
+    let service =
+        OrchestrationService::open(&path, Arc::new(|_, _, _| CommandOutcome::success())).unwrap();
+    let run = id(
+        service.invoke(&request("run.create", &["Project", "Goal"], None)),
+        "run",
+    )
+    .unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    let before = serde_json::to_value(service.runs().unwrap()).unwrap();
+    assert!(matches!(
+        service.invoke(&request(
+            "worker.attach",
+            &[&run, "Builder", "codex"],
+            Some(target(kind, generation))
+        )),
+        CommandOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        serde_json::to_value(service.runs().unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), saved);
+}
+
+#[rstest]
 #[case(ResourceKind::Terminal)]
-fn task_delivery_commits_before_using_exact_session(
+fn task_delivery_requires_exact_worker_report(
     directory: Result<assert_fs::TempDir, String>,
     #[case] kind: ResourceKind,
 ) {
@@ -112,7 +147,8 @@ fn task_delivery_commits_before_using_exact_session(
         });
     let service = OrchestrationService::open(&path, executor)
         .unwrap()
-        .with_cli("/tmp/Bootty Dev.app/Contents/MacOS/bootty-dev");
+        .with_cli("/tmp/Bootty Dev.app/Contents/MacOS/bootty-dev")
+        .with_cli_namespace("bootty-dev-demo");
     let original = target(kind, 9);
     let (run, task, worker) = setup(&service, &original).unwrap();
     let dispatched =
@@ -123,7 +159,8 @@ fn task_delivery_commits_before_using_exact_session(
     assert_eq!(invocation.target, Some(original.clone()));
     assert!(invocation.arguments[0].contains("Implement the requested change"));
     assert!(invocation.arguments[0].contains("/tmp/Bootty Dev.app/Contents/MacOS/bootty-dev"));
-    assert!(invocation.arguments[0].contains("native:codex:session-1@9"));
+    assert!(invocation.arguments[0].contains(&format!("{}@9", original.handle)));
+    assert!(invocation.arguments[0].contains("BOOTTY_DEVELOPMENT_NAMESPACE=bootty-dev-demo"));
     assert!(matches!(
         service.invoke(&request("run.finish", &[&run], None)),
         CommandOutcome::Failed { .. }
@@ -157,7 +194,7 @@ fn failures_are_retained_and_require_explicit_retry(
         Arc::new(move |_, _, _| outcome.clone()),
     )
     .unwrap();
-    let (run, task, worker) = setup(&service, &target(ResourceKind::Session, 9)).unwrap();
+    let (run, task, worker) = setup(&service, &target(ResourceKind::Terminal, 9)).unwrap();
     assert_eq!(
         service.invoke(&request("task.dispatch", &[&run, &task, &worker], None)),
         expected
@@ -186,7 +223,7 @@ fn restart_keeps_history_and_interrupts_unproven_work(
     let path = directory.path().join("coordination.json");
     let executor: Arc<dyn AgentCommandExecutor> = Arc::new(|_, _, _| CommandOutcome::success());
     let service = OrchestrationService::open(&path, Arc::clone(&executor)).unwrap();
-    let original = target(ResourceKind::Session, 9);
+    let original = target(ResourceKind::Terminal, 9);
     let (run, task, worker) = setup(&service, &original).unwrap();
     let dispatched =
         value(service.invoke(&request("task.dispatch", &[&run, &task, &worker], None))).unwrap();
@@ -203,7 +240,7 @@ fn restart_keeps_history_and_interrupts_unproven_work(
     let replaced = value(service.invoke(&request(
         "worker.attach",
         &[&run, "Builder", "codex"],
-        Some(target(ResourceKind::Session, 10)),
+        Some(target(ResourceKind::Terminal, 10)),
     )))
     .unwrap();
     assert_eq!(replaced["worker"]["id"], worker);
@@ -239,7 +276,7 @@ fn failed_commit_leaves_live_state_unchanged_and_never_dispatches(
         }),
     )
     .unwrap();
-    let (run, task, worker) = setup(&service, &target(ResourceKind::Session, 9)).unwrap();
+    let (run, task, worker) = setup(&service, &target(ResourceKind::Terminal, 9)).unwrap();
     let before = serde_json::to_value(service.runs().unwrap()).unwrap();
     std::fs::remove_dir_all(&parent).unwrap();
     std::fs::write(&parent, "blocks the state directory").unwrap();
@@ -275,7 +312,7 @@ fn accepted_delivery_with_failed_result_commit_remains_unproven(
         }),
     )
     .unwrap();
-    let (run, task, worker) = setup(&service, &target(ResourceKind::Session, 9)).unwrap();
+    let (run, task, worker) = setup(&service, &target(ResourceKind::Terminal, 9)).unwrap();
     assert!(
         matches!(service.invoke(&request("task.dispatch", &[&run, &task, &worker], None)), CommandOutcome::Failed { code, .. } if code == "delivery_unrecorded")
     );
@@ -294,7 +331,7 @@ fn messages_record_delivery_and_preserve_inbox_across_restart(
     let path = directory.path().join("coordination.json");
     let executor: Arc<dyn AgentCommandExecutor> = Arc::new(|_, _, _| CommandOutcome::success());
     let service = OrchestrationService::open(&path, Arc::clone(&executor)).unwrap();
-    let (run, _, worker) = setup(&service, &target(ResourceKind::Session, 9)).unwrap();
+    let (run, _, worker) = setup(&service, &target(ResourceKind::Terminal, 9)).unwrap();
     let delivered = value(service.invoke(&request(
         "message.send",
         &[&run, &worker, "Review the diff before completing"],
@@ -314,14 +351,14 @@ fn messages_record_delivery_and_preserve_inbox_across_restart(
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
     #[test]
-    fn changed_session_generation_cannot_complete_work(generation in 10_u64..u64::MAX, wrong_dispatch in "[a-z]{1,12}") {
+    fn changed_worker_generation_cannot_complete_work(generation in 10_u64..u64::MAX, wrong_dispatch in "[a-z]{1,12}") {
         let directory = assert_fs::TempDir::new().unwrap();
         let service = OrchestrationService::open(&directory.path().join("coordination.json"), Arc::new(|_, _, _| CommandOutcome::success())).unwrap();
-        let original = target(ResourceKind::Session, 9);
+        let original = target(ResourceKind::Terminal, 9);
         let (run, task, worker) = setup(&service, &original).unwrap();
         let dispatch = value(service.invoke(&request("task.dispatch", &[&run, &task, &worker], None))).unwrap()["task"]["dispatch"].as_str().unwrap().to_owned();
         let before = serde_json::to_value(service.runs().unwrap()).unwrap();
-        for (report_target, report_dispatch) in [(target(ResourceKind::Session, generation), dispatch), (original, wrong_dispatch)] {
+        for (report_target, report_dispatch) in [(target(ResourceKind::Terminal, generation), dispatch), (original, wrong_dispatch)] {
             prop_assert!(matches!(service.invoke(&request("task.complete", &[&run, &task, &report_dispatch, "completed"], Some(report_target))), CommandOutcome::Failed { .. }), "report with a changed generation or attempt must fail");
             assert_eq!(serde_json::to_value(service.runs().unwrap()).unwrap(), before);
         }

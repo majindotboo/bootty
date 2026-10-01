@@ -223,7 +223,7 @@ pub enum AppEffect {
     RestoreMacosPresentation,
     OpenUrl(String),
     ChooseProjectDirectory,
-    OpenNativeProjectSession {
+    OpenAgentProjectSession {
         cwd: String,
         provider: bootty_agents::AgentKind,
     },

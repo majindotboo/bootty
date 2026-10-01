@@ -227,208 +227,8 @@ fn core_command_resolution_reports_executor_and_argument_boundaries() {
 }
 
 #[rstest]
-fn native_agent_commands_have_session_targets_and_resolve_through_one_native_path() {
-    let catalog = CommandCatalog::default();
-    let native = catalog
-        .list()
-        .into_iter()
-        .filter(|descriptor| descriptor.id.starts_with("agents."))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native
-            .iter()
-            .map(|command| &command.id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        native.len()
-    );
-    assert_eq!(
-        catalog
-            .describe("agents.pi.start")
-            .expect("Pi start descriptor")
-            .target,
-        Some(ResourceKind::Binding)
-    );
-    assert!(matches!(
-        catalog
-            .resolve(CommandInvocation::from_action(
-                "agents.pi.state",
-                Caller::Socket
-            ))
-            .expect("resolve static native command")
-            .executor,
-        CommandExecutor::NativeAgent
-    ));
-}
-
-#[cfg(unix)]
-#[rstest]
-fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let (wake, wakes) = mpsc::channel();
-    let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        Arc::new(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_events),
-    )
-    .expect("composed app state");
-    let started = Instant::now();
-    open_native_session(&mut state, directory.path(), started);
-    let provider = directory.path().join("provider.py");
-    fs::write(&provider, r"import json,sys
-for line in sys.stdin:
- request=json.loads(line)
- method=request.get('method')
- if 'id' not in request: continue
- if method=='thread/start': result={'thread':{'id':'caller-thread'}}
- elif method=='turn/start':
-  print(json.dumps({'method':'turn/completed','params':{'turn':{'id':'turn','status':'completed'}}}),flush=True)
-  result={'turn':{'id':'turn'}}
- else: result={}
- print(json.dumps({'id':request['id'],'result':result}),flush=True)
-").unwrap();
-    let outcome = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.codex.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                "/usr/bin/python3".to_owned(),
-                serde_json::to_string(&[provider.to_string_lossy()]).unwrap(),
-            ],
-            Caller::Socket,
-        ),
-        started,
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    let service = state.native_agent_service().unwrap();
-    let record = service.sessions().into_iter().next().unwrap();
-
-    let callers = [
-        Caller::CommandPalette,
-        Caller::Keybinding,
-        Caller::BuiltinKeybinding,
-        Caller::Cli,
-        Caller::Socket,
-        Caller::Luau,
-        Caller::Internal,
-    ];
-    for (index, caller) in callers.into_iter().enumerate() {
-        let mut invocation = CommandInvocation::new(
-            "agents.codex.prompt",
-            vec![format!("caller-{index}")],
-            caller,
-        );
-        invocation.target = Some(record.target());
-        let outcome = submit_command_from_caller(
-            &mut state,
-            &wakes,
-            caller,
-            invocation,
-            started
-                .checked_add(Duration::from_millis(
-                    20_u64
-                        .checked_add(u64::try_from(index).expect("caller index fits"))
-                        .expect("test tick fits"),
-                ))
-                .expect("test timestamp fits"),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Success { .. }),
-            "{outcome:?}"
-        );
-    }
-    service.stop(&record.target()).unwrap();
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case("agents.pi.account.login")]
-#[case("agents.pi.account.logout")]
-fn native_account_commands_reject_another_provider_before_mutation(#[case] command: &str) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
-        test_config::config(
-            directory.path().join("config.toml"),
-            MultiplexerBackendConfig::Native,
-        ),
-        "main".to_owned(),
-        support::backends(),
-        Arc::new(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(events),
-    )
-    .unwrap();
-    let provider = directory.path().join("claude.py");
-    fs::write(&provider, r"import json,sys
-for line in sys.stdin:
- request=json.loads(line)
- if request.get('type')=='control_request':
-  print(json.dumps({'type':'control_response','response':{'request_id':request['request_id'],'subtype':'success','response':{'session_id':'owned-claude'}}}),flush=True)
-").unwrap();
-    let now = Instant::now();
-    let started = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                "/usr/bin/python3".to_owned(),
-                serde_json::to_string(&[provider.to_string_lossy()]).unwrap(),
-            ],
-            Caller::Socket,
-        ),
-        now,
-    );
-    assert!(
-        matches!(started, CommandOutcome::Success { .. }),
-        "{started:?}"
-    );
-    let service = state.native_agent_service().unwrap();
-    let record = service.sessions().into_iter().next().unwrap();
-    let before = pane_count(&state);
-    let mut invocation = CommandInvocation::new(command, Vec::new(), Caller::Socket);
-    invocation.target = Some(record.target());
-    invocation.confirmation = Some(invocation.confirmation());
-    let result = submit_command_from_caller(&mut state, &wakes, Caller::Socket, invocation, now);
-    assert!(
-        matches!(result, CommandOutcome::StaleTarget { .. }),
-        "{result:?}"
-    );
-    assert!(service.resolve(&record.target()).is_ok());
-    assert_eq!(pane_count(&state), before);
-    service.stop(&record.target()).unwrap();
-}
-
-#[rstest]
-#[case("agents.codex.stop", vec![])]
-#[case("agents.codex.remove", vec![])]
-#[case("agents.codex.account.logout", vec![])]
 #[case("orchestration.run.remove", vec!["missing-run".to_owned()])]
-fn native_and_coordination_destructive_commands_require_exact_confirmation(
+fn coordination_destructive_commands_require_exact_confirmation(
     #[case] command: &str,
     #[case] arguments: Vec<String>,
 ) {
@@ -452,13 +252,6 @@ fn native_and_coordination_destructive_commands_require_exact_confirmation(
     )
     .unwrap();
     let mut invocation = CommandInvocation::new(command, arguments, Caller::Socket);
-    if command.starts_with("agents.") {
-        invocation.target = Some(CommandTarget {
-            kind: ResourceKind::Session,
-            handle: "native:codex:missing".to_owned(),
-            generation: 1,
-        });
-    }
     let started = Instant::now();
     let outcome = submit_command_from_caller(
         &mut state,
@@ -1690,7 +1483,11 @@ fn authored_theme_preview_restore_save_and_apply_share_command_path() {
 
 #[cfg(unix)]
 #[rstest]
-fn agent_start_uses_native_rpc_with_literal_arguments_and_captured_directory() {
+#[case(false)]
+#[case(true)]
+fn agent_start_uses_a_backend_pty_with_literal_arguments_and_captured_directory(
+    #[case] single_executable: bool,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
     let config = test_config::config(
         directory.path().join("config.toml"),
@@ -1710,38 +1507,57 @@ fn agent_start_uses_native_rpc_with_literal_arguments_and_captured_directory() {
         Some(events),
     )
     .unwrap();
-    let before = pane_count(&state);
     let output = directory.path().join("agent-output");
-    let provider = directory.path().join("provider.py");
+    let listener = std::os::unix::net::UnixListener::bind(&output).unwrap();
+    let provider = directory.path().join("agent executable.py");
     fs::write(
         &provider,
-        r"import json,os,sys
-with open(sys.argv[2], 'w') as output:
- json.dump({'literal':sys.argv[1], 'cwd':os.getcwd()},output)
-for line in sys.stdin:
- request=json.loads(line)
- data={'sessionId':'native-test'} if request['type']=='get_state' else {'messages':[]}
- print(json.dumps({'id':request.get('id'),'type':'response','success':True,'data':data}),flush=True)
+        r"import json,os,sys,socket
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as output:
+ output.connect(sys.argv[2])
+ output.sendall(json.dumps({'literal':sys.argv[1], 'cwd':os.getcwd(), 'tty':sys.stdin.isatty() and sys.stdout.isatty(), 'term':os.environ.get('TERM'), 'colorterm':os.environ.get('COLORTERM'), 'no_color':os.environ.get('NO_COLOR')}).encode())
+for line in sys.stdin: print(line,flush=True)
 ",
     )
     .unwrap();
     let literal = "quoted ' value; $HOME `uname`";
-    let argv = serde_json::to_string(&[
+    let mut argv = serde_json::to_string(&[
         provider.to_str().unwrap(),
         literal,
         output.to_str().unwrap(),
     ])
     .unwrap();
+    let (provider_kind, program) = if single_executable {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = fs::read_to_string(&provider).unwrap();
+        fs::write(
+            &provider,
+            format!(
+                "#!/usr/bin/env python3\nimport sys\nsys.argv.extend([{},{}])\n{script}",
+                serde_json::to_string(literal).unwrap(),
+                serde_json::to_string(output.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
+        argv = "[]".to_owned();
+        (
+            bootty_agents::AgentKind::Codex,
+            provider.to_string_lossy().into_owned(),
+        )
+    } else {
+        (bootty_agents::AgentKind::Pi, "/usr/bin/python3".to_owned())
+    };
     let started = Instant::now();
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
         Caller::Socket,
         CommandInvocation::new(
-            "agents.pi.start",
+            format!("agents.{provider_kind}.start"),
             vec![
                 directory.path().to_string_lossy().into_owned(),
-                "/usr/bin/python3".to_owned(),
+                program,
                 argv,
             ],
             Caller::Socket,
@@ -1752,7 +1568,10 @@ for line in sys.stdin:
         matches!(outcome, CommandOutcome::Success { .. }),
         "{outcome:?}"
     );
-    let facts: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    let (mut connection, _) = listener.accept().unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut connection, &mut bytes).unwrap();
+    let facts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         facts.get("literal").and_then(serde_json::Value::as_str),
         Some(literal)
@@ -1767,141 +1586,56 @@ for line in sys.stdin:
         .unwrap(),
         std::fs::canonicalize(directory.path()).unwrap()
     );
-    assert_eq!(pane_count(&state), before);
-    let service = state.native_agent_service().unwrap();
-    let record = service.sessions().into_iter().next().unwrap();
-    assert_eq!(record.snapshot.session_id.as_deref(), Some("native-test"));
-    service.stop(&record.target()).unwrap();
-}
-
-/// A native session in another Space retains its full recent reply while the global listing
-/// exposes a bounded Unicode-safe preview, without changing the active Space.
-#[cfg(unix)]
-#[rstest]
-fn a_long_final_message_is_previewed_in_the_listing_and_whole_in_state() {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let elsewhere = WorkspaceRepository::open(&directory.path().join("config.toml"))
-        .expect("workspace")
-        .0
-        .create_space(
-            "Elsewhere",
-            "2",
-            [1, 2, 3],
-            false,
-            SpaceMuxOverride::default(),
-            false,
-        )
-        .expect("create Space")
-        .expect("valid Space")
-        .id();
-    let (wake, wakes) = mpsc::channel();
-    let (events, receiver) = bootty_control::event_queue();
-    drop(receiver);
-    let mut state = AppState::new_for_window_with_agents(
-        test_config::config(
-            directory.path().join("config.toml"),
-            MultiplexerBackendConfig::Native,
-        ),
-        "main".to_owned(),
-        support::backends(),
-        Arc::new(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(events),
-    )
-    .unwrap();
-    let provider = directory.path().join("provider.py");
-    fs::write(&provider, r"import json,sys
-for line in sys.stdin:
- request=json.loads(line)
- if 'id' not in request: continue
- method=request.get('method')
- if method=='thread/start': result={'thread':{'id':'preview-thread'}}
- elif method=='turn/start':
-  print(json.dumps({'method':'item/completed','params':{'item':{'id':'answer','type':'agentMessage','text':'é'*8192}}}),flush=True)
-  print(json.dumps({'method':'turn/completed','params':{'turn':{'status':'completed'}}}),flush=True)
-  result={}
- else: result={}
- print(json.dumps({'id':request['id'],'result':result}),flush=True)
-").unwrap();
-    let now = Instant::now();
-    let started = submit_command_from_caller(
-        &mut state,
-        &wakes,
+    assert_eq!(facts["tty"], true);
+    assert_eq!(facts["term"], "xterm-bootty");
+    assert_eq!(facts["colorterm"], "truecolor");
+    assert_eq!(facts["no_color"], serde_json::Value::Null);
+    let value = match outcome {
+        CommandOutcome::Success { value, .. } => Some(value),
+        _ => None,
+    }
+    .expect("the provider launch succeeded");
+    let target: CommandTarget = serde_json::from_value(value["terminal_target"].clone()).unwrap();
+    assert_eq!(target.kind, ResourceKind::Terminal);
+    assert_eq!(
+        state
+            .terminal_agent_service()
+            .unwrap()
+            .record(&target)
+            .unwrap()
+            .provider,
+        provider_kind
+    );
+    for caller in [
+        Caller::CommandPalette,
+        Caller::Keybinding,
+        Caller::BuiltinKeybinding,
+        Caller::Cli,
         Caller::Socket,
-        CommandInvocation::new(
-            "agents.codex.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                "/usr/bin/python3".to_owned(),
-                serde_json::to_string(&[provider.to_string_lossy()]).unwrap(),
-            ],
-            Caller::Socket,
-        ),
-        now,
-    );
+        Caller::Luau,
+        Caller::Internal,
+    ] {
+        let mut prompt = CommandInvocation::new(
+            format!("agents.{provider_kind}.prompt"),
+            vec!["Literal prompt".to_owned()],
+            caller,
+        );
+        prompt.target = Some(target.clone());
+        let prompted = submit_command_from_caller(&mut state, &wakes, caller, prompt, started);
+        assert!(
+            matches!(prompted, CommandOutcome::Success { .. }),
+            "{prompted:?}"
+        );
+    }
+    let mut stop =
+        CommandInvocation::from_action(&format!("agents.{provider_kind}.stop"), Caller::Socket);
+    stop.target = Some(target);
+    stop.confirmation = Some(stop.confirmation());
+    let stopped = submit_command_from_caller(&mut state, &wakes, Caller::Socket, stop, started);
     assert!(
-        matches!(started, CommandOutcome::Success { .. }),
-        "{started:?}"
+        matches!(stopped, CommandOutcome::Success { .. }),
+        "{stopped:?}"
     );
-    let service = state.native_agent_service().unwrap();
-    let record = service.sessions().into_iter().next().unwrap();
-    let mut prompt = CommandInvocation::new(
-        "agents.codex.prompt",
-        vec!["Long reply".to_owned()],
-        Caller::Socket,
-    );
-    prompt.target = Some(record.target());
-    let prompted = submit_command_from_caller(&mut state, &wakes, Caller::Socket, prompt, now);
-    assert!(
-        matches!(prompted, CommandOutcome::Success { .. }),
-        "{prompted:?}"
-    );
-    assert!(state.activate_space_from_ui(elsewhere));
-
-    let listing = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new("agents.list", Vec::new(), Caller::Socket),
-        now,
-    );
-    let CommandOutcome::Success { value: entries, .. } = listing else {
-        panic!("agents.list failed: {listing:?}");
-    };
-    let [entry] = entries.as_array().unwrap().as_slice() else {
-        panic!("one native agent: {entries:?}");
-    };
-    let message = "é".repeat(8 * 1024);
-    let preview = entry["last_message"].as_str().unwrap();
-    assert!(
-        entry["last_message_truncated"] == true
-            && !preview.is_empty()
-            && preview.len() <= 1024
-            && preview.len() < message.len()
-            && message.starts_with(preview),
-        "{entry:?}"
-    );
-    let target: CommandTarget = serde_json::from_value(entry["target"].clone()).unwrap();
-    assert_eq!(target, record.target());
-    assert_eq!(state.active_space_id(), elsewhere);
-
-    let mut read = CommandInvocation::new("agents.codex.state", Vec::new(), Caller::Socket);
-    read.target = Some(target);
-    let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now);
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("agents.codex.state failed: {outcome:?}");
-    };
-    let transcript = value["transcript"].as_array().unwrap();
-    let reply = transcript
-        .iter()
-        .find(|item| item["role"] == "assistant")
-        .unwrap();
-    assert_eq!(reply["text"].as_str(), Some(message.as_str()));
-    assert_eq!(state.active_space_id(), elsewhere);
-    service.stop(&record.target()).unwrap();
 }
 
 #[rstest]

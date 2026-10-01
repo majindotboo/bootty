@@ -27,7 +27,7 @@ This file describes the current production structure.
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
-| Native agent conversations and history | `bootty-agents::NativeAgentService` | Publishes only persisted session identities; bounded provider state stays process-owned. |
+| Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
 | Desktop capture and input | `bootty-computer` | User enabling and macOS permission checks precede every operation. |
 | Browser child views | `bootty-browser` | Wry owns navigation; host geometry and visibility arrive at the UI seam. |
@@ -266,17 +266,19 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
 ## Agents
 
-`bootty-agents` owns native Pi, Codex, and Claude subprocesses, their bounded JSON protocols, conversation histories, request replies, account operations, and lifecycle generations. Codex uses app-server, Pi uses RPC, and Claude uses streamed JSON. A native agent conversation is a session alongside terminal sessions in the Sessions sidebar; it is not a backend pane. Mux backends continue to own all terminal processes and topology.
+Pi, Codex, and Claude launch as terminal programs through the selected mux backend. The backend owns their processes, tabs, splits, and terminal state. `TerminalAgentService` owns bounded provider identities, retained launch metadata, and exact terminal targets. History and account queries use provider files and commands on a background worker. Resume and fork launch the provider's terminal flow. Agents appear within backend sessions in the Sessions sidebar.
 
-`NativeAgentService` persists a per-window registry before publishing new sessions. Restored conversations remain stopped until explicitly resumed. Targets contain the Bootty session identity and generation, independently of provider thread IDs. Provider callbacks request a repaint; the UI never waits for protocol reads or process exit.
+Terminal registrations persist before publication. Provider session IDs remain distinct from backend target handles and generations; stale targets cannot redirect input to another pane.
 
 `OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
 
-`bootty-ui` composes these owners and routes the palette, keybindings, CLI, socket, and agent commands through one catalog and invocation path. Native panels have fixed homes: Sessions on the left and tools on the right. The center displays the selected terminal or native agent session.
+`bootty-ui` composes these owners and routes the palette, keybindings, CLI, socket, and agent commands through one catalog and invocation path. Native panels have fixed homes: Sessions on the left and labeled tools on the right. The center displays the selected backend terminal window and its split tree.
 
-`bootty-computer` owns the macOS desktop helper and rechecks OS permissions and secure input before capture or input. `computer-use` must be enabled by a user action; agents cannot enable it or request permission. Capture metadata remains bounded and images use private files. `bootty-browser` owns Wry child-view lifetime, navigation events, and host geometry; the shell hides native views beneath GPUI dialogs and sheets.
+`bootty-computer` owns the macOS desktop helper and rechecks OS permissions and secure input before capture or input. `computer-use` must be enabled by a user action; agents cannot enable it or request permission. Capture metadata remains bounded and images use private files. `bootty-browser` owns Wry child-view lifetime, navigation events, and host geometry; the shell hides native views beneath GPUI dialogs and sheets. Its Linux adapter borrows the existing Xcb window as an Xlib handle on the same X server. Desktop startup selects X11 for both GPUI and GTK, using XWayland when launched from a Wayland desktop.
 
-Existing custom integrations remain unsupported and preserved. Native sessions require no installed hooks. The prior pane event service remains available for explicitly configured terminal adapters; it does not own native conversation state.
+Existing custom integrations remain unsupported and preserved. Built-in terminal launches require no installed hooks. The prior pane event service remains available for explicitly configured terminal adapters.
+
+Desktop pairing starts an explicitly enabled TLS listener on the chosen local interface. The pairing code contains its certificate pin and a random credential; remote requests then use the same local command owner and exact issued targets. Public status never exposes the credential. Listener lifetime follows the desktop owner, and revoke closes the listener. The phone owns its connection credential and presentation, while the desktop remains authoritative for sessions, terminal frames, and commands.
 
 ## Crates
 
@@ -298,7 +300,7 @@ Existing custom integrations remain unsupported and preserved. Native sessions r
 - `bootty-daemon` owns the installed headless executable entrypoint, argv and
   identity parsing, endpoint lifetime, and protocol serving. It composes
   `bootty-host` and the mux catalog; it does not duplicate their policy.
-- `bootty-agents` owns native conversations, provider protocols, accounts, history, and orchestration.
+- `bootty-agents` owns terminal agent metadata, accounts, history, and orchestration.
 - `bootty-computer` owns native desktop capture and input.
 - `bootty-browser` owns embedded Wry browser views.
 - `bootty-host` owns host identity/path interpretation, local, SSH, and WSL process

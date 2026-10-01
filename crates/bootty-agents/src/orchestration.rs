@@ -33,7 +33,7 @@ const MAX_MESSAGES: usize = 128;
 pub enum OrchestrationTaskState {
     Pending,
     Dispatching,
-    /// The provider accepted the prompt; completion still requires an explicit report.
+    /// The prompt was delivered; completion still requires an explicit worker report.
     Running,
     Completed,
     Failed,
@@ -219,6 +219,7 @@ impl OrchestrationRun {
 pub struct OrchestrationService {
     path: PathBuf,
     cli: Option<PathBuf>,
+    cli_namespace: Option<String>,
     commands: Arc<dyn AgentCommandExecutor>,
     store: Mutex<Store>,
 }
@@ -269,6 +270,7 @@ impl OrchestrationService {
         let service = Self {
             path: path.to_owned(),
             cli: None,
+            cli_namespace: None,
             commands,
             store: Mutex::new(store.clone()),
         };
@@ -282,6 +284,13 @@ impl OrchestrationService {
     #[must_use]
     pub fn with_cli(mut self, executable: impl Into<PathBuf>) -> Self {
         self.cli = Some(executable.into());
+        self
+    }
+
+    /// Keep development task reports on this owner even when a provider starts a fresh shell.
+    #[must_use]
+    pub fn with_cli_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.cli_namespace = Some(namespace.into());
         self
     }
 
@@ -429,9 +438,9 @@ impl OrchestrationService {
             task.worker = Some(worker.id.clone());
             task.dispatch = Some(dispatch.clone());
             task.target = Some(worker.target.clone());
-            let mut prompt = format!("Run goal: {goal}\nTask: {}\n\n{}\n\nBootty task: {run_id} / {} / {dispatch}\nReport completion through orchestration.task.complete or failure through orchestration.task.fail with run, task, dispatch, report and this exact session target.", task.title, task.prompt, task.id);
+            let mut prompt = format!("Run goal: {goal}\nTask: {}\n\n{}\n\nBootty task: {run_id} / {} / {dispatch}\nReport completion through orchestration.task.complete or failure through orchestration.task.fail with run, task, dispatch, report and this exact worker target.", task.title, task.prompt, task.id);
             if let Some(cli) = &self.cli {
-                let invocation = report_command(cli, &run_id, &task.id, &dispatch, &worker.target);
+                let invocation = report_command(cli, self.cli_namespace.as_deref(), &run_id, &task.id, &dispatch, &worker.target);
                 prompt.push_str("\nAfter verifying the result, execute the following command and replace REPORT with a short result. Use orchestration.task.fail instead if the task failed.\n");
                 prompt.push_str(&invocation);
             }
@@ -573,6 +582,7 @@ fn delivery_result(
 
 fn report_command(
     cli: &Path,
+    namespace: Option<&str>,
     run: &str,
     task: &str,
     dispatch: &str,
@@ -594,21 +604,30 @@ fn report_command(
     ];
     let command = arguments
         .iter()
-        .map(|argument| {
-            let escaped = if cfg!(windows) {
-                argument.replace('\'', "''")
-            } else {
-                argument.replace('\'', "'\\''")
-            };
-            format!("'{escaped}'")
-        })
+        .map(|argument| quote(argument))
         .collect::<Vec<_>>()
         .join(" ");
-    if cfg!(windows) {
-        format!("& {command}")
-    } else {
-        command
+    match (cfg!(windows), namespace) {
+        (true, Some(namespace)) => format!(
+            "$env:BOOTTY_DEVELOPMENT_NAMESPACE={}; & {command}",
+            quote(namespace)
+        ),
+        (true, None) => format!("& {command}"),
+        (false, Some(namespace)) => format!(
+            "env {} {command}",
+            quote(&format!("BOOTTY_DEVELOPMENT_NAMESPACE={namespace}"))
+        ),
+        (false, None) => command,
     }
+}
+
+fn quote(argument: &str) -> String {
+    let escaped = if cfg!(windows) {
+        argument.replace('\'', "''")
+    } else {
+        argument.replace('\'', "'\\''")
+    };
+    format!("'{escaped}'")
 }
 
 fn apply(
@@ -662,7 +681,7 @@ fn apply(
                 || task.dispatch.as_ref() != Some(dispatch)
             {
                 return Err(
-                    "report must match the exact dispatched session, generation, and dispatch id"
+                    "report must match the exact dispatched worker, generation, and dispatch id"
                         .to_owned(),
                 );
             }
@@ -769,9 +788,9 @@ fn attach_worker(
             request.target_supplied
                 && target.generation != 0
                 && !target.handle.is_empty()
-                && matches!(target.kind, ResourceKind::Terminal | ResourceKind::Session)
+                && target.kind == ResourceKind::Terminal
         })
-        .ok_or("attach requires an explicit live terminal or native session target")?;
+        .ok_or("attach requires an explicit live terminal target")?;
     let provider = AgentKind::ALL
         .into_iter()
         .find(|provider| provider.to_string() == provider_name)
@@ -942,7 +961,7 @@ pub fn orchestration_command_descriptors() -> Vec<CommandDescriptor> {
                     | "orchestration.task.complete"
                     | "orchestration.task.fail"
             )
-            .then_some(ResourceKind::Session),
+            .then_some(ResourceKind::Terminal),
             palette: false,
         })
         .collect()

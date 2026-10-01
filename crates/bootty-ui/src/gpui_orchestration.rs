@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use serde_json::Value;
 
-/// A live native session projection supplied by the shell. The session owner issues its target.
+/// A live agent terminal projection supplied by the shell. The backend issues its target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrchestrationAgentSession {
     pub name: String,
@@ -581,10 +581,10 @@ impl OrchestrationPanel {
     fn worker_form(&self, editable: bool, cx: &Context<Self>) -> impl IntoElement {
         section(cx)
             .child("Attach worker")
-            .child("Agent session")
+            .child("Agent terminal")
             .child(
                 Select::new(&self.session)
-                    .placeholder("Open a native agent session first")
+                    .placeholder("Start an agent in a terminal first")
                     .disabled(self.pending)
                     .w_full(),
             )
@@ -593,7 +593,7 @@ impl OrchestrationPanel {
             .child(
                 Button::new("coordination-attach-worker")
                     .small()
-                    .label("Attach session")
+                    .label("Attach terminal")
                     .disabled(
                         !editable
                             || self.session.read(cx).selected_value().is_none()
@@ -831,7 +831,7 @@ impl Render for OrchestrationPanel {
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Coordinate tasks across your native agent sessions."),
+                    .child("Coordinate tasks across your agent terminals."),
             );
         if let Some(error) = &self.error {
             content = content.child(div().text_color(cx.theme().danger).child(error.clone()));

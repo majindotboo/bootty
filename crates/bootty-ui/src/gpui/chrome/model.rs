@@ -483,9 +483,6 @@ pub enum ChromeIntent {
         to: SpaceKey,
     },
     ActivateSession(SessionTarget),
-    RenameNativeSession(bootty_control::CommandTarget),
-    RemoveNativeSession(bootty_control::CommandTarget),
-    NativeSessionHistory(bootty_control::CommandTarget),
     OpenGitChanges(SessionTarget),
     AdoptSession(SessionTarget),
     SessionContext {

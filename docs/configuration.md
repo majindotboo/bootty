@@ -620,9 +620,10 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Coordination creates persistent runs and tasks, attaches existing native agent
-sessions as workers, and dispatches prompts through the same command path.
-Task completion requires a report from the exact dispatched session and generation.
+Coordination creates persistent runs and tasks, attaches existing terminal agents
+as workers, and dispatches prompts through the same command path.
+Task completion requires a report from the exact dispatched terminal generation
+and attempt.
 Restarted work is marked interrupted and resumes only after an explicit retry.
 
 Sessions stays on the left and tools stay on the right. Panel resizing and

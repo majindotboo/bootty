@@ -155,11 +155,11 @@ impl AppState {
             Some(Event::NewSession(NewSessionPickerEvent::BrowseDirectory)) => {
                 effects.push(AppEffect::ChooseProjectDirectory);
             }
-            Some(Event::NewSession(NewSessionPickerEvent::CreateNativeSession {
+            Some(Event::NewSession(NewSessionPickerEvent::CreateAgentSession {
                 cwd,
                 provider,
             })) => {
-                effects.push(AppEffect::OpenNativeProjectSession { cwd, provider });
+                effects.push(AppEffect::OpenAgentProjectSession { cwd, provider });
                 self.dismiss_modal_dialog();
             }
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
@@ -505,7 +505,7 @@ impl AppState {
         match event {
             NewSessionPickerEvent::Close => self.dismiss_modal_dialog(),
             NewSessionPickerEvent::BrowseDirectory
-            | NewSessionPickerEvent::CreateNativeSession { .. } => {}
+            | NewSessionPickerEvent::CreateAgentSession { .. } => {}
             NewSessionPickerEvent::Error(error) => {
                 self.record_error(error);
             }

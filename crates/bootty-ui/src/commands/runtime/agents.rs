@@ -286,17 +286,55 @@ impl AppState {
         let outcome = match action {
             AgentWorkspaceAction::List => {
                 let mut agents = self.agent_overview();
-                let native = self.commands.native_agents.clone();
-                let repaint = self.repaint.clone();
-                let (sender, receiver) = mpsc::channel();
-                std::thread::spawn(move || {
-                    agents.extend(super::native_agents::native_agent_overview(
-                        native.as_deref(),
-                    ));
-                    let _ = sender.send(serialized_command_outcome(agents));
-                    repaint();
-                });
-                return CommandDispatch::Pending(PendingCommandResult::Outcome(receiver));
+                if let Some(service) = &self.commands.terminal_agents {
+                    for record in service.records() {
+                        if agents.iter().any(|agent| agent.target == record.target) {
+                            continue;
+                        }
+                        let Ok((_, Some(exact))) = self.resolve_command_target(
+                            "agents.focus",
+                            Some(ResourceKind::Terminal),
+                            Some(&record.target),
+                        ) else {
+                            continue;
+                        };
+                        let host = self
+                            .workspace
+                            .binding(exact.scope())
+                            .and_then(|binding| binding.multiplexer().remote.as_ref())
+                            .map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label);
+                        let title = record
+                            .launch
+                            .cwd
+                            .as_deref()
+                            .and_then(|cwd| Path::new(cwd).file_name())
+                            .map_or_else(
+                                || record.provider.to_string(),
+                                |name| name.to_string_lossy().into_owned(),
+                            );
+                        agents.push(crate::state::agent_attention::AgentOverview {
+                            provider: record.provider,
+                            target: record.target,
+                            scope: record.binding_id,
+                            pane: String::new(),
+                            host,
+                            title,
+                            status: "unknown".to_owned(),
+                            unread: false,
+                            attention_sequence: "0".to_owned(),
+                            can_resume: record.session_id.is_some(),
+                            cwd: record.launch.cwd,
+                            source: "terminal".to_owned(),
+                            session_id: record.session_id,
+                            session_file: None,
+                            last_event: None,
+                            last_message: None,
+                            last_message_truncated: false,
+                            turn_ended_at: None,
+                        });
+                    }
+                }
+                serialized_command_outcome(agents)
             }
             AgentWorkspaceAction::Focus => exact_target.map_or_else(
                 || CommandOutcome::Unavailable {

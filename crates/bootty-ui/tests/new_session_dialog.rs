@@ -510,7 +510,7 @@ fn setup_launches_the_selected_native_provider_in_the_selected_checkout(
     let row = spec.rows.iter().find(|row| row.id.0 == row_id).unwrap();
     assert_eq!(
         activate_picker_row(&mut dialog, row, &[]),
-        Some(NewSessionPickerEvent::CreateNativeSession {
+        Some(NewSessionPickerEvent::CreateAgentSession {
             cwd: "/projects/feature-checkout".to_owned(),
             provider,
         })

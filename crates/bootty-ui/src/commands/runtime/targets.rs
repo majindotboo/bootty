@@ -338,10 +338,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
             command.starts_with("git.")
-                || (command.starts_with("agents.")
-                    && command
-                        .rsplit_once('.')
-                        .is_some_and(|(_, operation)| operation == "start"))
+                || command.starts_with("agents.")
                 || command.starts_with("files.")
                 || matches!(
                     command,
@@ -367,7 +364,8 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                     | "terminal.submit"
                     | "terminal.capture"
                     | "pane.close"
-            ) || command.ends_with(".acknowledge")
+            ) || command.starts_with("orchestration.")
+                || command.ends_with(".acknowledge")
                 || (command.starts_with("agents.")
                     && [
                         ".prompt",
@@ -376,6 +374,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         ".abort",
                         ".interrupt",
                         ".state",
+                        ".stop",
                     ]
                     .iter()
                     .any(|operation| command.ends_with(operation)))

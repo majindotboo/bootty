@@ -541,7 +541,7 @@ pub enum NewSessionPickerEvent {
     CreateSession {
         cwd: String,
     },
-    CreateNativeSession {
+    CreateAgentSession {
         cwd: String,
         provider: bootty_agents::AgentKind,
     },
@@ -701,14 +701,14 @@ fn launch_spec(cwd: &str, remote: bool) -> DialogSpec {
     );
     terminal.detail = Some("Open a shell in this checkout".to_owned());
     let mut rows = vec![terminal];
-    if !remote {
+    {
         for (id, icon, label) in [
             ("codex", "openai", "Codex"),
             ("claude", "anthropic", "Claude"),
             ("pi", "pi", "Pi"),
         ] {
             let mut row = picker_row(RowId::new(id), icon, label.to_owned(), true);
-            row.detail = Some("Start a native agent session".to_owned());
+            row.detail = Some("Open the agent in a terminal".to_owned());
             rows.push(row);
         }
     }
@@ -733,7 +733,7 @@ fn launch_event(id: &str, cwd: &str) -> Option<NewSessionPickerEvent> {
         "pi" => AgentKind::Pi,
         _ => return None,
     };
-    Some(NewSessionPickerEvent::CreateNativeSession {
+    Some(NewSessionPickerEvent::CreateAgentSession {
         cwd: cwd.to_owned(),
         provider,
     })
