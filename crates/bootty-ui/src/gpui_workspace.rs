@@ -29,11 +29,11 @@ use bootty_control::{
 };
 use bootty_mux::provider::MuxBackendRegistry;
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface};
-use gpui_kit::component::{ElementExt as _, Root, WindowExt as _, notification::Notification};
+use gpui_kit::component::{ElementExt as _, WindowExt as _, notification::Notification};
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
-    Hsla, IntoElement, MouseButton, ParentElement, Pixels, Render, Styled, Subscription,
-    WeakEntity, Window, WindowDecorations, div, point, prelude::*, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, ExternalPaths,
+    FocusHandle, Focusable, Hsla, IntoElement, MouseButton, ParentElement, Pixels, Render, Styled,
+    Subscription, WeakEntity, Window, WindowDecorations, div, point, prelude::*, px, size,
 };
 use num_traits::ToPrimitive as _;
 
@@ -267,7 +267,7 @@ impl GpuiWorkspace {
         backends: Arc<MuxBackendRegistry>,
         control_plane: ControlPlane,
         cx: &mut App,
-    ) -> Result<gpui_kit::WindowHandle<Root>> {
+    ) -> Result<(AnyWindowHandle, Entity<Self>)> {
         let launch = WorkspaceLaunch::new(window_state_key.clone(), backends, control_plane);
         Self::open_with_launch(config, window_state_key, launch, cx)
     }
@@ -277,10 +277,8 @@ impl GpuiWorkspace {
         window_state_key: String,
         launch: WorkspaceLaunch,
         cx: &mut App,
-    ) -> Result<gpui_kit::WindowHandle<Root>> {
+    ) -> Result<(AnyWindowHandle, Entity<Self>)> {
         let options = crate::platform::native_options_for_config(&config, cx);
-        let bordered =
-            config.window.window_decoration != bootty_config::config::WindowDecoration::None;
         // Prepare fallible state before GPUI's infallible entity constructor publishes a view.
         // The bounded wake channel retains work that arrives before the window subscribes.
         let (repaint_tx, repaint_rx) = async_channel::bounded(1);
@@ -296,10 +294,10 @@ impl GpuiWorkspace {
             None,
             Some(launch.control_plane.event_sender()),
         )?;
-        cx.open_window(options, move |window, cx| {
+        gpui_kit::open_window(options, cx, move |window, cx| {
             crate::window::macos_enable_window_resizing(window);
             crate::window::macos_expose_text_target(window);
-            let workspace = cx.new(|cx| {
+            cx.new(|cx| {
                 Self::new(
                     state,
                     &window_state_key,
@@ -309,8 +307,7 @@ impl GpuiWorkspace {
                     window,
                     cx,
                 )
-            });
-            cx.new(|cx| Root::new(workspace, window, cx).bordered(bordered))
+            })
         })
     }
 
@@ -667,7 +664,7 @@ impl GpuiWorkspace {
         cx.defer(move |cx| {
             let window = Self::open_with_launch(config, window_state_key, launch, cx);
             match window {
-                Ok(window) => {
+                Ok((window, _)) => {
                     let _ = window.update(cx, |_, window, _| window.activate_window());
                 }
                 Err(error) => {
@@ -3275,9 +3272,6 @@ impl GpuiWorkspace {
 impl Render for GpuiWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_frame_metrics(window, cx);
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
         self.prepare_frame_state(window, cx);
         let config_revision = self.state.config_revision();
         let settings_changed = self.poll_settings_runtime(cx);
@@ -3319,9 +3313,6 @@ impl Render for GpuiWorkspace {
             },
         );
         self.window_frame(workspace, window, cx)
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 

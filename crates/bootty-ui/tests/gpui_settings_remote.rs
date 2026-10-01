@@ -30,7 +30,7 @@ fn remote_text_fields_use_retained_inputs_and_restore_focus_after_editing(cx: &T
         cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
             let probe = cx.new(RemoteProbe::new);
             opened_probe.replace(Some(probe.clone()));
-            cx.new(|cx| Root::new(probe, window, cx).bordered(false))
+            cx.new(|cx| Root::new(probe, window, cx))
         })
         .expect("open rooted remote settings window")
     });

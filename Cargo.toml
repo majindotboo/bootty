@@ -30,7 +30,7 @@ as_conversions = "deny"
 
 [workspace.dependencies]
 anstyle-parse = "1"
-gpui-kit = { version = "0.6.6", features = ["tree-sitter-lua", "tree-sitter-toml"] }
+gpui-kit = { version = "0.7.0", features = ["tree-sitter-lua", "tree-sitter-toml"] }
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 unicode-segmentation = "1.13.3"

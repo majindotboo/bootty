@@ -66,8 +66,9 @@ These are a floor, not a substitute. Read the guide for anything past this list.
 
 **Setup** — always required:
 ```rust
-gpui_component::init(cx);               // in app.run(), must be first
-Root::new(view, window, cx)             // first-level view in every window
+gpui_kit::init(cx);                     // in app.run(), must be first
+gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| AppView::new(window, cx)))
+                                        // wraps the view in Root, which hosts every overlay
 ```
 
 **Stateless** — use directly in render:

@@ -9,7 +9,7 @@ use crate::gpui_keymap_editor::{
     self, editor_snapshot as keymap_editor_snapshot, persisted_edit as persisted_keymap_edit,
 };
 use gpui_kit::component::{
-    Disableable as _, IconName, Root, Sizable as _, Size,
+    Disableable as _, IconName, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     tab::{Tab, TabBar},
 };
@@ -691,9 +691,6 @@ impl Render for GpuiSettingsWindow {
                 this.focus_target(target, window, cx);
             });
         }
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
         let font = setup_ui_font(window, cx);
         let active_tab = self.active_tab;
         let active_editor = match active_tab {
@@ -732,9 +729,6 @@ impl Render for GpuiSettingsWindow {
             .children(title_bar)
             .child(tab_strip)
             .child(div().flex_1().min_h_0().child(body))
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
@@ -815,7 +809,7 @@ impl GpuiWorkspace {
         let decorations = self.state.config().window.window_decoration;
         cx.defer(move |cx| {
             let options = settings_window_options(decorations, cx);
-            let window = cx.open_window(options, move |window, cx| {
+            let opened = gpui_kit::open_window(options, cx, move |window, cx| {
                 let view = cx.new(|cx| {
                     GpuiSettingsWindow::new(
                         settings.clone(),
@@ -829,19 +823,10 @@ impl GpuiWorkspace {
                 view.update(cx, |root, cx| {
                     root.activate_target(target, window, cx);
                 });
-                cx.new(|cx| Root::new(view, window, cx).bordered(true))
+                view
             });
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.settings_window = window.ok().and_then(|window| {
-                    window
-                        .read(cx)
-                        .ok()?
-                        .view()
-                        .clone()
-                        .downcast::<GpuiSettingsWindow>()
-                        .ok()
-                        .map(|view| view.downgrade())
-                });
+                workspace.settings_window = opened.ok().map(|(_, view)| view.downgrade());
                 workspace.settings_window_opening = false;
                 cx.notify();
             });

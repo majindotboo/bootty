@@ -44,8 +44,8 @@ fn main() {
         let entity = cx.new(|cx| MyState::default());
 
         // Open windows
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            cx.new(|cx| Root::new(view, window, cx))
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| MyView::new(window, cx))
         });
     });
 }

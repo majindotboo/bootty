@@ -23,11 +23,8 @@ struct SpaceEditorDialogSurface {
 }
 
 impl Render for SpaceEditorDialogSurface {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .track_focus(&self.background_focus)
-            .children(Root::render_dialog_layer(window, cx))
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().track_focus(&self.background_focus)
     }
 }
 
@@ -357,7 +354,7 @@ fn rooted_probe(
             move |window, cx| {
                 let probe = cx.new(|cx| SpaceEditorProbe::new(snapshot, window, cx));
                 opened_probe.replace(Some(probe.clone()));
-                cx.new(|cx| Root::new(probe, window, cx).bordered(false))
+                cx.new(|cx| Root::new(probe, window, cx))
             },
         )
         .expect("open rooted Space editor window")
@@ -395,7 +392,7 @@ fn rooted_space_editor_dialog_probe(
                 let surface = cx.new(|cx| SpaceEditorDialogSurface {
                     background_focus: cx.focus_handle(),
                 });
-                cx.new(|cx| Root::new(surface, window, cx).bordered(false))
+                cx.new(|cx| Root::new(surface, window, cx))
             },
         )
         .expect("open rooted Space editor dialog window")

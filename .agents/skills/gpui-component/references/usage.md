@@ -21,19 +21,16 @@ fn main() {
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx| {
-            gpui_component::init(cx); // MUST be first
+            gpui_kit::init(cx); // MUST be first
 
-            cx.spawn(async move |cx| {
-                cx.open_window(WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|_| MyApp);
-                    cx.new(|cx| Root::new(view, window, cx)) // Root wraps first view
-                }).expect("Failed to open window");
-            }).detach();
+            // Wraps the view in Root.
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| MyApp))
+                .expect("Failed to open window");
         });
 }
 ```
 
-**`Root` is required** as the first-level child of every window — it enables dialogs, sheets, and notifications.
+**`Root` is required** as the first-level child of every window — it hosts dialogs, sheets, and notifications. `gpui_kit::open_window` adds it.
 
 ---
 
@@ -373,20 +370,9 @@ v_flex().gap_4().p_4()
 
 ## Overlay Layers (Dialogs, Sheets, Notifications)
 
-To render overlays, add these to your first-level view's render:
-
-```rust
-impl Render for MyApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .child(self.main_content(window, cx))
-            .children(Root::render_dialog_layer(cx))
-            .children(Root::render_sheet_layer(cx))
-            .children(Root::render_notification_layer(cx))
-    }
-}
-```
+`Root` renders dialogs, sheets, and notifications above the window's content on
+its own; views add no layers. Open them through `WindowExt`, for example
+`window.open_dialog(cx, build)` and `window.push_notification(notification, cx)`.
 
 ---
 

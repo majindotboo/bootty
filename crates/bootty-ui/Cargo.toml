@@ -85,11 +85,10 @@ objc2-foundation.workspace = true
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 # The facade exposes renderer benchmarks; enable their underlying implementation.
-gpui-pre = { version = "=0.3.6", features = ["bench-support"] }
-gpui-pre-platform = { version = "=0.3.6", features = ["bench-support"] }
+gpui-pre = { version = "=0.3.7", features = ["bench-support"] }
+gpui-pre-platform = { version = "=0.3.7", features = ["bench-support"] }
 assert_fs.workspace = true
-# BenchAppContext takes criterion types; update when gpui-pre upgrades its benchmark API.
-criterion = "0.5"
+criterion.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true

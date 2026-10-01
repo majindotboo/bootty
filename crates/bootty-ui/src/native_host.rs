@@ -44,20 +44,15 @@ fn reopen_window(
     let server_control_plane = control_plane.clone();
     let config = reopen.config;
     let backends = reopen.backends;
-    let window = match GpuiWorkspace::open(config, state_key, backends, control_plane, cx) {
-        Ok(window) => window,
-        Err(error) => {
-            eprintln!("reopen Bootty window: {error:#}");
-            return;
-        }
-    };
+    let (window, workspace) =
+        match GpuiWorkspace::open(config, state_key, backends, control_plane, cx) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("reopen Bootty window: {error:#}");
+                return;
+            }
+        };
     let _ = window.update(cx, |_, window, _| window.activate_window());
-    let Ok(root) = window.read(cx) else {
-        return;
-    };
-    let Ok(workspace) = workspace_view(root) else {
-        return;
-    };
     let (commands, catalog, _) = workspace.read(cx).control_binding();
     reopen_control_server.replace(None);
     if let Ok(server) =
@@ -211,7 +206,7 @@ fn launch(
     let control_state_key = window_state_key.clone();
     let control_plane = reopen.control_plane.clone();
     let workspace_control_plane = control_plane.clone();
-    let window = GpuiWorkspace::open(
+    let (window, workspace) = GpuiWorkspace::open(
         config,
         window_state_key,
         backends,
@@ -224,7 +219,6 @@ fn launch(
         .update(cx, |_, window, _| window.activate_window())
         .context("activate Bootty window")?;
 
-    let workspace = workspace_view(window.read(cx)?)?;
     let (commands, catalog, _workspace_control_plane) = workspace.read(cx).control_binding();
     control_server.replace(Some(ControlServer::spawn(
         &control_state_key,

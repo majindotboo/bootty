@@ -16,7 +16,7 @@ use bootty_ui::{
 };
 use criterion::{BatchSize, BenchmarkGroup, Criterion, Throughput, measurement::Measurement};
 use gpui_kit::{
-    AppContext as _, BenchAppContext, BenchReport, Context, Entity, IntoElement,
+    AppContext as _, BenchAppContext, BenchMeasurement, BenchReport, Context, Entity, IntoElement,
     ParentElement as _, Render, StyleRefinement, Styled as _, Window, div,
 };
 use num_traits::ToPrimitive as _;
@@ -129,7 +129,7 @@ fn prepare_at_size(
         .len()
 }
 
-fn bench_gpui_terminal_scene(c: &mut Criterion) -> Result<()> {
+fn bench_gpui_terminal_scene(c: &mut Criterion<BenchMeasurement>) -> Result<()> {
     let text_system = native_text_system()?;
     #[cfg(target_os = "macos")]
     assert_native_grapheme_pixels(&text_system)?;
@@ -322,7 +322,9 @@ fn assert_native_grapheme_pixels(
                 Some(tile) => pixels.extend(tile),
                 None => glyph_error = Some(anyhow::anyhow!("native glyph pixels unavailable")),
             });
-            glyph_error.context("read native glyph pixels")?;
+            if let Some(error) = glyph_error {
+                return Err(error.context("read native glyph pixels"));
+            }
             ensure!(
                 pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0),
                 "{text} must produce native glyph pixels"
@@ -558,7 +560,7 @@ fn gpui_terminal_cursor_blink(cx: &mut BenchAppContext) -> Result<()> {
 
 // Keep benchmark setup failures visible; the attribute macro's generated wrapper has no result.
 fn run_gpui_bench(
-    criterion: &mut Criterion,
+    criterion: &mut Criterion<BenchMeasurement>,
     name: &'static str,
     benchmark: fn(&mut BenchAppContext) -> Result<()>,
 ) -> Result<()> {
@@ -580,12 +582,16 @@ fn run_gpui_bench(
         }
         cx.teardown();
     });
-    report.print(Some(name));
+    report.print(name);
     failure.map_or(Ok(()), Err)
 }
 
 fn main() -> Result<()> {
-    let mut criterion = Criterion::default().configure_from_args();
+    // GPUI's bench context records its frame metrics through this measurement; it times wall
+    // clock unless `BENCH_MEASUREMENT` picks another.
+    let mut criterion = Criterion::default()
+        .with_measurement(BenchMeasurement::from_env_or_exit())
+        .configure_from_args();
     bench_gpui_terminal_scene(&mut criterion)?;
     run_gpui_bench(
         &mut criterion,

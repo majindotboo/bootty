@@ -98,26 +98,24 @@ pointing toward smaller, more stable crates.
 
 ## Bootstrap and root ownership
 
-Initialize GPUI Component once, before creating component-backed views, and put
-`Root` at the first level of each window:
+Initialize GPUI Kit once, before creating component-backed views, and open each
+window through `gpui_kit::open_window`, which puts `Root` at its first level:
 
 ```rust
 app.run(move |cx| {
-    gpui_component::init(cx);
+    gpui_kit::init(cx);
 
-    cx.spawn(async move |cx| {
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            let workspace = cx.new(|cx| Workspace::new(window, cx));
-            cx.new(|cx| Root::new(workspace, window, cx))
+    let (_window, _workspace) =
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| Workspace::new(window, cx))
         })
         .expect("failed to open window");
-    })
-    .detach();
 });
 ```
 
 `Root` coordinates window-level component facilities such as overlays and
-notifications. Do not create a separate root for each page inside one window.
+notifications, and hosts dialogs, sheets, and notifications itself: views add no
+overlay layers. Do not create a separate root for each page inside one window.
 It also coordinates modal focus restoration, focus traps, tooltip/menu layers,
 and window-scoped text selection. Bypassing it can produce behavior that looks
 correct at rest but fails when overlays nest or focus changes quickly.

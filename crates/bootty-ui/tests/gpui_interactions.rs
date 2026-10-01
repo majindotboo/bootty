@@ -1148,12 +1148,8 @@ struct RootDialogSurface {
 }
 
 impl Render for RootDialogSurface {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layer = Root::render_dialog_layer(window, cx);
-        div()
-            .size_full()
-            .track_focus(&self.background_focus)
-            .children(layer)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().track_focus(&self.background_focus)
     }
 }
 
@@ -1183,7 +1179,7 @@ fn rooted_dialog_window(
                 background_focus: cx.focus_handle(),
             });
             opened_focus.replace(Some(surface.read(cx).background_focus.clone()));
-            cx.new(|cx| Root::new(surface, window, cx).bordered(false))
+            cx.new(|cx| Root::new(surface, window, cx))
         })
         .expect("open rooted dialog")
     });

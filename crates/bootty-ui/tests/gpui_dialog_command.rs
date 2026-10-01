@@ -74,8 +74,7 @@ fn terminal_find_spec() -> DialogSpec {
 }
 
 impl Render for CommandDialogProbe {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layer = Root::render_dialog_layer(window, cx);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .track_focus(&self.background_focus)
@@ -85,7 +84,6 @@ impl Render for CommandDialogProbe {
                     .is_non_modal()
                     .then(|| self.dialog.clone()),
             )
-            .children(layer)
     }
 }
 
@@ -144,7 +142,7 @@ fn rooted_probe(
             move |window, cx| {
                 let probe = cx.new(|cx| CommandDialogProbe::with_spec(window, cx, spec));
                 opened.replace(Some(probe.clone()));
-                cx.new(|cx| Root::new(probe, window, cx).bordered(false))
+                cx.new(|cx| Root::new(probe, window, cx))
             },
         )
         .expect("open rooted command dialog")

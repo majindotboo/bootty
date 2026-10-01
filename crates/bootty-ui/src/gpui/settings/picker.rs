@@ -12,9 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, rems,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, rems,
 };
 
 use super::model::SettingsChoice;
@@ -91,7 +91,7 @@ struct SettingsChoiceState {
     choices: Vec<SettingsChoice>,
     value: String,
     on_change: SelectionHandler,
-    _subscriptions: [Subscription; 2],
+    _subscription: Subscription,
 }
 
 impl SettingsChoiceState {
@@ -103,13 +103,13 @@ impl SettingsChoiceState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (select, subscriptions) = Self::build_select(&choices, &value, searchable, window, cx);
+        let (select, subscription) = Self::build_select(&choices, &value, searchable, window, cx);
         Self {
             select,
             choices,
             value,
             on_change,
-            _subscriptions: subscriptions,
+            _subscription: subscription,
         }
     }
 
@@ -143,7 +143,7 @@ impl SettingsChoiceState {
         searchable: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<SelectState<SelectChoiceDelegate>>, [Subscription; 2]) {
+    ) -> (Entity<SelectState<SelectChoiceDelegate>>, Subscription) {
         let selected_index = choices
             .iter()
             .position(|choice| choice.token == value)
@@ -164,22 +164,7 @@ impl SettingsChoiceState {
                 cx.notify();
             }
         });
-        let trigger_focus = select.focus_handle(cx);
-        let mut was_open = false;
-        let close_subscription = cx.observe_in(&select, window, move |this, select, window, cx| {
-            // Kit emits no DismissEvent and restores a filtered index on close. Remove this
-            // observer when Kit clears search and restores the committed value on dismissal.
-            // Focusable returns the popup handle while open and the trigger handle while closed.
-            let is_open = select.focus_handle(cx) != trigger_focus;
-            if std::mem::replace(&mut was_open, is_open) && !is_open {
-                select.update(cx, |select, cx| {
-                    let value = select.selected_value().unwrap_or(&this.value).clone();
-                    select.set_selected_value(&value, window, cx);
-                    cx.notify();
-                });
-            }
-        });
-        (select, [subscription, close_subscription])
+        (select, subscription)
     }
 }
 

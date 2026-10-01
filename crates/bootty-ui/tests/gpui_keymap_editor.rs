@@ -179,25 +179,6 @@ impl Render for ModalFocusProbe {
     }
 }
 
-struct RootLayers<V> {
-    view: Entity<V>,
-}
-
-impl<V: Render + 'static> Render for RootLayers<V> {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
-        div()
-            .relative()
-            .size_full()
-            .child(self.view.clone())
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
-    }
-}
-
 fn rooted_modal_focus_probe(
     cx: &TestAppContext,
 ) -> (Entity<ModalFocusProbe>, gpui_kit::VisualTestContext) {
@@ -207,8 +188,7 @@ fn rooted_modal_focus_probe(
         cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
             let probe = cx.new(ModalFocusProbe::new);
             opened_probe.replace(Some(probe.clone()));
-            let layers = cx.new(|_| RootLayers { view: probe });
-            cx.new(|cx| Root::new(layers, window, cx).bordered(false))
+            cx.new(|cx| Root::new(probe, window, cx))
         })
         .expect("open rooted keymap editor")
     });
@@ -233,8 +213,7 @@ fn rooted_keymap_probe_with_snapshot(
     let (_, cx) = cx.add_window_view(move |window, cx| {
         let probe = cx.new(|cx| KeymapProbe::with_snapshot(snapshot, cx));
         opened_probe.replace(Some(probe.clone()));
-        let layers = cx.new(|_| RootLayers { view: probe });
-        Root::new(layers, window, cx).bordered(false)
+        Root::new(probe, window, cx)
     });
     let probe = probe_slot
         .borrow_mut()

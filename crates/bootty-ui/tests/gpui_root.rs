@@ -45,7 +45,7 @@ fn root_forwards_pointer_input_and_releases_its_weak_child(cx: &TestAppContext) 
                 clicks: child_clicks,
             });
             opened_child.set(Some(child.downgrade()));
-            cx.new(|cx| Root::new(child, window, cx).bordered(false))
+            cx.new(|cx| Root::new(child, window, cx))
         })
         .expect("open rooted window")
     });

@@ -133,7 +133,7 @@ fn rooted_probe(
         cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
             let probe = cx.new(|cx| InlineInputProbe::new(snapshot, cx));
             opened_probe.replace(Some(probe.clone()));
-            cx.new(|cx| Root::new(probe, window, cx).bordered(false))
+            cx.new(|cx| Root::new(probe, window, cx))
         })
         .expect("open rooted settings window")
     });

@@ -12,9 +12,8 @@ struct PromptProbe {
 }
 
 impl Render for PromptProbe {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let layer = Root::render_dialog_layer(window, cx);
-        div().size_full().track_focus(&self.focus).children(layer)
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().track_focus(&self.focus)
     }
 }
 
@@ -26,7 +25,7 @@ fn confirmations_preserve_answers_and_cancel_without_losing_focus(cx: &mut TestA
         let probe = cx.new(|_| PromptProbe {
             focus: focus.clone(),
         });
-        Root::new(probe, window, cx).bordered(false)
+        Root::new(probe, window, cx)
     });
 
     for (selector, expected) in [
