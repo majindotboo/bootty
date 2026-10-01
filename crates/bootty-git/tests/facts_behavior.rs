@@ -103,7 +103,12 @@ impl CommandRunner for RecordingRunner {
             .push((program.to_owned(), args.to_vec()));
         Ok(CommandOutput {
             success: true,
-            stdout: "/remote/repo\n".to_owned(),
+            stdout: if args.iter().any(|arg| arg == "diff") {
+                "1\t0\tfile.rs\n"
+            } else {
+                "/remote/repo\n"
+            }
+            .to_owned(),
             stderr: String::new(),
         })
     }
@@ -213,12 +218,14 @@ fn completed_deep_refreshes_are_spaced_across_sessions() {
 
     cache.refresh("first", "/remote/first", true, start);
     runner.wait_for_diff_calls(1);
+    wait_for_published_diff(&cache, "first", start);
     let second_cold = start
         .checked_add(COLD_REFRESH_SPACING)
         .and_then(|time| time.checked_add(Duration::from_nanos(1)))
         .expect("cold refresh timestamp");
     cache.refresh("second", "/remote/second", true, second_cold);
     runner.wait_for_diff_calls(2);
+    wait_for_published_diff(&cache, "second", second_cold);
 
     let next = second_cold + FOCUSED_FACT_INTERVAL + Duration::from_nanos(1);
     cache.refresh("first", "/remote/first", true, next);
@@ -229,6 +236,25 @@ fn completed_deep_refreshes_are_spaced_across_sessions() {
         thread::yield_now();
     }
     assert_eq!(runner.diff_calls(), 3);
+}
+
+fn wait_for_published_diff(cache: &GitFactsCache<RecordingRunner>, key: &str, now: Instant) {
+    // A runner call precedes publication. Only published counts establish that the
+    // worker has cleared its running flag before the next simulated frame.
+    for _ in 0..10_000 {
+        if cache
+            .get(key, now)
+            .and_then(|facts| facts.diff_added)
+            .is_some()
+        {
+            return;
+        }
+        thread::yield_now();
+    }
+    assert_eq!(
+        cache.get(key, now).and_then(|facts| facts.diff_added),
+        Some(1)
+    );
 }
 
 #[test]
