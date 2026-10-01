@@ -1,15 +1,16 @@
 # Native workspace demonstrations
 
-Captured from the isolated development app on macOS. Screenshots show the real
-GPUI window; recordings preserve normal playback speed and contain only that
-window. The project and its changes are disposable demo data. The conversation
-and orchestration completion came from a live native agent session.
+Captured from isolated development apps. Screenshots show real GPUI windows;
+recordings preserve normal playback speed, with idle spans trimmed. The project
+and its changes are disposable demo data. Agent launches use ordinary backend
+terminals, including their normal tabs and splits.
 
-- [Project setup](project-setup.mp4): choosing a folder, checkout, and session type.
-- [Agent launch](agent-launch.mp4): checkout launch choices and a direct native session.
-- [Conversation](conversation.mp4): sending a prompt and receiving the live reply.
+- [Project setup](project-setup.mp4), 17 seconds: project artwork, checkout, and session choices.
+- [Agent terminals](agent-launch.mp4), 16 seconds: colored provider TUI, a new terminal tab, and splits.
 - [Browser](browser.mp4): local preview interaction and Cmd+K overlay visibility.
-- [Tools](tools.mp4): computer permission setup, grouped changes, and diff navigation.
+- [Tools](tools.mp4), 14 seconds: grouped changes, tracked diff, and Files navigation.
+- [Linux X11](linux-x11.mp4), 12 seconds, and [XWayland](linux-xwayland.mp4),
+  12 seconds: native browser input, navigation, resize, and palette restoration.
 
 ![Sessions and quiet usage](sessions.png)
 ![Checkout selection](checkout.png)
@@ -20,10 +21,15 @@ and orchestration completion came from a live native agent session.
 ![Local browser preview](browser.png)
 ![Computer setup](computer.png)
 ![Observed orchestration completion](orchestration.png)
-![Retained history and settled tool output](settled-tools.png)
-![Stopped-history fork with an independent live reply](fork.png)
+![Linux X11 browser](linux-x11.png)
+![Linux XWayland browser](linux-xwayland.png)
 
-Computer use remains disabled in the captured setup window. Screen Recording
-and Accessibility were already granted on this test machine. The native helper
-was separately exercised for capture, literal Unicode input, and secure-input
-refusal; this recording does not claim a new permission grant.
+Computer use is disabled and the current development identity reports Screen
+Recording and Accessibility as not granted. The native helper was separately
+exercised for capture, literal Unicode input, and secure-input refusal; these
+screenshots do not claim a new permission grant. The completed coordination run
+came from a real Codex terminal executing the supplied completion command.
+
+Linux browser embedding uses an X11 display, including XWayland. Pure Wayland
+without XWayland is unsupported. Optional agent conversations have separate
+demonstrations in their own change.
