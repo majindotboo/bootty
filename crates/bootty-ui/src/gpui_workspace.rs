@@ -604,7 +604,7 @@ impl GpuiWorkspace {
         cx: &Context<Self>,
     ) -> (Subscription, Option<u32>) {
         let keymap_context_for_release = keymap_context.to_owned();
-        cx.on_app_quit(|this, cx| this.close_link_forwards(cx))
+        cx.on_app_quit(|this, cx| this.close_owned_services(cx))
             .detach();
         cx.on_release(move |_, cx| {
             crate::gpui_actions::remove_workspace_key_bindings(&keymap_context_for_release, cx);
@@ -1127,9 +1127,15 @@ impl GpuiWorkspace {
         .detach();
     }
 
-    fn close_link_forwards(&mut self, cx: &Context<Self>) -> gpui_kit::Task<()> {
+    fn close_owned_services(&mut self, cx: &Context<Self>) -> gpui_kit::Task<()> {
         let forwards = self.state.take_link_forwards();
+        let native = self.state.native_agent_service();
         cx.background_executor().spawn(async move {
+            if let Some(native) = native
+                && let Err(error) = native.shutdown()
+            {
+                eprintln!("Native agent shutdown failed: {error}");
+            }
             let now = Instant::now();
             let runner = bootty_host::CancellableCommandRunner::with_deadline(
                 bootty_host::CommandCancellation::default(),
@@ -1143,10 +1149,10 @@ impl GpuiWorkspace {
 
     fn finish_document_exit(&mut self, quit: bool, window: &Window, cx: &Context<Self>) {
         if quit {
-            // Each workspace's quit observer awaits its own forwarding cleanup.
+            // Each workspace's quit observer awaits its owned services' cleanup.
             cx.quit();
         } else {
-            let cleanup = self.close_link_forwards(cx);
+            let cleanup = self.close_owned_services(cx);
             cx.spawn_in(window, async move |weak, cx| {
                 cleanup.await;
                 _ = weak.update_in(cx, |_, window, _| window.remove_window());

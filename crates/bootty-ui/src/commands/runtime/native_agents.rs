@@ -120,11 +120,12 @@ fn account_terminal(
             message: "Choose an agent account session".to_owned(),
         };
     };
-    let Some(record) = service
-        .sessions()
-        .into_iter()
-        .find(|record| record.target() == *native_target)
-    else {
+    let Some(record) = service.sessions().into_iter().find(|record| {
+        record.target() == *native_target
+            && invocation
+                .command
+                .starts_with(&format!("agents.{}.", record.config.provider))
+    }) else {
         return CommandOutcome::StaleTarget {
             message: "The agent account session is no longer available".to_owned(),
         };
@@ -237,12 +238,12 @@ fn execute(
             return Ok(Value::Null);
         }
         "remove" => {
-            service.remove(&record.id)?;
+            service.remove(target)?;
             return Ok(Value::Null);
         }
         "state" => return serde_json::to_value(record.snapshot).map_err(|error| error.to_string()),
         "resume" => {
-            return serde_json::to_value(service.resume(&record.id)?)
+            return serde_json::to_value(service.resume(target)?)
                 .map_err(|error| error.to_string());
         }
         "stop" => {

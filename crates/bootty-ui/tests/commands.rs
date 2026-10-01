@@ -357,6 +357,72 @@ for line in sys.stdin:
     service.stop(&record.target()).unwrap();
 }
 
+#[cfg(unix)]
+#[rstest]
+#[case("agents.pi.account.login")]
+#[case("agents.pi.account.logout")]
+fn native_account_commands_reject_another_provider_before_mutation(#[case] command: &str) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let (wake, wakes) = mpsc::channel();
+    let (events, _receiver) = bootty_control::event_queue();
+    let mut state = AppState::new_for_window_with_agents(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        "main".to_owned(),
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+        Some(events),
+    )
+    .unwrap();
+    let provider = directory.path().join("claude.py");
+    fs::write(&provider, r"import json,sys
+for line in sys.stdin:
+ request=json.loads(line)
+ if request.get('type')=='control_request':
+  print(json.dumps({'type':'control_response','response':{'request_id':request['request_id'],'subtype':'success','response':{'session_id':'owned-claude'}}}),flush=True)
+").unwrap();
+    let now = Instant::now();
+    let started = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new(
+            "agents.claude.start",
+            vec![
+                directory.path().to_string_lossy().into_owned(),
+                "/usr/bin/python3".to_owned(),
+                serde_json::to_string(&[provider.to_string_lossy()]).unwrap(),
+            ],
+            Caller::Socket,
+        ),
+        now,
+    );
+    assert!(
+        matches!(started, CommandOutcome::Success { .. }),
+        "{started:?}"
+    );
+    let service = state.native_agent_service().unwrap();
+    let record = service.sessions().into_iter().next().unwrap();
+    let before = pane_count(&state);
+    let mut invocation = CommandInvocation::new(command, Vec::new(), Caller::Socket);
+    invocation.target = Some(record.target());
+    invocation.confirmation = Some(invocation.confirmation());
+    let result = submit_command_from_caller(&mut state, &wakes, Caller::Socket, invocation, now);
+    assert!(
+        matches!(result, CommandOutcome::StaleTarget { .. }),
+        "{result:?}"
+    );
+    assert!(service.resolve(&record.target()).is_ok());
+    assert_eq!(pane_count(&state), before);
+    service.stop(&record.target()).unwrap();
+}
+
 #[rstest]
 #[case("agents.codex.stop", vec![])]
 #[case("agents.codex.remove", vec![])]
