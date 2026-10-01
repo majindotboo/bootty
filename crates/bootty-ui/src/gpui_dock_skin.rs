@@ -74,16 +74,24 @@ impl DockAreaRenderer for WorkspaceDockSkin {
     }
 
     fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        let chrome = if window.is_a11y_active() {
+            div()
+                .absolute()
+                .size_full()
+                .child(self.chrome.clone())
+                .into_any_element()
+        } else {
+            self.chrome
+                .clone()
+                .cached(gpui_kit::StyleRefinement::default().absolute().size_full())
+                .into_any_element()
+        };
         self.kit
             .center_frame(window, cx)
             .relative()
             // Bottom segments belong below the terminals, within the side docks.
             .pb(self.chrome.read(cx).dock_bottom_height())
-            .child(
-                self.chrome
-                    .clone()
-                    .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
-            )
+            .child(chrome)
             .when_some(self.owner.upgrade(), |frame, owner| {
                 frame.child(owner.read(cx).titlebar.clone())
             })
@@ -760,7 +768,19 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let content = self.kit.render_active_panel(panel, group, window, cx);
+        let content = if window.is_a11y_active() && !group.is_collapsed() {
+            // GPUI's cached replay omits accessibility nodes. Rebuild the subtree while
+            // assistive technology is active until upstream replays those registrations.
+            div()
+                .id("tab-content")
+                .overflow_y_scroll()
+                .overflow_x_hidden()
+                .flex_1()
+                .child(div().absolute().size_full().child(panel))
+                .into_any_element()
+        } else {
+            self.kit.render_active_panel(panel, group, window, cx)
+        };
         if group.active_panel().is_some_and(|panel| {
             terminal_panel_name(panel.panel_name(cx))
                 || panel.panel_name(cx) == "bootty.native-session"
