@@ -1,5 +1,6 @@
 mod agents;
 pub(super) mod computer;
+pub(super) mod connections;
 mod orchestration;
 mod targets;
 mod terminal_agents;
@@ -800,6 +801,13 @@ impl AppState {
         let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
         let scope = target_scope.unwrap_or_else(|| self.mux_scope());
         match executor {
+            CoreCommandExecutor::Connection(action, arguments) => self.dispatch_connection_command(
+                action,
+                &arguments,
+                invocation.caller,
+                effects,
+                execution,
+            ),
             CoreCommandExecutor::Computer(action, arguments) => self.dispatch_computer_command(
                 action,
                 &arguments,
@@ -844,12 +852,7 @@ impl AppState {
                 self.dispatch_link_open(target, &exact, &arguments, execution)
             }
             CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => {
-                let Some(target) = invocation.target else {
-                    return self.reject_command(CommandOutcome::Unavailable {
-                        message: "clipboard paste requires a terminal".to_owned(),
-                    });
-                };
-                self.dispatch_clipboard_paste(scope, target, execution)
+                self.dispatch_clipboard_paste(scope, invocation.target, execution)
             }
             CoreCommandExecutor::Pane(action, arguments) => {
                 self.dispatch_pane_command(action, &arguments, exact_target, execution)

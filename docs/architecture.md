@@ -44,6 +44,8 @@ This file describes the current production structure.
 | Desktop command resolution and UI policy | `bootty-ui::commands` | UI adapters resolve intents and delegate domain work to its owner. |
 | Clipboard image transfer | `bootty-host::clipboard_image` | The daemon verifies the complete byte count and SHA-256 digest before publishing a private temporary PNG path. |
 | Local control transport and instance ownership | `bootty-control` | The singleton lease publishes one owner-local endpoint. |
+| Paired remote command transport | `bootty-control::RemoteControlServer` | A certificate pin and per-listener credential precede every bounded request to the local owner. |
+| Desktop remote-control enablement | `bootty-ui::RemoteConnections` | Only an explicit desktop action enables a listener; revoke, quit, and owner replacement invalidate the lease. |
 | Native agent integration state and assets | `bootty-agents` | Native providers own bounded event parsing and integration files. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
 | Workspace composition | `bootty-ui::workspace_composition` | Reconciles the binding's terminal projection with Bootty-native panels. The terminal center is one locked singleton leaf retargeted at the selected mux window; it renders the whole split tree from the binding projection and never takes part in Dock drag, tabs, or documents. Documents live in the right dock. Dock never mirrors mux splits, Dock geometry never flows back into mux ratios, and native leaves never enter a backend command. |

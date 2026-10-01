@@ -48,6 +48,7 @@ pub use git::GitAction;
 pub use jobs::JobAction;
 pub use panes::PaneAction;
 pub use runtime::computer::ComputerCommand;
+pub use runtime::connections::ConnectionCommand;
 pub use sessions::SessionAction;
 pub use themes::ThemeAction;
 
@@ -67,6 +68,7 @@ pub fn command_invocation_from_catalog(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCommandExecutor {
+    Connection(ConnectionCommand, Vec<String>),
     Computer(ComputerCommand, Vec<String>),
     Synchronous(SynchronousCommand),
     Dock(DockAction, Option<u64>),
@@ -116,6 +118,7 @@ struct RegisteredCommand {
 
 #[derive(Clone, Copy, Debug)]
 enum CommandExecutorResolver {
+    Connection(ConnectionCommand),
     Computer(ComputerCommand),
     Dock(DockAction),
     Keybind,
@@ -200,6 +203,9 @@ impl CommandRegistry {
         let first_argument = || invocation.arguments.first().ok_or_else(invalid_arguments);
         let arguments = || invocation.arguments.clone();
         let executor = match registered.executor {
+            CommandExecutorResolver::Connection(action) => {
+                CoreCommandExecutor::Connection(action, arguments())
+            }
             CommandExecutorResolver::Computer(action) => {
                 CoreCommandExecutor::Computer(action, arguments())
             }
@@ -653,6 +659,16 @@ fn register_forward_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
 }
 
 fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    for action in ConnectionCommand::ALL {
+        let descriptor = action.descriptor();
+        commands.insert(
+            descriptor.id.clone(),
+            RegisteredCommand {
+                descriptor,
+                executor: CommandExecutorResolver::Connection(action),
+            },
+        );
+    }
     for action in ComputerCommand::ALL {
         let descriptor = action.descriptor();
         commands.insert(

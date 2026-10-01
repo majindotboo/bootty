@@ -629,6 +629,14 @@ button = "bottom"
 
 Agent status, attention and account usage appear in Sessions.
 
+Use **Connect a phone…** in the command palette to pair the mobile app. Enter
+this computer's local IP address, enable the connection, and copy the masked
+pairing code into the phone's pairing screen. `127.0.0.1` connects an iOS
+simulator running on this Mac. The pairing code contains a certificate pin and
+credential; keep it private. The phone controls live desktop sessions through
+the same command path. **Revoke connection**, quitting, or restarting Bootty
+ends access; the listener does not enable itself on the next launch.
+
 The Browser panel opens with **Open Browser** (`browser.show`). It hosts native
 webviews with separate tabs, back and forward history, reload, and an address
 bar. Bare localhost and loopback addresses use HTTP; other bare hosts use HTTPS.

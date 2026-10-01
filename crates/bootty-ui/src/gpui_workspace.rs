@@ -152,6 +152,7 @@ fn terminal_area(chrome: &ChromeSnapshot, docked: bool) -> SurfaceRect {
 
 #[derive(Clone)]
 struct WorkspaceLaunch {
+    remote_connections: crate::remote_connections::RemoteConnections,
     native_chrome: Rc<RefCell<chrome_frame::NativeChrome>>,
     window_state_root: Arc<str>,
     next_window_id: Arc<AtomicU64>,
@@ -164,8 +165,10 @@ impl WorkspaceLaunch {
         window_state_root: String,
         backends: Arc<MuxBackendRegistry>,
         control_plane: ControlPlane,
+        remote_connections: crate::remote_connections::RemoteConnections,
     ) -> Self {
         Self {
+            remote_connections,
             native_chrome: Rc::new(RefCell::new(chrome_frame::NativeChrome::default())),
             window_state_root: window_state_root.into(),
             next_window_id: Arc::new(AtomicU64::new(1)),
@@ -269,9 +272,15 @@ impl GpuiWorkspace {
         window_state_key: String,
         backends: Arc<MuxBackendRegistry>,
         control_plane: ControlPlane,
+        remote_connections: crate::remote_connections::RemoteConnections,
         cx: &mut App,
     ) -> Result<(AnyWindowHandle, Entity<Self>)> {
-        let launch = WorkspaceLaunch::new(window_state_key.clone(), backends, control_plane);
+        let launch = WorkspaceLaunch::new(
+            window_state_key.clone(),
+            backends,
+            control_plane,
+            remote_connections,
+        );
         Self::open_with_launch(config, window_state_key, launch, cx)
     }
 
@@ -288,7 +297,7 @@ impl GpuiWorkspace {
         let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
             let _ = repaint_tx.try_send(());
         });
-        let state = AppState::new_for_window_with_agents(
+        let mut state = AppState::new_for_window_with_agents(
             config,
             window_state_key.clone(),
             Arc::clone(&launch.backends),
@@ -297,6 +306,7 @@ impl GpuiWorkspace {
             None,
             Some(launch.control_plane.event_sender()),
         )?;
+        state.remote_connections = launch.remote_connections.clone();
         gpui_kit::open_window(options, cx, move |window, cx| {
             crate::window::macos_enable_window_resizing(window);
             crate::window::macos_expose_text_target(window);
@@ -702,6 +712,21 @@ impl GpuiWorkspace {
         let mut command = CommandInvocation::from_action("open_setting", Caller::Internal);
         command.arguments = vec![id.to_owned()];
         self.invoke_gpui_command(command, window, cx);
+    }
+
+    pub(crate) fn set_control_owner(
+        &self,
+        descriptor: Option<bootty_control::InstanceDescriptor>,
+        cx: &Context<Self>,
+    ) -> Result<()> {
+        if let Some(server) = self.state.remote_connections.set_owner(descriptor)? {
+            cx.background_executor()
+                .spawn(async move {
+                    drop(server);
+                })
+                .detach();
+        }
+        Ok(())
     }
 
     fn terminal_view_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
@@ -1347,6 +1372,7 @@ impl GpuiWorkspace {
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
                 AppEffect::OpenSettings => self.open_settings_window(window, cx),
                 AppEffect::OpenComputerSetup => self.open_computer_setup(window, cx),
+                AppEffect::OpenConnections => self.open_connections(window, cx),
                 AppEffect::OpenSetting(id) => {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
                 }
@@ -1418,6 +1444,27 @@ impl GpuiWorkspace {
                 .w(px(f32::from(window.rem_size()).mul(38.0)))
                 .max_w(px(f32::from(window.rem_size()).mul(45.0)))
                 .title("Computer use")
+                .content(move |body, _, _| body.p_0().child(content.clone()))
+        });
+        cx.defer_in(window, move |_, window, cx| {
+            view.focus_handle(cx).focus(window, cx);
+        });
+    }
+
+    fn open_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use std::ops::Mul as _;
+        self.state.close_overlay_dialogs();
+        self.dialogs.clear_presentation(window, cx);
+        let sender = self.state.app_command_sender(Caller::CommandPalette);
+        let view = cx.new(|cx| crate::gpui_connections::ConnectionsSetup::new(sender, window, cx));
+        let content = view.clone();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let content = content.clone();
+            dialog
+                // Dialog's width seam takes resolved native-window points.
+                .w(px(f32::from(window.rem_size()).mul(38.0)))
+                .max_w(px(f32::from(window.rem_size()).mul(45.0)))
+                .title("Connections")
                 .content(move |body, _, _| body.p_0().child(content.clone()))
         });
         cx.defer_in(window, move |_, window, cx| {
