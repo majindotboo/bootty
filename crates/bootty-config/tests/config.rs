@@ -1205,6 +1205,33 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
 
 // Switching preset must swap the built-in default tables while user override rows keep layering
 // on top; a regression here either loses the user's rows or leaves the old preset's chords live.
+#[rstest]
+#[case("bootty")]
+#[case("tmux")]
+#[case("ghostty")]
+fn every_preset_opens_the_palette_with_the_shared_shortcut(#[case] preset: &str) {
+    let config =
+        load_config_source(&format!("[input]\npreset = \"{preset}\"\n")).expect("valid config");
+    let trigger = if cfg!(target_os = "macos") {
+        "cmd+k"
+    } else {
+        "ctrl+shift+k"
+    };
+    for backend in [
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux,
+    ] {
+        let matching: Vec<_> = config
+            .input
+            .keybinds_for_backend(backend)
+            .into_iter()
+            .filter(|entry| split_keybind_entry(entry).is_some_and(|(key, _)| key == trigger))
+            .collect();
+        assert_eq!(matching, vec![format!("{trigger}=command_palette")]);
+    }
+}
+
 #[test]
 fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
     let config = load_config_source(indoc! {r#"

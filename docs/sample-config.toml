@@ -204,6 +204,7 @@ hide-tmux-status = false
 #     },
 #   ]
 # Bootty resolves the preset and compatibility arrays below first, then applies
+# Every preset binds Cmd+K to the command palette (Ctrl+Shift+K outside macOS).
 # keymap.json last. Existing TOML arrays remain supported and live-reloaded; new
 # edits should use the Keymap editor or keymap.json.
 #

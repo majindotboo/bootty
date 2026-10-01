@@ -135,6 +135,7 @@ host = "devbox" # ~/.ssh/config alias, hostname, or address
 # `args` come first on the command line, so any of these can be set differently.
 
 [input]
+# Every preset opens the command palette with Cmd+K (Ctrl+Shift+K outside macOS).
 preset = "ghostty" # ghostty (default), bootty, or tmux — which built-in default keybind set to use
 prefix = "ctrl+space" # leader for prefixed chords (bootty/tmux presets); defaults to ctrl+space / ctrl+b
 keybind = ["cmd+alt+shift+r=reload_config"]
