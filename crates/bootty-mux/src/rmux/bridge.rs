@@ -255,6 +255,7 @@ fn spawn_local_rmux_daemon(
                 bootty_config::ApplicationIdentity::Development => "bootty-dev",
             },
         )
+        .env_remove("NO_COLOR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -701,8 +702,7 @@ impl RmuxBridgeState {
             .size(TerminalSizeSpec::new(80, 24))
             .environment(bootty_rmux_process_environment());
         if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
-            // The command vector keeps tmux's rule: one element is shell text, more run directly.
-            request = request.command(argv);
+            request = request.argv(argv);
         }
         rmux.ensure_session(request).await?;
         // rmux has no way to set options as part of the create, so there is a window where the

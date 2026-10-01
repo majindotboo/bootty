@@ -101,6 +101,8 @@ pub struct SessionLaunchConfig {
     /// command line for the shell to run with `-c`; more are a program, found on the child's
     /// `PATH`, and its arguments, run directly. Shell integration applies only to the shell.
     pub command: Vec<String>,
+    /// Explicit backend session argv stays literal even when it contains only the executable.
+    pub command_is_argv: bool,
     pub working_directory: Option<PathBuf>,
     /// The mux pane this terminal is the front end for, exported as `BOOTTY_PANE`. Only backends
     /// that spawn the pane's own PTY know it, so it stays unset for a tmux attach, where tmux
@@ -120,6 +122,7 @@ impl Default for SessionLaunchConfig {
             shell: None,
             args: Vec::new(),
             command: Vec::new(),
+            command_is_argv: false,
             working_directory: None,
             pane_id: None,
             env: Vec::new(),

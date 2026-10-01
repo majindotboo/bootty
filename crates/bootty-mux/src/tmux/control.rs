@@ -354,7 +354,18 @@ fn spawn_argv(
     remote: Option<&RemoteHost>,
 ) -> (String, Vec<String>) {
     remote.map_or_else(
-        || (program.to_owned(), args.to_vec()),
+        || {
+            // The UI host may inherit automation-only color suppression. A new local
+            // server must not retain that variable in its global pane environment.
+            (
+                "env".to_owned(),
+                ["-u", "NO_COLOR", program]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect(),
+            )
+        },
         |remote| remote.command(program, args),
     )
 }
