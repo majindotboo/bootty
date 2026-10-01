@@ -46,7 +46,6 @@ pub struct SessionTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeChromeAction {
-    TogglePanel(bootty_config::config::PanelKind),
     ActivateWindow {
         session_id: String,
         window_id: String,

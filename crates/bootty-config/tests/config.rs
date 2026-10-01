@@ -1474,29 +1474,6 @@ fn wsl_remote_loads_through_the_toml_configuration_boundary() {
     assert_eq!(remote.distribution.as_str(), "Ubuntu 開発");
 }
 
-#[rstest::rstest]
-#[case("jobs")]
-#[case("transfers")]
-#[case("recovery")]
-#[case("shell")]
-fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
-    let dir = assert_fs::TempDir::new().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        format!("[panels.{panel}]\nbutton = \"none\"\n[panels.files]\nbutton = \"top\"\n"),
-    )
-    .unwrap();
-    let config = bootty_config::config::load_config_from_path(&path).unwrap();
-    assert_eq!(config.panels.len(), 1);
-    assert_eq!(
-        config
-            .panel(bootty_config::config::PanelKind::Files)
-            .dock(bootty_config::config::PanelKind::Files),
-        bootty_config::config::PanelDock::Right
-    );
-}
-
 #[cfg(unix)]
 #[rstest]
 #[case::root(None)]

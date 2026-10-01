@@ -233,7 +233,6 @@ impl Default for BoottyConfig {
             cursor: CursorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
-            panels: BTreeMap::new(),
             sidebar: SidebarConfig::default(),
             multiplexer: MultiplexerConfig::default(),
             ssh_profiles: BTreeMap::new(),

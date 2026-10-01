@@ -614,7 +614,7 @@ fn status_bars(
 ) -> (Option<StatusBarSnapshot>, Option<StatusBarSnapshot>) {
     let chrome = &state.config().chrome;
     let theme = state.ui_theme().palette;
-    let mut top_status = chrome.top_bar.then(|| {
+    let top_status = chrome.top_bar.then(|| {
         status_snapshot(
             "top",
             &chrome.top_segments,
@@ -624,7 +624,7 @@ fn status_bars(
             status_background,
         )
     });
-    let mut bottom_status = chrome.bottom_bar.then(|| {
+    let bottom_status = chrome.bottom_bar.then(|| {
         status_snapshot(
             "bottom",
             &chrome.bottom_segments,
@@ -634,42 +634,6 @@ fn status_bars(
             status_background,
         )
     });
-    for kind in bootty_config::config::PanelKind::ALL {
-        let target = match state.config().panel(kind).button {
-            bootty_config::config::PanelButton::None => continue,
-            bootty_config::config::PanelButton::Top => &mut top_status,
-            bootty_config::config::PanelButton::Bottom => &mut bottom_status,
-        };
-        let key = if state.config().panel(kind).button == bootty_config::config::PanelButton::Top {
-            "top"
-        } else {
-            "bottom"
-        };
-        let bar = target.get_or_insert_with(|| {
-            status_snapshot(key, &[], native, theme, projection, status_background)
-        });
-        let command = crate::commands::DockAction::TogglePanel(kind).command();
-        bar.segments.push(StatusSegmentSnapshot {
-            align: StatusAlignment::Right,
-            source_slot: bar.segments.len(),
-            surface: format!("panel:{}", kind.name()),
-            items: vec![StatusItemSnapshot {
-                key: kind.name().into(),
-                text: String::new(),
-                icon: Some(command.icon().into()),
-                gauge: None,
-                pad_left: 0.0,
-                pad_right: 0.0,
-                progress: None,
-                foreground: None,
-                background: None,
-                active: false,
-                action: Some(NativeChromeAction::TogglePanel(kind)),
-                reorder_anchor: None,
-                tab_context: None,
-            }],
-        });
-    }
     (top_status, bottom_status)
 }
 
@@ -1597,7 +1561,6 @@ fn apply_session_context(
 
 fn apply_status(state: &mut AppState, intent: StatusIntent) -> bool {
     match intent {
-        StatusIntent::Action(NativeChromeAction::TogglePanel(_)) => false, // Dispatched as a Command by the chrome button.
         StatusIntent::Action(NativeChromeAction::ToggleKeepAwake) => {
             state.toggle_keep_awake();
             true

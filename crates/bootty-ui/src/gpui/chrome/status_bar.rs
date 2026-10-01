@@ -16,7 +16,7 @@ use super::{
 };
 use crate::gpui::{IconSize, Rgba, sized_icon};
 use gpui_kit::component::{
-    ActiveTheme as _, ElementExt as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, ElementExt as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     menu::ContextMenuExt,
 };
@@ -61,7 +61,6 @@ struct ItemLayout {
 #[derive(Clone, Copy)]
 struct StatusBarStyle<'a> {
     tab_config: bootty_config::config::TabConfig,
-    keymap_context: &'a str,
     key: &'a str,
     background: Rgba,
     segmented: bool,
@@ -69,7 +68,6 @@ struct StatusBarStyle<'a> {
 
 pub(super) struct RenderParams<'a> {
     pub(super) tab_config: bootty_config::config::TabConfig,
-    pub(super) keymap_context: &'a str,
     pub(super) snapshot: &'a StatusBarSnapshot,
     pub(super) row_height: f32,
     pub(super) top_padding: f32,
@@ -85,7 +83,6 @@ pub(super) struct RenderParams<'a> {
 pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
     let RenderParams {
         tab_config,
-        keymap_context,
         snapshot,
         row_height,
         top_padding,
@@ -111,7 +108,6 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
     let mut right = Vec::new();
     let bar = StatusBarStyle {
         tab_config,
-        keymap_context,
         key: &snapshot.key,
         background: snapshot.background,
         segmented: compact,
@@ -400,7 +396,6 @@ pub(super) fn dock_tabs(
         chrome.snapshot.palette,
         StatusBarStyle {
             tab_config: chrome.snapshot.layout.terminal_tabs,
-            keymap_context: chrome.keymap_context(),
             key: &snapshot.key,
             background: snapshot.background,
             segmented: false,
@@ -880,9 +875,6 @@ fn render_item(
 ) -> gpui_kit::AnyElement {
     let tab = tab_active.is_some();
     let action = item.action.clone();
-    if let Some(super::NativeChromeAction::TogglePanel(kind)) = &item.action {
-        return panel_button(*kind, item, bar, colors, cx);
-    }
     let reorder_anchor = (!tab).then(|| item.reorder_anchor.clone()).flatten();
     let active = tab_active.unwrap_or(false);
     let foreground = if tab {
@@ -1035,41 +1027,6 @@ fn reorderable_item(
                 }));
             }
         }))
-}
-
-fn panel_button(
-    kind: bootty_config::config::PanelKind,
-    item: &StatusItemSnapshot,
-    bar: StatusBarStyle<'_>,
-    colors: ChromePalette,
-    cx: &Context<GpuiChrome>,
-) -> gpui_kit::AnyElement {
-    let action = crate::commands::DockAction::TogglePanel(kind);
-    let command = action.command();
-    let invocation = bootty_control::CommandInvocation::from_action(
-        command.action(),
-        bootty_control::Caller::Internal,
-    );
-    Button::new(SharedString::from(format!(
-        "panel-button-{}-{}",
-        bar.key, item.key
-    )))
-    .ghost()
-    .small()
-    .selected(item.active)
-    .child(sized_icon(
-        command.icon(),
-        IconSize::Small,
-        color(colors.text),
-    ))
-    .tooltip_with_action(
-        command.title(),
-        &crate::gpui_actions::dock_binding_action(action),
-        Some(bar.keymap_context),
-    )
-    .accessibility_label(command.title())
-    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChromeIntent::Command(invocation.clone()))))
-    .into_any_element()
 }
 
 fn status_action(

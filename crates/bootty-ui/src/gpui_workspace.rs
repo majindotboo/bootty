@@ -1028,7 +1028,6 @@ impl GpuiWorkspace {
                 &path,
                 key,
                 local_git,
-                self.state.config().panels.clone(),
                 window,
                 cx,
             )
@@ -3147,18 +3146,8 @@ impl GpuiWorkspace {
         }
     }
 
-    fn decorate_dock_chrome(
-        &self,
-        chrome_snapshot: &mut ChromeSnapshot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn decorate_dock_chrome(&self, chrome_snapshot: &mut ChromeSnapshot) {
         if self.tools.is_some() {
-            if let Some(tools) = &self.tools {
-                tools.update(cx, |tools, cx| {
-                    tools.sync_panel_settings(&self.state.config().panels, window, cx);
-                });
-            }
             let config = self.state.config();
             chrome_snapshot.layout.top_inset = self.state.window_chrome_facts().top_inset(
                 config.window.fullscreen_tabs_in_notch,
@@ -3170,27 +3159,6 @@ impl GpuiWorkspace {
                     - 1.0,
                 config.window.fullscreen_top_offset,
             );
-        }
-        if let Some(tools) = &self.tools {
-            for bar in [
-                &mut chrome_snapshot.top_status,
-                &mut chrome_snapshot.bottom_status,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for item in bar
-                    .segments
-                    .iter_mut()
-                    .flat_map(|segment| &mut segment.items)
-                {
-                    if let Some(crate::gpui::chrome::NativeChromeAction::TogglePanel(kind)) =
-                        item.action
-                    {
-                        item.active = tools.read(cx).panel_visible(kind, cx);
-                    }
-                }
-            }
         }
     }
 
@@ -3232,7 +3200,7 @@ impl GpuiWorkspace {
             viewport_height,
         );
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
-        self.decorate_dock_chrome(&mut chrome_snapshot, window, cx);
+        self.decorate_dock_chrome(&mut chrome_snapshot);
         self.sync_key_bindings(window, cx);
         self.chrome_view.update(cx, |chrome, cx| {
             chrome.set_docked_status(docked_terminals, cx);

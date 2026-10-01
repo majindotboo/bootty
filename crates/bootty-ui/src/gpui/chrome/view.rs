@@ -123,7 +123,6 @@ impl GpuiChrome {
         Some(status_bar::render(
             status_bar::RenderParams {
                 tab_config: self.snapshot.layout.terminal_tabs,
-                keymap_context: &self.keymap_context,
                 snapshot: &status,
                 row_height: self
                     .snapshot
@@ -464,7 +463,6 @@ impl GpuiChrome {
                     element.child(status_bar::render(
                         status_bar::RenderParams {
                             tab_config: self.snapshot.layout.terminal_tabs,
-                            keymap_context: &self.keymap_context,
                             snapshot: &status,
                             row_height: layout.status_height,
                             top_padding: layout.top_inset,
@@ -496,7 +494,6 @@ impl GpuiChrome {
                 element.child(status_bar::render(
                     status_bar::RenderParams {
                         tab_config: self.snapshot.layout.terminal_tabs,
-                        keymap_context: &self.keymap_context,
                         snapshot: &status,
                         row_height: layout.status_height,
                         top_padding: 0.0,

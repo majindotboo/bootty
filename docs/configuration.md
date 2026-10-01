@@ -620,13 +620,8 @@ Restarted work is marked interrupted and resumes only after an explicit retry.
 
 Sessions stays on the left and tools stay on the right. Panel resizing and
 visibility are retained, but panels cannot be moved, split, or floated.
-Settings → Panels chooses an optional status bar button for each tool:
-
-```toml
-[panels.changes]
-button = "bottom"
-```
-
+Tools, documents and browser pages share one row of labeled, closable tabs.
+The plus button opens a browser page; the command palette reopens closed tools.
 Agent status, attention and account usage appear in Sessions.
 
 Use **Connect a phone…** in the command palette to pair the mobile app. Enter

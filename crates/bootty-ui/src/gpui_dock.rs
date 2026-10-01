@@ -7,7 +7,7 @@ use crate::commands::DockAction;
 use layout::{LayoutSaveHandle, SavedLayout};
 use registry::{PanelFactory, register, register_factory};
 
-use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc, sync::Arc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use bootty_control::{BoundAppCommandSender, CommandTarget};
 use gpui_kit::component::dock::{
@@ -19,7 +19,7 @@ use gpui_kit::{
     Styled, Subscription, Window, div, prelude::*,
 };
 
-use crate::gpui_browser_panel::{BrowserPaletteRequested, BrowserPanel};
+use crate::gpui_browser_panel::{BrowserClosed, BrowserPaletteRequested, BrowserPanel};
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
 use crate::{
     gpui_document_panel::{DocumentClosed, DocumentPanel},
@@ -148,8 +148,6 @@ pub struct WorkspaceDock {
     retained_panels: Vec<ContextPanels>,
     document_context: Rc<RefCell<GitPanelContext>>,
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
-    panel_preferences:
-        BTreeMap<bootty_config::config::PanelKind, bootty_config::config::PanelConfig>,
     /// The single locked terminal leaf. The mux owns the window and every split inside it;
     /// Dock never adds, removes, or relocates this panel after its first placement.
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
@@ -163,7 +161,7 @@ pub struct WorkspaceDock {
     pub(crate) empty_terminal: Option<(NodeId, crate::workspace_composition::EmptyTerminalState)>,
     sessions: Entity<crate::gpui_sidebar_panel::SessionsPanel>,
     coordination: Entity<crate::gpui_orchestration::OrchestrationPanel>,
-    browser: Entity<BrowserPanel>,
+    pub(crate) browser: Entity<BrowserPanel>,
     browser_occluded: bool,
     documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>>,
     document_factory: PanelFactory,
@@ -192,10 +190,6 @@ impl WorkspaceDock {
         config_path: &std::path::Path,
         state_key: String,
         local_git: Option<bootty_git::GitFactsCache>,
-        panel_preferences: BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -259,7 +253,6 @@ impl WorkspaceDock {
             titlebar,
             // Seeded from the live config so the first settings sync only reacts to real
             // changes instead of relocating every panel out of the restored layout.
-            panel_preferences,
             terminal: terminal_panel,
             attachment,
             focused_group: None,
@@ -317,6 +310,20 @@ impl WorkspaceDock {
         register(area, coordination.clone(), cx);
         let browser = cx.new(|cx| BrowserPanel::new(window, cx));
         register(area, browser.clone(), cx);
+        let browser_area = area.clone();
+        cx.observe(&browser, move |_, _, cx| {
+            browser_area.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, _: &BrowserClosed, window, cx| {
+                this.remove_tool(bootty_config::config::PanelKind::Browser, window, cx);
+                this.sync_browser_visibility(window, cx);
+            },
+        )
+        .detach();
         let browser_palette = cx.subscribe(&browser, |_, _, _: &BrowserPaletteRequested, cx| {
             cx.emit(BrowserPaletteRequested);
         });
@@ -666,9 +673,30 @@ impl WorkspaceDock {
             pending.panel = Some(InspectorPanel::Browser);
             return;
         }
+        if self.browser.read(cx).is_empty() {
+            self.browser
+                .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        }
         self.show_tool(bootty_config::config::PanelKind::Browser, window, cx);
         self.sync_browser_visibility(window, cx);
         Focusable::focus_handle(&self.browser, cx).focus(window, cx);
+    }
+
+    pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser
+            .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        self.show_browser(window, cx);
+    }
+
+    pub(crate) fn close_tool_tab(&self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(kind) = bootty_config::config::PanelKind::ALL
+            .into_iter()
+            .find(|kind| self.tool_panel(*kind).panel_id(cx) == id)
+        {
+            self.remove_tool(kind, window, cx);
+            self.sync_browser_visibility(window, cx);
+            self.layout_changed(cx);
+        }
     }
 
     pub(crate) fn set_browser_occluded(
@@ -1060,22 +1088,6 @@ impl WorkspaceDock {
         })
     }
 
-    pub(crate) fn sync_panel_settings(
-        &mut self,
-        preferences: &BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.restoring.is_some() || &self.panel_preferences == preferences {
-            return;
-        }
-        self.panel_preferences.clone_from(preferences);
-        cx.notify();
-    }
-
     fn show_tool(
         &self,
         kind: bootty_config::config::PanelKind,
@@ -1084,13 +1096,11 @@ impl WorkspaceDock {
     ) {
         let panel = self.tool_panel(kind);
         let id = panel.panel_id(cx);
-        let home = panel_placement(
-            self.panel_preferences
-                .get(&kind)
-                .copied()
-                .unwrap_or_default()
-                .dock(kind),
-        );
+        let home = if kind == bootty_config::config::PanelKind::Sessions {
+            DockPlacement::Left
+        } else {
+            DockPlacement::Right
+        };
         self.area.update(cx, |area, cx| {
             if area.panel(id).is_none() {
                 area.add_panel_view(panel, home, None, window, cx);
@@ -1462,14 +1472,6 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
         }
     }
     groups
-}
-
-const fn panel_placement(dock: bootty_config::config::PanelDock) -> DockPlacement {
-    match dock {
-        bootty_config::config::PanelDock::Left => DockPlacement::Left,
-        bootty_config::config::PanelDock::Right => DockPlacement::Right,
-        bootty_config::config::PanelDock::Bottom => DockPlacement::Bottom,
-    }
 }
 
 fn panel_placement_in_area(area: &DockArea, id: PanelId) -> Option<DockPlacement> {

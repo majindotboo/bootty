@@ -1,6 +1,4 @@
 //! Browser tabs own native child webviews; GPUI owns their chrome and visibility.
-use std::ops::Mul as _;
-
 use bootty_browser::{
     BrowserBounds, BrowserEvent, BrowserShortcut, BrowserView, NativeBrowserError,
     normalize_address,
@@ -10,7 +8,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputEvent, InputState},
-    tab::{Tab, TabBar},
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
@@ -29,6 +26,7 @@ struct BrowserTab {
 }
 
 pub struct BrowserPaletteRequested;
+pub struct BrowserClosed;
 
 pub struct BrowserPanel {
     tabs: Vec<BrowserTab>,
@@ -148,7 +146,7 @@ impl BrowserPanel {
         self.tabs.iter_mut().find(|tab| tab.id == self.selected)
     }
 
-    fn select_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = id;
         for tab in &mut self.tabs {
             if let Some(view) = &mut tab.view
@@ -174,7 +172,12 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    fn new_tab(&mut self, address: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_tab(
+        &mut self,
+        address: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_id;
         let Some(next_id) = id.checked_add(1) else {
             return;
@@ -198,22 +201,36 @@ impl BrowserPanel {
         }
     }
 
-    fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let index = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == self.selected)
-            .unwrap_or(0);
-        self.tabs.retain(|tab| tab.id != self.selected);
+    pub(crate) fn tabs(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.tabs.iter().map(|tab| (tab.id, tab.title.as_str()))
+    }
+
+    pub(crate) const fn selected(&self) -> u64 {
+        self.selected
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        self.tabs.remove(index);
         if self.tabs.is_empty() {
-            self.new_tab(None, window, cx);
-        } else if let Some(id) = self
-            .tabs
-            .get(index.min(self.tabs.len().saturating_sub(1)))
-            .map(|tab| tab.id)
+            self.selected = 0;
+            cx.emit(BrowserClosed);
+        } else if self.selected == id
+            && let Some(next) = self
+                .tabs
+                .get(index)
+                .or_else(|| self.tabs.last())
+                .map(|tab| tab.id)
         {
-            self.select_tab(id, window, cx);
+            self.select_tab(next, window, cx);
         }
+        cx.notify();
     }
 
     fn navigate(
@@ -373,7 +390,7 @@ impl BrowserPanel {
                     }),
                     BrowserShortcut::Reload => self.navigate(BrowserView::reload, window, cx),
                     BrowserShortcut::NewTab => self.new_tab(None, window, cx),
-                    BrowserShortcut::CloseTab => self.close_tab(window, cx),
+                    BrowserShortcut::CloseTab => self.close_tab(self.selected, window, cx),
                 }
             }
             return;
@@ -451,6 +468,7 @@ impl BrowserPanel {
                     .icon(IconName::ArrowLeft)
                     .ghost()
                     .small()
+                    .size_6()
                     .disabled(!can_back)
                     .accessibility_label("Back")
                     .tooltip("Back")
@@ -463,24 +481,12 @@ impl BrowserPanel {
                     .icon(IconName::ArrowRight)
                     .ghost()
                     .small()
+                    .size_6()
                     .disabled(!can_forward)
                     .accessibility_label("Forward")
                     .tooltip("Forward")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.navigate(BrowserView::forward, window, cx);
-                    })),
-            )
-            .child(
-                Button::new("browser-reload")
-                    .icon(IconName::RotateCw)
-                    .ghost()
-                    .small()
-                    .disabled(!has_view)
-                    .loading(loading)
-                    .accessibility_label("Reload page")
-                    .tooltip("Reload page")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.navigate(BrowserView::reload, window, cx);
                     })),
             )
             .child(
@@ -490,7 +496,19 @@ impl BrowserPanel {
                         .accessibility_id("browser.address")
                         .aria_label("Web address")
                         .small()
-                        .prefix(Icon::new(IconName::Globe).small()),
+                        .suffix(
+                            Button::new("browser-reload")
+                                .icon(IconName::RotateCw)
+                                .ghost()
+                                .xsmall()
+                                .disabled(!has_view)
+                                .loading(loading)
+                                .accessibility_label("Reload page")
+                                .tooltip("Reload page")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.navigate(BrowserView::reload, window, cx);
+                                })),
+                        ),
                 )),
             )
             .child(
@@ -498,6 +516,7 @@ impl BrowserPanel {
                     .icon(IconName::ExternalLink)
                     .ghost()
                     .small()
+                    .size_6()
                     .disabled(!can_open_external)
                     .accessibility_label("Open in default browser")
                     .tooltip("Open in default browser")
@@ -517,9 +536,14 @@ impl Focusable for BrowserPanel {
 }
 impl EventEmitter<PanelEvent> for BrowserPanel {}
 impl EventEmitter<BrowserPaletteRequested> for BrowserPanel {}
+impl EventEmitter<BrowserClosed> for BrowserPanel {}
 impl BasePanel for BrowserPanel {
     fn panel_name(&self) -> &'static str {
         "bootty.browser"
+    }
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.active = false;
+        self.sync_visibility(cx);
     }
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         self.active = active;
@@ -537,57 +561,8 @@ impl Panel for BrowserPanel {
         "Browser"
     }
 }
-impl BrowserPanel {
-    fn render_tabs(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
-        let selected = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == self.selected)
-            .unwrap_or(0);
-        let ids: Vec<_> = self.tabs.iter().map(|tab| tab.id).collect();
-        let tabs = TabBar::new("browser-tabs")
-            .small()
-            .selected_index(selected)
-            .max_width(window.rem_size().mul(12.0))
-            .children(
-                self.tabs
-                    .iter()
-                    .map(|tab| Tab::new().label(tab.title.clone())),
-            )
-            .on_click(cx.listener(move |this, index: &usize, window, cx| {
-                if let Some(id) = ids.get(*index) {
-                    this.select_tab(*id, window, cx);
-                }
-            }));
-        div()
-            .flex()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(div().flex_1().min_w_0().child(tabs))
-            .child(
-                Button::new("browser-new-tab")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .small()
-                    .accessibility_label("New browser tab")
-                    .tooltip("New browser tab")
-                    .on_click(cx.listener(|this, _, window, cx| this.new_tab(None, window, cx))),
-            )
-            .child(
-                Button::new("browser-close-tab")
-                    .icon(IconName::Close)
-                    .ghost()
-                    .small()
-                    .accessibility_label("Close browser tab")
-                    .tooltip("Close browser tab")
-                    .on_click(cx.listener(|this, _, window, cx| this.close_tab(window, cx))),
-            )
-    }
-}
-
 impl Render for BrowserPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.weak_entity();
         let error = self.selected_tab().and_then(|tab| tab.error.clone());
         let empty = self
@@ -600,7 +575,6 @@ impl Render for BrowserPanel {
             .min_h_0()
             .min_w_0()
             .bg(cx.theme().background)
-            .child(self.render_tabs(window, cx))
             .child(self.render_toolbar(cx))
             .when_some(error, |body, message| {
                 body.child(

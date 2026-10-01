@@ -134,7 +134,6 @@ pub struct BoottyConfig {
     pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
-    pub panels: BTreeMap<PanelKind, PanelConfig>,
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
@@ -978,52 +977,5 @@ impl PanelKind {
             Self::Browser => "browser",
             Self::Coordination => "coordination",
         }
-    }
-}
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelDock {
-    Left,
-    Right,
-    Bottom,
-}
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelButton {
-    #[default]
-    None,
-    Top,
-    Bottom,
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
-pub struct PanelConfig {
-    pub button: PanelButton,
-}
-impl PanelConfig {
-    #[must_use]
-    pub const fn dock(self, kind: PanelKind) -> PanelDock {
-        match kind {
-            PanelKind::Sessions => PanelDock::Left,
-            _ => PanelDock::Right,
-        }
-    }
-}
-impl BoottyConfig {
-    #[must_use]
-    pub fn panel(&self, kind: PanelKind) -> PanelConfig {
-        self.panels
-            .get(&kind)
-            .copied()
-            .unwrap_or_else(|| match kind {
-                PanelKind::Browser => PanelConfig {
-                    button: PanelButton::Top,
-                },
-                _ => PanelConfig::default(),
-            })
     }
 }

@@ -438,23 +438,3 @@ palette = [
   # "#f5e0dc",
   # "#cba6f7",
 ]
-
-# Panels have fixed homes: Sessions left, tools right. Button: none/top/bottom.
-
-[panels.sessions]
-button = "none"
-
-[panels.files]
-button = "none"
-
-[panels.changes]
-button = "none"
-
-[panels.diff]
-button = "none"
-
-[panels.browser]
-button = "top"
-
-[panels.coordination]
-button = "none"

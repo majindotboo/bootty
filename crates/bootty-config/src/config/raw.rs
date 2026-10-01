@@ -30,8 +30,6 @@ pub(super) struct RawConfig {
     pub(super) appearance: AppearancePatch,
     pub(super) cursor: CursorPatch,
     pub(super) font: FontPatch,
-    #[serde(deserialize_with = "deserialize_panels")]
-    pub(super) panels: BTreeMap<super::model::PanelKind, super::model::PanelConfig>,
     pub(super) font_feature: Vec<String>,
     pub(super) chrome: ChromePatch,
     pub(super) sidebar: SidebarPatch,
@@ -333,19 +331,4 @@ fn parse_macos_titlebar_style(input: &str) -> Option<MacosTitlebarStyle> {
 
 fn normalize_config_value(input: &str) -> String {
     input.trim().to_ascii_lowercase().replace('-', "_")
-}
-
-fn deserialize_panels<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<BTreeMap<super::model::PanelKind, super::model::PanelConfig>, D::Error> {
-    use serde::de::IntoDeserializer as _;
-    let panels = BTreeMap::<String, super::model::PanelConfig>::deserialize(deserializer)?;
-    panels
-        .into_iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "jobs" | "transfers" | "recovery" | "shell"))
-        .map(|(name, value)| {
-            let kind = super::model::PanelKind::deserialize(name.into_deserializer())?;
-            Ok((kind, value))
-        })
-        .collect()
 }

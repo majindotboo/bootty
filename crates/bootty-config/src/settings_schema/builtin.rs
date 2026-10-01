@@ -91,15 +91,6 @@ fn custom(
 /// Every accepted compatibility spelling that is not itself a settings-surface control.
 pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] {
     &[
-        // Retired panel preferences remain loadable but have no UI or runtime effect.
-        &["panels", "jobs", "dock"],
-        &["panels", "jobs", "button"],
-        &["panels", "transfers", "dock"],
-        &["panels", "transfers", "button"],
-        &["panels", "recovery", "dock"],
-        &["panels", "recovery", "button"],
-        &["panels", "shell", "dock"],
-        &["panels", "shell", "button"],
         &["font-feature"],
         &["chrome", "status-bar"],
         &["chrome", "status-segment"],
@@ -144,7 +135,6 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(input_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
-    specs.extend(panel_specs());
     specs.push(spec(&["computer-use"], "Computer use", "Allow native agent commands to capture and control this computer after macOS permissions are granted.", "general", "Computer", SettingKind::Bool, SettingDefault::Field(|config| SettingValue::Bool(config.computer_use))));
     specs
 }
@@ -165,43 +155,6 @@ fn font_weight_specs() -> impl Iterator<Item = SettingSpec> {
             supersedes: Vec::new(),
             default: SettingDefault::UiFontWeight(role),
     })
-}
-
-fn panel_specs() -> Vec<SettingSpec> {
-    let mut specs = Vec::new();
-    macro_rules! panel {
-        ($kind:ident, $name:literal, $label:literal) => {
-            specs.push(spec(
-                &["panels", $name, "button"],
-                "Status bar button",
-                "Show a button that toggles this panel.",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelButton::None, "None"),
-                        (&crate::config::PanelButton::Top, "Top bar"),
-                        (&crate::config::PanelButton::Bottom, "Bottom bar"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config.panel(crate::config::PanelKind::$kind).button,
-                    ))
-                }),
-            ));
-        };
-    }
-    panel!(Sessions, "sessions", "Sessions");
-    panel!(Files, "files", "Files");
-    panel!(Changes, "changes", "Changes");
-    panel!(Diff, "diff", "Diff");
-    panel!(Browser, "browser", "Browser");
-    panel!(Coordination, "coordination", "Coordination");
-    specs
 }
 
 fn dock_header_specs() -> [SettingSpec; 2] {

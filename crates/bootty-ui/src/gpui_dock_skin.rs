@@ -229,6 +229,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         Rc::new(WorkspaceTabGroup {
             kit: self.kit.tab_group_renderer(),
             area: self.area.clone(),
+            owner: self.owner.clone(),
             chrome: self.chrome.clone(),
         })
     }
@@ -302,6 +303,7 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
 struct WorkspaceTabGroup {
     kit: Rc<dyn TabGroupRenderer>,
     area: WeakEntity<DockArea>,
+    owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
 }
 
@@ -527,43 +529,219 @@ impl WorkspaceTabGroup {
         })
     }
 
-    fn render_tool_navigation(group: &TabGroupContext, cx: &App) -> AnyElement {
+    fn render_tool_navigation(
+        &self,
+        group: &TabGroupContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        use bootty_config::config::{TabCloseButton, TabClosePosition, TabConfig};
+        let config = TabConfig {
+            close_button: TabCloseButton::Always,
+            close_position: TabClosePosition::Right,
+            ..TabConfig::default()
+        };
+        let browser = self
+            .owner
+            .upgrade()
+            .map(|owner| owner.read(cx).browser.clone());
+        let mut tabs = Vec::new();
+        let mut selected = None;
+        for (ix, panel) in group.panels().iter().enumerate() {
+            if !panel.visible(cx) {
+                continue;
+            }
+            if panel.panel_name(cx) == "bootty.browser" {
+                if let Some(browser) = &browser {
+                    for (id, label) in browser.read(cx).tabs() {
+                        let active = ix == group.active_ix() && browser.read(cx).selected() == id;
+                        if active {
+                            selected = Some(tabs.len());
+                        }
+                        tabs.push(Self::render_browser_tab(
+                            browser,
+                            (id, label),
+                            group,
+                            ix,
+                            config,
+                            cx,
+                        ));
+                    }
+                }
+            } else if let Some(tab) = self.render_tool_tab(group, ix, config, window, cx) {
+                if ix == group.active_ix() {
+                    selected = Some(tabs.len());
+                }
+                tabs.push(crate::gpui::tabs::ScrollableTab {
+                    id: format!("tool-tab:{:?}", panel.panel_id(cx)),
+                    title: None,
+                    focus: None,
+                    tab,
+                });
+            }
+        }
+        let owner = self.owner.clone();
         div()
             .id("workspace-tool-navigation")
             .debug_selector(|| "workspace-tool-navigation".to_owned())
-            .p_2()
-            .w_full()
             .flex()
-            .flex_wrap()
-            .gap_1()
-            .children(
-                group
-                    .panels()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, panel)| panel.visible(cx))
-                    .map(|(ix, panel)| {
-                        let (label, icon) = panel_identity(panel.panel_name(cx));
-                        let label = PanelHandle::of(panel)
-                            .and_then(|handle| handle.tab_name(cx))
-                            .unwrap_or_else(|| label.into());
-                        let select = group.clone();
-                        Button::new(SharedString::from(format!(
-                            "workspace-tool:{:?}",
-                            panel.panel_id(cx)
-                        )))
-                        .label(label.clone())
-                        .icon(icon)
-                        .small()
-                        .ghost()
-                        .max_w_full()
-                        .selected(ix == group.active_ix())
-                        .accessibility_label(format!("Show {label}"))
-                        .tooltip(label)
-                        .on_click(move |_, window, cx| select.select_tab(ix, window, cx))
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(crate::gpui::tabs::ScrollableTabBar {
+                        id: format!("workspace-tools:{:?}", group.node()).into(),
+                        config,
+                        background: self.chrome.read(cx).panel_background(),
+                        tabs,
+                        selected,
+                        notch: None,
+                        end: div().min_w_1().into_any_element(),
+                    }),
+            )
+            .child(
+                Button::new("new-sidebar-browser-tab")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .accessibility_label("New browser tab")
+                    .tooltip("New browser tab")
+                    .on_click(move |_, window, cx| {
+                        _ = owner.update(cx, |dock, cx| dock.new_browser_tab(window, cx));
                     }),
             )
             .into_any_element()
+    }
+
+    fn render_browser_tab(
+        browser: &Entity<crate::gpui_browser_panel::BrowserPanel>,
+        page: (u64, &str),
+        group: &TabGroupContext,
+        ix: usize,
+        config: bootty_config::config::TabConfig,
+        cx: &App,
+    ) -> crate::gpui::tabs::ScrollableTab {
+        let (id, label) = page;
+        let active = ix == group.active_ix() && browser.read(cx).selected() == id;
+        let tab_id = format!("browser-tab:{:?}:{id}", browser.entity_id());
+        let select = group.clone();
+        let select_browser = browser.clone();
+        let close_browser = browser.clone();
+        let close = Button::new(SharedString::from(format!("close-{tab_id}")))
+            .icon(IconName::Close)
+            .ghost()
+            .xsmall()
+            .size_4()
+            .accessibility_label(format!("Close {label}"))
+            .tooltip("Close tab")
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                close_browser.update(cx, |browser, cx| browser.close_tab(id, window, cx));
+            })
+            .into_any_element();
+        let tab = crate::gpui::tabs::tab(
+            tab_id.clone().into(),
+            config.appearance,
+            active,
+            cx.theme().primary,
+            cx,
+        )
+        .accessibility_label(label.to_owned())
+        .child(crate::gpui::tabs::content(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .child(Icon::new(IconName::Globe).small())
+                .child(div().max_w_40().truncate().child(label.to_owned()))
+                .into_any_element(),
+            Some(close),
+            tab_id.clone().into(),
+            config,
+        ))
+        .on_click(move |_, window, cx| {
+            select_browser.update(cx, |browser, cx| browser.select_tab(id, window, cx));
+            select.select_tab(ix, window, cx);
+        });
+        crate::gpui::tabs::ScrollableTab {
+            id: tab_id,
+            title: None,
+            focus: None,
+            tab,
+        }
+    }
+
+    fn render_tool_tab(
+        &self,
+        group: &TabGroupContext,
+        ix: usize,
+        config: bootty_config::config::TabConfig,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Tab> {
+        let panel = group.panels().get(ix)?;
+        let id = panel.panel_id(cx);
+        let handle = PanelHandle::of(panel);
+        let (fallback, icon) = panel_identity(panel.panel_name(cx));
+        let label = handle
+            .and_then(|handle| handle.tab_name(cx))
+            .unwrap_or_else(|| fallback.into());
+        let title = handle.map_or_else(
+            || label.clone().into_any_element(),
+            |handle| handle.title(window, cx),
+        );
+        let suffix = handle
+            .and_then(|handle| handle.title_suffix(window, cx))
+            .or_else(|| {
+                panel.closable(cx).then(|| {
+                    let owner = self.owner.clone();
+                    Button::new(SharedString::from(format!("close-tool:{id:?}")))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .size_4()
+                        .accessibility_label(format!("Close {label}"))
+                        .tooltip("Close tab")
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            _ = owner.update(cx, |dock, cx| dock.close_tool_tab(id, window, cx));
+                        })
+                        .into_any_element()
+                })
+            });
+        let select = group.clone();
+        let tab_id: SharedString = format!("tool-tab:{id:?}").into();
+        Some(
+            crate::gpui::tabs::tab(
+                tab_id.clone(),
+                config.appearance,
+                ix == group.active_ix(),
+                cx.theme().primary,
+                cx,
+            )
+            .accessibility_label(label)
+            .child(crate::gpui::tabs::content(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(Icon::new(icon).small())
+                    .child(title)
+                    .into_any_element(),
+                suffix,
+                tab_id,
+                config,
+            ))
+            .on_click(move |_, window, cx| select.select_tab(ix, window, cx)),
+        )
     }
 
     fn render_tabs(
@@ -577,7 +755,7 @@ impl WorkspaceTabGroup {
             .upgrade()
             .and_then(|area| group_placement(area.read(cx), group.node()));
         if placement == Some(DockPlacement::Right) {
-            return Self::render_tool_navigation(group, cx);
+            return self.render_tool_navigation(group, window, cx);
         }
         let tab_config = self.chrome.read(cx).dock_tabs_config();
         let tab_accent = self.chrome.read(cx).tab_accent();

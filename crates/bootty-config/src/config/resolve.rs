@@ -81,7 +81,6 @@ impl ConfigResolver<'_> {
         apply_partial_font(&mut config.font, raw.font)?;
         apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
-        config.panels = raw.panels;
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
