@@ -1,4 +1,7 @@
 mod agents;
+pub(super) mod computer;
+mod native_agents;
+mod orchestration;
 mod targets;
 
 use agents::{AgentScopeIndex, AppCommandAgentExecutor};
@@ -204,6 +207,8 @@ pub struct CommandRuntime {
     receiver: AppCommandReceiver,
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
+    native_agents: Option<Arc<bootty_agents::NativeAgentService>>,
+    orchestration: Option<Arc<bootty_agents::OrchestrationService>>,
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
     pending: Vec<PendingAppCommand>,
     jobs: Arc<bootty_host::jobs::JobRegistry>,
@@ -233,7 +238,7 @@ impl CommandRuntime {
         events: ControlEventSender,
         agent_state: &std::path::Path,
     ) -> Self {
-        let (sender, receiver) = app_command_channel(64, repaint);
+        let (sender, receiver) = app_command_channel(64, repaint.clone());
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
             sender: sender.clone(),
@@ -246,13 +251,38 @@ impl CommandRuntime {
             )
             .persisted_at(agent_state),
         );
-        Self::from_channel(
+        let native_agents =
+            bootty_agents::NativeAgentService::open(agent_state.with_extension("native.json"))
+                .map(Arc::new)
+                .map_err(|error| eprintln!("native agent storage unavailable: {error}"))
+                .ok();
+        let orchestration = bootty_agents::OrchestrationService::open(
+            &agent_state.with_extension("orchestration.json"),
+            Arc::new(AppCommandAgentExecutor {
+                sender: sender.clone(),
+            }),
+        )
+        .and_then(|service| {
+            std::env::current_exe()
+                .map(|executable| service.with_cli(executable))
+                .map_err(|error| error.to_string())
+        })
+        .map(Arc::new)
+        .map_err(|error| eprintln!("orchestration storage unavailable: {error}"))
+        .ok();
+        let mut runtime = Self::from_channel(
             sender,
             receiver,
             Some(agents),
             Some(scope_index),
             Some(events),
-        )
+        );
+        if let Some(agents) = &native_agents {
+            agents.set_change_handler(repaint);
+        }
+        runtime.native_agents = native_agents;
+        runtime.orchestration = orchestration;
+        runtime
     }
 
     fn from_channel(
@@ -280,6 +310,8 @@ impl CommandRuntime {
                 },
             )),
             agent_service: agents,
+            native_agents: None,
+            orchestration: None,
             agent_scope_index,
             pending: Vec::new(),
             forwards: Vec::new(),
@@ -386,6 +418,14 @@ impl AppState {
     /// return `None` and retain the static catalog's explicit unsupported behavior.
     pub fn agent_service(&self) -> Option<Arc<AgentService>> {
         self.commands.catalog.agents()
+    }
+
+    pub fn native_agent_service(&self) -> Option<Arc<bootty_agents::NativeAgentService>> {
+        self.commands.native_agents.clone()
+    }
+
+    pub fn orchestration_service(&self) -> Option<Arc<bootty_agents::OrchestrationService>> {
+        self.commands.orchestration.clone()
     }
 
     pub(crate) fn drain_app_commands(
@@ -666,6 +706,12 @@ impl AppState {
             Ok(resolved) => resolved,
             Err(outcome) => return self.reject_command(outcome),
         };
+        if matches!(
+            resolved.executor,
+            CommandExecutor::NativeAgent | CommandExecutor::Orchestration
+        ) {
+            return self.dispatch_service_command(resolved, effects, execution);
+        }
         let (target, exact_target) = match self.resolve_command_target(
             &resolved.invocation.command,
             resolved.descriptor.target,
@@ -705,6 +751,18 @@ impl AppState {
                 context.exact_target.as_ref(),
                 execution,
             ),
+            CommandExecutor::NativeAgent => {
+                let (deadline, cancellation) = executor::command_execution(execution);
+                self.dispatch_native_agent(
+                    context.invocation,
+                    context.exact_target.as_ref(),
+                    deadline,
+                    cancellation,
+                )
+            }
+            CommandExecutor::Orchestration => {
+                self.dispatch_orchestration(context.invocation, execution)
+            }
             CommandExecutor::UncomposedAgent => {
                 CommandDispatch::Complete(CommandOutcome::Unsupported {
                     message: "native agent service is not composed for this app instance"
@@ -712,6 +770,58 @@ impl AppState {
                 })
             }
         }
+    }
+
+    fn dispatch_service_command(
+        &mut self,
+        resolved: crate::commands::ResolvedCommandInvocation,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if matches!(resolved.executor, CommandExecutor::NativeAgent) {
+            let mut native_target = None;
+            if resolved.invocation.command.rsplit('.').next() == Some("start") {
+                match self.resolve_command_target(
+                    &resolved.invocation.command,
+                    resolved.descriptor.target,
+                    resolved.invocation.target.as_ref(),
+                ) {
+                    Ok((_, exact)) => native_target = exact,
+                    Err(outcome) => return self.reject_command(outcome),
+                }
+            } else if resolved.descriptor.target.is_some()
+                && !resolved
+                    .invocation
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.kind == ResourceKind::Session)
+            {
+                return self.reject_command(CommandOutcome::Unavailable {
+                    message: "Choose an explicit agent session".to_owned(),
+                });
+            }
+            if let Err(outcome) =
+                self.preflight_resolved_invocation(&resolved, native_target.as_ref(), effects)
+            {
+                return self.reject_command(outcome);
+            }
+            let (deadline, cancellation) = executor::command_execution(execution);
+            return self.dispatch_native_agent(
+                resolved.invocation,
+                native_target.as_ref(),
+                deadline,
+                cancellation,
+            );
+        }
+        if matches!(resolved.executor, CommandExecutor::Orchestration) {
+            if let Err(outcome) = self.preflight_resolved_invocation(&resolved, None, effects) {
+                return self.reject_command(outcome);
+            }
+            return self.dispatch_orchestration(resolved.invocation, execution);
+        }
+        self.reject_command(CommandOutcome::Unavailable {
+            message: "The command has no native service owner".to_owned(),
+        })
     }
 
     fn dispatch_core_command(
@@ -730,19 +840,21 @@ impl AppState {
         } = context;
         let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
         let scope = target_scope.unwrap_or_else(|| self.mux_scope());
-        let caller = invocation.caller;
         match executor {
+            CoreCommandExecutor::Computer(action, arguments) => self.dispatch_computer_command(
+                action,
+                &arguments,
+                invocation.caller,
+                self.config().computer_use,
+                effects,
+                execution,
+            ),
             CoreCommandExecutor::Recovery(action, arguments) => {
                 self.dispatch_recovery(action, &arguments, execution)
             }
-            CoreCommandExecutor::ShellPrompt(action, arguments) => exact_target.map_or_else(
-                || {
-                    CommandDispatch::Complete(CommandOutcome::Unavailable {
-                        message: "No terminal prompt is available".to_owned(),
-                    })
-                },
-                |exact| self.dispatch_shell_prompt(&exact, action, &arguments, execution),
-            ),
+            CoreCommandExecutor::ShellPrompt(action, arguments) => {
+                self.dispatch_shell_prompt(exact_target.as_ref(), action, &arguments, execution)
+            }
             CoreCommandExecutor::Forward(action, arguments) => {
                 self.dispatch_forward(action, &arguments, target_scope, execution)
             }
@@ -808,7 +920,7 @@ impl AppState {
             CoreCommandExecutor::Keybind(action) => self.dispatch_resolved_keybind_command(
                 action,
                 planned_mux_command,
-                caller,
+                invocation.caller,
                 viewport,
                 effects,
                 execution,

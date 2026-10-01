@@ -284,7 +284,20 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
     ) -> CommandDispatch {
         let outcome = match action {
-            AgentWorkspaceAction::List => serialized_command_outcome(self.agent_overview()),
+            AgentWorkspaceAction::List => {
+                let mut agents = self.agent_overview();
+                let native = self.commands.native_agents.clone();
+                let repaint = self.repaint.clone();
+                let (sender, receiver) = mpsc::channel();
+                std::thread::spawn(move || {
+                    agents.extend(super::native_agents::native_agent_overview(
+                        native.as_deref(),
+                    ));
+                    let _ = sender.send(serialized_command_outcome(agents));
+                    repaint();
+                });
+                return CommandDispatch::Pending(PendingCommandResult::Outcome(receiver));
+            }
             AgentWorkspaceAction::Focus => exact_target.map_or_else(
                 || CommandOutcome::Unavailable {
                     message: "No agent pane is available".to_owned(),

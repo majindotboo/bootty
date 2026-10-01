@@ -101,7 +101,11 @@ impl WorkspaceDialogs {
         }
     }
 
-    fn clear_presentation(&mut self, window: &mut Window, cx: &mut Context<GpuiWorkspace>) {
+    pub(super) fn clear_presentation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<GpuiWorkspace>,
+    ) {
         match self.presentation.take() {
             Some(Presentation::TerminalFind) => {
                 self.overlay.update(cx, |host, cx| {

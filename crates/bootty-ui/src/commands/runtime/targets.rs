@@ -316,6 +316,10 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
             command.starts_with("git.")
+                || (command.starts_with("agents.")
+                    && command
+                        .rsplit_once('.')
+                        .is_some_and(|(_, operation)| operation == "start"))
                 || command.starts_with("files.")
                 || matches!(
                     command,

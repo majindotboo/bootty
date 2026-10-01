@@ -222,7 +222,13 @@ pub enum AppEffect {
     ApplyMacosNonNativeFullscreen,
     RestoreMacosPresentation,
     OpenUrl(String),
+    ChooseProjectDirectory,
+    OpenNativeProjectSession {
+        cwd: String,
+        provider: bootty_agents::AgentKind,
+    },
     OpenSettings,
+    OpenComputerSetup,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
     OpenGitChanges {
