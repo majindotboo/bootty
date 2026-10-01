@@ -7,6 +7,7 @@ mod native_commands;
 mod native_protocol;
 mod native_service;
 mod native_session;
+mod orchestration;
 mod persistence;
 mod provider;
 mod service;
@@ -26,6 +27,11 @@ pub use native_protocol::{
 };
 pub use native_service::{NativeAgentService, NativeSessionRecord};
 pub use native_session::{NativeAgentSession, NativeChangeHandler, NativeSessionConfig};
+pub use orchestration::{
+    OrchestrationMessage, OrchestrationMessageState, OrchestrationRun, OrchestrationService,
+    OrchestrationTask, OrchestrationTaskState, OrchestrationWorker,
+    orchestration_command_descriptors,
+};
 pub use persistence::flush_all as flush_agent_state;
 pub use provider::{
     AgentAttention, AgentEventKind, AgentKind, AgentPaneKey, AgentSource, AgentState, AgentStatus,
