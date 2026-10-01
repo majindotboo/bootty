@@ -239,3 +239,56 @@ fn vector_artwork_does_not_follow_external_image_references(
     );
     assert_eq!(decode_project_icon("favicon.svg", svg.as_bytes()), None);
 }
+
+#[rstest]
+#[case("assets/desktop-icon.png", false)]
+#[case("crates/client/assets/desktop.ico", true)]
+#[case("packages/web/assets/brand-logo.png", false)]
+#[case("src/favicon.png", false)]
+fn conventional_and_package_artwork_is_discovered_on_its_owning_host(
+    project: Result<TempDir, assert_fs::fixture::FixtureError>,
+    #[case] relative: &str,
+    #[case] packaged_icon: bool,
+) {
+    let project = project.expect("project fixture");
+    let path = project.child(relative);
+    std::fs::create_dir_all(path.path().parent().unwrap()).unwrap();
+    let bytes = if packaged_icon {
+        include_bytes!("../../bootty/assets/bootty.ico").to_vec()
+    } else {
+        png(32, 32).unwrap()
+    };
+    path.write_binary(&bytes).unwrap();
+    for icon in [
+        detect_project_icon(project.path()),
+        detect_project_icon_with_runner(
+            &project.path().to_string_lossy(),
+            &bootty_git::SystemCommandRunner,
+        ),
+    ] {
+        let icon = icon.expect("owning-host artwork");
+        assert_eq!(icon.source, relative);
+        assert!(icon.width <= 64 && icon.height <= 64);
+    }
+}
+
+#[rstest]
+#[case("icons/arrow.png")]
+#[case("assets/photo.png")]
+fn unrelated_asset_images_are_not_project_artwork(
+    project: Result<TempDir, assert_fs::fixture::FixtureError>,
+    #[case] relative: &str,
+) {
+    let project = project.expect("project fixture");
+    let path = project.child(relative);
+    std::fs::create_dir_all(path.path().parent().unwrap()).unwrap();
+    path.write_binary(&png(32, 32).unwrap()).unwrap();
+    assert_eq!(detect_project_icon(project.path()), None);
+    assert_eq!(
+        detect_project_icon_with_runner(
+            &project.path().to_string_lossy(),
+            &bootty_git::SystemCommandRunner
+        ),
+        None
+    );
+}

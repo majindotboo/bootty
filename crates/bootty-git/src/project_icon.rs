@@ -21,7 +21,11 @@ const ICON_STEMS: &[&str] = &[
     "apple-touch-icon",
     "public/favicon",
     "favicon",
+    "app/favicon",
     "app/icon",
+    "src/favicon",
+    "assets/favicon",
+    "app-icon",
     "src/app/icon",
     "public/icon",
     "assets/icon",
@@ -31,9 +35,23 @@ const ICON_STEMS: &[&str] = &[
     "logo",
     "src-tauri/icons/icon",
     "icon",
-    "crates/bootty/assets/bootty.icon/Assets/Image",
 ];
 const ICON_EXTENSIONS: &[&str] = &["png", "webp", "ico", "svg"];
+const MAX_HOST_CANDIDATES: usize = 8;
+const ASSET_DIRECTORIES: &[&str] = &[
+    "",
+    "assets",
+    "resources",
+    "icons",
+    "images",
+    "public",
+    "static",
+    "src/assets",
+    "crates/*/assets",
+    "packages/*/assets",
+    "apps/*/assets",
+    "src-tauri/icons",
+];
 
 /// Validated, thumbnail-sized pixels ready for native rendering. Pixels use GPUI's BGRA order.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -56,7 +74,7 @@ pub fn detect_project_icon(root: &Path) -> Option<ProjectIcon> {
             return Some(icon);
         }
     }
-    None
+    read_host_icons(&root.to_string_lossy(), &crate::SystemCommandRunner, false)
 }
 
 /// Read through the injected execution host. Missing or unavailable hosts produce no artwork;
@@ -65,12 +83,40 @@ pub fn detect_project_icon_with_runner(
     root: &str,
     runner: &impl CommandRunner,
 ) -> Option<ProjectIcon> {
-    // One bounded host round trip. The first four candidate files are enough for damaged-file
-    // fallback; increase this budget only when projects need more alternate artwork sources.
+    read_host_icons(root, runner, true)
+}
+
+fn read_host_icons(
+    root: &str,
+    runner: &impl CommandRunner,
+    conventional: bool,
+) -> Option<ProjectIcon> {
+    // Asset searches cover branded application icons and one package level in monorepos.
+    // Eight bounded image reads allow damaged candidates without walking source trees.
+    let globs = ASSET_DIRECTORIES
+        .iter()
+        .flat_map(|directory| {
+            ICON_EXTENSIONS.iter().flat_map(move |extension| {
+                [
+                    format!("*.{extension}"),
+                    format!("*.icon/Assets/*.{extension}"),
+                ]
+                .into_iter()
+                .map(move |name| {
+                    format!(
+                        "\"$root\"/{directory}{}{name}",
+                        if directory.is_empty() { "" } else { "/" }
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let script = format!(
-        "root=$(cd -- \"$1\" && pwd -P) || exit 1; shift; count=0; for name do path=$root/$name; [ -f \"$path\" ] || continue; [ ! -L \"$path\" ] || continue; parent=$(dirname -- \"$path\"); parent=$(cd -- \"$parent\" && pwd -P) || continue; case \"$parent/\" in \"$root/\"*) ;; *) continue ;; esac; size=$(wc -c < \"$path\") || continue; [ \"$size\" -le {} ] || continue; printf '%s\\n' \"$name\"; head -c {} \"$path\" | base64 | tr -d '\\r\\n'; printf '\\n'; count=$((count + 1)); [ \"$count\" -lt 4 ] || break; done",
+        "root=$(cd -- \"$1\" && pwd -P) || exit 1; shift; project=${{root##*/}}; count=0; emit() {{ path=$1; [ -f \"$path\" ] || return 0; [ ! -L \"$path\" ] || return 0; parent=$(dirname -- \"$path\"); parent=$(cd -- \"$parent\" && pwd -P) || return 0; case \"$parent/\" in \"$root/\"*) ;; *) return 0 ;; esac; size=$(wc -c < \"$path\") || return 0; [ \"$size\" -le {} ] || return 0; name=${{path#\"$root\"/}}; printf '%s\\n' \"$name\"; head -c {} \"$path\" | base64 | tr -d '\\r\\n'; printf '\\n'; count=$((count + 1)); [ \"$count\" -lt {} ]; }}; for name do emit \"$root/$name\" || exit 0; done; for path in {globs}; do name=${{path#\"$root\"/}}; case \"$name\" in *.icon/Assets/*) ;; *) case \"${{name##*/}}\" in *.ico|*icon*|*Icon*|*logo*|*Logo*|*favicon*|\"$project\".*) ;; *) continue ;; esac ;; esac; emit \"$path\" || exit 0; done",
         MAX_PROJECT_ICON_BYTES,
-        MAX_PROJECT_ICON_BYTES + 1,
+        MAX_PROJECT_ICON_BYTES.saturating_add(1),
+        MAX_HOST_CANDIDATES,
     );
     let mut args = vec![
         "-c".to_owned(),
@@ -78,9 +124,13 @@ pub fn detect_project_icon_with_runner(
         "bootty-project-icon".to_owned(),
         root.to_owned(),
     ];
-    args.extend(candidates());
+    if conventional {
+        args.extend(candidates());
+    }
     let output = runner.run("sh", &args).ok()?;
-    if !output.success || output.stdout.len() > 4 * (MAX_PROJECT_ICON_BYTES * 4 / 3 + 256) {
+    if !output.success
+        || output.stdout.len() > MAX_HOST_CANDIDATES * (MAX_PROJECT_ICON_BYTES * 4 / 3 + 256)
+    {
         return None;
     }
     let mut lines = output.stdout.lines();
