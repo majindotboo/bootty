@@ -1,8 +1,11 @@
 use async_channel::Sender;
 use thiserror::Error;
+#[cfg(not(target_os = "linux"))]
+use wry::dpi::{LogicalPosition, LogicalSize};
+#[cfg(target_os = "linux")]
+use wry::dpi::{PhysicalPosition, PhysicalSize};
 use wry::{
     NewWindowResponse, PageLoadEvent, PermissionResponse, Rect, WebView, WebViewBuilder,
-    dpi::{LogicalPosition, LogicalSize},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 
@@ -14,10 +17,30 @@ pub struct BrowserBounds {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Physical pixels per logical host coordinate.
+    pub scale_factor: f64,
 }
 
 impl From<BrowserBounds> for Rect {
     fn from(bounds: BrowserBounds) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            // X11 screen DPI and GTK's integer scale can differ from GPUI's scale. Explicit
+            // device coordinates keep initial creation and subsequent layout on the same grid.
+            Self {
+                position: PhysicalPosition::new(
+                    bounds.x * bounds.scale_factor,
+                    bounds.y * bounds.scale_factor,
+                )
+                .into(),
+                size: PhysicalSize::new(
+                    bounds.width.max(1.0) * bounds.scale_factor,
+                    bounds.height.max(1.0) * bounds.scale_factor,
+                )
+                .into(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         Self {
             position: LogicalPosition::new(bounds.x, bounds.y).into(),
             size: LogicalSize::new(bounds.width.max(1.0), bounds.height.max(1.0)).into(),
@@ -52,6 +75,11 @@ pub enum NativeBrowserError {
         "Embedded browsing is unavailable for this window backend. Open links in your default browser."
     )]
     UnsupportedWindow,
+    #[cfg(target_os = "linux")]
+    #[error(
+        "Embedded browsing needs XWayland. Enable XWayland in your compositor and restart Bootty."
+    )]
+    XwaylandRequired,
     #[error("The browser is unavailable: {0}")]
     Platform(String),
     #[error(transparent)]
@@ -84,6 +112,9 @@ impl BrowserView {
             RawWindowHandle::AppKit(_) => cfg!(target_os = "macos"),
             RawWindowHandle::Win32(_) => cfg!(target_os = "windows"),
             RawWindowHandle::Xlib(_) => cfg!(target_os = "linux"),
+            RawWindowHandle::Xcb(_) => cfg!(target_os = "linux"),
+            #[cfg(target_os = "linux")]
+            RawWindowHandle::Wayland(_) => return Err(NativeBrowserError::XwaylandRequired),
             _ => false,
         };
         if !supported {
@@ -91,6 +122,8 @@ impl BrowserView {
         }
         #[cfg(target_os = "linux")]
         gtk::init().map_err(|error| NativeBrowserError::Platform(error.to_string()))?;
+        #[cfg(target_os = "linux")]
+        let window = &crate::x11_parent::X11Parent(handle);
         let title_events = events.clone();
         let popup_events = events.clone();
         let permission_events = events.clone();
@@ -185,6 +218,11 @@ impl BrowserView {
                 self.view.focus_parent()?;
             }
             self.view.set_visible(visible)?;
+            // GTK can restore a stale child allocation when showing the tab again.
+            #[cfg(target_os = "linux")]
+            if visible {
+                self.view.set_bounds(self.bounds.into())?;
+            }
             self.visible = visible;
         }
         Ok(())

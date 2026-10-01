@@ -1,5 +1,7 @@
 mod address;
 mod native;
+#[cfg(target_os = "linux")]
+mod x11_parent;
 
 pub use address::{AddressError, normalize_address};
 pub use native::{

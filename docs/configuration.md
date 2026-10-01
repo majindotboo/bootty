@@ -644,10 +644,11 @@ Cmd/Ctrl+W closes a tab, and Cmd/Ctrl+K opens the command palette while a page h
 focus. Tabs use temporary browser storage and do not retain website accounts
 after closing the app. Browser previews cannot grant device permissions or save
 downloads; use **Open in default browser** for those actions. Native browser
-embedding works on macOS and Windows. On Linux, the current GPUI backend exposes
-Xcb or Wayland handles, while the webview's child API accepts only Xlib. Bootty
-reports this unsupported backend explicitly; embedded Linux browsing can be
-enabled when a compatible safe child-view API is available.
+embedding works on macOS, Windows, and Linux X11. On Wayland desktops, Bootty
+uses XWayland for both its window and the embedded browser; XWayland must be
+enabled by the compositor. Startup selects the shared X11 backend automatically
+when `DISPLAY` is available. A Wayland session without XWayland can still open
+the application, but the Browser panel explains how to enable embedded browsing.
 
 The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
 underline, pill, outline, or segmented tabs; close-button side (left/right); and

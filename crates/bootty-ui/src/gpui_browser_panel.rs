@@ -378,6 +378,16 @@ impl BrowserPanel {
             return;
         }
         let started = matches!(&event, BrowserEvent::LoadStarted(_));
+        // Native page focus does not clear GPUI focus. Preserve edits by value.
+        let sync_address = id == self.selected
+            && self.selected_tab().is_some_and(|tab| {
+                self.address.read(cx).value().as_ref()
+                    == if tab.address == "about:blank" {
+                        ""
+                    } else {
+                        tab.address.as_str()
+                    }
+            });
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             match event {
                 BrowserEvent::LoadStarted(address) => {
@@ -394,7 +404,7 @@ impl BrowserPanel {
                 BrowserEvent::Notice(message) => tab.error = Some(message),
                 BrowserEvent::OpenTab(_) | BrowserEvent::Shortcut(_) => {}
             }
-            if id == self.selected && !self.address.focus_handle(cx).is_focused(window) {
+            if sync_address {
                 let address = tab.address.clone();
                 self.address
                     .update(cx, |input, cx| input.set_value(address, window, cx));
@@ -628,6 +638,7 @@ impl Render for BrowserPanel {
                                     y: f64::from(f32::from(clipped.origin.y)),
                                     width: f64::from(f32::from(clipped.size.width)),
                                     height: f64::from(f32::from(clipped.size.height)),
+                                    scale_factor: f64::from(window.scale_factor()),
                                 };
                                 window.defer(cx, move |window, cx| {
                                     _ = owner.update(cx, |this, cx| {

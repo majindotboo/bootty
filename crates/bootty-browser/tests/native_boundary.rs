@@ -26,6 +26,7 @@ fn unavailable_parent_is_a_reported_error(unavailable_window: UnavailableWindow)
             y: 0.0,
             width: 800.0,
             height: 600.0,
+            scale_factor: 1.0,
         },
         events,
     );
@@ -48,6 +49,7 @@ fn native_boundary_rejects_unsupported_addresses(
             y: 0.0,
             width: 800.0,
             height: 600.0,
+            scale_factor: 1.0,
         },
         events,
     );
