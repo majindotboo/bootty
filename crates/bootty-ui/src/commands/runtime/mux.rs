@@ -256,6 +256,7 @@ impl AppState {
                 } => *pending_scope == scope && pending_command == command,
                 // Its create already landed; only its pane is still starting.
                 PendingCommandResult::SessionStart { .. }
+                | PendingCommandResult::CaptureStart { .. }
                 | PendingCommandResult::Outcome(_)
                 | PendingCommandResult::Forward { .. }
                 | PendingCommandResult::Clipboard { .. }

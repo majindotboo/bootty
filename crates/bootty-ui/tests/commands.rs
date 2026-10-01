@@ -1416,6 +1416,121 @@ fn capture_and_export_use_the_attached_pane_and_never_replace_a_file() {
     );
 }
 
+#[cfg(unix)]
+#[rstest]
+#[case("new_tab", "target")]
+#[case("split_right", "pane_target")]
+#[case("split_down", "pane_target")]
+fn capture_starts_exact_unseen_native_panes_without_selecting_their_space(
+    #[case] command: &str,
+    #[case] field: &str,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = assert_fs::TempDir::new().unwrap();
+    let config_path = directory.path().join("config.toml");
+    WorkspaceRepository::open(&config_path)
+        .unwrap()
+        .0
+        .create_space(
+            "Capture",
+            "2",
+            [1, 2, 3],
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let shell = directory.path().join("capture-shell");
+    fs::write(&shell, "#!/bin/sh\nprintf 'capture-pane-%s\\r\\n' \"$$\"\nwhile IFS= read -r line; do printf '%s\\r\\n' \"$line\"; done\n").unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let (wake, wakes) = mpsc::channel();
+    let mut config = test_config::config(config_path, MultiplexerBackendConfig::Native);
+    config.session.shell = Some(shell.to_string_lossy().into_owned());
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+    )
+    .unwrap();
+    let now = Instant::now();
+    open_native_session(&mut state, directory.path(), now);
+    let original_space = state.active_space_id();
+    let original_selection = selection(&state);
+    let space = listed_space(&mut state, "Capture");
+    let created = submit_command(
+        &mut state,
+        session_request(
+            "session.create",
+            owned(&["hidden", directory.path().to_str().unwrap()]),
+            space["target"].clone(),
+        ),
+        now,
+    );
+    assert_eq!(failure_kind(&created), "success", "{created:?}");
+    let space = listed_space(&mut state, "Capture");
+    let topology = submit_command(
+        &mut state,
+        session_request(command, Vec::new(), space["sessions"][0][field].clone()),
+        now,
+    );
+    assert_eq!(failure_kind(&topology), "success", "{topology:?}");
+    let space = listed_space(&mut state, "Capture");
+    let windows = space["sessions"][0]["windows"].as_array().unwrap();
+    let targets = windows
+        .iter()
+        .flat_map(|window| window["panes"].as_array().unwrap())
+        .map(|pane| pane["terminal_target"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 2);
+    let mut processes = std::collections::HashSet::new();
+    for target in targets {
+        let mut stale = session_request("terminal.capture", Vec::new(), target.clone());
+        let generation = &mut stale.target.as_mut().unwrap().generation;
+        *generation = generation.saturating_add(1);
+        let rejected = submit_command(&mut state, stale, now);
+        assert_eq!(failure_kind(&rejected), "stale_target", "{rejected:?}");
+        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        loop {
+            let captured = submit_command_from_caller(
+                &mut state,
+                &wakes,
+                Caller::Socket,
+                session_request(
+                    "terminal.capture",
+                    owned(&["plain", "history"]),
+                    target.clone(),
+                ),
+                now,
+            );
+            let CommandOutcome::Success { value, .. } = captured else {
+                panic!("exact hidden capture failed: {captured:?}");
+            };
+            assert_eq!(value["target"], target);
+            assert_eq!(value["source"]["kind"], "pane_render_state");
+            let text = value["capture"]["text"].as_str().unwrap();
+            if let Some(process) = text.lines().find(|line| line.starts_with("capture-pane-")) {
+                assert!(
+                    processes.insert(process.to_owned()),
+                    "capture fell back to another pane: {text}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hidden pane publishes fixture output"
+            );
+        }
+        assert_eq!(state.active_space_id(), original_space);
+        assert_eq!(selection(&state), original_selection);
+    }
+    assert_eq!(processes.len(), 2);
+}
+
 #[rstest]
 fn authored_theme_preview_restore_save_and_apply_share_command_path() {
     let directory = assert_fs::TempDir::new().unwrap();

@@ -852,6 +852,25 @@ impl BackendPaneTerminal {
         self.prepare_native_targets(&targets, geometry)
     }
 
+    /// Start one hidden process-local pane without changing keyboard focus or window geometry.
+    /// # Errors
+    /// Returns an error for a non-local backend or a failed terminal startup.
+    pub fn prepare_scoped_native_pane(
+        &mut self,
+        scope: SpaceId,
+        pane: MuxPaneAnchor,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.behavior.topology == PaneTopology::ProcessLocal,
+            "this backend owns its pane processes"
+        );
+        let target = ScopedMuxPaneTarget::from_anchor(Some(scope), pane);
+        self.prepare_native_targets(
+            &[target],
+            self.native_window_spawn_geometry.unwrap_or(self.geometry),
+        )
+    }
+
     fn prepare_native_targets(
         &mut self,
         targets: &[ScopedMuxPaneTarget],

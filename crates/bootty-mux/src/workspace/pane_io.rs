@@ -12,12 +12,52 @@ use crate::{
     controller::{MuxCommandError, SpaceId},
     executor::begin_synchronous_command,
     provider::PaneTopology,
+    target::ExactMuxTarget,
     terminal::TerminalRuntime,
 };
 
 type Execution = Option<(Instant, CommandCancellation)>;
 
 impl WorkspaceRuntime {
+    /// Prepare the exact process-local pane for I/O, wherever its Space's owner lives.
+    /// This starts the terminal in the background without changing selection or pane layout.
+    /// # Errors
+    /// Returns an error if the pane is absent, not held by this Space, or cannot start.
+    pub fn prepare_space_terminal_runtime(&mut self, target: &ExactMuxTarget) -> Result<()> {
+        let ExactMuxTarget::Pane(scope, session, window, pane) = target else {
+            anyhow::bail!("terminal preparation requires an exact pane target");
+        };
+        let binding = self
+            .binding(*scope)
+            .ok_or_else(|| anyhow!("the target Space was closed"))?;
+        anyhow::ensure!(
+            binding.backend_policy.panes.topology == PaneTopology::ProcessLocal,
+            "this backend owns its pane processes"
+        );
+        let anchor = binding
+            .mux
+            .sessions()
+            .iter()
+            .find(|candidate| candidate.id == *session)
+            .and_then(|session| {
+                session
+                    .windows
+                    .iter()
+                    .find(|candidate| candidate.id == *window)
+            })
+            .and_then(|window| {
+                window
+                    .panes
+                    .iter()
+                    .find(|candidate| candidate.pane_id.as_deref() == Some(pane))
+            })
+            .cloned()
+            .ok_or_else(|| anyhow!("the requested pane is no longer held by this Space"))?;
+        self.space_terminal_owner(*scope)?
+            .terminal
+            .prepare_scoped_native_pane(*scope, anchor)
+    }
+
     /// Deliver input to one pane of the Space `scope`, leaving selection and UI focus alone, then
     /// report the result to `done`.
     ///

@@ -154,6 +154,13 @@ pub enum PendingCommandResult {
         result: mpsc::Receiver<MuxCommandResult>,
     },
     Outcome(mpsc::Receiver<CommandOutcome>),
+    /// Capture awaiting this exact pane's background process startup.
+    CaptureStart {
+        exact: ExactMuxTarget,
+        target: CommandTarget,
+        arguments: Vec<String>,
+        export: bool,
+    },
     /// An explicit create that succeeded, held until the first pane Bootty started for it runs.
     SessionStart {
         starting: StartingSession,
@@ -544,6 +551,9 @@ impl AppState {
             return Poll::Ready(Some(outcome));
         }
         let outcome = match &mut pending.result {
+            PendingCommandResult::CaptureStart { .. } => {
+                return self.poll_pending_terminal_capture(pending, now, effects);
+            }
             PendingCommandResult::DitchCleanup {
                 scope,
                 command,
