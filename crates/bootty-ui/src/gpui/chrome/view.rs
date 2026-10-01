@@ -57,6 +57,7 @@ pub(super) enum ContextMenu {
     },
     Space(SpaceSnapshot),
     Tab(TabContextSnapshot),
+    NativeSession(super::NativeSessionSidebar),
 }
 
 fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> {
@@ -176,10 +177,6 @@ impl GpuiChrome {
             self.sidebar_reconcile_hover,
             cx,
         ))
-    }
-
-    pub(crate) fn dock_codexbar(&self) -> Option<gpui_kit::AnyElement> {
-        sidebar::render_codexbar(self.snapshot.sidebar.as_ref()?, self.snapshot.palette)
     }
 
     pub(crate) const fn dock_presentation(
@@ -319,6 +316,7 @@ impl GpuiChrome {
             ContextMenu::Session { target, options } => sidebar::session_menu(target, *options),
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),
+            ContextMenu::NativeSession(session) => sidebar::native_session_menu(session),
         }
     }
 

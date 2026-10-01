@@ -982,15 +982,17 @@ pub enum PanelKind {
     Files,
     Changes,
     Diff,
-    Agents,
+    Browser,
+    Coordination,
 }
 impl PanelKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Sessions,
         Self::Files,
         Self::Changes,
         Self::Diff,
-        Self::Agents,
+        Self::Browser,
+        Self::Coordination,
     ];
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -999,7 +1001,8 @@ impl PanelKind {
             Self::Files => "files",
             Self::Changes => "changes",
             Self::Diff => "diff",
-            Self::Agents => "agents",
+            Self::Browser => "browser",
+            Self::Coordination => "coordination",
         }
     }
 }
@@ -1025,22 +1028,28 @@ pub enum PanelButton {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
 pub struct PanelConfig {
-    pub dock: Option<PanelDock>,
     pub button: PanelButton,
 }
 impl PanelConfig {
     #[must_use]
-    pub fn dock(self, kind: PanelKind) -> PanelDock {
-        self.dock.unwrap_or(if kind == PanelKind::Sessions {
-            PanelDock::Left
-        } else {
-            PanelDock::Right
-        })
+    pub const fn dock(self, kind: PanelKind) -> PanelDock {
+        match kind {
+            PanelKind::Sessions => PanelDock::Left,
+            _ => PanelDock::Right,
+        }
     }
 }
 impl BoottyConfig {
     #[must_use]
     pub fn panel(&self, kind: PanelKind) -> PanelConfig {
-        self.panels.get(&kind).copied().unwrap_or_default()
+        self.panels
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| match kind {
+                PanelKind::Browser => PanelConfig {
+                    button: PanelButton::Top,
+                },
+                _ => PanelConfig::default(),
+            })
     }
 }

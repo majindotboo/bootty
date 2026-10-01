@@ -172,30 +172,6 @@ fn panel_specs() -> Vec<SettingSpec> {
     macro_rules! panel {
         ($kind:ident, $name:literal, $label:literal) => {
             specs.push(spec(
-                &["panels", $name, "dock"],
-                "Dock",
-                "Where this panel opens.",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelDock::Left, "Left"),
-                        (&crate::config::PanelDock::Right, "Right"),
-                        (&crate::config::PanelDock::Bottom, "Bottom"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config
-                            .panel(crate::config::PanelKind::$kind)
-                            .dock(crate::config::PanelKind::$kind),
-                    ))
-                }),
-            ));
-            specs.push(spec(
                 &["panels", $name, "button"],
                 "Status bar button",
                 "Show a button that toggles this panel.",
@@ -223,7 +199,8 @@ fn panel_specs() -> Vec<SettingSpec> {
     panel!(Files, "files", "Files");
     panel!(Changes, "changes", "Changes");
     panel!(Diff, "diff", "Diff");
-    panel!(Agents, "agents", "Agents");
+    panel!(Browser, "browser", "Browser");
+    panel!(Coordination, "coordination", "Coordination");
     specs
 }
 

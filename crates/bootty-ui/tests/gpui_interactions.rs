@@ -3,7 +3,7 @@
 use bootty_ui::gpui as bootty_gpui;
 use std::{
     cell::RefCell,
-    ops::{Add as _, Div as _, Sub as _},
+    ops::{Add as _, Div as _, Mul as _, Sub as _},
     rc::Rc,
 };
 
@@ -134,6 +134,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 tree: None,
                 icon: None,
                 diff: None,
+                artwork: None,
                 color: color(220, 220, 230),
                 dim_color: color(150, 150, 160),
                 kind: SidebarRowKind::Session,
@@ -142,6 +143,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 selectable: true,
                 target: Some(target.clone()),
                 reorder_anchor: Some("session-1".to_owned()),
+                native_context: None,
                 context: Some(SessionContextSnapshot {
                     can_activate: true,
                     can_move_up: true,
@@ -161,6 +163,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 tree: None,
                 icon: Some("folder".to_owned()),
                 diff: None,
+                artwork: None,
                 color: color(180, 180, 190),
                 dim_color: color(130, 130, 140),
                 kind: SidebarRowKind::Detail,
@@ -169,6 +172,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 selectable: true,
                 target: Some(target),
                 reorder_anchor: None,
+                native_context: None,
                 context: None,
             },
         ],
@@ -577,7 +581,7 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
+fn quota_rows_keep_labels_beside_compact_meters(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
@@ -636,9 +640,23 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
                 let row = cx.debug_bounds(row).expect("quota row");
                 let labels = cx.debug_bounds(labels).expect("quota labels");
                 let track = cx.debug_bounds(track).expect("quota track");
-                assert_eq!(track.left(), row.left());
-                assert_eq!(track.right(), row.right());
-                assert!(track.top() >= labels.bottom());
+                assert!(labels.left() >= row.left());
+                assert!(labels.right() <= track.left(), "quota label overlaps meter");
+                assert!(track.right() <= row.right());
+                assert!(track.center().y >= labels.top());
+                assert!(track.center().y <= labels.bottom());
+                assert!(
+                    track.size.width <= row.size.width.div(2.0),
+                    "meter dominates the row"
+                );
+                assert!(
+                    track.size.height < labels.size.height.div(4.0),
+                    "meter is not thin"
+                );
+                assert!(
+                    row.size.height <= px(font_size).mul(1.75),
+                    "quota row uses more than one text line"
+                );
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }
@@ -1831,4 +1849,48 @@ fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) 
             < initial.div(2.0),
         "a short title should settle to a compact tab"
     );
+}
+
+#[gpui_kit::test]
+fn native_session_context_menu_preserves_target_and_keyboard_focus(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let native_target = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Session,
+        handle: "native:codex:conversation".to_owned(),
+        generation: 42,
+    };
+    let mut snapshot = chrome_snapshot();
+    let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
+    row.context = None;
+    row.native_context = Some(bootty_gpui::NativeSessionSidebar {
+        target: native_target.clone(),
+        provider: "codex".to_owned(),
+        title: "Conversation".to_owned(),
+        stopped: true,
+    });
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let focus = cx.update(|_, app| probe.read(app).chrome.read(app).focus_handle(app));
+    cx.update(|window, app| focus.focus(window, app));
+    let row = center(cx.debug_bounds("sidebar-row-session").expect("session row"));
+    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.update(|window, _| focus.is_focused(window)));
+    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("down down enter");
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [ChromeIntent::RenameNativeSession(native_target)]
+        );
+    });
 }

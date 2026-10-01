@@ -63,8 +63,9 @@ fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
     assert!(dialog.apply(&activate(dialog.spec()), &occupied).is_none());
     let worktrees = dialog.spec();
     assert_eq!(worktrees.text.as_deref(), Some(""));
+    assert_eq!(dialog.apply(&activate(worktrees), &occupied), None);
     assert!(matches!(
-        dialog.apply(&activate(worktrees), &occupied),
+        dialog.apply(&activate(dialog.spec()), &occupied),
         Some(NewSessionPickerEvent::CreateSession { cwd }) if cwd == path
     ));
 }

@@ -1484,7 +1484,7 @@ fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
-        format!("[panels.{panel}]\ndock = \"right\"\n[panels.files]\ndock = \"left\"\n"),
+        format!("[panels.{panel}]\nbutton = \"none\"\n[panels.files]\nbutton = \"top\"\n"),
     )
     .unwrap();
     let config = bootty_config::config::load_config_from_path(&path).unwrap();
@@ -1493,7 +1493,7 @@ fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
         config
             .panel(bootty_config::config::PanelKind::Files)
             .dock(bootty_config::config::PanelKind::Files),
-        bootty_config::config::PanelDock::Left
+        bootty_config::config::PanelDock::Right
     );
 }
 

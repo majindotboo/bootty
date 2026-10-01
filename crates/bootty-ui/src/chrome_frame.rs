@@ -177,6 +177,7 @@ fn selected_windows(
             id: window.id.clone(),
             index: window.index,
             name: window.name.clone(),
+            icon: window_agent_icon(state, window).to_owned(),
             active,
             progress,
             progress_indeterminate: progress.is_some()
@@ -202,6 +203,25 @@ fn selected_windows(
         );
     }
     (windows, tab_contexts)
+}
+
+fn window_agent_icon(state: &AppState, window: &bootty_mux::snapshot::MuxWindow) -> &'static str {
+    let Some(agents) = state.agent_service() else {
+        return "terminal";
+    };
+    let scope = state.mux_scope().persistence_value().to_string();
+    for pane in &window.panes {
+        for provider in bootty_agents::AgentKind::ALL {
+            if agents
+                .snapshot_scoped(provider, Some(&scope), pane.pane_id.as_deref())
+                .source
+                != bootty_agents::AgentSource::None
+            {
+                return provider.icon();
+            }
+        }
+    }
+    "terminal"
 }
 
 fn session_view(
@@ -691,6 +711,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             tree: None,
             icon: Some("circle-dashed".to_owned()),
             diff: None,
+            artwork: None,
             color: palette.text,
             dim_color: palette.muted,
             kind: SidebarRowKind::Group,
@@ -699,6 +720,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             selectable: false,
             target: None,
             reorder_anchor: None,
+            native_context: None,
             context: None,
         });
         rows.extend(unclaimed.into_iter().map(|session| SidebarRow {
@@ -712,6 +734,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             tree: None,
             icon: Some("bootty".to_owned()),
             diff: None,
+            artwork: None,
             color: palette.text,
             dim_color: palette.muted,
             kind: SidebarRowKind::Other("unassigned".to_owned()),
@@ -723,6 +746,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 session_id: session.session_id,
             }),
             reorder_anchor: None,
+            native_context: None,
             context: None,
         }));
     }
@@ -786,6 +810,8 @@ fn sidebar_rows(
         let trailing_color = trailing.as_ref().map(|_| state.ui_theme().palette.subtext);
         rows.push(SidebarRow {
             diff,
+            artwork: facts.project_icon.clone(),
+            icon: Some("folder".to_owned()),
             trailing,
             trailing_color,
             text: if grouped && !suffix.is_empty() {
@@ -874,6 +900,7 @@ fn sidebar_detail(
         key: format!("{}:{id}", base.key),
         text,
         icon: Some(icon.to_owned()),
+        artwork: None,
         color: subtext,
         indent: if grouped { 4 } else { 2 },
         tree: Some(
@@ -914,6 +941,7 @@ fn sidebar_session_base(
         tree: None,
         icon: None,
         diff: None,
+        artwork: None,
         color,
         dim_color,
         kind: SidebarRowKind::Detail,
@@ -925,6 +953,7 @@ fn sidebar_session_base(
             session_id: session.id.clone(),
         }),
         reorder_anchor: Some(session.name.clone()),
+        native_context: None,
         context: Some(SessionContextSnapshot {
             can_activate: !session.selected,
             can_move_up: index > 0,
@@ -959,7 +988,9 @@ fn sidebar_session_details(
                 }
             }
             "directory" => {
-                let cwd = session.cwd.as_deref().unwrap_or("unknown");
+                let Some(cwd) = session.cwd.as_deref().filter(|cwd| !cwd.is_empty()) else {
+                    continue;
+                };
                 let home = state
                     .active_multiplexer()
                     .remote
@@ -973,15 +1004,13 @@ fn sidebar_session_details(
                 ));
             }
             "branch" => {
-                let mut row = detail(
-                    "branch",
-                    "git-branch",
-                    facts.branch.clone().unwrap_or_else(|| "unknown".to_owned()),
-                );
+                let Some(branch) = &facts.branch else {
+                    continue;
+                };
+                let mut row = detail("branch", "git-branch", branch.clone());
                 row.trailing = match facts.branch_status {
-                    bootty_git::BranchStatus::Current => None,
+                    bootty_git::BranchStatus::Current | bootty_git::BranchStatus::Unknown => None,
                     bootty_git::BranchStatus::Stale => Some("stale".to_owned()),
-                    bootty_git::BranchStatus::Unknown => Some("unknown".to_owned()),
                 };
                 rows.push(row);
             }
@@ -1074,13 +1103,8 @@ fn sidebar_footer(
     let mut error = None;
     for (provider, usage) in UsageProvider::ALL.into_iter().zip(native.usage.current()) {
         error = error.or(usage.error.as_deref());
-        let provider_color = match provider {
-            UsageProvider::Codex => theme.accent,
-            UsageProvider::Claude => theme.warning,
-        };
         let tone_color = |tone| match tone {
-            QuotaTone::Provider => provider_color,
-            QuotaTone::Muted => theme.muted,
+            QuotaTone::Provider | QuotaTone::Muted => theme.muted,
             QuotaTone::Success => theme.success,
             QuotaTone::Warning => theme.warning,
             QuotaTone::Critical => theme.destructive,
@@ -1252,6 +1276,7 @@ fn window_status_items(
             };
             let index = make_cell("index", window.index.to_string());
             let mut name = make_cell("name", window.name.clone());
+            name.icon = Some(window.icon.clone());
             name.progress = window.progress.map(|value| StatusProgress {
                 value: (!window.progress_indeterminate).then_some(value),
                 color: parse_color(projection.mux.session_color.as_deref()).unwrap_or(theme.accent),
@@ -1395,7 +1420,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
             );
             true
         }
-        ChromeIntent::StartWindowDrag => false,
+        ChromeIntent::StartWindowDrag
+        | ChromeIntent::RenameNativeSession(_)
+        | ChromeIntent::RemoveNativeSession(_)
+        | ChromeIntent::NativeSessionHistory(_) => false,
         ChromeIntent::ActivateSpace(space) => {
             let space = id(space);
             if state.config().default_open_behavior == OpenBehavior::NewWindow {

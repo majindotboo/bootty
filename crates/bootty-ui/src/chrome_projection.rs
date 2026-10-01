@@ -6,6 +6,7 @@ pub struct WindowView {
     pub id: String,
     pub index: u32,
     pub name: String,
+    pub icon: String,
     pub active: bool,
     /// Terminal progress percentage for an inactive window, if any pane has reported it.
     pub progress: Option<u8>,

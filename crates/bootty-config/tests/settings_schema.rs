@@ -266,33 +266,30 @@ fn builtin_schema_keeps_the_hand_written_declarations() {
 
 #[rstest::rstest]
 fn panel_preferences_round_trip_through_the_schema(
-    #[values("left", "right", "bottom")] dock: &str,
     #[values("none", "top", "bottom")] button: &str,
 ) {
     use bootty_config::config::{PanelButton, PanelDock, PanelKind};
     for kind in PanelKind::ALL {
         let directory = assert_fs::TempDir::new().unwrap();
         let file = directory.child("config.toml");
-        file.write_str(&format!(
-            "[panels.{}]\ndock = {dock:?}\nbutton = {button:?}\n",
-            kind.name()
-        ))
-        .unwrap();
+        file.write_str(&format!("[panels.{}]\nbutton = {button:?}\n", kind.name()))
+            .unwrap();
         let config = load_config_from_path(file.path()).unwrap();
-        let expected_dock = match dock {
-            "left" => PanelDock::Left,
-            "bottom" => PanelDock::Bottom,
-            _ => PanelDock::Right,
-        };
         let expected_button = match button {
             "top" => PanelButton::Top,
             "bottom" => PanelButton::Bottom,
             _ => PanelButton::None,
         };
-        assert_eq!(config.panel(kind).dock(kind), expected_dock);
         assert_eq!(config.panel(kind).button, expected_button);
         let defaults = BoottyConfig::default();
-        assert_eq!(defaults.panel(kind).button, PanelButton::None);
+        assert_eq!(
+            defaults.panel(kind).button,
+            if kind == PanelKind::Browser {
+                PanelButton::Top
+            } else {
+                PanelButton::None
+            }
+        );
         assert_eq!(
             defaults.panel(kind).dock(kind),
             if kind == PanelKind::Sessions {

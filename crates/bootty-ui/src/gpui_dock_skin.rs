@@ -524,10 +524,10 @@ fn panel_toggle(
 impl WorkspaceTabGroup {
     fn tabs_visible(&self, group: &TabGroupContext, cx: &App) -> bool {
         use bootty_config::config::PanelTabs;
-        if group
-            .active_panel()
-            .is_some_and(|panel| terminal_panel_name(panel.panel_name(cx)))
-        {
+        if group.active_panel().is_some_and(|panel| {
+            terminal_panel_name(panel.panel_name(cx))
+                || panel.panel_name(cx) == "bootty.native-session"
+        }) {
             return false;
         }
         if self.always_hide_tabs.borrow().contains(&group.node()) {
@@ -812,10 +812,10 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         cx: &mut App,
     ) -> AnyElement {
         let content = self.kit.render_active_panel(panel, group, window, cx);
-        if group
-            .active_panel()
-            .is_some_and(|panel| terminal_panel_name(panel.panel_name(cx)))
-        {
+        if group.active_panel().is_some_and(|panel| {
+            terminal_panel_name(panel.panel_name(cx))
+                || panel.panel_name(cx) == "bootty.native-session"
+        }) {
             // Kit allows drops into any unlocked group. The mux-owned center only accepts
             // terminal pane drags, whose separate type and command path stay inside its view.
             return div()
@@ -972,61 +972,14 @@ fn panel_menu(
 }
 
 fn group_menu(
-    owner: WeakEntity<WorkspaceDock>,
-    group: &TabGroupContext,
-    always: bool,
+    _: WeakEntity<WorkspaceDock>,
+    _: &TabGroupContext,
+    _: bool,
     menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
+    _: &mut Window,
+    _: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    // The locked terminal center offers no tab or panel management: no tab strip to force,
-    // no panel to add beside the mux window.
-    let terminal_locked = !group.panels().is_empty()
-        && group
-            .panels()
-            .iter()
-            .all(|panel| terminal_panel_name(panel.panel_name(cx)));
-    if terminal_locked {
-        return menu;
-    }
-    let node = group.node();
-    let toggle_owner = owner.clone();
-    let hide_owner = owner.clone();
-    let hidden = owner
-        .upgrade()
-        .is_some_and(|owner| owner.read(cx).always_hide_tabs.borrow().contains(&node));
-    menu.separator()
-        .item(
-            PopupMenuItem::new("Always show tabs")
-                .checked(always)
-                .on_click(move |_, window, cx| {
-                    _ = toggle_owner.update(cx, |owner, cx| {
-                        owner.invoke_action(
-                            crate::commands::DockAction::ToggleTabBar,
-                            Some(node),
-                            window,
-                            cx,
-                        );
-                    });
-                }),
-        )
-        .item(
-            PopupMenuItem::new("Always hide tabs")
-                .checked(hidden)
-                .on_click(move |_, window, cx| {
-                    _ = hide_owner.update(cx, |owner, cx| {
-                        owner.invoke_action(
-                            crate::commands::DockAction::ToggleHiddenTabs,
-                            Some(node),
-                            window,
-                            cx,
-                        );
-                    });
-                }),
-        )
-        .submenu("Add panel", window, cx, move |menu, _, _| {
-            WorkspaceDock::panel_menu(&owner, node, menu)
-        })
+    menu
 }
 
 fn empty_terminal_view(

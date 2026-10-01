@@ -140,9 +140,7 @@ pub(super) fn render(
         reconcile_hover,
     }
     .content(width, docked);
-    let status_footer = (!docked)
-        .then(|| render_codexbar(snapshot, colors))
-        .flatten();
+    let status_footer = render_codexbar(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
 
@@ -530,13 +528,19 @@ impl SidebarRows {
             .when_some(row.number, |element, number| {
                 element.child(self.number_badge(row, number))
             })
-            .when_some(row.icon.clone(), |element, icon| {
-                element.child(div().flex_none().child(crate::gpui::icon(
-                    &icon,
-                    14.0,
-                    color(if selected { row.color } else { row.dim_color }),
-                )))
+            .when_some(row.artwork.as_ref(), |element, artwork| {
+                element.child(crate::gpui::project_artwork(artwork, 1.0))
             })
+            .when_some(
+                row.icon.clone().filter(|_| row.artwork.is_none()),
+                |element, icon| {
+                    element.child(div().flex_none().child(crate::gpui::icon(
+                        &icon,
+                        14.0,
+                        color(if selected { row.color } else { row.dim_color }),
+                    )))
+                },
+            )
             .child(
                 div()
                     .flex_1()
@@ -563,28 +567,16 @@ impl SidebarRows {
     }
 
     fn number_badge(&self, row: &SidebarRow, number: usize) -> gpui_kit::AnyElement {
-        let snapshot = &self.snapshot;
         div()
             .flex_none()
-            .w(px(14.0))
-            .h(px(14.0))
-            .flex()
-            .items_center()
-            .justify_center()
+            .w_4()
             .text_xs()
-            .rounded(px(3.0))
-            .when(row.active, |badge| {
-                badge
-                    .bg(color(row.color))
-                    .text_color(color(readable_color(row.color, snapshot.foreground)))
-            })
-            .when(!row.active, |badge| {
-                badge
-                    .border_1()
-                    .border_color(color(row.dim_color))
-                    .text_color(color(row.dim_color))
-            })
-            .child((number % 100).to_string())
+            .text_color(color(if row.active {
+                self.snapshot.foreground
+            } else {
+                row.dim_color
+            }))
+            .child(number.to_string())
             .into_any_element()
     }
 
@@ -814,7 +806,17 @@ impl SidebarRows {
             element
         };
         let context_owner = self.owner.clone();
-        let element = if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
+        let element = if let Some(context) = row.native_context.clone() {
+            element
+                .context_menu(move |menu, _, _| {
+                    super::popup_menu(
+                        menu,
+                        &ContextMenu::NativeSession(context.clone()),
+                        &context_owner,
+                    )
+                })
+                .into_any_element()
+        } else if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
             element
                 .context_menu(move |menu, _, _| {
                     super::popup_menu(
@@ -1013,76 +1015,48 @@ fn usage_meter(
     let fill_width = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
         .to_f32()
         .unwrap_or(0.0);
-    let marker = snapshot
-        .meter
-        .expected_remaining_percent
-        .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
-    let selector = |part: &str| {
-        let name = format!("sidebar-footer-{}-{part}", item.key);
-        move || name.clone()
-    };
-    v_flex()
+    let details = format!(
+        "{} · {} · {}",
+        snapshot.label, snapshot.meter.pace, snapshot.meter.reset
+    );
+    div()
+        .id(SharedString::from(format!("usage-{}", item.key)))
         .w_full()
         .min_w_0()
-        .gap_1()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(color(colors.muted))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
+        })
+        .when_some(item.icon.as_deref(), |element, icon| {
+            element.child(crate::gpui::sized_icon(
+                icon,
+                crate::gpui::IconSize::Small,
+                color(colors.muted),
+            ))
+        })
         .child(
             div()
-                .id(SharedString::from(format!("usage-labels-{}", item.key)))
-                .debug_selector(selector("labels"))
-                .w_full()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(color(item.color))
-                        .when_some(item.icon.as_deref(), |element, icon| {
-                            element.child(crate::gpui::sized_icon(
-                                icon,
-                                crate::gpui::IconSize::Small,
-                                color(snapshot.fill),
-                            ))
-                        })
-                        .child(snapshot.label.clone()),
-                )
-                .when(!snapshot.meter.pace.is_empty(), |element| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .text_color(color(snapshot.pace))
-                            .child(snapshot.meter.pace.clone()),
-                    )
+                .debug_selector({
+                    let key = item.key.clone();
+                    move || format!("sidebar-footer-{key}-labels")
                 })
-                .when(!snapshot.meter.reset.is_empty(), |element| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_color(color(colors.muted))
-                            .child(crate::gpui::sized_icon(
-                                "rotate-ccw",
-                                crate::gpui::IconSize::XSmall,
-                                color(colors.muted),
-                            ))
-                            .child(snapshot.meter.reset.clone()),
-                    )
-                }),
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(snapshot.label.clone()),
         )
         .child(
             div()
-                .id(SharedString::from(format!("usage-track-{}", item.key)))
-                .debug_selector(selector("track"))
-                .relative()
-                .w_full()
-                .h_1()
+                .debug_selector({
+                    let key = item.key.clone();
+                    move || format!("sidebar-footer-{key}-track")
+                })
+                .w_10()
+                .h_0p5()
                 .rounded_full()
                 .bg(color(snapshot.track))
                 .child(
@@ -1091,19 +1065,7 @@ fn usage_meter(
                         .w(relative(fill_width))
                         .rounded_full()
                         .bg(color(snapshot.fill)),
-                )
-                .when_some(marker, |element, marker| {
-                    element.child(
-                        div()
-                            .absolute()
-                            .left(relative(marker))
-                            .top_neg_1()
-                            .bottom_neg_1()
-                            .w_0p5()
-                            .rounded_full()
-                            .bg(color(snapshot.marker)),
-                    )
-                }),
+                ),
         )
         .into_any_element()
 }
@@ -1299,4 +1261,60 @@ pub(super) fn render_codexbar(
                 }))
         })
         .map(IntoElement::into_any_element)
+}
+
+pub(super) fn native_session_menu(session: &super::NativeSessionSidebar) -> Vec<MenuRow> {
+    let command = |operation: &str| {
+        let mut invocation = bootty_control::CommandInvocation::from_action(
+            &format!("agents.{}.{operation}", session.provider),
+            bootty_control::Caller::Internal,
+        );
+        invocation.target = Some(session.target.clone());
+        ChromeIntent::Command(invocation)
+    };
+    let row = |label: &str, enabled: bool, destructive: bool, starts_group: bool, intent| MenuRow {
+        label: label.to_owned(),
+        enabled,
+        destructive,
+        starts_group,
+        intent,
+    };
+    vec![
+        row(
+            "Conversation history",
+            true,
+            false,
+            false,
+            ChromeIntent::NativeSessionHistory(session.target.clone()),
+        ),
+        row(
+            "Rename conversation…",
+            true,
+            false,
+            false,
+            ChromeIntent::RenameNativeSession(session.target.clone()),
+        ),
+        row("Fork conversation", true, false, true, command("fork")),
+        row(
+            "Resume conversation",
+            session.stopped,
+            false,
+            false,
+            command("resume"),
+        ),
+        row(
+            "Archive conversation",
+            !session.stopped,
+            false,
+            true,
+            command("stop"),
+        ),
+        row(
+            "Remove from history…",
+            session.stopped,
+            true,
+            false,
+            ChromeIntent::RemoveNativeSession(session.target.clone()),
+        ),
+    ]
 }

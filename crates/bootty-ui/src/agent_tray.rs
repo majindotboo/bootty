@@ -135,12 +135,12 @@ impl AgentTray {
                 id.clone(),
                 (
                     sender.clone(),
-                    CommandInvocation::from_action("show_agents", Caller::Internal),
+                    CommandInvocation::from_action("show_sidebar", Caller::Internal),
                 ),
             );
             snapshot.items.push((
                 id,
-                format!("Open Agents · window {}", index.saturating_add(1)),
+                format!("Open Sessions · window {}", index.saturating_add(1)),
             ));
         }
         *ROUTES

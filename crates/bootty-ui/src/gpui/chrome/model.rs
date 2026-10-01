@@ -310,6 +310,7 @@ pub struct SidebarRow {
     pub tree: Option<String>,
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
+    pub artwork: Option<std::sync::Arc<bootty_git::ProjectIcon>>,
     pub color: Rgba,
     pub dim_color: Rgba,
     pub kind: SidebarRowKind,
@@ -319,6 +320,15 @@ pub struct SidebarRow {
     pub target: Option<SessionTarget>,
     pub reorder_anchor: Option<String>,
     pub context: Option<SessionContextSnapshot>,
+    pub native_context: Option<NativeSessionSidebar>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSessionSidebar {
+    pub target: bootty_control::CommandTarget,
+    pub provider: String,
+    pub title: String,
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +483,9 @@ pub enum ChromeIntent {
         to: SpaceKey,
     },
     ActivateSession(SessionTarget),
+    RenameNativeSession(bootty_control::CommandTarget),
+    RemoveNativeSession(bootty_control::CommandTarget),
+    NativeSessionHistory(bootty_control::CommandTarget),
     OpenGitChanges(SessionTarget),
     AdoptSession(SessionTarget),
     SessionContext {
