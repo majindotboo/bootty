@@ -32,18 +32,16 @@ impl AppState {
             MuxKeyAction::LastTab => ExactMuxAction::LastWindow,
             MuxKeyAction::MoveTab(delta) => ExactMuxAction::MoveWindow(delta),
             MuxKeyAction::ClosePane => ExactMuxAction::CloseWindowPane,
-            _ => return self.plan_remaining_mux_key_action(action, target),
+            _ => return Self::plan_remaining_mux_key_action(action, target),
         };
         self.plan_exact_mux_action(exact, target?)
     }
 
     fn plan_remaining_mux_key_action(
-        &self,
         action: MuxKeyAction,
         target: Option<&ExactMuxTarget>,
     ) -> Option<MuxCommand> {
-        let target =
-            target.filter(|target| target.scope() == self.workspace.active.binding.scope())?;
+        let target = target?;
         let (session, window_id, pane_id) = target.ids();
         let session_id = session.unwrap_or("local").to_owned();
         let window_id = window_id.map(str::to_owned);
@@ -95,8 +93,7 @@ impl AppState {
                 self.workspace.project_session_command(&cwd)
             });
         }
-        let binding = (target.scope() == self.workspace.active.binding.scope())
-            .then_some(&mut self.workspace.active.binding)?;
+        let binding = self.workspace.binding_mut(target.scope())?;
         let (session_id, requested_window, requested_pane) = target.ids();
         let session_id = session_id?.to_owned();
         let requested_window = requested_window.map(str::to_owned);

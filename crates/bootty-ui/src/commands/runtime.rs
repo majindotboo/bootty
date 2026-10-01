@@ -734,6 +734,13 @@ impl AppState {
                 Ok(command) => command,
                 Err(outcome) => return self.reject_command(outcome),
             };
+        if target_supplied
+            && let Some(exact) = &exact_target
+            && let Some(command @ (MuxCommand::NewWindow { .. } | MuxCommand::SplitPane { .. })) =
+                &planned_mux_command
+        {
+            return self.dispatch_targeted_topology(exact.scope(), command.clone(), execution);
+        }
         let context = ResolvedCommandContext {
             invocation: resolved.invocation,
             exact_target,
@@ -989,7 +996,7 @@ impl AppState {
             });
         }
         if let Some(command) = planned_mux_command.as_ref()
-            && let Some(outcome) = self.preflight_mux_command(command)
+            && let Some(outcome) = self.preflight_mux_command_for_scope(scope, command)
         {
             return Err(outcome);
         }

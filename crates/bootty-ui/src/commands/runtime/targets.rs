@@ -279,6 +279,28 @@ impl AppState {
         .command_target(ResourceKind::Terminal, binding_runtime.mux(), &binding)
     }
 
+    pub(crate) fn mux_pane_target(
+        &self,
+        scope: SpaceId,
+        kind: ResourceKind,
+        session: &str,
+        window: &str,
+        pane: &str,
+    ) -> Option<CommandTarget> {
+        let binding = self.workspace.binding(scope)?;
+        if binding.multiplexer().backend == bootty_config::config::MultiplexerBackendConfig::Herdr {
+            return None;
+        }
+        let handle = self.binding_target_handle(scope, binding.mux().binding_generation());
+        ExactMuxTarget::Pane(
+            scope,
+            session.to_owned(),
+            window.to_owned(),
+            pane.to_owned(),
+        )
+        .command_target(kind, binding.mux(), &handle)
+    }
+
     /// The Terminal target of a session's active pane in the binding's latest snapshot.
     pub(super) fn session_terminal_target(
         &self,
@@ -330,7 +352,10 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.create"
                 )
         }
-        ResourceKind::Session => command.starts_with("pane.") || command == "session.close",
+        ResourceKind::Session => {
+            command.starts_with("pane.") || matches!(command, "session.close" | "new_tab")
+        }
+        ResourceKind::Pane => matches!(command, "split_right" | "split_down"),
         // Terminal input and capture address the pane through the mux and never select it.
         ResourceKind::Terminal => {
             matches!(

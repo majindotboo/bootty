@@ -2750,3 +2750,108 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
         ["project"]
     );
 }
+
+#[rstest]
+#[case("new_tab", "target", 2, 2)]
+#[case("split_right", "pane_target", 1, 2)]
+#[case("split_down", "pane_target", 1, 2)]
+fn issued_topology_targets_modify_the_inactive_space_without_retargeting_selection(
+    #[case] command: &str,
+    #[case] field: &str,
+    #[case] expected_windows: usize,
+    #[case] expected_panes: usize,
+) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let config_path = directory.path().join("config.toml");
+    let other = WorkspaceRepository::open(&config_path)
+        .unwrap()
+        .0
+        .create_space(
+            "Phone",
+            "2",
+            [1, 2, 3],
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .unwrap()
+        .unwrap()
+        .id();
+    let mut state = native_state(directory.path());
+    let now = Instant::now();
+    open_native_session(&mut state, directory.path(), now);
+    let original_space = state.active_space_id();
+    let original_selection = selection(&state);
+    let phone = listed_space(&mut state, "Phone");
+    let created = submit_command(
+        &mut state,
+        session_request(
+            "session.create",
+            owned(&["phone", directory.path().to_str().unwrap()]),
+            phone["target"].clone(),
+        ),
+        now,
+    );
+    assert!(
+        matches!(created, CommandOutcome::Success { .. }),
+        "{created:?}"
+    );
+    let phone = listed_space(&mut state, "Phone");
+    let session = &phone["sessions"][0];
+    assert_eq!(session["topology_supported"], true);
+    let target = session[field].clone();
+    let mut stale = session_request(command, Vec::new(), target.clone());
+    let generation = &mut stale.target.as_mut().unwrap().generation;
+    *generation = generation.saturating_add(1);
+    let rejected = submit_command(&mut state, stale, now);
+    assert!(
+        matches!(rejected, CommandOutcome::StaleTarget { .. }),
+        "{rejected:?}"
+    );
+    let outcome = submit_command(
+        &mut state,
+        session_request(command, Vec::new(), target),
+        now,
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let phone = listed_space(&mut state, "Phone");
+    let windows = phone["sessions"][0]["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), expected_windows);
+    assert_eq!(
+        windows
+            .iter()
+            .map(|window| window["panes"].as_array().unwrap().len())
+            .sum::<usize>(),
+        expected_panes
+    );
+    for window in windows {
+        let issued: CommandTarget = serde_json::from_value(window["target"].clone()).unwrap();
+        assert_eq!(issued.kind, ResourceKind::MuxWindow);
+        for pane in window["panes"].as_array().unwrap() {
+            let issued: CommandTarget = serde_json::from_value(pane["target"].clone()).unwrap();
+            let terminal: CommandTarget =
+                serde_json::from_value(pane["terminal_target"].clone()).unwrap();
+            assert_eq!(issued.kind, ResourceKind::Pane);
+            assert_eq!(terminal.kind, ResourceKind::Terminal);
+        }
+    }
+    assert_eq!(state.active_space_id(), original_space);
+    assert_eq!(selection(&state), original_selection);
+    assert!(state.activate_space_from_ui(other));
+    if command != "new_tab" {
+        let rects = state.pane_rects(SurfaceRect::from_min_size(0.0, 0.0, 200.0, 100.0), 4.0);
+        assert_eq!(rects.len(), 2);
+        for (_, rect) in rects {
+            if command == "split_right" {
+                assert!(rect.width() < 100.0);
+                assert!((rect.height() - 100.0).abs() < f32::EPSILON);
+            } else {
+                assert!((rect.width() - 200.0).abs() < f32::EPSILON);
+                assert!(rect.height() < 50.0);
+            }
+        }
+    }
+}

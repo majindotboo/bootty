@@ -120,8 +120,49 @@ impl AppState {
         })
     }
 
+    pub(super) fn dispatch_targeted_topology(
+        &mut self,
+        scope: SpaceId,
+        command: MuxCommand,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(submitted) = executor::submit_authoritative_command_for_scope(
+            &mut self.workspace,
+            &self.repaint,
+            scope,
+            command,
+            None,
+            execution,
+            CommandSelection::Preserve,
+        ) else {
+            return self.reject_command(CommandOutcome::StaleTarget {
+                message: "The topology target Space was closed".to_owned(),
+            });
+        };
+        CommandDispatch::Pending(PendingCommandResult::Mux {
+            scope: submitted.scope,
+            command: submitted.command,
+            membership: submitted.membership,
+            layout: submitted.layout,
+            result: submitted.result,
+        })
+    }
+
     pub(super) fn preflight_mux_command(&self, command: &MuxCommand) -> Option<CommandOutcome> {
-        match executor::preflight_command(&self.workspace, command) {
+        self.preflight_mux_command_for_scope(self.mux_scope(), command)
+    }
+
+    pub(super) fn preflight_mux_command_for_scope(
+        &self,
+        scope: SpaceId,
+        command: &MuxCommand,
+    ) -> Option<CommandOutcome> {
+        let Some(binding) = self.workspace.binding(scope) else {
+            return Some(CommandOutcome::StaleTarget {
+                message: "The command Space was closed".to_owned(),
+            });
+        };
+        match executor::preflight_binding_command(binding, command) {
             Err(MuxCommandError::Failed(message)) => Some(CommandOutcome::Unavailable { message }),
             Err(MuxCommandError::Unsupported) => Some(CommandOutcome::Unsupported {
                 message: ErrorNotice::MuxOperationUnsupported.to_string(),
