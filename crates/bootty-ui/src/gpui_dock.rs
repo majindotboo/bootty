@@ -232,10 +232,7 @@ impl WorkspaceDock {
             &area,
             &panels,
             &sessions,
-            &[
-                panel_handle(browser.clone()),
-                panel_handle(coordination.clone()),
-            ],
+            &[panel_handle(coordination.clone())],
             sidebar_defaults,
             window,
             cx,
@@ -683,8 +680,17 @@ impl WorkspaceDock {
     }
 
     pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.browser
-            .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        // Reuse the initial page when opening the browser for the first time.
+        if self
+            .area
+            .read(cx)
+            .panel(PanelId::from(self.browser.entity_id()))
+            .is_some()
+            || self.browser.read(cx).is_empty()
+        {
+            self.browser
+                .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        }
         self.show_browser(window, cx);
     }
 
