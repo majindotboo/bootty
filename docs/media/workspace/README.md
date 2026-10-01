@@ -8,11 +8,14 @@ terminals, including their normal tabs and splits.
 - [Project setup](project-setup.mp4), 17 seconds: project artwork, checkout, and session choices.
 - [Agent terminals](agent-launch.mp4), 16 seconds: colored provider TUI, a new terminal tab, and splits.
 - [Browser](browser.mp4): top-level, closable page tabs, compact navigation, native input and Cmd+K overlay visibility.
+- [Current browser tabs](browser-tabs.mp4), 17 seconds: open and close a page,
+  Cmd+K restoration, shared tab spacing, usage reset time and bottom Spaces.
 - [Tools](tools.mp4), 14 seconds: grouped changes, tracked diff, and Files navigation.
 - [Linux X11](linux-x11.mp4), 12 seconds, and [XWayland](linux-xwayland.mp4),
   12 seconds: native browser input, navigation, resize, and palette restoration.
 
 ![Sessions and quiet usage](sessions.png)
+![Shared Pill appearance for terminal and sidebar tabs](shared-pill-tabs.png)
 ![Checkout selection](checkout.png)
 ![Checkout launch choices](launch.png)
 ![Grouped changes](changes.png)
@@ -23,6 +26,11 @@ terminals, including their normal tabs and splits.
 ![Observed orchestration completion](orchestration.png)
 ![Linux X11 browser](linux-x11.png)
 ![Linux XWayland browser](linux-xwayland.png)
+
+The current screenshots and browser-tabs recording show bottom icon-only Spaces
+with tooltip names, usage reset time and pacing, and the same tab appearance
+setting in both tab rows. The other short recordings demonstrate individual
+interactions before these spacing and footer refinements.
 
 Computer use is disabled and the current development identity reports Screen
 Recording and Accessibility as not granted. The native helper was separately
