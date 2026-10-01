@@ -358,7 +358,7 @@ fn spawn_argv(
             // The UI host may inherit automation-only color suppression. A new local
             // server must not retain that variable in its global pane environment.
             (
-                "env".to_owned(),
+                if cfg!(unix) { "/usr/bin/env" } else { "env" }.to_owned(),
                 ["-u", "NO_COLOR", program]
                     .map(str::to_owned)
                     .into_iter()
