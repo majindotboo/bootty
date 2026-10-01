@@ -8,8 +8,6 @@ pub enum DockAction {
     TogglePanel(bootty_config::config::PanelKind),
     CodexBar,
     Spaces,
-    ToggleHiddenTabs,
-    ToggleTabBar,
     Sidebar,
     Files,
     Changes,
@@ -69,8 +67,6 @@ impl DockAction {
             Self::ToggleRight => Command::ToggleRightDock,
             Self::CodexBar => Command::ShowCodexBar,
             Self::Spaces => Command::ShowSpaces,
-            Self::ToggleHiddenTabs => Command::ToggleHiddenTabs,
-            Self::ToggleTabBar => Command::ToggleTabBar,
             Self::Sidebar => Command::ShowSidebar,
             Self::Files => Command::ShowFiles,
             Self::Changes => Command::ShowChanges,
@@ -84,8 +80,6 @@ impl DockAction {
         [
             Self::ToggleLeft,
             Self::ToggleRight,
-            Self::ToggleTabBar,
-            Self::ToggleHiddenTabs,
             Self::CodexBar,
             Self::Spaces,
         ]

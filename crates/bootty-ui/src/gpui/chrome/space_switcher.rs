@@ -1,6 +1,6 @@
 use num_traits::ToPrimitive as _;
 
-use gpui_kit::{Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
+use gpui_kit::{Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*};
 
 use super::{
     ChromeIntent, ChromePalette, ContextMenu, GpuiChrome, MenuRow, Rgba, SpaceSnapshot,
@@ -8,25 +8,17 @@ use super::{
 };
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{
-    Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
 };
-
-const BUTTON_SIZE: f32 = 28.0;
-const BUTTON_GAP: f32 = 4.0;
 
 pub(super) fn render(
     spaces: &[SpaceSnapshot],
     transition: Option<SpaceTransition>,
-    height: f32,
     background: Rgba,
     colors: ChromePalette,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
-    let controls_min_width = px((spaces.len().to_f32().unwrap_or(f32::MAX)).mul_add(
-        BUTTON_GAP,
-        (spaces.len().to_f32().unwrap_or(f32::MAX) + 1.0) * BUTTON_SIZE,
-    ) + 8.0);
     let buttons = spaces
         .iter()
         .map(|space| space_button(space, transition, colors, cx));
@@ -35,25 +27,23 @@ pub(super) fn render(
         .id("bootty-gpui-space-switcher")
         .debug_selector(|| "bootty-gpui-space-switcher".to_owned())
         .flex_none()
-        .h(px(height))
         .w_full()
         .p_1()
-        .overflow_x_scroll()
         .border_t_1()
         .border_color(color(colors.border))
         .child(
             div()
                 .w_full()
-                .min_w(controls_min_width)
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_center()
-                .gap(px(BUTTON_GAP))
+                .gap_1()
                 .children(buttons)
                 .child(super::button::activated_button(
                     div()
                         .debug_selector(|| "space-create".to_owned())
-                        .size(px(BUTTON_SIZE))
+                        .min_h_7()
                         .flex_none()
                         .flex()
                         .items_center()
@@ -64,7 +54,9 @@ pub(super) fn render(
                                 .small()
                                 .text_color(color(colors.subtext)),
                         )
+                        .label("New")
                         .ghost()
+                        .small()
                         .accessibility_label("New Space")
                         .tooltip("New Space"),
                     move |_, app| {
@@ -106,11 +98,15 @@ fn space_button(
             move || format!("space-{key}")
         })
         .relative()
-        .size(px(BUTTON_SIZE))
+        .min_h_7()
+        .max_w_full()
         .flex()
         .items_center()
-        .justify_center()
-        .rounded(px(3.0))
+        .justify_start()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .rounded(cx.theme().radius)
         .text_color(if space.error.is_some() {
             color(colors.muted)
         } else if selected > 0.0 {
@@ -141,7 +137,17 @@ fn space_button(
             } else {
                 colors.subtext
             }),
-        ));
+        ))
+        .child(
+            div()
+                .debug_selector({
+                    let key = space.key.0;
+                    move || format!("space-label-{key}")
+                })
+                .whitespace_normal()
+                .text_sm()
+                .child(space.name.clone()),
+        );
     let owner = cx.weak_entity();
     let visual = visual.context_menu(move |menu, _, _| {
         super::popup_menu(menu, &ContextMenu::Space(menu_space.clone()), &owner)
@@ -150,8 +156,8 @@ fn space_button(
     let button = Button::new(SharedString::from(format!("space-button-{}", space.key.0)))
         .ghost()
         .p_0()
-        .w(px(BUTTON_SIZE))
-        .h(px(BUTTON_SIZE))
+        .max_w_full()
+        .h_auto()
         .tab_index(0_isize)
         .accessibility_label(space.name.clone())
         .tooltip(tooltip_error.map_or_else(
@@ -159,7 +165,7 @@ fn space_button(
             |detail| format!("{tooltip_name}\n{detail}"),
         ))
         .child(visual);
-    super::button::activated_button(div().size(px(BUTTON_SIZE)), button, move |_, app| {
+    super::button::activated_button(div().flex_none().max_w_full(), button, move |_, app| {
         if !click_space.active {
             _ = owner.update(app, |_, cx| cx.emit(ChromeIntent::ActivateSpace(activate)));
         }

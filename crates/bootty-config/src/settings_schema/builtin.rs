@@ -204,7 +204,7 @@ fn panel_specs() -> Vec<SettingSpec> {
     specs
 }
 
-fn dock_header_specs() -> [SettingSpec; 4] {
+fn dock_header_specs() -> [SettingSpec; 2] {
     [
         spec(
             &["chrome", "left-dock-toggle"],
@@ -223,62 +223,6 @@ fn dock_header_specs() -> [SettingSpec; 4] {
             "DOCKS",
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.chrome.right_dock_toggle)),
-        ),
-        spec(
-            &["chrome", "panel-tab-style"],
-            "Fixed dock tab labels",
-            "Label style for tabs in the narrow left and right docks. Main Dock tabs use icons and text.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Icons,
-                        "Icons only",
-                        "Show icons; hover for panel names.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::IconsAndText,
-                        "Icons and text",
-                        "Show each panel’s icon and name.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Text,
-                        "Text only",
-                        "Show panel names without icons.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.panel_tab_style))
-            }),
-        ),
-        spec(
-            &["chrome", "panel-tabs"],
-            "Fixed dock tabs",
-            "Tab visibility for the fixed left and right docks. Main and bottom Dock tabs stay visible unless hidden for that group.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Automatic,
-                        "Hide for a single panel",
-                        "Show tabs only when a group has multiple panels.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Always,
-                        "Always show",
-                        "Keep tabs visible even for a single panel.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Never,
-                        "Always hide",
-                        "Hide tabs and switch panels with commands.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.chrome.panel_tabs))),
         ),
     ]
 }

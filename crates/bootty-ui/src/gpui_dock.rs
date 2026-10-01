@@ -7,13 +7,7 @@ use crate::commands::DockAction;
 use layout::{LayoutSaveHandle, SavedLayout};
 use registry::{PanelFactory, register, register_factory};
 
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc, sync::Arc};
 
 use bootty_control::{BoundAppCommandSender, CommandTarget};
 use gpui_kit::component::dock::{
@@ -156,8 +150,6 @@ pub struct WorkspaceDock {
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
     panel_preferences:
         BTreeMap<bootty_config::config::PanelKind, bootty_config::config::PanelConfig>,
-    pub(crate) always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    pub(crate) always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
     /// The single locked terminal leaf. The mux owns the window and every split inside it;
     /// Dock never adds, removes, or relocates this panel after its first placement.
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
@@ -212,10 +204,7 @@ impl WorkspaceDock {
             scope.persistence_value(),
             context.host_identity
         );
-        let always_show_tabs = Rc::new(RefCell::new(HashSet::new()));
-        let always_hide_tabs = Rc::new(RefCell::new(HashSet::new()));
-        let (area, titlebar) =
-            Self::dock_area(chrome, &always_show_tabs, &always_hide_tabs, window, cx);
+        let (area, titlebar) = Self::dock_area(chrome, window, cx);
         let (terminal_panel, attachment) = Self::terminal_panels(
             &area,
             terminal,
@@ -271,8 +260,6 @@ impl WorkspaceDock {
             // Seeded from the live config so the first settings sync only reacts to real
             // changes instead of relocating every panel out of the restored layout.
             panel_preferences,
-            always_show_tabs,
-            always_hide_tabs,
             terminal: terminal_panel,
             attachment,
             focused_group: None,
@@ -338,8 +325,6 @@ impl WorkspaceDock {
 
     fn dock_area(
         chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
-        always_show_tabs: &Rc<RefCell<HashSet<NodeId>>>,
-        always_hide_tabs: &Rc<RefCell<HashSet<NodeId>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (
@@ -351,11 +336,9 @@ impl WorkspaceDock {
             let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
                 dock_owner.clone(),
                 chrome.clone(),
-                always_show_tabs.clone(),
-                always_hide_tabs.clone(),
                 cx,
             );
-            let mut area = DockArea::new("workspace", Some(9), window, cx).with_renderer(skin);
+            let mut area = DockArea::new("workspace", Some(10), window, cx).with_renderer(skin);
             area.set_locked(true, window, cx);
             area
         });
@@ -498,11 +481,7 @@ impl WorkspaceDock {
                     // Incompatible saves leave the default layout in place.
                     if saved.layout.version == this.area.read(cx).version() {
                         this.load_layout(saved, window, cx);
-                    } else {
-                        this.restore_tab_preferences(&saved, cx);
                     }
-                } else {
-                    this.restore_tab_paths(&[], &[], cx);
                 }
                 let pending = this.restoring.take().unwrap_or_default();
                 match pending.panel {
@@ -1246,34 +1225,12 @@ impl WorkspaceDock {
     }
 
     fn load_layout(&mut self, saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
-        let SavedLayout {
-            layout,
-            always_show_tabs,
-            always_hide_tabs,
-        } = saved;
+        let SavedLayout { layout } = saved;
         self.error = self
             .area
             .update(cx, |area, cx| area.load(layout, window, cx))
             .err()
             .map(|error| error.to_string());
-        self.restore_tab_paths(&always_show_tabs, &always_hide_tabs, cx);
-    }
-
-    fn restore_tab_preferences(&self, saved: &SavedLayout, cx: &App) {
-        self.restore_tab_paths(&saved.always_show_tabs, &saved.always_hide_tabs, cx);
-    }
-
-    fn restore_tab_paths(&self, shown: &[String], hidden: &[String], cx: &App) {
-        let groups = group_paths(self.area.read(cx));
-        let resolve = |paths: &[String]| {
-            groups
-                .iter()
-                .filter(|(path, _)| paths.contains(path))
-                .map(|(_, node)| *node)
-                .collect()
-        };
-        *self.always_show_tabs.borrow_mut() = resolve(shown);
-        *self.always_hide_tabs.borrow_mut() = resolve(hidden);
     }
 
     fn save_layout(&self, cx: &App) {
@@ -1284,29 +1241,7 @@ impl WorkspaceDock {
         let area = self.area.read(cx);
         SavedLayout {
             layout: area.dump(cx),
-            always_hide_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_hide_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
-            always_show_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_show_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
         }
-    }
-
-    pub(crate) fn set_always_show_tabs(&self, node: NodeId, show: bool, cx: &mut Context<Self>) {
-        if show {
-            self.always_hide_tabs.borrow_mut().remove(&node);
-            self.always_show_tabs.borrow_mut().insert(node);
-        } else {
-            self.always_show_tabs.borrow_mut().remove(&node);
-        }
-        self.save_layout(cx);
-        self.area.update(cx, |_, cx| cx.notify());
-        cx.notify();
     }
 
     pub(crate) fn toggle_dock(
@@ -1416,11 +1351,7 @@ impl WorkspaceDock {
         } else {
             existing
         };
-        if (action.panel().is_some()
-            || matches!(
-                action,
-                DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs
-            ))
+        if action.panel().is_some()
             && node.is_some_and(|node| {
                 self.area
                     .read(cx)
@@ -1448,9 +1379,6 @@ impl WorkspaceDock {
         match action {
             DockAction::ToggleLeft => self.toggle_dock(DockPlacement::Left, window, cx),
             DockAction::ToggleRight => self.toggle_dock(DockPlacement::Right, window, cx),
-            DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs => {
-                self.toggle_group_tabs(action, node, cx);
-            }
             DockAction::Sidebar | DockAction::Spaces | DockAction::CodexBar => {
                 self.show_sidebar(window, cx);
             }
@@ -1468,35 +1396,6 @@ impl WorkspaceDock {
             }
         }
         bootty_control::CommandOutcome::success()
-    }
-
-    fn toggle_group_tabs(&self, action: DockAction, node: Option<NodeId>, cx: &mut Context<Self>) {
-        let area = self.area.read(cx);
-        let groups = group_paths(area)
-            .into_iter()
-            .filter(|(_, node)| {
-                area.layout(DockPlacement::Center)
-                    .is_none_or(|tree| tree.find_node(*node).is_none())
-            })
-            .collect::<Vec<_>>();
-        let focused = self
-            .focused_group
-            .filter(|node| groups.iter().any(|(_, current)| current == node));
-        if let Some(node) = node
-            .or(focused)
-            .or_else(|| groups.first().map(|(_, node)| *node))
-        {
-            if action == DockAction::ToggleHiddenTabs {
-                let hidden = self.always_hide_tabs.borrow_mut().remove(&node);
-                if !hidden {
-                    self.always_hide_tabs.borrow_mut().insert(node);
-                }
-                self.set_always_show_tabs(node, false, cx);
-            } else {
-                let always = self.always_show_tabs.borrow().contains(&node);
-                self.set_always_show_tabs(node, !always, cx);
-            }
-        }
     }
 }
 

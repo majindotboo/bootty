@@ -191,8 +191,6 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_fields!(chrome, partial;
         left_dock_toggle,
         right_dock_toggle,
-        panel_tab_style,
-        panel_tabs,
         tabs_use_session_color,
     );
     for (tabs, patch) in [

@@ -80,8 +80,6 @@ fit-cell-height = true
 tabs-use-session-color = true
 top-bar = true
 bottom-bar = false
-panel-tab-style = "icons"
-panel-tabs = "automatic"
 status-height = 30
 status-background = "#1e1e2e"
 notched-fullscreen-black-chrome = true
@@ -589,23 +587,17 @@ header buttons. Panel commands include `show_sidebar`, `show_files`, `show_chang
 `show_diff`, and `show_coordination`.
 For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
 
-Right-click a tab or empty group header and choose **Add panel** to open or move a
-panel into that group. Panel commands accept an optional live `group` ID; an expired
-ID reports a stale target. Without a group, a panel opens in its existing location,
-or its default dock if closed. Document and diff tabs open from their file actions.
+Sessions occupies the left dock. Files, Changes, Diff, Browser, and Coordination
+occupy the right dock. Tool buttons always show icons and labels. Document and
+diff tabs open from their file actions; panel placement is fixed.
 
-The Appearance → Docks settings control each dock button independently and select
-icons only (default), icons and text, or text-only tab labels. `chrome.left-dock-toggle`
-and `chrome.right-dock-toggle` hide only their buttons; commands still work.
-`chrome.panel-tab-style` accepts `icons`, `icons-and-text`, or `text` for fixed left/right docks;
-the default is `icons`. Main and bottom Dock groups use icons and text. `chrome.panel-tabs` accepts
-`automatic`, `always`, or `never` for fixed docks. Main and bottom Dock groups keep their tabs
-visible unless that individual group is switched to command-only navigation.
+Fixed tools always show their icons and labels. The Appearance → Docks settings
+control each dock button independently. `chrome.left-dock-toggle` and
+`chrome.right-dock-toggle` hide only their buttons; commands still work.
 
-Single-panel groups hide their tabs automatically. **Always show tabs** in the group
-context menu overrides this; **Always hide tabs** enables command-only panel switching for that group; `toggle_tab_bar` toggles the same preference for the
-focused group and also accepts a group ID. Layout and tab preferences persist per
-window, shared across Spaces. `toggle_hidden_tabs` toggles the per-group hidden override. `show_codexbar` opens Agents with usage meters; `show_spaces` opens Sessions with the Space switcher. Dock controls and the status row remain available when tabs hide.
+Dock widths and visibility persist per window, shared across Spaces.
+`show_spaces` opens Sessions with the Space switcher. Agent state and usage appear
+within Sessions; there is no separate Agents panel.
 
 ## Panel controls
 
@@ -657,8 +649,8 @@ close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
 side padding without reserving a separate column. Hiding a close button keeps the
 close command and context menu available.
 
-Dock visibility and widths are saved in the workspace layout. Use each panel's
-Dock setting for placement and drag dock edges to resize. The legacy
+Dock visibility and widths are saved in the workspace layout. Drag dock edges
+to resize. The legacy
 `chrome.sidebar`, `chrome.sidebar-width`, and `sidebar.position` keys are accepted
 only to seed an unsaved layout or migrate an older layout; changing them does not
 alter an open workspace. They are no longer settings controls.
@@ -666,11 +658,11 @@ alter an open workspace. They are no longer settings controls.
 ## Git tool panels
 
 Use **Show Git Changes** in the palette (`show_changes`) or click a sidebar diff
-count. Changes and Diff are native Dock panels: drag their tabs to split or combine
-groups, resize the split, close panels, or toggle the right dock. Opening Changes again
+count. Changes and Diff occupy the right dock. Resize its edge, switch tools, or
+toggle the right dock. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
-Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
+Older layouts reconcile to the fixed panel homes; every tool remains available.
 
 Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
 index without changing working files. Commit uses only the index; Amend explicitly

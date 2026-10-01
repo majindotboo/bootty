@@ -100,8 +100,6 @@ fn chrome_layout() -> ChromeLayout {
     ChromeLayout {
         left_dock_toggle: true,
         right_dock_toggle: true,
-        panel_tab_style: bootty_config::config::PanelTabStyle::default(),
-        panel_tabs: bootty_config::config::PanelTabs::default(),
         dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
         terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
         width: 900.0,
@@ -143,7 +141,6 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 selectable: true,
                 target: Some(target.clone()),
                 reorder_anchor: Some("session-1".to_owned()),
-                native_context: None,
                 context: Some(SessionContextSnapshot {
                     can_activate: true,
                     can_move_up: true,
@@ -172,7 +169,6 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 selectable: true,
                 target: Some(target),
                 reorder_anchor: None,
-                native_context: None,
                 context: None,
             },
         ],
@@ -357,6 +353,110 @@ fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
         .collect();
 }
 
+fn grouped_chrome_snapshot() -> ChromeSnapshot {
+    let mut snapshot = chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let session = sidebar.rows[0].clone();
+    let detail = sidebar.rows[1].clone();
+    let heading = |key: &str, text: &str| SidebarRow {
+        key: key.to_owned(),
+        text: text.to_owned(),
+        kind: SidebarRowKind::Group,
+        target: None,
+        number: None,
+        selectable: false,
+        current: false,
+        active: false,
+        reorder_anchor: None,
+        context: None,
+        ..session.clone()
+    };
+    sidebar.rows = vec![
+        heading("project:1:alpha", "Alpha"),
+        session.clone(),
+        detail,
+        heading("project:1:beta", "Beta"),
+        SidebarRow {
+            key: "session-beta".to_owned(),
+            text: "Beta terminal".to_owned(),
+            target: Some(SessionTarget {
+                scope: SpaceKey(1),
+                session_id: "session-beta".to_owned(),
+            }),
+            current: false,
+            ..session
+        },
+    ];
+    snapshot
+}
+
+#[gpui_kit::test]
+fn project_disclosure_hides_its_children_and_selected_sessions_reveal_their_project(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = grouped_chrome_snapshot();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:alpha")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session").is_none());
+    assert!(cx.debug_bounds("sidebar-row-session:cwd").is_none());
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_some());
+    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
+
+    for key in ["session-beta", "session"] {
+        for row in &mut snapshot.sidebar.as_mut().expect("sidebar").rows {
+            row.current = row.key == key;
+        }
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+        });
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    assert!(cx.debug_bounds("sidebar-row-session:cwd").is_some());
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:alpha")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+}
+
+#[gpui_kit::test]
+fn disappearing_projects_discard_their_disclosure_state(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let snapshot = grouped_chrome_snapshot();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:beta")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_none());
+
+    let mut removed = snapshot.clone();
+    removed.sidebar.as_mut().expect("sidebar").rows.truncate(3);
+    for update in [&removed, &snapshot] {
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(update, window, cx));
+        });
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_some());
+}
+
 #[gpui_kit::test]
 fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
@@ -447,19 +547,22 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
         let shell = cx
             .debug_bounds("bootty-gpui-sidebar-shell")
             .expect("sidebar shell");
-        let footer = cx
+        let header = cx
             .debug_bounds("bootty-gpui-space-switcher")
             .expect("space switcher");
+        let footer_top = cx
+            .debug_bounds("bootty-gpui-sidebar-footer")
+            .map_or_else(|| shell.bottom(), |footer| footer.top());
         for selector in selectors {
             let row = cx
                 .debug_bounds(selector)
                 .expect("selected session entry row");
             assert!(
-                row.top() >= shell.top(),
-                "selected session entry row must be inside the sidebar: {selector}"
+                row.top() >= header.bottom(),
+                "selected session entry row must be below the header: {selector}"
             );
             assert!(
-                row.bottom() <= footer.top(),
+                row.bottom() <= footer_top,
                 "selected session entry row must be above the footer: {selector}"
             );
         }
@@ -542,10 +645,56 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
             .sub(switcher.center().x))
         .abs()
             <= px(0.5),
-        "space controls center within half a layout pixel"
+        "space controls center within half a layout pixel: first={first_space:?}, create={create_space:?}, switcher={switcher:?}"
     );
     assert!(first_space.right() < second_space.left());
     assert!(second_space.right() < create_space.left());
+}
+
+#[gpui_kit::test]
+fn workspace_labels_keep_their_full_width_and_wrap_inside_the_sidebar(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    snapshot.layout.sidebar_width = 285.0;
+    snapshot.spaces[0].name = "Default".to_owned();
+    snapshot.spaces[1].name = "UI Proof".to_owned();
+    let mut third = snapshot.spaces[1].clone();
+    third.key = SpaceKey(3);
+    third.name = "UI Proof Split A".to_owned();
+    snapshot.spaces.push(third);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let long_label = cx.debug_bounds("space-label-3").expect("long Space label");
+    let long_button = cx.debug_bounds("space-3").expect("long Space button");
+    let switcher = cx
+        .debug_bounds("bootty-gpui-space-switcher")
+        .expect("Space switcher");
+    assert!(long_label.left() >= long_button.left());
+    assert!(long_label.right() <= long_button.right());
+    for selector in ["space-1", "space-2", "space-3", "space-create"] {
+        let button = cx.debug_bounds(selector).expect("Space control");
+        assert!(button.left() >= switcher.left());
+        assert!(button.right() <= switcher.right());
+        assert!(button.bottom() <= switcher.bottom());
+    }
+    let first = cx.debug_bounds("space-1").expect("first Space");
+    assert!(
+        long_button.top() >= first.bottom(),
+        "full labels wrap to another row"
+    );
+    snapshot.spaces[2].name = "UI Proof".to_owned();
+    cx.update(|window, cx| {
+        probe
+            .read(cx)
+            .chrome
+            .clone()
+            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+    });
+    cx.run_until_parked();
+    let short_label = cx.debug_bounds("space-label-3").expect("short Space label");
+    let short_button = cx.debug_bounds("space-3").expect("short Space button");
+    assert!(long_label.size.width > short_label.size.width);
+    assert!(long_button.size.width > short_button.size.width);
 }
 
 #[gpui_kit::test]
@@ -742,21 +891,16 @@ fn crowded_sidebar_keeps_all_footer_items_and_spaces_reachable(cx: &mut TestAppC
     let switcher = cx
         .debug_bounds("bootty-gpui-space-switcher")
         .expect("space switcher");
-    cx.simulate_event(ScrollWheelEvent {
-        position: switcher.center(),
-        delta: ScrollDelta::Pixels(point(px(-1000.0), px(0.0))),
-        modifiers: Modifiers::none(),
-        touch_phase: TouchPhase::Moved,
-    });
-    cx.run_until_parked();
     let last_space = cx
         .debug_bounds("space-8")
-        .expect("last space remains scrollable");
+        .expect("last space remains visible");
     let create_space = cx
         .debug_bounds("space-create")
-        .expect("create space remains scrollable");
+        .expect("create space remains visible");
     assert!(last_space.left() >= switcher.left());
     assert!(create_space.right() <= switcher.right());
+    assert!(last_space.bottom() <= switcher.bottom());
+    assert!(create_space.bottom() <= switcher.bottom());
     cx.simulate_click(center(last_space), Modifiers::none());
     cx.simulate_click(center(create_space), Modifiers::none());
 
@@ -1862,48 +2006,4 @@ fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) 
             < initial.div(2.0),
         "a short title should settle to a compact tab"
     );
-}
-
-#[gpui_kit::test]
-fn native_session_context_menu_preserves_target_and_keyboard_focus(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let native_target = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Session,
-        handle: "native:codex:conversation".to_owned(),
-        generation: 42,
-    };
-    let mut snapshot = chrome_snapshot();
-    let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
-    row.context = None;
-    row.native_context = Some(bootty_gpui::NativeSessionSidebar {
-        target: native_target.clone(),
-        provider: "codex".to_owned(),
-        title: "Conversation".to_owned(),
-        stopped: true,
-    });
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let focus = cx.update(|_, app| probe.read(app).chrome.read(app).focus_handle(app));
-    cx.update(|window, app| focus.focus(window, app));
-    let row = center(cx.debug_bounds("sidebar-row-session").expect("session row"));
-    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        _ = window.draw(cx);
-    });
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(cx.update(|window, _| focus.is_focused(window)));
-    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        _ = window.draw(cx);
-    });
-    cx.simulate_keystrokes("down down enter");
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::RenameNativeSession(native_target)]
-        );
-    });
 }

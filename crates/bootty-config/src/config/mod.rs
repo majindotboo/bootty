@@ -23,11 +23,11 @@ pub use model::{
     InputConfig, KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle,
     MultiplexerBackendConfig, MultiplexerConfig, MultiplexerConfigError, NotificationPolicy,
     OnLastWindowClosed, OpenBehavior, PanelButton, PanelConfig, PanelDock, PanelKind,
-    PanelTabStyle, PanelTabs, ResolvedTheme, RestoreOnStartup, SegmentAlign, SessionConfig,
-    SidebarConfig, SidebarPosition, SshAuthenticationConfig, SshHostKeyPolicyConfig,
-    SshProfileConfig, SshRemoteConfig, StatusSegment, TabAppearance, TabCloseButton,
-    TabClosePosition, TabConfig, TerminalScrollbar, ThemeInfo, WhenClosingWithNoTabs, WindowConfig,
-    WindowDecoration, WindowFullscreen, config_token,
+    ResolvedTheme, RestoreOnStartup, SegmentAlign, SessionConfig, SidebarConfig, SidebarPosition,
+    SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig, SshRemoteConfig,
+    StatusSegment, TabAppearance, TabCloseButton, TabClosePosition, TabConfig, TerminalScrollbar,
+    ThemeInfo, WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
+    config_token,
 };
 pub use resolve::{available_theme_names, resolve_theme};
 pub use theme_catalog::{

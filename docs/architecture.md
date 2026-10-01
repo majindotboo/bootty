@@ -378,8 +378,8 @@ small interface. File size is a signal for review. It is not proof of depth.
 `bootty-ui::gpui_dock` composes one terminal workspace, documents, and tools into a
 GPUI Kit Dock. The terminal stays in the center; the binding owns its backend
 windows, pane topology, processes, and input. Documents initially open in the right
-dock. Typed panel preferences select each tool's home dock and optional top or bottom
-status button. All panel toggles use the same command path.
+dock. Sessions has a fixed home on the left; tools and documents have fixed homes
+on the right. All panel toggles use the same command path.
 Opaque client attachments retain their backend-owned
 layout. Builders resolve existing panel entities by Dock-area identity; they cannot
 restore another window's host or editor. Registration is removed when its workspace
@@ -391,18 +391,21 @@ One DockArea owns geometry across Space and session switches. Files, Changes, an
 Diff follow the selected terminal and its directory. Captured Git drafts and
 in-flight writes retain their original context; late replies cannot open panels
 in another context. Open documents retain their own host and path identities.
-Layout version 8 removes the retired Jobs, Transfers, Recovery, and Shell panels.
+Layout version 10 restores the fixed panel arrangement from earlier custom layouts.
 
-Sessions includes the compact Space switcher; Agents includes the usage and quota
-meters. Neither section is a standalone Dock leaf, so neither inherits the split
-minimum height. Saved standalone Spaces and CodexBar panels merge into those owners;
-existing destination panels keep their locations. Legacy `show_spaces` and
-`show_codexbar` invocations open Sessions and Agents respectively.
+Sessions includes the Space switcher, project groups, backend sessions and windows,
+agent state, and account usage meters. Published Git facts group repository
+subdirectories and linked worktrees under the owning host's main repository root.
+Projects appear in first-seen backend order; sessions keep their backend order
+within each project. Branches and working directories belong to session children.
+Project disclosure is transient chrome state; switching to a hidden session expands
+its project, and removed projects discard their disclosure state. Legacy
+`show_spaces` and `show_codexbar` invocations both open Sessions.
 
-`gpui_dock_skin` presents icon-labelled Kit segmented tabs with per-tab close
-controls and context menus, while Base owns selection, dragging, splitting, and
-close dispatch. Add-panel menus capture the destination group; selecting an
-existing tool panel moves it into that group. The application header reads mux
+`gpui_dock_skin` presents right-side tools as labelled Kit buttons with icons.
+Their labels remain visible at every width, wrapping into rows as needed. Base
+owns selection, focus, and geometry. Panels cannot be dragged into another region.
+The application header reads mux
 window tabs through the shared chrome projection and tab renderer, including scoped
 selection, pane closing, navigation, reordering, and context actions. Window-scoped
 pane actions resolve the binding's retained focus rather than a stale backend anchor.
@@ -418,14 +421,11 @@ Bottom status segments, including mux tabs, occupy the center dock's footer; sid
 docks keep their full height. On Linux, the window-level title bar and resize frame
 sit outside this dock layout, with Bootty controls whenever client decorations are
 selected or required by the compositor.
-Dock toggles, panel opening, and tab visibility use registered `CommandInvocation`s.
-Context menus supply the live destination node ID as an optional argument. The
+Dock toggles and panel opening use registered `CommandInvocation`s. The
 window completes these requests after applying them, or reports a stale group;
 requests arriving during layout restoration wait for it to finish.
-Single-panel groups hide their tabs automatically. Each group's context menu can
-keep tabs visible; this preference follows the live node and is serialized by
-its path alongside the same layout snapshot, then resolved after restoration.
-Dock and mux tab bars both use Kit's tab variants. Bootty supplies panel and mux
+The Sessions panel and terminal center do not show native panel tabs.
+Mux and document tab bars use Kit's tab variants. Bootty supplies panel and mux
 commands, tab content, and close affordances; the shared `gpui::tabs` layout keeps
 close buttons in side padding. Typed chrome settings independently control each
 surface's tab appearance and close-button side and visibility.
@@ -433,12 +433,9 @@ Dock visibility and dimensions belong to the saved layout. Legacy sidebar config
 values only seed unsaved or migrated layouts; live config reload does not show or
 hide Sessions. Legacy sidebar commands submit dock requests.
 `gpui_sidebar_panel` owns Sessions, agent rows, account usage and its Space switcher.
-Agents belong to sessions; there is no separate Agents panel. Layout version 9 fixes Sessions on the left and tools on the right. Panels cannot
-be dragged or dropped into another region. Previous custom layouts start from
-the fixed layout. Panel labels and
-dock-button visibility come from typed chrome settings. Each group can override
-automatic tab visibility with always-show or always-hide, including command-only
-switching.
+Agents belong to backend sessions; there is no separate Agents panel. Chrome
+settings control dock-toggle visibility and tab styling; panel placement and
+tool-navigation labels are fixed.
 `status_fit` measures the status controls and prepaints only whole controls that
 fit the available header width. Omitted controls receive no hitboxes.
 The notch inset places the strip's bottom border below the camera exclusion band.

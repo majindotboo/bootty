@@ -82,7 +82,7 @@ fn tab_halves_resolve_to_stable_insertion_boundaries(
 #[case(1200.0, 100.0, 200.0)]
 #[case(360.0, 286.0, 159.0)]
 #[case(100.0, 286.0, 99.0)]
-fn sidebar_width_matches_zed_bounds_without_starving_the_center(
+fn sidebar_width_respects_bounds_without_starving_the_center(
     #[case] window_width: f32,
     #[case] configured_width: f32,
     #[case] expected_width: f32,
@@ -90,8 +90,6 @@ fn sidebar_width_matches_zed_bounds_without_starving_the_center(
     let layout = ChromeLayout {
         left_dock_toggle: true,
         right_dock_toggle: true,
-        panel_tab_style: bootty_config::config::PanelTabStyle::default(),
-        panel_tabs: bootty_config::config::PanelTabs::default(),
         dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
         terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
         width: window_width,

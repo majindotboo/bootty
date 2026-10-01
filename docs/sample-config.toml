@@ -99,9 +99,6 @@ black = "auto"
 tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
-panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text
-# Controls single-panel tabs only in the fixed left/right docks. Main and bottom tabs stay visible.
-panel-tabs = "automatic" # automatic, always, never
 # Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
 # independently when its configured modules should be visible.
 top-bar = true

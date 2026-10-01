@@ -1,6 +1,6 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 use gpui_kit::base::Tab;
 use gpui_kit::component::{
@@ -11,7 +11,6 @@ use gpui_kit::component::{
         DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
         TabGroupRenderer,
     },
-    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
 };
 use gpui_kit::{
     AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
@@ -26,16 +25,12 @@ pub struct WorkspaceDockSkin {
     area: WeakEntity<DockArea>,
     owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
-    always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
 }
 
 impl WorkspaceDockSkin {
     pub(crate) fn new(
         owner: WeakEntity<WorkspaceDock>,
         chrome: Entity<GpuiChrome>,
-        always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-        always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
         cx: &mut Context<DockArea>,
     ) -> Rc<Self> {
         let mut bottom_height = chrome.read(cx).dock_bottom_height();
@@ -52,8 +47,6 @@ impl WorkspaceDockSkin {
             area: cx.weak_entity(),
             owner,
             chrome,
-            always_show_tabs,
-            always_hide_tabs,
         })
     }
 }
@@ -133,7 +126,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
     ) -> AnyElement {
         let placement = dock.placement();
         let handle = dock_resize_handle(dock, cx);
-        let (show_left, show_right, _, _) = self.chrome.read(cx).dock_presentation();
+        let (show_left, show_right) = self.chrome.read(cx).dock_presentation();
         let inset = self.chrome.read(cx).window_controls_inset();
         let header = if placement.is_left() {
             Some(
@@ -228,10 +221,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         Rc::new(WorkspaceTabGroup {
             kit: self.kit.tab_group_renderer(),
             area: self.area.clone(),
-            owner: self.owner.clone(),
             chrome: self.chrome.clone(),
-            always_show_tabs: self.always_show_tabs.clone(),
-            always_hide_tabs: self.always_hide_tabs.clone(),
         })
     }
 }
@@ -304,10 +294,7 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
 struct WorkspaceTabGroup {
     kit: Rc<dyn TabGroupRenderer>,
     area: WeakEntity<DockArea>,
-    owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
-    always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
 }
 
 pub struct WorkspaceTitleBar {
@@ -362,7 +349,7 @@ impl Render for WorkspaceTitleBar {
         };
         let (status, inset, show_left, show_right, notch_span) =
             self.chrome.update(cx, |chrome, cx| {
-                let (show_left, show_right, _, _) = chrome.dock_presentation();
+                let (show_left, show_right) = chrome.dock_presentation();
                 (
                     chrome.dock_status(
                         if right_open {
@@ -522,32 +509,53 @@ fn panel_toggle(
 }
 
 impl WorkspaceTabGroup {
-    fn tabs_visible(&self, group: &TabGroupContext, cx: &App) -> bool {
-        use bootty_config::config::PanelTabs;
-        if group.active_panel().is_some_and(|panel| {
-            terminal_panel_name(panel.panel_name(cx))
-                || panel.panel_name(cx) == "bootty.native-session"
-        }) {
-            return false;
-        }
-        if self.always_hide_tabs.borrow().contains(&group.node()) {
-            return false;
-        }
-        if self.always_show_tabs.borrow().contains(&group.node()) {
-            return true;
-        }
-        let placement = self
-            .area
-            .upgrade()
-            .and_then(|area| group_placement(area.read(cx), group.node()));
-        if !matches!(placement, Some(DockPlacement::Left | DockPlacement::Right)) {
-            return true;
-        }
-        match self.chrome.read(cx).dock_presentation().3 {
-            PanelTabs::Automatic => group.panels().iter().filter(|p| p.visible(cx)).count() > 1,
-            PanelTabs::Always => true,
-            PanelTabs::Never => false,
-        }
+    fn tabs_visible(group: &TabGroupContext, cx: &App) -> bool {
+        group.active_panel().is_none_or(|panel| {
+            !terminal_panel_name(panel.panel_name(cx))
+                && !matches!(
+                    panel.panel_name(cx),
+                    "bootty.native-session" | "bootty.sessions"
+                )
+        })
+    }
+
+    fn render_tool_navigation(group: &TabGroupContext, cx: &App) -> AnyElement {
+        div()
+            .id("workspace-tool-navigation")
+            .debug_selector(|| "workspace-tool-navigation".to_owned())
+            .p_2()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(
+                group
+                    .panels()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, panel)| panel.visible(cx))
+                    .map(|(ix, panel)| {
+                        let (label, icon) = panel_identity(panel.panel_name(cx));
+                        let label = PanelHandle::of(panel)
+                            .and_then(|handle| handle.tab_name(cx))
+                            .unwrap_or_else(|| label.into());
+                        let select = group.clone();
+                        Button::new(SharedString::from(format!(
+                            "workspace-tool:{:?}",
+                            panel.panel_id(cx)
+                        )))
+                        .label(label.clone())
+                        .icon(icon)
+                        .small()
+                        .ghost()
+                        .max_w_full()
+                        .selected(ix == group.active_ix())
+                        .accessibility_label(format!("Show {label}"))
+                        .tooltip(label)
+                        .on_click(move |_, window, cx| select.select_tab(ix, window, cx))
+                    }),
+            )
+            .into_any_element()
     }
 
     fn render_tabs(
@@ -560,13 +568,11 @@ impl WorkspaceTabGroup {
             .area
             .upgrade()
             .and_then(|area| group_placement(area.read(cx), group.node()));
+        if placement == Some(DockPlacement::Right) {
+            return Self::render_tool_navigation(group, cx);
+        }
         let tab_config = self.chrome.read(cx).dock_tabs_config();
         let tab_accent = self.chrome.read(cx).tab_accent();
-        let style = if matches!(placement, Some(DockPlacement::Left | DockPlacement::Right)) {
-            self.chrome.read(cx).dock_presentation().2
-        } else {
-            bootty_config::config::PanelTabStyle::IconsAndText
-        };
         let visible = group
             .panels()
             .iter()
@@ -587,13 +593,10 @@ impl WorkspaceTabGroup {
                     id,
                     title: None,
                     focus: None,
-                    tab: Self::render_group_tab(
-                        group, ix, style, tab_config, tab_accent, window, cx,
-                    )?,
+                    tab: Self::render_group_tab(group, ix, tab_config, tab_accent, window, cx)?,
                 })
             })
             .collect();
-        let target = group.clone();
         crate::gpui::tabs::ScrollableTabBar {
             id: format!("workspace-tabs-{:?}", group.node()).into(),
             config: tab_config,
@@ -606,13 +609,6 @@ impl WorkspaceTabGroup {
                 .h_full()
                 .flex_1()
                 .min_w_4()
-                .when(group.is_droppable(), |e| {
-                    e.on_drop(move |drag: &DragPanel, window, cx| {
-                        let ix = (drag.source() == target.node())
-                            .then(|| target.panels().len().saturating_sub(1));
-                        target.drop_panel(drag.clone(), ix, false, window, cx);
-                    })
-                })
                 .into_any_element(),
         }
         .into_any_element()
@@ -624,14 +620,12 @@ impl WorkspaceTabGroup {
     fn render_group_tab(
         group: &TabGroupContext,
         ix: usize,
-        style: bootty_config::config::PanelTabStyle,
         tab_config: bootty_config::config::TabConfig,
         accent: gpui_kit::Hsla,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Tab> {
         let panel = group.panels().get(ix)?;
-        let terminal_panel = terminal_panel_name(panel.panel_name(cx));
         let id = panel.panel_id(cx);
         let handle = PanelHandle::of(panel);
         let label = handle
@@ -651,12 +645,8 @@ impl WorkspaceTabGroup {
             .flex()
             .items_center()
             .gap_2()
-            .when(style != bootty_config::config::PanelTabStyle::Text, |e| {
-                e.child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
-            })
-            .when(style != bootty_config::config::PanelTabStyle::Icons, |e| {
-                e.child(title)
-            });
+            .child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
+            .child(title);
         let select = group.clone();
         let tab = crate::gpui::tabs::tab(
             hover_group.clone(),
@@ -667,11 +657,8 @@ impl WorkspaceTabGroup {
         )
         .group(hover_group.clone())
         .accessibility_label(label.clone())
-        .tooltip({
-            let label = label.clone();
-            move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
-            }
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
         })
         .child(crate::gpui::tabs::content(
             title.into_any_element(),
@@ -683,31 +670,7 @@ impl WorkspaceTabGroup {
             !group.is_collapsed() && group.active_panel().is_some_and(|p| p.panel_id(cx) == id),
         )
         .on_click(move |_, window, cx| select.select_tab(ix, window, cx));
-        let drag = (!terminal_panel && group.is_draggable())
-            .then(|| group.drag_panel(ix, cx))
-            .flatten();
-        Some(
-            tab.when_some(drag, |tab, drag| {
-                tab.on_drag(drag, move |drag, offset, window, cx| {
-                    cx.stop_propagation();
-                    drag.set_drag_offset(offset);
-                    drag.set_preview_size(gpui_kit::size(
-                        px(f32::from(window.rem_size()) * 10.),
-                        px(crate::gpui::UI_TAB_BAR_HEIGHT),
-                    ));
-                    cx.new(|_| TabPreview(label.clone()))
-                })
-            })
-            .when(group.is_droppable(), |tab| {
-                let group = group.clone();
-                tab.drag_over::<DragPanel>(|tab, _, _, cx| {
-                    tab.border_l_2().border_color(cx.theme().drag_border)
-                })
-                .on_drop(move |drag: &DragPanel, window, cx| {
-                    group.drop_panel(drag.clone(), Some(ix), true, window, cx);
-                })
-            }),
-        )
+        Some(tab)
     }
 }
 
@@ -729,22 +692,6 @@ fn close_panel_tab(
             group.close(id, window, cx);
         })
         .into_any_element()
-}
-
-struct TabPreview(SharedString);
-impl Render for TabPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .w_40()
-            .h_8()
-            .px_3()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .bg(cx.theme().tab_active)
-            .text_color(cx.theme().tab_foreground)
-            .child(self.0.clone())
-    }
 }
 
 impl TabGroupRenderer for WorkspaceTabGroup {
@@ -772,14 +719,19 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let tabs_visible = self.tabs_visible(group, cx);
+        let tabs_visible = Self::tabs_visible(group, cx);
         if !tabs_visible {
             return div().into_any_element();
         }
         let tabs = self.render_tabs(group, window, cx);
-        let owner = self.owner.clone();
-        let always = self.always_show_tabs.borrow().contains(&group.node());
-        let menu_group = group.clone();
+        if self
+            .area
+            .upgrade()
+            .and_then(|area| group_placement(area.read(cx), group.node()))
+            == Some(DockPlacement::Right)
+        {
+            return tabs;
+        }
         let classic = self.chrome.read(cx).dock_tabs_config().appearance
             == bootty_config::config::TabAppearance::Classic;
         div()
@@ -798,9 +750,6 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             })
             .pr_1()
             .child(div().flex_1().min_w_0().h_full().child(tabs))
-            .context_menu(move |menu, window, cx| {
-                panel_menu(&owner, &menu_group, always, menu, window, cx)
-            })
             .into_any_element()
     }
 
@@ -831,77 +780,7 @@ impl TabGroupRenderer for WorkspaceTabGroup {
                 .child(content)
                 .into_any_element();
         }
-        if self.tabs_visible(group, cx) {
-            return content;
-        }
-        let owner = self.owner.clone();
-        let group = group.clone();
-        let always = self.always_show_tabs.borrow().contains(&group.node());
-        let drag = group
-            .is_draggable()
-            .then(|| group.drag_panel(group.active_ix(), cx))
-            .flatten();
-        let drag_label = group
-            .active_panel()
-            .and_then(PanelHandle::of)
-            .and_then(|panel| panel.tab_name(cx))
-            .unwrap_or_else(|| "Panel".into());
-        // A tab-less native panel gets a full-width hover strip along its top edge, tty7-style.
-        // The strip reveals the drag pill without consuming layout space. Terminal leaves are
-        // excluded: their mux pane grips already own the top-center hover affordance.
-        let hover_group = SharedString::from(format!("hidden-panel-handle-{:?}", group.node()));
-        let handle = {
-            let pill = div()
-                .id("hidden-panel-drag-handle")
-                .mx_auto()
-                .mt_1()
-                .w(px(28.0))
-                .h(px(14.0))
-                .rounded(cx.theme().radius)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .opacity(0.0)
-                .group_hover(hover_group.clone(), |style| style.opacity(0.75))
-                .hover(|style| style.bg(cx.theme().secondary).opacity(1.0))
-                .child("•••")
-                .when_some(drag, |handle, drag| {
-                    let drag_label = drag_label.clone();
-                    handle.on_drag(drag, move |drag, offset, window, cx| {
-                        cx.stop_propagation();
-                        drag.set_drag_offset(offset);
-                        drag.set_preview_size(gpui_kit::size(
-                            px(f32::from(window.rem_size()) * 3.0),
-                            window.rem_size(),
-                        ));
-                        cx.new(|_| TabPreview(drag_label.clone()))
-                    })
-                });
-            div()
-                .id("hidden-panel-hover-strip")
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(22.0))
-                .group(hover_group)
-                .child(pill.context_menu(move |menu, window, cx| {
-                    panel_menu(&owner, &group, always, menu, window, cx)
-                }))
-        };
-        div()
-            .id("single-panel-content")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .size_full()
-            .child(content)
-            .child(handle)
-            .into_any_element()
+        content
     }
 
     fn render_drop_indicator(
@@ -920,66 +799,14 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let content = self.kit.render_empty(group, window, cx);
-        let owner = self.owner.clone();
-        let group = group.clone();
         Some(
             div()
                 .id("empty-group")
                 .size_full()
                 .children(content)
-                .context_menu(move |menu, window, cx| {
-                    group_menu(owner.clone(), &group, false, menu, window, cx)
-                })
                 .into_any_element(),
         )
     }
-}
-
-fn panel_menu(
-    owner: &WeakEntity<WorkspaceDock>,
-    group: &TabGroupContext,
-    always: bool,
-    menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let mut menu = menu;
-    if let Some(panel) = group.active_panel() {
-        if let Some(handle) = PanelHandle::of(panel) {
-            menu = handle.dropdown_menu(menu, window, cx);
-        }
-        if panel.closable(cx) {
-            let id = panel.panel_id(cx);
-            let group = group.clone();
-            menu = menu.item(
-                PopupMenuItem::new("Close panel")
-                    .on_click(move |_, window, cx| group.close(id, window, cx)),
-            );
-        }
-        if panel.zoomable(cx) {
-            let group = group.clone();
-            menu = menu.item(
-                PopupMenuItem::new(if group.is_zoomed() {
-                    "Restore pane"
-                } else {
-                    "Zoom pane"
-                })
-                .on_click(move |_, window, cx| group.toggle_zoom(window, cx)),
-            );
-        }
-    }
-    group_menu(owner.clone(), group, always, menu, window, cx)
-}
-
-fn group_menu(
-    _: WeakEntity<WorkspaceDock>,
-    _: &TabGroupContext,
-    _: bool,
-    menu: PopupMenu,
-    _: &mut Window,
-    _: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    menu
 }
 
 fn empty_terminal_view(
@@ -1009,8 +836,25 @@ fn empty_terminal_view(
             .child("Terminal unavailable")
             .child(div().max_w_full().child(reason))
             .into_any_element(),
-        EmptyTerminalState::Ready { can_create } => {
-            let action = crate::action_catalog::Command::NewTab.action();
+        EmptyTerminalState::Ready {
+            can_create,
+            has_session,
+        } => {
+            let (action, title, label, unavailable) = if has_session {
+                (
+                    crate::action_catalog::Command::NewTab.action(),
+                    "No open terminals",
+                    "New terminal",
+                    "This backend does not support creating terminals.",
+                )
+            } else {
+                (
+                    crate::action_catalog::Command::NewSession.action(),
+                    "No sessions",
+                    "New session",
+                    "This backend does not support creating sessions.",
+                )
+            };
             let binding_action = crate::gpui_actions::InvokeCommand::new(
                 bootty_control::CommandInvocation::from_action(
                     action,
@@ -1024,10 +868,10 @@ fn empty_terminal_view(
                         .highest_precedence_binding_for_action_in_context(&binding_action, context)
                 });
             content
-                .child("No open terminals")
+                .child(title)
                 .child(
                     Button::new("empty-terminal-new")
-                        .label("New terminal")
+                        .label(label)
                         .icon(IconName::Plus)
                         .primary()
                         .disabled(!can_create)
@@ -1053,9 +897,7 @@ fn empty_terminal_view(
                         ))
                     })
                 })
-                .when(!can_create, |content| {
-                    content.child("This backend does not support creating terminals.")
-                })
+                .when(!can_create, |content| content.child(unavailable))
                 .into_any_element()
         }
     }

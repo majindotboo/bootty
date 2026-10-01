@@ -3,6 +3,7 @@ use num_traits::ToPrimitive as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fmt::Write as _,
     rc::Rc,
     sync::OnceLock,
@@ -10,7 +11,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    Collapsible, Side,
+    Collapsible, Icon, IconName, Side, Sizable as _,
     menu::ContextMenuExt,
     shimmer::ShimmerText,
     sidebar::{Sidebar, SidebarItem},
@@ -23,16 +24,16 @@ use gpui_kit::{
 };
 
 use super::{
-    ChromeIntent, ChromeLayout, ChromePalette, ContextMenu, GpuiChrome, MenuRow, Rgba,
-    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarDiffSummary,
-    SidebarPosition, SidebarRow, SidebarRowKind, SidebarSnapshot, SpaceSnapshot, SpaceTransition,
-    TitlebarSnapshot, UsageMeterSnapshot, color, space_switcher,
+    ChromeIntent, ChromeLayout, ChromePalette, ContextMenu, GpuiChrome, MenuRow,
+    NativeChromeAction, Rgba, SessionContextAction, SessionContextSnapshot, SessionTarget,
+    SidebarDiffSummary, SidebarPosition, SidebarRow, SidebarRowKind, SidebarSnapshot,
+    SpaceSnapshot, SpaceTransition, StatusIntent, TitlebarSnapshot, UsageMeterSnapshot, color,
+    space_switcher,
 };
 use crate::gpui::theme::readable_color;
 
 const ROW_HEIGHT: f32 = 28.0;
 const GROUP_ROW_HEIGHT: f32 = 31.0;
-pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 const TRAFFIC_LIGHT_PADDING: f32 = 78.0;
 const ROW_PAD_X: f32 = 8.0;
@@ -127,6 +128,7 @@ pub(super) fn render(
     sidebar_row_bounds: &SidebarRowBounds,
     reveal_current: &Rc<Cell<bool>>,
     reconcile_hover: bool,
+    collapsed_groups: &HashSet<String>,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
     let width = layout.effective_sidebar_width();
@@ -139,26 +141,45 @@ pub(super) fn render(
         row_bounds: sidebar_row_bounds.clone(),
         reveal_current: reveal_current.clone(),
         reconcile_hover,
+        collapsed_groups: collapsed_groups.clone(),
     }
     .content(width, docked);
     let status_footer = render_codexbar(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
 
-    let header = sidebar_header(snapshot, title, layout, header_height, docked, colors, cx);
-    let component_footer = v_flex()
-        .w(px(width))
-        .when(docked, gpui_kit::Styled::w_full)
-        .mb_neg_3()
-        .when_some(status_footer, ParentElement::child)
+    let header = v_flex()
+        .w_full()
+        .gap_1()
+        .children(sidebar_header(
+            snapshot,
+            title,
+            layout,
+            header_height,
+            docked,
+            colors,
+            cx,
+        ))
+        .child(
+            div()
+                .px_3()
+                .pt_2()
+                .text_xs()
+                .text_color(color(colors.muted))
+                .child("Workspace"),
+        )
         .child(space_switcher::render(
             spaces,
             transition,
-            SPACE_SWITCHER_HEIGHT,
             snapshot.tint,
             colors,
             cx,
         ));
+    let component_footer = v_flex()
+        .w(px(width))
+        .when(docked, gpui_kit::Styled::w_full)
+        .mb_neg_3()
+        .when_some(status_footer, ParentElement::child);
     let side = match position {
         SidebarPosition::Left => Side::Left,
         SidebarPosition::Right => Side::Right,
@@ -176,7 +197,7 @@ pub(super) fn render(
         .text_color(color(snapshot.foreground))
         .border_l_0()
         .border_r_0()
-        .when_some(header, gpui_kit::component::sidebar::Sidebar::header)
+        .header(header)
         .child(content)
         .footer(component_footer);
 
@@ -222,6 +243,7 @@ struct SidebarRows {
     row_bounds: SidebarRowBounds,
     reveal_current: Rc<Cell<bool>>,
     reconcile_hover: bool,
+    collapsed_groups: HashSet<String>,
 }
 
 impl SidebarRows {
@@ -265,7 +287,7 @@ impl SidebarRows {
                         .justify_center()
                         .text_sm()
                         .text_color(color(colors.muted))
-                        .child("no sessions"),
+                        .child("No sessions"),
                 )
             })
             .children(self.render_session_blocks(current_rail_color))
@@ -278,6 +300,18 @@ impl SidebarRows {
         let mut blocks = Vec::new();
         let mut rows = self.snapshot.rows.iter().peekable();
         while let Some(row) = rows.next() {
+            if matches!(row.kind, SidebarRowKind::Group) && row.key.starts_with("project:") {
+                blocks.push(self.render_row(row, current_rail_color, false));
+                if self.collapsed_groups.contains(&row.key) {
+                    while rows
+                        .peek()
+                        .is_some_and(|next| !matches!(next.kind, SidebarRowKind::Group))
+                    {
+                        rows.next();
+                    }
+                }
+                continue;
+            }
             if !matches!(row.kind, SidebarRowKind::Session) {
                 blocks.push(self.render_row(row, current_rail_color, false));
                 continue;
@@ -526,6 +560,17 @@ impl SidebarRows {
             // Keep sidebar labels aligned along the same scan lane.
             .text_left()
             .gap_1()
+            .when(is_group && row.key.starts_with("project:"), |element| {
+                element.child(
+                    Icon::new(if self.collapsed_groups.contains(&row.key) {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall()
+                    .text_color(color(row.dim_color)),
+                )
+            })
             .when_some(row.number, |element, number| {
                 element.child(self.number_badge(row, number))
             })
@@ -547,7 +592,11 @@ impl SidebarRows {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(is_group, gpui_kit::Styled::text_xs)
+                    .when(is_group, gpui_kit::base::StyledExt::font_semibold)
+                    .when(
+                        matches!(&row.kind, SidebarRowKind::Other(kind) if kind == "project-path"),
+                        gpui_kit::Styled::text_xs,
+                    )
                     .text_color(if matches!(&row.kind, SidebarRowKind::Session) {
                         color(if current {
                             readable_color(snapshot.current, row.color)
@@ -796,6 +845,9 @@ impl SidebarRows {
         row: &SidebarRow,
         row_height: f32,
     ) -> gpui_kit::AnyElement {
+        if matches!(row.kind, SidebarRowKind::Group) && row.key.starts_with("project:") {
+            return self.project_disclosure(element, row, row_height);
+        }
         let accessible_label = if row.text.trim().is_empty() {
             row.key.clone()
         } else {
@@ -842,14 +894,22 @@ impl SidebarRows {
                 super::button::activated_button(div().w_full().h_full(), button, move |_, app| {
                     _ = owner.update(app, |_, cx| {
                         if let Some(target) = activation_target.clone() {
-                            let intent = if matches!(
-                                &activation_kind,
-                                SidebarRowKind::Other(kind) if kind == "unassigned"
-                            ) {
-                                ChromeIntent::AdoptSession(target)
-                            } else {
-                                ChromeIntent::ActivateSession(target)
-                            };
+                            let intent =
+                                if let SidebarRowKind::Window { window_id } = &activation_kind {
+                                    ChromeIntent::Status(StatusIntent::Action(
+                                        NativeChromeAction::ActivateWindow {
+                                            session_id: target.session_id,
+                                            window_id: window_id.clone(),
+                                        },
+                                    ))
+                                } else if matches!(
+                                    &activation_kind,
+                                    SidebarRowKind::Other(kind) if kind == "unassigned"
+                                ) {
+                                    ChromeIntent::AdoptSession(target)
+                                } else {
+                                    ChromeIntent::ActivateSession(target)
+                                };
                             cx.emit(intent);
                         }
                     });
@@ -868,6 +928,38 @@ impl SidebarRows {
         }
     }
 
+    fn project_disclosure(
+        &self,
+        element: Stateful<Div>,
+        row: &SidebarRow,
+        row_height: f32,
+    ) -> gpui_kit::AnyElement {
+        let key = row.key.clone();
+        let open = !self.collapsed_groups.contains(&key);
+        let owner = self.owner.clone();
+        Button::new(SharedString::from(format!("project-toggle:{key}")))
+            .text()
+            .p_0()
+            .w_full()
+            .h(px(row_height))
+            .toggled(open)
+            .accessibility_label(format!(
+                "{} project {}",
+                if open { "Collapse" } else { "Expand" },
+                row.text
+            ))
+            .child(element)
+            .on_click(move |_, _, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    if !this.sidebar_collapsed_groups.remove(&key) {
+                        this.sidebar_collapsed_groups.insert(key.clone());
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+    }
+
     fn render_row(
         &self,
         row: &SidebarRow,
@@ -879,6 +971,8 @@ impl SidebarRows {
         let selected = row.current || row.active;
         let row_height = if matches!(row.kind, SidebarRowKind::Group) {
             GROUP_ROW_HEIGHT
+        } else if matches!(&row.kind, SidebarRowKind::Other(kind) if kind == "project-path") {
+            22.0
         } else {
             ROW_HEIGHT
         };
@@ -950,11 +1044,10 @@ fn tree_guide(row: &SidebarRow, row_height: f32) -> Option<gpui_kit::AnyElement>
         "pipe" => (0.0, 0.0, false),
         _ => return None,
     };
-    let vertical_left = ROW_PAD_X + ROW_INDENT;
     let connector_left = f32::mul_add(f32::from(row.indent), ROW_INDENT, ROW_PAD_X) - ROW_INDENT;
     let vertical = div()
         .absolute()
-        .left(px(vertical_left))
+        .left(px(connector_left))
         .top(px(top))
         .bottom(px(bottom))
         .w(px(TREE_GUIDE_WIDTH))

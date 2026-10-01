@@ -1996,6 +1996,7 @@ impl GpuiWorkspace {
                     .binding
                     .capabilities()
                     .supports(operation),
+                session.is_some(),
             )
         })
     }

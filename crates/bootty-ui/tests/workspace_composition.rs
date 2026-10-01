@@ -17,19 +17,22 @@ use proptest::prelude::*;
 use rstest::rstest;
 
 #[rstest]
-#[case(false, None, true, EmptyTerminalState::Loading)]
-#[case(true, None, true, EmptyTerminalState::Ready { can_create: true })]
-#[case(true, None, false, EmptyTerminalState::Ready { can_create: false })]
-#[case(false, Some("Connecting to host"), true, EmptyTerminalState::Unavailable("Connecting to host".into()))]
-#[case(true, Some("Connection lost"), true, EmptyTerminalState::Unavailable("Connection lost".into()))]
+#[case(false, None, true, false, EmptyTerminalState::Loading)]
+#[case(true, None, true, false, EmptyTerminalState::Ready { can_create: true, has_session: false })]
+#[case(true, None, true, true, EmptyTerminalState::Ready { can_create: true, has_session: true })]
+#[case(true, None, false, false, EmptyTerminalState::Ready { can_create: false, has_session: false })]
+#[case(true, None, false, true, EmptyTerminalState::Ready { can_create: false, has_session: true })]
+#[case(false, Some("Connecting to host"), true, false, EmptyTerminalState::Unavailable("Connecting to host".into()))]
+#[case(true, Some("Connection lost"), true, true, EmptyTerminalState::Unavailable("Connection lost".into()))]
 fn empty_terminal_requires_an_available_snapshot(
     #[case] has_snapshot: bool,
     #[case] unavailable: Option<&str>,
     #[case] can_create: bool,
+    #[case] has_session: bool,
     #[case] expected: EmptyTerminalState,
 ) {
     assert_eq!(
-        EmptyTerminalState::from_snapshot(has_snapshot, unavailable, can_create),
+        EmptyTerminalState::from_snapshot(has_snapshot, unavailable, can_create, has_session),
         expected,
     );
 }

@@ -177,7 +177,7 @@ fn selected_windows(
             id: window.id.clone(),
             index: window.index,
             name: window.name.clone(),
-            icon: window_agent_icon(state, window).to_owned(),
+            icon: window_agent_icon(state, &session.id, window).to_owned(),
             active,
             progress,
             progress_indeterminate: progress.is_some()
@@ -205,12 +205,48 @@ fn selected_windows(
     (windows, tab_contexts)
 }
 
-fn window_agent_icon(state: &AppState, window: &bootty_mux::snapshot::MuxWindow) -> &'static str {
+fn window_agent_icon(
+    state: &AppState,
+    session: &str,
+    window: &bootty_mux::snapshot::MuxWindow,
+) -> &'static str {
+    if let Some(agents) = state.terminal_agent_service() {
+        for pane in std::iter::once(&window.anchor).chain(&window.panes) {
+            let record = pane.pane_id.as_deref().and_then(|pane| {
+                let target = state.mux_pane_target(
+                    state.mux_scope(),
+                    bootty_control::ResourceKind::Terminal,
+                    session,
+                    &window.id,
+                    pane,
+                )?;
+                agents.record(&target)
+            });
+            if let Some(record) = record {
+                return record.provider.icon();
+            }
+        }
+    }
+    for pane in std::iter::once(&window.anchor).chain(&window.panes) {
+        if let Some(process) = pane
+            .process
+            .as_deref()
+            .and_then(|process| std::path::Path::new(process).file_name())
+            .and_then(std::ffi::OsStr::to_str)
+        {
+            match process {
+                "codex" => return "openai",
+                "claude" => return "claude",
+                "pi" => return "pi",
+                _ => {}
+            }
+        }
+    }
     let Some(agents) = state.agent_service() else {
         return "terminal";
     };
     let scope = state.mux_scope().persistence_value().to_string();
-    for pane in &window.panes {
+    for pane in std::iter::once(&window.anchor).chain(&window.panes) {
         for provider in bootty_agents::AgentKind::ALL {
             if agents
                 .snapshot_scoped(provider, Some(&scope), pane.pane_id.as_deref())
@@ -273,6 +309,7 @@ fn session_view(
         active: session.active,
         selected,
         cwd: session.anchor.cwd.clone(),
+        windows: selected_windows(state, session, state.mux().selected_window()).0,
         pane_id: session.anchor.pane_id.clone(),
         pane_pid: session.anchor.pane_pid,
         process: session.anchor.process.clone(),
@@ -506,8 +543,6 @@ pub fn snapshot(
         layout: ChromeLayout {
             left_dock_toggle: chrome.left_dock_toggle,
             right_dock_toggle: chrome.right_dock_toggle,
-            panel_tab_style: chrome.panel_tab_style,
-            panel_tabs: chrome.panel_tabs,
             dock_tabs: chrome.dock_tabs,
             terminal_tabs: chrome.terminal_tabs,
 
@@ -720,7 +755,6 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             selectable: false,
             target: None,
             reorder_anchor: None,
-            native_context: None,
             context: None,
         });
         rows.extend(unclaimed.into_iter().map(|session| SidebarRow {
@@ -746,7 +780,6 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 session_id: session.session_id,
             }),
             reorder_anchor: None,
-            native_context: None,
             context: None,
         }));
     }
@@ -759,74 +792,148 @@ fn sidebar_rows(
     projection: &ChromeProjection,
     palette: ChromePalette,
 ) -> Vec<SidebarRow> {
-    let sessions = &projection.mux.sessions;
-    let display_name = |session: &SessionView| {
-        if session.display_name.is_empty() {
-            session.name.clone()
-        } else {
-            session.display_name.clone()
-        }
-    };
-    let names = sessions.iter().map(display_name).collect::<Vec<_>>();
-    let mut groups = session_groups(&names);
-    let mut modules = state.config().sidebar.session_modules.clone();
-    if !state.config().sidebar.session_modules_configured {
-        modules.extend(bootty_agents::AgentKind::ALL.map(|provider| provider.module().to_owned()));
-    }
-    let mut rows = Vec::new();
-    let mut last_group = None;
-    for (index, (session, name)) in sessions.iter().zip(&names).enumerate() {
-        let (group, suffix) = name.split_once('/').unwrap_or((name, ""));
-        let (count, emitted) = groups.entry(group).or_default();
-        *emitted = emitted.saturating_add(1);
-        let grouped = !group.is_empty() && *count > 1;
-        let last = *emitted == *count;
-        let base = sidebar_session_base(state, session, index, sessions.len(), palette);
-        if grouped && last_group != Some(group) {
-            rows.push(SidebarRow {
-                key: format!("group:{group}:{}", session.id),
-                text: group.to_owned(),
-                kind: SidebarRowKind::Group,
-                active: false,
-                current: false,
-                target: None,
-                ..base.clone()
-            });
-        }
-        let facts = projection
+    let mut projects = Vec::<(String, Vec<(usize, &SessionView)>)>::new();
+    for (ix, session) in projection.mux.sessions.iter().enumerate() {
+        let directory = projection
             .session_facts
             .get(&session.id)
+            .and_then(|facts| facts.project_root.as_deref())
+            .or(session.cwd.as_deref())
+            .unwrap_or_default();
+        if let Some((_, sessions)) = projects.iter_mut().find(|(path, _)| path == directory) {
+            sessions.push((ix, session));
+        } else {
+            projects.push((directory.to_owned(), vec![(ix, session)]));
+        }
+    }
+    let mut rows = Vec::new();
+    for (directory, sessions) in projects {
+        let Some((ix, first)) = sessions.first() else {
+            continue;
+        };
+        let base = sidebar_session_base(state, first, *ix, projection.mux.sessions.len(), palette);
+        let facts = projection
+            .session_facts
+            .get(&first.id)
             .cloned()
             .unwrap_or_default();
-        let has_diff = facts.diff_added.is_some() && facts.diff_removed.is_some();
-        let diff = sidebar_diff(&facts, &modules, state.ui_theme().palette);
-        let process = facts
-            .display_process
-            .as_ref()
-            .filter(|process| !process.is_empty());
-        let trailing = (!has_diff && modules.iter().any(|module| module == "process"))
-            .then(|| process.cloned())
-            .flatten();
-        let trailing_color = trailing.as_ref().map(|_| state.ui_theme().palette.subtext);
-        rows.push(SidebarRow {
-            diff,
-            artwork: facts.project_icon.clone(),
+        let name = std::path::Path::new(&directory)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Terminals");
+        let heading = SidebarRow {
+            key: format!("project:{}:{directory}", projection.mux.scope_key),
+            text: name.to_owned(),
+            trailing: Some(format!(
+                "{} {}",
+                sessions.len(),
+                if sessions.len() == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                },
+            )),
+            trailing_color: Some(palette.subtext),
+            color: palette.text,
+            dim_color: palette.subtext,
+            artwork: facts.project_icon,
             icon: Some("folder".to_owned()),
-            trailing,
-            trailing_color,
-            text: if grouped && !suffix.is_empty() {
-                suffix
-            } else {
-                group
-            }
-            .to_owned(),
-            kind: SidebarRowKind::Session,
-            number: Some(index.saturating_add(1)),
-            indent: if grouped { 2 } else { 0 },
+            kind: SidebarRowKind::Group,
+            active: false,
+            current: false,
+            selectable: false,
+            target: None,
+            context: None,
+            reorder_anchor: None,
+            ..base
+        };
+        rows.push(heading.clone());
+        if !directory.is_empty() {
+            rows.push(SidebarRow {
+                key: format!("project-path:{}:{directory}", projection.mux.scope_key),
+                text: bootty_git::project::display_path(
+                    &directory,
+                    state
+                        .active_multiplexer()
+                        .remote
+                        .is_none()
+                        .then_some(native.home.as_deref())
+                        .flatten(),
+                ),
+                trailing: None,
+                artwork: None,
+                icon: None,
+                kind: SidebarRowKind::Other("project-path".to_owned()),
+                indent: 2,
+                color: palette.subtext,
+                ..heading
+            });
+        }
+        for (ix, session) in sessions {
+            rows.extend(sidebar_session_rows(
+                state, native, projection, session, ix, name, palette,
+            ));
+        }
+    }
+    rows
+}
+
+fn sidebar_session_rows(
+    state: &AppState,
+    native: &NativeChrome,
+    projection: &ChromeProjection,
+    session: &SessionView,
+    ix: usize,
+    name: &str,
+    palette: ChromePalette,
+) -> Vec<SidebarRow> {
+    let modules = &state.config().sidebar.session_modules;
+    let mut rows = Vec::new();
+    let base = sidebar_session_base(state, session, ix, projection.mux.sessions.len(), palette);
+    let facts = projection
+        .session_facts
+        .get(&session.id)
+        .cloned()
+        .unwrap_or_default();
+    let title = if session.display_name.is_empty() {
+        &session.name
+    } else {
+        &session.display_name
+    };
+    rows.push(SidebarRow {
+        text: if title == name {
+            "Terminal".to_owned()
+        } else {
+            title.clone()
+        },
+        icon: Some(
+            session
+                .windows
+                .iter()
+                .find(|window| window.icon != "terminal")
+                .map_or("terminal", |window| window.icon.as_str())
+                .to_owned(),
+        ),
+        diff: sidebar_diff(&facts, modules, state.ui_theme().palette),
+        kind: SidebarRowKind::Session,
+        indent: 2,
+        selectable: true,
+        ..base.clone()
+    });
+    for (window_ix, terminal) in session.windows.iter().enumerate() {
+        rows.push(SidebarRow {
+            key: format!("window:{}:{}", session.id, terminal.id),
+            text: terminal.name.clone(),
+            icon: Some(terminal.icon.clone()),
+            kind: SidebarRowKind::Window {
+                window_id: terminal.id.clone(),
+            },
+            trailing: terminal.progress.map(|value| format!("{value}%")),
+            trailing_color: Some(palette.subtext),
+            indent: 4,
             tree: Some(
-                if !grouped {
-                    "none"
-                } else if last {
+                if window_ix.saturating_add(1) == session.windows.len() {
                     "last"
                 } else {
                     "middle"
@@ -834,24 +941,19 @@ fn sidebar_rows(
                 .to_owned(),
             ),
             selectable: true,
+            active: false,
+            current: session.selected && terminal.active,
+            context: None,
+            reorder_anchor: None,
             ..base.clone()
         });
-        let detail = |id: &str, icon: &str, text: String| {
-            sidebar_detail(
-                &base,
-                grouped,
-                last,
-                id,
-                icon,
-                text,
-                state.ui_theme().palette.subtext,
-            )
-        };
-        rows.extend(sidebar_session_details(
-            state, native, session, &facts, &modules, base.color, &detail,
-        ));
-        last_group = Some(group);
     }
+    let detail = |id: &str, icon: &str, text: String| {
+        sidebar_detail(&base, true, true, id, icon, text, palette.subtext)
+    };
+    rows.extend(sidebar_session_details(
+        state, native, session, &facts, modules, base.color, &detail,
+    ));
     rows
 }
 
@@ -873,18 +975,6 @@ fn sidebar_diff(
     } else {
         None
     }
-}
-
-fn session_groups(names: &[String]) -> HashMap<&str, (usize, usize)> {
-    let mut groups = HashMap::<&str, (usize, usize)>::new();
-    for name in names {
-        let count = &mut groups
-            .entry(name.split('/').next().unwrap_or(name))
-            .or_default()
-            .0;
-        *count = count.saturating_add(1);
-    }
-    groups
 }
 
 fn sidebar_detail(
@@ -953,7 +1043,6 @@ fn sidebar_session_base(
             session_id: session.id.clone(),
         }),
         reorder_anchor: Some(session.name.clone()),
-        native_context: None,
         context: Some(SessionContextSnapshot {
             can_activate: !session.selected,
             can_move_up: index > 0,

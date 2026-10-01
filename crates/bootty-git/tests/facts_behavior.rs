@@ -109,6 +109,55 @@ impl CommandRunner for RecordingRunner {
     }
 }
 
+#[derive(Clone)]
+struct ProjectRootRunner;
+
+impl CommandRunner for ProjectRootRunner {
+    fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = match (program, args.get(2..).unwrap_or_default()) {
+            ("git", ["symbolic-ref", "--quiet", "--short", "HEAD"]) => "feature/ui",
+            ("git", ["rev-parse", "--show-toplevel"]) => "/remote/feature-worktree",
+            ("git", ["worktree", "list", "--porcelain", "-z"]) => {
+                "worktree /remote/project\0HEAD 111\0branch refs/heads/main\0\0worktree /remote/feature-worktree\0HEAD 222\0branch refs/heads/feature/ui\0\0"
+            }
+            _ => "",
+        };
+        Ok(CommandOutput {
+            success: !output.is_empty(),
+            stdout: output.to_owned(),
+            stderr: String::new(),
+        })
+    }
+}
+
+#[rstest::rstest]
+#[case("/remote/feature-worktree")]
+#[case("/remote/feature-worktree/crates/ui")]
+fn session_facts_publish_the_owning_hosts_project_root_for_linked_worktrees(#[case] cwd: &str) {
+    let cache = GitFactsCache::with_remote_runner(ProjectRootRunner);
+    let now = Instant::now();
+    let input = GitSessionFactsInput {
+        scope_key: "remote-host".to_owned(),
+        session_id: "$1".to_owned(),
+        cwd: Some(cwd.to_owned()),
+        pane_pid: None,
+        process: None,
+        selected: true,
+    };
+    cache.refresh_session(&input, now);
+    for _ in 0..10_000 {
+        let facts = cache.refresh_session(&input, now);
+        if facts.branch.is_some() {
+            assert_eq!(facts.project_root.as_deref(), Some("/remote/project"));
+            assert_eq!(facts.branch.as_deref(), Some("feature/ui"));
+            return;
+        }
+        thread::yield_now();
+    }
+    panic!("Git worker did not publish its project facts");
+}
+
 #[test]
 fn injected_runner_keeps_git_paths_on_the_target_host() {
     let runner = RecordingRunner::default();

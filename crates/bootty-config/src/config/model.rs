@@ -330,30 +330,6 @@ pub struct FontConfig {
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
-pub enum PanelTabStyle {
-    #[default]
-    Icons,
-    IconsAndText,
-    Text,
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelTabs {
-    #[default]
-    Automatic,
-    Always,
-    Never,
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
 pub enum TabAppearance {
     #[default]
     Classic,
@@ -399,8 +375,6 @@ pub struct TabConfig {
 pub struct ChromeConfig {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
-    pub panel_tab_style: PanelTabStyle,
-    pub panel_tabs: PanelTabs,
     pub tabs_use_session_color: bool,
     pub dock_tabs: TabConfig,
     pub terminal_tabs: TabConfig,

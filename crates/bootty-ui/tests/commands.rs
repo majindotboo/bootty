@@ -2079,8 +2079,6 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 #[case("toggle_browser_panel")]
 #[case("toggle_left_dock")]
 #[case("toggle_right_dock")]
-#[case("toggle_tab_bar")]
-#[case("toggle_hidden_tabs")]
 #[case("show_codexbar")]
 #[case("show_spaces")]
 #[case("show_sidebar")]

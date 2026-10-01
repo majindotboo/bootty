@@ -93,8 +93,6 @@ pub enum SidebarPosition {
 pub struct ChromeLayout {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
-    pub panel_tab_style: bootty_config::config::PanelTabStyle,
-    pub panel_tabs: bootty_config::config::PanelTabs,
     pub dock_tabs: bootty_config::config::TabConfig,
     pub terminal_tabs: bootty_config::config::TabConfig,
     pub width: f32,
@@ -113,7 +111,7 @@ pub struct ChromeLayout {
 }
 
 impl ChromeLayout {
-    /// Clamp the configured sidebar to Zed's persisted range while keeping a usable center area in
+    /// Clamp the configured sidebar to the persisted range while keeping a usable center area in
     /// windows too narrow to satisfy both normal minimums.
     #[must_use]
     pub fn effective_sidebar_width(&self) -> f32 {
@@ -320,21 +318,15 @@ pub struct SidebarRow {
     pub target: Option<SessionTarget>,
     pub reorder_anchor: Option<String>,
     pub context: Option<SessionContextSnapshot>,
-    pub native_context: Option<NativeSessionSidebar>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeSessionSidebar {
-    pub target: bootty_control::CommandTarget,
-    pub provider: String,
-    pub title: String,
-    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
     Session,
+    Window {
+        window_id: String,
+    },
     Detail,
     Progress {
         value: Option<u8>,

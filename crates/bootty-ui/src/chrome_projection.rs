@@ -33,6 +33,7 @@ pub struct SessionView {
     pub active: bool,
     pub selected: bool,
     pub cwd: Option<String>,
+    pub windows: Vec<WindowView>,
     /// The session's active pane, its process id, and the command running in it, as the last mux
     /// snapshot reported them. Modules read these instead of asking the backend again.
     pub pane_id: Option<String>,

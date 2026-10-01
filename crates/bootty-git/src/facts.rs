@@ -34,6 +34,8 @@ const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// worktree identity; a cwd alone is not a safe remote identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitFacts {
+    /// Owning host's main worktree path; linked worktrees share this project identity.
+    pub project_root: Option<String>,
     pub project_icon: Option<Arc<crate::ProjectIcon>>,
     pub branch: Option<String>,
     pub branch_status: BranchStatus,
@@ -66,6 +68,7 @@ pub struct GitSessionFactsInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitSessionFacts {
     pub pane_pid: Option<u32>,
+    pub project_root: Option<String>,
     pub project_icon: Option<Arc<crate::ProjectIcon>>,
     pub branch: Option<String>,
     pub branch_status: BranchStatus,
@@ -324,6 +327,7 @@ where
         let mut facts = self.refresh_with_identity(&cache_key, cwd, input.selected, now, &identity);
         GitSessionFacts {
             pane_pid: input.pane_pid,
+            project_root: facts.project_root.take(),
             project_icon: facts.project_icon.take(),
             branch: facts.branch.take(),
             branch_status: facts.branch_status,
@@ -387,14 +391,19 @@ where
                     .then_some(entry.facts.worktree_revision)
             });
             let icon = icon_revision.map(|revision| {
-                let root = git.worktree_root(&cwd).unwrap_or_else(|| cwd.clone());
+                let worktree = git.worktree_root(&cwd);
+                let project_root = worktree
+                    .as_deref()
+                    .and_then(|root| git.main_worktree(root))
+                    .or_else(|| worktree.clone());
+                let root = worktree.unwrap_or_else(|| cwd.clone());
                 let icon = if local {
                     crate::detect_project_icon(Path::new(&root))
                 } else {
                     crate::project_icon::detect_project_icon_with_runner(&root, &git.runner)
                 }
                 .map(Arc::new);
-                (revision, icon)
+                (revision, project_root, icon)
             });
             if retired.load(Ordering::Acquire) {
                 return;
@@ -403,7 +412,8 @@ where
                 && let Some(entry) = entries.get_mut(&cache_key)
                 && Arc::ptr_eq(&entry.incarnation, &incarnation)
             {
-                if let Some((revision, icon)) = icon {
+                if let Some((revision, project_root, icon)) = icon {
+                    entry.facts.project_root = project_root;
                     entry.facts.project_icon = icon;
                     entry.icon_revision = Some(revision);
                 }

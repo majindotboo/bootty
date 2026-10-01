@@ -1,8 +1,8 @@
 use super::model::{
     AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
     MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
-    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SshProfileConfig,
-    StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    OpenBehavior, RestoreOnStartup, SidebarPosition, SshProfileConfig, StatusSegment,
+    WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
@@ -98,8 +98,6 @@ pub(super) struct TabPatch {
 pub(super) struct ChromePatch {
     pub(super) left_dock_toggle: Option<bool>,
     pub(super) right_dock_toggle: Option<bool>,
-    pub(super) panel_tab_style: Option<PanelTabStyle>,
-    pub(super) panel_tabs: Option<PanelTabs>,
     pub(super) tabs_use_session_color: Option<bool>,
     pub(super) dock_tabs: Option<TabPatch>,
     pub(super) terminal_tabs: Option<TabPatch>,
