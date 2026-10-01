@@ -803,7 +803,7 @@ impl NativeAgentSessionView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_sm().child("Project conversations"))
+                    .child(div().text_sm().child("Conversations"))
                     .child(
                         Button::new("close-native-history")
                             .icon(IconName::Close)
@@ -822,7 +822,7 @@ impl NativeAgentSessionView {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No other conversations in this project."),
+                    .child("No conversations yet."),
             );
         }
         for (id, title) in &self.history {
