@@ -18,7 +18,10 @@ The loopback listener supports simulator testing. A physical phone needs an
 explicitly enabled LAN listener and a reachable computer address. Remote control
 starts disabled and is not persisted across desktop restarts.
 
-Choose a session to read its live terminal output and send text with Enter.
+Choose a session to read its live terminal output. Type in the input strip and
+tap the purple **Send** button or the software keyboard’s **Return** key to send
+the text followed by Enter. Pasting text never submits it; inspect the input
+before sending.
 Esc, Tab, Ctrl+C, and arrow controls send terminal keys. Root-issued tabs and
 pane controls let you choose a terminal, create a tab, or split a pane when the
 backend supports it. While typing, **Done** dismisses the keyboard and restores
@@ -71,6 +74,10 @@ xcrun simctl install UUID mobile/dist/iphonesimulator/BoottyMobile.app
 xcrun simctl launch UUID dev.bootty.mobile.dev
 ```
 
+In Device Hub, use **Device → Keyboard → Toggle Software Keyboard** if its
+simulated hardware keyboard suppresses the phone keyboard. **Open in New
+Window** switches to a compact simulator window for touch interaction.
+
 The build script takes `/tmp/bootty-cargo-build.lock` with Python `fcntl.flock`
 for Cargo. Other Bootty builds and commit hooks must use that same lock.
 `mobile/` is a separate Cargo workspace, keeping desktop dependencies and
@@ -105,6 +112,14 @@ loopback to an isolated Development desktop:
 - [Project directory and explicit agent provider picker](media/new-session.png)
 - [Live terminal output, tabs, panes, and input strip](media/live-terminal.png)
 - [Terminal chrome and navigation, 20 seconds](media/workspace-control.mp4)
+- [Typing and Return on the actual iPhone software keyboard, 10 seconds](media/keyboard-control.mp4)
+- [Input and key strip above the software keyboard](media/keyboard.png)
+- [Live output after software Return](media/keyboard-input.png)
+- [Tab/pane choice, leave/reopen, and confirmed closure with the desktop minimized, 19 seconds](media/hidden-topology.mp4)
+- [Reopened split pane with live output](media/split-reopen.png)
+- [Explicit session closure confirmation](media/close-confirmation.png)
+- [Multiline paste stays in the bounded input strip](media/paste.png)
+- [Explicit Send preserves two separate commands and outputs](media/paste-output.png)
 
 The earlier control recordings cover Unicode input, native/tmux tabs and splits,
 and an interactive Claude terminal. They precede the visual update:
@@ -119,9 +134,18 @@ The visual pass verified readable portrait and landscape layouts, increased
 Dynamic Type, provider icons, real terminal glyphs, and live tab/split creation.
 The disposable session was closed, the listener revoked, and the phone credential
 removed. The existing 9 native and 2 rmux sessions retained their exact targets
-and order. The software keyboard did not appear in this Device Hub pass, so this
-pass does not establish its layout. Earlier software keyboard checks remain
-separate evidence. No model prompt was submitted.
+and order. The actual iPhone software keys composed `echo return`; **Return**
+returned live output and cleared the input. **Send** also returned live output
+in the earlier keyboard pass, and **Done** restored topology controls. The input
+strip and terminal keys stayed above the keyboard. With the desktop minimized, the phone created
+two tabs and three panes, chose panes, left and reopened the session, and closed
+it through explicit confirmation. A separate public control check captured all
+three exact panes with the desktop fully covered. Multiline paste and a pasted
+lone newline stayed unsubmitted and retained its line breaks; an exact terminal
+capture confirmed that neither reached the shell before explicit Send. Sending
+the two pasted commands then produced two independent outputs. The topology
+clip removes idle spans at normal speed.
+No model prompt was submitted.
 
 ## Platform limits
 
@@ -148,7 +172,9 @@ This is a polling terminal companion, with bounded captures of 80 history lines;
 it does not stream terminal frames, resize the desktop terminal, render images,
 or forward terminal mouse input. Herdr remains opaque and does not expose inner
 tabs or panes. Device Hub exposes GPUI content as one accessibility group;
-full VoiceOver navigation remains unverified. Android is not implemented.
+full VoiceOver navigation remains unverified. The app bridges explicit software
+Return through the platform’s public key API, with UIKit paste kept separate.
+Android is not implemented.
 iOS 16 is the deployment minimum; simulator execution establishes evidence only
 for the runtime actually tested.
 

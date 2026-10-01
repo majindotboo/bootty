@@ -37,11 +37,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 /// One embedded GPUI view for the process lifetime. UIKit owns native layout.
-final class TerminalSurface: UIView {
+final class TerminalSurface: UIView, UITextViewDelegate, UITextPasteDelegate {
     private let gpuiWindow: UnsafeMutableRawPointer
     let contentController: UIViewController
     private var displayLink: CADisplayLink?
     private var inputObservers: [NSObjectProtocol] = []
+    private var isPasting = false
 
     override init(frame: CGRect) {
         gpui_ios_set_embedded()
@@ -75,6 +76,8 @@ final class TerminalSurface: UIView {
         // The embedded GPUI platform uses a native composition buffer. Terminal
         // commands must preserve literal quotes/dashes until its traits API exposes them.
         for input in contentController.view.subviews.compactMap({ $0 as? UITextView }) {
+            input.delegate = self
+            input.pasteDelegate = self
             input.smartQuotesType = .no
             input.smartDashesType = .no
             input.smartInsertDeleteType = .no
@@ -89,6 +92,28 @@ final class TerminalSurface: UIView {
                 }
             })
         }
+    }
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange,
+                  replacementText text: String) -> Bool {
+        guard !isPasting, text == "\n", textView.markedTextRange == nil else { return true }
+        // The pinned platform forwards software Return as text. Use its public
+        // key path until it emits Return directly; Kit owns the focused action.
+        gpui_ios_handle_key_event(gpuiWindow, 0x28, 0, true)
+        gpui_ios_handle_key_event(gpuiWindow, 0x28, 0, false)
+        wake()
+        return false
+    }
+
+    func textPasteConfigurationSupporting(_ configuration: UITextPasteConfigurationSupporting,
+                                         performPasteOf text: NSAttributedString,
+                                         to range: UITextRange) -> UITextRange {
+        guard let input = configuration as? UITextView else { return range }
+        // Paste is always text, including a lone newline; never submit it.
+        isPasting = true
+        defer { isPasting = false }
+        input.replace(range, withText: text.string)
+        return input.selectedTextRange ?? range
     }
 
     func startFrames() {

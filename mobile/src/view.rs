@@ -7,7 +7,7 @@ use gpui_kit::{
     component::{
         ActiveTheme, Disableable, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
         tab::{Tab, TabBar},
     },
     div, px,
@@ -43,7 +43,7 @@ pub struct WorkspaceView {
     pending: bool,
     confirmation: Option<Invocation>,
     create_space: Option<String>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     name: Entity<InputState>,
     cwd: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -51,11 +51,16 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type terminal input…"));
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 3)
+                .submit_on_enter(true)
+                .placeholder("Type terminal input…")
+        });
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let cwd = cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/project/path"));
         let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                 this.send_input(window, cx);
             }
         });
@@ -66,8 +71,11 @@ impl WorkspaceView {
             let mut subscriptions = subscriptions;
             // Remove this adapter when the pinned iOS backend implements
             // PlatformWindow::text_input_state_changed for GPUI's input handler.
-            for field in [&input, &name, &cwd] {
-                let focus = field.read(cx).focus_handle(cx);
+            for focus in [
+                input.read(cx).focus_handle(cx),
+                name.read(cx).focus_handle(cx),
+                cwd.read(cx).focus_handle(cx),
+            ] {
                 subscriptions.push(cx.on_focus(&focus, window, |this, window, cx| {
                     this.update_keyboard(window, cx);
                 }));
@@ -107,9 +115,13 @@ impl WorkspaceView {
     #[cfg(target_os = "ios")]
     fn update_keyboard(&self, window: &Window, cx: &Context<Self>) {
         use gpui_kit::Focusable;
-        if [&self.input, &self.name, &self.cwd]
-            .iter()
-            .any(|field| field.read(cx).focus_handle(cx).is_focused(window))
+        if [
+            self.input.read(cx).focus_handle(cx),
+            self.name.read(cx).focus_handle(cx),
+            self.cwd.read(cx).focus_handle(cx),
+        ]
+        .iter()
+        .any(|focus| focus.is_focused(window))
         {
             gpui_mobile::show_keyboard();
         } else {
@@ -830,7 +842,7 @@ impl WorkspaceView {
                     .items_center()
                     .child(
                         div().flex_1().min_w_0().child(
-                            Input::new(&self.input)
+                            Textarea::new(&self.input)
                                 .large()
                                 .min_h(px(44.))
                                 .disabled(disabled),
