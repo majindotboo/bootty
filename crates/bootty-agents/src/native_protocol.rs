@@ -308,6 +308,7 @@ impl NativeSessionSnapshot {
                     self.status = NativeSessionStatus::Error;
                 }
             }
+            "extension_ui_request" => self.pi_information(value),
             "tool_execution_start" => {
                 self.message(
                     field(value, "toolCallId")
@@ -335,6 +336,51 @@ impl NativeSessionSnapshot {
                 );
             }
             _ => {}
+        }
+    }
+    fn pi_information(&mut self, value: &Value) {
+        let (id, text) = match field(value, "method").as_str() {
+            Some("notify") => (
+                format!("notice:{}", field(value, "id")),
+                field(value, "message")
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            Some("setStatus") => (
+                format!("status:{}", field(value, "statusKey")),
+                field(value, "statusText")
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            Some("setWidget") => (
+                format!("widget:{}", field(value, "widgetKey")),
+                field(value, "widgetLines")
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Some("setTitle") => (
+                "provider-title".to_owned(),
+                field(value, "title")
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            Some("set_editor_text") => (
+                "provider-editor".to_owned(),
+                field(value, "text").as_str().unwrap_or_default().to_owned(),
+            ),
+            _ => return,
+        };
+        if text.is_empty() {
+            self.transcript.retain(|item| item.id != id);
+        } else {
+            self.message(id, "notice", text, true);
         }
     }
 }

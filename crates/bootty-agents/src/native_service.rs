@@ -208,6 +208,9 @@ impl NativeAgentService {
             return Err("Native session needs a binding and title of at most 256 bytes".to_owned());
         }
         let _mutation = lock(&self.mutation);
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err("Native agent host is shutting down".to_owned());
+        }
         if config.provider == crate::AgentKind::Claude && config.session_id.is_none() {
             // The CLI accepts a client-issued UUID, so identity exists before the first prompt.
             let id = uuid::Uuid::new_v4().to_string();
@@ -251,13 +254,26 @@ impl NativeAgentService {
             .find(|record| record.id == id)
             .cloned()
             .ok_or("Unknown native agent session")?;
-        match NativeAgentSession::spawn(config.unwrap_or(record.config)) {
-            Ok(session) => {
-                session.restore_recent_history(&record.snapshot);
+        let started = NativeAgentSession::start(config.unwrap_or(record.config))
+            .map(Arc::new)
+            .and_then(|session| {
                 let publisher = self.publication.clone();
                 session.set_change_handler(Arc::new(move || {
                     let _ = publisher.try_send(());
                 }));
+                {
+                    let mut live = lock(&self.live);
+                    if self.shutdown.load(Ordering::Acquire) {
+                        return Err("Native agent host is shutting down".to_owned());
+                    }
+                    live.insert(id.to_owned(), Arc::clone(&session));
+                }
+                session.initialize()?;
+                Ok(session)
+            });
+        match started {
+            Ok(session) => {
+                session.restore_recent_history(&record.snapshot);
                 let snapshot = session.snapshot();
                 let mut candidate = lock(&self.store).clone();
                 let record = candidate
@@ -284,11 +300,15 @@ impl NativeAgentService {
                 }
                 record.snapshot = snapshot;
                 let result = record.clone();
-                self.commit(candidate)?;
-                lock(&self.live).insert(id.to_owned(), Arc::new(session));
+                if let Err(error) = self.commit(candidate) {
+                    session.stop();
+                    lock(&self.live).remove(id);
+                    return Err(error);
+                }
                 Ok(result)
             }
             Err(error) => {
+                lock(&self.live).remove(id);
                 let mut candidate = lock(&self.store).clone();
                 if let Some(record) = candidate.records.iter_mut().find(|record| record.id == id) {
                     record.snapshot.error = Some(error.clone());
@@ -302,9 +322,12 @@ impl NativeAgentService {
 
     /// # Errors
     /// Returns an unknown/live-session error or provider resume failure.
-    pub fn resume(&self, id: &str) -> Result<NativeSessionRecord, String> {
+    pub fn resume(&self, target: &CommandTarget) -> Result<NativeSessionRecord, String> {
         let _mutation = lock(&self.mutation);
-        if lock(&self.live).contains_key(id) {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err("Native agent host is shutting down".to_owned());
+        }
+        if lock(&self.live).contains_key(&target.handle) {
             return Err("Native session already has a live process".to_owned());
         }
         let mut candidate = lock(&self.store).clone();
@@ -312,12 +335,12 @@ impl NativeAgentService {
         let record = candidate
             .records
             .iter_mut()
-            .find(|record| record.id == id)
+            .find(|record| record.target() == *target)
             .ok_or("Unknown native agent session")?;
         record.generation = generation;
         record.snapshot.status = NativeSessionStatus::Starting;
         self.commit(candidate)?;
-        self.launch(id, None)
+        self.launch(&target.handle, None)
     }
 
     #[must_use]
@@ -345,12 +368,13 @@ impl NativeAgentService {
             .iter()
             .find(|record| record.target() == *target)
             .ok_or("Native session target is unknown or stale")?;
-        let id = record.id.clone();
-        drop(store);
-        lock(&self.live)
-            .get(&id)
+        // Keep generation validation and process lookup under the same catalog lease.
+        let session = lock(&self.live)
+            .get(&record.id)
             .cloned()
-            .ok_or_else(|| "Native session is stopped; resume it explicitly".to_owned())
+            .ok_or_else(|| "Native session is stopped; resume it explicitly".to_owned());
+        drop(store);
+        session
     }
 
     /// # Errors
@@ -392,18 +416,50 @@ impl NativeAgentService {
 
     /// # Errors
     /// Returns unknown/live-session errors or failed persistence.
-    pub fn remove(&self, id: &str) -> Result<(), String> {
+    pub fn remove(&self, target: &CommandTarget) -> Result<(), String> {
         let _mutation = lock(&self.mutation);
-        if lock(&self.live).contains_key(id) {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err("Native agent host is shutting down".to_owned());
+        }
+        if lock(&self.live).contains_key(&target.handle) {
             return Err("Stop the native session before removing it".to_owned());
         }
         let mut candidate = lock(&self.store).clone();
         let before = candidate.records.len();
-        candidate.records.retain(|record| record.id != id);
+        candidate
+            .records
+            .retain(|record| record.target() != *target);
         if candidate.records.len() == before {
-            return Err("Unknown native session".to_owned());
+            return Err("Native session target is unknown or stale".to_owned());
         }
         self.commit(candidate)
+    }
+
+    /// Stop owned processes before saving their final state. Call on a shutdown worker and await
+    /// completion before releasing the window or exiting the host.
+    /// # Errors
+    /// Returns final catalog persistence failures after every owned process has been stopped.
+    pub fn shutdown(&self) -> Result<(), String> {
+        self.shutdown.store(true, Ordering::Release);
+        let sessions = std::mem::take(&mut *lock(&self.live));
+        for session in sessions.values() {
+            session.stop();
+        }
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        for record in &mut candidate.records {
+            if let Some(session) = sessions.get(&record.id) {
+                record.snapshot = session.snapshot();
+                record.config.session_id = record
+                    .snapshot
+                    .session_file
+                    .clone()
+                    .or_else(|| record.snapshot.session_id.clone());
+            }
+        }
+        self.commit(candidate)?;
+        let _ = self.publication.try_send(());
+        Ok(())
     }
 
     fn commit(&self, candidate: Store) -> Result<(), String> {
@@ -438,8 +494,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 impl Drop for NativeAgentService {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = self.publication.try_send(());
+        if let Err(error) = self.shutdown() {
+            eprintln!("Native agent shutdown state was not saved: {error}");
+        }
     }
 }
 
@@ -461,7 +518,9 @@ fn start_publication_worker(
         .name("native-agent-history".to_owned())
         .spawn(move || {
             while receiver.recv().is_ok() {
-                let shutdown = state.shutdown.load(Ordering::Acquire);
+                if state.shutdown.load(Ordering::Acquire) {
+                    return;
+                }
                 {
                     let _mutation = lock(&state.mutation);
                     let mut candidate = lock(&state.store).clone();
@@ -471,14 +530,12 @@ fn start_publication_worker(
                         for record in &mut candidate.records {
                             if let Some(session) = live.get(&record.id) {
                                 let snapshot = session.snapshot();
-                                if (shutdown
-                                    || matches!(
-                                        snapshot.status,
-                                        NativeSessionStatus::Idle
-                                            | NativeSessionStatus::Stopped
-                                            | NativeSessionStatus::Error
-                                    ))
-                                    && snapshot.revision != record.snapshot.revision
+                                if matches!(
+                                    snapshot.status,
+                                    NativeSessionStatus::Idle
+                                        | NativeSessionStatus::Stopped
+                                        | NativeSessionStatus::Error
+                                ) && snapshot.revision != record.snapshot.revision
                                 {
                                     record.config.session_id = snapshot
                                         .session_file
@@ -506,10 +563,6 @@ fn start_publication_worker(
                             }
                         }
                     }
-                }
-                if shutdown {
-                    lock(&state.live).clear();
-                    return;
                 }
                 publish(&state.revision, &state.change_handler);
             }

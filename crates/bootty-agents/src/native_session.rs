@@ -67,6 +67,12 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns provider launch, handshake, resume or protocol errors after reaping the child.
     pub fn spawn(config: NativeSessionConfig) -> Result<Self, String> {
+        let session = Self::start(config)?;
+        session.initialize()?;
+        Ok(session)
+    }
+
+    pub(crate) fn start(config: NativeSessionConfig) -> Result<Self, String> {
         let mut command = native_command(&config)?;
         let mut child = command
             .spawn()
@@ -159,11 +165,10 @@ impl NativeAgentSession {
             closing,
             change_handler,
         };
-        session.initialize()?;
         Ok(session)
     }
 
-    fn initialize(&self) -> Result<(), String> {
+    pub(crate) fn initialize(&self) -> Result<(), String> {
         match self.config.provider {
             AgentKind::Codex => {
                 self.rpc("initialize", json!({"clientInfo":{"name":"bootty","title":"Bootty","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
@@ -337,6 +342,9 @@ impl NativeAgentSession {
             }
             AgentKind::Claude => {
                 json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}})
+            }
+            AgentKind::Pi if request.method == "confirm" => {
+                json!({"type":"extension_ui_response","id":id,"confirmed":response.as_bool().ok_or("Confirmation requires a boolean response")?})
             }
             AgentKind::Pi => json!({"type":"extension_ui_response","id":id,"value":response}),
         };
@@ -634,7 +642,13 @@ fn read_frames(
                     parameters: field(&value, "request").clone(),
                 })
             }
-            AgentKind::Pi if field(&value, "type") == "extension_ui_request" => {
+            AgentKind::Pi
+                if field(&value, "type") == "extension_ui_request"
+                    && matches!(
+                        field(&value, "method").as_str(),
+                        Some("select" | "confirm" | "input" | "editor")
+                    ) =>
+            {
                 Some(NativeAgentRequest {
                     id: field(&value, "id").as_str().unwrap_or_default().to_owned(),
                     method: field(&value, "method")

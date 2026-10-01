@@ -137,20 +137,162 @@ fn registry_persists_identity_and_rejects_retired_process_generations() {
     assert!(service.resolve(&target).is_ok());
     service.stop(&target).unwrap();
     assert!(service.resolve(&target).is_err());
-    let second = service.resume(&first.id).unwrap();
+    let second = service.resume(&first.target()).unwrap();
     assert_eq!(second.id, first.id);
     assert!(second.generation > first.generation);
     assert!(service.resolve(&target).is_err());
     service.stop(&second.target()).unwrap();
+    assert!(service.resume(&first.target()).is_err());
+    assert!(service.remove(&first.target()).is_err());
+    assert!(service.rename(&first.target(), "Retired title").is_err());
+    assert_eq!(service.sessions().len(), 1);
     drop(service);
     let restored = NativeAgentService::open(path).unwrap();
     assert_eq!(
         restored.sessions()[0].snapshot.status,
         NativeSessionStatus::Stopped
     );
-    let third = restored.resume(&first.id).unwrap();
+    let third = restored.resume(&second.target()).unwrap();
     assert!(third.generation > second.generation);
     assert!(restored.resolve(&second.target()).is_err());
+}
+
+#[rstest]
+#[case(true)]
+#[case(false)]
+fn pi_information_never_becomes_an_approval_and_confirm_uses_native_boolean(#[case] allow: bool) {
+    let root = TempDir::new().unwrap();
+    let provider = root.path().join("pi.py");
+    fs::write(&provider, r"#!/usr/bin/env python3
+import json,sys
+confirmed=None
+def emit(value): print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ request=json.loads(line)
+ method=request.get('type')
+ if method=='extension_ui_response':
+  confirmed=request.get('confirmed')
+  emit({'type':'agent_end'})
+  continue
+ if method=='get_messages':
+  for i in range(360):
+   name=['notify','setStatus','setWidget','setTitle','set_editor_text'][i%5]
+   emit({'type':'extension_ui_request','id':str(i),'method':name,'message':'notice','statusKey':'progress','statusText':str(i),'widgetKey':'summary','widgetLines':['info'],'title':'provider title','text':'draft'})
+  data={'messages':[]}
+ elif method=='request_confirmation':
+  emit({'type':'extension_ui_request','id':'confirm-request','method':'confirm','title':'Proceed?'})
+  data={}
+ else: data={'sessionId':'pi-session','confirmed':confirmed}
+ emit({'id':request.get('id'),'type':'response','success':True,'data':data})
+").unwrap();
+    fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut launch = NativeSessionConfig::new(AgentKind::Pi, root.path());
+    launch.program = provider.to_string_lossy().into_owned();
+    let session = NativeAgentSession::spawn(launch).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    assert_eq!(
+        snapshot.requests,
+        Vec::<bootty_agents::NativeAgentRequest>::new()
+    );
+    assert!(!snapshot.transcript.is_empty() && snapshot.transcript.len() <= 256);
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.id.contains("status:"))
+            .count(),
+        1
+    );
+    session
+        .rpc("request_confirmation", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(session.snapshot().requests.len(), 1);
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Waiting);
+    session.approve("confirm-request", allow).unwrap();
+    let state = session.rpc("get_state", serde_json::json!({})).unwrap();
+    assert_eq!(state["confirmed"].as_bool(), Some(allow));
+    assert_eq!(
+        session.snapshot().requests,
+        Vec::<bootty_agents::NativeAgentRequest>::new()
+    );
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn native_host_shutdown_reaps_process_and_saves_before_return(#[case] explicit: bool) {
+    let root = TempDir::new().unwrap();
+    let mut launch = config(AgentKind::Codex, root.path()).unwrap();
+    let executable = std::path::PathBuf::from(&launch.program);
+    let pid_file = root.path().join("pid");
+    let source = fs::read_to_string(&executable).unwrap();
+    fs::write(
+        &executable,
+        source.replace(
+            "import json,sys",
+            &format!(
+                "import json,sys,os\nwith open({},'w') as output: output.write(str(os.getpid()))",
+                serde_json::to_string(&pid_file.to_string_lossy()).unwrap()
+            ),
+        ),
+    )
+    .unwrap();
+    launch.arguments.clear();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service.create("binding", "Owned process", launch).unwrap();
+    service.prompt(&record.target(), "Save reply").unwrap();
+    let pid = fs::read_to_string(pid_file).unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    if explicit {
+        service.shutdown().unwrap();
+    }
+    drop(service);
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Stopped);
+    let check = std::process::Command::new("/usr/bin/python3").args(["-c", "import os,sys\ntry: os.kill(int(sys.argv[1]),0)\nexcept ProcessLookupError: sys.exit(0)\nsys.exit(1)", &pid]).status().unwrap();
+    assert!(
+        check.success(),
+        "Owned process must be reaped before shutdown returns"
+    );
+    let restored = NativeAgentService::open(&path).unwrap();
+    let saved = restored.sessions();
+    assert_eq!(saved.len(), 1);
+    assert!(
+        saved[0]
+            .snapshot
+            .transcript
+            .iter()
+            .any(|item| item.role == "assistant" && item.text == "hello")
+    );
+}
+
+#[rstest]
+fn native_shutdown_cancels_a_provider_waiting_for_its_initial_handshake() {
+    use std::io::Read as _;
+    let root = TempDir::new().unwrap();
+    let ready_path = root.path().join("ready.sock");
+    let ready = std::os::unix::net::UnixListener::bind(&ready_path).unwrap();
+    let program = root.path().join("starting.py");
+    fs::write(&program, format!("#!/usr/bin/env python3\nimport os,socket,sys\ns=socket.socket(socket.AF_UNIX)\ns.connect({})\ns.sendall(str(os.getpid()).encode())\ns.close()\nsys.stdin.read()\n", serde_json::to_string(&ready_path.to_string_lossy()).unwrap())).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut launch = NativeSessionConfig::new(AgentKind::Codex, root.path());
+    launch.program = program.to_string_lossy().into_owned();
+    let service =
+        std::sync::Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let worker_service = std::sync::Arc::clone(&service);
+    let worker = std::thread::spawn(move || worker_service.create("binding", "Starting", launch));
+    let (mut stream, _) = ready.accept().unwrap();
+    let mut pid = String::new();
+    stream.read_to_string(&mut pid).unwrap();
+    service.shutdown().unwrap();
+    assert!(worker.join().unwrap().is_err());
+    let check = std::process::Command::new("/usr/bin/python3").args(["-c", "import os,sys\ntry: os.kill(int(sys.argv[1]),0)\nexcept ProcessLookupError: sys.exit(0)\nsys.exit(1)", &pid]).status().unwrap();
+    assert!(
+        check.success(),
+        "An unresponsive handshake must not outlive its host"
+    );
 }
 
 #[rstest]
@@ -313,7 +455,7 @@ fn completed_provider_reply_is_saved_before_publication() {
     }
     service.rename(&record.target(), "Saved title").unwrap();
     service.stop(&record.target()).unwrap();
-    let resumed = service.resume(&record.id).unwrap();
+    let resumed = service.resume(&record.target()).unwrap();
     assert!(
         resumed
             .snapshot
@@ -322,6 +464,6 @@ fn completed_provider_reply_is_saved_before_publication() {
             .any(|item| item.role == "assistant" && item.text == "hello")
     );
     service.stop(&resumed.target()).unwrap();
-    service.remove(&record.id).unwrap();
+    service.remove(&resumed.target()).unwrap();
     assert!(service.sessions().is_empty());
 }
