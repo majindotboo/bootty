@@ -415,6 +415,9 @@ impl BrowserPanel {
             .and_then(|tab| tab.view.as_ref())
             .is_some_and(BrowserView::can_go_forward);
         let has_view = tab.is_some_and(|tab| tab.view.is_some());
+        let can_open_external = tab.is_some_and(|tab| {
+            tab.address != "about:blank" && normalize_address(&tab.address).is_ok()
+        });
         let loading = tab.is_some_and(|tab| tab.loading);
         div()
             .flex()
@@ -476,7 +479,7 @@ impl BrowserPanel {
                     .icon(IconName::ExternalLink)
                     .ghost()
                     .small()
-                    .disabled(!has_view)
+                    .disabled(!can_open_external)
                     .accessibility_label("Open in default browser")
                     .tooltip("Open in default browser")
                     .on_click(cx.listener(|this, _, _, cx| {
