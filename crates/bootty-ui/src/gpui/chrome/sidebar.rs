@@ -148,26 +148,20 @@ pub(super) fn render(
 
     let resize_handle = resize_handle(position, cx);
 
-    let header = v_flex()
-        .w_full()
-        .gap_1()
-        .children(sidebar_header(
-            snapshot,
-            title,
-            layout,
-            header_height,
-            docked,
-            colors,
-            cx,
-        ))
-        .child(
-            div()
-                .px_3()
-                .pt_2()
-                .text_xs()
-                .text_color(color(colors.muted))
-                .child("Workspace"),
-        )
+    let header = v_flex().w_full().gap_1().children(sidebar_header(
+        snapshot,
+        title,
+        layout,
+        header_height,
+        docked,
+        colors,
+        cx,
+    ));
+    let component_footer = v_flex()
+        .w(px(width))
+        .when(docked, gpui_kit::Styled::w_full)
+        .mb_neg_3()
+        .when_some(status_footer, ParentElement::child)
         .child(space_switcher::render(
             spaces,
             transition,
@@ -175,11 +169,6 @@ pub(super) fn render(
             colors,
             cx,
         ));
-    let component_footer = v_flex()
-        .w(px(width))
-        .when(docked, gpui_kit::Styled::w_full)
-        .mb_neg_3()
-        .when_some(status_footer, ParentElement::child);
     let side = match position {
         SidebarPosition::Left => Side::Left,
         SidebarPosition::Right => Side::Right,
@@ -487,6 +476,7 @@ fn sidebar_header(
     (snapshot.title_visible && !docked).then(|| {
         div()
             .id("bootty-gpui-sidebar-header")
+            .debug_selector(|| "bootty-gpui-sidebar-header".to_owned())
             .w(px(width))
             .when(docked, gpui_kit::Styled::w_full)
             .mt_neg_3()
@@ -1098,26 +1088,42 @@ fn usage_meter(
 ) -> gpui_kit::AnyElement {
     let mut details = format!("{} · {}", snapshot.provider.id(), snapshot.label);
     if let Some(expected) = snapshot.meter.expected_remaining_percent {
-        _ = write!(details, " · {expected:.0}% expected for time left");
+        let _ = write!(details, " · {expected:.0}% expected for time left");
     }
     if !snapshot.meter.pace.is_empty() {
-        _ = write!(details, " · {} vs pace", snapshot.meter.pace);
+        let _ = write!(details, " · {} vs pace", snapshot.meter.pace);
     }
     if !snapshot.meter.reset.is_empty() {
-        _ = write!(details, " · resets in {}", snapshot.meter.reset);
+        let _ = write!(details, " · resets in {}", snapshot.meter.reset);
     }
     div()
         .id(SharedString::from(format!("usage-{}", item.key)))
         .w_full()
         .min_w_0()
         .flex()
-        .items_center()
-        .gap_2()
+        .flex_col()
+        .gap_1()
         .text_xs()
         .text_color(color(colors.muted))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
         })
+        .child(usage_labels(snapshot, item, colors))
+        .child(usage_track(snapshot, &item.key))
+        .into_any_element()
+}
+
+fn usage_labels(
+    snapshot: &UsageMeterSnapshot,
+    item: &super::SidebarFooterItem,
+    colors: ChromePalette,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
         .when_some(item.icon.as_deref(), |element, icon| {
             element.child(crate::gpui::sized_icon(
                 icon,
@@ -1148,8 +1154,21 @@ fn usage_meter(
                     .child(snapshot.meter.pace.clone()),
             )
         })
-        .child(usage_track(snapshot, &item.key))
-        .into_any_element()
+        .when(!snapshot.meter.reset.is_empty(), |element| {
+            element.child(
+                div()
+                    .debug_selector({
+                        let key = item.key.clone();
+                        move || format!("sidebar-footer-{key}-reset")
+                    })
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(crate::gpui::icon("clock", 12.0, color(colors.muted)))
+                    .child(snapshot.meter.reset.clone()),
+            )
+        })
 }
 
 fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::AnyElement {
@@ -1166,7 +1185,7 @@ fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::AnyElement
         .debug_selector(move || track_selector)
         .relative()
         .flex_none()
-        .w_10()
+        .w_full()
         .h_0p5()
         .rounded_full()
         .bg(color(snapshot.track))

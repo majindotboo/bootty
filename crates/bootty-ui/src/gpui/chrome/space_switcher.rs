@@ -54,7 +54,6 @@ pub(super) fn render(
                                 .small()
                                 .text_color(color(colors.subtext)),
                         )
-                        .label("New")
                         .ghost()
                         .small()
                         .accessibility_label("New Space")
@@ -99,11 +98,12 @@ fn space_button(
         })
         .relative()
         .min_h_7()
+        .min_w_7()
         .max_w_full()
         .flex()
         .items_center()
-        .justify_start()
-        .px_2()
+        .justify_center()
+        .px_1()
         .py_1()
         .gap_2()
         .rounded(cx.theme().radius)
@@ -137,17 +137,7 @@ fn space_button(
             } else {
                 colors.subtext
             }),
-        ))
-        .child(
-            div()
-                .debug_selector({
-                    let key = space.key.0;
-                    move || format!("space-label-{key}")
-                })
-                .whitespace_normal()
-                .text_sm()
-                .child(space.name.clone()),
-        );
+        ));
     let owner = cx.weak_entity();
     let visual = visual.context_menu(move |menu, _, _| {
         super::popup_menu(menu, &ContextMenu::Space(menu_space.clone()), &owner)
