@@ -28,6 +28,7 @@ This file describes the current production structure.
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
+| Optional conversation identities and protocol processes | `bootty-agents::NativeAgentService` | Persists identities before publishing them; bounded provider state stays process-owned. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
 | Desktop capture and input | `bootty-computer` | User enabling and macOS permission checks precede every operation. |
 | Browser child views | `bootty-browser` | Wry owns navigation; host geometry and visibility arrive at the UI seam. |
@@ -271,6 +272,12 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 Pi, Codex, and Claude launch as terminal programs through the selected mux backend. The backend owns their processes, tabs, splits, and terminal state. `TerminalAgentService` owns bounded provider identities, retained launch metadata, and exact terminal targets. History and account queries use provider files and commands on a background worker. Resume and fork launch the provider's terminal flow. Agents appear within backend sessions in the Sessions sidebar.
 
 Terminal registrations persist before publication. Provider session IDs remain distinct from backend target handles and generations; stale targets cannot redirect input to another pane.
+
+Optional conversations enter through `harness.open` or the explicit
+`harness.<provider>.*` commands. `NativeAgentService` owns protocol children and
+retained conversation history; the renderer owns composition and selection only.
+Loading retained history never restarts a provider. Terminal tabs and splits keep
+their mux targets when a conversation is open.
 
 `OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
 

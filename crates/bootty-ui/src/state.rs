@@ -228,6 +228,7 @@ pub enum AppEffect {
         provider: bootty_agents::AgentKind,
     },
     OpenSettings,
+    OpenAgentConversation,
     OpenComputerSetup,
     OpenConnections,
     OpenSetting(String),

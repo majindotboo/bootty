@@ -405,6 +405,7 @@ binding_actions! {
     ShowCoordination => "show_coordination" [unit],
     OpenSetting(value: String) => "open_setting" [required_string],
     OpenSettings => "open_settings" [unit],
+    OpenAgentConversation => "harness.open" [unit],
     ChangeAppearance(value: AppearanceChoice)
         => "change_appearance" [nested_enum(AppearanceChoice::parse)],
     SwitchTheme => "switch_theme" [unit],

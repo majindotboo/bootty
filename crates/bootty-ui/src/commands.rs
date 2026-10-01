@@ -835,6 +835,7 @@ fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
 pub enum CommandExecutor {
     Core(CoreCommandExecutor),
     Agent(Arc<AgentService>),
+    NativeAgent,
     TerminalAgent,
     Orchestration,
     /// The static agent catalog remains discoverable in tests and uncomposed app states.
@@ -984,6 +985,17 @@ impl CommandCatalog {
                 descriptor,
                 invocation,
                 executor: CommandExecutor::TerminalAgent,
+            });
+        }
+        if let Some(descriptor) = bootty_agents::native_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor: CommandExecutor::NativeAgent,
             });
         }
         if let Some(descriptor) = bootty_agents::orchestration_command_descriptors()
@@ -1160,6 +1172,11 @@ fn resource_kind(value: &str) -> Option<ResourceKind> {
 
 fn service_command_descriptors() -> Vec<CommandDescriptor> {
     let mut commands = bootty_agents::terminal_command_descriptors();
+    for command in bootty_agents::native_command_descriptors() {
+        if !commands.iter().any(|primary| primary.id == command.id) {
+            commands.push(command);
+        }
+    }
     commands.extend(bootty_agents::orchestration_command_descriptors());
     for command in agent_command_descriptors() {
         if !commands.iter().any(|native| native.id == command.id) {

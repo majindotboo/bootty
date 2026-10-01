@@ -34,6 +34,7 @@ pub enum AppAction {
     FocusTerminal,
     ToggleSidebarVisibility,
     OpenSettings,
+    OpenAgentConversation,
     EditTheme,
     ExportTerminal,
     ChangeAppearance(bootty_config::config::AppearanceMode),
@@ -451,6 +452,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         }
         Binding::OpenSetting(id) => Keybind::OpenSetting(id),
         Binding::OpenSettings => Keybind::App(AppAction::OpenSettings),
+        Binding::OpenAgentConversation => Keybind::App(AppAction::OpenAgentConversation),
         Binding::ChangeAppearance(choice) => {
             Keybind::App(AppAction::ChangeAppearance(appearance_mode(choice)))
         }

@@ -3,7 +3,9 @@
 //! Projects accepted configuration, mux state, and native service facts into the workspace window.
 
 mod agent_launch;
+mod conversation_harness;
 mod dialogs;
+mod native_sessions;
 mod settings_window;
 mod terminal_agents;
 use dialogs::WorkspaceDialogs;
@@ -215,6 +217,8 @@ pub struct GpuiWorkspace {
     document_close_prompt: bool,
     tools_focus_subscription: Option<Subscription>,
     terminal_agents: terminal_agents::TerminalAgents,
+    native_sessions: native_sessions::NativeSessions,
+    native_session_subscription: Option<Subscription>,
     integration_rows: Vec<ModuleIntegrationsSnapshot>,
     launch: WorkspaceLaunch,
     terminal: TerminalPaneView,
@@ -246,7 +250,7 @@ pub struct GpuiWorkspace {
     settings_window_opening: bool,
     keymap_editor: Entity<GpuiKeymapEditor>,
     _keymap_editor_subscription: Subscription,
-    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig)>,
+    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig, bool)>,
     last_keymap_editor_revision: Option<u64>,
     last_config_file_editor_revision: Option<u64>,
     dialogs: WorkspaceDialogs,
@@ -383,6 +387,8 @@ impl GpuiWorkspace {
             document_close_prompt: false,
             tools_focus_subscription: None,
             terminal_agents: terminal_agents::TerminalAgents::default(),
+            native_sessions: native_sessions::NativeSessions::default(),
+            native_session_subscription: None,
             state,
             integration_rows,
             launch,
@@ -598,7 +604,12 @@ impl GpuiWorkspace {
             }
             if active && window.focused(cx).is_none() && !window.has_active_dialog(cx) {
                 // Reactivation preserves the current component focus, including modal traps.
-                schedule_focus(this.focus.clone(), window, cx);
+                let focus = this
+                    .tools
+                    .as_ref()
+                    .and_then(|tools| tools.read(cx).native_session_focus(cx))
+                    .unwrap_or_else(|| this.focus.clone());
+                schedule_focus(focus, window, cx);
             } else if !active {
                 this.terminal_mouse_buttons.clear();
                 this.pending_link_click = None;
@@ -778,17 +789,18 @@ impl GpuiWorkspace {
             self.state.keymap_focus()
         };
         let backend = self.state.multiplexer_backend();
-        let keymap = (snapshot.revision, focus, backend);
+        let conversation = self.native_sessions.selected.is_some() && focus == KeymapFocus::Other;
+        let keymap = (snapshot.revision, focus, backend, conversation);
         if self.last_keymap == Some(keymap) {
             return;
         }
 
-        let bindings = crate::gpui_actions::key_bindings_for_snapshot(
-            &snapshot,
-            focus,
-            backend,
-            &self.state.command_catalog(),
-        );
+        let catalog = self.state.command_catalog();
+        let bindings = if conversation {
+            crate::gpui_actions::key_bindings_for_conversation(&snapshot, backend, &catalog)
+        } else {
+            crate::gpui_actions::key_bindings_for_snapshot(&snapshot, focus, backend, &catalog)
+        };
         let hints = bindings.command_hints(&self.state.command_catalog());
         self.dialogs.view.update(cx, |view, cx| {
             view.set_command_keybindings(Some(hints), cx);
@@ -867,10 +879,16 @@ impl GpuiWorkspace {
 
     fn invoke_gpui_command(
         &mut self,
-        invocation: CommandInvocation,
+        mut invocation: CommandInvocation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.conversation_returns_to_terminal(&invocation) {
+            self.clear_native_session(window, cx);
+        }
+        if invocation.target.is_none() {
+            invocation.target = self.selected_native_target(&invocation.command);
+        }
         if invocation
             .command
             .strip_prefix("agents.")
@@ -882,6 +900,7 @@ impl GpuiWorkspace {
                 )
             })
         {
+            self.clear_native_session(window, cx);
             self.open_terminal_agent_command(invocation, window, cx);
             return;
         }
@@ -1055,6 +1074,42 @@ impl GpuiWorkspace {
             },
         )
         .detach();
+        self.native_session_subscription = Some(cx.subscribe_in(
+            &tools,
+            window,
+            |this, _, event: &crate::gpui_agent_session::OpenNativeSession, window, cx| {
+                match event {
+                    crate::gpui_agent_session::OpenNativeSession::Record(record) => {
+                        this.select_native_session(record.as_ref(), window, cx);
+                    }
+                    crate::gpui_agent_session::OpenNativeSession::Existing(id) => {
+                        if let Some(record) = this
+                            .native_sessions
+                            .records
+                            .iter()
+                            .find(|record| &record.id == id)
+                            .cloned()
+                        {
+                            this.select_native_session(&record, window, cx);
+                        }
+                    }
+                    crate::gpui_agent_session::OpenNativeSession::Terminal => {
+                        this.invoke_gpui_command(
+                            CommandInvocation::from_action("focus_terminal", Caller::Internal),
+                            window,
+                            cx,
+                        );
+                    }
+                    crate::gpui_agent_session::OpenNativeSession::AccountTerminal(target) => {
+                        this.clear_native_session(window, cx);
+                        let mut invocation =
+                            CommandInvocation::from_action("agents.focus", Caller::Internal);
+                        invocation.target = Some(target.clone());
+                        this.invoke_gpui_command(invocation, window, cx);
+                    }
+                }
+            },
+        ));
         self.tools = Some(tools);
         cx.notify();
     }
@@ -1131,7 +1186,13 @@ impl GpuiWorkspace {
 
     fn close_owned_services(&mut self, cx: &Context<Self>) -> gpui_kit::Task<()> {
         let forwards = self.state.take_link_forwards();
+        let native = self.state.native_agent_service();
         cx.background_executor().spawn(async move {
+            if let Some(native) = native
+                && let Err(error) = native.shutdown()
+            {
+                eprintln!("Native agent shutdown failed: {error}");
+            }
             let now = Instant::now();
             let runner = bootty_host::CancellableCommandRunner::with_deadline(
                 bootty_host::CommandCancellation::default(),
@@ -1160,9 +1221,53 @@ impl GpuiWorkspace {
     fn apply_chrome_intent(
         &mut self,
         intent: ChromeIntent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match &intent {
+            ChromeIntent::Command(invocation)
+                if self.conversation_returns_to_terminal(invocation) =>
+            {
+                self.invoke_gpui_command(invocation.clone(), window, cx);
+                return;
+            }
+            ChromeIntent::RenameNativeSession(target) => {
+                self.rename_native_session(target.clone(), window, cx);
+                return;
+            }
+            ChromeIntent::RemoveNativeSession(target) => {
+                self.remove_native_session(target.clone(), window, cx);
+                return;
+            }
+            ChromeIntent::NativeSessionHistory(target) => {
+                self.native_session_history(target, window, cx);
+                return;
+            }
+            _ => {}
+        }
+        if let ChromeIntent::ActivateSession(target) = &intent {
+            if target.session_id.starts_with("native:") {
+                if let Some(record) = self
+                    .native_sessions
+                    .records
+                    .iter()
+                    .find(|record| record.id == target.session_id)
+                    .cloned()
+                {
+                    self.select_native_session(&record, window, cx);
+                }
+                return;
+            }
+            self.clear_native_session(window, cx);
+        } else if matches!(
+            &intent,
+            ChromeIntent::ActivateSpace(_)
+                | ChromeIntent::Status(crate::gpui::chrome::StatusIntent::Action(
+                    crate::gpui::chrome::NativeChromeAction::ActivateWindow { .. }
+                ))
+        ) {
+            self.clear_native_session(window, cx);
+        }
         if intent == ChromeIntent::StartWindowDrag {
             self.pending_window_move = true;
         } else {
@@ -1370,6 +1475,7 @@ impl GpuiWorkspace {
                 } => self.open_git_changes(scope, target, directory, host, window, cx),
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
                 AppEffect::OpenSettings => self.open_settings_window(window, cx),
+                AppEffect::OpenAgentConversation => self.open_agent_conversation(window, cx),
                 AppEffect::OpenComputerSetup => self.open_computer_setup(window, cx),
                 AppEffect::OpenConnections => self.open_connections(window, cx),
                 AppEffect::OpenSetting(id) => {
@@ -1400,7 +1506,8 @@ impl GpuiWorkspace {
         ));
     }
 
-    fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_native_session(window, cx);
         cx.activate(true);
         window.activate_window();
         self.focus.focus(window, cx);
@@ -1751,6 +1858,7 @@ impl GpuiWorkspace {
 
     fn sync_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_terminal_agents(window, cx);
+        self.refresh_native_sessions(window, cx);
         crate::agent_tray::update(
             cx.entity_id(),
             self.state.agent_overview(),
@@ -1980,17 +2088,37 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.visible_terminals.clear();
-        if let Some(empty_terminal) = self.empty_terminal_state() {
-            dock.update(cx, |dock, cx| {
-                dock.clear_terminals(window, cx);
-                dock.set_empty_terminal(Some(empty_terminal), cx);
-            });
+        if let Some(record) = self
+            .native_sessions
+            .selected
+            .as_ref()
+            .and_then(|id| {
+                self.native_sessions
+                    .records
+                    .iter()
+                    .find(|record| &record.id == id)
+            })
+            .cloned()
+        {
+            if dock.read(cx).selected_native_session() != Some(record.id.as_str()) {
+                dock.update(cx, |dock, cx| {
+                    dock.show_native_session(&record, &self.native_sessions.records, window, cx);
+                });
+            }
         } else {
-            dock.update(cx, |dock, cx| dock.set_empty_terminal(None, cx));
-            if self.state.uses_native_terminal_layout() {
-                self.prepare_dock_terminals(&dock, window, colors, cx);
+            dock.update(cx, |dock, cx| dock.show_terminal_session(window, cx));
+            if let Some(empty_terminal) = self.empty_terminal_state() {
+                dock.update(cx, |dock, cx| {
+                    dock.clear_terminals(window, cx);
+                    dock.set_empty_terminal(Some(empty_terminal), cx);
+                });
             } else {
-                self.prepare_dock_attachment(&dock, window, colors, cx);
+                dock.update(cx, |dock, cx| dock.set_empty_terminal(None, cx));
+                if self.state.uses_native_terminal_layout() {
+                    self.prepare_dock_terminals(&dock, window, colors, cx);
+                } else {
+                    self.prepare_dock_attachment(&dock, window, colors, cx);
+                }
             }
         }
         div()
@@ -3199,6 +3327,7 @@ impl GpuiWorkspace {
             viewport_width,
             viewport_height,
         );
+        self.decorate_native_sessions(&mut chrome_snapshot);
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
         self.decorate_dock_chrome(&mut chrome_snapshot);
         self.sync_key_bindings(window, cx);

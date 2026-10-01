@@ -1478,7 +1478,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
             );
             true
         }
-        ChromeIntent::StartWindowDrag => false,
+        ChromeIntent::StartWindowDrag
+        | ChromeIntent::RenameNativeSession(_)
+        | ChromeIntent::RemoveNativeSession(_)
+        | ChromeIntent::NativeSessionHistory(_) => false,
         ChromeIntent::ActivateSpace(space) => {
             let space = id(space);
             if state.config().default_open_behavior == OpenBehavior::NewWindow {

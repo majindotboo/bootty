@@ -1,6 +1,7 @@
 mod agents;
 pub(super) mod computer;
 pub(super) mod connections;
+mod native_agents;
 mod orchestration;
 mod targets;
 mod terminal_agents;
@@ -208,6 +209,7 @@ pub struct CommandRuntime {
     receiver: AppCommandReceiver,
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
+    native_agents: Option<Arc<bootty_agents::NativeAgentService>>,
     terminal_agents: Option<Arc<bootty_agents::TerminalAgentService>>,
     orchestration: Option<Arc<bootty_agents::OrchestrationService>>,
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
@@ -239,7 +241,7 @@ impl CommandRuntime {
         events: ControlEventSender,
         agent_state: &std::path::Path,
     ) -> Self {
-        let (sender, receiver) = app_command_channel(64, repaint);
+        let (sender, receiver) = app_command_channel(64, repaint.clone());
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
             sender: sender.clone(),
@@ -252,6 +254,11 @@ impl CommandRuntime {
             )
             .persisted_at(agent_state),
         );
+        let native_agents =
+            bootty_agents::NativeAgentService::open(agent_state.with_extension("native.json"))
+                .map(Arc::new)
+                .map_err(|error| eprintln!("native agent storage unavailable: {error}"))
+                .ok();
         let orchestration = bootty_agents::OrchestrationService::open(
             &agent_state.with_extension("orchestration.json"),
             Arc::new(AppCommandAgentExecutor {
@@ -281,11 +288,15 @@ impl CommandRuntime {
             Some(scope_index),
             Some(events),
         );
+        if let Some(agents) = &native_agents {
+            agents.set_change_handler(repaint);
+        }
         runtime.terminal_agents =
             bootty_agents::TerminalAgentService::open(agent_state.with_extension("terminal.json"))
                 .map(Arc::new)
                 .map_err(|error| eprintln!("terminal agent metadata unavailable: {error}"))
                 .ok();
+        runtime.native_agents = native_agents;
         runtime.orchestration = orchestration;
         runtime
     }
@@ -315,6 +326,7 @@ impl CommandRuntime {
                 },
             )),
             agent_service: agents,
+            native_agents: None,
             terminal_agents: None,
             orchestration: None,
             agent_scope_index,
@@ -423,6 +435,10 @@ impl AppState {
     /// return `None` and retain the static catalog's explicit unsupported behavior.
     pub fn agent_service(&self) -> Option<Arc<AgentService>> {
         self.commands.catalog.agents()
+    }
+
+    pub fn native_agent_service(&self) -> Option<Arc<bootty_agents::NativeAgentService>> {
+        self.commands.native_agents.clone()
     }
 
     pub fn terminal_agent_service(&self) -> Option<Arc<bootty_agents::TerminalAgentService>> {
@@ -662,6 +678,7 @@ impl AppState {
             .and_then(crate::commands::DockAction::from_command)
             .is_some()
             || invocation.command.starts_with("agents.")
+            || invocation.command.starts_with("harness.")
             || invocation.command == "paste_from_clipboard"
             || invocation.command.starts_with("git.")
             || invocation.command.starts_with("files.")
@@ -711,11 +728,11 @@ impl AppState {
             Ok(resolved) => resolved,
             Err(outcome) => return self.reject_command(outcome),
         };
-        if matches!(resolved.executor, CommandExecutor::Orchestration) {
-            if let Err(outcome) = self.preflight_resolved_invocation(&resolved, None, effects) {
-                return self.reject_command(outcome);
-            }
-            return self.dispatch_orchestration(resolved.invocation, execution);
+        if matches!(
+            resolved.executor,
+            CommandExecutor::NativeAgent | CommandExecutor::Orchestration
+        ) {
+            return self.dispatch_service_command(resolved, effects, execution);
         }
         let (target, exact_target) = match self.resolve_command_target(
             &resolved.invocation.command,
@@ -772,6 +789,15 @@ impl AppState {
                     cancellation,
                 )
             }
+            CommandExecutor::NativeAgent => {
+                let (deadline, cancellation) = executor::command_execution(execution);
+                self.dispatch_native_agent(
+                    context.invocation,
+                    context.exact_target.as_ref(),
+                    deadline,
+                    cancellation,
+                )
+            }
             CommandExecutor::Orchestration => {
                 self.dispatch_orchestration(context.invocation, execution)
             }
@@ -782,6 +808,58 @@ impl AppState {
                 })
             }
         }
+    }
+
+    fn dispatch_service_command(
+        &mut self,
+        resolved: crate::commands::ResolvedCommandInvocation,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if matches!(resolved.executor, CommandExecutor::NativeAgent) {
+            let mut native_target = None;
+            if resolved.invocation.command.rsplit('.').next() == Some("start") {
+                match self.resolve_command_target(
+                    &resolved.invocation.command,
+                    resolved.descriptor.target,
+                    resolved.invocation.target.as_ref(),
+                ) {
+                    Ok((_, exact)) => native_target = exact,
+                    Err(outcome) => return self.reject_command(outcome),
+                }
+            } else if resolved.descriptor.target.is_some()
+                && !resolved
+                    .invocation
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.kind == ResourceKind::Session)
+            {
+                return self.reject_command(CommandOutcome::Unavailable {
+                    message: "Choose an explicit agent session".to_owned(),
+                });
+            }
+            if let Err(outcome) =
+                self.preflight_resolved_invocation(&resolved, native_target.as_ref(), effects)
+            {
+                return self.reject_command(outcome);
+            }
+            let (deadline, cancellation) = executor::command_execution(execution);
+            return self.dispatch_native_agent(
+                resolved.invocation,
+                native_target.as_ref(),
+                deadline,
+                cancellation,
+            );
+        }
+        if matches!(resolved.executor, CommandExecutor::Orchestration) {
+            if let Err(outcome) = self.preflight_resolved_invocation(&resolved, None, effects) {
+                return self.reject_command(outcome);
+            }
+            return self.dispatch_orchestration(resolved.invocation, execution);
+        }
+        self.reject_command(CommandOutcome::Unavailable {
+            message: "The command has no native service owner".to_owned(),
+        })
     }
 
     fn dispatch_core_command(

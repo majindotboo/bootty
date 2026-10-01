@@ -508,3 +508,68 @@ fn right_dock_defaults_dispatch_and_resolve_a_tooltip_hint(cx: &mut TestAppConte
             .unwrap();
     }
 }
+
+#[gpui_kit::test]
+fn conversation_navigation_preserves_editor_shortcuts_and_user_overrides(cx: &mut TestAppContext) {
+    use bootty_config::{
+        config::MultiplexerBackendConfig,
+        keymap_file::{KeymapAction, KeymapBindingKind, KeymapBindingSource, KeymapContext},
+    };
+    use bootty_ui::{
+        commands::CommandCatalog,
+        gpui_actions::{key_bindings_for_conversation, replace_workspace_key_bindings},
+        keymap_runtime::{KeymapBindingSnapshot, KeymapSnapshot},
+    };
+    let binding = |key: &str, command: &str| KeymapBindingSnapshot {
+        context: KeymapContext::Terminal,
+        keystrokes: key.to_owned(),
+        action: KeymapAction::command(command),
+        kind: KeymapBindingKind::Binding,
+        source: KeymapBindingSource::User,
+    };
+    let mut snapshot = KeymapSnapshot {
+        path: std::path::PathBuf::default(),
+        keymap: bootty_config::keymap_file::KeymapFile::default(),
+        diagnostics: Vec::new(),
+        revision: 0,
+        effective_bindings: vec![
+            binding("cmd+t", "new_tab"),
+            binding("cmd+d", "split_right"),
+            binding("cmd+c", "copy_to_clipboard"),
+        ],
+    };
+    let catalog = CommandCatalog::default();
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.update(|cx| {
+        let received = Rc::clone(&received);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            cx.new(|_| BindingProbe {
+                focus,
+                received,
+                key_context: WORKSPACE_KEY_CONTEXT.to_owned(),
+            })
+        })
+        .unwrap()
+    });
+    for expected in [vec!["new_tab", "split_right"], vec!["split_right"]] {
+        cx.update(|cx| {
+            replace_workspace_key_bindings(
+                key_bindings_for_conversation(
+                    &snapshot,
+                    MultiplexerBackendConfig::Native,
+                    &catalog,
+                ),
+                cx,
+            )
+            .unwrap();
+        });
+        received.borrow_mut().clear();
+        cx.simulate_keystrokes(*window, "cmd-t cmd-d cmd-c tab enter");
+        assert_eq!(*received.borrow(), expected);
+        snapshot
+            .effective_bindings
+            .push(binding("cmd+t", "copy_to_clipboard"));
+    }
+}

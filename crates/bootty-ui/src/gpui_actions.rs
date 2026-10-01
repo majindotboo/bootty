@@ -438,6 +438,52 @@ pub fn key_bindings_for_snapshot(
     WorkspaceKeyBindings::new(terminal_keys.chain(command_keys).chain(effective))
 }
 
+/// Keep existing terminal navigation available while a conversation composer owns text focus.
+#[must_use]
+pub fn key_bindings_for_conversation(
+    snapshot: &KeymapSnapshot,
+    backend: MultiplexerBackendConfig,
+    catalog: &CommandCatalog,
+) -> WorkspaceKeyBindings {
+    let mut bindings = key_bindings_for_snapshot(snapshot, KeymapFocus::Other, backend, catalog);
+    let terminal = key_bindings_for_snapshot(snapshot, KeymapFocus::Terminal, backend, catalog);
+    let mut seen = std::collections::HashSet::new();
+    let mut navigation = Vec::new();
+    for binding in terminal.bindings.into_iter().rev() {
+        // The last effective binding wins, including user removals and text-editing overrides.
+        if seen.insert(binding.keystrokes.clone())
+            && matches!(&binding.action, WorkspaceBindingAction::Invoke(invocation)
+                if invocation_returns_to_terminal(invocation, catalog))
+        {
+            navigation.push(binding);
+        }
+    }
+    bindings.bindings.extend(navigation.into_iter().rev());
+    bindings
+}
+
+pub(crate) fn invocation_returns_to_terminal(
+    invocation: &CommandInvocation,
+    catalog: &CommandCatalog,
+) -> bool {
+    use crate::{
+        app_actions::{AppAction, KeybindAction},
+        commands::{CommandExecutor, CoreCommandExecutor},
+    };
+    catalog.resolve(invocation.clone()).is_ok_and(|resolved| {
+        matches!(
+            resolved.executor,
+            CommandExecutor::Core(
+                CoreCommandExecutor::Keybind(
+                    KeybindAction::Mux(_)
+                        | KeybindAction::App(AppAction::FocusTerminal | AppAction::NewMuxSession)
+                ) | CoreCommandExecutor::Pane(..)
+                    | CoreCommandExecutor::Session(..)
+            )
+        )
+    })
+}
+
 fn gpui_keystroke(trigger: &BindingTrigger) -> Option<String> {
     if has_side_constraint(trigger.mods) {
         return None;

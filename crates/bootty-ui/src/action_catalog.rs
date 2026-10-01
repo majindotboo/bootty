@@ -229,6 +229,9 @@ command_catalog! {
         "New Session",
         "Pick a directory or worktree and start a session",
         "new_mux_session", "square-plus", Sessions, shown, Write, Binding, None;
+    OpenAgentConversation:
+        "Open agent conversation…", "Choose a provider for an optional conversation tab",
+        "harness.open", "bot", Sessions, shown, Write, ApplicationWindow, None;
     SwitchSession:
         "Switch Session", "Fuzzy-find and jump to an open session",
         "session_picker", "terminal", Sessions, shown, Write, Binding, None;

@@ -179,6 +179,7 @@ impl AppState {
                 effects.push(AppEffect::Dock(crate::commands::DockRequest::local(action)));
             }
             AppAction::OpenSettings => effects.push(AppEffect::OpenSettings),
+            AppAction::OpenAgentConversation => effects.push(AppEffect::OpenAgentConversation),
             AppAction::ToggleFullscreen => self.toggle_fullscreen(viewport, effects),
             AppAction::FocusTerminal => {
                 self.close_overlay_dialogs();
