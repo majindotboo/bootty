@@ -30,6 +30,8 @@ bootty command agents.codex.account.login
 Replace `codex` with `claude` or `pi`. `start` accepts optional working directory,
 executable, and JSON argv. Arguments remain literal. The GUI focuses the created
 terminal; script callers receive its issued target without changing selection.
+Session names combine the provider and project, using the backend's existing
+uniqueness rules when that name is already in use.
 `prompt` pastes text and submits it through the ordinary terminal command path.
 `interrupt` and `abort` send the provider's terminal interrupt key. `stop` closes
 that backend pane and requires exact destructive confirmation.

@@ -45,6 +45,7 @@ impl AppState {
             &self.binding_target_handle(scope, binding.mux().binding_generation()),
         );
         let remote = binding.multiplexer().remote.is_some();
+        let session_names = self.agent_session_names_in_use();
         let isolate_color_environment = cfg!(unix)
             && matches!(
                 binding.multiplexer().backend,
@@ -71,6 +72,7 @@ impl AppState {
                 binding_id: &binding_id,
                 cwd,
                 remote,
+                session_names,
                 isolate_color_environment,
                 color_override,
                 deadline,
@@ -82,6 +84,23 @@ impl AppState {
         });
         CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
     }
+
+    fn agent_session_names_in_use(&self) -> Vec<String> {
+        let mut names = self
+            .workspace
+            .all_bindings()
+            .flat_map(|binding| binding.mux().backend_session_names().iter().cloned())
+            .collect::<Vec<_>>();
+        names.extend(self.commands.pending.iter().filter_map(|pending| match &pending.result {
+            PendingCommandResult::Mux {
+                command: bootty_mux::command::MuxCommand::CreateProjectSession { session_id, .. },
+                ..
+            } => Some(session_id.clone()),
+            PendingCommandResult::SessionStart { name, .. } => Some(name.clone()),
+            _ => None,
+        }));
+        names
+    }
 }
 
 struct TerminalAgentContext<'a> {
@@ -91,6 +110,7 @@ struct TerminalAgentContext<'a> {
     binding_id: &'a str,
     cwd: String,
     remote: bool,
+    session_names: Vec<String>,
     isolate_color_environment: bool,
     color_override: Option<String>,
     deadline: Instant,
@@ -379,6 +399,16 @@ fn start_terminal(
             .chain(launch.arguments.iter().cloned())
             .collect()
     };
+    let cwd = launch.cwd.as_deref().unwrap_or_default();
+    let project = if context.remote {
+        bootty_mux::session_names::session_name_for_remote_path(cwd)
+    } else {
+        bootty_git::suggested_session_name(cwd)
+    };
+    let name = bootty_mux::session_names::unique_session_name(
+        &bootty_mux::session_names::portable_session_name(&format!("{provider} {project}")),
+        context.session_names.iter().map(String::as_str),
+    );
     let TerminalAgentContext {
         service,
         executor,
@@ -394,11 +424,7 @@ fn start_terminal(
     };
     let mut request = CommandInvocation::new(
         "session.create",
-        vec![
-            format!("{provider} {}", TerminalAgentService::new_session_id()),
-            launch.cwd.clone().unwrap_or_default(),
-            encoded,
-        ],
+        vec![name, launch.cwd.clone().unwrap_or_default(), encoded],
         Caller::Internal,
     );
     request.target = binding_target;

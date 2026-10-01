@@ -1549,6 +1549,28 @@ for line in sys.stdin: print(line,flush=True)
         (bootty_agents::AgentKind::Pi, "/usr/bin/python3".to_owned())
     };
     let started = Instant::now();
+    let project = directory.path().file_name().unwrap().to_str().unwrap();
+    let name = format!("{provider_kind} {}", project.replace('.', "_"));
+    let existing = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new(
+            "session.create",
+            vec![
+                name.clone(),
+                directory.path().to_string_lossy().into_owned(),
+                "[\"/bin/cat\"]".to_owned(),
+            ],
+            Caller::Socket,
+        ),
+        started,
+    );
+    assert!(
+        matches!(existing, CommandOutcome::Success { .. }),
+        "{existing:?}"
+    );
+
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
@@ -1567,6 +1589,21 @@ for line in sys.stdin: print(line,flush=True)
     assert!(
         matches!(outcome, CommandOutcome::Success { .. }),
         "{outcome:?}"
+    );
+    let launched_name = format!("{name}-2");
+    assert!(
+        state
+            .mux()
+            .all_sessions()
+            .iter()
+            .any(|session| session.name == launched_name)
+    );
+    assert!(
+        state
+            .mux()
+            .all_sessions()
+            .iter()
+            .any(|session| session.name == name)
     );
     let (mut connection, _) = listener.accept().unwrap();
     let mut bytes = Vec::new();
