@@ -110,6 +110,13 @@ These local services have explicit process ownership and shutdown, persist befor
 publication, and restore stopped history without automatically starting processes.
 They do not replace the primary terminal interface.
 
+The [short launch demo](media/agent-conversations/explicit-conversation.mp4)
+samples actual app states from the explicit chooser through a real provider reply.
+
+![Retained conversation and real reply](media/agent-conversations/real-conversation.png)
+
+![Backend terminal tabs and splits](media/agent-conversations/terminal-tabs-and-splits.png)
+
 Existing custom Lua and Luau files remain preserved and unsupported. Previously
 configured terminal adapters can still publish pane-scoped events. The primary
 terminal launch, history, and account paths do not need them. Settings does not
