@@ -356,6 +356,13 @@ impl BrowserPanel {
         if !self.tabs.iter().any(|tab| tab.id == id) {
             return;
         }
+        if matches!(event, BrowserEvent::PageFocused) {
+            if id == self.selected && self.visible && self.host_visible {
+                // Clear GPUI shortcut dispatch without changing native keyboard focus.
+                window.blur(cx);
+            }
+            return;
+        }
         if let BrowserEvent::Shortcut(shortcut) = event {
             if id == self.selected && self.visible {
                 match shortcut {
@@ -402,7 +409,9 @@ impl BrowserPanel {
                 }
                 BrowserEvent::TitleChanged(title) => tab.title = title,
                 BrowserEvent::Notice(message) => tab.error = Some(message),
-                BrowserEvent::OpenTab(_) | BrowserEvent::Shortcut(_) => {}
+                BrowserEvent::PageFocused
+                | BrowserEvent::OpenTab(_)
+                | BrowserEvent::Shortcut(_) => {}
             }
             if sync_address {
                 let address = tab.address.clone();

@@ -50,6 +50,7 @@ impl From<BrowserBounds> for Rect {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserEvent {
+    PageFocused,
     Shortcut(BrowserShortcut),
     LoadStarted(String),
     LoadFinished(String),
@@ -136,6 +137,11 @@ impl BrowserView {
             .with_focused(false)
             .with_initialization_script(
                 r"
+                for (const type of ['pointerdown', 'focusin']) {
+                    document.addEventListener(type, event => {
+                        if (event.isTrusted) window.ipc.postMessage('browser-focus');
+                    }, true);
+                }
                 document.addEventListener('keydown', event => {
                     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
                     const key = event.key.toLowerCase();
@@ -147,6 +153,10 @@ impl BrowserView {
             ",
             )
             .with_ipc_handler(move |request| {
+                if request.body() == "browser-focus" {
+                    _ = shortcut_events.try_send(BrowserEvent::PageFocused);
+                    return;
+                }
                 let shortcut = match request.body().as_str() {
                     "browser-key:k" => BrowserShortcut::Palette,
                     "browser-key:l" => BrowserShortcut::Address,
