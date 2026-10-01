@@ -250,7 +250,7 @@ pub struct GpuiWorkspace {
     settings_window_opening: bool,
     keymap_editor: Entity<GpuiKeymapEditor>,
     _keymap_editor_subscription: Subscription,
-    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig)>,
+    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig, bool)>,
     last_keymap_editor_revision: Option<u64>,
     last_config_file_editor_revision: Option<u64>,
     dialogs: WorkspaceDialogs,
@@ -789,17 +789,18 @@ impl GpuiWorkspace {
             self.state.keymap_focus()
         };
         let backend = self.state.multiplexer_backend();
-        let keymap = (snapshot.revision, focus, backend);
+        let conversation = self.native_sessions.selected.is_some() && focus == KeymapFocus::Other;
+        let keymap = (snapshot.revision, focus, backend, conversation);
         if self.last_keymap == Some(keymap) {
             return;
         }
 
-        let bindings = crate::gpui_actions::key_bindings_for_snapshot(
-            &snapshot,
-            focus,
-            backend,
-            &self.state.command_catalog(),
-        );
+        let catalog = self.state.command_catalog();
+        let bindings = if conversation {
+            crate::gpui_actions::key_bindings_for_conversation(&snapshot, backend, &catalog)
+        } else {
+            crate::gpui_actions::key_bindings_for_snapshot(&snapshot, focus, backend, &catalog)
+        };
         let hints = bindings.command_hints(&self.state.command_catalog());
         self.dialogs.view.update(cx, |view, cx| {
             view.set_command_keybindings(Some(hints), cx);

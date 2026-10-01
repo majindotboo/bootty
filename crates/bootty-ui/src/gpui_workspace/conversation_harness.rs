@@ -11,27 +11,10 @@ use super::GpuiWorkspace;
 
 impl GpuiWorkspace {
     pub(super) fn conversation_returns_to_terminal(&self, invocation: &CommandInvocation) -> bool {
-        use crate::{
-            app_actions::{AppAction, KeybindAction},
-            commands::{CommandExecutor, CoreCommandExecutor},
-        };
-        self.state
-            .command_catalog()
-            .resolve(invocation.clone())
-            .is_ok_and(|resolved| {
-                matches!(
-                    resolved.executor,
-                    CommandExecutor::Core(
-                        CoreCommandExecutor::Keybind(
-                            KeybindAction::Mux(_)
-                                | KeybindAction::App(
-                                    AppAction::FocusTerminal | AppAction::NewMuxSession
-                                )
-                        ) | CoreCommandExecutor::Pane(..)
-                            | CoreCommandExecutor::Session(..)
-                    )
-                )
-            })
+        crate::gpui_actions::invocation_returns_to_terminal(
+            invocation,
+            &self.state.command_catalog(),
+        )
     }
 
     pub(super) fn open_agent_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
