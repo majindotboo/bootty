@@ -47,6 +47,21 @@ impl AgentLaunch {
         )
     }
 
+    /// Literal argv for a POSIX backend whose server may retain color suppression.
+    /// The platform helper changes only the new process environment, preserving explicit config.
+    #[must_use]
+    pub fn posix_terminal_argv(&self, color_override: Option<&str>) -> Vec<String> {
+        let mut argv = vec!["/usr/bin/env".to_owned()];
+        if let Some(value) = color_override {
+            argv.extend(["--".to_owned(), format!("NO_COLOR={value}")]);
+        } else {
+            argv.extend(["-u".to_owned(), "NO_COLOR".to_owned(), "--".to_owned()]);
+        }
+        argv.push(self.program.clone());
+        argv.extend(self.arguments.iter().cloned());
+        argv
+    }
+
     /// # Errors
     /// Returns an error for an invalid program, oversized arguments, or control characters in launch values.
     pub fn validate(&self) -> Result<(), String> {

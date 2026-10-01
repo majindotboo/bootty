@@ -110,18 +110,81 @@ pub fn agent_account_launch(provider: AgentKind, program: &str, logout: bool) ->
     }
 }
 
+/// Query installed account interfaces without opening a second conversation or reading secrets.
+/// # Errors
+/// Returns unsupported account discovery or bounded command/protocol errors.
+pub fn terminal_account_status(
+    provider: AgentKind,
+    program: &str,
+    provider_id: Option<&str>,
+) -> Result<Value, String> {
+    match provider {
+        AgentKind::Claude => bounded_json_command(program, &["auth", "status", "--json"]),
+        AgentKind::Codex => {
+            let bytes = bounded_output_command(program, &["login", "status"], true)?;
+            let status = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+            if status.trim().starts_with("Logged in") {
+                Ok(json!({"loggedIn":true,"provider":"codex"}))
+            } else if status.contains("Not logged in") {
+                Ok(json!({"loggedIn":false,"provider":"codex"}))
+            } else {
+                Err("Codex account status was not recognized".to_owned())
+            }
+        }
+        AgentKind::Pi => bounded_json_command(
+            program,
+            &[
+                "auth",
+                "check",
+                "--provider",
+                provider_id.ok_or("Select a Pi provider to check account readiness")?,
+                "--json",
+                "--no-refresh",
+            ],
+        ),
+    }
+}
+
 fn bounded_json_command(program: &str, arguments: &[&str]) -> Result<Value, String> {
+    serde_json::from_slice(&bounded_output_command(program, arguments, false)?)
+        .map_err(|error| error.to_string())
+}
+
+fn bounded_output_command(
+    program: &str,
+    arguments: &[&str],
+    stderr: bool,
+) -> Result<Vec<u8>, String> {
     let mut child = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(if stderr {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if stderr {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .spawn()
         .map_err(|error| error.to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Account stdout is not available")?;
+    let stdout: Box<dyn Read + Send> = if stderr {
+        Box::new(
+            child
+                .stderr
+                .take()
+                .ok_or("Account output is not available")?,
+        )
+    } else {
+        Box::new(
+            child
+                .stdout
+                .take()
+                .ok_or("Account output is not available")?,
+        )
+    };
     let child = Arc::new(Mutex::new(child));
     let waiter = Arc::clone(&child);
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -137,7 +200,7 @@ fn bounded_json_command(program: &str, arguments: &[&str]) -> Result<Value, Stri
             if bytes.len() > 64 * 1024 {
                 return Err("Account response exceeds 64 KiB".to_owned());
             }
-            serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())
+            Ok(bytes)
         });
         let _ = sender.send(result);
     });
