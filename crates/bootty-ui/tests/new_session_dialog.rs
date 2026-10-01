@@ -21,6 +21,7 @@ fn project(path: &str, favorite: bool) -> ProjectPickerEntry {
     ProjectPickerEntry {
         path: path.to_owned(),
         favorite,
+        icon: None,
     }
 }
 
@@ -45,7 +46,7 @@ fn project_picker_projects_are_grouped_and_favorites_are_visible() {
             .filter(|row| row.action.is_none())
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["Favorites", "Directories"]
+        vec!["Favorites", "Projects"]
     );
     assert_eq!(
         project_row(&spec, "/projects/favorite").icon.as_deref(),
@@ -57,7 +58,7 @@ fn project_picker_projects_are_grouped_and_favorites_are_visible() {
     );
     assert_eq!(
         spec.hint.as_deref(),
-        Some("Enter open   Ctrl+Shift+F favorite   Esc close")
+        Some("Choose a project   Ctrl+Shift+F favorite   Esc close")
     );
 }
 
@@ -82,10 +83,23 @@ fn project_row_ids_map_activation_across_groups() {
         },
         &[],
     );
-    assert!(matches!(
-        result,
-        Some(NewSessionPickerEvent::CreateSession { cwd }) if cwd == favorite
-    ));
+    assert_eq!(result, None);
+    assert_eq!(dialog.spec().title, "Choose checkout");
+    let checkout = dialog.spec().rows[0].clone();
+    assert_eq!(activate_picker_row(&mut dialog, &checkout, &[]), None);
+    let launch = dialog.spec();
+    assert_eq!(launch.title, "Start session");
+    let terminal = launch
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "terminal")
+        .unwrap();
+    assert_eq!(
+        activate_picker_row(&mut dialog, terminal, &[]),
+        Some(NewSessionPickerEvent::CreateSession {
+            cwd: favorite.to_owned()
+        })
+    );
 }
 
 #[test]
@@ -480,4 +494,63 @@ fn directory_search_accepts_both_home_path_spellings(#[case] abbreviated: bool) 
         &[],
     );
     assert!(project_row(&dialog.spec(), &path).action.is_some());
+}
+
+#[rstest::rstest]
+#[case("codex", bootty_agents::AgentKind::Codex)]
+#[case("claude", bootty_agents::AgentKind::Claude)]
+#[case("pi", bootty_agents::AgentKind::Pi)]
+fn setup_launches_the_selected_native_provider_in_the_selected_checkout(
+    #[case] row_id: &str,
+    #[case] provider: bootty_agents::AgentKind,
+) {
+    let mut dialog = NewSessionDialog::from_projects(Vec::new());
+    dialog.set_checkout("/projects/feature-checkout".to_owned());
+    let spec = dialog.spec();
+    let row = spec.rows.iter().find(|row| row.id.0 == row_id).unwrap();
+    assert_eq!(
+        activate_picker_row(&mut dialog, row, &[]),
+        Some(NewSessionPickerEvent::CreateNativeSession {
+            cwd: "/projects/feature-checkout".to_owned(),
+            provider,
+        })
+    );
+}
+
+#[rstest::rstest]
+fn native_directory_selection_is_reviewable_before_session_creation() {
+    let mut dialog = NewSessionDialog::from_projects(Vec::new());
+    let spec = dialog.spec();
+    let browse = spec
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "browse-directory")
+        .unwrap();
+    assert_eq!(
+        activate_picker_row(&mut dialog, browse, &[]),
+        Some(NewSessionPickerEvent::BrowseDirectory)
+    );
+    // Choosing a folder changes the draft. The explicit checkout and launch choices still apply.
+    dialog.set_directory("/newly-selected/folder".to_owned());
+    let selected = dialog.spec();
+    assert_eq!(selected.text.as_deref(), Some("/newly-selected/folder"));
+    assert!(project_row(&selected, "/newly-selected/folder").enabled);
+}
+
+#[rstest::rstest]
+fn project_picker_projects_real_artwork_with_name_and_path() {
+    let artwork = bootty_git::ProjectIcon {
+        source: "icon.png".to_owned(),
+        width: 1,
+        height: 1,
+        bgra: vec![30, 20, 10, 255],
+    };
+    let mut entry = project("/projects/bootty", false);
+    entry.icon = Some(artwork.clone());
+    let dialog = NewSessionDialog::from_projects(vec![entry]);
+    let spec = dialog.spec();
+    let row = project_row(&spec, "/projects/bootty");
+    assert_eq!(row.label, "bootty");
+    assert_eq!(row.detail.as_deref(), Some("/projects/bootty"));
+    assert_eq!(row.artwork.as_deref(), Some(&artwork));
 }

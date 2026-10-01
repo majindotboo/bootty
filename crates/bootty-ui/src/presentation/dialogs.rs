@@ -790,6 +790,7 @@ impl CommandPaletteDialog {
             }
             rows.push(DialogRow {
                 id: RowId::new(visible.to_string()),
+                artwork: None,
                 icon: Some(command.icon().to_owned()),
                 label: row.primary.to_owned(),
                 color: None,
@@ -920,6 +921,7 @@ impl SessionPickerDialog {
                 });
                 DialogRow {
                     id: RowId::new(visible.to_string()),
+                    artwork: None,
                     icon: Some("terminal".to_owned()),
                     label: row.primary.to_owned(),
                     color: colors
@@ -1021,6 +1023,7 @@ impl SpacePickerDialog {
             .enumerate()
             .map(|(visible, row)| DialogRow {
                 id: RowId::new(visible.to_string()),
+                artwork: None,
                 icon: Some(if row.value.is_some() {
                     "shapes".to_owned()
                 } else {
@@ -1184,6 +1187,7 @@ impl DitchSessionDialog {
         ));
         rows.extend(self.list.rows().into_iter().map(|row| DialogRow {
             id: RowId::new(row.source_index.to_string()),
+            artwork: None,
             icon: Some(if matches!(row.value, DitchAction::DetachWorktree) {
                 "unlink".to_owned()
             } else if matches!(row.value, DitchAction::KillOnly) {
@@ -1267,6 +1271,7 @@ impl KeybindHelpDialog {
             .enumerate()
             .map(|(index, row)| DialogRow {
                 id: RowId::new(index.to_string()),
+                artwork: None,
                 icon: None,
                 label: row.action,
                 color: None,

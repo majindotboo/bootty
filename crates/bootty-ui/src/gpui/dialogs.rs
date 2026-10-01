@@ -255,6 +255,7 @@ impl DialogAction {
 pub struct DialogRow {
     pub id: RowId,
     pub icon: Option<String>,
+    pub artwork: Option<std::sync::Arc<bootty_git::ProjectIcon>>,
     pub label: String,
     /// Product identity color, subordinate to disabled and destructive states.
     pub color: Option<Hsla>,
@@ -274,6 +275,7 @@ impl DialogRow {
         Self {
             id: RowId::new(id),
             icon: None,
+            artwork: None,
             label: label.into(),
             color: None,
             detail: None,
@@ -291,6 +293,7 @@ impl DialogRow {
         Self {
             id: RowId::new(id),
             icon: None,
+            artwork: None,
             label: label.into(),
             color: None,
             detail: None,
@@ -713,6 +716,7 @@ impl DialogView {
         if self.spec == spec {
             return;
         }
+        let transfer_focus = self.focus_target_changed(spec.as_ref(), window, cx);
         let changed = self.spec.as_ref().map(|spec| &spec.id) != spec.as_ref().map(|spec| &spec.id);
         let same_query = self
             .spec
@@ -780,7 +784,33 @@ impl DialogView {
             }
         }
         self.sync_fields(window, cx);
+        if transfer_focus {
+            // Command installs its new input mode during render. Keep focus on our retained
+            // frame until then so removing the old query cannot detach the keyboard path.
+            let focus = if self.is_command_surface() {
+                self.command_focus.clone()
+            } else {
+                self.focus_handle(cx)
+            };
+            focus.focus(window, cx);
+        }
         cx.notify();
+    }
+
+    fn focus_target_changed(&self, next: Option<&DialogSpec>, window: &Window, cx: &App) -> bool {
+        self.spec
+            .as_ref()
+            .zip(next)
+            .is_some_and(|(previous, next)| {
+                previous.id == next.id
+                    && (previous.role != next.role
+                        || previous.text.is_some() != next.text.is_some())
+                    && (self.focus_handle(cx).contains_focused(window, cx)
+                        || self
+                            .fields
+                            .values()
+                            .any(|(input, _)| input.focus_handle(cx).contains_focused(window, cx)))
+            })
     }
 
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1690,8 +1720,22 @@ fn command_item(row: DialogRow, destructive_color: Hsla) -> CommandItem {
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .when_some(row.icon.clone(), |this, icon| {
-                    this.child(crate::gpui::icon(&icon, 14.0, foreground))
+                .when_some(row.artwork.as_ref(), |this, artwork| {
+                    this.child(crate::gpui::project_artwork(artwork, 1.25))
+                })
+                .when(row.artwork.is_none(), |this| {
+                    if row.id.0.starts_with("project:") {
+                        this.child(crate::gpui::project_monogram(
+                            &row.label,
+                            1.25,
+                            colors.muted,
+                            foreground,
+                        ))
+                    } else {
+                        this.when_some(row.icon.clone(), |this, icon| {
+                            this.child(crate::gpui::icon(&icon, 14.0, foreground))
+                        })
+                    }
                 })
                 .child(
                     v_flex()

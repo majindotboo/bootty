@@ -152,6 +152,16 @@ impl AppState {
             },
             Some(Event::Ditch(event)) => self.apply_ditch_session_event(event),
             Some(Event::KeybindDismiss) => self.dismiss_keybind_help(),
+            Some(Event::NewSession(NewSessionPickerEvent::BrowseDirectory)) => {
+                effects.push(AppEffect::ChooseProjectDirectory);
+            }
+            Some(Event::NewSession(NewSessionPickerEvent::CreateNativeSession {
+                cwd,
+                provider,
+            })) => {
+                effects.push(AppEffect::OpenNativeProjectSession { cwd, provider });
+                self.dismiss_modal_dialog();
+            }
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
             Some(Event::RenameSession(event)) => self.apply_rename_session_event(event),
             Some(Event::RenameTab(event)) => self.apply_rename_tab_event(event),
@@ -484,17 +494,27 @@ impl AppState {
         ));
     }
 
+    /// Resume the open project picker after the native directory chooser returns.
+    pub fn set_new_session_directory(&mut self, path: String) {
+        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+            dialog.set_directory(path);
+        }
+    }
+
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
             NewSessionPickerEvent::Close => self.dismiss_modal_dialog(),
+            NewSessionPickerEvent::BrowseDirectory
+            | NewSessionPickerEvent::CreateNativeSession { .. } => {}
             NewSessionPickerEvent::Error(error) => {
                 self.record_error(error);
             }
             NewSessionPickerEvent::CreateWorktree { repo, request } => {
                 match bootty_git::Git::new().create_worktree(&repo, &request) {
                     Ok(path) => {
-                        self.create_project_session_for_cwd(&path);
-                        self.dismiss_modal_dialog();
+                        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+                            dialog.set_checkout(path);
+                        }
                     }
                     Err(error) => {
                         self.record_notice(crate::error_catalog::ErrorNotice::Worktree(format!(
