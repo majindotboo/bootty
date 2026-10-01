@@ -859,7 +859,18 @@ impl SidebarRows {
             element
         };
         let context_owner = self.owner.clone();
-        let element = if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
+        let element = if let SidebarRowKind::Conversation(context) = &row.kind {
+            let context = context.clone();
+            element
+                .context_menu(move |menu, _, _| {
+                    super::popup_menu(
+                        menu,
+                        &ContextMenu::NativeSession(context.clone()),
+                        &context_owner,
+                    )
+                })
+                .into_any_element()
+        } else if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
             element
                 .context_menu(move |menu, _, _| {
                     super::popup_menu(
@@ -1383,4 +1394,60 @@ pub(super) fn render_codexbar(
                 }))
         })
         .map(IntoElement::into_any_element)
+}
+
+pub(super) fn native_session_menu(session: &super::NativeSessionSidebar) -> Vec<MenuRow> {
+    let command = |operation: &str| {
+        let mut invocation = bootty_control::CommandInvocation::from_action(
+            &format!("harness.{}.{operation}", session.provider),
+            bootty_control::Caller::Internal,
+        );
+        invocation.target = Some(session.target.clone());
+        ChromeIntent::Command(invocation)
+    };
+    let row = |label: &str, enabled: bool, destructive: bool, starts_group: bool, intent| MenuRow {
+        label: label.to_owned(),
+        enabled,
+        destructive,
+        starts_group,
+        intent,
+    };
+    vec![
+        row(
+            "Conversation history",
+            true,
+            false,
+            false,
+            ChromeIntent::NativeSessionHistory(session.target.clone()),
+        ),
+        row(
+            "Rename conversation…",
+            true,
+            false,
+            false,
+            ChromeIntent::RenameNativeSession(session.target.clone()),
+        ),
+        row("Fork conversation", true, false, true, command("fork")),
+        row(
+            "Resume conversation",
+            session.stopped,
+            false,
+            false,
+            command("resume"),
+        ),
+        row(
+            "Archive conversation",
+            !session.stopped,
+            false,
+            true,
+            command("stop"),
+        ),
+        row(
+            "Remove from history…",
+            session.stopped,
+            true,
+            false,
+            ChromeIntent::RemoveNativeSession(session.target.clone()),
+        ),
+    ]
 }

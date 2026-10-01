@@ -96,6 +96,20 @@ Reports identify the exact worker target and dispatch attempt. A restart marks
 unfinished dispatches interrupted; retry is explicit. Messages retain their own
 delivery results.
 
+## Optional conversations
+
+Open the command palette and choose **Open agent conversation…**, then select a
+provider. The optional conversation panel retains its transcript and composer.
+**Terminal** returns to the backend terminal; tab and split commands act on the
+terminal without closing the conversation.
+
+The explicit `harness.<provider>.*` commands own bounded provider protocol
+sessions separately from terminal agents. `harness.native.list` returns their
+records and snapshots, and `harness.list` returns bounded overview previews.
+These local services have explicit process ownership and shutdown, persist before
+publication, and restore stopped history without automatically starting processes.
+They do not replace the primary terminal interface.
+
 Existing custom Lua and Luau files remain preserved and unsupported. Previously
 configured terminal adapters can still publish pane-scoped events. The primary
 terminal launch, history, and account paths do not need them. Settings does not

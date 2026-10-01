@@ -52,6 +52,7 @@ pub(super) type TabBounds = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
 
 #[derive(Clone)]
 pub(super) enum ContextMenu {
+    NativeSession(super::NativeSessionSidebar),
     Session {
         target: SessionTarget,
         options: SessionContextSnapshot,
@@ -326,6 +327,7 @@ impl GpuiChrome {
 
     fn menu_rows(menu: &ContextMenu) -> Vec<MenuRow> {
         match menu {
+            ContextMenu::NativeSession(session) => sidebar::native_session_menu(session),
             ContextMenu::Session { target, options } => sidebar::session_menu(target, *options),
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),

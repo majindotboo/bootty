@@ -257,6 +257,10 @@ fn terminal_and_conversation_commands_keep_distinct_target_paths() {
         catalog.describe("harness.codex.state").unwrap().target,
         Some(ResourceKind::Session)
     );
+    let launcher = catalog.describe("harness.open").unwrap();
+    assert!(launcher.palette);
+    assert_eq!(launcher.title, "Open agent conversation…");
+    assert_eq!(launcher.target, Some(ResourceKind::ApplicationWindow));
     assert!(matches!(
         catalog
             .resolve(CommandInvocation::from_action(

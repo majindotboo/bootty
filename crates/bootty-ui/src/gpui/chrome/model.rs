@@ -321,8 +321,17 @@ pub struct SidebarRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSessionSidebar {
+    pub target: bootty_control::CommandTarget,
+    pub provider: String,
+    pub title: String,
+    pub stopped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
+    Conversation(NativeSessionSidebar),
     Session,
     Window {
         window_id: String,
@@ -475,6 +484,9 @@ pub enum ChromeIntent {
         to: SpaceKey,
     },
     ActivateSession(SessionTarget),
+    RenameNativeSession(bootty_control::CommandTarget),
+    RemoveNativeSession(bootty_control::CommandTarget),
+    NativeSessionHistory(bootty_control::CommandTarget),
     OpenGitChanges(SessionTarget),
     AdoptSession(SessionTarget),
     SessionContext {
