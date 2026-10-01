@@ -96,4 +96,6 @@ delivery results.
 
 Existing custom Lua and Luau files remain preserved and unsupported. Previously
 configured terminal adapters can still publish pane-scoped events. The primary
-terminal launch, history, and account paths do not need them.
+terminal launch, history, and account paths do not need them. Settings does not
+install or remove legacy adapters; stale adapter requests report unsupported
+without changing files or configuration.

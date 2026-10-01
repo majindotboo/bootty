@@ -83,11 +83,11 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
         ] {
             descriptors.push(CommandDescriptor {
                 id: format!("agents.{provider}.{operation}"),
-                title: format!("{provider} {}", operation.replace('.', " ")),
+                title: terminal_command_title(provider, operation),
                 description: "Use the agent’s terminal interface".to_owned(),
                 mutation,
                 target: Some(target),
-                palette: matches!(operation, "start" | "history" | "account.login"),
+                palette: terminal_command_in_palette(provider, operation),
                 arguments: CompactSchema {
                     arguments: arguments
                         .into_iter()
@@ -105,4 +105,31 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
         }
     }
     descriptors
+}
+
+fn terminal_command_title(provider: AgentKind, operation: &str) -> String {
+    let name = match provider {
+        AgentKind::Codex => "Codex",
+        AgentKind::Claude => "Claude",
+        AgentKind::Pi => "Pi",
+    };
+    match operation {
+        "start" => format!("Open {name} terminal"),
+        "history" => format!("{name} session history"),
+        "resume" => format!("Resume {name} session"),
+        "fork" => format!("Fork {name} session"),
+        "sessions" => format!("List {name} sessions"),
+        "account.status" => format!("{name} account status"),
+        "account.login" => format!("Sign in to {name}"),
+        "account.logout" => format!("Sign out of {name}"),
+        "prompt" => format!("Send prompt to {name}"),
+        "interrupt" | "abort" => format!("Interrupt {name}"),
+        "stop" => format!("Close {name} terminal"),
+        _ => format!("{name} {operation}"),
+    }
+}
+
+fn terminal_command_in_palette(provider: AgentKind, operation: &str) -> bool {
+    matches!(operation, "start" | "history" | "resume" | "account.login")
+        || (operation == "fork" && provider != AgentKind::Pi)
 }
