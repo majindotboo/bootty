@@ -7,7 +7,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
-    Hsla, IntoElement, Render, SharedString, Window,
+    Hsla, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window,
 };
 
 pub struct GitDiffPanel {
@@ -66,10 +66,6 @@ impl Focusable for GitDiffPanel {
     }
 }
 impl BasePanel for GitDiffPanel {
-    fn visible(&self, _: &App) -> bool {
-        self.title.is_some()
-    }
-
     fn set_active(&mut self, active: bool, _: &mut Window, _: &mut Context<Self>) {
         self.active = active;
     }
@@ -107,6 +103,17 @@ impl Panel for GitDiffPanel {
 }
 impl Render for GitDiffPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.title.is_none() {
+            return gpui_kit::div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_6()
+                .text_color(cx.theme().muted_foreground)
+                .child("Choose a change to view its diff.")
+                .into_any_element();
+        }
         let colors = [
             cx.theme().success,
             cx.theme().danger,
@@ -146,6 +153,6 @@ impl Render for GitDiffPanel {
                 .collect();
             self.decorations.set(decorations, cx);
         }
-        crate::gpui::readonly_editor(&self.editor, "Git diff")
+        crate::gpui::readonly_editor(&self.editor, "Git diff").into_any_element()
     }
 }

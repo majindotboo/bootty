@@ -355,3 +355,18 @@ fn partial_tab_settings_preserve_surface_defaults(#[case] surface: &str) {
     assert_eq!(actual.appearance, expected.appearance);
     assert_eq!(actual.close_button, expected.close_button);
 }
+
+#[rstest::rstest]
+#[case("chrome.panel-tab-style")]
+#[case("chrome.panel-tabs")]
+#[case("panels.sessions.dock")]
+#[case("panels.files.dock")]
+#[case("panels.changes.dock")]
+#[case("panels.diff.dock")]
+#[case("panels.agents.dock")]
+#[case("panels.agents.button")]
+fn retired_placement_and_tab_preferences_do_not_offer_settings_controls(#[case] path: &str) {
+    let schema = SettingsSchema::builtin();
+    assert!(schema.allows_path(&path.split('.').collect::<Vec<_>>()));
+    assert!(schema.get(path).is_none());
+}

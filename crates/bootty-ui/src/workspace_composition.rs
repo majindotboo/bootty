@@ -7,7 +7,7 @@
 //! enter a backend command.
 
 use bootty_mux::{snapshot::MuxSession, workspace::ScopedWindowId};
-use gpui_kit::component::dock::{DockPlacement, PanelInfo, PanelState};
+use gpui_kit::component::dock::{DockAreaState, DockPlacement, DockState, PanelInfo, PanelState};
 use gpui_kit::px;
 
 /// Presentation for a terminal region with no open backend terminals.
@@ -194,4 +194,112 @@ fn normalize_terminal_region(
     map_panel_children(state, |child| {
         normalize_terminal_region(child, leaf, placed)
     })
+}
+
+fn native_panel_leaves(state: &PanelState, output: &mut Vec<PanelState>) {
+    if state.children.is_empty() {
+        if matches!(state.info, PanelInfo::Panel(_))
+            && !matches!(
+                state.panel_name.as_str(),
+                "" | "StackPanel" | "TabPanel" | "Tiles"
+            )
+        {
+            output.push(state.clone());
+        }
+    } else {
+        for child in &state.children {
+            native_panel_leaves(child, output);
+        }
+    }
+}
+fn selected_native_panel(state: &PanelState) -> Option<&PanelState> {
+    if state.children.is_empty() {
+        return Some(state);
+    }
+    let ix = state.info.active_index().unwrap_or_default();
+    state.children.get(ix).and_then(selected_native_panel)
+}
+
+/// Restore native content into its fixed homes without changing backend terminal topology.
+/// Older movable layouts retain every document and the side sizes and visibility.
+#[must_use]
+pub fn fixed_panel_layout(mut layout: DockAreaState) -> DockAreaState {
+    let active = layout
+        .right_dock
+        .as_ref()
+        .and_then(|dock| selected_native_panel(dock.panel()))
+        .cloned();
+    let mut panels = Vec::new();
+    native_panel_leaves(&layout.center, &mut panels);
+    for dock in [&layout.left_dock, &layout.right_dock, &layout.bottom_dock]
+        .into_iter()
+        .flatten()
+    {
+        native_panel_leaves(dock.panel(), &mut panels);
+    }
+    let terminal = panels
+        .iter()
+        .find(|panel| {
+            matches!(
+                panel.panel_name.as_str(),
+                "bootty.terminal" | "bootty.attachment"
+            )
+        })
+        .cloned();
+    let sidebar_home = [&layout.left_dock, &layout.right_dock, &layout.bottom_dock]
+        .into_iter()
+        .flatten()
+        .find(|dock| {
+            let mut leaves_here = Vec::new();
+            native_panel_leaves(dock.panel(), &mut leaves_here);
+            leaves_here.iter().any(|panel| {
+                matches!(
+                    panel.panel_name.as_str(),
+                    "bootty.sessions" | "bootty.sidebar"
+                )
+            })
+        });
+    let left_size = sidebar_home.map_or(px(240.0), DockState::size);
+    let left_open = sidebar_home.is_none_or(DockState::open);
+    let right_size = layout
+        .right_dock
+        .as_ref()
+        .map_or(px(320.0), DockState::size);
+    let right_open = layout.right_dock.as_ref().is_some_and(DockState::open);
+    let mut tools = Vec::new();
+    for panel in panels {
+        if !matches!(
+            panel.panel_name.as_str(),
+            "bootty.terminal"
+                | "bootty.attachment"
+                | "bootty.sessions"
+                | "bootty.sidebar"
+                | "bootty.spaces"
+                | "bootty.agents"
+        ) && !tools.contains(&panel)
+        {
+            tools.push(panel);
+        }
+    }
+    let active_ix = active
+        .as_ref()
+        .and_then(|panel| tools.iter().position(|candidate| candidate == panel))
+        .unwrap_or_default();
+    layout.center = tab_group_state(terminal.into_iter().collect());
+    layout.left_dock = Some(DockState::new(
+        tab_group_state(vec![PanelState::new("bootty.sessions")]),
+        DockPlacement::Left,
+        left_size,
+        left_open,
+    ));
+    let mut right = tab_group_state(tools);
+    right.info = PanelInfo::tabs(active_ix);
+    layout.right_dock = Some(DockState::new(
+        right,
+        DockPlacement::Right,
+        right_size,
+        right_open,
+    ));
+    layout.bottom_dock = None;
+    layout
 }

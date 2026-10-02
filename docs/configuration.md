@@ -80,8 +80,6 @@ fit-cell-height = true
 tabs-use-session-color = true
 top-bar = true
 bottom-bar = false
-panel-tab-style = "icons"
-panel-tabs = "automatic"
 status-height = 30
 status-background = "#1e1e2e"
 notched-fullscreen-black-chrome = true
@@ -588,23 +586,21 @@ header buttons. Panel commands are `show_sidebar`, `show_files`, `show_changes`,
 and `show_agents`.
 For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
 
-Right-click a tab or empty group header and choose **Add panel** to open or move a
-panel into that group. Panel commands accept an optional live `group` ID; an expired
-ID reports a stale target. Without a group, a panel opens in its existing location,
-or its default dock if closed. Document and diff tabs open from their file actions.
+Sessions occupy the left sidebar. Files, Changes, Diff and documents open as
+labeled peer tabs in the right tool area. Its plus menu and empty state open
+tools; closing the last tab returns to the empty state. Tools cannot be dragged
+into another region or split into nested groups. The mux owns terminal tabs,
+splits and ratios independently.
 
-The Appearance → Docks settings control each dock button independently and select
-icons only (default), icons and text, or text-only tab labels. `chrome.left-dock-toggle`
-and `chrome.right-dock-toggle` hide only their buttons; commands still work.
-`chrome.panel-tab-style` accepts `icons`, `icons-and-text`, or `text` for fixed left/right docks;
-the default is `icons`. Main and bottom Dock groups use icons and text. `chrome.panel-tabs` accepts
-`automatic`, `always`, or `never` for fixed docks. Main and bottom Dock groups keep their tabs
-visible unless that individual group is switched to command-only navigation.
-
-Single-panel groups hide their tabs automatically. **Always show tabs** in the group
-context menu overrides this; **Always hide tabs** enables command-only panel switching for that group; `toggle_tab_bar` toggles the same preference for the
-focused group and also accepts a group ID. Layout and tab preferences persist per
-window, shared across Spaces. `toggle_hidden_tabs` toggles the per-group hidden override. `show_codexbar` opens Agents with usage meters; `show_spaces` opens Sessions with the Space switcher. Dock controls and the status row remain available when tabs hide.
+`chrome.left-dock-toggle` and `chrome.right-dock-toggle` control the header
+buttons; their commands remain available. Side visibility, widths, tool tabs
+and document positions persist per window, shared across Spaces. Older layouts
+are flattened into these fixed homes while retaining their documents.
+The retired `chrome.panel-tab-style`, `chrome.panel-tabs`, `toggle_tab_bar` and
+`toggle_hidden_tabs` no longer hide tool labels or navigation.
+`show_agents` still provides the existing agent controls through the palette;
+Agents has no primary navigation entry. `show_spaces` opens the left sidebar,
+whose Space switcher remains at the bottom.
 
 ## Panel controls
 
@@ -619,23 +615,9 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Settings → Panels offers a dock dropdown (left, right, bottom) and a status bar
-button dropdown (none, top, bottom) for each tool panel. For example:
-
-```toml
-[panels.sessions]
-dock = "left"
-button = "top"
-
-[panels.agents]
-dock = "right"
-button = "bottom"
-```
-
-Sessions defaults to the left dock and the other tool panels to the right, with
-no status buttons. Selecting a dock moves an open panel there; hidden panels use
-that dock when reopened. Dragging can override placement for the current workspace; explicit dock
-settings apply again when reopening it. Status buttons also make their chosen bar visible.
+Settings → Panels offers an optional status bar button (none, top, bottom) for
+Sessions, Files, Changes and Diff. Panel placement is fixed. Legacy `dock`
+preferences and Agents button preferences remain loadable but have no effect.
 
 The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
 underline, pill, outline, or segmented tabs; close-button side (left/right); and
@@ -643,17 +625,15 @@ close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
 side padding without reserving a separate column. Hiding a close button keeps the
 close command and context menu available.
 
-Dock visibility and widths are saved in the workspace layout. Use each panel's
-Dock setting for placement and drag dock edges to resize. The legacy
-`chrome.sidebar`, `chrome.sidebar-width`, and `sidebar.position` keys are accepted
-only to seed an unsaved layout or migrate an older layout; changing them does not
-alter an open workspace. They are no longer settings controls.
+Side visibility and widths are saved in `native-panels.json`; drag a side edge
+to resize. The legacy `chrome.sidebar` and `chrome.sidebar-width` keys seed an
+unsaved layout. `sidebar.position` no longer moves the sidebar.
 
 ## Git tool panels
 
 Use **Show Git Changes** in the palette (`show_changes`) or click a sidebar diff
-count. Changes and Diff are native Dock panels: drag their tabs to split or combine
-groups, resize the split, close panels, or toggle the right dock. Opening Changes again
+count. Changes and Diff are peer tabs in the right tool area: switch or close their
+tabs, resize the side, or toggle its visibility. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
 Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.

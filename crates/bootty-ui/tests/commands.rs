@@ -1549,7 +1549,7 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     open_native_session(&mut state, directory.path(), started);
     let output = directory.path().join("agent-output");
     let literal = "quoted ' value; $HOME `uname`";
-    let script = "printf '%s\\n%s\\n' \"$1\" \"$BOOTTY_AGENT_LAUNCH_CONTEXT\" > \"$2\"; printf 'agent ready\\n'; exec cat";
+    let script = "printf '%s\\n%s\\n' \"$1\" \"$BOOTTY_AGENT_LAUNCH_CONTEXT\" > \"$2.tmp\"; mv \"$2.tmp\" \"$2\"; printf 'agent ready\\n'; exec cat";
     let argv =
         serde_json::to_string(&["-c", script, "agent", literal, output.to_str().unwrap()]).unwrap();
     let outcome = submit_command_from_caller(
@@ -2102,23 +2102,24 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 }
 
 #[rstest]
-#[case("toggle_sessions_panel")]
-#[case("toggle_files_panel")]
-#[case("toggle_changes_panel")]
-#[case("toggle_diff_panel")]
-#[case("toggle_agents_panel")]
-#[case("toggle_left_dock")]
-#[case("toggle_right_dock")]
-#[case("toggle_tab_bar")]
-#[case("toggle_hidden_tabs")]
-#[case("show_codexbar")]
-#[case("show_spaces")]
-#[case("show_sidebar")]
-#[case("show_files")]
-#[case("show_changes")]
-#[case("show_agents")]
+#[case("toggle_sessions_panel", true)]
+#[case("toggle_files_panel", true)]
+#[case("toggle_changes_panel", true)]
+#[case("toggle_diff_panel", true)]
+#[case("toggle_agents_panel", true)]
+#[case("toggle_left_dock", true)]
+#[case("toggle_right_dock", true)]
+#[case("toggle_tab_bar", false)]
+#[case("toggle_hidden_tabs", false)]
+#[case("show_codexbar", true)]
+#[case("show_spaces", true)]
+#[case("show_sidebar", true)]
+#[case("show_files", true)]
+#[case("show_changes", true)]
+#[case("show_agents", true)]
 fn dock_commands_share_palette_bindings_and_window_completion(
     #[case] command: &str,
+    #[case] palette: bool,
     #[values(
         Caller::CommandPalette,
         Caller::Keybinding,
@@ -2128,7 +2129,7 @@ fn dock_commands_share_palette_bindings_and_window_completion(
     caller: Caller,
 ) {
     let catalog = CommandCatalog::default();
-    assert!(catalog.describe(command).unwrap().palette);
+    assert_eq!(catalog.describe(command).unwrap().palette, palette);
     let mut bindings =
         bootty_ui::app_actions::AppKeyBindings::from_keybinds(&[format!("ctrl+shift+d={command}")])
             .expect("dock action is bindable");

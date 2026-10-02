@@ -7,21 +7,12 @@ use crate::commands::DockAction;
 use layout::{LayoutSaveHandle, SavedLayout};
 use registry::{PanelFactory, register, register_factory};
 
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use bootty_control::{BoundAppCommandSender, CommandTarget};
-use gpui_kit::component::{
-    dock::{
-        BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, NodeId,
-        PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo, panel_handle,
-    },
-    menu::{PopupMenu, PopupMenuItem},
+use gpui_kit::component::dock::{
+    BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, NodeId, PaneNode,
+    PaneRef, Panel, PanelEvent, PanelId, PanelInfo, panel_handle,
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
@@ -184,10 +175,6 @@ pub struct WorkspaceDock {
     retained_panels: Vec<ContextPanels>,
     document_context: Rc<RefCell<GitPanelContext>>,
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
-    panel_preferences:
-        BTreeMap<bootty_config::config::PanelKind, bootty_config::config::PanelConfig>,
-    pub(crate) always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    pub(crate) always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
     /// The single locked terminal leaf. The mux owns the window and every split inside it;
     /// Dock never adds, removes, or relocates this panel after its first placement.
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
@@ -227,10 +214,6 @@ impl WorkspaceDock {
         config_path: &std::path::Path,
         state_key: String,
         local_git: Option<bootty_git::GitFactsCache>,
-        panel_preferences: BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -240,14 +223,10 @@ impl WorkspaceDock {
             context.host_identity
         );
         let dock_owner = cx.weak_entity();
-        let always_show_tabs = Rc::new(RefCell::new(HashSet::new()));
-        let always_hide_tabs = Rc::new(RefCell::new(HashSet::new()));
         let area = cx.new(|cx| {
             let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
                 dock_owner.clone(),
                 chrome.clone(),
-                always_show_tabs.clone(),
-                always_hide_tabs.clone(),
                 cx,
             );
             DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
@@ -300,7 +279,7 @@ impl WorkspaceDock {
         let document_factory =
             Self::document_factory(current_document_context, document_list, sender, dock);
         register_factory(&area, "bootty.document", document_factory.clone(), cx);
-        Self::configure_default_layout(&area, &panels, &sessions, sidebar_defaults, window, cx);
+        Self::configure_default_layout(&area, &sessions, sidebar_defaults, window, cx);
         let path = config_path.with_file_name("native-panels.json");
         let save = Self::layout_writer(path.clone(), state_key.clone(), cx);
         let (focus, subscriptions) = Self::subscribe_layout(&area, window, cx);
@@ -311,11 +290,6 @@ impl WorkspaceDock {
             document_context,
             area,
             titlebar,
-            // Seeded from the live config so the first settings sync only reacts to real
-            // changes instead of relocating every panel out of the restored layout.
-            panel_preferences,
-            always_show_tabs,
-            always_hide_tabs,
             terminal: terminal_panel,
             attachment,
             focused_group: None,
@@ -337,19 +311,13 @@ impl WorkspaceDock {
 
     fn configure_default_layout(
         area: &Entity<DockArea>,
-        panels: &ContextPanels,
         sessions: &Entity<crate::gpui_sidebar_panel::SessionsPanel>,
         sidebar_defaults: (crate::gpui::chrome::SidebarPosition, f32, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let layout = DockLayout::tabs()
-            .panel_view(panel_handle(panels.changes.clone()), cx)
-            .panel_view(panel_handle(panels.files.clone()), cx);
-        let sidebar_placement = match sidebar_defaults.0 {
-            crate::gpui::chrome::SidebarPosition::Left => DockPlacement::Left,
-            crate::gpui::chrome::SidebarPosition::Right => DockPlacement::Right,
-        };
+        let layout = DockLayout::tabs();
+        let sidebar_placement = DockPlacement::Left;
         area.update(cx, |area, cx| {
             area.set_center(DockLayout::tabs(), window, cx);
             area.set_dock(DockPlacement::Right, layout, window, cx);
@@ -432,14 +400,7 @@ impl WorkspaceDock {
                 .await;
             _ = weak.update_in(cx, |this, window, cx| {
                 if let Some(saved) = saved {
-                    // Incompatible saves leave the default layout in place.
-                    if saved.layout.version == this.area.read(cx).version() {
-                        this.load_layout(saved, window, cx);
-                    } else {
-                        this.restore_tab_preferences(&saved, cx);
-                    }
-                } else {
-                    this.restore_tab_paths(&[], &[], cx);
+                    this.load_layout(saved, window, cx);
                 }
                 let pending = this.restoring.take().unwrap_or_default();
                 match pending.panel {
@@ -682,28 +643,9 @@ impl WorkspaceDock {
             });
             return;
         }
-        let documents = self
-            .documents()
-            .into_iter()
-            .map(|document| PanelId::from(document.entity_id()))
-            .chain(std::iter::once(PanelId::from(self.panels.diff.entity_id())))
-            .filter(|candidate| *candidate != id)
-            .collect::<Vec<_>>();
         self.area.update(cx, |area, cx| {
-            let target = area.layout(DockPlacement::Right).and_then(|tree| {
-                documents
-                    .iter()
-                    .find_map(|id| tree.find_panel_node(*id))
-                    .map(|node| InsertTarget::Tabs {
-                        node,
-                        ix: None,
-                        activate: true,
-                    })
-            });
             area.add_panel_view(panel, DockPlacement::Right, None, window, cx);
-            if let Some(target) = target {
-                area.move_panel(id, target, window, cx);
-            }
+            area.select_panel(id, window, cx);
             if !area.is_dock_open(DockPlacement::Right) {
                 area.toggle_dock(DockPlacement::Right, window, cx);
             }
@@ -943,31 +885,21 @@ impl WorkspaceDock {
         cx: &mut Context<Self>,
     ) {
         use bootty_config::config::PanelKind;
-        self.area.update(cx, |area, cx| {
-            match kind {
-                PanelKind::Sessions => area.remove_panel(self.sessions.clone(), window, cx),
-                PanelKind::Files => area.remove_panel(self.panels.files.clone(), window, cx),
-                PanelKind::Changes => area.remove_panel(self.panels.changes.clone(), window, cx),
-                PanelKind::Diff => area.remove_panel(self.panels.diff.clone(), window, cx),
-                PanelKind::Agents => area.remove_panel(self.agents.clone(), window, cx),
-            }
-            for placement in [
-                DockPlacement::Left,
-                DockPlacement::Right,
-                DockPlacement::Bottom,
-            ] {
-                if placement == DockPlacement::Bottom
-                    && area
-                        .layout(placement)
-                        .is_some_and(|tree| tree.panels().next().is_none())
-                {
-                    // Kit keeps a closed bottom dock's tab strip. An empty one has no tabs to reopen.
-                    area.remove_dock(placement, window, cx);
-                } else if area.is_dock_open(placement) && area.is_empty(placement, cx) {
-                    area.toggle_dock(placement, window, cx);
-                }
-            }
+        self.area.update(cx, |area, cx| match kind {
+            PanelKind::Sessions => area.remove_panel(self.sessions.clone(), window, cx),
+            PanelKind::Files => area.remove_panel(self.panels.files.clone(), window, cx),
+            PanelKind::Changes => area.remove_panel(self.panels.changes.clone(), window, cx),
+            PanelKind::Diff => area.remove_panel(self.panels.diff.clone(), window, cx),
+            PanelKind::Agents => area.remove_panel(self.agents.clone(), window, cx),
         });
+    }
+
+    pub(crate) fn panel_present(&self, kind: bootty_config::config::PanelKind, cx: &App) -> bool {
+        let id = self.tool_panel(kind).panel_id(cx);
+        self.area
+            .read(cx)
+            .layout(DockPlacement::Right)
+            .is_some_and(|tree| tree.find_panel_node(id).is_some())
     }
 
     pub(crate) fn panel_visible(&self, kind: bootty_config::config::PanelKind, cx: &App) -> bool {
@@ -994,44 +926,6 @@ impl WorkspaceDock {
         })
     }
 
-    pub(crate) fn sync_panel_settings(
-        &mut self,
-        preferences: &BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.restoring.is_some() || &self.panel_preferences == preferences {
-            return;
-        }
-        for kind in bootty_config::config::PanelKind::ALL {
-            let previous = self
-                .panel_preferences
-                .get(&kind)
-                .copied()
-                .unwrap_or_default();
-            let next = preferences.get(&kind).copied().unwrap_or_default();
-            if previous.dock != next.dock {
-                let panel = self.tool_panel(kind);
-                if self.area.read(cx).panel(panel.panel_id(cx)).is_some() {
-                    let visible = self.panel_visible(kind, cx);
-                    self.remove_tool(kind, window, cx);
-                    self.area.update(cx, |area, cx| {
-                        let placement = panel_placement(next.dock(kind));
-                        area.add_panel_view(panel, placement, None, window, cx);
-                        if visible && !area.is_dock_open(placement) {
-                            area.toggle_dock(placement, window, cx);
-                        }
-                    });
-                }
-            }
-        }
-        self.panel_preferences.clone_from(preferences);
-        cx.notify();
-    }
-
     fn show_tool(
         &self,
         kind: bootty_config::config::PanelKind,
@@ -1040,13 +934,11 @@ impl WorkspaceDock {
     ) {
         let panel = self.tool_panel(kind);
         let id = panel.panel_id(cx);
-        let home = panel_placement(
-            self.panel_preferences
-                .get(&kind)
-                .copied()
-                .unwrap_or_default()
-                .dock(kind),
-        );
+        let home = if kind == bootty_config::config::PanelKind::Sessions {
+            DockPlacement::Left
+        } else {
+            DockPlacement::Right
+        };
         self.area.update(cx, |area, cx| {
             if area.panel(id).is_none() {
                 area.add_panel_view(panel, home, None, window, cx);
@@ -1171,6 +1063,11 @@ impl WorkspaceDock {
                     _ = owner.update(cx, |this, cx| {
                         this.area
                             .update(cx, |area, cx| area.remove_panel(panel, window, cx));
+                        cx.defer_in(window, |this, window, cx| {
+                            this.terminal.update(cx, |terminal, cx| {
+                                terminal.focus_terminal(window, cx);
+                            });
+                        });
                     });
                 });
             });
@@ -1181,34 +1078,13 @@ impl WorkspaceDock {
     }
 
     fn load_layout(&mut self, saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
-        let SavedLayout {
-            layout,
-            always_show_tabs,
-            always_hide_tabs,
-        } = saved;
+        let mut layout = crate::workspace_composition::fixed_panel_layout(saved.layout);
+        layout.version = self.area.read(cx).version();
         self.error = self
             .area
             .update(cx, |area, cx| area.load(layout, window, cx))
             .err()
             .map(|error| error.to_string());
-        self.restore_tab_paths(&always_show_tabs, &always_hide_tabs, cx);
-    }
-
-    fn restore_tab_preferences(&self, saved: &SavedLayout, cx: &App) {
-        self.restore_tab_paths(&saved.always_show_tabs, &saved.always_hide_tabs, cx);
-    }
-
-    fn restore_tab_paths(&self, shown: &[String], hidden: &[String], cx: &App) {
-        let groups = group_paths(self.area.read(cx));
-        let resolve = |paths: &[String]| {
-            groups
-                .iter()
-                .filter(|(path, _)| paths.contains(path))
-                .map(|(_, node)| *node)
-                .collect()
-        };
-        *self.always_show_tabs.borrow_mut() = resolve(shown);
-        *self.always_hide_tabs.borrow_mut() = resolve(hidden);
     }
 
     fn save_layout(&self, cx: &App) {
@@ -1219,29 +1095,31 @@ impl WorkspaceDock {
         let area = self.area.read(cx);
         SavedLayout {
             layout: area.dump(cx),
-            always_hide_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_hide_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
-            always_show_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_show_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
         }
     }
 
-    pub(crate) fn set_always_show_tabs(&self, node: NodeId, show: bool, cx: &mut Context<Self>) {
-        if show {
-            self.always_hide_tabs.borrow_mut().remove(&node);
-            self.always_show_tabs.borrow_mut().insert(node);
+    pub(crate) fn close_tool_tab(
+        &self,
+        id: PanelId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(kind) = bootty_config::config::PanelKind::ALL
+            .into_iter()
+            .find(|kind| self.tool_panel(*kind).panel_id(cx) == id)
+        {
+            self.remove_tool(kind, window, cx);
+            self.layout_changed(cx);
         } else {
-            self.always_show_tabs.borrow_mut().remove(&node);
+            return false;
         }
-        self.save_layout(cx);
-        self.area.update(cx, |_, cx| cx.notify());
-        cx.notify();
+        // Closing a focused panel must not leave keyboard input in a detached subtree.
+        cx.defer_in(window, |this, window, cx| {
+            this.terminal.update(cx, |terminal, cx| {
+                terminal.focus_terminal(window, cx);
+            });
+        });
+        true
     }
 
     pub(crate) fn toggle_dock(
@@ -1258,29 +1136,6 @@ impl WorkspaceDock {
                 area.set_dock(placement, DockLayout::tabs(), window, cx);
             });
         }
-    }
-
-    pub(crate) fn panel_menu(
-        owner: &gpui_kit::WeakEntity<Self>,
-        node: NodeId,
-        mut menu: PopupMenu,
-    ) -> PopupMenu {
-        for descriptor in crate::commands::PANELS {
-            let crate::commands::PanelCreation::Command(action) = descriptor.creation else {
-                continue;
-            };
-            let owner = owner.clone();
-            menu = menu.item(
-                PopupMenuItem::new(descriptor.label)
-                    .icon(descriptor.icon.clone())
-                    .on_click(move |_, window, cx| {
-                        _ = owner.update(cx, |this, cx| {
-                            this.invoke_action(action, Some(node), window, cx);
-                        });
-                    }),
-            );
-        }
-        menu
     }
 
     pub(crate) fn sessions_focused(&self, window: &Window, cx: &App) -> bool {
@@ -1407,10 +1262,9 @@ impl WorkspaceDock {
             DockAction::ToggleLeft => self.toggle_dock(DockPlacement::Left, window, cx),
             DockAction::ToggleRight => self.toggle_dock(DockPlacement::Right, window, cx),
             DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs => {
-                self.toggle_group_tabs(action, node, cx);
-            }
-            _ if let Some(node) = node => {
-                self.open_panel_at(action, node, window, cx);
+                return bootty_control::CommandOutcome::Unavailable {
+                    message: "Tool tabs always remain visible.".into(),
+                };
             }
             DockAction::Sidebar | DockAction::Spaces => self.show_sidebar(window, cx),
             DockAction::Files => self.show_files(window, cx),
@@ -1424,85 +1278,6 @@ impl WorkspaceDock {
             }
         }
         bootty_control::CommandOutcome::success()
-    }
-
-    fn toggle_group_tabs(&self, action: DockAction, node: Option<NodeId>, cx: &mut Context<Self>) {
-        let area = self.area.read(cx);
-        let groups = group_paths(area)
-            .into_iter()
-            .filter(|(_, node)| {
-                area.layout(DockPlacement::Center)
-                    .is_none_or(|tree| tree.find_node(*node).is_none())
-            })
-            .collect::<Vec<_>>();
-        let focused = self
-            .focused_group
-            .filter(|node| groups.iter().any(|(_, current)| current == node));
-        if let Some(node) = node
-            .or(focused)
-            .or_else(|| groups.first().map(|(_, node)| *node))
-        {
-            if action == DockAction::ToggleHiddenTabs {
-                let hidden = self.always_hide_tabs.borrow_mut().remove(&node);
-                if !hidden {
-                    self.always_hide_tabs.borrow_mut().insert(node);
-                }
-                self.set_always_show_tabs(node, false, cx);
-            } else {
-                let always = self.always_show_tabs.borrow().contains(&node);
-                self.set_always_show_tabs(node, !always, cx);
-            }
-        }
-    }
-
-    fn open_panel_at(
-        &mut self,
-        action: crate::commands::DockAction,
-        node: NodeId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let placement = [
-            DockPlacement::Center,
-            DockPlacement::Left,
-            DockPlacement::Right,
-            DockPlacement::Bottom,
-        ]
-        .into_iter()
-        .find(|placement| {
-            self.area
-                .read(cx)
-                .layout(*placement)
-                .is_some_and(|tree| tree.find_node(node).is_some())
-        });
-        let Some(placement) = placement else {
-            return;
-        };
-        let Some(kind) = action.panel() else {
-            return;
-        };
-        self.refresh_tool(kind, window, cx);
-        let panel = self.tool_panel(kind);
-        let id = panel.panel_id(cx);
-        self.area.update(cx, |area, cx| {
-            if area.panel(id).is_none() {
-                area.add_panel_view(panel, placement, None, window, cx);
-            }
-            let ix = panel_tab_index(area, placement, node, id);
-            area.move_panel(
-                id,
-                InsertTarget::Tabs {
-                    node,
-                    ix,
-                    activate: true,
-                },
-                window,
-                cx,
-            );
-            if placement != DockPlacement::Center && !area.is_dock_open(placement) {
-                area.toggle_dock(placement, window, cx);
-            }
-        });
     }
 }
 
@@ -1568,14 +1343,6 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
         }
     }
     groups
-}
-
-const fn panel_placement(dock: bootty_config::config::PanelDock) -> DockPlacement {
-    match dock {
-        bootty_config::config::PanelDock::Left => DockPlacement::Left,
-        bootty_config::config::PanelDock::Right => DockPlacement::Right,
-        bootty_config::config::PanelDock::Bottom => DockPlacement::Bottom,
-    }
 }
 
 fn panel_placement_in_area(area: &DockArea, id: PanelId) -> Option<DockPlacement> {

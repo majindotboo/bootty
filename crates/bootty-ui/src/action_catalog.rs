@@ -200,11 +200,11 @@ command_catalog! {
         "Show Spaces", "Open the Space switcher in Sessions",
         "show_spaces", "layout-grid", Layout, shown, Write, ApplicationWindow, DockGroup;
     ToggleHiddenTabs:
-        "Toggle always hide tabs", "Toggle command-only panel switching for the focused group",
-        "toggle_hidden_tabs", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "Toggle always hide tabs", "Retired: tool tabs always remain visible",
+        "toggle_hidden_tabs", "panel-top", Layout, hidden, Write, ApplicationWindow, DockGroup;
     ToggleTabBar:
-        "Toggle always show tabs", "Toggle single-panel tabs for the focused tab group",
-        "toggle_tab_bar", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "Toggle always show tabs", "Retired: tool tabs always remain visible",
+        "toggle_tab_bar", "panel-top", Layout, hidden, Write, ApplicationWindow, DockGroup;
     EditTheme:
         "Edit Theme", "Import, duplicate, preview and save terminal colors",
         "edit_theme", "paintbrush", Application, shown, Write, ApplicationWindow, None;

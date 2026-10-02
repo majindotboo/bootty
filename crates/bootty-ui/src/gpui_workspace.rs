@@ -980,7 +980,6 @@ impl GpuiWorkspace {
                 &path,
                 key,
                 local_git,
-                self.state.config().panels.clone(),
                 window,
                 cx,
             )
@@ -3008,18 +3007,8 @@ impl GpuiWorkspace {
         }
     }
 
-    fn decorate_dock_chrome(
-        &self,
-        chrome_snapshot: &mut ChromeSnapshot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn decorate_dock_chrome(&self, chrome_snapshot: &mut ChromeSnapshot, cx: &Context<Self>) {
         if self.tools.is_some() {
-            if let Some(tools) = &self.tools {
-                tools.update(cx, |tools, cx| {
-                    tools.sync_panel_settings(&self.state.config().panels, window, cx);
-                });
-            }
             let config = self.state.config();
             chrome_snapshot.layout.top_inset = self.state.window_chrome_facts().top_inset(
                 config.window.fullscreen_tabs_in_notch,
@@ -3093,7 +3082,7 @@ impl GpuiWorkspace {
             viewport_height,
         );
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
-        self.decorate_dock_chrome(&mut chrome_snapshot, window, cx);
+        self.decorate_dock_chrome(&mut chrome_snapshot, cx);
         self.sync_key_bindings(window, cx);
         self.chrome_view.update(cx, |chrome, cx| {
             chrome.set_docked_status(docked_terminals, cx);

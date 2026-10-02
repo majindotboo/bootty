@@ -12,6 +12,7 @@ use bootty_ui::workspace_composition::{
 use gpui_kit::component::dock::{
     DockPlacement, PaneTree, PanelBuilder, PanelId, PanelInfo, PanelState, RootKind,
 };
+use gpui_kit::px;
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -306,4 +307,66 @@ fn stranded_sidebar_chrome_follows_the_sidebar() {
             DockPlacement::Right
         );
     }
+}
+
+proptest! {
+    #[test]
+    fn fixed_homes_preserve_documents_and_are_stable(
+        paths in prop::collection::vec("[a-z]{1,24}\\.rs", 0..12),
+        left_width in 160u16..450, right_width in 200u16..650,
+        left_open in any::<bool>(), right_open in any::<bool>(),
+    ) {
+        use bootty_ui::workspace_composition::fixed_panel_layout;
+        use gpui_kit::component::dock::{DockAreaState, DockState};
+        let documents: Vec<_> = paths.into_iter().enumerate().map(|(ix, path)| PanelState {
+            panel_name: "bootty.document".into(), children: vec![],
+            info: PanelInfo::panel(serde_json::json!({"host":"remote-host", "path":path, "line":ix.saturating_add(1)})),
+        }).collect();
+        let selected = documents.last().cloned();
+        let nested = PanelState { panel_name: "StackPanel".into(), children: documents.clone(), info: PanelInfo::stack(vec![], gpui_kit::Axis::Vertical) };
+        let legacy = DockAreaState {
+            version: Some(8), center: terminal_panel_state(&window_id(), "shell"),
+            left_dock: Some(DockState::new(nested, DockPlacement::Left, px(f32::from(left_width)), true)),
+            right_dock: Some(DockState::new(PanelState::new("bootty.sessions"), DockPlacement::Right, px(f32::from(right_width)), left_open)),
+            bottom_dock: selected.map(|panel| DockState::new(panel, DockPlacement::Bottom, px(190.), right_open)),
+        };
+        let fixed = fixed_panel_layout(legacy);
+        let left = fixed.left_dock.as_ref().unwrap();
+        let right = fixed.right_dock.as_ref().unwrap();
+        prop_assert_eq!(left.panel().children[0].panel_name.as_str(), "bootty.sessions");
+        prop_assert_eq!(left.size(), px(f32::from(right_width)));
+        prop_assert_eq!(left.open(), left_open);
+        prop_assert_eq!(&right.panel().children, &documents);
+        prop_assert!(fixed.bottom_dock.is_none());
+        prop_assert_eq!(single_terminal_leaf(&fixed.center), terminal_leaf_state(&window_id(), "shell"));
+        prop_assert_eq!(fixed_panel_layout(fixed.clone()), fixed);
+    }
+}
+
+#[rstest]
+#[case(true)]
+#[case(false)]
+fn fixed_homes_retain_active_document_and_closed_tool_region(#[case] open: bool) {
+    use bootty_ui::workspace_composition::fixed_panel_layout;
+    use gpui_kit::component::dock::{DockAreaState, DockState};
+    let document = document_panel();
+    let state = DockAreaState {
+        right_dock: Some(DockState::new(
+            PanelState {
+                panel_name: "TabPanel".into(),
+                children: vec![PanelState::new("bootty.files"), document.clone()],
+                info: PanelInfo::tabs(1),
+            },
+            DockPlacement::Right,
+            px(350.),
+            open,
+        )),
+        ..DockAreaState::default()
+    };
+    let fixed = fixed_panel_layout(state);
+    let right = fixed.right_dock.unwrap();
+    assert_eq!(right.panel().children[1], document);
+    assert_eq!(right.panel().info.active_index(), Some(1));
+    assert_eq!(right.size(), px(350.));
+    assert_eq!(right.open(), open);
 }

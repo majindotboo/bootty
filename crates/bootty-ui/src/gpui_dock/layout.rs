@@ -8,10 +8,6 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
 pub(super) struct SavedLayout {
     #[serde(flatten)]
     pub layout: DockAreaState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub always_show_tabs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub always_hide_tabs: Vec<String>,
 }
 
 struct LayoutSave {

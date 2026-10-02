@@ -43,10 +43,7 @@ impl TerminalPanel {
     ) -> Self {
         let focus = cx.focus_handle();
         let focus_subscription = cx.on_focus_in(&focus, window, |this, window, cx| {
-            let id = this.window_id.clone();
-            _ = this.owner.update(cx, |owner, cx| {
-                owner.focus_terminal_window(&this.binding_target, &id, window, cx);
-            });
+            this.focus_terminal(window, cx);
         });
         Self {
             binding_target,
@@ -61,6 +58,12 @@ impl TerminalPanel {
             prepared: None,
             _focus_subscription: focus_subscription,
         }
+    }
+
+    pub(crate) fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+        _ = self.owner.update(cx, |owner, cx| {
+            owner.focus_terminal_window(&self.binding_target, &self.window_id, window, cx);
+        });
     }
 
     pub(crate) fn set_title(&mut self, title: String, cx: &mut Context<Self>) {

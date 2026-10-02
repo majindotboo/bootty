@@ -16,7 +16,6 @@ use crate::{
     metrics::MetricsService,
     usage::{QuotaTone, UsageProvider, UsageService},
 };
-use bootty_config::config::SidebarPosition as ConfigSidebarPosition;
 use bootty_mux::repository::DEFAULT_SPACE_COLOR;
 
 use crate::{
@@ -493,10 +492,7 @@ pub fn snapshot(
 
             width,
             height,
-            sidebar_position: match config.sidebar.position {
-                ConfigSidebarPosition::Left => SidebarPosition::Left,
-                ConfigSidebarPosition::Right => SidebarPosition::Right,
-            },
+            sidebar_position: SidebarPosition::Left,
             sidebar_width: chrome.sidebar_width,
             gap: layout_gap,
             top_inset: facts.top_inset(
@@ -579,7 +575,10 @@ fn status_bars(
             status_background,
         )
     });
-    for kind in bootty_config::config::PanelKind::ALL {
+    for kind in bootty_config::config::PanelKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != bootty_config::config::PanelKind::Agents)
+    {
         let target = match state.config().panel(kind).button {
             bootty_config::config::PanelButton::None => continue,
             bootty_config::config::PanelButton::Top => &mut top_status,

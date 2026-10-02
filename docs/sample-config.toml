@@ -97,9 +97,6 @@ black = "auto"
 tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
-panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text
-# Controls single-panel tabs only in the fixed left/right docks. Main and bottom tabs stay visible.
-panel-tabs = "automatic" # automatic, always, never
 # Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
 # independently when its configured modules should be visible.
 top-bar = true
@@ -439,24 +436,16 @@ palette = [
   # "#cba6f7",
 ]
 
-# Tool panel defaults. Dock: left/right/bottom. Button: none/top/bottom.
+# Optional tool buttons: none/top/bottom. Sessions live on the left; tools on the right.
 
 [panels.sessions]
-dock = "left"
 button = "none"
 
 [panels.files]
-dock = "right"
 button = "none"
 
 [panels.changes]
-dock = "right"
 button = "none"
 
 [panels.diff]
-dock = "right"
-button = "none"
-
-[panels.agents]
-dock = "right"
 button = "none"
