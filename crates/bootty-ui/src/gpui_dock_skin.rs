@@ -11,6 +11,7 @@ use gpui_kit::component::{
         DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
         TabGroupRenderer,
     },
+    menu::{DropdownMenu as _, PopupMenuItem},
 };
 use gpui_kit::{
     AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
@@ -584,7 +585,6 @@ impl WorkspaceTabGroup {
                 });
             }
         }
-        let owner = self.owner.clone();
         div()
             .id("workspace-tool-navigation")
             .debug_selector(|| "workspace-tool-navigation".to_owned())
@@ -608,18 +608,7 @@ impl WorkspaceTabGroup {
                         end: div().min_w_1().into_any_element(),
                     }),
             )
-            .child(
-                Button::new("new-sidebar-browser-tab")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .small()
-                    .size_6()
-                    .accessibility_label("New browser tab")
-                    .tooltip("New browser tab")
-                    .on_click(move |_, window, cx| {
-                        _ = owner.update(cx, |dock, cx| dock.new_browser_tab(window, cx));
-                    }),
-            )
+            .child(sidebar_tab_picker(self.owner.clone()))
             .into_any_element()
     }
 
@@ -998,6 +987,14 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
+        if self
+            .area
+            .upgrade()
+            .and_then(|area| group_placement(area.read(cx), group.node()))
+            == Some(DockPlacement::Right)
+        {
+            return Some(empty_sidebar(&self.owner, cx));
+        }
         let content = self.kit.render_empty(group, window, cx);
         Some(
             div()
@@ -1007,6 +1004,118 @@ impl TabGroupRenderer for WorkspaceTabGroup {
                 .into_any_element(),
         )
     }
+}
+
+fn sidebar_tools() -> impl Iterator<Item = &'static crate::commands::PanelDescriptor> {
+    crate::commands::PANELS.iter().filter(|panel| {
+        matches!(
+            panel.creation,
+            crate::commands::PanelCreation::Command(
+                crate::commands::DockAction::Files
+                    | crate::commands::DockAction::Changes
+                    | crate::commands::DockAction::Coordination
+                    | crate::commands::DockAction::Browser
+            )
+        )
+    })
+}
+
+fn open_sidebar_tab(
+    owner: &WeakEntity<WorkspaceDock>,
+    action: crate::commands::DockAction,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    _ = owner.update(cx, |dock, cx| {
+        if action == crate::commands::DockAction::Browser {
+            dock.new_browser_tab(window, cx);
+        } else {
+            dock.submit_command(
+                bootty_control::CommandInvocation::from_action(
+                    action.command().action(),
+                    bootty_control::Caller::Internal,
+                ),
+                window,
+                cx,
+            );
+        }
+    });
+}
+
+fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>) -> impl IntoElement {
+    let menu_owner = owner.clone();
+    Button::new("new-sidebar-tab")
+        .icon(IconName::Plus)
+        .ghost()
+        .small()
+        .size_6()
+        .accessibility_label("Open a sidebar tab")
+        .tooltip("Open a sidebar tab")
+        .dropdown_menu(move |mut menu, _, _| {
+            for panel in sidebar_tools() {
+                let crate::commands::PanelCreation::Command(action) = panel.creation else {
+                    continue;
+                };
+                let owner = menu_owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(panel.label)
+                        .icon(panel.icon.clone())
+                        .on_click(move |_, window, cx| {
+                            open_sidebar_tab(&owner, action, window, cx);
+                        }),
+                );
+            }
+            menu
+        })
+        .on_open_change(move |open, window, cx| {
+            _ = owner.update(cx, |dock, cx| {
+                dock.set_browser_menu_open(*open, window, cx);
+            });
+        })
+}
+
+fn empty_sidebar(owner: &WeakEntity<WorkspaceDock>, cx: &App) -> AnyElement {
+    div()
+        .id("empty-tool-sidebar")
+        .debug_selector(|| "empty-tool-sidebar".to_owned())
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_6()
+        .child(
+            div()
+                .w_full()
+                .max_w_64()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .mb_2()
+                        .child("Open a sidebar tab"),
+                )
+                .children(sidebar_tools().filter_map(|panel| {
+                    let crate::commands::PanelCreation::Command(action) = panel.creation else {
+                        return None;
+                    };
+                    let owner = owner.clone();
+                    Some(
+                        Button::new(SharedString::from(format!("empty-open-{}", panel.name)))
+                            .label(panel.label)
+                            .icon(panel.icon.clone())
+                            .outline()
+                            .w_full()
+                            .on_click(move |_, window, cx| {
+                                open_sidebar_tab(&owner, action, window, cx);
+                            }),
+                    )
+                })),
+        )
+        .into_any_element()
 }
 
 fn empty_terminal_view(

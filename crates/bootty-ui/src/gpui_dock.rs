@@ -163,6 +163,7 @@ pub struct WorkspaceDock {
     coordination: Entity<crate::gpui_orchestration::OrchestrationPanel>,
     pub(crate) browser: Entity<BrowserPanel>,
     browser_occluded: bool,
+    browser_menu_open: bool,
     documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>>,
     document_factory: PanelFactory,
     present: bool,
@@ -263,6 +264,7 @@ impl WorkspaceDock {
             coordination,
             browser,
             browser_occluded: false,
+            browser_menu_open: false,
             documents,
             document_factory,
             present: true,
@@ -677,7 +679,11 @@ impl WorkspaceDock {
         }
         self.show_tool(bootty_config::config::PanelKind::Browser, window, cx);
         self.sync_browser_visibility(window, cx);
-        Focusable::focus_handle(&self.browser, cx).focus(window, cx);
+        // The new panel and dialog dismissal must finish mounting before taking focus.
+        cx.defer_in(window, |this, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            Focusable::focus_handle(&this.browser, cx).focus(window, cx);
+        });
     }
 
     pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -716,10 +722,21 @@ impl WorkspaceDock {
         self.sync_browser_visibility(window, cx);
     }
 
+    pub(crate) fn set_browser_menu_open(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_menu_open = open;
+        self.sync_browser_visibility(window, cx);
+    }
+
     fn sync_browser_visibility(&self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
         let visible = self.present
             && !self.browser_occluded
+            && !self.browser_menu_open
             && !window.has_active_dialog(cx)
             && !window.has_active_sheet(cx)
             && self.panel_visible(bootty_config::config::PanelKind::Browser, cx);
@@ -1064,7 +1081,10 @@ impl WorkspaceDock {
                 {
                     // Kit keeps a closed bottom dock's tab strip. An empty one has no tabs to reopen.
                     area.remove_dock(placement, window, cx);
-                } else if area.is_dock_open(placement) && area.is_empty(placement, cx) {
+                } else if placement == DockPlacement::Left
+                    && area.is_dock_open(placement)
+                    && area.is_empty(placement, cx)
+                {
                     area.toggle_dock(placement, window, cx);
                 }
             }
