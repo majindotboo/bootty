@@ -19,11 +19,31 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
             .chain(history_account_specs(label));
         for (operation, title, names, required, target, mutation, palette) in specs {
             descriptors.push(CommandDescriptor {
-                id: format!("agents.{provider}.{operation}"), title,
-                description: "Uses the provider's native terminal interface; backend terminals own tabs, splits and processes.".to_owned(),
+                id: format!("agents.{provider}.{operation}"),
+                title,
+                description: match operation {
+                    "start" => format!("Start {label} in the selected project."),
+                    "tab" => format!("Start {label} in a new tab in this session."),
+                    "account.login" => format!("Open {label}'s sign-in flow in a terminal."),
+                    _ => format!("Use {label}'s terminal interface."),
+                },
                 mutation,
-                arguments: CompactSchema { arguments: names.into_iter().enumerate().map(|(index, name)| ArgumentSchema { name: name.to_owned(), value_type: ValueType::String, required: index < required, choices: Vec::new(), minimum: None, maximum: None }).collect() },
-                target, palette,
+                arguments: CompactSchema {
+                    arguments: names
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, name)| ArgumentSchema {
+                            name: name.to_owned(),
+                            value_type: ValueType::String,
+                            required: index < required,
+                            choices: Vec::new(),
+                            minimum: None,
+                            maximum: None,
+                        })
+                        .collect(),
+                },
+                target,
+                palette,
             });
         }
     }
@@ -158,7 +178,8 @@ fn history_account_specs(label: &str) -> [TerminalCommandSpec; 4] {
             0,
             None,
             MutationClass::Read,
-            true,
+            // Keep the query on the command API until a history view can present its result.
+            false,
         ),
         (
             "account.status",

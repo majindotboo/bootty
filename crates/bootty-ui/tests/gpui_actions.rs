@@ -377,6 +377,14 @@ fn palette_launches_native_terminals_from_the_shared_catalog(
         &localizer,
         &catalog.list(),
     );
+    assert!(
+        !palette
+            .spec()
+            .rows
+            .iter()
+            .any(|row| row.label.ends_with(" session history")),
+        "history queries need a view before they can be offered in the palette"
+    );
     let command = format!("agents.{provider}.{operation}");
     palette.apply(&DialogIntent::TextChanged {
         dialog: DialogId::new(COMMAND_PALETTE_ID),
