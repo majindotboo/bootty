@@ -1,5 +1,6 @@
 use num_traits::ToPrimitive as _;
 
+use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
@@ -144,11 +145,7 @@ pub(super) fn render(
         radius: cx.theme().radius_lg,
     }
     .content(width, docked);
-    let status_footer = render_codexbar(
-        snapshot,
-        colors,
-        width >= f32::from(cx.theme().font_size) * 17.0,
-    );
+    let status_footer = render_codexbar(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
 
@@ -311,13 +308,10 @@ impl SidebarRows {
                     && next.target == row.target
             }) {
                 if let Some(detail) = rows.next() {
-                    // Keep navigation about sessions. Reveal their terminal topology
-                    // on selection; progress and attention remain visible everywhere.
-                    if selected
-                        || !matches!(
-                            detail.kind,
-                            SidebarRowKind::Window { .. } | SidebarRowKind::Detail
-                        )
+                    // Terminal topology belongs in the tab strip. Keep task
+                    // progress visible and show metadata only for selection.
+                    if !matches!(detail.kind, SidebarRowKind::Window { .. })
+                        && (selected || !matches!(detail.kind, SidebarRowKind::Detail))
                     {
                         session_rows.push(self.render_row(detail, true));
                     }
@@ -1056,7 +1050,6 @@ fn usage_meter(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
-    inline: bool,
 ) -> gpui_kit::AnyElement {
     let mut details = format!("{} · {}", snapshot.provider.id(), snapshot.label);
     if let Some(expected) = snapshot.meter.expected_remaining_percent {
@@ -1080,10 +1073,8 @@ fn usage_meter(
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
         })
-        .child(usage_labels(snapshot, item, colors, inline))
-        .when(!inline, |row| {
-            row.child(usage_details(snapshot, item, colors))
-        })
+        .child(usage_labels(snapshot, item, colors))
+        .child(usage_track(snapshot, &item.key))
         .into_any_element()
 }
 
@@ -1091,7 +1082,6 @@ fn usage_labels(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
-    inline: bool,
 ) -> impl IntoElement {
     div()
         .w_full()
@@ -1115,16 +1105,15 @@ fn usage_labels(
                 .flex_none()
                 .child(snapshot.window_label.clone()),
         )
-        .child(usage_track(snapshot, &item.key))
+        .child(div().flex_1().min_w_0())
         .child(
             div()
                 .flex_none()
+                .font_semibold()
                 .text_color(color(snapshot.fill))
                 .child(format!("{:.0}%", snapshot.meter.remaining_percent)),
         )
-        .when(inline, |row| {
-            row.child(usage_details(snapshot, item, colors))
-        })
+        .child(usage_details(snapshot, item, colors))
 }
 
 fn usage_details(
@@ -1364,7 +1353,6 @@ pub(super) fn session_menu(
 pub(super) fn render_codexbar(
     snapshot: &SidebarSnapshot,
     colors: ChromePalette,
-    inline: bool,
 ) -> Option<gpui_kit::AnyElement> {
     (!snapshot.footer.is_empty())
         .then(|| {
@@ -1390,7 +1378,7 @@ pub(super) fn render_codexbar(
                         .text_xs()
                         .text_color(color(item.color));
                     if let Some(meter) = &item.meter {
-                        row.child(usage_meter(meter, item, colors, inline))
+                        row.child(usage_meter(meter, item, colors))
                             .into_any_element()
                     } else {
                         row.child(div().min_w_0().child(item.text.clone()))
