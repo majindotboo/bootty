@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use base64::Engine as _;
 use bootty_mux::terminal::{
     BackendPanePolicy, MuxPaneTarget, PaneStartRequest, ScopedMuxPaneTarget, TerminalRuntime,
 };
@@ -29,6 +30,70 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const INPUT_MARKER: &str = "BOOTTY_NATIVE_INPUT=accepted";
 const PANE_MARKER: &str = "BOOTTY_NATIVE_PANE=native-pane";
 const SIZE_MARKER: &str = "BOOTTY_NATIVE_SIZE=30 100";
+
+#[rstest]
+fn large_live_image_reaches_native_terminal_frames() -> Result<()> {
+    let directory = assert_fs::TempDir::new()?;
+    let pixels = [12, 34, 56, 255].repeat(1024 * 512);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&pixels);
+    let chunks = encoded.as_bytes().chunks(4096);
+    let count = chunks.len();
+    let mut output = Vec::new();
+    for (index, chunk) in chunks.enumerate() {
+        let more = u8::from(index.saturating_add(1) < count);
+        let header = if index == 0 {
+            format!("\x1b_Ga=T,i=42,q=2,f=32,s=1024,v=512,c=20,r=10,m={more};")
+        } else {
+            format!("\x1b_Gm={more};")
+        };
+        output.extend_from_slice(header.as_bytes());
+        output.extend_from_slice(chunk);
+        output.extend_from_slice(b"\x1b\\");
+    }
+    fs::write(directory.path().join("image.vt"), output)?;
+    let script = directory.path().join("image.sh");
+    fs::write(
+        &script,
+        "printf 'BOOTTY_IMAGE_READY\\n'\nIFS= read -r trigger\ncat image.vt\nprintf '\\nBOOTTY_IMAGE_COMPLETE\\n'\nIFS= read -r input\nprintf 'BOOTTY_AFTER_IMAGE=%s\\n' \"$input\"\nIFS= read -r finish\n",
+    )?;
+    let target = ScopedMuxPaneTarget::from(MuxPaneTarget::Pane {
+        session_id: "native-image-session".to_owned(),
+        pane_id: "native-image-pane".to_owned(),
+        cwd: Some(directory.path().to_string_lossy().into_owned()),
+    });
+    let (repaint_tx, repaint_rx) = mpsc::channel();
+    let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = repaint_tx.send(());
+    });
+    let mut config = TerminalSessionConfig::default();
+    config.launch.command = vec!["/bin/sh".to_owned(), script.to_string_lossy().into_owned()];
+    config.launch.command_is_argv = true;
+    let mut policy = bootty_mux::native::NativePanePolicy;
+    let mut terminal = policy
+        .start_terminal(PaneStartRequest {
+            target: &target,
+            geometry: geometry(80, 24),
+            spawn_geometry: geometry(80, 24),
+            display_scale: 1.0,
+            render_cell: CellMetrics::new(10.0, 20.0),
+            terminal_config: &config,
+            repaint_wakeup: &wakeup,
+        })?
+        .context("native image terminal")?;
+    wait_for_frame(&mut *terminal, &repaint_rx, "BOOTTY_IMAGE_READY")?;
+    terminal.write_input(b"render\n")?;
+    let image_frame = wait_for_frame(&mut *terminal, &repaint_rx, "BOOTTY_IMAGE_COMPLETE")?;
+    assert_eq!(image_frame.images.placements.len(), 1);
+    let image = &image_frame.images.placements[0];
+    assert_eq!((image.image_width, image.image_height), (1024, 512));
+    assert_eq!(image.data.as_slice(), pixels.as_slice());
+    terminal.write_input(b"accepted\n")?;
+    let after_input = wait_for_frame(&mut *terminal, &repaint_rx, "BOOTTY_AFTER_IMAGE=accepted")?;
+    drop(terminal);
+    policy.deactivate();
+    draw_with_gpui(image_frame, after_input);
+    Ok(())
+}
 
 #[rstest]
 fn native_policy_publishes_real_frames_through_gpui() -> Result<()> {
@@ -112,6 +177,8 @@ fn native_policy_publishes_real_frames_through_gpui() -> Result<()> {
 }
 
 fn draw_with_gpui(initial: Arc<RenderFrame>, final_frame: Arc<RenderFrame>) {
+    let expects_images =
+        !initial.images.placements.is_empty() || !final_frame.images.placements.is_empty();
     let mut cx = TestAppContext::single();
     let cx = cx.add_empty_window();
     let metrics = TerminalRenderMetrics::default();
@@ -151,6 +218,9 @@ fn draw_with_gpui(initial: Arc<RenderFrame>, final_frame: Arc<RenderFrame>) {
     assert_eq!(snapshot.prepaint_calls, 2);
     assert_eq!(snapshot.paint_calls, 2);
     assert!(snapshot.glyph_primitives > 0);
+    if expects_images {
+        assert!(snapshot.image_primitives > 0);
+    }
 }
 
 fn wait_for_frame(
