@@ -304,20 +304,29 @@ impl SidebarRows {
                 blocks.push(self.render_row(row, false));
                 continue;
             }
+            let selected = row.current || row.active;
             let mut session_rows = vec![self.render_row(row, true)];
             while rows.peek().is_some_and(|next| {
                 !matches!(next.kind, SidebarRowKind::Group | SidebarRowKind::Session)
                     && next.target == row.target
             }) {
                 if let Some(detail) = rows.next() {
-                    session_rows.push(self.render_row(detail, true));
+                    // Keep navigation about sessions. Reveal their terminal topology
+                    // on selection; progress and attention remain visible everywhere.
+                    if selected
+                        || !matches!(
+                            detail.kind,
+                            SidebarRowKind::Window { .. } | SidebarRowKind::Detail
+                        )
+                    {
+                        session_rows.push(self.render_row(detail, true));
+                    }
                 }
             }
             let hovered = row
                 .target
                 .as_ref()
                 .is_some_and(|target| self.pointer_hovered_session.as_ref() == Some(target));
-            let selected = row.current || row.active;
             let block = div()
                 .id(SharedString::from(format!("sidebar-session-{}", row.key)))
                 .debug_selector({
@@ -591,7 +600,7 @@ impl SidebarRows {
                     .min_w_0()
                     .truncate()
                     .when(
-                        is_group || matches!(row.kind, SidebarRowKind::Session),
+                        is_group || selected && matches!(row.kind, SidebarRowKind::Session),
                         gpui_kit::base::StyledExt::font_semibold,
                     )
                     .when(informational_row(&row.kind), gpui_kit::Styled::text_xs)
