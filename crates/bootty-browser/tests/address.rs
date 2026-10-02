@@ -1,4 +1,4 @@
-use bootty_browser::{AddressError, normalize_address};
+use bootty_browser::{AddressError, normalize_address, resolve_address};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -40,5 +40,39 @@ proptest! {
     #[test]
     fn loopback_ports_keep_http(port in 1u16..=u16::MAX) {
         prop_assert_eq!(normalize_address(&format!("localhost:{port}")), Ok(format!("http://localhost:{port}/")));
+    }
+}
+
+#[rstest]
+#[case("terminal ui", "https://duckduckgo.com/?q=terminal+ui")]
+#[case("localhost:3000", "http://localhost:3000/")]
+#[case("example.com/docs", "https://example.com/docs")]
+#[case("rust", "https://duckduckgo.com/?q=rust")]
+fn address_bar_resolves_searches_and_websites(#[case] input: &str, #[case] expected: &str) {
+    assert_eq!(
+        resolve_address(input, "https://duckduckgo.com/"),
+        Ok(expected.to_owned())
+    );
+}
+
+#[rstest]
+#[case("javascript:alert(1)")]
+#[case("data:text/html,hi")]
+#[case("file:///tmp/page.html")]
+#[case("https://user:password@example.com")]
+fn searching_does_not_hide_unsafe_addresses(#[case] input: &str) {
+    assert_eq!(
+        resolve_address(input, "https://duckduckgo.com/"),
+        normalize_address(input)
+    );
+}
+
+proptest! {
+    #[test]
+    fn search_terms_round_trip_without_changing_the_destination(words in "[a-zA-Z &#+=?]{1,100}") {
+        let resolved = resolve_address(&words, "https://www.google.com/search")?;
+        let url = url::Url::parse(&resolved)?;
+        prop_assert_eq!(url.host_str(), Some("www.google.com"));
+        prop_assert_eq!(url.query_pairs().find(|(key, _)| key == "q").map(|(_, value)| value.into_owned()), Some(words.trim().to_owned()));
     }
 }

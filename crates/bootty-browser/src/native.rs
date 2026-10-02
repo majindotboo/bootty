@@ -5,11 +5,11 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 #[cfg(target_os = "linux")]
 use wry::dpi::{PhysicalPosition, PhysicalSize};
 use wry::{
-    NewWindowResponse, PageLoadEvent, PermissionResponse, Rect, WebView, WebViewBuilder,
+    NewWindowResponse, PageLoadEvent, PermissionResponse, Rect, WebView,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 
-use crate::{AddressError, normalize_address};
+use crate::{AddressError, BrowserProfile, normalize_address};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserBounds {
@@ -104,6 +104,8 @@ impl BrowserView {
         address: &str,
         bounds: BrowserBounds,
         events: Sender<BrowserEvent>,
+        profile: &mut BrowserProfile,
+        persist_site_data: bool,
     ) -> Result<Self, NativeBrowserError> {
         let address = normalize_address(address)?;
         let handle = window
@@ -130,7 +132,8 @@ impl BrowserView {
         let permission_events = events.clone();
         let download_events = events.clone();
         let shortcut_events = events.clone();
-        let view = WebViewBuilder::new()
+        let view = profile
+            .builder()
             .with_url(&address)
             .with_bounds(bounds.into())
             .with_visible(false)
@@ -167,8 +170,8 @@ impl BrowserView {
                 };
                 _ = shortcut_events.try_send(BrowserEvent::Shortcut(shortcut));
             })
-            // Preview tabs have no durable browser profile; this also separates app identities.
-            .with_incognito(true)
+            // The profile is scoped to the app identity; private pages never retain site data.
+            .with_incognito(!persist_site_data)
             .with_navigation_handler(|url| normalize_address(&url).is_ok())
             .with_document_title_changed_handler(move |title| {
                 _ = title_events.try_send(BrowserEvent::TitleChanged(
@@ -188,7 +191,7 @@ impl BrowserView {
             })
             .with_permission_handler(move |_| {
                 _ = permission_events.try_send(BrowserEvent::Notice(
-                    "This preview cannot access the camera, microphone, or location.".to_owned(),
+                    "This browser cannot access the camera, microphone, or location.".to_owned(),
                 ));
                 PermissionResponse::Deny
             })

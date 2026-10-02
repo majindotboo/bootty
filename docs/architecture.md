@@ -30,7 +30,7 @@ This file describes the current production structure.
 | Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
 | Desktop capture and input | `bootty-computer` | User enabling and macOS permission checks precede every operation. |
-| Browser child views | `bootty-browser` | Wry owns navigation; host geometry and visibility arrive at the UI seam. |
+| Browser child views and site data | `bootty-browser` | Wry owns navigation and identity-scoped browser profiles; host geometry and visibility arrive at the UI seam. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
 | Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
 | The installed remote Space catalog | `bootty-mux::remote_catalog::Catalog` | A backend-scoped lease serializes mutations; membership follows backend session tags. |

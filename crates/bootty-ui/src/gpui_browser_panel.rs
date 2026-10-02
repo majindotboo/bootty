@@ -1,7 +1,7 @@
 //! Browser tabs own native child webviews; GPUI owns their chrome and visibility.
 use bootty_browser::{
-    BrowserBounds, BrowserEvent, BrowserShortcut, BrowserView, NativeBrowserError,
-    normalize_address,
+    BrowserBounds, BrowserEvent, BrowserProfile, BrowserShortcut, BrowserView, NativeBrowserError,
+    normalize_address, resolve_address,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -27,9 +27,12 @@ struct BrowserTab {
 
 pub struct BrowserPaletteRequested;
 pub struct BrowserClosed;
+pub struct BrowserSettingsRequested;
 
 pub struct BrowserPanel {
     tabs: Vec<BrowserTab>,
+    profile: BrowserProfile,
+    config: bootty_config::config::BrowserConfig,
     selected: u64,
     next_id: u64,
     address: Entity<InputState>,
@@ -41,9 +44,13 @@ pub struct BrowserPanel {
 }
 
 impl BrowserPanel {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        config: &bootty_config::config::BoottyConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let address =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Web address or localhost:3000"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter an address"));
         cx.subscribe_in(&address, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 let address = this.address.read(cx).value().to_string();
@@ -67,6 +74,8 @@ impl BrowserPanel {
                 error: None,
                 view: None,
             }],
+            profile: BrowserProfile::new(config.config_path.with_file_name("browser")),
+            config: config.browser,
             selected: 1,
             next_id: 2,
             address,
@@ -84,7 +93,7 @@ impl BrowserPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), NativeBrowserError> {
-        let address = normalize_address(address)?;
+        let address = resolve_address(address, self.config.search_engine.address())?;
         let navigation = self
             .selected_tab()
             .and_then(|tab| tab.view.as_ref())
@@ -135,6 +144,27 @@ impl BrowserPanel {
                 tab.error = Some(error.to_string());
             }
         }
+        cx.notify();
+    }
+
+    pub(crate) fn configure(
+        &mut self,
+        config: bootty_config::config::BrowserConfig,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config == config {
+            return;
+        }
+        if self.config.persist_site_data != config.persist_site_data {
+            for tab in &mut self.tabs {
+                if let Some(view) = &mut tab.view {
+                    _ = view.set_visible(false);
+                }
+                tab.view = None;
+                tab.error = None;
+            }
+        }
+        self.config = config;
         cx.notify();
     }
 
@@ -310,10 +340,21 @@ impl BrowserPanel {
         });
         if create {
             let (sender, receiver) = async_channel::bounded(128);
+            let Some(address) = self.selected_tab().map(|tab| tab.address.clone()) else {
+                return;
+            };
+            let view = BrowserView::new(
+                window,
+                &address,
+                bounds,
+                sender,
+                &mut self.profile,
+                self.config.persist_site_data,
+            );
             let Some(tab) = self.selected_mut() else {
                 return;
             };
-            match BrowserView::new(window, &tab.address, bounds, sender) {
+            match view {
                 Ok(view) => tab.view = Some(view),
                 Err(error) => {
                     tab.error = Some(error.to_string());
@@ -521,6 +562,16 @@ impl BrowserPanel {
                 )),
             )
             .child(
+                Button::new("browser-settings")
+                    .icon(IconName::Settings)
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .accessibility_label("Browser settings")
+                    .tooltip("Browser settings")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(BrowserSettingsRequested))),
+            )
+            .child(
                 Button::new("browser-external")
                     .icon(IconName::ExternalLink)
                     .ghost()
@@ -546,6 +597,7 @@ impl Focusable for BrowserPanel {
 impl EventEmitter<PanelEvent> for BrowserPanel {}
 impl EventEmitter<BrowserPaletteRequested> for BrowserPanel {}
 impl EventEmitter<BrowserClosed> for BrowserPanel {}
+impl EventEmitter<BrowserSettingsRequested> for BrowserPanel {}
 impl BasePanel for BrowserPanel {
     fn panel_name(&self) -> &'static str {
         "bootty.browser"
@@ -612,12 +664,8 @@ impl Render for BrowserPanel {
                                 .gap_2()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(Icon::new(IconName::Globe).large())
-                                .child("Preview a website or your local development server")
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .child("Enter an address above to get started."),
-                                ),
+                                .child("Search the web or open your development server")
+                                .child(div().text_sm().child("Enter a search or address above.")),
                         )
                     })
                     .child(

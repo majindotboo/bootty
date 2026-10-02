@@ -1002,7 +1002,7 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         let sender = self.state.app_command_sender(Caller::Internal);
-        let path = self.state.config().config_path.clone();
+        let config = self.state.config().clone();
         let key = self.state.window_state_key.clone();
         let local_git = self
             .state
@@ -1028,7 +1028,7 @@ impl GpuiWorkspace {
                 &self.chrome_view,
                 scope,
                 sender,
-                &path,
+                &config,
                 key,
                 local_git,
                 window,
@@ -3228,6 +3228,9 @@ impl GpuiWorkspace {
             projection.is_some() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| {
+                tools.browser.update(cx, |browser, cx| {
+                    browser.configure(self.state.config().browser, cx);
+                });
                 tools.set_browser_occluded(browser_occluded, window, cx);
             });
         }

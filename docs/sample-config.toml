@@ -95,6 +95,10 @@ bold = "auto"
 extra-bold = "auto"
 black = "auto"
 
+[browser]
+search-engine = "duck_duck_go" # google, bing, brave
+persist-site-data = true
+
 [chrome]
 tabs-use-session-color = true
 left-dock-toggle = true

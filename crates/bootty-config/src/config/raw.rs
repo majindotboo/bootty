@@ -32,6 +32,7 @@ pub(super) struct RawConfig {
     pub(super) font: FontPatch,
     pub(super) font_feature: Vec<String>,
     pub(super) chrome: ChromePatch,
+    pub(super) browser: BrowserPatch,
     pub(super) sidebar: SidebarPatch,
     pub(super) multiplexer: MultiplexerPatch,
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
@@ -330,4 +331,11 @@ fn parse_macos_titlebar_style(input: &str) -> Option<MacosTitlebarStyle> {
 
 fn normalize_config_value(input: &str) -> String {
     input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct BrowserPatch {
+    pub(super) search_engine: Option<super::model::BrowserSearchEngine>,
+    pub(super) persist_site_data: Option<bool>,
 }

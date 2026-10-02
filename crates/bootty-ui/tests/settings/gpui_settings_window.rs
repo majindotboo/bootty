@@ -330,7 +330,7 @@ fn settings_content_exposes_its_accessible_group_identity(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn settings_expose_the_eight_zed_shaped_pages_in_product_order(cx: &mut TestAppContext) {
+fn settings_expose_native_pages_in_product_order(cx: &mut TestAppContext) {
     init_zed_ui(cx);
     let (_, cx) = cx.add_window_view(|_, cx| {
         SettingsWindowProbe::with_snapshot(snapshot_with_category(SettingsCategory::General), cx)
@@ -341,6 +341,7 @@ fn settings_expose_the_eight_zed_shaped_pages_in_product_order(cx: &mut TestAppC
         ("settings-category-keymap", "Keymap"),
         ("settings-category-window-and-layout", "Window & Layout"),
         ("settings-category-panels", "Panels"),
+        ("settings-category-browser", "Browser"),
         ("settings-category-terminal", "Terminal"),
         ("settings-category-remotes", "Remotes"),
         ("settings-category-advanced", "Advanced"),
@@ -940,6 +941,7 @@ fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
                     vec![toggle_row("panels.sidebar", "Show sidebar")],
                 )],
             ),
+            browser_page(),
             page(
                 SettingsCategory::Terminal,
                 vec![section(
@@ -1062,4 +1064,19 @@ fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         (actual - expected).abs() <= tolerance,
         "expected {expected}px ± {tolerance}px, got {actual}px"
     );
+}
+
+fn browser_page() -> SettingsPage {
+    page(
+        SettingsCategory::Browser,
+        vec![section(
+            "browser",
+            "Browser",
+            "search cookies privacy",
+            vec![toggle_row(
+                "browser.persist-site-data",
+                "Remember cookies and site data",
+            )],
+        )],
+    )
 }

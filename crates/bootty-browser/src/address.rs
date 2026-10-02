@@ -60,3 +60,26 @@ pub fn normalize_address(address: &str) -> Result<String, AddressError> {
     }
     Ok(url.into())
 }
+
+/// Resolves web addresses and safely encodes search terms for the configured engine.
+///
+/// # Errors
+/// Rejects empty input, unsafe explicit schemes, embedded credentials, and invalid engines.
+pub fn resolve_address(input: &str, search_engine: &str) -> Result<String, AddressError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(AddressError::Empty);
+    }
+    let host = input.split('/').next().unwrap_or_default();
+    if input.contains("://")
+        || host.contains(':')
+        || input == "about:blank"
+        || (!input.chars().any(char::is_whitespace) && (host.contains('.') || host == "localhost"))
+    {
+        return normalize_address(input);
+    }
+    let mut search =
+        Url::parse(&normalize_address(search_engine)?).map_err(|_| AddressError::Invalid)?;
+    search.query_pairs_mut().append_pair("q", input);
+    Ok(search.into())
+}

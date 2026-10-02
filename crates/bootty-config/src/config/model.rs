@@ -134,6 +134,7 @@ pub struct BoottyConfig {
     pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
+    pub browser: BrowserConfig,
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
@@ -146,6 +147,46 @@ pub struct BoottyConfig {
     pub window: WindowConfig,
     pub config_path: PathBuf,
     pub compatibility_warnings: Vec<String>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum BrowserSearchEngine {
+    #[default]
+    DuckDuckGo,
+    Google,
+    Bing,
+    Brave,
+}
+
+impl BrowserSearchEngine {
+    #[must_use]
+    pub const fn address(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "https://duckduckgo.com/",
+            Self::Google => "https://www.google.com/search",
+            Self::Bing => "https://www.bing.com/search",
+            Self::Brave => "https://search.brave.com/search",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserConfig {
+    pub search_engine: BrowserSearchEngine,
+    pub persist_site_data: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            search_engine: BrowserSearchEngine::default(),
+            persist_site_data: true,
+        }
+    }
 }
 
 #[derive(

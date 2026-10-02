@@ -1,4 +1,6 @@
-use bootty_browser::{AddressError, BrowserBounds, BrowserView, NativeBrowserError};
+use bootty_browser::{
+    AddressError, BrowserBounds, BrowserProfile, BrowserView, NativeBrowserError,
+};
 use rstest::{fixture, rstest};
 use wry::raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
 
@@ -29,6 +31,8 @@ fn unavailable_parent_is_a_reported_error(unavailable_window: UnavailableWindow)
             scale_factor: 1.0,
         },
         events,
+        &mut BrowserProfile::new(std::path::PathBuf::from("unused-browser-profile")),
+        true,
     );
     assert!(matches!(result, Err(NativeBrowserError::Platform(_))));
 }
@@ -52,6 +56,8 @@ fn native_boundary_rejects_unsupported_addresses(
             scale_factor: 1.0,
         },
         events,
+        &mut BrowserProfile::new(std::path::PathBuf::from("unused-browser-profile")),
+        true,
     );
     assert!(matches!(
         result,

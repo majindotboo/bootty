@@ -134,6 +134,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(input_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
+    specs.extend(browser_specs());
     specs.push(spec(&["computer-use"], "Computer use", "Allow native agent commands to capture and control this computer after macOS permissions are granted.", "general", "Computer", SettingKind::Bool, SettingDefault::Field(|config| SettingValue::Bool(config.computer_use))));
     specs
 }
@@ -1539,6 +1540,39 @@ fn custom_runtime_specs() -> [SettingSpec; 4] {
             "extensions",
             "EXTENSIONS",
             SettingEditor::Extensions,
+        ),
+    ]
+}
+
+fn browser_specs() -> [SettingSpec; 2] {
+    use crate::config::BrowserSearchEngine as Engine;
+    [
+        spec(
+            &["browser", "search-engine"],
+            "Search engine",
+            "Search from the browser address bar when you enter words instead of an address.",
+            "browser",
+            "SEARCH",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&Engine::DuckDuckGo, "DuckDuckGo"),
+                    SettingOption::of(&Engine::Google, "Google"),
+                    SettingOption::of(&Engine::Bing, "Bing"),
+                    SettingOption::of(&Engine::Brave, "Brave"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.browser.search_engine))
+            }),
+        ),
+        spec(
+            &["browser", "persist-site-data"],
+            "Remember cookies and site data",
+            "Keep website sign-ins between launches in this app's browser profile. Turn off for private tabs. Existing saved data is retained; changing this setting reloads open pages.",
+            "browser",
+            "PRIVACY",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.browser.persist_site_data)),
         ),
     ]
 }

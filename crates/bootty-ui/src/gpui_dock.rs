@@ -19,7 +19,9 @@ use gpui_kit::{
     Styled, Subscription, Window, div, prelude::*,
 };
 
-use crate::gpui_browser_panel::{BrowserClosed, BrowserPaletteRequested, BrowserPanel};
+use crate::gpui_browser_panel::{
+    BrowserClosed, BrowserPaletteRequested, BrowserPanel, BrowserSettingsRequested,
+};
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
 use crate::{
     gpui_document_panel::{DocumentClosed, DocumentPanel},
@@ -188,12 +190,13 @@ impl WorkspaceDock {
         chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
         scope: bootty_mux::controller::SpaceId,
         sender: BoundAppCommandSender,
-        config_path: &std::path::Path,
+        config: &bootty_config::config::BoottyConfig,
         state_key: String,
         local_git: Option<bootty_git::GitFactsCache>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let config_path = &config.config_path;
         let legacy_key = format!(
             "{state_key}:space:{}:host:{}",
             scope.persistence_value(),
@@ -215,7 +218,7 @@ impl WorkspaceDock {
             cx.new(|cx| crate::gpui_sidebar_panel::SessionsPanel::new(chrome.clone(), cx));
         register(&area, sessions.clone(), cx);
         let (coordination, browser, browser_palette) =
-            Self::fixed_tools(&area, &sender, window, cx);
+            Self::fixed_tools(&area, &sender, config, window, cx);
         Self::register_sidebar(&area, &sessions, cx);
         let panels = ContextPanels::new(context.clone(), sender.clone(), local_git, window, cx);
         panels.register(&area, cx);
@@ -290,6 +293,7 @@ impl WorkspaceDock {
     fn fixed_tools(
         area: &Entity<DockArea>,
         sender: &BoundAppCommandSender,
+        config: &bootty_config::config::BoottyConfig,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (
@@ -307,7 +311,7 @@ impl WorkspaceDock {
             )
         });
         register(area, coordination.clone(), cx);
-        let browser = cx.new(|cx| BrowserPanel::new(window, cx));
+        let browser = cx.new(|cx| BrowserPanel::new(config, window, cx));
         register(area, browser.clone(), cx);
         let browser_area = area.clone();
         cx.observe(&browser, move |_, _, cx| {
@@ -321,6 +325,19 @@ impl WorkspaceDock {
                 this.remove_tool(bootty_config::config::PanelKind::Browser, window, cx);
                 this.sync_browser_visibility(window, cx);
                 Focusable::focus_handle(&this.terminal, cx).focus(window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, _: &BrowserSettingsRequested, window, cx| {
+                let mut invocation = bootty_control::CommandInvocation::from_action(
+                    "open_setting",
+                    bootty_control::Caller::CommandPalette,
+                );
+                invocation.arguments = vec!["browser.search-engine".to_owned()];
+                this.submit_command(invocation, window, cx);
             },
         )
         .detach();

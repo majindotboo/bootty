@@ -809,3 +809,8 @@ URL scheme. Fractional number controls use two decimal places; integer controls
 remain integral.
 
 `computer-use = false` is the default. Enable it in Settings or the native computer setup before agents can capture or control the desktop. Screen Recording and Accessibility permissions remain separate macOS grants.
+
+The Browser settings page chooses the address-bar search engine and whether cookies and site data
+survive app restarts. `[browser]` accepts `search-engine` (`duck_duck_go`, `google`, `bing`, or
+`brave`) and `persist-site-data` (default `true`). Turning persistence off recreates open pages in
+private mode without deleting the saved profile. Development and Production use separate profiles.
