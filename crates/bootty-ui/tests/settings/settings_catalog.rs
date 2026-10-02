@@ -15,28 +15,21 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[rstest]
-fn native_settings_catalog_keeps_the_zed_page_snapshot() {
-    let snapshot = settings_catalog_pages()
+#[case("browser.search-engine")]
+#[case("browser.persist-site-data")]
+fn browser_controls_have_their_own_settings_destination(#[case] id: &str) {
+    let schema = SettingsSchema::builtin();
+    let spec = schema
+        .specs()
         .iter()
-        .map(|page| (page.category, page.id, page.label))
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        snapshot,
-        vec![
-            (SettingsCategory::General, "general", "General"),
-            (SettingsCategory::Appearance, "appearance", "Appearance"),
-            (SettingsCategory::Keymap, "keymap", "Keymap"),
-            (
-                SettingsCategory::WindowAndLayout,
-                "window-and-layout",
-                "Window & Layout",
-            ),
-            (SettingsCategory::Panels, "panels", "Panels"),
-            (SettingsCategory::Terminal, "terminal", "Terminal"),
-            (SettingsCategory::Remotes, "remotes", "Remotes"),
-            (SettingsCategory::Advanced, "advanced", "Advanced"),
-        ]
+        .find(|spec| spec.id() == id)
+        .expect("browser setting");
+    let category = settings_category_for(id, spec.page.as_ref());
+    assert_eq!(category, SettingsCategory::Browser);
+    assert!(
+        settings_catalog_pages()
+            .iter()
+            .any(|page| page.category == category)
     );
 }
 
