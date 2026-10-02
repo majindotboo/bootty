@@ -309,6 +309,7 @@ pub struct SidebarRow {
     pub number: Option<usize>,
     pub indent: u16,
     pub tree: Option<String>,
+    pub artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
     pub color: Rgba,

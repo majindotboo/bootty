@@ -30,13 +30,13 @@ type RemoteGitCache = bootty_git::GitFactsCache<
 >;
 
 pub struct NativeChrome {
-    home: Option<std::path::PathBuf>,
     pub(crate) local_git: bootty_git::GitFactsCache,
     remote_git: Vec<(
         bootty_config::config::RemoteConfig,
         RemoteGitCache,
         std::time::Instant,
     )>,
+    artwork: crate::project_artwork::ProjectArtworkCache,
     pub(crate) metrics: MetricsService,
     pub(crate) usage: UsageService,
     pub(crate) clock: ClockSnapshot,
@@ -45,9 +45,9 @@ pub struct NativeChrome {
 impl Default for NativeChrome {
     fn default() -> Self {
         Self {
-            home: bootty_git::home_dir(),
             local_git: bootty_git::GitFactsCache::new(),
             remote_git: Vec::new(),
+            artwork: crate::project_artwork::ProjectArtworkCache::default(),
             metrics: MetricsService::default(),
             usage: UsageService::default(),
             clock: ClockSnapshot::now(),
@@ -556,6 +556,7 @@ fn status_bars(
     let theme = state.ui_theme().palette;
     let mut top_status = chrome.top_bar.then(|| {
         status_snapshot(
+            state,
             "top",
             &chrome.top_segments,
             native,
@@ -566,6 +567,7 @@ fn status_bars(
     });
     let mut bottom_status = chrome.bottom_bar.then(|| {
         status_snapshot(
+            state,
             "bottom",
             &chrome.bottom_segments,
             native,
@@ -589,7 +591,15 @@ fn status_bars(
             "bottom"
         };
         let bar = target.get_or_insert_with(|| {
-            status_snapshot(key, &[], native, theme, projection, status_background)
+            status_snapshot(
+                state,
+                key,
+                &[],
+                native,
+                theme,
+                projection,
+                status_background,
+            )
         });
         let command = crate::commands::DockAction::TogglePanel(kind).command();
         bar.segments.push(StatusSegmentSnapshot {
@@ -695,6 +705,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             number: None,
             indent: 0,
             tree: None,
+            artwork: None,
             icon: Some("circle-dashed".to_owned()),
             diff: None,
             color: palette.text,
@@ -716,6 +727,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             number: None,
             indent: 2,
             tree: None,
+            artwork: None,
             icon: Some("bootty".to_owned()),
             diff: None,
             color: palette.text,
@@ -742,32 +754,61 @@ fn sidebar_rows(
     palette: ChromePalette,
 ) -> Vec<SidebarRow> {
     let sessions = &projection.mux.sessions;
-    let display_name = |session: &SessionView| {
-        if session.display_name.is_empty() {
-            session.name.clone()
-        } else {
-            session.display_name.clone()
-        }
-    };
-    let names = sessions.iter().map(display_name).collect::<Vec<_>>();
-    let mut groups = session_groups(&names);
-    let mut modules = state.config().sidebar.session_modules.clone();
-    if !state.config().sidebar.session_modules_configured {
-        modules.extend(bootty_agents::AgentKind::ALL.map(|provider| provider.module().to_owned()));
-    }
+    let scope = state.mux_scope().persistence_value().to_string();
+    let now = std::time::Instant::now();
     let mut rows = Vec::new();
+    let mut groups = Vec::<((Option<&str>, Option<&str>), Vec<(usize, &SessionView)>)>::new();
+    for (index, session) in sessions.iter().enumerate() {
+        let group = (
+            session.cwd.as_deref(),
+            projection
+                .session_facts
+                .get(&session.id)
+                .and_then(|facts| facts.branch.as_deref()),
+        );
+        if let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
+            indices.push((index, session));
+        } else {
+            groups.push((group, vec![(index, session)]));
+        }
+    }
     let mut last_group = None;
-    for (index, (session, name)) in sessions.iter().zip(&names).enumerate() {
-        let (group, suffix) = name.split_once('/').unwrap_or((name, ""));
-        let (count, emitted) = groups.entry(group).or_default();
-        *emitted = emitted.saturating_add(1);
-        let grouped = !group.is_empty() && *count > 1;
-        let last = *emitted == *count;
+    for (index, session) in groups.into_iter().flat_map(|(_, indices)| indices) {
+        let facts = projection
+            .session_facts
+            .get(&session.id)
+            .cloned()
+            .unwrap_or_default();
+        let name = if session.display_name.is_empty() {
+            &session.name
+        } else {
+            &session.display_name
+        };
+        let cwd = session.cwd.as_deref();
+        let project = cwd
+            .and_then(|cwd| cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Terminal");
+        let group = (cwd.unwrap_or("").to_owned(), facts.branch.clone());
         let base = sidebar_session_base(state, session, index, sessions.len(), palette);
-        if grouped && last_group != Some(group) {
+        if last_group.as_ref() != Some(&group) {
             rows.push(SidebarRow {
-                key: format!("group:{group}:{}", session.id),
-                text: group.to_owned(),
+                key: format!("project:{}:{}", scope, session.id),
+                text: project.to_owned(),
+                trailing: facts.branch.clone(),
+                trailing_color: Some(palette.muted),
+                color: palette.text,
+                dim_color: palette.muted,
+                artwork: cwd.and_then(|cwd| {
+                    native.artwork.request(
+                        &scope,
+                        cwd,
+                        state.active_multiplexer().remote.as_ref(),
+                        now,
+                        &state.repaint,
+                    )
+                }),
+                icon: Some("folder".to_owned()),
                 kind: SidebarRowKind::Group,
                 active: false,
                 current: false,
@@ -775,128 +816,82 @@ fn sidebar_rows(
                 ..base.clone()
             });
         }
-        let facts = projection
-            .session_facts
-            .get(&session.id)
-            .cloned()
-            .unwrap_or_default();
-        let has_diff = facts.diff_added.is_some() && facts.diff_removed.is_some();
-        let diff = sidebar_diff(&facts, &modules, state.ui_theme().palette);
-        let process = facts
-            .display_process
-            .as_ref()
-            .filter(|process| !process.is_empty());
-        let trailing = (!has_diff && modules.iter().any(|module| module == "process"))
-            .then(|| process.cloned())
-            .flatten();
-        let trailing_color = trailing.as_ref().map(|_| state.ui_theme().palette.subtext);
-        rows.push(SidebarRow {
-            diff,
-            trailing,
-            trailing_color,
-            text: if grouped && !suffix.is_empty() {
-                suffix
-            } else {
-                group
-            }
-            .to_owned(),
-            kind: SidebarRowKind::Session,
-            number: Some(index.saturating_add(1)),
-            indent: if grouped { 2 } else { 0 },
-            tree: Some(
-                if !grouped {
-                    "none"
-                } else if last {
-                    "last"
-                } else {
-                    "middle"
-                }
-                .to_owned(),
-            ),
-            selectable: true,
-            ..base.clone()
-        });
-        let detail = |id: &str, icon: &str, text: String| {
-            sidebar_detail(
-                &base,
-                grouped,
-                last,
-                id,
-                icon,
-                text,
-                state.ui_theme().palette.subtext,
-            )
+        let title = name.strip_prefix(&format!("{project}/")).unwrap_or(name);
+        let title = if title == project
+            || facts.branch.as_deref() == Some(title)
+            || std::path::Path::new(title).is_absolute()
+        {
+            "Terminal"
+        } else {
+            title
         };
-        rows.extend(sidebar_session_details(
-            state, native, session, &facts, &modules, base.color, &detail,
-        ));
+        let mut row = SidebarRow {
+            text: title.to_owned(),
+            icon: Some("terminal".to_owned()),
+            kind: SidebarRowKind::Session,
+            selectable: true,
+            ..base
+        };
+        if let Some(activity) = terminal_activity(state, &session.id, None) {
+            use bootty_agents::TerminalAgentStatus as S;
+            let theme = state.ui_theme().palette;
+            let (status, tone) = match activity.status {
+                S::Starting => ("Starting", theme.muted),
+                S::Idle => ("Idle", theme.muted),
+                S::Working => ("Working", theme.success),
+                S::Waiting => ("Waiting", theme.warning),
+                S::Finished => ("Finished", theme.muted),
+                S::Stopped => ("Stopped", theme.muted),
+                S::Error => ("Error", theme.destructive),
+                S::Unavailable => ("Unavailable", theme.warning),
+            };
+            row.icon = Some(activity.provider.icon().to_owned());
+            row.trailing = Some(status.to_owned());
+            row.trailing_color = Some(tone);
+        }
+        rows.push(row);
         last_group = Some(group);
     }
     rows
 }
 
-fn sidebar_diff(
-    facts: &bootty_git::GitSessionFacts,
-    modules: &[String],
-    theme: crate::gpui::UiPalette,
-) -> Option<crate::gpui::chrome::SidebarDiffSummary> {
-    if modules.iter().any(|module| module == "diffs") {
-        facts
-            .diff_added
-            .zip(facts.diff_removed)
-            .map(|(added, removed)| crate::gpui::chrome::SidebarDiffSummary {
-                added,
-                removed,
-                added_color: theme.success,
-                removed_color: theme.destructive,
+fn terminal_activity(
+    state: &AppState,
+    session_id: &str,
+    window_id: Option<&str>,
+) -> Option<bootty_agents::TerminalAgentActivity> {
+    use bootty_control::ResourceKind;
+    let agents = state.terminal_agent_service()?;
+    let scope = state.mux_scope();
+    let mux = state.mux();
+    let session = mux.backend_session_by_id_or_name(session_id)?;
+    let binding = state.binding_target_handle(scope, mux.binding_generation());
+    session
+        .windows
+        .iter()
+        .filter(|window| window_id.is_none_or(|id| window.id == id))
+        .flat_map(|window| {
+            window.panes.iter().filter_map(|pane| {
+                let target = ExactMuxTarget::Pane(
+                    scope,
+                    session.id.clone(),
+                    window.id.clone(),
+                    pane.pane_id.clone()?,
+                )
+                .command_target(ResourceKind::Terminal, mux, &binding)?;
+                agents.activity(&target)
             })
-    } else {
-        None
-    }
-}
-
-fn session_groups(names: &[String]) -> HashMap<&str, (usize, usize)> {
-    let mut groups = HashMap::<&str, (usize, usize)>::new();
-    for name in names {
-        let count = &mut groups
-            .entry(name.split('/').next().unwrap_or(name))
-            .or_default()
-            .0;
-        *count = count.saturating_add(1);
-    }
-    groups
-}
-
-fn sidebar_detail(
-    base: &SidebarRow,
-    grouped: bool,
-    last: bool,
-    id: &str,
-    icon: &str,
-    text: String,
-    subtext: Rgba,
-) -> SidebarRow {
-    SidebarRow {
-        key: format!("{}:{id}", base.key),
-        text,
-        icon: Some(icon.to_owned()),
-        color: subtext,
-        indent: if grouped { 4 } else { 2 },
-        tree: Some(
-            if !grouped {
-                "none"
-            } else if last {
-                "blank"
-            } else {
-                "pipe"
-            }
-            .to_owned(),
-        ),
-        active: false,
-        current: base.current,
-        selectable: true,
-        ..base.clone()
-    }
+        })
+        .max_by_key(|activity| match activity.status {
+            bootty_agents::TerminalAgentStatus::Error => 8,
+            bootty_agents::TerminalAgentStatus::Waiting => 7,
+            bootty_agents::TerminalAgentStatus::Working => 6,
+            bootty_agents::TerminalAgentStatus::Starting => 5,
+            bootty_agents::TerminalAgentStatus::Unavailable => 4,
+            bootty_agents::TerminalAgentStatus::Finished => 3,
+            bootty_agents::TerminalAgentStatus::Stopped => 2,
+            bootty_agents::TerminalAgentStatus::Idle => 1,
+        })
 }
 
 fn sidebar_session_base(
@@ -918,6 +913,7 @@ fn sidebar_session_base(
         number: None,
         indent: 0,
         tree: None,
+        artwork: None,
         icon: None,
         diff: None,
         color,
@@ -939,137 +935,6 @@ fn sidebar_session_base(
             can_return_to_last: state.mux().previous_selected_session().is_some(),
         }),
     }
-}
-
-fn sidebar_session_details(
-    state: &AppState,
-    native: &NativeChrome,
-    session: &SessionView,
-    facts: &bootty_git::GitSessionFacts,
-    modules: &[String],
-    color: Rgba,
-    detail: &impl Fn(&str, &str, String) -> SidebarRow,
-) -> Vec<SidebarRow> {
-    let has_diff = facts.diff_added.is_some() && facts.diff_removed.is_some();
-    let process = facts
-        .display_process
-        .as_ref()
-        .filter(|process| !process.is_empty());
-    let mut rows = Vec::new();
-    for module in modules {
-        match module.as_str() {
-            "diffs" => {}
-            "process" => {
-                if has_diff && let Some(process) = process {
-                    rows.push(detail("process", "terminal", process.clone()));
-                }
-            }
-            "directory" => {
-                let cwd = session.cwd.as_deref().unwrap_or("unknown");
-                let home = state
-                    .active_multiplexer()
-                    .remote
-                    .is_none()
-                    .then_some(native.home.as_deref())
-                    .flatten();
-                rows.push(detail(
-                    "cwd",
-                    "folder",
-                    bootty_git::project::display_path(cwd, home),
-                ));
-            }
-            "branch" => {
-                let mut row = detail(
-                    "branch",
-                    "git-branch",
-                    facts.branch.clone().unwrap_or_else(|| "unknown".to_owned()),
-                );
-                row.trailing = match facts.branch_status {
-                    bootty_git::BranchStatus::Current => None,
-                    bootty_git::BranchStatus::Stale => Some("stale".to_owned()),
-                    bootty_git::BranchStatus::Unknown => Some("unknown".to_owned()),
-                };
-                rows.push(row);
-            }
-            "ports" if !session.ports.is_empty() => rows.push(detail(
-                "ports",
-                "plug",
-                session
-                    .ports
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )),
-            "progress" => {
-                for (index, progress) in session.progresses.iter().enumerate() {
-                    let mut row =
-                        detail(&format!("progress:{index}"), "", progress.process.clone());
-                    row.icon = None;
-                    row.color = color;
-                    row.dim_color = state.ui_theme().palette.border;
-                    row.kind = SidebarRowKind::Progress {
-                        value: (!progress.indeterminate).then_some(progress.value),
-                        label: Some(progress.process.clone()),
-                    };
-                    rows.push(row);
-                }
-            }
-            name => rows.extend(sidebar_agent_rows(state, session, name, detail)),
-        }
-    }
-    rows
-}
-
-fn sidebar_agent_rows(
-    state: &AppState,
-    session: &SessionView,
-    name: &str,
-    detail: &impl Fn(&str, &str, String) -> SidebarRow,
-) -> Vec<SidebarRow> {
-    let agent_scope = state.mux_scope().persistence_value().to_string();
-    let mut rows = Vec::new();
-    let Some(provider) = bootty_agents::AgentKind::ALL
-        .into_iter()
-        .find(|provider| provider.module() == name)
-    else {
-        return Vec::new();
-    };
-    let Some(agents) = state.agent_service() else {
-        return Vec::new();
-    };
-    // One row per pane running this agent, whichever window is active.
-    for pane in &session.pane_ids {
-        let agent = agents.snapshot_scoped(provider, Some(&agent_scope), Some(pane));
-        if agent.source == bootty_agents::AgentSource::None {
-            continue;
-        }
-        let theme = state.ui_theme().palette;
-        let color = match provider {
-            bootty_agents::AgentKind::Pi => theme.primary,
-            bootty_agents::AgentKind::Codex => theme.accent,
-            bootty_agents::AgentKind::Claude => theme.warning,
-        };
-        let mut row = detail(
-            &format!("{name}:{pane}"),
-            provider.icon(),
-            provider.to_string(),
-        );
-        row.color = color;
-        row.trailing = Some(if agent.unread() {
-            format!("● {}", agent.display_status())
-        } else {
-            agent.display_status()
-        });
-        row.trailing_color = Some(if agent.status == bootty_agents::AgentStatus::Idle {
-            theme.muted
-        } else {
-            color
-        });
-        row.trailing_shimmer = agent.status.is_working();
-        rows.push(row);
-    }
-    rows
 }
 
 fn sidebar_footer(
@@ -1163,6 +1028,7 @@ fn sidebar_footer(
 }
 
 fn status_snapshot(
+    state: &AppState,
     key: &str,
     configured: &[bootty_config::config::StatusSegment],
     native: &NativeChrome,
@@ -1174,7 +1040,7 @@ fn status_snapshot(
         .iter()
         .enumerate()
         .filter_map(|(source_slot, configured)| {
-            let mut items = status_items(&configured.module, native, projection, theme);
+            let mut items = status_items(state, &configured.module, native, projection, theme);
             for (index, item) in items.iter_mut().enumerate() {
                 item.key = format!("{source_slot}:{index}:{}", item.key);
                 item.icon = item.icon.take().or_else(|| configured.icon.clone());
@@ -1206,6 +1072,7 @@ fn status_snapshot(
 }
 
 fn status_items(
+    state: &AppState,
     module: &str,
     native: &NativeChrome,
     projection: &ChromeProjection,
@@ -1228,7 +1095,7 @@ fn status_items(
             .map(|name| status_cell("session", name.clone(), Some("folder"), theme.accent))
             .into_iter()
             .collect(),
-        "windows" => window_status_items(projection, theme),
+        "windows" => window_status_items(state, projection, theme),
         "sysinfo" => system_status_items(native, projection, theme),
         _ => Vec::new(),
     }
@@ -1258,6 +1125,7 @@ fn status_cell(
 }
 
 fn window_status_items(
+    state: &AppState,
     projection: &ChromeProjection,
     theme: crate::gpui::UiPalette,
 ) -> Vec<StatusItemSnapshot> {
@@ -1290,6 +1158,16 @@ fn window_status_items(
             };
             let index = make_cell("index", window.index.to_string());
             let mut name = make_cell("name", window.name.clone());
+            name.icon = Some(
+                projection
+                    .tab_contexts
+                    .get(&window.id)
+                    .and_then(|context| {
+                        terminal_activity(state, &context.session_id, Some(&window.id))
+                    })
+                    .map_or("terminal", |activity| activity.provider.icon())
+                    .to_owned(),
+            );
             name.progress = window.progress.map(|value| StatusProgress {
                 value: (!window.progress_indeterminate).then_some(value),
                 color: parse_color(projection.mux.session_color.as_deref()).unwrap_or(theme.accent),

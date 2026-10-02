@@ -4,21 +4,20 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::OnceLock,
-    time::Instant,
 };
 
 use gpui_kit::component::{
-    Collapsible, Side,
+    ActiveTheme as _, Collapsible, Side,
     menu::ContextMenuExt,
     shimmer::ShimmerText,
     sidebar::{Sidebar, SidebarItem},
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{
-    App, Bounds, Context, Div, Empty, IntoElement, MouseButton, MouseUpEvent, ParentElement,
-    Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window, canvas, div, prelude::*,
-    px, relative,
+    App, Bounds, Context, Div, Empty, FontWeight, IntoElement, MouseButton, MouseUpEvent,
+    ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window, canvas, div,
+    img, prelude::*, px, relative,
 };
 
 use super::{
@@ -29,14 +28,11 @@ use super::{
 };
 use crate::gpui::theme::readable_color;
 
-const ROW_HEIGHT: f32 = 28.0;
-const GROUP_ROW_HEIGHT: f32 = 31.0;
+const ROW_HEIGHT: f32 = 1.75;
+const GROUP_ROW_HEIGHT: f32 = 2.0;
 pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 const TRAFFIC_LIGHT_PADDING: f32 = 78.0;
-const ROW_PAD_X: f32 = 8.0;
-const ROW_INDENT: f32 = 8.0;
-const TREE_GUIDE_WIDTH: f32 = 1.0;
 const CURRENT_RAIL_WIDTH: f32 = 4.0;
 
 #[derive(Clone)]
@@ -134,6 +130,8 @@ pub(super) fn render(
         snapshot: snapshot.clone(),
         pointer_hovered_session: pointer_hovered_session.cloned(),
         colors,
+        radius: cx.theme().radius,
+        icon_size: f32::from(cx.theme().font_size) * 0.875,
         owner: cx.weak_entity(),
         row_bounds: sidebar_row_bounds.clone(),
         reveal_current: reveal_current.clone(),
@@ -217,6 +215,8 @@ struct SidebarRows {
     snapshot: SidebarSnapshot,
     pointer_hovered_session: Option<SessionTarget>,
     colors: ChromePalette,
+    radius: Pixels,
+    icon_size: f32,
     owner: WeakEntity<GpuiChrome>,
     row_bounds: SidebarRowBounds,
     reveal_current: Rc<Cell<bool>>,
@@ -256,15 +256,32 @@ impl SidebarRows {
             )
             .when(self.snapshot.rows.is_empty(), |element| {
                 element.child(
-                    div()
-                        .h(px(ROW_HEIGHT * 3.0))
+                    v_flex()
                         .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
+                        .p_4()
+                        .gap_2()
                         .text_sm()
                         .text_color(color(colors.muted))
-                        .child("no sessions"),
+                        .child("No sessions")
+                        .child(
+                            Button::new("sidebar-create-session")
+                                .debug_selector(|| "sidebar-create-session".to_owned())
+                                .label("New session")
+                                .ghost()
+                                .on_click({
+                                    let owner = self.owner.clone();
+                                    move |_, _, cx| {
+                                        _ = owner.update(cx, |_, cx| {
+                                            cx.emit(ChromeIntent::Command(
+                                                bootty_control::CommandInvocation::from_action(
+                                                    "new_mux_session",
+                                                    bootty_control::Caller::Internal,
+                                                ),
+                                            ));
+                                        });
+                                    }
+                                }),
+                        ),
                 )
             })
             .children(self.render_session_blocks(current_rail_color))
@@ -277,18 +294,21 @@ impl SidebarRows {
         let mut blocks = Vec::new();
         let mut rows = self.snapshot.rows.iter().peekable();
         while let Some(row) = rows.next() {
+            if matches!(
+                row.kind,
+                SidebarRowKind::Detail | SidebarRowKind::Progress { .. } | SidebarRowKind::Ports(_)
+            ) {
+                continue;
+            }
             if !matches!(row.kind, SidebarRowKind::Session) {
                 blocks.push(self.render_row(row, current_rail_color, false));
                 continue;
             }
-            let mut session_rows = vec![self.render_row(row, current_rail_color, true)];
             while rows.peek().is_some_and(|next| {
                 !matches!(next.kind, SidebarRowKind::Group | SidebarRowKind::Session)
                     && next.target == row.target
             }) {
-                if let Some(detail) = rows.next() {
-                    session_rows.push(self.render_row(detail, current_rail_color, true));
-                }
+                rows.next();
             }
             let hovered = row
                 .target
@@ -305,6 +325,8 @@ impl SidebarRows {
                 .w_full()
                 .flex()
                 .flex_col()
+                .rounded(self.radius)
+                .overflow_hidden()
                 .bg(color(if hovered {
                     self.snapshot.hover
                 } else if selected {
@@ -315,7 +337,7 @@ impl SidebarRows {
                 .when(row.current, |block| {
                     block.child(Self::current_rail(row, current_rail_color))
                 })
-                .children(session_rows)
+                .child(self.render_row(row, current_rail_color, true))
                 .when_some(row.target.clone(), |block, target| {
                     let owner = self.owner.clone();
                     block.on_hover(move |hovered: &bool, _, cx| {
@@ -332,7 +354,13 @@ impl SidebarRows {
                         });
                     })
                 });
-            blocks.push(self.drop_target(block, row).into_any_element());
+            blocks.push(
+                div()
+                    .px_1()
+                    .py_0p5()
+                    .child(self.drop_target(block, row))
+                    .into_any_element(),
+            );
         }
         blocks
     }
@@ -441,14 +469,12 @@ fn sidebar_header(
     layout: &ChromeLayout,
     header_height: f32,
     docked: bool,
-    colors: ChromePalette,
+    _colors: ChromePalette,
     cx: &Context<GpuiChrome>,
 ) -> Option<gpui_kit::AnyElement> {
     let width = layout.effective_sidebar_width();
     let reserve_window_controls =
         title.reserve_window_controls && layout.sidebar_position == SidebarPosition::Left;
-    let title = title.clone();
-    let title_has_icon = title.icon.is_some();
     (snapshot.title_visible && !docked).then(|| {
         div()
             .id("bootty-gpui-sidebar-header")
@@ -472,29 +498,6 @@ fn sidebar_header(
                 cx.listener(|_, _, _, cx| {
                     cx.emit(ChromeIntent::StartWindowDrag);
                 }),
-            )
-            .when_some(title.icon, |element, icon| {
-                element.child(crate::gpui::icon(&icon, 14.0, color(colors.muted)))
-            })
-            .when(!title_has_icon, |element| {
-                element.child(div().size(px(14.0)))
-            })
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(color(snapshot.foreground))
-                    .truncate()
-                    .child(title.title),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .pl_1()
-                    .text_xs()
-                    .text_color(color(colors.muted))
-                    .child(title.session_count.to_string()),
             )
             .into_any_element()
     })
@@ -525,28 +528,40 @@ impl SidebarRows {
             // Keep sidebar labels aligned along the same scan lane.
             .text_left()
             .gap_1()
-            .when_some(row.number, |element, number| {
-                element.child(self.number_badge(row, number))
-            })
-            .when_some(row.icon.clone(), |element, icon| {
-                element.child(div().flex_none().child(crate::gpui::icon(
-                    &icon,
-                    14.0,
-                    color(if selected { row.color } else { row.dim_color }),
-                )))
-            })
             .child(
                 div()
+                    .size_4()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .map(|slot| {
+                        if let Some(artwork) = &row.artwork {
+                            slot.child(img(artwork.clone()).size_full())
+                        } else if let Some(icon) = &row.icon {
+                            slot.child(crate::gpui::icon(
+                                icon,
+                                self.icon_size,
+                                color(if selected { row.color } else { row.dim_color }),
+                            ))
+                        } else {
+                            slot
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .debug_selector({
+                        let key = row.key.clone();
+                        move || format!("sidebar-title-{key}")
+                    })
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .when(is_group, gpui_kit::Styled::text_xs)
+                    .when(!is_group, |title| title.font_weight(FontWeight::MEDIUM))
                     .text_color(if matches!(&row.kind, SidebarRowKind::Session) {
-                        color(if current {
-                            readable_color(snapshot.current, row.color)
-                        } else {
-                            row.dim_color
-                        })
+                        color(snapshot.foreground)
                     } else if matches!(&row.kind, SidebarRowKind::Group) {
                         color(if current { row.color } else { row.dim_color })
                     } else if row.active {
@@ -560,39 +575,17 @@ impl SidebarRows {
             .into_any_element()
     }
 
-    fn number_badge(&self, row: &SidebarRow, number: usize) -> gpui_kit::AnyElement {
-        let snapshot = &self.snapshot;
-        div()
-            .flex_none()
-            .w(px(14.0))
-            .h(px(14.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_xs()
-            .rounded(px(3.0))
-            .when(row.active, |badge| {
-                badge
-                    .bg(color(row.color))
-                    .text_color(color(readable_color(row.color, snapshot.foreground)))
-            })
-            .when(!row.active, |badge| {
-                badge
-                    .border_1()
-                    .border_color(color(row.dim_color))
-                    .text_color(color(row.dim_color))
-            })
-            .child((number % 100).to_string())
-            .into_any_element()
-    }
-
     fn trailing_label(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
         let trailing = row.trailing.clone()?;
         let colors = self.colors;
         let trailing_color = color(row.trailing_color.unwrap_or(colors.muted));
         div()
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("sidebar-status-{key}")
+            })
             .flex_none()
-            .max_w(px(96.0))
+            .max_w(gpui_kit::rems(6.0))
             .truncate()
             .text_xs()
             .text_color(trailing_color)
@@ -647,14 +640,10 @@ impl SidebarRows {
         let row_bounds = self.row_bounds.clone();
         let reveal_current = self.reveal_current.clone();
         let reveal_row = row.current && matches!(row.kind, SidebarRowKind::Session);
-        let reveal_detail_height = reveal_row.then(|| self.session_detail_height(row));
         canvas(
             move |bounds, window, _| {
                 if reveal_row && reveal_current.replace(false) {
-                    let reveal_bounds = reveal_detail_height.map_or(bounds, |detail_height| {
-                        Self::session_reveal_bounds(bounds, detail_height)
-                    });
-                    window.request_autoscroll(reveal_bounds);
+                    window.request_autoscroll(bounds);
                 }
                 row_bounds.borrow_mut().push((target.clone(), bounds));
                 bounds
@@ -665,31 +654,6 @@ impl SidebarRows {
         .inset_0()
         .into_any_element()
         .into()
-    }
-
-    fn session_detail_height(&self, row: &SidebarRow) -> f32 {
-        self.snapshot
-            .rows
-            .iter()
-            .position(|candidate| candidate.key == row.key)
-            .map_or(0.0, |index| {
-                self.snapshot
-                    .rows
-                    .iter()
-                    .skip(index.saturating_add(1))
-                    .take_while(|candidate| {
-                        candidate.current && matches!(candidate.kind, SidebarRowKind::Detail)
-                    })
-                    .fold(0.0, |height, _| height + ROW_HEIGHT)
-            })
-    }
-
-    fn session_reveal_bounds(bounds: Bounds<Pixels>, detail_height: f32) -> Bounds<Pixels> {
-        let bottom: f32 = bounds.bottom().into();
-        Bounds::from_corners(
-            gpui_kit::point(bounds.left(), bounds.top()),
-            gpui_kit::point(bounds.right(), px(bottom + detail_height)),
-        )
     }
 
     fn diff_button(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
@@ -801,16 +765,15 @@ impl SidebarRows {
         row: &SidebarRow,
         row_height: f32,
     ) -> gpui_kit::AnyElement {
-        let accessible_label = if row.text.trim().is_empty() {
+        let label = if row.text.trim().is_empty() {
             row.key.clone()
         } else {
             row.text.clone()
         };
-        let element = if row.selectable {
-            element.cursor_pointer()
-        } else {
-            element
-        };
+        let accessible_label = row
+            .trailing
+            .as_ref()
+            .map_or_else(|| label.clone(), |status| format!("{label} · {status}"));
         let context_owner = self.owner.clone();
         let element = if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
             element
@@ -839,7 +802,7 @@ impl SidebarRows {
             .text()
             .p_0()
             .w_full()
-            .h(px(row_height))
+            .h(gpui_kit::rems(row_height))
             .tab_index(0_isize)
             .accessibility_label(accessible_label)
             .child(element);
@@ -865,7 +828,7 @@ impl SidebarRows {
                 .id(SharedString::from(hitbox_selector))
                 .debug_selector(move || hitbox_debug_selector)
                 .w_full()
-                .h(px(row_height))
+                .h(gpui_kit::rems(row_height))
                 .child(activated)
                 .into_any_element()
         } else {
@@ -887,7 +850,6 @@ impl SidebarRows {
         } else {
             ROW_HEIGHT
         };
-        let row_indent = f32::from(row.indent) * 8.0;
         let pointer_hovered = row
             .target
             .as_ref()
@@ -903,8 +865,8 @@ impl SidebarRows {
             })
             .w_full()
             .relative()
-            .h(px(row_height))
-            .pl(px(ROW_PAD_X + row_indent))
+            .h(gpui_kit::rems(row_height))
+            .pl_2()
             .pr_2()
             .flex()
             .items_center()
@@ -929,14 +891,10 @@ impl SidebarRows {
             } else {
                 color(snapshot.tint)
             })
-            // Full-width rows touch both shell edges; rounded corners expose the sidebar/terminal
-            // backing surfaces at either edge.
-            .rounded(px(0.0))
-            .when_some(tree_guide(row, row_height), ParentElement::child)
+            .rounded(self.radius)
             .child(self.label(row))
             .children(self.bounds_probe(row))
-            .children(self.diff_button(row))
-            .when_some(progress(&row.kind, row), ParentElement::child);
+            .children(self.diff_button(row));
         let element = self.drag_row(element, row);
         let element = if !in_session_block && matches!(row.kind, SidebarRowKind::Group) {
             self.drop_target(element, row)
@@ -945,38 +903,6 @@ impl SidebarRows {
         };
         self.row_control(element, row, row_height)
     }
-}
-
-fn tree_guide(row: &SidebarRow, row_height: f32) -> Option<gpui_kit::AnyElement> {
-    let tree = row.tree.as_deref()?;
-    let (top, bottom, connector) = match tree {
-        "middle" => (0.0, 0.0, true),
-        "last" => (0.0, row_height * 0.5, true),
-        "pipe" => (0.0, 0.0, false),
-        _ => return None,
-    };
-    let vertical_left = ROW_PAD_X + ROW_INDENT;
-    let connector_left = f32::mul_add(f32::from(row.indent), ROW_INDENT, ROW_PAD_X) - ROW_INDENT;
-    let vertical = div()
-        .absolute()
-        .left(px(vertical_left))
-        .top(px(top))
-        .bottom(px(bottom))
-        .w(px(TREE_GUIDE_WIDTH))
-        .bg(color(row.dim_color));
-    let mut guide = div().absolute().inset_0().child(vertical);
-    if connector {
-        guide = guide.child(
-            div()
-                .absolute()
-                .left(px(connector_left))
-                .top(px((row_height - TREE_GUIDE_WIDTH) * 0.5))
-                .w(px(ROW_INDENT))
-                .h(px(TREE_GUIDE_WIDTH))
-                .bg(color(row.dim_color)),
-        );
-    }
-    Some(guide.into_any_element())
 }
 
 fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
@@ -1101,94 +1027,6 @@ fn usage_meter(
                             .bg(color(snapshot.marker)),
                     )
                 }),
-        )
-        .into_any_element()
-}
-
-fn progress(kind: &SidebarRowKind, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
-    match kind {
-        SidebarRowKind::Progress { value, .. } => {
-            Some(progress_bar(*value, row.color, row.dim_color))
-        }
-        SidebarRowKind::Ports(ports) => Some(
-            div()
-                .text_xs()
-                .text_color(color(row.dim_color))
-                .child(
-                    ports
-                        .iter()
-                        .map(u16::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                )
-                .into_any_element(),
-        ),
-        _ => None,
-    }
-}
-
-fn progress_bar(value: Option<u8>, fill: Rgba, track: Rgba) -> gpui_kit::AnyElement {
-    const WIDTH: f32 = 72.0;
-    const HEIGHT: f32 = 6.0;
-    const SWEEP_PERIOD: f64 = 1.5;
-    static STARTED: OnceLock<Instant> = OnceLock::new();
-    let started = *STARTED.get_or_init(Instant::now);
-    div()
-        .relative()
-        .w(px(WIDTH))
-        .h(px(HEIGHT))
-        .flex_none()
-        .rounded(px(3.0))
-        .bg(color(track))
-        .child(
-            canvas(
-                move |bounds, _, _| bounds,
-                move |bounds, _, window, _| {
-                    let width = f32::from(bounds.size.width).max(0.0);
-                    let (fill_x, fill_width) = value.map_or_else(
-                        || {
-                            if window.is_window_active() {
-                                window.request_animation_frame();
-                            }
-                            let phase =
-                                (started.elapsed().as_secs_f64() % SWEEP_PERIOD) / SWEEP_PERIOD;
-                            let phase = if phase < 0.5 {
-                                phase * 2.0
-                            } else {
-                                phase.mul_add(-2.0, 2.0)
-                            };
-                            let phase = phase.to_f32().unwrap_or(0.0);
-                            let fill_width = width * 0.35;
-                            (width * 0.65 * phase, fill_width)
-                        },
-                        |value| (0.0, width * (f32::from(value.min(100)) / 100.0)),
-                    );
-                    window.paint_quad(gpui_kit::quad(
-                        gpui_kit::Bounds {
-                            origin: gpui_kit::point(
-                                px(f32::from(bounds.origin.x) + fill_x),
-                                bounds.origin.y,
-                            ),
-                            size: gpui_kit::size(px(fill_width), px(HEIGHT)),
-                        },
-                        gpui_kit::Corners {
-                            top_left: px(3.0),
-                            top_right: px(3.0),
-                            bottom_right: px(3.0),
-                            bottom_left: px(3.0),
-                        },
-                        color(fill),
-                        px(0.0),
-                        gpui_kit::transparent_black(),
-                        gpui_kit::BorderStyle::Solid,
-                    ));
-                },
-            )
-            .absolute()
-            .left(px(0.0))
-            .right(px(0.0))
-            .top(px(0.0))
-            .bottom(px(0.0)),
         )
         .into_any_element()
 }

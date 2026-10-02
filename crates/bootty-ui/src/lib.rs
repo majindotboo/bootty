@@ -45,6 +45,7 @@ pub mod paint_plan;
 pub mod platform;
 pub mod presentation;
 pub mod product_dialogs;
+pub mod project_artwork;
 mod remote_catalog;
 mod settings_runtime;
 pub mod settings_session;

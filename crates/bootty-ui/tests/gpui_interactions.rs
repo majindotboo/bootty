@@ -131,6 +131,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 number: Some(1),
                 indent: 0,
                 tree: None,
+                artwork: None,
                 icon: None,
                 diff: None,
                 color: color(220, 220, 230),
@@ -158,6 +159,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 number: None,
                 indent: 2,
                 tree: None,
+                artwork: None,
                 icon: Some("folder".to_owned()),
                 diff: None,
                 color: color(180, 180, 190),
@@ -290,7 +292,11 @@ fn sidebar_tab_space_and_status_clicks_emit_their_typed_actions(cx: &mut TestApp
     let session = cx
         .debug_bounds("sidebar-row-hitbox-session")
         .expect("session row hitbox");
-    assert_eq!(session.size.width, px(240.0));
+    let shell = cx
+        .debug_bounds("bootty-gpui-sidebar-shell")
+        .expect("sidebar shell");
+    assert!(session.left() > shell.left());
+    assert!(session.right() < shell.right());
     // Exercise the edge too: valid layout bounds alone do not catch an inset scroll clip.
     cx.simulate_click(
         point(session.left().add(px(1.0)), session.center().y),
@@ -353,7 +359,7 @@ fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
 }
 
 #[gpui_kit::test]
-fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext) {
+fn dropping_on_task_title_reorders_the_whole_session(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
@@ -366,8 +372,8 @@ fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext
             .expect("source session"),
     );
     let end = center(
-        cx.debug_bounds("sidebar-row-hitbox-session-1:cwd")
-            .expect("destination detail"),
+        cx.debug_bounds("sidebar-row-hitbox-session-1")
+            .expect("destination task"),
     );
     cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(
@@ -401,30 +407,9 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
     for (selected, selectors) in [
-        (
-            39,
-            [
-                "sidebar-row-session-39",
-                "sidebar-row-session-39:cwd",
-                "sidebar-row-session-39:branch",
-            ],
-        ),
-        (
-            0,
-            [
-                "sidebar-row-session-0",
-                "sidebar-row-session-0:cwd",
-                "sidebar-row-session-0:branch",
-            ],
-        ),
-        (
-            25,
-            [
-                "sidebar-row-session-25",
-                "sidebar-row-session-25:cwd",
-                "sidebar-row-session-25:branch",
-            ],
-        ),
+        (39, ["sidebar-row-session-39"]),
+        (0, ["sidebar-row-session-0"]),
+        (25, ["sidebar-row-session-25"]),
     ] {
         let selected_key = format!("session-{selected}");
         for row in &mut snapshot.sidebar.as_mut().expect("sidebar").rows {
@@ -489,7 +474,7 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAppContext) {
+fn compact_task_rows_keep_inset_targets_and_centered_space_controls(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let (_, cx) = cx.add_window_view(ChromeProbe::new);
 
@@ -503,8 +488,11 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     let rail = cx
         .debug_bounds("sidebar-current-rail-session")
         .expect("current session rail");
-    assert_eq!(row.origin.x, px(0.0));
-    assert_eq!(row.size.width, px(240.0));
+    let shell = cx
+        .debug_bounds("bootty-gpui-sidebar-shell")
+        .expect("sidebar shell");
+    assert!(row.left() > shell.left());
+    assert!(row.right() < shell.right());
     assert_eq!(hitbox.origin.x, row.origin.x);
     assert_eq!(hitbox.size.width, row.size.width);
     assert_eq!(block.origin.x, row.origin.x);
@@ -512,16 +500,9 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     assert_eq!(rail.origin.x, block.origin.x);
     assert_eq!(rail.size.width, px(4.0));
 
-    let detail = cx
-        .debug_bounds("sidebar-row-session:cwd")
-        .expect("session detail row");
-    assert!(detail.top() >= row.bottom());
-    assert!(block.bottom() >= detail.bottom());
+    assert_eq!(cx.debug_bounds("sidebar-row-session:cwd"), None);
+    assert_eq!(block.size.height, row.size.height);
     assert_eq!(rail.size.height, block.size.height);
-    assert!(
-        cx.debug_bounds("sidebar-current-rail-session:cwd")
-            .is_none()
-    );
 
     let first_space = cx.debug_bounds("space-1").expect("first space");
     let second_space = cx.debug_bounds("space-2").expect("second space");
@@ -541,6 +522,104 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     );
     assert!(first_space.right() < second_space.left());
     assert!(second_space.right() < create_space.left());
+}
+
+#[gpui_kit::test]
+fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestAppContext) {
+    for font_size in [12.0, 16.0, 20.0] {
+        cx.update(|cx| {
+            init_theme(UiPalette::default(), cx);
+            bootty_gpui::update_ui_font_size(font_size, cx);
+        });
+        let mut snapshot = chrome_snapshot();
+        let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+        let template = sidebar.rows.first().expect("task title").clone();
+        sidebar.rows = ["Working", "Waiting", "Finished", "Error", "● Finished"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, status)| {
+                let mut row = template.clone();
+                row.key = format!("task-{index}");
+                row.text =
+                    "A long task title describing the actual work without terminal process paths"
+                        .to_owned();
+                row.trailing = Some(status.to_owned());
+                row.current = index == 0;
+                row.target = Some(SessionTarget {
+                    scope: SpaceKey(1),
+                    session_id: row.key.clone(),
+                });
+                row
+            })
+            .collect();
+        let (probe, cx) = cx
+            .add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+        let selected = cx
+            .debug_bounds("sidebar-row-task-0")
+            .expect("selected task");
+        for (row_id, title_id, status_id) in [
+            (
+                "sidebar-row-task-0",
+                "sidebar-title-task-0",
+                "sidebar-status-task-0",
+            ),
+            (
+                "sidebar-row-task-1",
+                "sidebar-title-task-1",
+                "sidebar-status-task-1",
+            ),
+            (
+                "sidebar-row-task-2",
+                "sidebar-title-task-2",
+                "sidebar-status-task-2",
+            ),
+            (
+                "sidebar-row-task-3",
+                "sidebar-title-task-3",
+                "sidebar-status-task-3",
+            ),
+            (
+                "sidebar-row-task-4",
+                "sidebar-title-task-4",
+                "sidebar-status-task-4",
+            ),
+        ] {
+            let row = cx.debug_bounds(row_id).expect("task");
+            let title = cx.debug_bounds(title_id).expect("task title");
+            let status = cx.debug_bounds(status_id).expect("unselected status");
+            assert_eq!(row.size.height, selected.size.height);
+            assert_eq!(row.size.width, selected.size.width);
+            assert!(title.right() <= status.left());
+            assert!(status.right() <= row.right());
+            assert!(status.size.width > px(0.0));
+        }
+        let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+        for row in &mut sidebar.rows {
+            row.current = row.key == "task-1";
+        }
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("sidebar-row-task-0")
+                .expect("former selected task")
+                .size
+                .height,
+            selected.size.height
+        );
+        assert_eq!(
+            cx.debug_bounds("sidebar-row-task-1")
+                .expect("new selected task")
+                .size
+                .height,
+            selected.size.height
+        );
+    }
 }
 
 #[gpui_kit::test]
@@ -1832,4 +1911,21 @@ fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) 
             < initial.div(2.0),
         "a short title should settle to a compact tab"
     );
+}
+
+#[gpui_kit::test]
+fn empty_session_sidebar_opens_the_shared_creation_command(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    snapshot.sidebar.as_mut().expect("sidebar").rows.clear();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let create = cx
+        .debug_bounds("sidebar-create-session")
+        .expect("visible creation action");
+    cx.simulate_click(center(create), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)]
+            if invocation.command == "new_mux_session" && invocation.caller == bootty_control::Caller::Internal));
+    });
 }
