@@ -104,7 +104,7 @@ pub(crate) fn restore_keyboard_focus(window: &mut gpui_kit::Window) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn restore_keyboard_focus(_: &mut gpui_kit::Window) {}
+pub(crate) const fn restore_keyboard_focus(_: &mut gpui_kit::Window) {}
 
 /// Restore native resizing before GPUI captures the window's style for simple fullscreen.
 #[cfg(target_os = "macos")]
