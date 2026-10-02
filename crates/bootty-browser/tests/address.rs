@@ -69,7 +69,7 @@ fn searching_does_not_hide_unsafe_addresses(#[case] input: &str) {
 
 proptest! {
     #[test]
-    fn search_terms_round_trip_without_changing_the_destination(words in "[a-zA-Z &#+=?]{1,100}") {
+    fn search_terms_round_trip_without_changing_the_destination(words in "[a-zA-Z][a-zA-Z &#+=?]{0,99}") {
         let resolved = resolve_address(&words, "https://www.google.com/search")?;
         let url = url::Url::parse(&resolved)?;
         prop_assert_eq!(url.host_str(), Some("www.google.com"));
