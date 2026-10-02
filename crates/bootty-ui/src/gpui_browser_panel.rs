@@ -39,6 +39,8 @@ enum BrowserInteraction {
     Selecting,
     Editing,
     ManagingLogin,
+    Palette,
+    RestoringPageFocus,
 }
 
 #[derive(Clone)]
@@ -348,7 +350,12 @@ impl BrowserPanel {
         }
     }
 
-    fn layout_webview(&mut self, bounds: BrowserBounds, window: &Window, cx: &mut Context<Self>) {
+    fn layout_webview(
+        &mut self,
+        bounds: BrowserBounds,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.visible
             || self
                 .selected_tab()
@@ -418,6 +425,30 @@ impl BrowserPanel {
             tab.error = Some(error.to_string());
             cx.notify();
         }
+        if matches!(
+            self.interaction,
+            BrowserInteraction::Palette | BrowserInteraction::RestoringPageFocus
+        ) {
+            let restore = self.interaction == BrowserInteraction::RestoringPageFocus;
+            self.interaction = BrowserInteraction::Idle;
+            if restore && let Some(view) = self.selected_tab().and_then(|tab| tab.view.as_ref()) {
+                // Root restores GPUI focus; the page's native responder must be restored separately.
+                window.blur(cx);
+                if let Err(error) = view.focus() {
+                    if let Some(tab) = self.selected_mut() {
+                        tab.error = Some(error.to_string());
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn cancel_palette(&mut self, cx: &mut Context<Self>) {
+        if self.interaction == BrowserInteraction::Palette {
+            self.interaction = BrowserInteraction::RestoringPageFocus;
+            cx.notify();
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -446,6 +477,11 @@ impl BrowserPanel {
             if let Some(view) = self.selected_tab().and_then(|tab| tab.view.as_ref()) {
                 _ = view.set_annotation_mode(false);
             }
+            self.interaction = BrowserInteraction::Idle;
+        } else if matches!(
+            self.interaction,
+            BrowserInteraction::Palette | BrowserInteraction::RestoringPageFocus
+        ) {
             self.interaction = BrowserInteraction::Idle;
         }
     }
@@ -564,7 +600,11 @@ impl BrowserPanel {
         if let BrowserEvent::Shortcut(shortcut) = event {
             if id == self.selected && self.visible {
                 match shortcut {
-                    BrowserShortcut::Palette => cx.emit(BrowserPaletteRequested),
+                    BrowserShortcut::Palette => {
+                        self.stop_annotation();
+                        self.interaction = BrowserInteraction::Palette;
+                        cx.emit(BrowserPaletteRequested);
+                    }
                     BrowserShortcut::Address => self.address.update(cx, |input, cx| {
                         crate::window::restore_keyboard_focus(window);
                         input.focus(window, cx);
@@ -855,10 +895,14 @@ impl BasePanel for BrowserPanel {
         "bootty.browser"
     }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.stop_annotation();
         self.active = false;
         self.sync_visibility(cx);
     }
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if !active {
+            self.stop_annotation();
+        }
         self.active = active;
         self.sync_visibility(cx);
     }
