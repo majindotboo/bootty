@@ -829,13 +829,9 @@ fn sidebar_rows(
         } else {
             title
         };
-        let terminal_detail = state
-            .mux()
-            .backend_session_by_id_or_name(&session.id)
-            .map(sidebar_terminal_detail);
         let mut row = SidebarRow {
             text: title.to_owned(),
-            secondary: terminal_detail,
+            secondary: None,
             icon: Some("terminal".to_owned()),
             kind: SidebarRowKind::Session,
             selectable: true,
@@ -848,20 +844,6 @@ fn sidebar_rows(
         last_group = Some(group);
     }
     rows
-}
-
-fn sidebar_terminal_detail(session: &bootty_mux::snapshot::MuxSession) -> String {
-    let tabs = session.windows.len();
-    let panes = session
-        .windows
-        .iter()
-        .map(|window| window.panes.len())
-        .sum::<usize>();
-    format!(
-        "{tabs} tab{} · {panes} pane{}",
-        if tabs == 1 { "" } else { "s" },
-        if panes == 1 { "" } else { "s" }
-    )
 }
 
 fn sidebar_agent_activity(
