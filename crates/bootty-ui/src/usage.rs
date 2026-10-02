@@ -233,10 +233,10 @@ impl UsageWindow {
                 ..=-1 => format!("+{}%", rounded_deficit.unsigned_abs()),
                 _ => String::new(),
             },
-            pace_tone: if rounded_deficit > 0 {
-                deficit_tone(f64::from(rounded_deficit))
-            } else {
-                QuotaTone::Muted
+            pace_tone: match rounded_deficit.cmp(&0) {
+                std::cmp::Ordering::Greater => deficit_tone(f64::from(rounded_deficit)),
+                std::cmp::Ordering::Less => QuotaTone::Success,
+                std::cmp::Ordering::Equal => QuotaTone::Muted,
             },
             reset: reset
                 .filter(|reset| *reset > 0)

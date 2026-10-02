@@ -652,7 +652,15 @@ fn sidebar_snapshot(
     };
     SidebarSnapshot {
         rows,
-        footer: sidebar_footer(native, theme),
+        footer: if sidebar_config
+            .modules
+            .iter()
+            .any(|module| module == "codexbar")
+        {
+            sidebar_footer(native, theme)
+        } else {
+            Vec::new()
+        },
         title_visible: config.window.custom_chrome_title_visible(),
         focused: state.sidebar_focused(),
         hovered_session: state.sidebar_hovered_session().map(neutral_target),
@@ -1084,7 +1092,22 @@ fn sidebar_footer(
             QuotaTone::Critical => theme.destructive,
         };
         for window in &usage.windows {
-            let meter = window.meter(native.clock.epoch);
+            let mut meter = window.meter(native.clock.epoch);
+            let stale = window
+                .resets_at
+                .is_some_and(|reset| reset <= native.clock.epoch);
+            if stale {
+                meter.tone = QuotaTone::Muted;
+                meter.pace.clear();
+            }
+            let reset_at = window
+                .resets_at
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
+                .map(|date| {
+                    date.with_timezone(&chrono::Local)
+                        .format("%b %-d %H:%M")
+                        .to_string()
+                });
             rows.push(crate::gpui::chrome::SidebarFooterItem {
                 key: format!("{}:{}", provider.id(), window.label),
                 text: format!("{} {}", provider.id(), window.label),
@@ -1098,7 +1121,24 @@ fn sidebar_footer(
                 color: theme.text,
                 meter: Some(UsageMeterSnapshot {
                     provider,
-                    label: format!("{} {:.0}% left", window.label, meter.remaining_percent),
+                    label: if stale {
+                        format!("{} updating", window.label)
+                    } else {
+                        format!("{} {:.0}% left", window.label, meter.remaining_percent)
+                    },
+                    description: format!(
+                        "{} {}: {:.0}% remaining. Pacing is an estimate. Resets {}{}.",
+                        provider.id(),
+                        window.label,
+                        meter.remaining_percent,
+                        reset_at.as_deref().unwrap_or("at an unknown time"),
+                        if meter.reset.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (in {})", meter.reset)
+                        }
+                    ),
+                    reset_at,
                     fill: tone_color(meter.tone),
                     marker: tone_color(meter.marker_tone),
                     pace: tone_color(meter.pace_tone),

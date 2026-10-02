@@ -589,6 +589,8 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             meter: Some(UsageMeterSnapshot {
                 provider: UsageProvider::Codex,
                 label: format!("{label} 23% left"),
+                reset_at: Some("Oct 6 14:00".to_owned()),
+                description: "Codex remaining quota and estimated pace".to_owned(),
                 fill: palette().accent,
                 marker: palette().accent,
                 pace: palette().text,

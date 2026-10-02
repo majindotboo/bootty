@@ -1664,11 +1664,14 @@ impl GpuiWorkspace {
             .collect::<Vec<_>>();
         changed |= self.last_pane_layouts != layouts;
         self.last_pane_layouts = layouts;
-        let usage_visible = self.tools.as_ref().is_some_and(|tools| {
-            tools
-                .read(cx)
-                .panel_visible(bootty_config::config::PanelKind::Agents, cx)
-        });
+        let usage_visible = self.state.config().chrome.sidebar
+            && self
+                .state
+                .config()
+                .sidebar
+                .modules
+                .iter()
+                .any(|module| module == "codexbar");
         self.launch
             .native_chrome
             .borrow_mut()
@@ -3051,11 +3054,14 @@ impl GpuiWorkspace {
     ) -> ChromeSnapshot {
         let viewport = self.workspace_bounds.size;
         let viewport_height: f32 = viewport.height.into();
-        let usage_visible = self.tools.as_ref().is_some_and(|tools| {
-            tools
-                .read(cx)
-                .panel_visible(bootty_config::config::PanelKind::Agents, cx)
-        });
+        let usage_visible = self.state.config().chrome.sidebar
+            && self
+                .state
+                .config()
+                .sidebar
+                .modules
+                .iter()
+                .any(|module| module == "codexbar");
         self.launch
             .native_chrome
             .borrow_mut()

@@ -140,9 +140,7 @@ pub(super) fn render(
         reconcile_hover,
     }
     .content(width, docked);
-    let status_footer = (!docked)
-        .then(|| render_codexbar(snapshot, colors))
-        .flatten();
+    let status_footer = render_codexbar(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
 
@@ -1024,11 +1022,15 @@ fn usage_meter(
     v_flex()
         .w_full()
         .min_w_0()
-        .gap_1()
+        .gap_0p5()
         .child(
             div()
                 .id(SharedString::from(format!("usage-labels-{}", item.key)))
                 .debug_selector(selector("labels"))
+                .tooltip({
+                    let description = snapshot.description.clone();
+                    move |window, cx| Tooltip::new(description.clone()).build(window, cx)
+                })
                 .w_full()
                 .flex()
                 .flex_wrap()
@@ -1059,7 +1061,7 @@ fn usage_meter(
                             .child(snapshot.meter.pace.clone()),
                     )
                 })
-                .when(!snapshot.meter.reset.is_empty(), |element| {
+                .when_some(snapshot.reset_at.as_ref(), |element, reset_at| {
                     element.child(
                         div()
                             .flex_none()
@@ -1067,12 +1069,7 @@ fn usage_meter(
                             .items_center()
                             .gap_1()
                             .text_color(color(colors.muted))
-                            .child(crate::gpui::sized_icon(
-                                "rotate-ccw",
-                                crate::gpui::IconSize::XSmall,
-                                color(colors.muted),
-                            ))
-                            .child(snapshot.meter.reset.clone()),
+                            .child(reset_at.clone()),
                     )
                 }),
         )
@@ -1273,9 +1270,9 @@ pub(super) fn render_codexbar(
                 .debug_selector(|| "bootty-gpui-sidebar-footer".to_owned())
                 .flex_none()
                 .w_full()
-                .px_1()
-                .py_2()
-                .gap_2()
+                .px_2()
+                .py_1()
+                .gap_1()
                 .border_t_1()
                 .border_color(color(snapshot.border))
                 .children(snapshot.footer.iter().map(|item| {
