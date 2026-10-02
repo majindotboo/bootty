@@ -1625,12 +1625,21 @@ with open(directory / 'agent-input', 'a') as received:
 
 #[cfg(unix)]
 #[rstest]
-fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
+#[case(true)]
+#[case(false)]
+fn agent_start_delivers_literal_arguments_to_a_new_native_pty(
+    #[case] explicit_cwd: bool,
+    #[values("start", "tab")] operation: &str,
+    #[values(Caller::CommandPalette, Caller::Cli, Caller::Socket)] caller: Caller,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let config = test_config::config(
+    let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
+    let configured_cwd = directory.path().join("configured-directory");
+    fs::create_dir(&configured_cwd).unwrap();
+    config.session.working_directory = Some(configured_cwd);
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
     let mut state = AppState::new_for_window_with_agents(
@@ -1654,15 +1663,19 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
-        Caller::Socket,
+        caller,
         CommandInvocation::new(
-            "agents.claude.start",
+            format!("agents.claude.{operation}"),
             vec![
-                directory.path().to_string_lossy().into_owned(),
+                if explicit_cwd {
+                    directory.path().to_string_lossy().into_owned()
+                } else {
+                    String::new()
+                },
                 program.to_string_lossy().into_owned(),
                 argv,
             ],
-            Caller::Socket,
+            caller,
         ),
         started,
     );
@@ -1687,7 +1700,15 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
             let CommandOutcome::Success { value, .. } = &outcome else {
                 panic!("native launch failed: {outcome:?}");
             };
-            let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+            let target: CommandTarget = serde_json::from_value(
+                value[if operation == "tab" {
+                    "created"
+                } else {
+                    "terminal"
+                }]
+                .clone(),
+            )
+            .unwrap();
             let record = state
                 .terminal_agent_service()
                 .unwrap()

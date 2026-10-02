@@ -276,7 +276,14 @@ impl AppState {
         } else {
             bootty_agents::LaunchShell::Posix
         };
-        context.cwd = agent_working_directory(binding.mux().all_sessions(), session, window, pane);
+        context.cwd = if matches!(exact, ExactMuxTarget::Binding(_)) {
+            binding
+                .mux()
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.cwd.clone())
+        } else {
+            agent_working_directory(binding.mux().all_sessions(), session, window, pane)
+        };
         context
     }
 
@@ -357,10 +364,13 @@ fn agent_working_directory(
     let session = sessions
         .iter()
         .find(|candidate| Some(candidate.id.as_str()) == session)?;
+    let Some(window) = window else {
+        return session.anchor.cwd.clone();
+    };
     let window = session
         .windows
         .iter()
-        .find(|candidate| Some(candidate.id.as_str()) == window)?;
+        .find(|candidate| candidate.id == window)?;
     let anchor = window
         .panes
         .iter()
