@@ -290,7 +290,7 @@ fn sidebar_tab_space_and_status_clicks_emit_their_typed_actions(cx: &mut TestApp
     let session = cx
         .debug_bounds("sidebar-row-hitbox-session")
         .expect("session row hitbox");
-    assert_eq!(session.size.width, px(240.0));
+    assert!(session.left() > px(0.0) && session.right() < px(240.0));
     // Exercise the edge too: valid layout bounds alone do not catch an inset scroll clip.
     cx.simulate_click(
         point(session.left().add(px(1.0)), session.center().y),
@@ -598,7 +598,7 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAppContext) {
+fn sidebar_cards_keep_details_and_center_the_space_switcher(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let (_, cx) = cx.add_window_view(ChromeProbe::new);
 
@@ -609,29 +609,18 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     let block = cx
         .debug_bounds("sidebar-session-session")
         .expect("session block");
-    let rail = cx
-        .debug_bounds("sidebar-current-rail-session")
-        .expect("current session rail");
-    assert_eq!(row.origin.x, px(0.0));
-    assert_eq!(row.size.width, px(240.0));
+    assert!(block.left() > px(0.0));
+    assert!(block.right() < px(240.0));
+    assert!(row.left() > block.left());
+    assert!(row.right() < block.right());
     assert_eq!(hitbox.origin.x, row.origin.x);
     assert_eq!(hitbox.size.width, row.size.width);
-    assert_eq!(block.origin.x, row.origin.x);
-    assert_eq!(block.size.width, row.size.width);
-    assert_eq!(rail.origin.x, block.origin.x);
-    assert_eq!(rail.size.width, px(4.0));
 
     let detail = cx
         .debug_bounds("sidebar-row-session:cwd")
         .expect("session detail row");
     assert!(detail.top() >= row.bottom());
     assert!(block.bottom() >= detail.bottom());
-    assert_eq!(rail.size.height, block.size.height);
-    assert!(
-        cx.debug_bounds("sidebar-current-rail-session:cwd")
-            .is_none()
-    );
-
     let first_space = cx.debug_bounds("space-1").expect("first space");
     let second_space = cx.debug_bounds("space-2").expect("second space");
     let create_space = cx.debug_bounds("space-create").expect("create space");

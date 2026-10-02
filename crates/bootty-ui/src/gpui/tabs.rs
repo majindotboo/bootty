@@ -26,8 +26,8 @@ pub fn tab(
     cx: &App,
 ) -> Tab {
     let theme = cx.theme();
-    let fill = accent.mix_oklab(theme.secondary, 0.18);
-    let outline = accent.mix_oklab(theme.secondary, 0.6);
+    let fill = theme.secondary_hover;
+    let outline = accent.mix_oklab(theme.foreground, 0.35);
     let hover = theme.secondary_hover;
     let compact = matches!(appearance, TabAppearance::Pill | TabAppearance::Outline);
     Tab::new(id)
@@ -42,10 +42,10 @@ pub fn tab(
         .line_height(relative(1.25))
         .whitespace_nowrap()
         .text_sm()
-        .text_color(theme.tab_foreground)
+        .text_color(theme.foreground.opacity(0.8))
         .when(compact, Styled::rounded_full)
         .when(appearance == TabAppearance::Segmented, |tab| {
-            tab.rounded_sm()
+            tab.rounded(theme.radius)
         })
         .when(appearance == TabAppearance::Outline, |tab| {
             tab.border_1().border_color(theme.border)
@@ -55,7 +55,9 @@ pub fn tab(
         })
         .styles(|styles| {
             styles.selected(|style| {
-                let style = style.text_color(theme.foreground);
+                let style = style
+                    .text_color(theme.foreground)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM);
                 match appearance {
                     TabAppearance::Underline => style.border_color(outline),
                     TabAppearance::Outline => style.border_color(outline).bg(fill),

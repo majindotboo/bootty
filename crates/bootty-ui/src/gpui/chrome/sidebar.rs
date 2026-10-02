@@ -11,7 +11,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    Collapsible, Icon, IconName, Side, Sizable as _,
+    ActiveTheme as _, Collapsible, Icon, IconName, Side, Sizable as _,
     menu::ContextMenuExt,
     shimmer::ShimmerText,
     sidebar::{Sidebar, SidebarItem},
@@ -39,7 +39,6 @@ const TRAFFIC_LIGHT_PADDING: f32 = 78.0;
 const ROW_PAD_X: f32 = 8.0;
 const ROW_INDENT: f32 = 8.0;
 const TREE_GUIDE_WIDTH: f32 = 1.0;
-const CURRENT_RAIL_WIDTH: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) struct DraggedSidebar;
@@ -142,6 +141,7 @@ pub(super) fn render(
         reveal_current: reveal_current.clone(),
         reconcile_hover,
         collapsed_groups: collapsed_groups.clone(),
+        radius: cx.theme().radius_lg,
     }
     .content(width, docked);
     let status_footer = render_codexbar(snapshot, colors);
@@ -233,6 +233,7 @@ struct SidebarRows {
     reveal_current: Rc<Cell<bool>>,
     reconcile_hover: bool,
     collapsed_groups: HashSet<String>,
+    radius: Pixels,
 }
 
 impl SidebarRows {
@@ -245,12 +246,6 @@ impl SidebarRows {
 
     fn render_content(&self, width: f32, docked: bool) -> gpui_kit::AnyElement {
         let colors = self.colors;
-        let current_rail_color = self
-            .snapshot
-            .rows
-            .iter()
-            .find(|row| row.current && matches!(&row.kind, SidebarRowKind::Session))
-            .map(|row| row.color);
         v_flex()
             .w(px(width))
             .when(docked, gpui_kit::Styled::w_full)
@@ -279,18 +274,18 @@ impl SidebarRows {
                         .child("No sessions"),
                 )
             })
-            .children(self.render_session_blocks(current_rail_color))
+            .children(self.render_session_blocks())
             .child(self.reorder_end())
             .child(self.hover_reconciliation())
             .into_any_element()
     }
 
-    fn render_session_blocks(&self, current_rail_color: Option<Rgba>) -> Vec<gpui_kit::AnyElement> {
+    fn render_session_blocks(&self) -> Vec<gpui_kit::AnyElement> {
         let mut blocks = Vec::new();
         let mut rows = self.snapshot.rows.iter().peekable();
         while let Some(row) = rows.next() {
             if matches!(row.kind, SidebarRowKind::Group) && row.key.starts_with("project:") {
-                blocks.push(self.render_row(row, current_rail_color, false));
+                blocks.push(self.render_row(row, false));
                 if self.collapsed_groups.contains(&row.key) {
                     while rows
                         .peek()
@@ -302,16 +297,16 @@ impl SidebarRows {
                 continue;
             }
             if !matches!(row.kind, SidebarRowKind::Session) {
-                blocks.push(self.render_row(row, current_rail_color, false));
+                blocks.push(self.render_row(row, false));
                 continue;
             }
-            let mut session_rows = vec![self.render_row(row, current_rail_color, true)];
+            let mut session_rows = vec![self.render_row(row, true)];
             while rows.peek().is_some_and(|next| {
                 !matches!(next.kind, SidebarRowKind::Group | SidebarRowKind::Session)
                     && next.target == row.target
             }) {
                 if let Some(detail) = rows.next() {
-                    session_rows.push(self.render_row(detail, current_rail_color, true));
+                    session_rows.push(self.render_row(detail, true));
                 }
             }
             let hovered = row
@@ -326,19 +321,30 @@ impl SidebarRows {
                     move || format!("sidebar-session-{key}")
                 })
                 .relative()
-                .w_full()
+                .mx_2()
+                .my_1()
+                .w_auto()
                 .flex()
                 .flex_col()
+                .py_1()
+                .rounded(self.radius)
+                .border_1()
+                .border_color(
+                    color(if selected {
+                        self.colors.accent
+                    } else {
+                        self.snapshot.border
+                    })
+                    .opacity(if selected { 0.4 } else { 0.3 }),
+                )
+                .overflow_hidden()
                 .bg(color(if hovered {
                     self.snapshot.hover
                 } else if selected {
-                    self.snapshot.current
+                    self.colors.surface
                 } else {
-                    self.snapshot.tint
+                    self.colors.base
                 }))
-                .when(row.current, |block| {
-                    block.child(Self::current_rail(row, current_rail_color))
-                })
                 .children(session_rows)
                 .when_some(row.target.clone(), |block, target| {
                     let owner = self.owner.clone();
@@ -527,9 +533,7 @@ fn sidebar_header(
 
 impl SidebarRows {
     fn label(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
-        let snapshot = &self.snapshot;
         let selected = row.current || row.active;
-        let current = row.current;
         let is_group = matches!(row.kind, SidebarRowKind::Group);
         let row_text = if row.text.trim().is_empty() {
             match &row.kind {
@@ -582,24 +586,20 @@ impl SidebarRows {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(is_group, gpui_kit::base::StyledExt::font_semibold)
                     .when(
-                        matches!(&row.kind, SidebarRowKind::Other(kind) if kind == "project-path"),
-                        gpui_kit::Styled::text_xs,
+                        is_group || matches!(row.kind, SidebarRowKind::Session),
+                        gpui_kit::base::StyledExt::font_semibold,
                     )
-                    .text_color(if matches!(&row.kind, SidebarRowKind::Session) {
-                        color(if current {
-                            readable_color(snapshot.current, row.color)
+                    .when(informational_row(&row.kind), gpui_kit::Styled::text_xs)
+                    .text_color(color(
+                        if matches!(row.kind, SidebarRowKind::Session | SidebarRowKind::Group) {
+                            self.colors.text
+                        } else if row.active {
+                            self.colors.subtext
                         } else {
-                            row.dim_color
-                        })
-                    } else if matches!(&row.kind, SidebarRowKind::Group) {
-                        color(if current { row.color } else { row.dim_color })
-                    } else if row.active {
-                        color(row.color)
-                    } else {
-                        color(snapshot.foreground)
-                    })
+                            readable_color(self.colors.surface, self.colors.muted)
+                        },
+                    ))
                     .child(row_text),
             )
             .children(self.trailing_label(row))
@@ -644,38 +644,6 @@ impl SidebarRows {
             .into()
     }
 
-    fn current_rail(row: &SidebarRow, current_rail_color: Option<Rgba>) -> gpui_kit::AnyElement {
-        div()
-            .debug_selector({
-                let key = row.key.clone();
-                move || format!("sidebar-current-rail-{key}")
-            })
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .bottom(px(0.0))
-            .w(px(CURRENT_RAIL_WIDTH))
-            .bg(color(current_rail_color.unwrap_or(row.color)))
-            .into_any_element()
-    }
-
-    fn keyboard_rail(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
-        let current = row.current;
-        let colors = self.colors;
-        let keyboard_focus_key = row.key.clone();
-        div()
-            .debug_selector(move || format!("sidebar-keyboard-focus-{keyboard_focus_key}"))
-            .absolute()
-            // Keep the focus rail visible alongside the current-session rail.
-            .left(px(if current { CURRENT_RAIL_WIDTH } else { 0.0 }))
-            .top(px(3.0))
-            .bottom(px(3.0))
-            .w(px(2.0))
-            .rounded(px(1.0))
-            .bg(color(colors.accent))
-            .into_any_element()
-    }
-
     fn bounds_probe(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
         let target = row.target.clone()?;
         let row_bounds = self.row_bounds.clone();
@@ -714,7 +682,7 @@ impl SidebarRows {
                     .take_while(|candidate| {
                         candidate.current && matches!(candidate.kind, SidebarRowKind::Detail)
                     })
-                    .fold(0.0, |height, _| height + ROW_HEIGHT)
+                    .fold(0.0, |height, _| height + 22.0)
             })
     }
 
@@ -950,21 +918,15 @@ impl SidebarRows {
             .into_any_element()
     }
 
-    fn render_row(
-        &self,
-        row: &SidebarRow,
-        current_rail_color: Option<Rgba>,
-        in_session_block: bool,
-    ) -> gpui_kit::AnyElement {
+    fn render_row(&self, row: &SidebarRow, in_session_block: bool) -> gpui_kit::AnyElement {
         let snapshot = &self.snapshot;
-        let current = row.current;
         let selected = row.current || row.active;
         let row_height = if matches!(row.kind, SidebarRowKind::Group) {
             GROUP_ROW_HEIGHT
-        } else if matches!(&row.kind, SidebarRowKind::Other(kind) if kind == "project-path") {
-            22.0
+        } else if matches!(row.kind, SidebarRowKind::Session) {
+            30.0
         } else {
-            ROW_HEIGHT
+            22.0
         };
         let row_indent = f32::from(row.indent) * 8.0;
         let pointer_hovered = row
@@ -990,14 +952,8 @@ impl SidebarRows {
             .text_sm()
             .text_left()
             .overflow_hidden()
-            .when(current && !in_session_block, |element| {
-                element.child(Self::current_rail(row, current_rail_color))
-            })
             .when(keyboard_focused, |element| {
-                element.child(self.keyboard_rail(row))
-            })
-            .when(!snapshot.focused, |row| {
-                row.opacity(1.0 - snapshot.dim_when_unfocused.clamp(0.0, 1.0))
+                element.border_1().border_color(color(self.colors.accent))
             })
             .bg(if in_session_block {
                 gpui_kit::Hsla::transparent_black()
@@ -1008,9 +964,7 @@ impl SidebarRows {
             } else {
                 color(snapshot.tint)
             })
-            // Full-width rows touch both shell edges; rounded corners expose the sidebar/terminal
-            // backing surfaces at either edge.
-            .rounded(px(0.0))
+            .when(!in_session_block, |element| element.rounded(self.radius))
             .when_some(tree_guide(row, row_height), ParentElement::child)
             .child(self.label(row))
             .children(self.bounds_probe(row))
@@ -1024,6 +978,10 @@ impl SidebarRows {
         };
         self.row_control(element, row, row_height)
     }
+}
+
+const fn informational_row(kind: &SidebarRowKind) -> bool {
+    !matches!(kind, SidebarRowKind::Session | SidebarRowKind::Group)
 }
 
 fn tree_guide(row: &SidebarRow, row_height: f32) -> Option<gpui_kit::AnyElement> {
