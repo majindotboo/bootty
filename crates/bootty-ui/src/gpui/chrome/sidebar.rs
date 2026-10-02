@@ -311,11 +311,6 @@ impl SidebarRows {
             }) {
                 rows.next();
             }
-            let hovered = row
-                .target
-                .as_ref()
-                .is_some_and(|target| self.pointer_hovered_session.as_ref() == Some(target));
-            let selected = row.current || row.active;
             let block = div()
                 .id(SharedString::from(format!("sidebar-session-{}", row.key)))
                 .debug_selector({
@@ -328,13 +323,7 @@ impl SidebarRows {
                 .flex_col()
                 .rounded(self.radius)
                 .overflow_hidden()
-                .bg(color(if hovered {
-                    self.snapshot.hover
-                } else if selected {
-                    self.snapshot.current
-                } else {
-                    self.snapshot.tint
-                }))
+                .bg(color(self.background(row)))
                 .when(row.current, |block| {
                     block.child(Self::current_rail(row, current_rail_color))
                 })
@@ -505,6 +494,20 @@ fn sidebar_header(
 }
 
 impl SidebarRows {
+    fn background(&self, row: &SidebarRow) -> Rgba {
+        if row
+            .target
+            .as_ref()
+            .is_some_and(|target| self.pointer_hovered_session.as_ref() == Some(target))
+        {
+            self.snapshot.hover
+        } else if row.current || row.active {
+            self.snapshot.current
+        } else {
+            self.snapshot.tint
+        }
+    }
+
     fn label(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
         let snapshot = &self.snapshot;
         let selected = row.current || row.active;
@@ -587,7 +590,10 @@ impl SidebarRows {
                                 .truncate()
                                 .text_xs()
                                 .font_weight(FontWeight::NORMAL)
-                                .text_color(color(self.colors.muted))
+                                .text_color(color(readable_color(
+                                    self.background(row),
+                                    self.colors.muted,
+                                )))
                                 .child(secondary),
                         )
                     }),
@@ -599,7 +605,10 @@ impl SidebarRows {
     fn trailing_label(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
         let trailing = row.trailing.clone()?;
         let colors = self.colors;
-        let trailing_color = color(row.trailing_color.unwrap_or(colors.muted));
+        let trailing_color = color(readable_color(
+            self.background(row),
+            row.trailing_color.unwrap_or(colors.muted),
+        ));
         div()
             .debug_selector({
                 let key = row.key.clone();
@@ -888,16 +897,11 @@ impl SidebarRows {
     ) -> gpui_kit::AnyElement {
         let snapshot = &self.snapshot;
         let current = row.current;
-        let selected = row.current || row.active;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
             SidebarRowKind::Session if row.secondary.is_some() => SESSION_ROW_HEIGHT,
             _ => ROW_HEIGHT,
         };
-        let pointer_hovered = row
-            .target
-            .as_ref()
-            .is_some_and(|target| self.pointer_hovered_session.as_ref() == Some(target));
         let keyboard_focused = row.target.as_ref().is_some_and(|target| {
             snapshot.focused && snapshot.hovered_session.as_ref() == Some(target)
         });
@@ -928,12 +932,8 @@ impl SidebarRows {
             })
             .bg(if in_session_block {
                 gpui_kit::Hsla::transparent_black()
-            } else if pointer_hovered {
-                color(snapshot.hover)
-            } else if selected {
-                color(snapshot.current)
             } else {
-                color(snapshot.tint)
+                color(self.background(row))
             })
             .rounded(self.radius)
             .child(self.label(row))
