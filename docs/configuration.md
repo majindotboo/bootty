@@ -617,7 +617,8 @@ Restarted work is marked interrupted and resumes only after an explicit retry.
 Sessions stays on the left and tools stay on the right. Panel resizing and
 visibility are retained, but panels cannot be moved, split, or floated.
 Tools, documents and browser pages share one row of labeled, closable tabs.
-The plus button opens a browser page; the command palette reopens closed tools.
+The plus button and empty sidebar offer Files, Changes, Coordination, and a new
+browser page. The command palette opens the same tools.
 Agent status, attention and account usage appear in Sessions.
 
 Use **Connect a phone…** in the command palette to pair the mobile app. Enter
@@ -633,17 +634,26 @@ webviews with separate tabs, back and forward history, reload, and an address
 bar. Bare localhost and loopback addresses use HTTP; other bare hosts use HTTPS.
 Cmd/Ctrl+L focuses the address, Cmd/Ctrl+R reloads, Cmd/Ctrl+T opens a tab,
 Cmd/Ctrl+W closes a tab, and Cmd/Ctrl+K opens the command palette while a page has
-focus. Tabs use temporary browser storage and do not retain website accounts
-after closing the app. Browser previews cannot grant device permissions or save
-downloads; use **Open in default browser** for those actions. Native browser
+focus. The Browser settings page selects the search engine and persistent site
+data. Plain address-bar text searches the chosen engine. Site data persists in
+an identity-specific native profile; macOS 13 uses private storage until named
+profiles are available on macOS 14. Saved logins use the OS credential store,
+scoped to the current website and Bootty identity. Filling requires HTTPS or
+loopback HTTP and one unambiguous sign-in form; it never submits the form.
+One saved login per origin is supported.
+
+**Annotate page** selects an element for a native comment editor. Review and
+copy the feedback, or paste it into the selected terminal without submitting it.
+Browser previews cannot grant device permissions or save downloads; use
+**Open in default browser** for those actions. Native browser
 embedding works on macOS, Windows, and Linux X11. On Wayland desktops, Bootty
 uses XWayland for both its window and the embedded browser; XWayland must be
 enabled by the compositor. Startup selects the shared X11 backend automatically
 when `DISPLAY` is available. A Wayland session without XWayland can still open
 the application, but the Browser panel explains how to enable embedded browsing.
 
-The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
-underline, pill, outline, or segmented tabs; close-button side (left/right); and
+The shared **Tabs** settings select classic, underline, pill, outline, or
+segmented appearance for terminal and sidebar tabs; close-button side (left/right); and
 close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
 side padding without reserving a separate column. Hiding a close button keeps the
 close command and context menu available.
@@ -815,10 +825,3 @@ survive app restarts. `[browser]` accepts `search-engine` (`duck_duck_go`, `goog
 `brave`) and `persist-site-data` (default `true`). Turning persistence off recreates open pages in
 private mode without deleting the saved profile. Development and Production use separate profiles.
 
-Browser site data uses an identity-specific native profile. On macOS 13, embedded
-pages stay private; persistent named profiles require macOS 14 or newer.
-
-The browser toolbar opens saved logins for the current website. Logins stay in
-the OS credential store, isolated by Bootty identity and exact origin. Fill
-requires HTTPS or loopback HTTP and one visible, unambiguous sign-in form; it
-never submits the form. One saved login per origin is currently supported.
