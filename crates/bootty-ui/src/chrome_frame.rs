@@ -699,7 +699,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
         rows.push(SidebarRow {
             key: "unassigned".to_owned(),
             text: "Unassigned".to_owned(),
+            secondary: None,
             trailing: None,
+            trailing_icon: None,
             trailing_color: None,
             trailing_shimmer: false,
             number: None,
@@ -721,7 +723,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
         rows.extend(unclaimed.into_iter().map(|session| SidebarRow {
             key: session.session_id.clone(),
             text: session.name,
+            secondary: None,
             trailing: None,
+            trailing_icon: None,
             trailing_color: None,
             trailing_shimmer: false,
             number: None,
@@ -825,34 +829,76 @@ fn sidebar_rows(
         } else {
             title
         };
+        let terminal_detail = state
+            .mux()
+            .backend_session_by_id_or_name(&session.id)
+            .map(sidebar_terminal_detail);
         let mut row = SidebarRow {
             text: title.to_owned(),
+            secondary: terminal_detail,
             icon: Some("terminal".to_owned()),
             kind: SidebarRowKind::Session,
             selectable: true,
             ..base
         };
         if let Some(activity) = terminal_activity(state, &session.id, None) {
-            use bootty_agents::TerminalAgentStatus as S;
-            let theme = state.ui_theme().palette;
-            let (status, tone) = match activity.status {
-                S::Starting => ("Starting", theme.muted),
-                S::Idle => ("Idle", theme.muted),
-                S::Working => ("Working", theme.success),
-                S::Waiting => ("Waiting", theme.warning),
-                S::Finished => ("Finished", theme.muted),
-                S::Stopped => ("Stopped", theme.muted),
-                S::Error => ("Error", theme.destructive),
-                S::Unavailable => ("Unavailable", theme.warning),
-            };
-            row.icon = Some(activity.provider.icon().to_owned());
-            row.trailing = Some(status.to_owned());
-            row.trailing_color = Some(tone);
+            sidebar_agent_activity(&mut row, &activity, state.ui_theme().palette);
         }
         rows.push(row);
         last_group = Some(group);
     }
     rows
+}
+
+fn sidebar_terminal_detail(session: &bootty_mux::snapshot::MuxSession) -> String {
+    let tabs = session.windows.len();
+    let panes = session
+        .windows
+        .iter()
+        .map(|window| window.panes.len())
+        .sum::<usize>();
+    format!(
+        "{tabs} tab{} · {panes} pane{}",
+        if tabs == 1 { "" } else { "s" },
+        if panes == 1 { "" } else { "s" }
+    )
+}
+
+fn sidebar_agent_activity(
+    row: &mut SidebarRow,
+    activity: &bootty_agents::TerminalAgentActivity,
+    theme: crate::gpui::UiPalette,
+) {
+    use bootty_agents::TerminalAgentStatus as S;
+    let (status, icon, tone) = match activity.status {
+        S::Starting => ("Starting", "circle-dashed", theme.muted),
+        S::Idle => ("Idle", "circle", theme.muted),
+        S::Working => ("Working", "circle-dashed", theme.success),
+        S::Waiting => ("Waiting", "message-circle-question-mark", theme.warning),
+        S::Finished => ("Finished", "circle-check", theme.muted),
+        S::Stopped => ("Stopped", "circle-pause", theme.muted),
+        S::Error => ("Error", "circle-alert", theme.destructive),
+        S::Unavailable => ("Unavailable", "unplug", theme.warning),
+    };
+    row.icon = Some(activity.provider.icon().to_owned());
+    let provider = match activity.provider {
+        bootty_agents::AgentKind::Codex => "Codex",
+        bootty_agents::AgentKind::Claude => "Claude",
+        bootty_agents::AgentKind::Pi => "Pi",
+    };
+    row.secondary = Some(
+        activity
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.trim().is_empty())
+            .map_or_else(
+                || provider.to_owned(),
+                |detail| format!("{provider} · {}", detail.lines().next().unwrap_or(detail)),
+            ),
+    );
+    row.trailing = Some(status.to_owned());
+    row.trailing_icon = Some(icon.to_owned());
+    row.trailing_color = Some(tone);
 }
 
 fn terminal_activity(
@@ -907,7 +953,9 @@ fn sidebar_session_base(
     SidebarRow {
         key: session.id.clone(),
         text: String::new(),
+        secondary: None,
         trailing: None,
+        trailing_icon: None,
         trailing_color: None,
         trailing_shimmer: false,
         number: None,

@@ -29,6 +29,7 @@ use super::{
 use crate::gpui::theme::readable_color;
 
 const ROW_HEIGHT: f32 = 1.75;
+const SESSION_ROW_HEIGHT: f32 = 2.5;
 const GROUP_ROW_HEIGHT: f32 = 2.0;
 pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
@@ -550,26 +551,46 @@ impl SidebarRows {
                     }),
             )
             .child(
-                div()
-                    .debug_selector({
-                        let key = row.key.clone();
-                        move || format!("sidebar-title-{key}")
-                    })
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .when(is_group, gpui_kit::Styled::text_xs)
-                    .when(!is_group, |title| title.font_weight(FontWeight::MEDIUM))
-                    .text_color(if matches!(&row.kind, SidebarRowKind::Session) {
-                        color(snapshot.foreground)
-                    } else if matches!(&row.kind, SidebarRowKind::Group) {
-                        color(if current { row.color } else { row.dim_color })
-                    } else if row.active {
-                        color(row.color)
-                    } else {
-                        color(snapshot.foreground)
-                    })
-                    .child(row_text),
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .debug_selector({
+                                let key = row.key.clone();
+                                move || format!("sidebar-title-{key}")
+                            })
+                            .min_w_0()
+                            .truncate()
+                            .when(is_group, gpui_kit::Styled::text_xs)
+                            .when(!is_group, |title| title.font_weight(FontWeight::MEDIUM))
+                            .text_color(if matches!(&row.kind, SidebarRowKind::Session) {
+                                color(snapshot.foreground)
+                            } else if is_group {
+                                color(if current { row.color } else { row.dim_color })
+                            } else if row.active {
+                                color(row.color)
+                            } else {
+                                color(snapshot.foreground)
+                            })
+                            .child(row_text),
+                    )
+                    .when_some(row.secondary.clone(), |column, secondary| {
+                        column.child(
+                            div()
+                                .debug_selector({
+                                    let key = row.key.clone();
+                                    move || format!("sidebar-secondary-{key}")
+                                })
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(color(self.colors.muted))
+                                .child(secondary),
+                        )
+                    }),
             )
             .children(self.trailing_label(row))
             .into_any_element()
@@ -585,10 +606,29 @@ impl SidebarRows {
                 move || format!("sidebar-status-{key}")
             })
             .flex_none()
-            .max_w(gpui_kit::rems(6.0))
+            .flex()
+            .items_center()
+            .gap_1()
+            .max_w(gpui_kit::rems(7.5))
             .truncate()
             .text_xs()
             .text_color(trailing_color)
+            .when_some(row.trailing_icon.as_ref(), |element, icon| {
+                element.child(
+                    div()
+                        .debug_selector({
+                            let key = row.key.clone();
+                            move || format!("sidebar-status-icon-{key}")
+                        })
+                        .size_3()
+                        .flex_none()
+                        .child(crate::gpui::icon(
+                            icon,
+                            self.icon_size * 0.85,
+                            trailing_color,
+                        )),
+                )
+            })
             .map(|element| {
                 if row.trailing_shimmer {
                     element.child(
@@ -770,6 +810,10 @@ impl SidebarRows {
         } else {
             row.text.clone()
         };
+        let label = row.secondary.as_ref().map_or_else(
+            || label.clone(),
+            |secondary| format!("{label} · {secondary}"),
+        );
         let accessible_label = row
             .trailing
             .as_ref()
@@ -845,10 +889,10 @@ impl SidebarRows {
         let snapshot = &self.snapshot;
         let current = row.current;
         let selected = row.current || row.active;
-        let row_height = if matches!(row.kind, SidebarRowKind::Group) {
-            GROUP_ROW_HEIGHT
-        } else {
-            ROW_HEIGHT
+        let row_height = match row.kind {
+            SidebarRowKind::Group => GROUP_ROW_HEIGHT,
+            SidebarRowKind::Session if row.secondary.is_some() => SESSION_ROW_HEIGHT,
+            _ => ROW_HEIGHT,
         };
         let pointer_hovered = row
             .target

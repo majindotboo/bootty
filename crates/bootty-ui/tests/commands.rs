@@ -2269,7 +2269,7 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 #[case("toggle_files_panel", true)]
 #[case("toggle_changes_panel", true)]
 #[case("toggle_diff_panel", true)]
-#[case("toggle_agents_panel", true)]
+#[case("toggle_agents_panel", false)]
 #[case("toggle_left_dock", true)]
 #[case("toggle_right_dock", true)]
 #[case("toggle_tab_bar", false)]
@@ -2279,7 +2279,7 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 #[case("show_sidebar", true)]
 #[case("show_files", true)]
 #[case("show_changes", true)]
-#[case("show_agents", true)]
+#[case("show_agents", false)]
 fn dock_commands_share_palette_bindings_and_window_completion(
     #[case] command: &str,
     #[case] palette: bool,

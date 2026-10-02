@@ -125,7 +125,9 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
             SidebarRow {
                 key: "session".to_owned(),
                 text: "Session one".to_owned(),
+                secondary: None,
                 trailing: None,
+                trailing_icon: None,
                 trailing_color: None,
                 trailing_shimmer: false,
                 number: Some(1),
@@ -153,7 +155,9 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
             SidebarRow {
                 key: "session:cwd".to_owned(),
                 text: "/Users/luan/src/bootty".to_owned(),
+                secondary: None,
                 trailing: None,
+                trailing_icon: None,
                 trailing_color: None,
                 trailing_shimmer: false,
                 number: None,
@@ -524,6 +528,44 @@ fn compact_task_rows_keep_inset_targets_and_centered_space_controls(cx: &mut Tes
     assert!(second_space.right() < create_space.left());
 }
 
+const TASK_ROW_SELECTORS: [(&str, &str, &str, &str, &str); 5] = [
+    (
+        "sidebar-row-task-0",
+        "sidebar-title-task-0",
+        "sidebar-status-task-0",
+        "sidebar-secondary-task-0",
+        "sidebar-status-icon-task-0",
+    ),
+    (
+        "sidebar-row-task-1",
+        "sidebar-title-task-1",
+        "sidebar-status-task-1",
+        "sidebar-secondary-task-1",
+        "sidebar-status-icon-task-1",
+    ),
+    (
+        "sidebar-row-task-2",
+        "sidebar-title-task-2",
+        "sidebar-status-task-2",
+        "sidebar-secondary-task-2",
+        "sidebar-status-icon-task-2",
+    ),
+    (
+        "sidebar-row-task-3",
+        "sidebar-title-task-3",
+        "sidebar-status-task-3",
+        "sidebar-secondary-task-3",
+        "sidebar-status-icon-task-3",
+    ),
+    (
+        "sidebar-row-task-4",
+        "sidebar-title-task-4",
+        "sidebar-status-task-4",
+        "sidebar-secondary-task-4",
+        "sidebar-status-icon-task-4",
+    ),
+];
+
 #[gpui_kit::test]
 fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestAppContext) {
     for font_size in [12.0, 16.0, 20.0] {
@@ -534,56 +576,41 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
         let mut snapshot = chrome_snapshot();
         let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
         let template = sidebar.rows.first().expect("task title").clone();
-        sidebar.rows = ["Working", "Waiting", "Finished", "Error", "● Finished"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, status)| {
-                let mut row = template.clone();
-                row.key = format!("task-{index}");
-                row.text =
-                    "A long task title describing the actual work without terminal process paths"
-                        .to_owned();
-                row.trailing = Some(status.to_owned());
-                row.current = index == 0;
-                row.target = Some(SessionTarget {
-                    scope: SpaceKey(1),
-                    session_id: row.key.clone(),
-                });
-                row
-            })
-            .collect();
+        sidebar.rows = [
+            ("Working", "circle-dashed"),
+            ("Waiting", "message-circle-question-mark"),
+            ("Finished", "circle-check"),
+            ("Error", "circle-alert"),
+            ("Unavailable", "unplug"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, icon))| {
+            assert!(bootty_gpui::has_icon(icon), "status glyph must render");
+            let mut row = template.clone();
+            row.key = format!("task-{index}");
+            row.text =
+                "A long task title describing the actual work without terminal process paths"
+                    .to_owned();
+            row.trailing = Some(status.to_owned());
+            row.trailing_icon = Some(icon.to_owned());
+            row.secondary = Some(
+                "Codex · A long activity detail that must truncate within the pill".to_owned(),
+            );
+            row.current = index == 0;
+            row.target = Some(SessionTarget {
+                scope: SpaceKey(1),
+                session_id: row.key.clone(),
+            });
+            row
+        })
+        .collect();
         let (probe, cx) = cx
             .add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
         let selected = cx
             .debug_bounds("sidebar-row-task-0")
             .expect("selected task");
-        for (row_id, title_id, status_id) in [
-            (
-                "sidebar-row-task-0",
-                "sidebar-title-task-0",
-                "sidebar-status-task-0",
-            ),
-            (
-                "sidebar-row-task-1",
-                "sidebar-title-task-1",
-                "sidebar-status-task-1",
-            ),
-            (
-                "sidebar-row-task-2",
-                "sidebar-title-task-2",
-                "sidebar-status-task-2",
-            ),
-            (
-                "sidebar-row-task-3",
-                "sidebar-title-task-3",
-                "sidebar-status-task-3",
-            ),
-            (
-                "sidebar-row-task-4",
-                "sidebar-title-task-4",
-                "sidebar-status-task-4",
-            ),
-        ] {
+        for (row_id, title_id, status_id, secondary_id, icon_id) in TASK_ROW_SELECTORS {
             let row = cx.debug_bounds(row_id).expect("task");
             let title = cx.debug_bounds(title_id).expect("task title");
             let status = cx.debug_bounds(status_id).expect("unselected status");
@@ -592,6 +619,13 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
             assert!(title.right() <= status.left());
             assert!(status.right() <= row.right());
             assert!(status.size.width > px(0.0));
+            let secondary = cx.debug_bounds(secondary_id).expect("session detail");
+            let icon = cx.debug_bounds(icon_id).expect("status glyph");
+            assert!(secondary.top() >= title.bottom());
+            assert!(secondary.bottom() <= row.bottom());
+            assert!(secondary.right() <= status.left());
+            assert!(icon.left() >= status.left());
+            assert!(icon.right() <= status.right());
         }
         let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
         for row in &mut sidebar.rows {

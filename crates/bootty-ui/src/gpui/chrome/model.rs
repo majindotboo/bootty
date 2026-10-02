@@ -302,7 +302,9 @@ pub struct SidebarSnapshot {
 pub struct SidebarRow {
     pub key: String,
     pub text: String,
+    pub secondary: Option<String>,
     pub trailing: Option<String>,
+    pub trailing_icon: Option<String>,
     pub trailing_color: Option<Rgba>,
     /// Animate the trailing text with a shimmer while the row reports live work.
     pub trailing_shimmer: bool,
