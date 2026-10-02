@@ -70,6 +70,31 @@
       "capture_started_at": "2026-10-02T03:30:44.904000+00:00",
       "capture_finished_at": "2026-10-02T03:30:47.235000+00:00",
       "sha256": "5f1fb1ea79accfd1d507dca31662c25e8dca93c7d96fc663950ee579e2c42972"
+    },
+    {
+      "file": "project-selection.png",
+      "captured_at": "2026-10-02T03:48:41.055562+00:00",
+      "executable_sha256": "76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5",
+      "sha256": "a93cb872d200777a586b12f78edda1b5890fd66bf0d9adc10c97fa3c31bb1e59"
+    },
+    {
+      "file": "checkout-selection.png",
+      "captured_at": "2026-10-02T03:48:56.588252+00:00",
+      "executable_sha256": "76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5",
+      "sha256": "8fcd5799770f85465e5fb6682bca8f06094d2ea1273c785120f045f19ba4d820"
+    },
+    {
+      "file": "session-launch.png",
+      "captured_at": "2026-10-02T03:49:13.996825+00:00",
+      "executable_sha256": "76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5",
+      "sha256": "3311b2f859d6993617b694845d94dc65d9ef04d4dbd126837e62a83d397b2bd6"
+    },
+    {
+      "file": "project-setup.mp4",
+      "capture_started_at": "2026-10-02T03:51:59.043000+00:00",
+      "capture_finished_at": "2026-10-02T03:52:01.675000+00:00",
+      "executable_sha256": "76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5",
+      "sha256": "06d5b07fcefad5d2c4aeeb4100167f169c33febcb11abafac295b2abaf12c3e4"
     }
   ]
 }
