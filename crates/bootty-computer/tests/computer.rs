@@ -7,6 +7,19 @@ use rstest::rstest;
 
 proptest! {
     #[test]
+    fn keyboard_shortcuts_accept_letters_digits_and_function_keys(
+        key in prop_oneof![
+            proptest::char::range('a', 'z').prop_map(|key| key.to_string()),
+            (0..10_u8).prop_map(|key| key.to_string()),
+            (1..21_u8).prop_map(|key| format!("f{key}")),
+        ]
+    ) {
+        let wire = serde_json::json!({"action": "key", "key": key, "modifiers": ["command"]});
+        let action = serde_json::from_value::<ComputerAction>(wire.clone())?;
+        prop_assert_eq!(serde_json::to_value(action)?, wire);
+    }
+
+    #[test]
     fn disabled_access_never_starts_a_helper(x in any::<f64>(), y in any::<f64>()) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let computer = Computer::new(PathBuf::from("/missing/bootty-computer-helper"));
