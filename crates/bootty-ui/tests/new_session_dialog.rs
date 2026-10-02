@@ -87,13 +87,10 @@ fn project_row_ids_map_activation_across_groups() {
     assert_eq!(dialog.spec().title, "Choose checkout");
     let checkout = dialog.spec().rows[0].clone();
     assert_eq!(activate_picker_row(&mut dialog, &checkout, &[]), None);
+    select_launcher(&mut dialog, "terminal");
     let launch = dialog.spec();
-    assert_eq!(launch.title, "Start session");
-    let terminal = launch
-        .rows
-        .iter()
-        .find(|row| row.id.0 == "terminal")
-        .unwrap();
+    assert_eq!(launch.title, "New session");
+    let terminal = launch.rows.iter().find(|row| row.id.0 == "submit").unwrap();
     assert_eq!(
         activate_picker_row(&mut dialog, terminal, &[]),
         Some(NewSessionPickerEvent::CreateSession {
@@ -110,7 +107,7 @@ fn current_checkout_is_reviewable_and_project_switching_can_return(#[case] cwd: 
     let mut dialog = NewSessionDialog::from_projects(vec![project("/projects/other", true)]);
     dialog.set_checkout(cwd.to_owned());
     let spec = dialog.spec();
-    assert_eq!(spec.title, "Start session");
+    assert_eq!(spec.title, "New session");
     assert!(
         spec.footer
             .as_deref()
@@ -130,8 +127,9 @@ fn current_checkout_is_reviewable_and_project_switching_can_return(#[case] cwd: 
         .find(|row| row.id.0 == "current-checkout")
         .unwrap();
     assert_eq!(activate_picker_row(&mut dialog, current, &[]), None);
+    select_launcher(&mut dialog, "terminal");
     let spec = dialog.spec();
-    let terminal = spec.rows.iter().find(|row| row.id.0 == "terminal").unwrap();
+    let terminal = spec.rows.iter().find(|row| row.id.0 == "submit").unwrap();
     assert_eq!(
         activate_picker_row(&mut dialog, terminal, &[]),
         Some(NewSessionPickerEvent::CreateSession {
@@ -172,16 +170,17 @@ fn launch_draft_survives_project_switching_and_names_its_execution(
         .find(|row| row.id.0 == "current-checkout")
         .unwrap();
     activate_picker_row(&mut dialog, back, &[]);
+    select_launcher(&mut dialog, launcher);
     let spec = dialog.spec();
     assert_eq!(spec.text.as_deref(), Some(draft));
-    let row = spec.rows.iter().find(|row| row.id.0 == launcher).unwrap();
+    let row = spec.rows.iter().find(|row| row.id.0 == "submit").unwrap();
     let expected = if launcher == "terminal" {
         assert_eq!(
             row.label,
             if draft.is_empty() {
-                "Terminal"
+                "Open terminal"
             } else {
-                "Command"
+                "Start command"
             }
         );
         NewSessionPickerEvent::CreateSession {
@@ -204,8 +203,9 @@ fn launch_draft_survives_project_switching_and_names_its_execution(
 fn selected_checkout_can_start_while_the_other_project_catalog_loads(#[case] launcher: &str) {
     let mut dialog = NewSessionDialog::open_local(std::sync::Arc::new(|| {}));
     dialog.set_checkout("/projects/current".to_owned());
+    select_launcher(&mut dialog, launcher);
     let spec = dialog.spec();
-    let row = spec.rows.iter().find(|row| row.id.0 == launcher).unwrap();
+    let row = spec.rows.iter().find(|row| row.id.0 == "submit").unwrap();
     assert!(activate_picker_row(&mut dialog, row, &[]).is_some());
 }
 
@@ -452,6 +452,33 @@ fn worktree_project() -> assert_fs::TempDir {
     repo
 }
 
+fn select_launcher(dialog: &mut NewSessionDialog, launcher: &str) {
+    let value = match launcher {
+        "terminal" => "Terminal",
+        "codex" => "Codex",
+        "claude" => "Claude",
+        "pi" => "Pi",
+        _ => panic!("unknown launcher"),
+    };
+    assert_eq!(
+        dialog.apply(
+            &DialogIntent::FieldChanged {
+                dialog: dialog.spec().id,
+                field: if launcher == "terminal" {
+                    "mode"
+                } else {
+                    "provider"
+                }
+                .to_owned(),
+                value: value.to_owned(),
+            },
+            &[]
+        ),
+        None,
+        "selecting a launcher does not start a session"
+    );
+}
+
 fn activate_picker_row(
     dialog: &mut NewSessionDialog,
     row: &bootty_gpui::DialogRow,
@@ -611,8 +638,9 @@ fn setup_launches_the_selected_native_provider_in_the_selected_checkout(
 ) {
     let mut dialog = NewSessionDialog::from_projects(Vec::new());
     dialog.set_checkout("/projects/feature-checkout".to_owned());
+    select_launcher(&mut dialog, row_id);
     let spec = dialog.spec();
-    let row = spec.rows.iter().find(|row| row.id.0 == row_id).unwrap();
+    let row = spec.rows.iter().find(|row| row.id.0 == "submit").unwrap();
     assert_eq!(
         activate_picker_row(&mut dialog, row, &[]),
         Some(NewSessionPickerEvent::CreateAgentSession {
@@ -702,6 +730,7 @@ fn generated_worktree_has_a_reviewable_destination_and_preserves_task(
         name: None,
         start_ref: None,
     };
+    let destination = request.destination(&path).unwrap();
     assert_eq!(
         spec.footer,
         Some(format!(
@@ -724,6 +753,11 @@ fn generated_worktree_has_a_reviewable_destination_and_preserves_task(
             request
         })
     );
+    dialog.set_checkout(destination.clone());
+    let spec = dialog.spec();
+    assert_eq!(spec.role, bootty_gpui::DialogRole::SessionLaunch);
+    assert_eq!(spec.text.as_deref(), Some(task));
+    assert_eq!(spec.footer.as_deref(), Some(destination.as_str()));
 }
 
 #[rstest::rstest]
@@ -753,4 +787,47 @@ fn filtering_projects_selects_the_match_instead_of_the_return_action() {
     assert_eq!(row.id.0, "project:/projects/other");
     activate_picker_row(&mut dialog, row, &[]);
     assert_eq!(dialog.spec().title, "Choose checkout");
+}
+
+#[rstest::rstest]
+fn dedicated_launch_keeps_provider_and_draft_when_modes_change() {
+    let mut dialog = NewSessionDialog::from_projects(Vec::new());
+    dialog.set_checkout("/projects/current".to_owned());
+    let id = dialog.spec().id;
+    let draft = "Review this change\nKeep the public API";
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: id.clone(),
+            value: draft.to_owned(),
+        },
+        &[],
+    );
+    select_launcher(&mut dialog, "claude");
+    select_launcher(&mut dialog, "terminal");
+    let spec = dialog.spec();
+    assert_eq!(spec.role, bootty_gpui::DialogRole::SessionLaunch);
+    assert_eq!(spec.text_label.as_deref(), Some("Command (optional)"));
+    assert_eq!(spec.rows[0].label, "Start command");
+    assert_eq!(
+        dialog.apply(
+            &DialogIntent::FieldChanged {
+                dialog: id,
+                field: "mode".to_owned(),
+                value: "Agent".to_owned(),
+            },
+            &[]
+        ),
+        None
+    );
+    let spec = dialog.spec();
+    assert_eq!(spec.text.as_deref(), Some(draft));
+    assert_eq!(spec.rows[0].label, "Start Claude");
+    assert_eq!(
+        activate_picker_row(&mut dialog, &spec.rows[0], &[]),
+        Some(NewSessionPickerEvent::CreateAgentSession {
+            cwd: "/projects/current".to_owned(),
+            provider: bootty_agents::AgentKind::Claude,
+            prompt: draft.to_owned(),
+        })
+    );
 }

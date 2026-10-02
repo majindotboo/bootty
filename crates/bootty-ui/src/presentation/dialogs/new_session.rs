@@ -1,7 +1,10 @@
 //! Directory, worktree, and branch creation states for the new-session workflow.
 
 use super::{NEW_SESSION_ID, normalized_name};
-use crate::gpui::{DialogAction, DialogIntent, DialogRow, DialogSpec, RowId};
+use crate::gpui::{
+    DialogAction, DialogField, DialogFieldKind, DialogIntent, DialogRole, DialogRow, DialogSpec,
+    RowId,
+};
 use crate::new_session::{NewSessionEffect, NewSessionOutcome, NewSessionWorker};
 use crate::product_dialogs::searchable::{SearchableEntry, SearchableIntent, SearchableList};
 use crate::strings::home_dir;
@@ -19,6 +22,14 @@ pub struct NewSessionDialog {
     project_picker: Option<ProjectPicker>,
     checkout: Option<String>,
     draft: String,
+    mode: LaunchMode,
+    provider: bootty_agents::AgentKind,
+}
+
+#[derive(Clone, Copy)]
+enum LaunchMode {
+    Agent,
+    Terminal,
 }
 
 enum NewSessionStep {
@@ -81,6 +92,12 @@ impl NewSessionDialog {
             project_picker: None,
             checkout: None,
             draft: String::new(),
+            mode: if remote {
+                LaunchMode::Terminal
+            } else {
+                LaunchMode::Agent
+            },
+            provider: bootty_agents::AgentKind::Codex,
         }
     }
 
@@ -154,10 +171,12 @@ impl NewSessionDialog {
         let remote = self.is_remote();
         let (rows, title, icon, hint, empty, text_hint, filter) = match &self.step {
             NewSessionStep::BranchName(draft) => return draft.spec(remote, busy),
-            NewSessionStep::Launch { cwd } => return launch_spec(cwd, remote, &self.draft, busy),
+            NewSessionStep::Launch { cwd } => {
+                return launch_spec(cwd, remote, &self.draft, self.mode, self.provider, busy);
+            }
             NewSessionStep::Project(picker) => (
                 picker.rows(remote, !busy),
-                "New session",
+                "Choose project",
                 "folder",
                 "Choose a project   Ctrl+Shift+F favorite   Esc close",
                 match (busy, remote) {
@@ -236,7 +255,16 @@ impl NewSessionDialog {
                 None
             }
             DialogIntent::FieldChanged { field, value, .. } => {
-                if let NewSessionStep::BranchName(draft) = &mut self.step {
+                if matches!(self.step, NewSessionStep::Launch { .. }) {
+                    match (field.as_str(), value.as_str()) {
+                        ("mode", "Agent") if !self.is_remote() => self.mode = LaunchMode::Agent,
+                        ("mode", "Terminal") => self.mode = LaunchMode::Terminal,
+                        ("provider", "Codex") => self.provider = bootty_agents::AgentKind::Codex,
+                        ("provider", "Claude") => self.provider = bootty_agents::AgentKind::Claude,
+                        ("provider", "Pi") => self.provider = bootty_agents::AgentKind::Pi,
+                        _ => {}
+                    }
+                } else if let NewSessionStep::BranchName(draft) = &mut self.step {
                     match field.as_str() {
                         "folder" => draft.folder.clone_from(value),
                         "start-ref" => draft.start_ref.clone_from(value),
@@ -283,10 +311,23 @@ impl NewSessionDialog {
                             open_cwds,
                         );
                     }
-                    if self.is_remote() && row.0 != "terminal" {
+                    if row.0 != "submit" {
                         return None;
                     }
-                    return launch_event(&row.0, cwd, &self.draft);
+                    return Some(match self.mode {
+                        LaunchMode::Terminal => NewSessionPickerEvent::CreateSession {
+                            cwd: cwd.clone(),
+                            command: (!self.draft.trim().is_empty()).then(|| self.draft.clone()),
+                        },
+                        LaunchMode::Agent if !self.is_remote() => {
+                            NewSessionPickerEvent::CreateAgentSession {
+                                cwd: cwd.clone(),
+                                provider: self.provider,
+                                prompt: self.draft.clone(),
+                            }
+                        }
+                        LaunchMode::Agent => return None,
+                    });
                 }
                 self.select_row(row)?;
                 self.activate_selected(open_cwds)
@@ -782,65 +823,99 @@ fn worktree_row(
     row
 }
 
-fn launch_spec(cwd: &str, remote: bool, draft: &str, catalog_loading: bool) -> DialogSpec {
-    let mut terminal = picker_row(
-        RowId::new("terminal"),
-        "terminal",
-        if draft.trim().is_empty() {
-            "Terminal"
+fn launch_spec(
+    cwd: &str,
+    remote: bool,
+    draft: &str,
+    mode: LaunchMode,
+    provider: bootty_agents::AgentKind,
+    catalog_loading: bool,
+) -> DialogSpec {
+    let provider_name = match provider {
+        bootty_agents::AgentKind::Codex => "Codex",
+        bootty_agents::AgentKind::Claude => "Claude",
+        bootty_agents::AgentKind::Pi => "Pi",
+    };
+    let agent = matches!(mode, LaunchMode::Agent);
+    let command = !agent && !draft.trim().is_empty();
+    let label = if agent {
+        format!("Start {provider_name}")
+    } else if command {
+        "Start command".to_owned()
+    } else {
+        "Open terminal".to_owned()
+    };
+    let mut spec = DialogSpec::prompt(
+        NEW_SESSION_ID,
+        "New session",
+        draft,
+        if agent {
+            "What would you like the agent to do?"
         } else {
-            "Command"
+            "Enter a command, or leave empty to open a shell…"
+        },
+        DialogAction::new("start-session"),
+    );
+    spec.role = DialogRole::SessionLaunch;
+    spec.text_label = Some(
+        if agent {
+            "Prompt"
+        } else {
+            "Command (optional)"
         }
         .to_owned(),
-        true,
     );
-    terminal.detail = Some(
-        if draft.trim().is_empty() {
-            "Open a shell in this checkout"
-        } else {
-            "Run the text as a command in this checkout"
-        }
-        .to_owned(),
-    );
-    let mut rows = Vec::new();
-    {
-        for (id, icon, label) in [
-            ("codex", "openai", "Codex"),
-            ("claude", "anthropic", "Claude"),
-            ("pi", "pi", "Pi"),
-        ] {
-            let mut row = picker_row(RowId::new(id), icon, label.to_owned(), !remote);
-            row.detail = Some(
-                if draft.trim().is_empty() {
-                    "Open the agent in a terminal"
-                } else {
-                    "Start the task in the agent’s terminal"
-                }
-                .to_owned(),
-            );
-            rows.push(row);
-        }
-    }
-    rows.push(terminal);
-    rows.push(picker_row(
-        RowId::new("choose-checkout"),
-        "git-branch",
-        "Choose checkout or worktree…".to_owned(),
-        !catalog_loading,
-    ));
-    rows.push(picker_row(
-        RowId::new("choose-project"),
-        "folder",
-        "Choose another project…".to_owned(),
-        !catalog_loading,
-    ));
-    let mut spec = DialogSpec::searchable(NEW_SESSION_ID, "Start session", "", rows);
-    spec.text = Some(draft.to_owned());
-    spec.text_label = Some("Task or command".to_owned());
-    spec.text_hint = Some("Describe the task, or leave empty to open a terminal…".to_owned());
     spec.icon = Some("terminal".to_owned());
     spec.footer = Some(display_project_path(cwd, remote));
-    spec.hint = Some("Enter start session   Esc close".to_owned());
+    spec.hint = Some(
+        if agent {
+            "The agent starts in the selected checkout."
+        } else if command {
+            "Run this command in the selected checkout."
+        } else {
+            "Open a shell in the selected checkout."
+        }
+        .to_owned(),
+    );
+    if let Some(submit) = spec.rows.first_mut() {
+        submit.label = label;
+    }
+    spec.fields = vec![DialogField {
+        id: "mode".to_owned(),
+        label: "Session".to_owned(),
+        value: if agent { "Agent" } else { "Terminal" }.to_owned(),
+        placeholder: String::new(),
+        kind: DialogFieldKind::Choice(if remote {
+            vec!["Terminal".to_owned()]
+        } else {
+            vec!["Agent".to_owned(), "Terminal".to_owned()]
+        }),
+    }];
+    if agent {
+        spec.fields.push(DialogField {
+            id: "provider".to_owned(),
+            label: "Provider".to_owned(),
+            value: provider_name.to_owned(),
+            placeholder: String::new(),
+            kind: DialogFieldKind::Choice(vec![
+                "Codex".to_owned(),
+                "Claude".to_owned(),
+                "Pi".to_owned(),
+            ]),
+        });
+    }
+    spec.rows.push(picker_row(
+        RowId::new("choose-project"),
+        "folder",
+        project_name(cwd),
+        !catalog_loading,
+    ));
+    spec.rows.push(picker_row(
+        RowId::new("choose-checkout"),
+        "git-branch",
+        "Choose checkout or new worktree…".to_owned(),
+        !catalog_loading,
+    ));
     spec
 }
 
@@ -856,27 +931,6 @@ fn generated_task_branch(draft: &str) -> String {
         .unwrap_or(&words)
         .trim_end_matches('-');
     format!("task/{}", if slug.is_empty() { "new-task" } else { slug })
-}
-
-fn launch_event(id: &str, cwd: &str, draft: &str) -> Option<NewSessionPickerEvent> {
-    use bootty_agents::AgentKind;
-    let provider = match id {
-        "terminal" => {
-            return Some(NewSessionPickerEvent::CreateSession {
-                cwd: cwd.to_owned(),
-                command: (!draft.trim().is_empty()).then(|| draft.to_owned()),
-            });
-        }
-        "codex" => AgentKind::Codex,
-        "claude" => AgentKind::Claude,
-        "pi" => AgentKind::Pi,
-        _ => return None,
-    };
-    Some(NewSessionPickerEvent::CreateAgentSession {
-        cwd: cwd.to_owned(),
-        provider,
-        prompt: draft.to_owned(),
-    })
 }
 
 fn worktree_row_id(entry: &WorktreePickerEntry) -> RowId {
