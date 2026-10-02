@@ -1,0 +1,75 @@
+{
+  "source_commit": "ade61d879fee0428acd05507deef2d8217008cde",
+  "executable_sha256": "75a8dfffefece34004322d8d2fe1436cb5586c7894cdd3197a0ddde3ee7bd6ae",
+  "app": "BoottyDev-1b977f5b74a225a8",
+  "capture_method": "native window through computer-use API",
+  "artifacts": [
+    {
+      "file": "agent-terminals.png",
+      "captured_at": "2026-10-02T03:30:47.344018+00:00",
+      "sha256": "ca93691a9f8c4cf031eb0e1e9f7aab6a2dbb00a1546ec001eac31861cc8918dc"
+    },
+    {
+      "file": "annotation-paste.png",
+      "captured_at": "2026-10-02T03:28:11.731612+00:00",
+      "sha256": "3335817d5ac79fe9721f17010707508423544ed0c456cb6950b5c71ea2e8385c"
+    },
+    {
+      "file": "annotations.png",
+      "captured_at": "2026-10-02T03:28:10.560903+00:00",
+      "sha256": "e617c89282d8f7d796572de0a29f75edddc02c8baf9d6fdd8098ee91cd1772d5"
+    },
+    {
+      "file": "browser-search.png",
+      "captured_at": "2026-10-02T03:29:09.971370+00:00",
+      "sha256": "625394ea58bbcc04e752f61e00bbeae6518e556583ba4109a3facacab90ed88c"
+    },
+    {
+      "file": "browser-settings.png",
+      "captured_at": "2026-10-02T03:28:31.011024+00:00",
+      "sha256": "2a3ea136feca84104d777908d17699120757f7de2dd7dffb4d89c95cc3f8234e"
+    },
+    {
+      "file": "browser.png",
+      "captured_at": "2026-10-02T03:27:51.722989+00:00",
+      "sha256": "4e0087e9789bb666fec1826e4a380dc3b17d66c3239dcb89f3582c1018179a0a"
+    },
+    {
+      "file": "coordination.png",
+      "captured_at": "2026-10-02T03:15:57.065320+00:00",
+      "sha256": "16ac43e7db0802cdecac52085f571c967fd77066a09e7d8a75a751a84778e4c2"
+    },
+    {
+      "file": "empty-sidebar.png",
+      "captured_at": "2026-10-02T03:35:12.004095+00:00",
+      "sha256": "4a0d29116fd50b5259a927281cc15b92e5f07005052446b3237e7636f9b860d4"
+    },
+    {
+      "file": "files.png",
+      "captured_at": "2026-10-02T03:35:17.250051+00:00",
+      "sha256": "855741eb16553c779a8e7314b2dc926411ba242ea529a5a1036a9e91b92004dd"
+    },
+    {
+      "file": "history.png",
+      "captured_at": "2026-10-02T03:29:53.886061+00:00",
+      "sha256": "6ec818c77c50bc7ef64f9baa321f85bc7198e5ab8129c15c7af256b1389c075b"
+    },
+    {
+      "file": "sessions.png",
+      "captured_at": "2026-10-02T03:35:11.931193+00:00",
+      "sha256": "b1e6774098329632a10e24eda85cc9fa151480a437dfe14cd0202f63bbd9092b"
+    },
+    {
+      "file": "browser.mp4",
+      "capture_started_at": "2026-10-02T03:29:25.786000+00:00",
+      "capture_finished_at": "2026-10-02T03:29:27.744000+00:00",
+      "sha256": "cb425f7cb39e178acd873c7ddce7d8b6e3f506c2d3a89fd1483fffb9fafb840d"
+    },
+    {
+      "file": "agent-launch.mp4",
+      "capture_started_at": "2026-10-02T03:30:44.904000+00:00",
+      "capture_finished_at": "2026-10-02T03:30:47.235000+00:00",
+      "sha256": "5f1fb1ea79accfd1d507dca31662c25e8dca93c7d96fc663950ee579e2c42972"
+    }
+  ]
+}
