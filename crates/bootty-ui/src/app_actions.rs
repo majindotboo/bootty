@@ -409,7 +409,6 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::FocusTerminal => Keybind::App(AppAction::FocusTerminal),
         Binding::ToggleSidebarFocus => Keybind::App(AppAction::ToggleSidebarFocus),
         Binding::ToggleSidebarVisibility => Keybind::App(AppAction::ToggleSidebarVisibility),
-        Binding::ShowAgents => Keybind::App(AppAction::Dock(crate::commands::DockAction::Agents)),
         Binding::ShowFiles => Keybind::App(AppAction::Dock(crate::commands::DockAction::Files)),
         Binding::ShowSidebar => Keybind::App(AppAction::Dock(crate::commands::DockAction::Sidebar)),
         Binding::ToggleSessionsPanel => Keybind::App(AppAction::Dock(
@@ -424,9 +423,14 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::ToggleDiffPanel => Keybind::App(AppAction::Dock(
             crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Diff),
         )),
-        Binding::ToggleAgentsPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Agents),
+        Binding::ToggleBrowserPanel => Keybind::App(AppAction::Dock(
+            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Browser),
         )),
+        Binding::ToggleCoordinationPanel => {
+            Keybind::App(AppAction::Dock(crate::commands::DockAction::TogglePanel(
+                bootty_config::config::PanelKind::Coordination,
+            )))
+        }
         Binding::ToggleLeftDock => {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleLeft))
         }
@@ -434,19 +438,17 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleRight))
         }
         Binding::ShowSpaces => Keybind::App(AppAction::Dock(crate::commands::DockAction::Spaces)),
-        Binding::ToggleHiddenTabs => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::ToggleHiddenTabs,
-        )),
         Binding::ShowCodexBar => {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::CodexBar))
-        }
-        Binding::ToggleTabBar => {
-            Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleTabBar))
         }
         Binding::EditTheme => Keybind::App(AppAction::EditTheme),
         Binding::ExportTerminal => Keybind::App(AppAction::ExportTerminal),
         Binding::ShowChanges => Keybind::App(AppAction::Dock(crate::commands::DockAction::Changes)),
         Binding::ShowDiff => Keybind::App(AppAction::Dock(crate::commands::DockAction::Diff)),
+        Binding::ShowBrowser => Keybind::App(AppAction::Dock(crate::commands::DockAction::Browser)),
+        Binding::ShowCoordination => {
+            Keybind::App(AppAction::Dock(crate::commands::DockAction::Coordination))
+        }
         Binding::OpenSetting(id) => Keybind::OpenSetting(id),
         Binding::OpenSettings => Keybind::App(AppAction::OpenSettings),
         Binding::ChangeAppearance(choice) => {

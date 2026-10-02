@@ -14,7 +14,7 @@ run = "cargo run --quiet --locked -p xtasks -- launch"
 
 [tasks.test]
 description = "Run workspace tests with nextest"
-run = "cargo nextest run"
+run = "python3 scripts/run-workspace-tests.py"
 
 [tasks.fmt]
 description = "Check formatting"

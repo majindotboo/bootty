@@ -63,8 +63,9 @@ fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
     assert!(dialog.apply(&activate(dialog.spec()), &occupied).is_none());
     let worktrees = dialog.spec();
     assert_eq!(worktrees.text.as_deref(), Some(""));
+    assert_eq!(dialog.apply(&activate(worktrees), &occupied), None);
     assert!(matches!(
-        dialog.apply(&activate(worktrees), &occupied),
+        dialog.apply(&activate(dialog.spec()), &occupied),
         Some(NewSessionPickerEvent::CreateSession { cwd }) if cwd == path
     ));
 }
@@ -506,4 +507,42 @@ fn right_dock_defaults_dispatch_and_resolve_a_tooltip_hint(cx: &mut TestAppConte
             })
             .unwrap();
     }
+}
+
+#[rstest]
+#[case("Codex", "Open Codex terminal", "agents.codex.start")]
+#[case("Claude", "Open Claude terminal", "agents.claude.start")]
+#[case("Pi", "Open Pi terminal", "agents.pi.start")]
+#[case("Codex history", "Codex session history", "agents.codex.history")]
+#[case("Claude history", "Claude session history", "agents.claude.history")]
+#[case("Pi history", "Pi session history", "agents.pi.history")]
+#[case("Codex", "Sign in to Codex", "agents.codex.account.login")]
+#[case("Claude", "Sign in to Claude", "agents.claude.account.login")]
+#[case("Pi", "Sign in to Pi", "agents.pi.account.login")]
+fn palette_discovers_and_invokes_terminal_agent_commands(
+    #[case] query: &str,
+    #[case] title: &str,
+    #[case] command: &str,
+) {
+    let mut palette = CommandPaletteDialog::open(&[], CommandPaletteState::default()).unwrap();
+    palette.apply(&DialogIntent::TextChanged {
+        dialog: DialogId::new(COMMAND_PALETTE_ID),
+        value: query.into(),
+    });
+    let row = palette
+        .spec()
+        .rows
+        .into_iter()
+        .find(|row| row.enabled && row.label == title)
+        .expect("agent command visible in palette");
+    let action = row.action.expect("invocable agent command");
+    assert_eq!(
+        palette.apply(&DialogIntent::Activate {
+            dialog: DialogId::new(COMMAND_PALETTE_ID),
+            row: row.id,
+            action: action.id,
+            payload: action.payload,
+        }),
+        Some(CommandPaletteEvent::Invoke(command.into()))
+    );
 }

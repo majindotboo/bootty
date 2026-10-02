@@ -80,8 +80,6 @@ fit-cell-height = true
 tabs-use-session-color = true
 top-bar = true
 bottom-bar = false
-panel-tab-style = "icons"
-panel-tabs = "automatic"
 status-height = 30
 status-background = "#1e1e2e"
 notched-fullscreen-black-chrome = true
@@ -89,15 +87,11 @@ gap = 0
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.0
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [multiplexer]
 backend = "rmux"
@@ -135,6 +129,7 @@ host = "devbox" # ~/.ssh/config alias, hostname, or address
 # `args` come first on the command line, so any of these can be set differently.
 
 [input]
+# Every preset opens the command palette with Cmd+K (Ctrl+Shift+K outside macOS).
 preset = "ghostty" # ghostty (default), bootty, or tmux — which built-in default keybind set to use
 prefix = "ctrl+space" # leader for prefixed chords (bootty/tmux presets); defaults to ctrl+space / ctrl+b
 keybind = ["cmd+alt+shift+r=reload_config"]
@@ -510,9 +505,9 @@ An explicit `[window].fullscreen-top-offset` overrides the reserved height.
 Tab strips reveal a newly selected or keyboard-focused tab and show scroll
 buttons only in directions with more tabs. Terminal tab widths grow as needed,
 then wait for the title to remain unchanged for one second before shrinking.
-Close buttons default to the left on macOS and the right elsewhere. Override
-`close-position = "left"` or `"right"` under `[chrome.terminal-tabs]` or
-`[chrome.dock-tabs]` independently.
+Terminal and sidebar tabs share `[chrome.tabs]` for appearance, close-button side,
+and visibility. Close buttons default to always visible on the right. Set
+`close-position = "left"` or `close-button = "hover"` to change both strips.
 
 `chrome.tabs-use-session-color` defaults to `true`: active terminal and dock tabs
 use a muted tint of the selected session color. Set it to `false` to use the theme
@@ -584,33 +579,27 @@ Connection tests report results for both saved profiles and unsaved drafts.
 
 `toggle_left_dock` and `toggle_right_dock` show or hide their respective docks.
 The palette, keybinding editor, CLI and socket expose the same commands as the
-header buttons. Panel commands are `show_sidebar`, `show_files`, `show_changes`,
-and `show_agents`.
+header buttons. Panel commands include `show_sidebar`, `show_files`, `show_changes`,
+`show_diff`, and `show_coordination`.
 For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
 
-Right-click a tab or empty group header and choose **Add panel** to open or move a
-panel into that group. Panel commands accept an optional live `group` ID; an expired
-ID reports a stale target. Without a group, a panel opens in its existing location,
-or its default dock if closed. Document and diff tabs open from their file actions.
+Sessions occupies the left dock. Files, Changes, Diff, Browser, and Coordination
+occupy the right dock. Tool buttons always show icons and labels. Document and
+diff tabs open from their file actions; panel placement is fixed.
 
-The Appearance → Docks settings control each dock button independently and select
-icons only (default), icons and text, or text-only tab labels. `chrome.left-dock-toggle`
-and `chrome.right-dock-toggle` hide only their buttons; commands still work.
-`chrome.panel-tab-style` accepts `icons`, `icons-and-text`, or `text` for fixed left/right docks;
-the default is `icons`. Main and bottom Dock groups use icons and text. `chrome.panel-tabs` accepts
-`automatic`, `always`, or `never` for fixed docks. Main and bottom Dock groups keep their tabs
-visible unless that individual group is switched to command-only navigation.
+Fixed tools always show their icons and labels. The Appearance → Docks settings
+control each dock button independently. `chrome.left-dock-toggle` and
+`chrome.right-dock-toggle` hide only their buttons; commands still work.
 
-Single-panel groups hide their tabs automatically. **Always show tabs** in the group
-context menu overrides this; **Always hide tabs** enables command-only panel switching for that group; `toggle_tab_bar` toggles the same preference for the
-focused group and also accepts a group ID. Layout and tab preferences persist per
-window, shared across Spaces. `toggle_hidden_tabs` toggles the per-group hidden override. `show_codexbar` opens Agents with usage meters; `show_spaces` opens Sessions with the Space switcher. Dock controls and the status row remain available when tabs hide.
+Dock widths and visibility persist per window, shared across Spaces.
+`show_spaces` opens Sessions with the Space switcher. Agent state and usage appear
+within Sessions; there is no separate Agents panel.
 
 ## Panel controls
 
 Every tool panel has a `toggle_<name>_panel` command, available in the palette,
-keymap, CLI, and control socket. Names are `sessions`, `files`, `changes`, `diff`,
-`agents`, `jobs`, `transfers`, `recovery`, and `shell`. A toggle closes an active,
+keymap, CLI, and control socket. Names include `sessions`, `files`, `changes`, `diff`,
+and `coordination`. A toggle closes an active,
 visible panel; otherwise it opens and selects that panel. Terminal topology and
 contextual document tabs retain their own close and navigation commands.
 
@@ -619,32 +608,58 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Settings → Panels offers a dock dropdown (left, right, bottom) and a status bar
-button dropdown (none, top, bottom) for each tool panel. For example:
+Coordination creates persistent runs and tasks, attaches existing terminal agents
+as workers, and dispatches prompts through the same command path.
+Task completion requires a report from the exact dispatched terminal generation
+and attempt.
+Restarted work is marked interrupted and resumes only after an explicit retry.
 
-```toml
-[panels.sessions]
-dock = "left"
-button = "top"
+Sessions stays on the left and tools stay on the right. Panel resizing and
+visibility are retained, but panels cannot be moved, split, or floated.
+Tools, documents and browser pages share one row of labeled, closable tabs.
+The plus button and empty sidebar offer Files, Changes, Coordination, and a new
+browser page. The command palette opens the same tools.
+Agent status, attention and account usage appear in Sessions.
 
-[panels.agents]
-dock = "right"
-button = "bottom"
-```
+Use **Connect a phone…** in the command palette to pair the mobile app. Enter
+this computer's local IP address, enable the connection, and copy the masked
+pairing code into the phone's pairing screen. `127.0.0.1` connects an iOS
+simulator running on this Mac. The pairing code contains a certificate pin and
+credential; keep it private. The phone controls live desktop sessions through
+the same command path. **Revoke connection**, quitting, or restarting Bootty
+ends access; the listener does not enable itself on the next launch.
 
-Sessions defaults to the left dock and the other tool panels to the right, with
-no status buttons. Selecting a dock moves an open panel there; hidden panels use
-that dock when reopened. Dragging can override placement for the current workspace; explicit dock
-settings apply again when reopening it. Status buttons also make their chosen bar visible.
+The Browser panel opens with **Open Browser** (`browser.show`). It hosts native
+webviews with separate tabs, back and forward history, reload, and an address
+bar. Bare localhost and loopback addresses use HTTP; other bare hosts use HTTPS.
+Cmd/Ctrl+L focuses the address, Cmd/Ctrl+R reloads, Cmd/Ctrl+T opens a tab,
+Cmd/Ctrl+W closes a tab, and Cmd/Ctrl+K opens the command palette while a page has
+focus. The Browser settings page selects the search engine and persistent site
+data. Plain address-bar text searches the chosen engine. Site data persists in
+an identity-specific native profile; macOS 13 uses private storage until named
+profiles are available on macOS 14. Saved logins use the OS credential store,
+scoped to the current website and Bootty identity. Filling requires HTTPS or
+loopback HTTP and one unambiguous sign-in form; it never submits the form.
+One saved login per origin is supported.
 
-The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
-underline, pill, outline, or segmented tabs; close-button side (left/right); and
+**Annotate page** selects an element for a native comment editor. Review and
+copy the feedback, or paste it into the selected terminal without submitting it.
+Browser previews cannot grant device permissions or save downloads; use
+**Open in default browser** for those actions. Native browser
+embedding works on macOS, Windows, and Linux X11. On Wayland desktops, Bootty
+uses XWayland for both its window and the embedded browser; XWayland must be
+enabled by the compositor. Startup selects the shared X11 backend automatically
+when `DISPLAY` is available. A Wayland session without XWayland can still open
+the application, but the Browser panel explains how to enable embedded browsing.
+
+The shared **Tabs** settings select classic, underline, pill, outline, or
+segmented appearance for terminal and sidebar tabs; close-button side (left/right); and
 close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
 side padding without reserving a separate column. Hiding a close button keeps the
 close command and context menu available.
 
-Dock visibility and widths are saved in the workspace layout. Use each panel's
-Dock setting for placement and drag dock edges to resize. The legacy
+Dock visibility and widths are saved in the workspace layout. Drag dock edges
+to resize. The legacy
 `chrome.sidebar`, `chrome.sidebar-width`, and `sidebar.position` keys are accepted
 only to seed an unsaved layout or migrate an older layout; changing them does not
 alter an open workspace. They are no longer settings controls.
@@ -652,11 +667,11 @@ alter an open workspace. They are no longer settings controls.
 ## Git tool panels
 
 Use **Show Git Changes** in the palette (`show_changes`) or click a sidebar diff
-count. Changes and Diff are native Dock panels: drag their tabs to split or combine
-groups, resize the split, close panels, or toggle the right dock. Opening Changes again
+count. Changes and Diff occupy the right dock. Resize its edge, switch tools, or
+toggle the right dock. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
-Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
+Older layouts reconcile to the fixed panel homes; every tool remains available.
 
 Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
 index without changing working files. Commit uses only the index; Amend explicitly
@@ -802,3 +817,16 @@ and **Copy setting link**. macOS packages register links such as `bootty://setti
 at that configuration path. The equivalent CLI command is `bootty command open_setting font.size`. Development packages use their own namespace as the
 URL scheme. Fractional number controls use two decimal places; integer controls
 remain integral.
+
+`computer-use = false` is the default. Enable it in Settings or the native computer setup before agents can capture or control the desktop. Screen Recording and Accessibility permissions remain separate macOS grants.
+
+`bootty computer.key k command` opens the command palette after access is enabled.
+Named keys support `a`–`z`, `0`–`9`, `f1`–`f20`, navigation keys and punctuation
+names such as `left_bracket` and `slash`. Modifiers are comma-separated
+`command`, `control`, `option` and `shift`. Named keys use ANSI keyboard positions;
+use `computer.type` for text in the current language. Secure input pauses both paths.
+
+The Browser settings page chooses the address-bar search engine and whether cookies and site data
+survive app restarts. `[browser]` accepts `search-engine` (`duck_duck_go`, `google`, `bing`, or
+`brave`) and `persist-site-data` (default `true`). Turning persistence off recreates open pages in
+private mode without deleting the saved profile. Development and Production use separate profiles.

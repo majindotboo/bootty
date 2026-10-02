@@ -123,6 +123,7 @@ impl MultiplexerConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoottyConfig {
     pub locale: String,
+    pub computer_use: bool,
     pub version: u32,
     pub restore_on_startup: RestoreOnStartup,
     pub cli_default_open_behavior: OpenBehavior,
@@ -133,7 +134,7 @@ pub struct BoottyConfig {
     pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
-    pub panels: BTreeMap<PanelKind, PanelConfig>,
+    pub browser: BrowserConfig,
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
@@ -146,6 +147,46 @@ pub struct BoottyConfig {
     pub window: WindowConfig,
     pub config_path: PathBuf,
     pub compatibility_warnings: Vec<String>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum BrowserSearchEngine {
+    #[default]
+    DuckDuckGo,
+    Google,
+    Bing,
+    Brave,
+}
+
+impl BrowserSearchEngine {
+    #[must_use]
+    pub const fn address(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "https://duckduckgo.com/",
+            Self::Google => "https://www.google.com/search",
+            Self::Bing => "https://www.bing.com/search",
+            Self::Brave => "https://search.brave.com/search",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserConfig {
+    pub search_engine: BrowserSearchEngine,
+    pub persist_site_data: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            search_engine: BrowserSearchEngine::default(),
+            persist_site_data: true,
+        }
+    }
 }
 
 #[derive(
@@ -329,30 +370,6 @@ pub struct FontConfig {
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
-pub enum PanelTabStyle {
-    #[default]
-    Icons,
-    IconsAndText,
-    Text,
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelTabs {
-    #[default]
-    Automatic,
-    Always,
-    Never,
-}
-
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
 pub enum TabAppearance {
     #[default]
     Classic,
@@ -398,11 +415,8 @@ pub struct TabConfig {
 pub struct ChromeConfig {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
-    pub panel_tab_style: PanelTabStyle,
-    pub panel_tabs: PanelTabs,
     pub tabs_use_session_color: bool,
-    pub dock_tabs: TabConfig,
-    pub terminal_tabs: TabConfig,
+    pub tabs: TabConfig,
 
     pub sidebar: bool,
     /// Whether to show the module bar above the terminal.
@@ -981,15 +995,17 @@ pub enum PanelKind {
     Files,
     Changes,
     Diff,
-    Agents,
+    Browser,
+    Coordination,
 }
 impl PanelKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Sessions,
         Self::Files,
         Self::Changes,
         Self::Diff,
-        Self::Agents,
+        Self::Browser,
+        Self::Coordination,
     ];
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -998,48 +1014,8 @@ impl PanelKind {
             Self::Files => "files",
             Self::Changes => "changes",
             Self::Diff => "diff",
-            Self::Agents => "agents",
+            Self::Browser => "browser",
+            Self::Coordination => "coordination",
         }
-    }
-}
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelDock {
-    Left,
-    Right,
-    Bottom,
-}
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelButton {
-    #[default]
-    None,
-    Top,
-    Bottom,
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
-pub struct PanelConfig {
-    pub dock: Option<PanelDock>,
-    pub button: PanelButton,
-}
-impl PanelConfig {
-    #[must_use]
-    pub fn dock(self, kind: PanelKind) -> PanelDock {
-        self.dock.unwrap_or(if kind == PanelKind::Sessions {
-            PanelDock::Left
-        } else {
-            PanelDock::Right
-        })
-    }
-}
-impl BoottyConfig {
-    #[must_use]
-    pub fn panel(&self, kind: PanelKind) -> PanelConfig {
-        self.panels.get(&kind).copied().unwrap_or_default()
     }
 }

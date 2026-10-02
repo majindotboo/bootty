@@ -22,9 +22,14 @@ impl AppState {
     pub(super) fn dispatch_clipboard_paste(
         &mut self,
         scope: SpaceId,
-        target: CommandTarget,
+        target: Option<CommandTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        let Some(target) = target else {
+            return self.reject_command(CommandOutcome::Unavailable {
+                message: "clipboard paste requires a terminal".to_owned(),
+            });
+        };
         let (deadline, cancellation) = executor::command_execution(execution);
         if cancellation.is_cancelled() {
             return CommandDispatch::Complete(CommandOutcome::cancelled());

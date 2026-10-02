@@ -8,20 +8,26 @@ bootty-dev = ["bootty-config/bootty-dev"]
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 bootty-config = { path = "../bootty-config" }
 getrandom.workspace = true
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 rmux-ipc.workspace = true
 rmux-os.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+subtle = "2.6.1"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 assert_fs.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

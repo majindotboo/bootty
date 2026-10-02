@@ -20,6 +20,7 @@ fn workspace_view(root: &Root) -> Result<Entity<GpuiWorkspace>> {
 
 #[derive(Clone)]
 struct ReopenContext {
+    remote_connections: crate::remote_connections::RemoteConnections,
     config: BoottyConfig,
     window_state_key: String,
     backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
@@ -44,20 +45,45 @@ fn reopen_window(
     let server_control_plane = control_plane.clone();
     let config = reopen.config;
     let backends = reopen.backends;
-    let (window, workspace) =
-        match GpuiWorkspace::open(config, state_key, backends, control_plane, cx) {
-            Ok(opened) => opened,
-            Err(error) => {
-                eprintln!("reopen Bootty window: {error:#}");
-                return;
-            }
-        };
+    let remote_connections = reopen.remote_connections;
+    match remote_connections.set_owner(None) {
+        Ok(Some(server)) => cx
+            .background_executor()
+            .spawn(async move {
+                drop(server);
+            })
+            .detach(),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("revoke prior Bootty connection: {error:#}");
+            return;
+        }
+    }
+    let (window, workspace) = match GpuiWorkspace::open(
+        config,
+        state_key,
+        backends,
+        control_plane,
+        remote_connections,
+        cx,
+    ) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("reopen Bootty window: {error:#}");
+            return;
+        }
+    };
     let _ = window.update(cx, |_, window, _| window.activate_window());
     let (commands, catalog, _) = workspace.read(cx).control_binding();
     reopen_control_server.replace(None);
     if let Ok(server) =
         ControlServer::spawn(&control_state_key, commands, catalog, &server_control_plane)
     {
+        if let Err(error) = workspace.update(cx, |workspace, cx| {
+            workspace.set_control_owner(server.descriptor().cloned(), cx)
+        }) {
+            eprintln!("connect Bootty control owner: {error:#}");
+        }
         reopen_control_server.replace(Some(server));
     }
 }
@@ -188,6 +214,7 @@ fn launch(
     let localizer = crate::i18n::Localizer::new(&config.locale)?;
     crate::i18n::publish(&localizer, cx);
     crate::gpui_document_panel::init(cx);
+    crate::gpui_browser_panel::init(cx);
     app_menu.replace(crate::menu::install(&localizer));
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new(
@@ -198,6 +225,7 @@ fn launch(
     let quit_after_last_window =
         config.on_last_window_closed == OnLastWindowClosed::QuitApp || !cfg!(target_os = "macos");
     let reopen = ReopenContext {
+        remote_connections: crate::remote_connections::RemoteConnections::default(),
         config: config.clone(),
         window_state_key: window_state_key.clone(),
         backends: Arc::clone(&backends),
@@ -211,6 +239,7 @@ fn launch(
         window_state_key,
         backends,
         workspace_control_plane,
+        reopen.remote_connections.clone(),
         cx,
     )
     .context("open Bootty window")?;
@@ -220,12 +249,21 @@ fn launch(
         .context("activate Bootty window")?;
 
     let (commands, catalog, _workspace_control_plane) = workspace.read(cx).control_binding();
-    control_server.replace(Some(ControlServer::spawn(
-        &control_state_key,
-        commands,
-        catalog,
-        &control_plane,
-    )?));
+    let server = ControlServer::spawn(&control_state_key, commands, catalog, &control_plane)?;
+    workspace.update(cx, |workspace, cx| {
+        workspace.set_control_owner(server.descriptor().cloned(), cx)
+    })?;
+    control_server.replace(Some(server));
+    let quitting_connections = reopen.remote_connections.clone();
+    cx.on_app_quit(move |cx| {
+        let connections = quitting_connections.clone();
+        cx.background_executor().spawn(async move {
+            if let Err(error) = connections.revoke() {
+                eprintln!("revoke Bootty connection: {error:#}");
+            }
+        })
+    })
+    .detach();
     reopen_context.replace(Some(reopen));
 
     cx.on_window_closed(move |cx, _| {

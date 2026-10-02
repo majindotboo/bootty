@@ -111,6 +111,9 @@ pub struct MuxCommandCompletion {
     /// The selection the command asked for. Both are `None` for a command that preserves it.
     pub selected_session: Option<String>,
     pub selected_window: Option<String>,
+    /// The single new window observed after creation, independent of preserved UI selection.
+    pub created_window: Option<(String, String)>,
+    creating_window: Option<(String, Vec<String>)>,
     preserve_selection: bool,
     snapshot: Option<(MuxBindingConfig, MuxSnapshot)>,
 }
@@ -127,6 +130,8 @@ impl MuxCommandCompletion {
         Self {
             selected_session,
             selected_window,
+            created_window: None,
+            creating_window: None,
             preserve_selection: false,
             snapshot: None,
         }
@@ -136,12 +141,31 @@ impl MuxCommandCompletion {
         Self {
             selected_session: None,
             selected_window: None,
+            created_window: None,
+            creating_window: None,
             preserve_selection: true,
             snapshot: None,
         }
     }
 
-    fn with_snapshot(self, config: MuxBindingConfig, snapshot: MuxSnapshot) -> Self {
+    fn with_snapshot(mut self, config: MuxBindingConfig, snapshot: MuxSnapshot) -> Self {
+        if let Some((session_id, previous)) = self.creating_window.take()
+            && let Some(session) = snapshot
+                .sessions
+                .iter()
+                .find(|session| session_matches(session, &session_id))
+        {
+            let mut created = session
+                .windows
+                .iter()
+                .filter(|window| !previous.contains(&window.id));
+            // Concurrent creations are ambiguous; do not issue an input target for them.
+            if let Some(window) = created.next()
+                && created.next().is_none()
+            {
+                self.created_window = Some((session.id.clone(), window.id.clone()));
+            }
+        }
         if self.preserve_selection {
             return Self {
                 snapshot: Some((config, snapshot)),
@@ -168,6 +192,8 @@ impl MuxCommandCompletion {
         Self {
             selected_session,
             selected_window,
+            created_window: self.created_window,
+            creating_window: None,
             preserve_selection: false,
             snapshot: Some((config, snapshot)),
         }
@@ -1259,13 +1285,28 @@ impl MuxController {
             let _ = response_tx.send(Err(MuxCommandError::Unavailable));
             return response_rx;
         }
-        let completion = match selection {
+        let mut completion = match selection {
             CommandSelection::Follow => {
                 let (selected_session, selected_window) = self.command_completion(&command);
                 MuxCommandCompletion::requested(selected_session, selected_window)
             }
             CommandSelection::Preserve => MuxCommandCompletion::preserving_selection(),
         };
+        if let MuxCommand::NewWindow { session_id, .. } = &command
+            && let Some(session) = self
+                .sessions
+                .iter()
+                .find(|session| session_matches(session, session_id))
+        {
+            completion.creating_window = Some((
+                session.id.clone(),
+                session
+                    .windows
+                    .iter()
+                    .map(|window| window.id.clone())
+                    .collect(),
+            ));
+        }
         if cancellation.is_cancelled() {
             let _ = response_tx.send(Err(MuxCommandError::Cancelled));
             return response_rx;

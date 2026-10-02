@@ -6,6 +6,7 @@ pub struct WindowView {
     pub id: String,
     pub index: u32,
     pub name: String,
+    pub icon: String,
     pub active: bool,
     /// Terminal progress percentage for an inactive window, if any pane has reported it.
     pub progress: Option<u8>,
@@ -32,6 +33,7 @@ pub struct SessionView {
     pub active: bool,
     pub selected: bool,
     pub cwd: Option<String>,
+    pub windows: Vec<WindowView>,
     /// The session's active pane, its process id, and the command running in it, as the last mux
     /// snapshot reported them. Modules read these instead of asking the backend again.
     pub pane_id: Option<String>,

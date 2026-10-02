@@ -30,7 +30,6 @@ fn run() -> Result<ExitCode> {
     if let Some(code) = bootty_mux::rmux::run_embedded_rmux_daemon()? {
         return Ok(process_exit_code(code));
     }
-    let backends = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
     let cli = Cli::parse();
     // Correct a stale `$SHELL` to the OS login shell before any child inherits
     // it; tmux otherwise bakes the wrong shell into the server's default-shell.
@@ -40,6 +39,11 @@ fn run() -> Result<ExitCode> {
     {
         return Ok(process_exit_code(code));
     }
+    #[cfg(target_os = "linux")]
+    if matches!(cli.subcommand(), Some(Command::App(_)) | None) {
+        bootty::desktop_environment::initialize_browser_environment()?;
+    }
+    let backends = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
     #[cfg(target_os = "macos")]
     if let Err(error) = macos_cli::ensure_cli_link() {
         eprintln!("Could not install the Bootty command: {error}");

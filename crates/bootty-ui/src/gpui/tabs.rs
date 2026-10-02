@@ -26,8 +26,8 @@ pub fn tab(
     cx: &App,
 ) -> Tab {
     let theme = cx.theme();
-    let fill = accent.mix_oklab(theme.secondary, 0.18);
-    let outline = accent.mix_oklab(theme.secondary, 0.6);
+    let fill = theme.secondary_hover;
+    let outline = accent.mix_oklab(theme.foreground, 0.35);
     let hover = theme.secondary_hover;
     let compact = matches!(appearance, TabAppearance::Pill | TabAppearance::Outline);
     Tab::new(id)
@@ -42,10 +42,10 @@ pub fn tab(
         .line_height(relative(1.25))
         .whitespace_nowrap()
         .text_sm()
-        .text_color(theme.tab_foreground)
+        .text_color(theme.foreground.opacity(0.8))
         .when(compact, Styled::rounded_full)
         .when(appearance == TabAppearance::Segmented, |tab| {
-            tab.rounded_sm()
+            tab.rounded(theme.radius)
         })
         .when(appearance == TabAppearance::Outline, |tab| {
             tab.border_1().border_color(theme.border)
@@ -55,7 +55,9 @@ pub fn tab(
         })
         .styles(|styles| {
             styles.selected(|style| {
-                let style = style.text_color(theme.foreground);
+                let style = style
+                    .text_color(theme.foreground)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM);
                 match appearance {
                     TabAppearance::Underline => style.border_color(outline),
                     TabAppearance::Outline => style.border_color(outline).bg(fill),
@@ -73,42 +75,44 @@ pub fn content(
     config: TabConfig,
 ) -> Div {
     let close = close.filter(|_| config.close_button != TabCloseButton::Hidden);
+    let close = close.map(|close| {
+        div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .when(config.close_button == TabCloseButton::Hover, |button| {
+                button
+                    .invisible()
+                    .group_hover(hover_group, gpui_kit::Styled::visible)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(close)
+    });
+    let (left, right) = match config.close_position {
+        TabClosePosition::Left => (close, None),
+        TabClosePosition::Right => (None, close),
+    };
     div()
         .h_full()
         .flex_1()
-        .relative()
         .flex()
         .items_center()
-        .justify_center()
         .min_w_0()
-        .px_3()
-        .when(close.is_some(), gpui_kit::Styled::px_4)
-        .child(content)
-        .when_some(close, |row, close| {
-            row.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .w_4()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(config.close_position == TabClosePosition::Left, |button| {
-                        button.left_0()
-                    })
-                    .when(config.close_position == TabClosePosition::Right, |button| {
-                        button.right_0()
-                    })
-                    .when(config.close_button == TabCloseButton::Hover, |button| {
-                        button
-                            .invisible()
-                            .group_hover(hover_group, gpui_kit::Styled::visible)
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(close),
-            )
-        })
+        .px_2()
+        .gap_1()
+        .when_some(left, ParentElement::child)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(content),
+        )
+        .when_some(right, ParentElement::child)
 }
 
 /// A single tab scroll owner, shared by mux and panel chrome.
@@ -227,7 +231,7 @@ impl TabScrollState {
                 };
                 let text = window.text_system().shape_line(
                     title.clone(),
-                    px(rem * 0.75),
+                    px(rem * 0.875),
                     &[TextRun {
                         len: title.len(),
                         font: window.text_style().font(),
@@ -239,7 +243,7 @@ impl TabScrollState {
                     None,
                 );
                 let desired = px(rem
-                    .mul_add(2.5, f32::from(text.width))
+                    .mul_add(3.5, f32::from(text.width))
                     .clamp(rem * 4.0, rem * 15.0));
                 let width = self.widths.entry(item.id).or_insert_with(|| TabWidth {
                     title: title.clone(),

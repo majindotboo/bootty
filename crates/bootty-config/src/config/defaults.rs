@@ -100,16 +100,11 @@ impl Default for ChromeConfig {
         Self {
             left_dock_toggle: true,
             right_dock_toggle: true,
-            panel_tab_style: super::model::PanelTabStyle::default(),
-            panel_tabs: super::model::PanelTabs::default(),
             tabs_use_session_color: true,
-            dock_tabs: super::model::TabConfig {
+            tabs: super::model::TabConfig {
                 appearance: super::model::TabAppearance::Segmented,
-                ..Default::default()
-            },
-            terminal_tabs: super::model::TabConfig {
-                appearance: super::model::TabAppearance::Pill,
-                ..Default::default()
+                close_position: super::model::TabClosePosition::Right,
+                close_button: super::model::TabCloseButton::Always,
             },
             sidebar: true,
             top_bar: true,
@@ -225,6 +220,7 @@ impl Default for BoottyConfig {
         Self {
             version: 1,
             locale: "en".to_owned(),
+            computer_use: false,
             restore_on_startup: RestoreOnStartup::default(),
             cli_default_open_behavior: OpenBehavior::default(),
             default_open_behavior: OpenBehavior::default(),
@@ -234,7 +230,7 @@ impl Default for BoottyConfig {
             cursor: CursorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
-            panels: BTreeMap::new(),
+            browser: super::model::BrowserConfig::default(),
             sidebar: SidebarConfig::default(),
             multiplexer: MultiplexerConfig::default(),
             ssh_profiles: BTreeMap::new(),

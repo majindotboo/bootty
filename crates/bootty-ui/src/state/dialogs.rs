@@ -152,6 +152,16 @@ impl AppState {
             },
             Some(Event::Ditch(event)) => self.apply_ditch_session_event(event),
             Some(Event::KeybindDismiss) => self.dismiss_keybind_help(),
+            Some(Event::NewSession(NewSessionPickerEvent::BrowseDirectory)) => {
+                effects.push(AppEffect::ChooseProjectDirectory);
+            }
+            Some(Event::NewSession(NewSessionPickerEvent::CreateAgentSession {
+                cwd,
+                provider,
+            })) => {
+                effects.push(AppEffect::OpenAgentProjectSession { cwd, provider });
+                self.dismiss_modal_dialog();
+            }
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
             Some(Event::RenameSession(event)) => self.apply_rename_session_event(event),
             Some(Event::RenameTab(event)) => self.apply_rename_tab_event(event),
@@ -365,30 +375,34 @@ impl AppState {
         self.dismiss_modal_dialog();
     }
     pub fn apply_command_palette_event(&mut self, event: CommandPaletteEvent) {
-        match event {
-            CommandPaletteEvent::Close => self.dismiss_modal_dialog(),
-            CommandPaletteEvent::Run(command) => {
-                // Resolve the user's current context before another queued caller can change it.
+        let invocation = match event {
+            CommandPaletteEvent::Close => {
                 self.dismiss_modal_dialog();
-                let Some(mut invocation) =
-                    command_invocation_from_catalog(command, Caller::CommandPalette)
-                else {
-                    return;
-                };
-                if let Some(kind) = self.commands.target_kind(&invocation.command) {
-                    let Some(target) = self.current_command_target_for(&invocation.command, kind)
-                    else {
-                        self.commands.clear_queue();
-                        self.record_notice(crate::error_catalog::ErrorNotice::NoCurrentTarget(
-                            format!("no current {kind:?} target is available"),
-                        ));
-                        return;
-                    };
-                    invocation.target = Some(target);
-                }
-                self.commands.queue(invocation);
+                return;
             }
+            CommandPaletteEvent::Run(command) => {
+                command_invocation_from_catalog(command, Caller::CommandPalette)
+            }
+            CommandPaletteEvent::Invoke(command) => Some(
+                bootty_control::CommandInvocation::from_action(&command, Caller::CommandPalette),
+            ),
+        };
+        // Capture the user's context before another queued caller can change it.
+        self.dismiss_modal_dialog();
+        let Some(mut invocation) = invocation else {
+            return;
+        };
+        if let Some(kind) = self.commands.target_kind(&invocation.command) {
+            let Some(target) = self.current_command_target_for(&invocation.command, kind) else {
+                self.commands.clear_queue();
+                self.record_notice(crate::error_catalog::ErrorNotice::NoCurrentTarget(format!(
+                    "no current {kind:?} target is available"
+                )));
+                return;
+            };
+            invocation.target = Some(target);
         }
+        self.commands.queue(invocation);
     }
     pub fn apply_theme_picker_event(
         &mut self,
@@ -484,17 +498,27 @@ impl AppState {
         ));
     }
 
+    /// Resume the open project picker after the native directory chooser returns.
+    pub fn set_new_session_directory(&mut self, path: String) {
+        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+            dialog.set_directory(path);
+        }
+    }
+
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
             NewSessionPickerEvent::Close => self.dismiss_modal_dialog(),
+            NewSessionPickerEvent::BrowseDirectory
+            | NewSessionPickerEvent::CreateAgentSession { .. } => {}
             NewSessionPickerEvent::Error(error) => {
                 self.record_error(error);
             }
             NewSessionPickerEvent::CreateWorktree { repo, request } => {
                 match bootty_git::Git::new().create_worktree(&repo, &request) {
                     Ok(path) => {
-                        self.create_project_session_for_cwd(&path);
-                        self.dismiss_modal_dialog();
+                        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+                            dialog.set_checkout(path);
+                        }
                     }
                     Err(error) => {
                         self.record_notice(crate::error_catalog::ErrorNotice::Worktree(format!(

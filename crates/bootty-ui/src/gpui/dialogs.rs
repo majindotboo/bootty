@@ -255,6 +255,7 @@ impl DialogAction {
 pub struct DialogRow {
     pub id: RowId,
     pub icon: Option<String>,
+    pub artwork: Option<std::sync::Arc<bootty_git::ProjectIcon>>,
     pub label: String,
     /// Product identity color, subordinate to disabled and destructive states.
     pub color: Option<Hsla>,
@@ -274,6 +275,7 @@ impl DialogRow {
         Self {
             id: RowId::new(id),
             icon: None,
+            artwork: None,
             label: label.into(),
             color: None,
             detail: None,
@@ -291,6 +293,7 @@ impl DialogRow {
         Self {
             id: RowId::new(id),
             icon: None,
+            artwork: None,
             label: label.into(),
             color: None,
             detail: None,
@@ -713,6 +716,7 @@ impl DialogView {
         if self.spec == spec {
             return;
         }
+        let transfer_focus = self.focus_target_changed(spec.as_ref(), window, cx);
         let changed = self.spec.as_ref().map(|spec| &spec.id) != spec.as_ref().map(|spec| &spec.id);
         let same_query = self
             .spec
@@ -721,13 +725,20 @@ impl DialogView {
             .is_some_and(|(previous, next)| previous.text == next.text);
         let preserve_selected_row = (!changed && same_query)
             .then(|| self.selected_row_id(cx))
-            .flatten();
+            .flatten()
+            .filter(|row_id| {
+                spec.as_ref().is_some_and(|spec| {
+                    spec.rows
+                        .iter()
+                        .any(|row| row.id == *row_id && row.enabled && row.action.is_some())
+                })
+            });
+        self.select_initial_current = preserve_selected_row.is_none();
         if changed && spec.is_some() {
             // A new modal owns fresh query, selection, and scroll state. Retain the entity
             // only while that modal is open so ordinary model refreshes preserve focus.
             self.command = cx.new(|cx| CommandState::new(window, cx));
             self.suppress_query = None;
-            self.select_initial_current = true;
             self.suppress_initial_selection = false;
         }
         if changed {
@@ -780,7 +791,33 @@ impl DialogView {
             }
         }
         self.sync_fields(window, cx);
+        if transfer_focus {
+            // Command installs its new input mode during render. Keep focus on our retained
+            // frame until then so removing the old query cannot detach the keyboard path.
+            let focus = if self.is_command_surface() {
+                self.command_focus.clone()
+            } else {
+                self.focus_handle(cx)
+            };
+            focus.focus(window, cx);
+        }
         cx.notify();
+    }
+
+    fn focus_target_changed(&self, next: Option<&DialogSpec>, window: &Window, cx: &App) -> bool {
+        self.spec
+            .as_ref()
+            .zip(next)
+            .is_some_and(|(previous, next)| {
+                previous.id == next.id
+                    && (previous.role != next.role
+                        || previous.text.is_some() != next.text.is_some())
+                    && (self.focus_handle(cx).contains_focused(window, cx)
+                        || self
+                            .fields
+                            .values()
+                            .any(|(input, _)| input.focus_handle(cx).contains_focused(window, cx)))
+            })
     }
 
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1385,9 +1422,11 @@ impl DialogView {
                 }
             });
         command = Self::command_header(command, spec, cx);
+        let command = command.render(window, cx).into_any_element();
+        // Install the new rows before repairing selection so a phase change cannot reuse
+        // the old numeric index for a different action or paint a stale highlight.
         self.sync_command_selection(&rows, spec.role == DialogRole::ThemePicker, window, cx);
-        let command = command.render(window, cx);
-        command.into_any_element()
+        command
     }
 
     fn command_header(mut command: Command, spec: &DialogSpec, cx: &Context<Self>) -> Command {
@@ -1432,33 +1471,25 @@ impl DialogView {
         &mut self,
         rows: &[Vec<DialogRow>],
         theme_picker: bool,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.select_initial_current {
             self.select_initial_current = false;
-            if let Some(index) = initial_selection(rows, theme_picker) {
-                let command = self.command.clone();
-                let owner = cx.weak_entity();
-                window.defer(cx, move |window, cx| {
-                    if command.read(cx).selected_index() != Some(index) {
-                        _ = owner.update(cx, |this, _| this.suppress_initial_selection = true);
-                        command.update(cx, |state, cx| {
-                            state.set_selected_index(Some(index), window, cx);
-                        });
-                    }
+            if let Some(index) = initial_selection(rows, theme_picker)
+                && self.command.read(cx).selected_index() != Some(index)
+            {
+                self.suppress_initial_selection = true;
+                self.command.update(cx, |state, cx| {
+                    state.set_selected_index(Some(index), window, cx);
                 });
             }
         } else if let Some(row_id) = self.preserve_selected_row.take()
             && let Some(index) = command_index_for_row(rows, &row_id)
+            && self.command.read(cx).selected_index() != Some(index)
         {
-            let command = self.command.clone();
-            window.defer(cx, move |window, cx| {
-                if command.read(cx).selected_index() != Some(index) {
-                    command.update(cx, |state, cx| {
-                        state.set_selected_index(Some(index), window, cx);
-                    });
-                }
+            self.command.update(cx, |state, cx| {
+                state.set_selected_index(Some(index), window, cx);
             });
         }
     }
@@ -1690,8 +1721,22 @@ fn command_item(row: DialogRow, destructive_color: Hsla) -> CommandItem {
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .when_some(row.icon.clone(), |this, icon| {
-                    this.child(crate::gpui::icon(&icon, 14.0, foreground))
+                .when_some(row.artwork.as_ref(), |this, artwork| {
+                    this.child(crate::gpui::project_artwork(artwork, 1.25))
+                })
+                .when(row.artwork.is_none(), |this| {
+                    if row.id.0.starts_with("project:") {
+                        this.child(crate::gpui::project_monogram(
+                            &row.label,
+                            1.25,
+                            colors.muted,
+                            foreground,
+                        ))
+                    } else {
+                        this.when_some(row.icon.clone(), |this, icon| {
+                            this.child(crate::gpui::icon(&icon, 14.0, foreground))
+                        })
+                    }
                 })
                 .child(
                     v_flex()

@@ -131,22 +131,15 @@ fn tabs_can_use_session_or_theme_color(#[case] enabled: bool) {
 }
 
 #[rstest]
-fn terminal_tabs_default_to_pills_with_hover_close() {
+fn shared_tabs_default_to_segments_with_visible_close() {
     let config = load_config_source("").expect("valid config");
     assert!(config.chrome.tabs_use_session_color);
-    assert_eq!(config.chrome.terminal_tabs.appearance, TabAppearance::Pill);
+    assert_eq!(config.chrome.tabs.appearance, TabAppearance::Segmented);
     assert_eq!(
-        config.chrome.terminal_tabs.close_position,
-        if cfg!(target_os = "macos") {
-            bootty_config::config::TabClosePosition::Left
-        } else {
-            bootty_config::config::TabClosePosition::Right
-        }
+        config.chrome.tabs.close_position,
+        bootty_config::config::TabClosePosition::Right
     );
-    assert_eq!(
-        config.chrome.terminal_tabs.close_button,
-        TabCloseButton::Hover
-    );
+    assert_eq!(config.chrome.tabs.close_button, TabCloseButton::Always);
 }
 
 #[rstest]
@@ -1205,6 +1198,33 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
 
 // Switching preset must swap the built-in default tables while user override rows keep layering
 // on top; a regression here either loses the user's rows or leaves the old preset's chords live.
+#[rstest]
+#[case("bootty")]
+#[case("tmux")]
+#[case("ghostty")]
+fn every_preset_opens_the_palette_with_the_shared_shortcut(#[case] preset: &str) {
+    let config =
+        load_config_source(&format!("[input]\npreset = \"{preset}\"\n")).expect("valid config");
+    let trigger = if cfg!(target_os = "macos") {
+        "cmd+k"
+    } else {
+        "ctrl+shift+k"
+    };
+    for backend in [
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux,
+    ] {
+        let matching: Vec<_> = config
+            .input
+            .keybinds_for_backend(backend)
+            .into_iter()
+            .filter(|entry| split_keybind_entry(entry).is_some_and(|(key, _)| key == trigger))
+            .collect();
+        assert_eq!(matching, vec![format!("{trigger}=command_palette")]);
+    }
+}
+
 #[test]
 fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
     let config = load_config_source(indoc! {r#"
@@ -1445,29 +1465,6 @@ fn wsl_remote_loads_through_the_toml_configuration_boundary() {
         panic!("WSL host");
     };
     assert_eq!(remote.distribution.as_str(), "Ubuntu 開発");
-}
-
-#[rstest::rstest]
-#[case("jobs")]
-#[case("transfers")]
-#[case("recovery")]
-#[case("shell")]
-fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
-    let dir = assert_fs::TempDir::new().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        format!("[panels.{panel}]\ndock = \"right\"\n[panels.files]\ndock = \"left\"\n"),
-    )
-    .unwrap();
-    let config = bootty_config::config::load_config_from_path(&path).unwrap();
-    assert_eq!(config.panels.len(), 1);
-    assert_eq!(
-        config
-            .panel(bootty_config::config::PanelKind::Files)
-            .dock(bootty_config::config::PanelKind::Files),
-        bootty_config::config::PanelDock::Left
-    );
 }
 
 #[cfg(unix)]

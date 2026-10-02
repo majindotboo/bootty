@@ -459,7 +459,12 @@ impl<R: CommandRunner> TmuxBackend<R> {
         if !argv.is_empty() {
             // Ends option parsing, so a program named like a flag stays the program.
             invocation.push("--".to_owned());
-            invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            if let [program] = argv {
+                // tmux shell-interprets a single argument; quote the literal executable.
+                invocation.push(tmux_argument(&bootty_host::shell_quote(program)));
+            } else {
+                invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            }
         }
         if let Some(identity) = &tag.identity {
             invocation.extend(set_session_option_args(

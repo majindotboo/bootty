@@ -46,7 +46,6 @@ pub struct SessionTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeChromeAction {
-    TogglePanel(bootty_config::config::PanelKind),
     ActivateWindow {
         session_id: String,
         window_id: String,
@@ -73,6 +72,7 @@ pub struct UsageMeterSnapshot {
     pub meter: crate::usage::QuotaMeter,
     pub provider: crate::usage::UsageProvider,
     pub label: String,
+    pub window_label: String,
     pub fill: Rgba,
     pub marker: Rgba,
     pub pace: Rgba,
@@ -93,10 +93,7 @@ pub enum SidebarPosition {
 pub struct ChromeLayout {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
-    pub panel_tab_style: bootty_config::config::PanelTabStyle,
-    pub panel_tabs: bootty_config::config::PanelTabs,
-    pub dock_tabs: bootty_config::config::TabConfig,
-    pub terminal_tabs: bootty_config::config::TabConfig,
+    pub tabs: bootty_config::config::TabConfig,
     pub width: f32,
     pub height: f32,
     pub sidebar_position: SidebarPosition,
@@ -113,7 +110,7 @@ pub struct ChromeLayout {
 }
 
 impl ChromeLayout {
-    /// Clamp the configured sidebar to Zed's persisted range while keeping a usable center area in
+    /// Clamp the configured sidebar to the persisted range while keeping a usable center area in
     /// windows too narrow to satisfy both normal minimums.
     #[must_use]
     pub fn effective_sidebar_width(&self) -> f32 {
@@ -310,6 +307,7 @@ pub struct SidebarRow {
     pub tree: Option<String>,
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
+    pub artwork: Option<std::sync::Arc<bootty_git::ProjectIcon>>,
     pub color: Rgba,
     pub dim_color: Rgba,
     pub kind: SidebarRowKind,
@@ -325,6 +323,9 @@ pub struct SidebarRow {
 pub enum SidebarRowKind {
     Group,
     Session,
+    Window {
+        window_id: String,
+    },
     Detail,
     Progress {
         value: Option<u8>,

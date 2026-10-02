@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// The longest session name a caller may choose, in bytes.
-pub const SESSION_NAME_MAX_BYTES: usize = 256;
+pub use crate::session_names::SESSION_NAME_MAX_BYTES;
 /// The most argv elements a caller may pass for a new session's first pane.
 pub const SESSION_ARGV_MAX_ELEMENTS: usize = 64;
 /// The most argv bytes a caller may pass, counting one terminator per element.
@@ -340,11 +340,18 @@ fn validate_session_name(name: &str) -> Result<(), SessionRequestError> {
         ));
     }
     // tmux and rmux rewrite `:` and `.` and escape `\`; tmux expands `#` formats in a name.
-    if let Some(character) = name.chars().find(|c| matches!(c, ':' | '.' | '\\' | '#')) {
+    if let Some(character) = name
+        .chars()
+        .find(|&c| crate::session_names::invalid_session_name_character(c))
+    {
         return invalid(format!("session name {name:?} contains {character:?}"));
     }
     // `-` reads as a flag, and tmux targets read `$`, `@` and `%` as ids and `=` as exact-match.
-    if name.starts_with(['-', '$', '@', '%', '=']) {
+    if name
+        .chars()
+        .next()
+        .is_some_and(crate::session_names::reserved_session_name_start)
+    {
         return invalid(format!(
             "session name {name:?} cannot start with '-', '$', '@', '%' or '='"
         ));

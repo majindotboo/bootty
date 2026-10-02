@@ -279,6 +279,28 @@ impl AppState {
         .command_target(ResourceKind::Terminal, binding_runtime.mux(), &binding)
     }
 
+    pub(crate) fn mux_pane_target(
+        &self,
+        scope: SpaceId,
+        kind: ResourceKind,
+        session: &str,
+        window: &str,
+        pane: &str,
+    ) -> Option<CommandTarget> {
+        let binding = self.workspace.binding(scope)?;
+        if binding.multiplexer().backend == bootty_config::config::MultiplexerBackendConfig::Herdr {
+            return None;
+        }
+        let handle = self.binding_target_handle(scope, binding.mux().binding_generation());
+        ExactMuxTarget::Pane(
+            scope,
+            session.to_owned(),
+            window.to_owned(),
+            pane.to_owned(),
+        )
+        .command_target(kind, binding.mux(), &handle)
+    }
+
     /// The Terminal target of a session's active pane in the binding's latest snapshot.
     pub(super) fn session_terminal_target(
         &self,
@@ -316,6 +338,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
             command.starts_with("git.")
+                || command.starts_with("agents.")
                 || command.starts_with("files.")
                 || matches!(
                     command,
@@ -326,7 +349,15 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.create"
                 )
         }
-        ResourceKind::Session => command.starts_with("pane.") || command == "session.close",
+        ResourceKind::Session => {
+            command.starts_with("pane.")
+                || command
+                    .strip_prefix("agents.")
+                    .and_then(|command| command.split_once('.'))
+                    .is_some_and(|(_, operation)| operation == "tab")
+                || matches!(command, "session.close" | "new_tab")
+        }
+        ResourceKind::Pane => matches!(command, "split_right" | "split_down"),
         // Terminal input and capture address the pane through the mux and never select it.
         ResourceKind::Terminal => {
             matches!(
@@ -338,7 +369,8 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                     | "terminal.submit"
                     | "terminal.capture"
                     | "pane.close"
-            ) || command.ends_with(".acknowledge")
+            ) || command.starts_with("orchestration.")
+                || command.ends_with(".acknowledge")
                 || (command.starts_with("agents.")
                     && [
                         ".prompt",
@@ -347,6 +379,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         ".abort",
                         ".interrupt",
                         ".state",
+                        ".stop",
                     ]
                     .iter()
                     .any(|operation| command.ends_with(operation)))

@@ -1,6 +1,6 @@
 //! Directory, worktree, and branch creation states for the new-session workflow.
 
-use super::{NEW_SESSION_ID, normalized_name, parse_index};
+use super::{NEW_SESSION_ID, normalized_name};
 use crate::gpui::{DialogAction, DialogIntent, DialogRow, DialogSpec, RowId};
 use crate::new_session::{NewSessionEffect, NewSessionOutcome, NewSessionWorker};
 use crate::product_dialogs::searchable::{SearchableEntry, SearchableIntent, SearchableList};
@@ -25,6 +25,9 @@ enum NewSessionStep {
         list: SearchableList<WorktreePickerEntry>,
     },
     BranchName(WorktreeDraft),
+    Launch {
+        cwd: String,
+    },
 }
 
 struct ProjectPicker {
@@ -73,6 +76,20 @@ impl NewSessionDialog {
         }
     }
 
+    pub fn set_directory(&mut self, path: String) {
+        if self.is_remote() {
+            return;
+        }
+        if let NewSessionStep::Project(picker) = &mut self.step {
+            picker.inject_direct_project(&path, false);
+            picker.list.apply(SearchableIntent::SetFilter(path));
+        }
+    }
+
+    pub fn set_checkout(&mut self, cwd: String) {
+        self.step = NewSessionStep::Launch { cwd };
+    }
+
     pub fn poll(&mut self) -> Option<NewSessionPickerEvent> {
         let result = self.worker.as_mut()?.poll()?;
         let remote = self.is_remote();
@@ -83,15 +100,12 @@ impl NewSessionDialog {
                     picker.replace_entries(remote);
                     if !remote {
                         let filter = picker.list.filter().to_owned();
-                        picker.inject_direct_project(&filter);
+                        picker.inject_direct_project(&filter, false);
                     }
                 }
             }
             Ok(NewSessionOutcome::Worktrees(worktrees)) => {
                 if let NewSessionStep::Worktree { list, .. } = &mut self.step {
-                    if let Some(cwd) = single_unused_worktree_cwd(&worktrees, &[], true) {
-                        return Some(NewSessionPickerEvent::CreateSession { cwd });
-                    }
                     list.replace_entries(worktree_entries(&worktrees));
                     select_source(list, default_worktree_selection(&worktrees, &[], true));
                 }
@@ -101,9 +115,7 @@ impl NewSessionDialog {
                     picker.set_favorite(&path, favorite, remote);
                 }
             }
-            Ok(NewSessionOutcome::CreatedWorktree(cwd)) => {
-                return Some(NewSessionPickerEvent::CreateSession { cwd });
-            }
+            Ok(NewSessionOutcome::CreatedWorktree(cwd)) => self.set_checkout(cwd),
             Err(error) => match &mut self.step {
                 NewSessionStep::BranchName(draft) => draft.error = Some(error),
                 _ => return Some(NewSessionPickerEvent::Error(error)),
@@ -118,26 +130,26 @@ impl NewSessionDialog {
         let remote = self.is_remote();
         let (rows, title, icon, hint, empty, text_hint, filter) = match &self.step {
             NewSessionStep::BranchName(draft) => return draft.spec(remote, busy),
+            NewSessionStep::Launch { cwd } => return launch_spec(cwd, remote),
             NewSessionStep::Project(picker) => (
                 picker.rows(remote, !busy),
-                "Directory",
+                "New session",
                 "folder",
-                "Enter open   Ctrl+Shift+F favorite   Esc close",
+                "Choose a project   Ctrl+Shift+F favorite   Esc close",
                 match (busy, remote) {
                     (false, _) => "no matching directories",
                     (true, true) => "loading remote projects…",
                     (true, false) => "loading directories…",
                 },
-                "filter directories…",
+                "Search projects or enter a folder path…",
                 picker.list.filter(),
             ),
             NewSessionStep::Worktree { list, .. } => (
                 list.rows()
                     .into_iter()
-                    .enumerate()
-                    .map(|(visible, row)| {
-                        picker_row(
-                            RowId::new(visible.to_string()),
+                    .map(|row| {
+                        worktree_row(
+                            worktree_row_id(row.value),
                             if row.value.is_new {
                                 "plus"
                             } else {
@@ -145,12 +157,13 @@ impl NewSessionDialog {
                             },
                             row.value.label.clone(),
                             !busy,
+                            row.value,
                         )
                     })
                     .collect(),
-                "Worktree",
+                "Choose checkout",
                 "git-branch",
-                "Enter create session   Esc close",
+                "Enter choose checkout   Esc close",
                 match (busy, remote) {
                     (false, _) => "no matching worktrees",
                     (true, true) => "loading remote worktrees…",
@@ -165,6 +178,9 @@ impl NewSessionDialog {
         spec.hint = Some(hint.to_owned());
         empty.clone_into(&mut spec.empty_text);
         spec.text_hint = Some(text_hint.to_owned());
+        if let NewSessionStep::Worktree { project, .. } = &self.step {
+            spec.footer = Some(display_project_path(&project.path, remote));
+        }
         spec
     }
 
@@ -204,6 +220,15 @@ impl NewSessionDialog {
                 self.toggle_project_favorite()
             }
             DialogIntent::Activate { row, .. } if !self.worker_busy() => {
+                if row.0 == "browse-directory" && !self.is_remote() {
+                    return Some(NewSessionPickerEvent::BrowseDirectory);
+                }
+                if let NewSessionStep::Launch { cwd } = &self.step {
+                    if self.is_remote() && row.0 != "terminal" {
+                        return None;
+                    }
+                    return launch_event(&row.0, cwd);
+                }
                 self.select_row(row)?;
                 self.activate_selected(open_cwds)
             }
@@ -218,13 +243,12 @@ impl NewSessionDialog {
                 picker
                     .list
                     .apply(SearchableIntent::SetFilter(value.to_owned()));
-                if !remote {
-                    picker.inject_direct_project(value);
-                }
+                picker.inject_direct_project(value, remote);
             }
             NewSessionStep::Worktree { list, .. } => {
                 list.apply(SearchableIntent::SetFilter(value.to_owned()));
             }
+            NewSessionStep::Launch { .. } => {}
             NewSessionStep::BranchName(draft) => {
                 value.clone_into(&mut draft.branch);
                 draft.error = None;
@@ -240,9 +264,13 @@ impl NewSessionDialog {
                 picker.list.apply(SearchableIntent::Select(index));
             }
             NewSessionStep::Worktree { list, .. } => {
-                list.apply(SearchableIntent::Select(parse_index(row)?));
+                let index = list
+                    .rows()
+                    .iter()
+                    .position(|entry| worktree_row_id(entry.value) == *row)?;
+                list.apply(SearchableIntent::Select(index));
             }
-            NewSessionStep::BranchName(_) => {}
+            NewSessionStep::BranchName(_) | NewSessionStep::Launch { .. } => {}
         }
         Some(())
     }
@@ -262,19 +290,14 @@ impl NewSessionDialog {
                         start_ref: String::new(),
                         error: None,
                     });
-                    None
                 } else {
-                    Some(
-                        worktree
-                            .path
-                            .clone()
-                            .map_or(NewSessionPickerEvent::Close, |cwd| {
-                                NewSessionPickerEvent::CreateSession { cwd }
-                            }),
-                    )
+                    let cwd = worktree.path.clone()?;
+                    self.set_checkout(cwd);
                 }
+                None
             }
             NewSessionStep::BranchName(_) => self.create_worktree(),
+            NewSessionStep::Launch { .. } => None,
         }
     }
 
@@ -291,9 +314,6 @@ impl NewSessionDialog {
             SearchableList::new(Vec::new())
         } else {
             let worktrees = discover_worktree_picker_entries(&project.path);
-            if let Some(cwd) = single_unused_worktree_cwd(&worktrees, open_cwds, false) {
-                return Some(NewSessionPickerEvent::CreateSession { cwd });
-            }
             let mut list = SearchableList::new(worktree_entries(&worktrees));
             select_source(
                 &mut list,
@@ -363,20 +383,21 @@ impl NewSessionDialog {
 }
 
 impl ProjectPicker {
-    fn inject_direct_project(&mut self, filter: &str) {
-        let Some(project) = direct_project_entry(filter) else {
+    fn inject_direct_project(&mut self, filter: &str, remote: bool) {
+        let Some(project) = direct_project_entry(filter, remote) else {
             self.list
-                .replace_entries(project_entries(&self.projects, false));
+                .replace_entries(project_entries(&self.projects, remote));
             return;
         };
         let mut projects = self.projects.clone();
         if !projects
             .iter()
-            .any(|existing| same_dir(&existing.path, &project.path, false))
+            .any(|existing| same_dir(&existing.path, &project.path, remote))
         {
             projects.insert(0, project);
         }
-        self.list.replace_entries(project_entries(&projects, false));
+        self.list
+            .replace_entries(project_entries(&projects, remote));
         self.list
             .apply(SearchableIntent::SetFilter(filter.to_owned()));
     }
@@ -392,6 +413,7 @@ impl ProjectPicker {
             self.projects.push(ProjectPickerEntry {
                 path: path.to_owned(),
                 favorite,
+                icon: None,
             });
         }
         self.replace_entries(remote);
@@ -425,12 +447,16 @@ impl ProjectPicker {
             } else {
                 &mut directories
             };
-            target.push(picker_row(
+            let mut item = picker_row(
                 project_row_id(&project.path),
                 if project.favorite { "star" } else { "folder" },
-                display_project_path(&project.path, remote),
+                project_name(&project.path),
                 enabled,
-            ));
+            );
+            item.artwork = project.icon.clone().map(std::sync::Arc::new);
+            item.detail = Some(display_project_path(&project.path, remote));
+            item.trailing = project.favorite.then(|| "Favorite".to_owned());
+            target.push(item);
         }
 
         let mut rows = Vec::with_capacity(
@@ -439,12 +465,20 @@ impl ProjectPicker {
                 .saturating_add(directories.len())
                 .saturating_add(2),
         );
+        if !remote && enabled && self.list.filter().is_empty() {
+            rows.push(picker_row(
+                RowId::new("browse-directory"),
+                "folder-open",
+                "Choose folder…".to_owned(),
+                enabled,
+            ));
+        }
         if !favorites.is_empty() {
             rows.push(DialogRow::section("favorites", "Favorites"));
             rows.extend(favorites);
         }
         if !directories.is_empty() {
-            rows.push(DialogRow::section("directories", "Directories"));
+            rows.push(DialogRow::section("directories", "Projects"));
             rows.extend(directories);
         }
         rows
@@ -456,7 +490,7 @@ impl WorktreeDraft {
         let repo = display_project_path(&self.repo, remote);
         let mut spec = DialogSpec::prompt(
             NEW_SESSION_ID,
-            "New Worktree",
+            "New worktree",
             &self.branch,
             "branch name…",
             DialogAction::new("create-worktree"),
@@ -485,7 +519,7 @@ impl WorktreeDraft {
             (if busy {
                 "Creating…"
             } else {
-                "Create Worktree"
+                "Create worktree"
             })
             .clone_into(&mut row.label);
             row.detail.clone_from(&self.error);
@@ -498,6 +532,7 @@ impl WorktreeDraft {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NewSessionPickerEvent {
     Close,
+    BrowseDirectory,
     Error(String),
     CreateWorktree {
         repo: String,
@@ -505,6 +540,10 @@ pub enum NewSessionPickerEvent {
     },
     CreateSession {
         cwd: String,
+    },
+    CreateAgentSession {
+        cwd: String,
+        provider: bootty_agents::AgentKind,
     },
 }
 
@@ -529,6 +568,7 @@ fn project_entries(
 fn picker_row(id: RowId, icon: &str, label: String, enabled: bool) -> DialogRow {
     DialogRow {
         id,
+        artwork: None,
         icon: Some(icon.to_owned()),
         label,
         color: None,
@@ -565,19 +605,22 @@ fn display_project_path(path: &str, remote: bool) -> String {
     }
 }
 
-fn direct_project_entry(filter: &str) -> Option<ProjectPickerEntry> {
+fn direct_project_entry(filter: &str, remote: bool) -> Option<ProjectPickerEntry> {
     let filter = filter.trim();
     if !looks_like_directory_path(filter) {
         return None;
     }
-    let path = crate::strings::expand_home_path(filter);
-    path.is_dir().then(|| ProjectPickerEntry {
-        path: path
-            .canonicalize()
-            .unwrap_or(path)
+    let path = if remote {
+        filter.to_owned()
+    } else {
+        crate::strings::expand_home_path(filter)
             .to_string_lossy()
-            .into_owned(),
+            .into_owned()
+    };
+    Some(ProjectPickerEntry {
+        path,
         favorite: false,
+        icon: None,
     })
 }
 
@@ -592,27 +635,8 @@ fn looks_like_directory_path(filter: &str) -> bool {
                 || filter.starts_with(r"..\"))
 }
 
-fn same_dir(a: &str, b: &str, remote: bool) -> bool {
-    if remote {
-        return a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\']);
-    }
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
-    }
-}
-
-fn single_unused_worktree_cwd(
-    entries: &[WorktreePickerEntry],
-    open_cwds: &[String],
-    remote: bool,
-) -> Option<String> {
-    let mut real = entries.iter().filter(|entry| !entry.is_new);
-    let only = real.next()?;
-    if real.next().is_some() || worktree_is_open(only, open_cwds, remote) {
-        return None;
-    }
-    only.path.clone()
+fn same_dir(a: &str, b: &str, _remote: bool) -> bool {
+    a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\'])
 }
 
 fn default_worktree_selection(
@@ -644,4 +668,81 @@ fn select_source<T>(list: &mut SearchableList<T>, source: usize) {
     {
         list.apply(SearchableIntent::Select(visible));
     }
+}
+
+fn project_name(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+fn worktree_row(
+    id: RowId,
+    icon: &str,
+    label: String,
+    enabled: bool,
+    worktree: &WorktreePickerEntry,
+) -> DialogRow {
+    let mut row = picker_row(id, icon, label, enabled);
+    row.detail.clone_from(&worktree.path);
+    row.trailing = worktree.occupied.then(|| "Open session".to_owned());
+    row
+}
+
+fn launch_spec(cwd: &str, remote: bool) -> DialogSpec {
+    let mut terminal = picker_row(
+        RowId::new("terminal"),
+        "terminal",
+        "Terminal".to_owned(),
+        true,
+    );
+    terminal.detail = Some("Open a shell in this checkout".to_owned());
+    let mut rows = vec![terminal];
+    {
+        for (id, icon, label) in [
+            ("codex", "openai", "Codex"),
+            ("claude", "anthropic", "Claude"),
+            ("pi", "pi", "Pi"),
+        ] {
+            let mut row = picker_row(RowId::new(id), icon, label.to_owned(), true);
+            row.detail = Some("Open the agent in a terminal".to_owned());
+            rows.push(row);
+        }
+    }
+    let mut spec = DialogSpec::searchable(NEW_SESSION_ID, "Start session", "", rows);
+    spec.text = None;
+    spec.icon = Some("terminal".to_owned());
+    spec.footer = Some(display_project_path(cwd, remote));
+    spec.hint = Some("Enter start session   Esc close".to_owned());
+    spec
+}
+
+fn launch_event(id: &str, cwd: &str) -> Option<NewSessionPickerEvent> {
+    use bootty_agents::AgentKind;
+    let provider = match id {
+        "terminal" => {
+            return Some(NewSessionPickerEvent::CreateSession {
+                cwd: cwd.to_owned(),
+            });
+        }
+        "codex" => AgentKind::Codex,
+        "claude" => AgentKind::Claude,
+        "pi" => AgentKind::Pi,
+        _ => return None,
+    };
+    Some(NewSessionPickerEvent::CreateAgentSession {
+        cwd: cwd.to_owned(),
+        provider,
+    })
+}
+
+fn worktree_row_id(entry: &WorktreePickerEntry) -> RowId {
+    RowId::new(if entry.is_new {
+        "new-worktree".to_owned()
+    } else {
+        format!("worktree:{}", entry.path.as_deref().unwrap_or(&entry.label))
+    })
 }

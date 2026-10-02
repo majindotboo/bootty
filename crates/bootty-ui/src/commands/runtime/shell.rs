@@ -48,6 +48,21 @@ impl AppState {
 
     pub(super) fn dispatch_shell_prompt(
         &mut self,
+        exact: Option<&ExactMuxTarget>,
+        action: &'static str,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(exact) = exact else {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "No terminal prompt is available".to_owned(),
+            });
+        };
+        self.dispatch_attached_shell_prompt(exact, action, arguments, execution)
+    }
+
+    fn dispatch_attached_shell_prompt(
+        &mut self,
         exact: &ExactMuxTarget,
         action: &'static str,
         arguments: &[String],

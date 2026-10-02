@@ -76,6 +76,20 @@ mod platform_menu {
             ])
             .ok()?;
         menu.append(&app_menu).ok()?;
+        // Native child views receive editing shortcuts through the Cocoa responder chain.
+        let edit_menu = Submenu::new(localizer.message("common-edit", None), true);
+        edit_menu
+            .append_items(&[
+                &PredefinedMenuItem::undo(None),
+                &PredefinedMenuItem::redo(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::cut(None),
+                &PredefinedMenuItem::copy(None),
+                &PredefinedMenuItem::paste(None),
+                &PredefinedMenuItem::select_all(None),
+            ])
+            .ok()?;
+        menu.append(&edit_menu).ok()?;
         menu.init_for_nsapp();
         Some(AppMenu { _menu: menu })
     }

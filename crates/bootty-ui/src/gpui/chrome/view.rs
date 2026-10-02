@@ -2,7 +2,7 @@ use num_traits::ToPrimitive as _;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 
@@ -30,6 +30,7 @@ pub struct GpuiChrome {
     pub(super) focus: FocusHandle,
     pub(super) status_tab_focus_handles: HashMap<String, FocusHandle>,
     pub(super) pointer_hovered_session: Option<SessionTarget>,
+    pub(super) sidebar_collapsed_groups: HashSet<String>,
     pub(super) sidebar_dragging: bool,
     pub(super) sidebar_reconcile_hover: bool,
     pub(super) sidebar_reveal_current: Rc<Cell<bool>>,
@@ -80,6 +81,7 @@ impl GpuiChrome {
             focus: cx.focus_handle(),
             status_tab_focus_handles: HashMap::new(),
             pointer_hovered_session: None,
+            sidebar_collapsed_groups: HashSet::new(),
             sidebar_dragging: false,
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
@@ -120,8 +122,7 @@ impl GpuiChrome {
             .retain(|segment| segment.surface != "windows");
         Some(status_bar::render(
             status_bar::RenderParams {
-                tab_config: self.snapshot.layout.terminal_tabs,
-                keymap_context: &self.keymap_context,
+                tab_config: self.snapshot.layout.tabs,
                 snapshot: &status,
                 row_height: self
                     .snapshot
@@ -174,28 +175,15 @@ impl GpuiChrome {
             &self.sidebar_row_bounds,
             &self.sidebar_reveal_current,
             self.sidebar_reconcile_hover,
+            &self.sidebar_collapsed_groups,
             cx,
         ))
     }
 
-    pub(crate) fn dock_codexbar(&self) -> Option<gpui_kit::AnyElement> {
-        sidebar::render_codexbar(self.snapshot.sidebar.as_ref()?, self.snapshot.palette)
-    }
-
-    pub(crate) const fn dock_presentation(
-        &self,
-    ) -> (
-        bool,
-        bool,
-        bootty_config::config::PanelTabStyle,
-        bootty_config::config::PanelTabs,
-    ) {
-        let l = &self.snapshot.layout;
+    pub(crate) const fn dock_presentation(&self) -> (bool, bool) {
         (
-            l.left_dock_toggle,
-            l.right_dock_toggle,
-            l.panel_tab_style,
-            l.panel_tabs,
+            self.snapshot.layout.left_dock_toggle,
+            self.snapshot.layout.right_dock_toggle,
         )
     }
 
@@ -224,8 +212,8 @@ impl GpuiChrome {
         color(self.snapshot.palette.tab_accent)
     }
 
-    pub(crate) const fn dock_tabs_config(&self) -> bootty_config::config::TabConfig {
-        self.snapshot.layout.dock_tabs
+    pub(crate) const fn tabs_config(&self) -> bootty_config::config::TabConfig {
+        self.snapshot.layout.tabs
     }
 
     pub(crate) fn sidebar_defaults(&self) -> (SidebarPosition, f32, bool) {
@@ -256,9 +244,30 @@ impl GpuiChrome {
         }
         if current_sidebar_session(&self.snapshot) != current_sidebar_session(snapshot) {
             self.sidebar_reveal_current.set(true);
+            if let Some(sidebar) = &snapshot.sidebar {
+                let mut project = None;
+                for row in &sidebar.rows {
+                    if row.kind == super::SidebarRowKind::Group {
+                        project = Some(&row.key);
+                    } else if row.current && row.kind == super::SidebarRowKind::Session {
+                        if let Some(key) = project {
+                            self.sidebar_collapsed_groups.remove(key);
+                        }
+                        break;
+                    }
+                }
+            }
         }
         self.sidebar_row_bounds.borrow_mut().clear();
         self.tab_bounds.borrow_mut().clear();
+        self.sidebar_collapsed_groups.retain(|key| {
+            snapshot.sidebar.as_ref().is_some_and(|sidebar| {
+                sidebar
+                    .rows
+                    .iter()
+                    .any(|row| row.key == *key && row.kind == super::SidebarRowKind::Group)
+            })
+        });
         self.snapshot.clone_from(snapshot);
         self.sync_status_tab_focus_handles(cx);
         cx.notify();
@@ -453,8 +462,7 @@ impl GpuiChrome {
                 |element, status| {
                     element.child(status_bar::render(
                         status_bar::RenderParams {
-                            tab_config: self.snapshot.layout.terminal_tabs,
-                            keymap_context: &self.keymap_context,
+                            tab_config: self.snapshot.layout.tabs,
                             snapshot: &status,
                             row_height: layout.status_height,
                             top_padding: layout.top_inset,
@@ -485,8 +493,7 @@ impl GpuiChrome {
             .when_some(bottom_status, |element, status| {
                 element.child(status_bar::render(
                     status_bar::RenderParams {
-                        tab_config: self.snapshot.layout.terminal_tabs,
-                        keymap_context: &self.keymap_context,
+                        tab_config: self.snapshot.layout.tabs,
                         snapshot: &status,
                         row_height: layout.status_height,
                         top_padding: 0.0,
@@ -553,6 +560,7 @@ impl GpuiChrome {
                         &self.sidebar_row_bounds,
                         &self.sidebar_reveal_current,
                         sidebar_reconcile_hover,
+                        &self.sidebar_collapsed_groups,
                         cx,
                     ))
                 },
@@ -576,6 +584,7 @@ impl GpuiChrome {
                         &self.sidebar_row_bounds,
                         &self.sidebar_reveal_current,
                         sidebar_reconcile_hover,
+                        &self.sidebar_collapsed_groups,
                         cx,
                     ))
                 },

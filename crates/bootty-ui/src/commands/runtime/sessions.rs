@@ -290,8 +290,24 @@ impl AppState {
                     .member_sessions()
                     .into_iter()
                     .map(|session| {
+                        let opaque=binding.multiplexer().backend==bootty_config::config::MultiplexerBackendConfig::Herdr;
+                        let windows=if opaque {Vec::new()} else {session.windows.iter().map(|window|{
+                            let mut seen=std::collections::BTreeSet::new();
+                            let panes=std::iter::once(&window.anchor).chain(&window.panes).filter_map(|pane|{
+                                let id=pane.pane_id.as_deref()?;
+                                if !seen.insert(id) {return None;}
+                                Some(serde_json::json!({"target":self.mux_pane_target(scope,ResourceKind::Pane,&session.id,&window.id,id),"terminal_target":self.mux_pane_target(scope,ResourceKind::Terminal,&session.id,&window.id,id),"cwd":pane.cwd}))
+                            }).collect::<Vec<_>>();
+                            serde_json::json!({"name":window.name,"target":self.mux_resource_target(scope,ResourceKind::MuxWindow,&session.id,Some(&window.id)),"panes":panes})
+                        }).collect::<Vec<_>>()};
+                        let pane_target=session.windows.iter().find(|window|Some(window.id.as_str())==session.active_window_id.as_deref()).or_else(||session.windows.first()).and_then(|window|window.anchor.pane_id.as_deref().and_then(|pane|self.mux_pane_target(scope,ResourceKind::Pane,&session.id,&window.id,pane)));
                         serde_json::json!({
                             "name": session.name,
+                            "pane_target": pane_target,
+                            "topology_supported": !opaque,
+                            "windows": windows,
+                            "terminal_target": self.session_terminal_target(scope, &session.id),
+                            "cwd": session.anchor.cwd,
                             "target": self.mux_resource_target(
                                 scope,
                                 ResourceKind::Session,

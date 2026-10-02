@@ -47,6 +47,8 @@ pub use files::FileAction;
 pub use git::GitAction;
 pub use jobs::JobAction;
 pub use panes::PaneAction;
+pub use runtime::computer::ComputerCommand;
+pub use runtime::connections::ConnectionCommand;
 pub use sessions::SessionAction;
 pub use themes::ThemeAction;
 
@@ -66,6 +68,8 @@ pub fn command_invocation_from_catalog(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCommandExecutor {
+    Connection(ConnectionCommand, Vec<String>),
+    Computer(ComputerCommand, Vec<String>),
     Synchronous(SynchronousCommand),
     Dock(DockAction, Option<u64>),
     Keybind(KeybindAction),
@@ -114,6 +118,8 @@ struct RegisteredCommand {
 
 #[derive(Clone, Copy, Debug)]
 enum CommandExecutorResolver {
+    Connection(ConnectionCommand),
+    Computer(ComputerCommand),
     Dock(DockAction),
     Keybind,
     Sidebar(SidebarAction),
@@ -197,6 +203,12 @@ impl CommandRegistry {
         let first_argument = || invocation.arguments.first().ok_or_else(invalid_arguments);
         let arguments = || invocation.arguments.clone();
         let executor = match registered.executor {
+            CommandExecutorResolver::Connection(action) => {
+                CoreCommandExecutor::Connection(action, arguments())
+            }
+            CommandExecutorResolver::Computer(action) => {
+                CoreCommandExecutor::Computer(action, arguments())
+            }
             CommandExecutorResolver::Dock(action) => CoreCommandExecutor::Dock(
                 action,
                 invocation
@@ -647,6 +659,26 @@ fn register_forward_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
 }
 
 fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    for action in ConnectionCommand::ALL {
+        let descriptor = action.descriptor();
+        commands.insert(
+            descriptor.id.clone(),
+            RegisteredCommand {
+                descriptor,
+                executor: CommandExecutorResolver::Connection(action),
+            },
+        );
+    }
+    for action in ComputerCommand::ALL {
+        let descriptor = action.descriptor();
+        commands.insert(
+            descriptor.id.clone(),
+            RegisteredCommand {
+                descriptor,
+                executor: CommandExecutorResolver::Computer(action),
+            },
+        );
+    }
     for (id, names, mutation) in [
         ("recovery.list", vec![], MutationClass::Read),
         ("recovery.get", vec!["id"], MutationClass::Read),
@@ -803,6 +835,8 @@ fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
 pub enum CommandExecutor {
     Core(CoreCommandExecutor),
     Agent(Arc<AgentService>),
+    TerminalAgent,
+    Orchestration,
     /// The static agent catalog remains discoverable in tests and uncomposed app states.
     /// Invocation is rejected explicitly until the host supplies its event transport.
     UncomposedAgent,
@@ -829,11 +863,11 @@ struct NativeCatalogSource {
 
 impl CommandCatalogSource for NativeCatalogSource {
     fn list(&self) -> Vec<CommandDescriptor> {
-        agent_command_descriptors()
+        service_command_descriptors()
     }
 
     fn describe(&self, id: &str) -> Option<CommandDescriptor> {
-        agent_command_descriptors()
+        service_command_descriptors()
             .into_iter()
             .find(|command| command.id == id)
     }
@@ -941,6 +975,28 @@ impl CommandCatalog {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
+        if let Some(descriptor) = bootty_agents::terminal_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor: CommandExecutor::TerminalAgent,
+            });
+        }
+        if let Some(descriptor) = bootty_agents::orchestration_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor: CommandExecutor::Orchestration,
+            });
+        }
         if let Some(descriptor) = agent_command_descriptors()
             .into_iter()
             .find(|descriptor| descriptor.id == invocation.command)
@@ -1100,4 +1156,15 @@ fn resource_kind(value: &str) -> Option<ResourceKind> {
         "terminal" => Some(ResourceKind::Terminal),
         _ => None,
     }
+}
+
+fn service_command_descriptors() -> Vec<CommandDescriptor> {
+    let mut commands = bootty_agents::terminal_command_descriptors();
+    commands.extend(bootty_agents::orchestration_command_descriptors());
+    for command in agent_command_descriptors() {
+        if !commands.iter().any(|native| native.id == command.id) {
+            commands.push(command);
+        }
+    }
+    commands
 }

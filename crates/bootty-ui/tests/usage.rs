@@ -66,3 +66,46 @@ proptest! {
         prop_assert!((0.0..=100.0).contains(&window.meter(0).remaining_percent));
     }
 }
+
+#[rstest]
+#[case(25.0, 50, "+25%", QuotaTone::Success)]
+#[case(50.0, 50, "", QuotaTone::Muted)]
+#[case(60.0, 50, "−10%", QuotaTone::Warning)]
+#[case(80.0, 50, "−30%", QuotaTone::Critical)]
+#[case(60.0, 20, "+20%", QuotaTone::Success)]
+fn pacing_compares_allowance_with_the_time_left_in_the_window(
+    #[case] used: f64,
+    #[case] expected: i64,
+    #[case] pace: &str,
+    #[case] tone: QuotaTone,
+) {
+    let meter = UsageWindow {
+        label: "5h",
+        used_percent: used,
+        duration_secs: 100.0,
+        resets_at: Some(expected),
+    }
+    .meter(0);
+    assert_eq!(
+        meter.expected_remaining_percent,
+        num_traits::ToPrimitive::to_f64(&expected)
+    );
+    assert_eq!(meter.pace, pace);
+    assert_eq!(meter.pace_tone, tone);
+}
+
+#[rstest]
+#[case(None)]
+#[case(Some(0))]
+#[case(Some(-1))]
+fn pacing_is_absent_without_an_active_reset(#[case] reset: Option<i64>) {
+    let meter = UsageWindow {
+        label: "5h",
+        used_percent: 70.0,
+        duration_secs: 100.0,
+        resets_at: reset,
+    }
+    .meter(0);
+    assert_eq!(meter.expected_remaining_percent, None);
+    assert_eq!(meter.pace, "");
+}

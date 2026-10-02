@@ -91,15 +91,6 @@ fn custom(
 /// Every accepted compatibility spelling that is not itself a settings-surface control.
 pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] {
     &[
-        // Retired panel preferences remain loadable but have no UI or runtime effect.
-        &["panels", "jobs", "dock"],
-        &["panels", "jobs", "button"],
-        &["panels", "transfers", "dock"],
-        &["panels", "transfers", "button"],
-        &["panels", "recovery", "dock"],
-        &["panels", "recovery", "button"],
-        &["panels", "shell", "dock"],
-        &["panels", "shell", "button"],
         &["font-feature"],
         &["chrome", "status-bar"],
         &["chrome", "status-segment"],
@@ -117,8 +108,7 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
 pub(super) fn specs() -> Vec<SettingSpec> {
     let mut specs = Vec::new();
     specs.extend(dock_header_specs());
-    specs.extend(dock_tabs_specs());
-    specs.extend(terminal_tabs_specs());
+    specs.extend(tabs_specs());
     specs.extend(interface_preferences_specs());
     specs.extend(application_lifecycle_specs());
     specs.extend(open_behavior_specs());
@@ -144,7 +134,8 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(input_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
-    specs.extend(panel_specs());
+    specs.extend(browser_specs());
+    specs.push(spec(&["computer-use"], "Computer use", "Allow native agent commands to capture and control this computer after macOS permissions are granted.", "general", "Computer", SettingKind::Bool, SettingDefault::Field(|config| SettingValue::Bool(config.computer_use))));
     specs
 }
 
@@ -166,67 +157,7 @@ fn font_weight_specs() -> impl Iterator<Item = SettingSpec> {
     })
 }
 
-fn panel_specs() -> Vec<SettingSpec> {
-    let mut specs = Vec::new();
-    macro_rules! panel {
-        ($kind:ident, $name:literal, $label:literal) => {
-            specs.push(spec(
-                &["panels", $name, "dock"],
-                "Dock",
-                "Where this panel opens.",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelDock::Left, "Left"),
-                        (&crate::config::PanelDock::Right, "Right"),
-                        (&crate::config::PanelDock::Bottom, "Bottom"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config
-                            .panel(crate::config::PanelKind::$kind)
-                            .dock(crate::config::PanelKind::$kind),
-                    ))
-                }),
-            ));
-            specs.push(spec(
-                &["panels", $name, "button"],
-                "Status bar button",
-                "Show a button that toggles this panel.",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelButton::None, "None"),
-                        (&crate::config::PanelButton::Top, "Top bar"),
-                        (&crate::config::PanelButton::Bottom, "Bottom bar"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config.panel(crate::config::PanelKind::$kind).button,
-                    ))
-                }),
-            ));
-        };
-    }
-    panel!(Sessions, "sessions", "Sessions");
-    panel!(Files, "files", "Files");
-    panel!(Changes, "changes", "Changes");
-    panel!(Diff, "diff", "Diff");
-    panel!(Agents, "agents", "Agents");
-    specs
-}
-
-fn dock_header_specs() -> [SettingSpec; 4] {
+fn dock_header_specs() -> [SettingSpec; 2] {
     [
         spec(
             &["chrome", "left-dock-toggle"],
@@ -246,141 +177,28 @@ fn dock_header_specs() -> [SettingSpec; 4] {
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.chrome.right_dock_toggle)),
         ),
-        spec(
-            &["chrome", "panel-tab-style"],
-            "Fixed dock tab labels",
-            "Label style for tabs in the narrow left and right docks. Main Dock tabs use icons and text.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Icons,
-                        "Icons only",
-                        "Show icons; hover for panel names.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::IconsAndText,
-                        "Icons and text",
-                        "Show each panel’s icon and name.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Text,
-                        "Text only",
-                        "Show panel names without icons.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.panel_tab_style))
-            }),
-        ),
-        spec(
-            &["chrome", "panel-tabs"],
-            "Fixed dock tabs",
-            "Tab visibility for the fixed left and right docks. Main and bottom Dock tabs stay visible unless hidden for that group.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Automatic,
-                        "Hide for a single panel",
-                        "Show tabs only when a group has multiple panels.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Always,
-                        "Always show",
-                        "Keep tabs visible even for a single panel.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Never,
-                        "Always hide",
-                        "Hide tabs and switch panels with commands.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.chrome.panel_tabs))),
-        ),
     ]
 }
 
-fn dock_tabs_specs() -> [SettingSpec; 3] {
-    [
-        spec(
-            &["chrome", "dock-tabs", "appearance"],
-            "Tab style",
-            "Choose the appearance of dock tabs.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
-                    SettingOption::of(&crate::config::TabAppearance::Underline, "Underline"),
-                    SettingOption::of(&crate::config::TabAppearance::Pill, "Pill"),
-                    SettingOption::of(&crate::config::TabAppearance::Outline, "Outline"),
-                    SettingOption::of(&crate::config::TabAppearance::Segmented, "Segmented"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.appearance))
-            }),
-        ),
-        spec(
-            &["chrome", "dock-tabs", "close-position"],
-            "Close button side",
-            "Place the close button on the left or right side of each tab.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
-                    SettingOption::of(&crate::config::TabClosePosition::Right, "Right"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.close_position))
-            }),
-        ),
-        spec(
-            &["chrome", "dock-tabs", "close-button"],
-            "Show close button",
-            "Show close buttons always, on hover, or never.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
-                    SettingOption::of(&crate::config::TabCloseButton::Hover, "On hover"),
-                    SettingOption::of(&crate::config::TabCloseButton::Hidden, "Hidden"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.close_button))
-            }),
-        ),
-    ]
-}
-
-fn terminal_tabs_specs() -> [SettingSpec; 4] {
+fn tabs_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["chrome", "tabs-use-session-color"],
             "Use session color for tabs",
             "Tint active tabs with the selected session's color. Turn off to use the theme accent.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Bool,
             SettingDefault::Field(|config| {
                 SettingValue::Bool(config.chrome.tabs_use_session_color)
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "appearance"],
+            &["chrome", "tabs", "appearance"],
             "Tab style",
-            "Choose the appearance of terminal tabs.",
+            "Choose the appearance of terminal and sidebar tabs.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
@@ -391,15 +209,15 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.appearance))
+                SettingValue::Token(token(&config.chrome.tabs.appearance))
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "close-position"],
+            &["chrome", "tabs", "close-position"],
             "Close button side",
             "Place the close button on the left or right side of each tab.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
@@ -407,15 +225,15 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.close_position))
+                SettingValue::Token(token(&config.chrome.tabs.close_position))
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "close-button"],
+            &["chrome", "tabs", "close-button"],
             "Show close button",
             "Show close buttons always, on hover, or never.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
@@ -424,7 +242,7 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.close_button))
+                SettingValue::Token(token(&config.chrome.tabs.close_button))
             }),
         ),
     ]
@@ -1722,6 +1540,39 @@ fn custom_runtime_specs() -> [SettingSpec; 4] {
             "extensions",
             "EXTENSIONS",
             SettingEditor::Extensions,
+        ),
+    ]
+}
+
+fn browser_specs() -> [SettingSpec; 2] {
+    use crate::config::BrowserSearchEngine as Engine;
+    [
+        spec(
+            &["browser", "search-engine"],
+            "Search engine",
+            "Search from the browser address bar when you enter words instead of an address.",
+            "browser",
+            "SEARCH",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&Engine::DuckDuckGo, "DuckDuckGo"),
+                    SettingOption::of(&Engine::Google, "Google"),
+                    SettingOption::of(&Engine::Bing, "Bing"),
+                    SettingOption::of(&Engine::Brave, "Brave"),
+                ],
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.browser.search_engine))
+            }),
+        ),
+        spec(
+            &["browser", "persist-site-data"],
+            "Remember cookies and site data",
+            "Keep website sign-ins between launches in this app's browser profile (macOS 14+). Turn off for private tabs. Existing saved data is retained; changing this setting reloads open pages.",
+            "browser",
+            "PRIVACY",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.browser.persist_site_data)),
         ),
     ]
 }

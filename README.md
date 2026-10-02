@@ -72,6 +72,33 @@ mise run test
 mise run bench -- --ci-smoke
 ```
 
+Settings scenarios share one integration executable so each edit links the UI
+once. Run the complete suite with `cargo nextest run -p bootty-ui --test settings`,
+or select an existing scenario module with
+`cargo nextest run -p bootty-ui gpui_settings_text`. The module names preserve
+focused filtering; the former individual `--test settings_*` and
+`--test gpui_settings_*` targets are now part of `--test settings`.
+
+Routine tests omit debug symbols; development builds and the profiling profile keep
+them. `mise run test` checks for a 12 GiB build budget plus a 12 GiB free-space
+reserve, and stops only its own test process group if either limit is reached.
+Use `python3 scripts/run-workspace-tests.py --check-only` before the first rebuild
+after changing the test profile. Direct nextest invocations bypass this disk guard.
+For interactive test debugging, pass `--cargo-profile dev` to nextest.
+
+On macOS and Linux when builds are idle, write a retention dry run under the
+shared build lock:
+
+```sh
+python3 scripts/test-artifact-retention.py --target-dir target \
+  --manifest artifacts/test-retention.json
+```
+
+The tool proposes keeping two generations with identical Cargo target, profile,
+features, flags, compiler, platform, configuration and source-path identities.
+Recent outputs, live readers and unrecognized artifacts stay protected. The tool
+never deletes files; audit the manifest before any separately authorized cleanup.
+
 ## Docs
 
 - Architecture and crate boundaries: `docs/architecture.md`

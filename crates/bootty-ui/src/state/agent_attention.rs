@@ -40,7 +40,7 @@ pub struct AgentOverview {
 const LAST_MESSAGE_PREVIEW: usize = 1024;
 
 /// The first [`LAST_MESSAGE_PREVIEW`] bytes of `message`, and whether anything was cut.
-fn message_preview(message: Option<&str>) -> (Option<String>, bool) {
+pub fn message_preview(message: Option<&str>) -> (Option<String>, bool) {
     let Some(message) = message else {
         return (None, false);
     };

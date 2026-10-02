@@ -4,19 +4,23 @@ mod diff;
 
 pub use diff::GitDiffPanel;
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
     CommandTarget,
 };
-use bootty_git::changes::{ChangeGroup, RepositoryChanges, RepositoryOverview};
+use bootty_git::changes::{ChangeGroup, DiffStat, RepositoryChanges, RepositoryOverview};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState},
     list::ListItem,
+    menu::PopupMenuItem,
     tree::{Tree, TreeEntry, TreeItem, TreeState},
 };
 use gpui_kit::{
@@ -44,7 +48,7 @@ pub struct GitChangesPanel {
     sender: BoundAppCommandSender,
     diff: Entity<GitDiffPanel>,
     message: Entity<InputState>,
-    changes: Option<RepositoryChanges>,
+    changes: Option<Arc<RepositoryChanges>>,
     tree: Entity<TreeState>,
     overview: Option<RepositoryOverview>,
     branch_name: Entity<InputState>,
@@ -61,6 +65,7 @@ pub struct GitChangesPanel {
     pending_directory: Option<String>,
     pending_read: Option<(&'static str, Vec<String>)>,
     messages: std::collections::HashMap<String, String>,
+    _message_subscription: gpui_kit::Subscription,
 }
 
 pub struct OpenDiff;
@@ -141,7 +146,18 @@ impl GitChangesPanel {
             }
         })
         .detach();
+        let message =
+            cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t(cx, "git-message")));
+        let message_subscription = cx.subscribe(
+            &message,
+            |_, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
+            _message_subscription: message_subscription,
             host_visible: true,
             context,
             sender,
@@ -152,9 +168,7 @@ impl GitChangesPanel {
             pending_directory: None,
             pending_read: None,
             messages: std::collections::HashMap::new(),
-            message: cx.new(|cx| {
-                InputState::new(window, cx).placeholder(crate::i18n::t(cx, "git-message"))
-            }),
+            message,
             changes: None,
             tree: cx.new(|cx| TreeState::new(cx)),
             overview: None,
@@ -407,9 +421,9 @@ impl GitChangesPanel {
     ) -> Result<(), serde_json::Error> {
         match command {
             "git.status" => {
-                let changes = serde_json::from_value(value)?;
-                if self.changes.as_ref() != Some(&changes) {
-                    self.changes = Some(changes);
+                let changes: RepositoryChanges = serde_json::from_value(value)?;
+                if self.changes.as_deref() != Some(&changes) {
+                    self.changes = Some(Arc::new(changes));
                     self.sync_tree(cx);
                 }
                 self.refresh_selected_diff(window, cx);
@@ -511,11 +525,58 @@ impl GitChangesPanel {
         }
     }
 
+    fn commit_controls(&self, cx: &Context<Self>) -> impl IntoElement {
+        let commit_disabled = self.mutating
+            || self.message.read(cx).value().trim().is_empty()
+            || !self.changes.as_ref().is_some_and(|changes| {
+                changes
+                    .files
+                    .iter()
+                    .any(|file| file.groups().any(|group| group == ChangeGroup::Staged))
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(crate::gpui::focus_input(
+                &self.message,
+                Input::new(&self.message).disabled(self.mutating),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("commit")
+                            .label(crate::i18n::t(cx, "git-commit"))
+                            .primary()
+                            .small()
+                            .disabled(commit_disabled)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.commit(false, window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("amend")
+                            .label(crate::i18n::t(cx, "git-amend"))
+                            .ghost()
+                            .small()
+                            .disabled(
+                                self.mutating || self.message.read(cx).value().trim().is_empty(),
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.commit(true, window, cx)),
+                            ),
+                    ),
+            )
+    }
+
     fn file_row(
         entry: &TreeEntry,
         selected: bool,
         owner: &gpui_kit::WeakEntity<Self>,
         pending: bool,
+        changes: Option<&RepositoryChanges>,
         cx: &App,
     ) -> ListItem {
         let item = entry.item();
@@ -548,33 +609,20 @@ impl GitChangesPanel {
             );
         }
         let (group, path) = id.split_once(':').unwrap_or(("", &item.label));
-        let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
         let staged = group == "staged";
+        let file = changes.and_then(|changes| changes.files.iter().find(|file| file.path == path));
+        let stat = file.and_then(|file| {
+            if staged {
+                file.staged_diff
+            } else {
+                file.unstaged_diff
+            }
+        });
+        let status = file.map(|file| if staged { file.index } else { file.worktree });
         let stage_path = path.to_owned();
         let stage_owner = owner.clone();
         row = row
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        Icon::new(IconName::File)
-                            .small()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(div().min_w_0().flex_1().truncate().child(name.to_owned()))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(directory.to_owned()),
-                    ),
-            )
+            .child(file_identity(path, group, stat, status, cx))
             .suffix(move |_, _| {
                 let path = stage_path.clone();
                 let owner = stage_owner.clone();
@@ -614,8 +662,46 @@ impl GitChangesPanel {
     fn file_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let owner = cx.weak_entity();
         let pending = self.mutating;
+        let menu_owner = owner.clone();
+        let changes = self.changes.clone();
         let tree = Tree::new(&self.tree, move |_, entry, selected, _, cx| {
-            Self::file_row(entry, selected, &owner, pending, cx)
+            Self::file_row(entry, selected, &owner, pending, changes.as_deref(), cx)
+        })
+        .context_menu(move |_, entry, menu, _, _| {
+            let id = entry.item().id.clone();
+            let Some((group, path)) = id.split_once(':') else {
+                return menu;
+            };
+            let open_owner = menu_owner.clone();
+            let stage_owner = menu_owner.clone();
+            let stage_path = path.to_owned();
+            let copy_path = path.to_owned();
+            let staged = group == "staged";
+            menu.item(
+                PopupMenuItem::new("View diff").on_click(move |_, window, cx| {
+                    let _ = open_owner.update(cx, |this, cx| this.open_change(&id, window, cx));
+                }),
+            )
+            .item(
+                PopupMenuItem::new(if staged { "Unstage file" } else { "Stage file" })
+                    .disabled(pending)
+                    .on_click(move |_, window, cx| {
+                        let _ = stage_owner.update(cx, |this, cx| {
+                            this.request(
+                                if staged { "git.unstage" } else { "git.stage" },
+                                vec![stage_path.clone()],
+                                window,
+                                cx,
+                            );
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("Copy relative path").on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copy_path.clone()));
+                }),
+            )
         });
         let focus_tree = self.tree.clone();
         div()
@@ -941,7 +1027,46 @@ impl GitChangesPanel {
                 .gap_2()
                 .min_w_0()
                 .flex_shrink_0()
+                .child(crate::gpui::sized_icon(
+                    "git-branch",
+                    crate::gpui::IconSize::Small,
+                    cx.theme().muted_foreground,
+                ))
                 .child(div().flex_1().min_w_0().truncate().text_sm().child(branch))
+                .when_some(self.changes.as_ref(), |row, changes| {
+                    let (added, removed) = changes
+                        .files
+                        .iter()
+                        .flat_map(|file| [file.staged_diff, file.unstaged_diff])
+                        .flatten()
+                        .fold(
+                            (0u64, 0u64),
+                            |(added_total, removed_total), stat| match stat {
+                                DiffStat::Text { added, removed } => (
+                                    added_total.saturating_add(added),
+                                    removed_total.saturating_add(removed),
+                                ),
+                                DiffStat::Binary => (added_total, removed_total),
+                            },
+                        );
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} {}",
+                                changes.files.len(),
+                                if changes.files.len() == 1 {
+                                    "file"
+                                } else {
+                                    "files"
+                                }
+                            )),
+                    )
+                    .when(added != 0 || removed != 0, |row| {
+                        row.child(diff_stat_element(DiffStat::Text { added, removed }, cx))
+                    })
+                })
                 .child(
                     Button::new("refresh")
                         .icon(IconName::RotateCw)
@@ -1064,34 +1189,87 @@ impl Render for GitChangesPanel {
             content = self.append_stashes(content, &overview.stashes, cx);
             body = body.child(content);
         }
-        body.child(crate::gpui::focus_input(
-            &self.message,
-            Input::new(&self.message).disabled(self.mutating),
-        ))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("commit")
-                        .label(crate::i18n::t(cx, "git-commit"))
-                        .small()
-                        .disabled(self.mutating)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.commit(false, window, cx)),
-                        ),
-                )
-                .child(
-                    Button::new("amend")
-                        .label(crate::i18n::t(cx, "git-amend"))
-                        .small()
-                        .disabled(self.mutating)
-                        .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
-                ),
-        )
+        body.child(self.commit_controls(cx))
     }
 }
 
 fn short_commit(commit: &str) -> String {
     commit.chars().take(10).collect()
+}
+
+fn diff_stat_element(stat: DiffStat, cx: &App) -> gpui_kit::AnyElement {
+    match stat {
+        DiffStat::Binary => div()
+            .flex_none()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("Binary")
+            .into_any_element(),
+        DiffStat::Text { added, removed } => div()
+            .flex()
+            .flex_none()
+            .gap_1()
+            .text_xs()
+            .when(added > 0, |row| {
+                row.child(
+                    div()
+                        .text_color(cx.theme().success)
+                        .child(format!("+{added}")),
+                )
+            })
+            .when(removed > 0, |row| {
+                row.child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(format!("−{removed}")),
+                )
+            })
+            .into_any_element(),
+    }
+}
+
+fn file_identity(
+    path: &str,
+    group: &str,
+    stat: Option<DiffStat>,
+    status: Option<char>,
+    cx: &App,
+) -> impl IntoElement {
+    let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .flex_1()
+        .child(
+            Icon::new(IconName::File)
+                .small()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(div().min_w_0().flex_1().truncate().child(name.to_owned()))
+        .when(!directory.is_empty(), |row| {
+            row.child(
+                div()
+                    .min_w_0()
+                    .max_w_full()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(directory.to_owned()),
+            )
+        })
+        .when_some(stat, |row, stat| row.child(diff_stat_element(stat, cx)))
+        .when(stat.is_none(), |row| {
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if group == "untracked" {
+                        "New".to_owned()
+                    } else {
+                        status.unwrap_or(' ').to_string()
+                    }),
+            )
+        })
 }

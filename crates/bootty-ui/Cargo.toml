@@ -22,6 +22,9 @@ ab_glyph.workspace = true
 arboard.workspace = true
 async-channel.workspace = true
 bootty-agents = { path = "../bootty-agents" }
+tokio = { workspace = true, features = ["rt"] }
+bootty-computer = { path = "../bootty-computer" }
+bootty-browser = { path = "../bootty-browser" }
 bootty-control = { path = "../bootty-control" }
 bootty-config = { path = "../bootty-config" }
 bootty-git = { path = "../bootty-git" }
@@ -97,6 +100,10 @@ rusqlite.workspace = true
 rstest.workspace = true
 static_assertions.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[[test]]
+name = "settings"
+path = "tests/settings/main.rs"
 
 [[bench]]
 name = "pipeline_resources"

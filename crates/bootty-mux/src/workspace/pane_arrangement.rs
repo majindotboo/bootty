@@ -1,7 +1,7 @@
 //! Capture native placement before dispatch; publish it only after authoritative completion.
 use super::{BindingRuntime, ScopedWindowId};
 use crate::{
-    command::{MuxCommand, MuxDirection},
+    command::{MuxCommand, MuxDirection, MuxSplitDirection},
     pane_layout::{Direction, PaneLayout, SplitDirection},
     provider::PaneTopology,
 };
@@ -11,6 +11,7 @@ use std::collections::HashMap;
 pub struct PreparedPaneArrangement {
     layouts: HashMap<ScopedWindowId, PaneLayout>,
     extracted: Option<(String, String)>,
+    split: Option<(String, SplitDirection)>,
 }
 
 impl BindingRuntime {
@@ -21,6 +22,21 @@ impl BindingRuntime {
         if self.backend_policy.panes.topology != PaneTopology::ProcessLocal {
             return None;
         }
+        if let MuxCommand::SplitPane {
+            session_id,
+            pane_id: Some(pane),
+            direction,
+        } = command
+        {
+            return self.prepare_split_pane_arrangement(session_id, pane, *direction);
+        }
+        self.prepare_pane_move_arrangement(command)
+    }
+
+    fn prepare_pane_move_arrangement(
+        &self,
+        command: &MuxCommand,
+    ) -> Option<PreparedPaneArrangement> {
         if let MuxCommand::MergeWindows {
             session_id,
             source_window_id,
@@ -52,6 +68,7 @@ impl BindingRuntime {
             return Some(PreparedPaneArrangement {
                 layouts: HashMap::from([(source_key, source), (target_key, target)]),
                 extracted: None,
+                split: None,
             });
         }
         let (session, source, target) = match command {
@@ -111,7 +128,29 @@ impl BindingRuntime {
             extracted = Some((session.clone(), source.clone()));
         }
         layouts.insert(source_key, source_layout);
-        Some(PreparedPaneArrangement { layouts, extracted })
+        Some(PreparedPaneArrangement {
+            layouts,
+            extracted,
+            split: None,
+        })
+    }
+
+    fn prepare_split_pane_arrangement(
+        &self,
+        session_id: &str,
+        pane: &str,
+        direction: MuxSplitDirection,
+    ) -> Option<PreparedPaneArrangement> {
+        let (key, layout) = self.layout_for_pane(session_id, pane)?;
+        let direction = match direction {
+            MuxSplitDirection::Right => SplitDirection::Right,
+            MuxSplitDirection::Down => SplitDirection::Down,
+        };
+        Some(PreparedPaneArrangement {
+            layouts: HashMap::from([(key, layout)]),
+            extracted: None,
+            split: Some((pane.to_owned(), direction)),
+        })
     }
 
     fn layout_for_pane(
@@ -168,6 +207,20 @@ impl BindingRuntime {
                 .iter()
                 .filter_map(|pane| pane.pane_id.as_ref())
                 .collect::<Vec<_>>();
+            if let Some((pane, direction)) = &prepared.split {
+                let mut added = ids.iter().filter(|pane| !layout.contains(pane));
+                if let Some(added_pane) = added.next()
+                    && added.next().is_none()
+                    && ids.len() == layout.panes().len().saturating_add(1)
+                    && layout.panes().iter().all(|pane| ids.contains(&pane))
+                {
+                    let mut split = layout.clone();
+                    split.set_focus(pane);
+                    split.split_focused((*added_pane).clone(), *direction);
+                    self.pane_layouts.insert(key.clone(), split);
+                }
+                continue;
+            }
             if ids.len() == layout.panes().len() && ids.iter().all(|pane| layout.contains(pane)) {
                 self.pane_layouts.insert(key.clone(), layout.clone());
             }

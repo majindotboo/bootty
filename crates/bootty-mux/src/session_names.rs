@@ -1,5 +1,7 @@
 use std::{collections::HashSet, path::Path};
 
+pub const SESSION_NAME_MAX_BYTES: usize = 256;
+
 /// Derive the default session name for a local path.
 #[must_use]
 pub fn session_name_for_path(path: &str) -> String {
@@ -68,4 +70,41 @@ pub fn is_uniquified_session_name(name: &str, base: &str) -> bool {
         .is_some_and(|digits| {
             !digits.is_empty() && digits.chars().all(|char| char.is_ascii_digit())
         })
+}
+
+/// Make a generated label portable across exact backend targets, with room for a uniqueness suffix.
+#[must_use]
+pub fn portable_session_name(label: &str) -> String {
+    let label = rmux_proto::SessionName::new(label.to_owned())
+        .map_or_else(|_| "bootty".to_owned(), rmux_proto::SessionName::into_inner);
+    // unique_session_name uses u128 suffixes: reserve the dash and at most 39 decimal digits.
+    let limit = SESSION_NAME_MAX_BYTES.saturating_sub(40);
+    let mut name = String::new();
+    for character in label.chars() {
+        let character = if invalid_session_name_character(character) {
+            '_'
+        } else {
+            character
+        };
+        // A leading slash would become an empty group in unique_session_name.
+        if name.is_empty() && (reserved_session_name_start(character) || character == '/') {
+            name.push('_');
+        }
+        if name.len().saturating_add(character.len_utf8()) > limit {
+            break;
+        }
+        name.push(character);
+    }
+    if name.is_empty() {
+        name.push_str("bootty");
+    }
+    name
+}
+
+pub(crate) const fn invalid_session_name_character(character: char) -> bool {
+    character.is_control() || matches!(character, ':' | '.' | '\\' | '#')
+}
+
+pub(crate) const fn reserved_session_name_start(character: char) -> bool {
+    matches!(character, '-' | '$' | '@' | '%' | '=')
 }

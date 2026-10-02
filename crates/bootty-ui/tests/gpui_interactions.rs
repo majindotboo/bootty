@@ -3,7 +3,7 @@
 use bootty_ui::gpui as bootty_gpui;
 use std::{
     cell::RefCell,
-    ops::{Add as _, Div as _, Sub as _},
+    ops::{Add as _, Div as _, Mul as _, Sub as _},
     rc::Rc,
 };
 
@@ -100,10 +100,7 @@ fn chrome_layout() -> ChromeLayout {
     ChromeLayout {
         left_dock_toggle: true,
         right_dock_toggle: true,
-        panel_tab_style: bootty_config::config::PanelTabStyle::default(),
-        panel_tabs: bootty_config::config::PanelTabs::default(),
-        dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
-        terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
+        tabs: bootty_config::config::ChromeConfig::default().tabs,
         width: 900.0,
         height: 600.0,
         sidebar_position: SidebarPosition::Left,
@@ -134,6 +131,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 tree: None,
                 icon: None,
                 diff: None,
+                artwork: None,
                 color: color(220, 220, 230),
                 dim_color: color(150, 150, 160),
                 kind: SidebarRowKind::Session,
@@ -161,6 +159,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 tree: None,
                 icon: Some("folder".to_owned()),
                 diff: None,
+                artwork: None,
                 color: color(180, 180, 190),
                 dim_color: color(130, 130, 140),
                 kind: SidebarRowKind::Detail,
@@ -291,7 +290,7 @@ fn sidebar_tab_space_and_status_clicks_emit_their_typed_actions(cx: &mut TestApp
     let session = cx
         .debug_bounds("sidebar-row-hitbox-session")
         .expect("session row hitbox");
-    assert_eq!(session.size.width, px(240.0));
+    assert!(session.left() > px(0.0) && session.right() < px(240.0));
     // Exercise the edge too: valid layout bounds alone do not catch an inset scroll clip.
     cx.simulate_click(
         point(session.left().add(px(1.0)), session.center().y),
@@ -353,6 +352,110 @@ fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
         .collect();
 }
 
+fn grouped_chrome_snapshot() -> ChromeSnapshot {
+    let mut snapshot = chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let session = sidebar.rows[0].clone();
+    let detail = sidebar.rows[1].clone();
+    let heading = |key: &str, text: &str| SidebarRow {
+        key: key.to_owned(),
+        text: text.to_owned(),
+        kind: SidebarRowKind::Group,
+        target: None,
+        number: None,
+        selectable: false,
+        current: false,
+        active: false,
+        reorder_anchor: None,
+        context: None,
+        ..session.clone()
+    };
+    sidebar.rows = vec![
+        heading("project:1:alpha", "Alpha"),
+        session.clone(),
+        detail,
+        heading("project:1:beta", "Beta"),
+        SidebarRow {
+            key: "session-beta".to_owned(),
+            text: "Beta terminal".to_owned(),
+            target: Some(SessionTarget {
+                scope: SpaceKey(1),
+                session_id: "session-beta".to_owned(),
+            }),
+            current: false,
+            ..session
+        },
+    ];
+    snapshot
+}
+
+#[gpui_kit::test]
+fn project_disclosure_hides_its_children_and_selected_sessions_reveal_their_project(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = grouped_chrome_snapshot();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:alpha")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session").is_none());
+    assert!(cx.debug_bounds("sidebar-row-session:cwd").is_none());
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_some());
+    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
+
+    for key in ["session-beta", "session"] {
+        for row in &mut snapshot.sidebar.as_mut().expect("sidebar").rows {
+            row.current = row.key == key;
+        }
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+        });
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    assert!(cx.debug_bounds("sidebar-row-session:cwd").is_some());
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:alpha")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+}
+
+#[gpui_kit::test]
+fn disappearing_projects_discard_their_disclosure_state(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let snapshot = grouped_chrome_snapshot();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let project = cx
+        .debug_bounds("sidebar-row-project:1:beta")
+        .expect("project heading");
+    cx.simulate_click(center(project), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_none());
+
+    let mut removed = snapshot.clone();
+    removed.sidebar.as_mut().expect("sidebar").rows.truncate(3);
+    for update in [&removed, &snapshot] {
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(update, window, cx));
+        });
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("sidebar-row-session-beta").is_some());
+}
+
 #[gpui_kit::test]
 fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
@@ -401,32 +504,7 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
     fill_sidebar_sessions(snapshot.sidebar.as_mut().expect("sidebar"));
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    for (selected, selectors) in [
-        (
-            39,
-            [
-                "sidebar-row-session-39",
-                "sidebar-row-session-39:cwd",
-                "sidebar-row-session-39:branch",
-            ],
-        ),
-        (
-            0,
-            [
-                "sidebar-row-session-0",
-                "sidebar-row-session-0:cwd",
-                "sidebar-row-session-0:branch",
-            ],
-        ),
-        (
-            25,
-            [
-                "sidebar-row-session-25",
-                "sidebar-row-session-25:cwd",
-                "sidebar-row-session-25:branch",
-            ],
-        ),
-    ] {
+    for selected in [39, 0, 25] {
         let selected_key = format!("session-{selected}");
         for row in &mut snapshot.sidebar.as_mut().expect("sidebar").rows {
             row.current =
@@ -443,19 +521,49 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
         let shell = cx
             .debug_bounds("bootty-gpui-sidebar-shell")
             .expect("sidebar shell");
-        let footer = cx
+        let header_bottom = cx
+            .debug_bounds("bootty-gpui-sidebar-header")
+            .map_or_else(|| shell.top(), |header| header.bottom());
+        let spaces_top = cx
             .debug_bounds("bootty-gpui-space-switcher")
-            .expect("space switcher");
+            .expect("Spaces footer")
+            .top();
+        let footer_top =
+            cx.debug_bounds("bootty-gpui-sidebar-footer")
+                .map_or(spaces_top, |footer| {
+                    if footer.top() < spaces_top {
+                        footer.top()
+                    } else {
+                        spaces_top
+                    }
+                });
+        let selectors = match selected {
+            39 => [
+                "sidebar-row-session-39",
+                "sidebar-row-session-39:cwd",
+                "sidebar-row-session-39:branch",
+            ],
+            0 => [
+                "sidebar-row-session-0",
+                "sidebar-row-session-0:cwd",
+                "sidebar-row-session-0:branch",
+            ],
+            _ => [
+                "sidebar-row-session-25",
+                "sidebar-row-session-25:cwd",
+                "sidebar-row-session-25:branch",
+            ],
+        };
         for selector in selectors {
             let row = cx
                 .debug_bounds(selector)
                 .expect("selected session entry row");
             assert!(
-                row.top() >= shell.top(),
-                "selected session entry row must be inside the sidebar: {selector}"
+                row.top() >= header_bottom,
+                "selected session entry row must be below the header: {selector}"
             );
             assert!(
-                row.bottom() <= footer.top(),
+                row.bottom() <= footer_top,
                 "selected session entry row must be above the footer: {selector}"
             );
         }
@@ -490,7 +598,7 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAppContext) {
+fn sidebar_cards_keep_details_and_center_the_space_switcher(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let (_, cx) = cx.add_window_view(ChromeProbe::new);
 
@@ -501,29 +609,18 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
     let block = cx
         .debug_bounds("sidebar-session-session")
         .expect("session block");
-    let rail = cx
-        .debug_bounds("sidebar-current-rail-session")
-        .expect("current session rail");
-    assert_eq!(row.origin.x, px(0.0));
-    assert_eq!(row.size.width, px(240.0));
+    assert!(block.left() > px(0.0));
+    assert!(block.right() < px(240.0));
+    assert!(row.left() > block.left());
+    assert!(row.right() < block.right());
     assert_eq!(hitbox.origin.x, row.origin.x);
     assert_eq!(hitbox.size.width, row.size.width);
-    assert_eq!(block.origin.x, row.origin.x);
-    assert_eq!(block.size.width, row.size.width);
-    assert_eq!(rail.origin.x, block.origin.x);
-    assert_eq!(rail.size.width, px(4.0));
 
     let detail = cx
         .debug_bounds("sidebar-row-session:cwd")
         .expect("session detail row");
     assert!(detail.top() >= row.bottom());
     assert!(block.bottom() >= detail.bottom());
-    assert_eq!(rail.size.height, block.size.height);
-    assert!(
-        cx.debug_bounds("sidebar-current-rail-session:cwd")
-            .is_none()
-    );
-
     let first_space = cx.debug_bounds("space-1").expect("first space");
     let second_space = cx.debug_bounds("space-2").expect("second space");
     let create_space = cx.debug_bounds("space-create").expect("create space");
@@ -538,10 +635,67 @@ fn sidebar_rows_and_space_switcher_use_the_full_centered_surface(cx: &mut TestAp
             .sub(switcher.center().x))
         .abs()
             <= px(0.5),
-        "space controls center within half a layout pixel"
+        "space controls center within half a layout pixel: first={first_space:?}, create={create_space:?}, switcher={switcher:?}"
     );
     assert!(first_space.right() < second_space.left());
     assert!(second_space.right() < create_space.left());
+}
+
+#[gpui_kit::test]
+fn spaces_are_icon_only_at_the_bottom_and_names_do_not_resize_them(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    snapshot.layout.sidebar_width = 285.0;
+    let mut third = snapshot.spaces[1].clone();
+    third.key = SpaceKey(3);
+    third.name = "UI Proof Split A".to_owned();
+    snapshot.spaces.push(third);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let long_button = cx.debug_bounds("space-3").expect("third Space button");
+    let switcher = cx
+        .debug_bounds("bootty-gpui-space-switcher")
+        .expect("Space switcher");
+    let sidebar = cx
+        .debug_bounds("bootty-gpui-sidebar-shell")
+        .expect("sidebar");
+    assert!(
+        switcher.top() > sidebar.center().y,
+        "Spaces belong in the footer"
+    );
+    assert!(switcher.bottom() <= sidebar.bottom());
+    assert!(switcher.bottom() >= sidebar.bottom().sub(px(16.0)));
+    for selector in ["space-label-1", "space-label-2", "space-label-3"] {
+        assert!(cx.debug_bounds(selector).is_none(), "no inline Space names");
+    }
+    for selector in ["space-1", "space-2", "space-3", "space-create"] {
+        let button = cx.debug_bounds(selector).expect("Space control");
+        assert!(button.left() >= switcher.left());
+        assert!(button.right() <= switcher.right());
+        assert!(button.bottom() <= switcher.bottom());
+        assert!(
+            button.size.width <= px(32.0),
+            "icon-only controls stay compact"
+        );
+    }
+    snapshot.spaces[2].name = "UI Proof".to_owned();
+    cx.update(|window, cx| {
+        probe
+            .read(cx)
+            .chrome
+            .clone()
+            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+    });
+    cx.run_until_parked();
+    let short_button = cx.debug_bounds("space-3").expect("renamed Space button");
+    assert_eq!(long_button, short_button);
+    cx.simulate_click(center(short_button), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [ChromeIntent::ActivateSpace(SpaceKey(3))]
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -577,7 +731,7 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
+fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
@@ -590,6 +744,7 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             meter: Some(UsageMeterSnapshot {
                 provider: UsageProvider::Codex,
                 label: format!("{label} 23% left"),
+                window_label: label.to_owned(),
                 fill: palette().accent,
                 marker: palette().accent,
                 pace: palette().text,
@@ -621,24 +776,57 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             });
             cx.run_until_parked();
             let mut previous_bottom = px(0.0);
-            for (row, labels, track) in [
+            for (row, labels, track, pace_selector, expected_selector, reset_selector) in [
                 (
                     "sidebar-footer-codex:5h",
                     "sidebar-footer-codex:5h-labels",
                     "sidebar-footer-codex:5h-track",
+                    "sidebar-footer-codex:5h-pace",
+                    "sidebar-footer-codex:5h-expected",
+                    "sidebar-footer-codex:5h-reset",
                 ),
                 (
                     "sidebar-footer-codex:7d",
                     "sidebar-footer-codex:7d-labels",
                     "sidebar-footer-codex:7d-track",
+                    "sidebar-footer-codex:7d-pace",
+                    "sidebar-footer-codex:7d-expected",
+                    "sidebar-footer-codex:7d-reset",
                 ),
             ] {
                 let row = cx.debug_bounds(row).expect("quota row");
                 let labels = cx.debug_bounds(labels).expect("quota labels");
                 let track = cx.debug_bounds(track).expect("quota track");
-                assert_eq!(track.left(), row.left());
-                assert_eq!(track.right(), row.right());
-                assert!(track.top() >= labels.bottom());
+                assert!(labels.left() >= row.left());
+                let pace = cx
+                    .debug_bounds(pace_selector)
+                    .expect("visible quota pacing");
+                let expected = cx
+                    .debug_bounds(expected_selector)
+                    .expect("expected allowance marker");
+                assert!(labels.left() >= row.left());
+                let reset = cx.debug_bounds(reset_selector).expect("visible reset time");
+                assert!(pace.right() <= reset.left(), "quota pacing overlaps reset");
+                assert!(reset.right() <= row.right());
+                assert!(expected.left() >= track.left() && expected.right() <= track.right());
+                assert!(track.right() <= row.right());
+                assert!(
+                    track.left() >= labels.right(),
+                    "meter overlaps window label"
+                );
+                assert!(
+                    track.size.width >= px(font_size).mul(2.0),
+                    "meter remains useful"
+                );
+                assert!(track.top() < labels.bottom(), "meter shares the quota row");
+                assert!(
+                    track.size.height < labels.size.height.div(4.0),
+                    "meter is not thin"
+                );
+                assert!(
+                    row.size.height <= px(font_size).mul(3.0),
+                    "quota row stays compact"
+                );
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }
@@ -711,21 +899,16 @@ fn crowded_sidebar_keeps_all_footer_items_and_spaces_reachable(cx: &mut TestAppC
     let switcher = cx
         .debug_bounds("bootty-gpui-space-switcher")
         .expect("space switcher");
-    cx.simulate_event(ScrollWheelEvent {
-        position: switcher.center(),
-        delta: ScrollDelta::Pixels(point(px(-1000.0), px(0.0))),
-        modifiers: Modifiers::none(),
-        touch_phase: TouchPhase::Moved,
-    });
-    cx.run_until_parked();
     let last_space = cx
         .debug_bounds("space-8")
-        .expect("last space remains scrollable");
+        .expect("last space remains visible");
     let create_space = cx
         .debug_bounds("space-create")
-        .expect("create space remains scrollable");
+        .expect("create space remains visible");
     assert!(last_space.left() >= switcher.left());
     assert!(create_space.right() <= switcher.right());
+    assert!(last_space.bottom() <= switcher.bottom());
+    assert!(create_space.bottom() <= switcher.bottom());
     cx.simulate_click(center(last_space), Modifiers::none());
     cx.simulate_click(center(create_space), Modifiers::none());
 
@@ -1548,7 +1731,7 @@ fn terminal_tab_variants_keep_close_buttons_in_padding(cx: &mut TestAppContext) 
                 TabCloseButton::Hidden,
             ] {
                 let mut snapshot = chrome_snapshot();
-                snapshot.layout.terminal_tabs = TabConfig {
+                snapshot.layout.tabs = TabConfig {
                     appearance,
                     close_position,
                     close_button,
@@ -1611,7 +1794,7 @@ fn terminal_tab_progress_stays_below_label(cx: &mut TestAppContext) {
         TabAppearance::Segmented,
     ] {
         let mut snapshot = chrome_snapshot();
-        snapshot.layout.terminal_tabs.appearance = appearance;
+        snapshot.layout.tabs.appearance = appearance;
         let item = snapshot
             .top_status
             .as_mut()

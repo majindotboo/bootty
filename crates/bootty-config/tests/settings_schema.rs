@@ -265,46 +265,6 @@ fn builtin_schema_keeps_the_hand_written_declarations() {
 }
 
 #[rstest::rstest]
-fn panel_preferences_round_trip_through_the_schema(
-    #[values("left", "right", "bottom")] dock: &str,
-    #[values("none", "top", "bottom")] button: &str,
-) {
-    use bootty_config::config::{PanelButton, PanelDock, PanelKind};
-    for kind in PanelKind::ALL {
-        let directory = assert_fs::TempDir::new().unwrap();
-        let file = directory.child("config.toml");
-        file.write_str(&format!(
-            "[panels.{}]\ndock = {dock:?}\nbutton = {button:?}\n",
-            kind.name()
-        ))
-        .unwrap();
-        let config = load_config_from_path(file.path()).unwrap();
-        let expected_dock = match dock {
-            "left" => PanelDock::Left,
-            "bottom" => PanelDock::Bottom,
-            _ => PanelDock::Right,
-        };
-        let expected_button = match button {
-            "top" => PanelButton::Top,
-            "bottom" => PanelButton::Bottom,
-            _ => PanelButton::None,
-        };
-        assert_eq!(config.panel(kind).dock(kind), expected_dock);
-        assert_eq!(config.panel(kind).button, expected_button);
-        let defaults = BoottyConfig::default();
-        assert_eq!(defaults.panel(kind).button, PanelButton::None);
-        assert_eq!(
-            defaults.panel(kind).dock(kind),
-            if kind == PanelKind::Sessions {
-                PanelDock::Left
-            } else {
-                PanelDock::Right
-            }
-        );
-    }
-}
-
-#[rstest::rstest]
 fn legacy_sidebar_configuration_remains_loadable_for_layout_migration() {
     let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
     file.write_str(
@@ -335,23 +295,22 @@ fn legacy_sidebar_configuration_remains_loadable_for_layout_migration() {
 }
 
 #[rstest::rstest]
-#[case("dock-tabs")]
-#[case("terminal-tabs")]
-fn partial_tab_settings_preserve_surface_defaults(#[case] surface: &str) {
+fn partial_tab_settings_preserve_defaults() {
     let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
-    file.write_str(&format!("[chrome.{surface}]\nclose-position = \"left\"\n"))
+    file.write_str("[chrome.tabs]\nclose-position = \"left\"\n")
         .unwrap();
     let config = load_config_from_path(file.path()).unwrap();
     let defaults = BoottyConfig::default();
-    let (actual, expected) = if surface == "dock-tabs" {
-        (config.chrome.dock_tabs, defaults.chrome.dock_tabs)
-    } else {
-        (config.chrome.terminal_tabs, defaults.chrome.terminal_tabs)
-    };
     assert_eq!(
-        actual.close_position,
+        config.chrome.tabs.close_position,
         bootty_config::config::TabClosePosition::Left
     );
-    assert_eq!(actual.appearance, expected.appearance);
-    assert_eq!(actual.close_button, expected.close_button);
+    assert_eq!(
+        config.chrome.tabs.appearance,
+        defaults.chrome.tabs.appearance
+    );
+    assert_eq!(
+        config.chrome.tabs.close_button,
+        defaults.chrome.tabs.close_button
+    );
 }

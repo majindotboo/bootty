@@ -6,7 +6,7 @@ use std::sync::{
 
 use bootty_config::config::RemoteConfig;
 use bootty_git::{self as project, ProjectPickerEntry, WorktreePickerEntry};
-use bootty_host::{CancellableCommandRunner, CommandCancellation};
+use bootty_host::{CancellableCommandRunner, CommandCancellation, CommandRunner as _};
 use bootty_mux::controller::RepaintHandle;
 
 use crate::error_catalog::ErrorNotice;
@@ -124,6 +124,12 @@ fn run_effect(
             NewSessionOutcome::Projects(project::discover_project_picker_entries(home.as_deref()))
         }
         (NewSessionTarget::Local { .. }, NewSessionEffect::ListWorktrees(project, open_cwds)) => {
+            let path = PathBuf::from(&project);
+            anyhow::ensure!(
+                path.is_dir(),
+                "Choose an existing project folder: {project}"
+            );
+            let project = path.canonicalize()?.to_string_lossy().into_owned();
             let mut worktrees = project::discover_worktree_picker_entries(&project);
             project::mark_occupied_worktrees(&mut worktrees, &open_cwds);
             NewSessionOutcome::Worktrees(worktrees)
@@ -145,6 +151,24 @@ fn run_effect(
             )?)
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ListWorktrees(project, open_cwds)) => {
+            let host = bootty_host::remote::RemoteCommandRunner::new(
+                bootty_host::remote::RemoteHost::new(remote.clone()),
+                runner.clone(),
+            );
+            let path = host.run("sh", &[
+                "-c".to_owned(),
+                "case $1 in '~/'*) path=$HOME/${1#'~/'} ;; *) path=$1 ;; esac; cd -- \"$path\" && pwd -P".to_owned(),
+                "bootty-project-directory".to_owned(), project,
+            ])?;
+            anyhow::ensure!(
+                path.success,
+                "Choose an existing folder on the connected host"
+            );
+            let project = path
+                .stdout
+                .strip_suffix('\n')
+                .unwrap_or(&path.stdout)
+                .to_owned();
             NewSessionOutcome::Worktrees(
                 bootty_mux::remote_space::list_remote_worktrees_with_runner(
                     remote, &project, &open_cwds, runner,

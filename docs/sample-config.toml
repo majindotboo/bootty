@@ -7,6 +7,8 @@
 
 version = 1
 locale = "en"
+# Enable native desktop control only after granting OS permissions.
+computer-use = false
 
 # Application lifecycle. These names and defaults follow Zed; the restored unit is a Bootty Space.
 restore_on_startup = "last_session" # last_session, last_workspace, none
@@ -93,13 +95,14 @@ bold = "auto"
 extra-bold = "auto"
 black = "auto"
 
+[browser]
+search-engine = "duck_duck_go" # google, bing, brave
+persist-site-data = true
+
 [chrome]
 tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
-panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text
-# Controls single-panel tabs only in the fixed left/right docks. Main and bottom tabs stay visible.
-panel-tabs = "automatic" # automatic, always, never
 # Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
 # independently when its configured modules should be visible.
 top-bar = true
@@ -139,15 +142,11 @@ module = "clock"
 # align = "right"
 # module = "clock"
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [sidebar]
 # Sessions colors layer on top of the active theme.
@@ -204,6 +203,7 @@ hide-tmux-status = false
 #     },
 #   ]
 # Bootty resolves the preset and compatibility arrays below first, then applies
+# Every preset binds Cmd+K to the command palette (Ctrl+Shift+K outside macOS).
 # keymap.json last. Existing TOML arrays remain supported and live-reloaded; new
 # edits should use the Keymap editor or keymap.json.
 #
@@ -438,25 +438,3 @@ palette = [
   # "#f5e0dc",
   # "#cba6f7",
 ]
-
-# Tool panel defaults. Dock: left/right/bottom. Button: none/top/bottom.
-
-[panels.sessions]
-dock = "left"
-button = "none"
-
-[panels.files]
-dock = "right"
-button = "none"
-
-[panels.changes]
-dock = "right"
-button = "none"
-
-[panels.diff]
-dock = "right"
-button = "none"
-
-[panels.agents]
-dock = "right"
-button = "none"

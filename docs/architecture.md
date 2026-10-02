@@ -27,6 +27,10 @@ This file describes the current production structure.
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
+| Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
+| Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
+| Desktop capture and input | `bootty-computer` | User enabling and macOS permission checks precede every operation. |
+| Browser child views and site data | `bootty-browser` | Wry owns navigation and identity-scoped browser profiles; host geometry and visibility arrive at the UI seam. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
 | Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
 | The installed remote Space catalog | `bootty-mux::remote_catalog::Catalog` | A backend-scoped lease serializes mutations; membership follows backend session tags. |
@@ -40,6 +44,8 @@ This file describes the current production structure.
 | Desktop command resolution and UI policy | `bootty-ui::commands` | UI adapters resolve intents and delegate domain work to its owner. |
 | Clipboard image transfer | `bootty-host::clipboard_image` | The daemon verifies the complete byte count and SHA-256 digest before publishing a private temporary PNG path. |
 | Local control transport and instance ownership | `bootty-control` | The singleton lease publishes one owner-local endpoint. |
+| Paired remote command transport | `bootty-control::RemoteControlServer` | A certificate pin and per-listener credential precede every bounded request to the local owner. |
+| Desktop remote-control enablement | `bootty-ui::RemoteConnections` | Only an explicit desktop action enables a listener; revoke, quit, and owner replacement invalidate the lease. |
 | Native agent integration state and assets | `bootty-agents` | Native providers own bounded event parsing and integration files. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
 | Workspace composition | `bootty-ui::workspace_composition` | Reconciles the binding's terminal projection with Bootty-native panels. The terminal center is one locked singleton leaf retargeted at the selected mux window; it renders the whole split tree from the binding projection and never takes part in Dock drag, tabs, or documents. Documents live in the right dock. Dock never mirrors mux splits, Dock geometry never flows back into mux ratios, and native leaves never enter a backend command. |
@@ -135,11 +141,37 @@ catalog-backed remote Spaces.
 
 ## Terminal path
 
-`bootty-mux` delivers rmux live pane bytes through its public `pipe-pane` API.
-A Bootty daemon helper shares each pane's stream over local IPC with bounded
-buffers and exits when its last reader leaves. No output is spooled to disk.
-The SDK keyframe restores the initial text and modes; its bounded recovery ring
-is not used for live image data. Remote pane readers use the same host-side path.
+`bootty-mux` uses the supported SDK pipe-pane path for live rmux bytes. Each
+reader has an independent bounded queue; an EOF drains its queued tail before
+closing. Initial recovery seeds text and input modes while concurrent live bytes
+continue through the pipe. A stalled reader disconnects and reconnects rather
+than blocking another reader. Input and resize remain responsive.
+
+The pinned SDK's pipe can lose producer bytes before Bootty's helper stdin,
+including in an already-attached live stream; it exposes no sequence or gap
+status for those bytes. Its separate recovery subscription also loses large
+live bursts, and switching to it worsened exact-image delivery in matched runs.
+The pipe transport therefore remains the live path. This preserves baseline
+behavior, not a lossless rmux graphics guarantee. Historical keyframes restore
+text and modes, not images beyond retained output. Upgrade this limit when the
+SDK exposes a lossless per-pane stream or public producer retention controls;
+no dependency internals are patched. The SDK documents bounded live retention
+(256 KiB by default), not lossless unpaced producer bursts. This limitation
+predates the current redesign; complete burst delivery remains unresolved.
+Routine rmux acceptance sends a compressed image below 4 KiB on the wire and
+checks placement, dimensions and every byte of its decoded 2 MiB pixel buffer
+in both readers, followed by input after the second reader closes. This does
+not prove uncompressed burst delivery. The original unpaced raw image workload
+and its full pixel assertions remain runnable with
+`BOOTTY_RMUX_IMAGE_BURST_STRESS=1 mise run test -- -p bootty-mux --test embedded_daemon kitty_images_reach_terminal_frames`.
+It is an explicit stress diagnostic with known intermittent loss, rather than
+a supported lossless transport contract. Native PTY acceptance still exercises
+the unpaced raw 2 MiB image, full pixels and GPUI image primitives. Public raw
+subscription acceptance separately checks reported gaps and text recovery.
+
+The rmux pane worker owns both remote transport process trees. Closing the
+terminal ends them even while its output reader waits on a quiet SSH stream;
+transport lifetime does not depend on another output line arriving.
 
 ```text
 TerminalSession
@@ -262,22 +294,19 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
 ## Agents
 
-`bootty-agents` owns the native Pi, Codex, and Claude providers: provider state,
-explicit event parsing, command forwarding, lifecycle generations, hook and
-integration file installation, and typed agent snapshots. Providers run in visible
-terminal panes. Pi reports events through its installed adapter; Codex and Claude
-report native command-hook events. The service accepts a narrow pane-scope resolver from the UI and a
-control event publisher; it does not import mux or GPUI.
+Pi, Codex, and Claude launch as terminal programs through the selected mux backend. The backend owns their processes, tabs, splits, and terminal state. `TerminalAgentService` owns bounded provider identities, retained launch metadata, and exact terminal targets. History and account queries use provider files and commands on a background worker. Resume and fork launch the provider's terminal flow. Agents appear within backend sessions in the Sessions sidebar.
 
-`bootty-ui` composes one agent service per desktop owner, exposes its descriptors
-through the desktop command catalog, and projects typed agent facts into chrome
-and panels. Agent workers and event publication remain asynchronous and are
-retired before a replacement can publish stale state.
+Terminal registrations persist before publication. Provider session IDs remain distinct from backend target handles and generations; stale targets cannot redirect input to another pane.
 
-Bootty does not infer agent state from process names, terminal output, screen
-contents, or transcripts. The service persists what agents reported to a
-per-window private file injected by `bootty-ui` and restores it, marked
-`restored`, on the next start.
+`OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
+
+`bootty-ui` composes these owners and routes the palette, keybindings, CLI, socket, and agent commands through one catalog and invocation path. Native panels have fixed homes: Sessions on the left and labeled tools on the right. The center displays the selected backend terminal window and its split tree.
+
+`bootty-computer` owns the macOS desktop helper and rechecks OS permissions and secure input before capture or input. `computer-use` must be enabled by a user action; agents cannot enable it or request permission. Capture metadata remains bounded and images use private files. `bootty-browser` owns Wry child-view lifetime, navigation events, and host geometry; the shell hides native views beneath GPUI dialogs and sheets. Saved logins use the host platform credential store, keyed by app identity and exact origin. The host checks the selected tab and navigation revision before filling; the page script checks origin again and never submits the form. Element annotations accept bounded main-document metadata only while the host enables selection. A native editor reviews the comment before copying it or submitting a `terminal.paste` invocation; pasting does not submit terminal input. Its Linux adapter borrows the existing Xcb window as an Xlib handle on the same X server. Desktop startup selects X11 for both GPUI and GTK, using XWayland when launched from a Wayland desktop.
+
+Existing custom integrations remain unsupported and preserved. Built-in terminal launches require no installed hooks. The prior pane event service remains available for explicitly configured terminal adapters.
+
+Desktop pairing starts an explicitly enabled TLS listener on the chosen local interface. The pairing code contains its certificate pin and a random credential; remote requests then use the same local command owner and exact issued targets. Public status never exposes the credential. Listener lifetime follows the desktop owner, and revoke closes the listener. The phone owns its connection credential and presentation, while the desktop remains authoritative for sessions, terminal frames, and commands.
 
 ## Crates
 
@@ -299,8 +328,9 @@ per-window private file injected by `bootty-ui` and restores it, marked
 - `bootty-daemon` owns the installed headless executable entrypoint, argv and
   identity parsing, endpoint lifetime, and protocol serving. It composes
   `bootty-host` and the mux catalog; it does not duplicate their policy.
-- `bootty-agents` owns native Pi, Codex, and Claude provider state, explicit
-  event parsing, command forwarding, lifecycle, and integration files/assets.
+- `bootty-agents` owns terminal agent metadata, accounts, history, and orchestration.
+- `bootty-computer` owns native desktop capture and input.
+- `bootty-browser` owns embedded Wry browser views.
 - `bootty-host` owns host identity/path interpretation, local, SSH, and WSL process
   execution, shell quoting, daemon installation/bootstrap, and generic remote
   framing/forwarding.
@@ -376,8 +406,8 @@ small interface. File size is a signal for review. It is not proof of depth.
 `bootty-ui::gpui_dock` composes one terminal workspace, documents, and tools into a
 GPUI Kit Dock. The terminal stays in the center; the binding owns its backend
 windows, pane topology, processes, and input. Documents initially open in the right
-dock. Typed panel preferences select each tool's home dock and optional top or bottom
-status button. All panel toggles use the same command path.
+dock. Sessions has a fixed home on the left; tools and documents have fixed homes
+on the right. All panel toggles use the same command path.
 Opaque client attachments retain their backend-owned
 layout. Builders resolve existing panel entities by Dock-area identity; they cannot
 restore another window's host or editor. Registration is removed when its workspace
@@ -389,18 +419,21 @@ One DockArea owns geometry across Space and session switches. Files, Changes, an
 Diff follow the selected terminal and its directory. Captured Git drafts and
 in-flight writes retain their original context; late replies cannot open panels
 in another context. Open documents retain their own host and path identities.
-Layout version 8 removes the retired Jobs, Transfers, Recovery, and Shell panels.
+Layout version 10 restores the fixed panel arrangement from earlier custom layouts.
 
-Sessions includes the compact Space switcher; Agents includes the usage and quota
-meters. Neither section is a standalone Dock leaf, so neither inherits the split
-minimum height. Saved standalone Spaces and CodexBar panels merge into those owners;
-existing destination panels keep their locations. Legacy `show_spaces` and
-`show_codexbar` invocations open Sessions and Agents respectively.
+Sessions includes the Space switcher, project groups, backend sessions and windows,
+agent state, and account usage meters. Published Git facts group repository
+subdirectories and linked worktrees under the owning host's main repository root.
+Projects appear in first-seen backend order; sessions keep their backend order
+within each project. Branches and working directories belong to session children.
+Project disclosure is transient chrome state; switching to a hidden session expands
+its project, and removed projects discard their disclosure state. Legacy
+`show_spaces` and `show_codexbar` invocations both open Sessions.
 
-`gpui_dock_skin` presents icon-labelled Kit segmented tabs with per-tab close
-controls and context menus, while Base owns selection, dragging, splitting, and
-close dispatch. Add-panel menus capture the destination group; selecting an
-existing tool panel moves it into that group. The application header reads mux
+`gpui_dock_skin` presents right-side tools as labelled Kit buttons with icons.
+Their labels remain visible at every width, wrapping into rows as needed. Base
+owns selection, focus, and geometry. Panels cannot be dragged into another region.
+The application header reads mux
 window tabs through the shared chrome projection and tab renderer, including scoped
 selection, pane closing, navigation, reordering, and context actions. Window-scoped
 pane actions resolve the binding's retained focus rather than a stale backend anchor.
@@ -416,27 +449,21 @@ Bottom status segments, including mux tabs, occupy the center dock's footer; sid
 docks keep their full height. On Linux, the window-level title bar and resize frame
 sit outside this dock layout, with Bootty controls whenever client decorations are
 selected or required by the compositor.
-Dock toggles, panel opening, and tab visibility use registered `CommandInvocation`s.
-Context menus supply the live destination node ID as an optional argument. The
+Dock toggles and panel opening use registered `CommandInvocation`s. The
 window completes these requests after applying them, or reports a stale group;
 requests arriving during layout restoration wait for it to finish.
-Single-panel groups hide their tabs automatically. Each group's context menu can
-keep tabs visible; this preference follows the live node and is serialized by
-its path alongside the same layout snapshot, then resolved after restoration.
-Dock and mux tab bars both use Kit's tab variants. Bootty supplies panel and mux
+The Sessions panel and terminal center do not show native panel tabs.
+Mux and document tab bars use Kit's tab variants. Bootty supplies panel and mux
 commands, tab content, and close affordances; the shared `gpui::tabs` layout keeps
 close buttons in side padding. Typed chrome settings independently control each
 surface's tab appearance and close-button side and visibility.
 Dock visibility and dimensions belong to the saved layout. Legacy sidebar config
 values only seed unsaved or migrated layouts; live config reload does not show or
 hide Sessions. Legacy sidebar commands submit dock requests.
-`gpui_sidebar_panel` owns Sessions and its Space switcher. `gpui_agents_panel`
-owns the Agents view and usage section; the existing chrome projection retains
-usage data and Space actions. Layout version 7 merges the former standalone
-navigation panels while preserving the destination panels and unrelated geometry. Panel labels and
-dock-button visibility come from typed chrome settings. Each group can override
-automatic tab visibility with always-show or always-hide, including command-only
-switching.
+`gpui_sidebar_panel` owns Sessions, agent rows, account usage and its Space switcher.
+Agents belong to backend sessions; there is no separate Agents panel. Chrome
+settings control dock-toggle visibility and tab styling; panel placement and
+tool-navigation labels are fixed.
 `status_fit` measures the status controls and prepaints only whole controls that
 fit the available header width. Omitted controls receive no hitboxes.
 The notch inset places the strip's bottom border below the camera exclusion band.
@@ -685,14 +712,14 @@ are configured at creation and refreshed only when the requested material change
 
 ### Native agent launch context
 
-`bootty-agents::AgentLaunch` owns bounded argv, session operation syntax and
-shell serialization. The app captures the exact source pane, parent mux session,
-working directory and host shell before dispatch. Start, resume and fork create
-or use a visible terminal, then submit through `terminal.paste` and
-`terminal.submit`. Hook adapters return session/cwd and a sanitized launch
-context. Resume/fork always use a new tab and fail before mutation without an
-explicit or pane-reported session. Mailbox callers receive the same authoritative
-mux completion target as CLI/socket callers.
+`bootty-agents::AgentLaunch` owns bounded argv and provider session syntax.
+Native provider start, resume, fork and sign-in commands create a backend-owned
+terminal and select it through the shared command mailbox. Account and session
+history queries run off the UI thread. The local history dialog searches provider
+metadata and submits the same start/resume/fork commands as CLI/socket callers;
+it does not render conversations or own terminal topology. Remote hosts retain
+the provider terminal picker until remote history queries are available.
+Mailbox callers receive the authoritative mux completion target.
 
 Agent attention sequences and acknowledgement cursors belong to `bootty-agents`.
 `bootty-ui` projects only panes found in live bindings, captures generation-scoped

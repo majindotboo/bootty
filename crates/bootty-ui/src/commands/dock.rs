@@ -8,22 +8,22 @@ pub enum DockAction {
     TogglePanel(bootty_config::config::PanelKind),
     CodexBar,
     Spaces,
-    ToggleHiddenTabs,
-    ToggleTabBar,
     Sidebar,
     Files,
     Changes,
     Diff,
-    Agents,
+    Browser,
+    Coordination,
 }
 
 impl DockAction {
-    pub const PANELS: [Self; 5] = [
+    pub const PANELS: [Self; 6] = [
         Self::Sidebar,
         Self::Files,
         Self::Changes,
         Self::Diff,
-        Self::Agents,
+        Self::Browser,
+        Self::Coordination,
     ];
 
     #[must_use]
@@ -31,11 +31,12 @@ impl DockAction {
         use bootty_config::config::PanelKind;
         Some(match self {
             Self::TogglePanel(kind) => kind,
-            Self::Sidebar | Self::Spaces => PanelKind::Sessions,
-            Self::Agents | Self::CodexBar => PanelKind::Agents,
+            Self::Sidebar | Self::Spaces | Self::CodexBar => PanelKind::Sessions,
             Self::Files => PanelKind::Files,
             Self::Changes => PanelKind::Changes,
             Self::Diff => PanelKind::Diff,
+            Self::Browser => PanelKind::Browser,
+            Self::Coordination => PanelKind::Coordination,
             _ => return None,
         })
     }
@@ -47,7 +48,8 @@ impl DockAction {
             PanelKind::Files => Self::Files,
             PanelKind::Changes => Self::Changes,
             PanelKind::Diff => Self::Diff,
-            PanelKind::Agents => Self::Agents,
+            PanelKind::Browser => Self::Browser,
+            PanelKind::Coordination => Self::Coordination,
         }
     }
     #[must_use]
@@ -58,19 +60,19 @@ impl DockAction {
                 bootty_config::config::PanelKind::Files => Command::ToggleFilesPanel,
                 bootty_config::config::PanelKind::Changes => Command::ToggleChangesPanel,
                 bootty_config::config::PanelKind::Diff => Command::ToggleDiffPanel,
-                bootty_config::config::PanelKind::Agents => Command::ToggleAgentsPanel,
+                bootty_config::config::PanelKind::Browser => Command::ToggleBrowserPanel,
+                bootty_config::config::PanelKind::Coordination => Command::ToggleCoordinationPanel,
             },
             Self::ToggleLeft => Command::ToggleLeftDock,
             Self::ToggleRight => Command::ToggleRightDock,
             Self::CodexBar => Command::ShowCodexBar,
             Self::Spaces => Command::ShowSpaces,
-            Self::ToggleHiddenTabs => Command::ToggleHiddenTabs,
-            Self::ToggleTabBar => Command::ToggleTabBar,
             Self::Sidebar => Command::ShowSidebar,
             Self::Files => Command::ShowFiles,
             Self::Changes => Command::ShowChanges,
             Self::Diff => Command::ShowDiff,
-            Self::Agents => Command::ShowAgents,
+            Self::Browser => Command::ShowBrowser,
+            Self::Coordination => Command::ShowCoordination,
         }
     }
 
@@ -78,8 +80,6 @@ impl DockAction {
         [
             Self::ToggleLeft,
             Self::ToggleRight,
-            Self::ToggleTabBar,
-            Self::ToggleHiddenTabs,
             Self::CodexBar,
             Self::Spaces,
         ]
@@ -107,6 +107,13 @@ pub struct PanelDescriptor {
 
 /// The single product catalog for native Dock panels.
 pub const PANELS: &[PanelDescriptor] = &[
+    PanelDescriptor {
+        name: "bootty.coordination",
+        label: "Coordination",
+        description: "Coordinate tasks and messages across native agent sessions.",
+        icon: gpui_kit::component::IconName::Bot,
+        creation: PanelCreation::Command(DockAction::Coordination),
+    },
     PanelDescriptor {
         name: "bootty.sessions",
         label: "Sessions",
@@ -136,11 +143,11 @@ pub const PANELS: &[PanelDescriptor] = &[
         creation: PanelCreation::Command(DockAction::Diff),
     },
     PanelDescriptor {
-        name: "bootty.agents",
-        label: "Agents",
-        description: "Inspect agent sessions, attention state, and usage quotas.",
-        icon: gpui_kit::component::IconName::Bot,
-        creation: PanelCreation::Command(DockAction::Agents),
+        name: "bootty.browser",
+        label: "Browser",
+        description: "Browse websites and local development servers.",
+        icon: gpui_kit::component::IconName::Globe,
+        creation: PanelCreation::Command(DockAction::Browser),
     },
     PanelDescriptor {
         name: "bootty.terminal",

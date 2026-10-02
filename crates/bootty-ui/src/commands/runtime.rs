@@ -1,5 +1,9 @@
 mod agents;
+pub(super) mod computer;
+pub(super) mod connections;
+mod orchestration;
 mod targets;
+mod terminal_agents;
 
 use agents::{AgentScopeIndex, AppCommandAgentExecutor};
 
@@ -150,6 +154,13 @@ pub enum PendingCommandResult {
         result: mpsc::Receiver<MuxCommandResult>,
     },
     Outcome(mpsc::Receiver<CommandOutcome>),
+    /// Capture awaiting this exact pane's background process startup.
+    CaptureStart {
+        exact: ExactMuxTarget,
+        target: CommandTarget,
+        arguments: Vec<String>,
+        export: bool,
+    },
     /// An explicit create that succeeded, held until the first pane Bootty started for it runs.
     SessionStart {
         starting: StartingSession,
@@ -204,6 +215,8 @@ pub struct CommandRuntime {
     receiver: AppCommandReceiver,
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
+    terminal_agents: Option<Arc<bootty_agents::TerminalAgentService>>,
+    orchestration: Option<Arc<bootty_agents::OrchestrationService>>,
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
     pending: Vec<PendingAppCommand>,
     jobs: Arc<bootty_host::jobs::JobRegistry>,
@@ -246,13 +259,42 @@ impl CommandRuntime {
             )
             .persisted_at(agent_state),
         );
-        Self::from_channel(
+        let orchestration = bootty_agents::OrchestrationService::open(
+            &agent_state.with_extension("orchestration.json"),
+            Arc::new(AppCommandAgentExecutor {
+                sender: sender.clone(),
+            }),
+        )
+        .and_then(|service| {
+            std::env::current_exe()
+                .map(|executable| {
+                    let service = service.with_cli(executable);
+                    match bootty_config::ApplicationIdentity::for_process()
+                        .development_namespace_environment()
+                    {
+                        Some((_, namespace)) => service.with_cli_namespace(namespace),
+                        None => service,
+                    }
+                })
+                .map_err(|error| error.to_string())
+        })
+        .map(Arc::new)
+        .map_err(|error| eprintln!("orchestration storage unavailable: {error}"))
+        .ok();
+        let mut runtime = Self::from_channel(
             sender,
             receiver,
             Some(agents),
             Some(scope_index),
             Some(events),
-        )
+        );
+        runtime.terminal_agents =
+            bootty_agents::TerminalAgentService::open(agent_state.with_extension("terminal.json"))
+                .map(Arc::new)
+                .map_err(|error| eprintln!("terminal agent metadata unavailable: {error}"))
+                .ok();
+        runtime.orchestration = orchestration;
+        runtime
     }
 
     fn from_channel(
@@ -280,6 +322,8 @@ impl CommandRuntime {
                 },
             )),
             agent_service: agents,
+            terminal_agents: None,
+            orchestration: None,
             agent_scope_index,
             pending: Vec::new(),
             forwards: Vec::new(),
@@ -386,6 +430,14 @@ impl AppState {
     /// return `None` and retain the static catalog's explicit unsupported behavior.
     pub fn agent_service(&self) -> Option<Arc<AgentService>> {
         self.commands.catalog.agents()
+    }
+
+    pub fn terminal_agent_service(&self) -> Option<Arc<bootty_agents::TerminalAgentService>> {
+        self.commands.terminal_agents.clone()
+    }
+
+    pub fn orchestration_service(&self) -> Option<Arc<bootty_agents::OrchestrationService>> {
+        self.commands.orchestration.clone()
     }
 
     pub(crate) fn drain_app_commands(
@@ -499,6 +551,9 @@ impl AppState {
             return Poll::Ready(Some(outcome));
         }
         let outcome = match &mut pending.result {
+            PendingCommandResult::CaptureStart { .. } => {
+                return self.poll_pending_terminal_capture(pending, now, effects);
+            }
             PendingCommandResult::DitchCleanup {
                 scope,
                 command,
@@ -666,6 +721,12 @@ impl AppState {
             Ok(resolved) => resolved,
             Err(outcome) => return self.reject_command(outcome),
         };
+        if matches!(resolved.executor, CommandExecutor::Orchestration) {
+            if let Err(outcome) = self.preflight_resolved_invocation(&resolved, None, effects) {
+                return self.reject_command(outcome);
+            }
+            return self.dispatch_orchestration(resolved.invocation, execution);
+        }
         let (target, exact_target) = match self.resolve_command_target(
             &resolved.invocation.command,
             resolved.descriptor.target,
@@ -688,6 +749,13 @@ impl AppState {
                 Ok(command) => command,
                 Err(outcome) => return self.reject_command(outcome),
             };
+        if target_supplied
+            && let Some(exact) = &exact_target
+            && let Some(command @ (MuxCommand::NewWindow { .. } | MuxCommand::SplitPane { .. })) =
+                &planned_mux_command
+        {
+            return self.dispatch_targeted_topology(exact.scope(), command.clone(), execution);
+        }
         let context = ResolvedCommandContext {
             invocation: resolved.invocation,
             exact_target,
@@ -705,6 +773,19 @@ impl AppState {
                 context.exact_target.as_ref(),
                 execution,
             ),
+            CommandExecutor::TerminalAgent => {
+                let (deadline, cancellation) = executor::command_execution(execution);
+                self.dispatch_terminal_agent(
+                    context.invocation,
+                    context.exact_target.as_ref(),
+                    deadline,
+                    cancellation,
+                    effects,
+                )
+            }
+            CommandExecutor::Orchestration => {
+                self.dispatch_orchestration(context.invocation, execution)
+            }
             CommandExecutor::UncomposedAgent => {
                 CommandDispatch::Complete(CommandOutcome::Unsupported {
                     message: "native agent service is not composed for this app instance"
@@ -730,19 +811,28 @@ impl AppState {
         } = context;
         let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
         let scope = target_scope.unwrap_or_else(|| self.mux_scope());
-        let caller = invocation.caller;
         match executor {
+            CoreCommandExecutor::Connection(action, arguments) => self.dispatch_connection_command(
+                action,
+                &arguments,
+                invocation.caller,
+                effects,
+                execution,
+            ),
+            CoreCommandExecutor::Computer(action, arguments) => self.dispatch_computer_command(
+                action,
+                &arguments,
+                invocation.caller,
+                self.config().computer_use,
+                effects,
+                execution,
+            ),
             CoreCommandExecutor::Recovery(action, arguments) => {
                 self.dispatch_recovery(action, &arguments, execution)
             }
-            CoreCommandExecutor::ShellPrompt(action, arguments) => exact_target.map_or_else(
-                || {
-                    CommandDispatch::Complete(CommandOutcome::Unavailable {
-                        message: "No terminal prompt is available".to_owned(),
-                    })
-                },
-                |exact| self.dispatch_shell_prompt(&exact, action, &arguments, execution),
-            ),
+            CoreCommandExecutor::ShellPrompt(action, arguments) => {
+                self.dispatch_shell_prompt(exact_target.as_ref(), action, &arguments, execution)
+            }
             CoreCommandExecutor::Forward(action, arguments) => {
                 self.dispatch_forward(action, &arguments, target_scope, execution)
             }
@@ -773,12 +863,7 @@ impl AppState {
                 self.dispatch_link_open(target, &exact, &arguments, execution)
             }
             CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => {
-                let Some(target) = invocation.target else {
-                    return self.reject_command(CommandOutcome::Unavailable {
-                        message: "clipboard paste requires a terminal".to_owned(),
-                    });
-                };
-                self.dispatch_clipboard_paste(scope, target, execution)
+                self.dispatch_clipboard_paste(scope, invocation.target, execution)
             }
             CoreCommandExecutor::Pane(action, arguments) => {
                 self.dispatch_pane_command(action, &arguments, exact_target, execution)
@@ -808,7 +893,7 @@ impl AppState {
             CoreCommandExecutor::Keybind(action) => self.dispatch_resolved_keybind_command(
                 action,
                 planned_mux_command,
-                caller,
+                invocation.caller,
                 viewport,
                 effects,
                 execution,
@@ -877,7 +962,7 @@ impl AppState {
             });
         }
         if let Some(command) = planned_mux_command.as_ref()
-            && let Some(outcome) = self.preflight_mux_command(command)
+            && let Some(outcome) = self.preflight_mux_command_for_scope(scope, command)
         {
             return Err(outcome);
         }

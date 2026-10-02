@@ -33,8 +33,6 @@ const REMOTE_STREAM_PAYLOAD_ENV: &str = "BOOTTY_RMUX_REMOTE_STREAM_PAYLOAD";
 const REMOTE_STREAM_CHILD_TEST: &str = "embedded_rmux_remote_pane_stream_child";
 const ISOLATED_PATH: &str = "/usr/bin:/bin";
 const POSIX_SHELL: &str = "/bin/sh";
-/// What a prepared pane prints back. No scenario prints it for another reason.
-const PANE_READY: &str = "BOOTTY_PANE_READY";
 const PANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PANE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -115,6 +113,7 @@ embedded_scenarios!(
     shell_exit_is_quiet,
     bounded_live_output,
     kitty_images_reach_terminal_frames,
+    public_raw_output_reports_retained_gap,
     large_restore_progress,
 );
 
@@ -848,7 +847,8 @@ if expected in data:
         };
         let (mut stream, frames) = spawn_remote_pane_stream(request.encode()?)?;
         let result = (|| -> Result<()> {
-            let RemotePaneStreamFrame::Rebase(keyframe) = next_remote_pane_stream_frame(&frames)?
+            let RemotePaneStreamFrame::Rebase(keyframe) =
+                next_remote_pane_stream_frame(&frames).context("initial remote rebase")?
             else {
                 anyhow::bail!("remote pane stream sent bytes before its initial rebase")
             };
@@ -873,7 +873,7 @@ if expected in data:
 
             terminal.write_input(b"printf 'BOOTTY_RMUX_REMOTE_BYTES\\n'\r")?;
             loop {
-                match next_remote_pane_stream_frame(&frames)? {
+                match next_remote_pane_stream_frame(&frames).context("new remote output")? {
                     RemotePaneStreamFrame::End => {
                         anyhow::bail!("remote pane ended before new output")
                     }
@@ -900,7 +900,7 @@ if expected in data:
             terminal.write_input(b"\x04")?;
             loop {
                 if matches!(
-                    next_remote_pane_stream_frame(&frames)?,
+                    next_remote_pane_stream_frame(&frames).context("remote shell exit")?,
                     RemotePaneStreamFrame::End
                 ) {
                     return Ok(());
@@ -993,9 +993,76 @@ if expected in data:
                 anyhow::ensure!(!terminal.copy_mode_active()?);
                 return Ok(());
             }
-            anyhow::ensure!(std::time::Instant::now() < deadline, "shell did not exit");
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "shell did not exit; last frame: {:?}",
+                terminal.extract_frame()?.text_rows()
+            );
             thread::yield_now();
         }
+    }
+
+    pub fn public_raw_output_reports_retained_gap() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let (mut output, mut recovery) = runtime.block_on(async {
+            let rmux = rmux_sdk::Rmux::connect(rmux_sdk::RmuxEndpoint::UnixSocket(
+                endpoint_path_for(ApplicationIdentity::Production)?,
+            ))
+            .await?;
+            let name = rmux_sdk::SessionName::new(&session_id).map_err(anyhow::Error::msg)?;
+            let pane = rmux.session(name).await?.pane(0, 0);
+            let output = pane.output_stream().await?;
+            let mut recovery = pane.recover_output().await?;
+            anyhow::ensure!(
+                matches!(
+                    recovery.next().await?,
+                    Some(rmux_sdk::PaneRecoveryEvent::Rebase(_))
+                ),
+                "recovery did not initialize its epoch"
+            );
+            anyhow::Ok((output, recovery))
+        })?;
+        let fixture = assert_fs::NamedTempFile::new("retained-output.txt")?;
+        std::fs::write(fixture.path(), vec![b'X'; 2 * 1024 * 1024])?;
+        terminal.write_input(
+            format!(
+                "cat {} && printf '\\nBOOTTY_GAP_RECOVERED\\n'\r",
+                fixture.path().display(),
+            )
+            .as_bytes(),
+        )?;
+        // A consumed frame proves the daemon received the tail; a writer-side file
+        // marker alone can race its authoritative recovery snapshot.
+        wait_for_terminal_text(&mut terminal, "BOOTTY_GAP_RECOVERED")?;
+        let item = runtime
+            .block_on(output.next())?
+            .context("public output ended")?;
+        let rmux_sdk::PaneOutputChunk::Lag(lag) = item else {
+            anyhow::bail!("stalled subscriber did not report its missing bytes");
+        };
+        anyhow::ensure!(
+            lag.missed_events > 0 && lag.resume_sequence > lag.expected_sequence,
+            "incomplete lag report"
+        );
+        let item = runtime
+            .block_on(recovery.next())?
+            .context("recovery ended")?;
+        let rmux_sdk::PaneRecoveryEvent::Rebase(rebase) = item else {
+            anyhow::bail!("recovery stitched bytes across the gap");
+        };
+        assert_eq!(rebase.reason, rmux_sdk::PaneRecoveryRebaseReason::Lag);
+        anyhow::ensure!(
+            String::from_utf8_lossy(&rebase.keyframe).contains("BOOTTY_GAP_RECOVERED"),
+            "recovery omitted authoritative final text"
+        );
+        wait_for_terminal_text(&mut terminal, "BOOTTY_GAP_RECOVERED")?;
+        terminal.write_input(b"printf 'BOOTTY_AFTER_GAP\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_AFTER_GAP")?;
+        ditch_session(&mut backend, &session_id)
     }
 
     pub fn kitty_images_reach_terminal_frames() -> Result<()> {
@@ -1005,16 +1072,30 @@ if expected in data:
         prepare_pane(&mut terminal)?;
         let mut second = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut second)?;
+        let ready = format!("BOOTTY_IMAGE_READY_{}", new_session_identity());
+        terminal.write_input(format!("printf '%s\\n' '{ready}'\r").as_bytes())?;
+        wait_for_terminal_text(&mut terminal, &ready)?;
+        wait_for_terminal_text(&mut second, &ready)?;
         let fixture = assert_fs::NamedTempFile::new("kitty.vt")?;
-        let payload =
-            base64::engine::general_purpose::STANDARD.encode(vec![255_u8; 1024 * 512 * 4]);
+        // The SDK retains a bounded live ring, without producer backpressure. Default
+        // coverage sends a small compressed wire image and checks all 2 MiB of pixels.
+        // Keep the original unpaced raw workload available as an explicit stress mode.
+        let raw_burst = std::env::var_os("BOOTTY_RMUX_IMAGE_BURST_STRESS").is_some();
+        let pixels = vec![255_u8; 1024 * 512 * 4];
+        let wire = if raw_burst {
+            pixels.as_slice()
+        } else {
+            include_bytes!("fixtures/kitty-white-1024x512.zlib").as_slice()
+        };
+        let payload = base64::engine::general_purpose::STANDARD.encode(wire);
+        let compression = if raw_burst { "" } else { "o=z," };
         let mut output = Vec::new();
         let chunks = payload.as_bytes().chunks(4096);
         let count = chunks.len();
         for (index, chunk) in chunks.enumerate() {
             let more = u8::from(index.saturating_add(1) < count);
             let header = if index == 0 {
-                format!("\x1b_Ga=T,i=42,q=2,f=32,s=1024,v=512,c=20,r=10,m={more};")
+                format!("\x1b_Ga=T,i=42,q=2,f=32,{compression}s=1024,v=512,c=20,r=10,m={more};")
             } else {
                 format!("\x1b_Gm={more};")
             };
@@ -1023,11 +1104,26 @@ if expected in data:
             output.extend_from_slice(b"\x1b\\");
         }
         output.extend_from_slice(b"\r\nBOOTTY_IMAGE_COMPLETE\r\n");
+        if !raw_burst {
+            anyhow::ensure!(
+                output.len() < 4096,
+                "bounded graphics fixture exceeds wire budget"
+            );
+        }
         std::fs::write(fixture.path(), &output)?;
         terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
         wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
-        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
+        let second_frame = second.extract_frame()?;
+        assert_eq!(second_frame.images.placements.len(), 1);
+        let second_image = second_frame
+            .images
+            .placements
+            .first()
+            .context("second rendered image")?;
+        assert_eq!(second_image.image_width, 1024);
+        assert_eq!(second_image.image_height, 512);
+        assert_eq!(second_image.data.as_ref(), pixels.as_slice());
         drop(second);
         terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
@@ -1036,6 +1132,8 @@ if expected in data:
         let image = frame.images.placements.first().context("rendered image")?;
         assert_eq!(image.image_width, 1024);
         assert_eq!(image.image_height, 512);
+        assert_eq!(image.data.len(), 1024 * 512 * 4);
+        assert_eq!(image.data.iter().position(|byte| *byte != 255), None);
         ditch_session(&mut backend, &session_id)
     }
 
@@ -1045,9 +1143,8 @@ if expected in data:
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut terminal)?;
 
-        // 2MB is past the in-flight bound (`RMUX_OUTPUT_CHANNEL_CAPACITY` events
-        // of `RMUX_OUTPUT_EVENT_MAX_BYTES`), so the producer has to be held back
-        // rather than spooled to disk.
+        // Exercise Bootty's bounded consumer queues without a disk spool. This
+        // does not assert lossless producer delivery across the SDK retention ring.
         terminal.write_input(
             b"printf 'BOOTTY_RMUX_BOUND_START\\n'; yes X | head -c 2000000; printf '\\nBOOTTY_RMUX_BOUND_END\\n'\r",
         )?;
@@ -1224,7 +1321,8 @@ fn create_embedded_session(
         session_id: session_id.clone(),
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         tag,
-        argv: None,
+        // Explicit argv avoids login-shell rc files changing EOF behavior.
+        argv: Some(vec![POSIX_SHELL.to_owned()]),
     })?;
 
     let snapshot = backend.snapshot()?;
@@ -1371,17 +1469,21 @@ fn wait_for_terminal_text(terminal: &mut ActiveTerminal, expected: &str) -> Resu
 /// command line that was typed, and a wait for a marker is satisfied by the
 /// command asking for it rather than by the pane printing it.
 fn prepare_pane(terminal: &mut ActiveTerminal) -> Result<()> {
+    // Another reader may replay the earlier probe before its own input is live.
+    let probe = new_session_identity();
+    let marker = format!("BOOTTY_PANE_{probe}");
+    let command = format!("stty -echo; printf '%s%s\\n' 'BOOTTY_PANE_' '{probe}'\r");
     let deadline = std::time::Instant::now()
         .checked_add(PANE_TIMEOUT)
         .context("pane deadline")?;
     loop {
         // Split so the echo of this line cannot answer for the pane.
-        terminal.write_input(b"stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
+        terminal.write_input(command.as_bytes())?;
         let attempt = (std::time::Instant::now()
             .checked_add(PANE_PROBE_INTERVAL)
             .context("probe deadline")?)
         .min(deadline);
-        if poll_frames_until(terminal, attempt, |text| text.contains(PANE_READY))?.is_none() {
+        if poll_frames_until(terminal, attempt, |text| text.contains(&marker))?.is_none() {
             return Ok(());
         }
         anyhow::ensure!(

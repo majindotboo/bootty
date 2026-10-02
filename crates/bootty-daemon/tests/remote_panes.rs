@@ -72,10 +72,11 @@ impl FakeRemote {
     fn environment(&self) -> String {
         let value = |path: &Path| shell_quote(&path.to_string_lossy());
         format!(
-            "unset TMUX TMUX_PANE\nexport HOME={} TMUX_TMPDIR={} BOOTTY_DAEMON_STATE={} SHELL=/bin/sh",
+            "unset TMUX TMUX_PANE\nexport HOME={} TMUX_TMPDIR={} BOOTTY_DAEMON_STATE={} XDG_CONFIG_HOME={} SHELL=/bin/sh",
             value(&self.home()),
             value(&self.tmux_tmpdir()),
             value(&self.root.path().join("state/daemon.sqlite")),
+            value(&self.root.path().join("config")),
         )
     }
 

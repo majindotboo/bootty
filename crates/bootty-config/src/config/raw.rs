@@ -1,8 +1,8 @@
 use super::model::{
     AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
     MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
-    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SshProfileConfig,
-    StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    OpenBehavior, RestoreOnStartup, SidebarPosition, SshProfileConfig, StatusSegment,
+    WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct RawConfig {
     pub(super) locale: Option<String>,
+    pub(super) computer_use: Option<bool>,
     pub(super) version: Option<u32>,
     #[serde(rename = "restore_on_startup")]
     pub(super) restore_on_startup: Option<RestoreOnStartup>,
@@ -29,10 +30,9 @@ pub(super) struct RawConfig {
     pub(super) appearance: AppearancePatch,
     pub(super) cursor: CursorPatch,
     pub(super) font: FontPatch,
-    #[serde(deserialize_with = "deserialize_panels")]
-    pub(super) panels: BTreeMap<super::model::PanelKind, super::model::PanelConfig>,
     pub(super) font_feature: Vec<String>,
     pub(super) chrome: ChromePatch,
+    pub(super) browser: BrowserPatch,
     pub(super) sidebar: SidebarPatch,
     pub(super) multiplexer: MultiplexerPatch,
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
@@ -97,11 +97,8 @@ pub(super) struct TabPatch {
 pub(super) struct ChromePatch {
     pub(super) left_dock_toggle: Option<bool>,
     pub(super) right_dock_toggle: Option<bool>,
-    pub(super) panel_tab_style: Option<PanelTabStyle>,
-    pub(super) panel_tabs: Option<PanelTabs>,
     pub(super) tabs_use_session_color: Option<bool>,
-    pub(super) dock_tabs: Option<TabPatch>,
-    pub(super) terminal_tabs: Option<TabPatch>,
+    pub(super) tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
     #[serde(alias = "status-bar")]
     pub(super) top_bar: Option<bool>,
@@ -336,17 +333,9 @@ fn normalize_config_value(input: &str) -> String {
     input.trim().to_ascii_lowercase().replace('-', "_")
 }
 
-fn deserialize_panels<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<BTreeMap<super::model::PanelKind, super::model::PanelConfig>, D::Error> {
-    use serde::de::IntoDeserializer as _;
-    let panels = BTreeMap::<String, super::model::PanelConfig>::deserialize(deserializer)?;
-    panels
-        .into_iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "jobs" | "transfers" | "recovery" | "shell"))
-        .map(|(name, value)| {
-            let kind = super::model::PanelKind::deserialize(name.into_deserializer())?;
-            Ok((kind, value))
-        })
-        .collect()
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct BrowserPatch {
+    pub(super) search_engine: Option<super::model::BrowserSearchEngine>,
+    pub(super) persist_site_data: Option<bool>,
 }

@@ -101,7 +101,11 @@ impl WorkspaceDialogs {
         }
     }
 
-    fn clear_presentation(&mut self, window: &mut Window, cx: &mut Context<GpuiWorkspace>) {
+    pub(super) fn clear_presentation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<GpuiWorkspace>,
+    ) {
         match self.presentation.take() {
             Some(Presentation::TerminalFind) => {
                 self.overlay.update(cx, |host, cx| {
@@ -120,6 +124,7 @@ impl WorkspaceDialogs {
         cx: &mut Context<GpuiWorkspace>,
     ) {
         let id = spec.id.clone();
+        let browser_palette = id.0 == crate::presentation::dialogs::COMMAND_PALETTE_ID;
         self.view
             .update(cx, |view, cx| view.present(Some(spec), window, cx));
         if self.view.read(cx).is_non_modal() {
@@ -154,6 +159,12 @@ impl WorkspaceDialogs {
                 .close_button(show_root_chrome)
                 .on_cancel(move |_, _, cx| {
                     let _ = workspace.update(cx, |workspace, cx| {
+                        if browser_palette && let Some(tools) = &workspace.tools {
+                            let browser = tools.read(cx).browser.clone();
+                            browser.update(cx, |browser, cx| {
+                                browser.cancel_palette(cx);
+                            });
+                        }
                         workspace.state.close_overlay_dialogs();
                         cx.notify();
                     });

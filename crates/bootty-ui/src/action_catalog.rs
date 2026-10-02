@@ -181,9 +181,13 @@ command_catalog! {
     ToggleDiffPanel:
         "Toggle Diff panel", "Show or hide the diff panel",
         "toggle_diff_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleAgentsPanel:
-        "Toggle Agents panel", "Show or hide the agents panel",
-        "toggle_agents_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
+    ToggleBrowserPanel:
+        "Toggle Browser panel", "Show or hide the browser panel",
+        "toggle_browser_panel", "globe", Layout, shown, Write, ApplicationWindow, DockGroup;
+    ToggleCoordinationPanel:
+        "Toggle Coordination panel", "Show or hide tasks and worker sessions",
+        "toggle_coordination_panel", "bot", Layout, shown, Write, ApplicationWindow, DockGroup;
+
     ToggleLeftDock:
         "Toggle left dock", "Show or hide the left dock",
         "toggle_left_dock", "panel-left", Layout, shown, Write, ApplicationWindow, None;
@@ -194,26 +198,18 @@ command_catalog! {
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowCodexBar:
-        "Show agent usage", "Open usage and quota meters in Agents",
+        "Show agent usage", "Show account usage in Sessions",
         "show_codexbar", "chart-no-axes-column", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSpaces:
         "Show Spaces", "Open the Space switcher in Sessions",
         "show_spaces", "layout-grid", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleHiddenTabs:
-        "Toggle always hide tabs", "Toggle command-only panel switching for the focused group",
-        "toggle_hidden_tabs", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleTabBar:
-        "Toggle always show tabs", "Toggle single-panel tabs for the focused tab group",
-        "toggle_tab_bar", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
     EditTheme:
         "Edit Theme", "Import, duplicate, preview and save terminal colors",
         "edit_theme", "paintbrush", Application, shown, Write, ApplicationWindow, None;
     ExportTerminal:
         "Export Terminal", "Save retained terminal content as plain text, ANSI or HTML",
         "export_terminal", "download", Terminal, shown, Write, ApplicationWindow, None;
-    ShowAgents:
-        "Show Agents", "Open agent attention, session and navigation controls",
-        "show_agents", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
+
     ShowFiles:
         "Browse Files", "Open the Files panel for the terminal directory",
         "show_files", "folder", Application, shown, Write, ApplicationWindow, DockGroup;
@@ -223,6 +219,12 @@ command_catalog! {
     ShowDiff:
         "Show Git Diff", "Open the Git Diff panel",
         "show_diff", "git-compare", Application, shown, Write, ApplicationWindow, DockGroup;
+    ShowBrowser:
+        "Open Browser", "Browse a website or local development server",
+        "browser.show", "globe", Application, shown, Write, ApplicationWindow, DockGroup;
+    ShowCoordination:
+        "Show Coordination", "Create runs, attach agent workers, and dispatch tasks",
+        "show_coordination", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
     NewSession:
         "New Session",
         "Pick a directory or worktree and start a session",
@@ -366,6 +368,12 @@ command_catalog! {
     OpenSettings:
         "Settings", "Open the settings surface",
         "open_settings", "settings", Application, shown, Write, ApplicationWindow, None;
+    ComputerSetup:
+        "Computer use…", "Set up native desktop access for agents",
+        "computer.setup", "monitor", Application, shown, Write, None, None;
+    ConnectionsSetup:
+        "Connect a phone…", "Pair the mobile app with this desktop",
+        "connections.setup", "smartphone", Application, shown, Write, None, None;
     ReloadConfig:
         "Reload Config", "Re-read the config file from disk",
         "reload_config", "refresh-cw", Application, shown, Write, ApplicationWindow, None;

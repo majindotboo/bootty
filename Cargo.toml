@@ -52,6 +52,7 @@ getrandom = "0.4"
 fontdb = "0.24"
 font-kit = { package = "zed-font-kit", version = "=0.14.1-zed" }
 image = { version = "0.25", default-features = false }
+resvg = { version = "0.46", default-features = false }
 iconflow = { version = "1", features = [
   "pack-bootstrap",
   "pack-lucide",
@@ -135,6 +136,7 @@ embed-resource = "3.0.11"
 winsafe = { version = "0.0.29", default-features = false, features = ["kernel"] }
 winreg = "0.56"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+wry = "0.57"
 
 [profile.dev]
 debug = "limited"
@@ -146,6 +148,10 @@ debug = "limited"
 # a font. Collect the debug info into one .dSYM per binary instead, which keeps debugging intact and
 # leaves the directory bounded.
 split-debuginfo = "packed"
+
+[profile.test]
+# Routine tests do not need per-executable debug bundles. Dev and profiling keep symbols.
+debug = 0
 
 [profile.profiling]
 inherits = "release"

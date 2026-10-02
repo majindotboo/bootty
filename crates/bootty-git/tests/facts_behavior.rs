@@ -103,10 +103,64 @@ impl CommandRunner for RecordingRunner {
             .push((program.to_owned(), args.to_vec()));
         Ok(CommandOutput {
             success: true,
-            stdout: "/remote/repo\n".to_owned(),
+            stdout: if args.iter().any(|arg| arg == "diff") {
+                "1\t0\tfile.rs\n"
+            } else {
+                "/remote/repo\n"
+            }
+            .to_owned(),
             stderr: String::new(),
         })
     }
+}
+
+#[derive(Clone)]
+struct ProjectRootRunner;
+
+impl CommandRunner for ProjectRootRunner {
+    fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = match (program, args.get(2..).unwrap_or_default()) {
+            ("git", ["symbolic-ref", "--quiet", "--short", "HEAD"]) => "feature/ui",
+            ("git", ["rev-parse", "--show-toplevel"]) => "/remote/feature-worktree",
+            ("git", ["worktree", "list", "--porcelain", "-z"]) => {
+                "worktree /remote/project\0HEAD 111\0branch refs/heads/main\0\0worktree /remote/feature-worktree\0HEAD 222\0branch refs/heads/feature/ui\0\0"
+            }
+            _ => "",
+        };
+        Ok(CommandOutput {
+            success: !output.is_empty(),
+            stdout: output.to_owned(),
+            stderr: String::new(),
+        })
+    }
+}
+
+#[rstest::rstest]
+#[case("/remote/feature-worktree")]
+#[case("/remote/feature-worktree/crates/ui")]
+fn session_facts_publish_the_owning_hosts_project_root_for_linked_worktrees(#[case] cwd: &str) {
+    let cache = GitFactsCache::with_remote_runner(ProjectRootRunner);
+    let now = Instant::now();
+    let input = GitSessionFactsInput {
+        scope_key: "remote-host".to_owned(),
+        session_id: "$1".to_owned(),
+        cwd: Some(cwd.to_owned()),
+        pane_pid: None,
+        process: None,
+        selected: true,
+    };
+    cache.refresh_session(&input, now);
+    for _ in 0..10_000 {
+        let facts = cache.refresh_session(&input, now);
+        if facts.branch.is_some() {
+            assert_eq!(facts.project_root.as_deref(), Some("/remote/project"));
+            assert_eq!(facts.branch.as_deref(), Some("feature/ui"));
+            return;
+        }
+        thread::yield_now();
+    }
+    panic!("Git worker did not publish its project facts");
 }
 
 #[test]
@@ -164,12 +218,14 @@ fn completed_deep_refreshes_are_spaced_across_sessions() {
 
     cache.refresh("first", "/remote/first", true, start);
     runner.wait_for_diff_calls(1);
+    wait_for_published_diff(&cache, "first", start);
     let second_cold = start
         .checked_add(COLD_REFRESH_SPACING)
         .and_then(|time| time.checked_add(Duration::from_nanos(1)))
         .expect("cold refresh timestamp");
     cache.refresh("second", "/remote/second", true, second_cold);
     runner.wait_for_diff_calls(2);
+    wait_for_published_diff(&cache, "second", second_cold);
 
     let next = second_cold + FOCUSED_FACT_INTERVAL + Duration::from_nanos(1);
     cache.refresh("first", "/remote/first", true, next);
@@ -180,6 +236,25 @@ fn completed_deep_refreshes_are_spaced_across_sessions() {
         thread::yield_now();
     }
     assert_eq!(runner.diff_calls(), 3);
+}
+
+fn wait_for_published_diff(cache: &GitFactsCache<RecordingRunner>, key: &str, now: Instant) {
+    // A runner call precedes publication. Only published counts establish that the
+    // worker has cleared its running flag before the next simulated frame.
+    for _ in 0..10_000 {
+        if cache
+            .get(key, now)
+            .and_then(|facts| facts.diff_added)
+            .is_some()
+        {
+            return;
+        }
+        thread::yield_now();
+    }
+    assert_eq!(
+        cache.get(key, now).and_then(|facts| facts.diff_added),
+        Some(1)
+    );
 }
 
 #[test]

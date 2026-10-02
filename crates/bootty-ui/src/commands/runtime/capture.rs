@@ -1,13 +1,23 @@
-use std::{io::Write as _, path::Path, sync::mpsc, time::Instant};
+use std::{
+    io::Write as _,
+    path::Path,
+    sync::mpsc,
+    task::{Poll, ready},
+    time::Instant,
+};
 
 use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget, ResourceKind};
 use bootty_mux::{
     backend::PaneCapture, executor, target::ExactMuxTarget, terminal::TerminalRuntime,
 };
-use bootty_terminal::terminal_capture::{CaptureFormat, CaptureOptions, CaptureScope};
+use bootty_terminal::{
+    terminal_capture::{CaptureFormat, CaptureOptions, CaptureScope, TerminalCapture},
+    terminal_session::PendingWorkerResponse,
+};
 
-use super::{CommandDispatch, PendingCommandResult};
+use super::{CommandDispatch, PendingAppCommand, PendingCommandResult};
 use crate::AppState;
+use crate::state::AppEffect;
 
 fn failure(message: impl Into<String>) -> CommandOutcome {
     CommandOutcome::Failed {
@@ -41,6 +51,9 @@ impl AppState {
             (None, arguments)
         };
         let options = capture_options(args, export);
+        if let Err(message) = options.validate() {
+            return CommandDispatch::Complete(failure(message));
+        }
         let current = self
             .current_exact_mux_target_for("terminal.capture", ResourceKind::Terminal)
             .as_ref()
@@ -74,6 +87,13 @@ impl AppState {
                 (deadline, cancellation),
             );
         }
+        if native
+            && !backend_panes
+            && !has_runtime
+            && let Err(error) = self.workspace.prepare_space_terminal_runtime(exact)
+        {
+            return CommandDispatch::Complete(failure(error.to_string()));
+        }
         let terminal: Option<&mut dyn TerminalRuntime> = if native {
             exact
                 .ids()
@@ -89,30 +109,70 @@ impl AppState {
                 message: "The requested terminal has no attached capture runtime".to_owned(),
             });
         };
+        match terminal.started() {
+            Ok(true) => {}
+            Ok(false) => {
+                return CommandDispatch::Pending(PendingCommandResult::CaptureStart {
+                    exact: exact.clone(),
+                    target,
+                    arguments: arguments.to_vec(),
+                    export,
+                });
+            }
+            Err(error) => return CommandDispatch::Complete(failure(error.to_string())),
+        }
         let pending = match terminal.capture(options) {
             Ok(pending) => pending,
             Err(error) => return CommandDispatch::Complete(failure(error.to_string())),
         };
+        let source = serde_json::json!({
+            "host": host,
+            "backend": backend,
+            "kind": if native { "pane_render_state" } else { "client_attachment_render_state" },
+            "original_output": false,
+        });
+        self.dispatch_runtime_capture(
+            pending,
+            target,
+            source,
+            destination,
+            (deadline, cancellation),
+        )
+    }
+
+    fn dispatch_runtime_capture(
+        &self,
+        pending: PendingWorkerResponse<Result<TerminalCapture, String>>,
+        target: CommandTarget,
+        source: serde_json::Value,
+        destination: Option<String>,
+        (deadline, cancellation): (Instant, CommandCancellation),
+    ) -> CommandDispatch {
         let (sender, result) = mpsc::channel();
         let repaint = self.repaint.clone();
         std::thread::spawn(move || {
-            let result = pending.receive("capturing terminal").and_then(|result| result.map_err(anyhow::Error::msg)).and_then(|mut capture| {
-                // Capture itself is read-only. Claim the mutation only when ready to publish,
-                // allowing a dismissed form or timed-out caller to cancel while formatting.
-                executor::begin_synchronous_command(Some((deadline, cancellation))).map_err(|error| anyhow::anyhow!("Capture stopped before export: {error:?}"))?;
-                let bytes = capture.text.len();
-                if let Some(path) = &destination {
-                    write_capture(Path::new(path), capture.text.as_bytes())?;
-                    capture.text.clear();
-                }
-                Ok(serde_json::json!({
-                    "capture": capture,
-                    "bytes": bytes,
-                    "target": target,
-                    "source": {"host": host, "backend": backend, "kind": if native { "pane_render_state" } else { "client_attachment_render_state" }, "original_output": false},
-                    "destination": destination,
-                }))
-            });
+            let result = pending
+                .receive("capturing terminal")
+                .and_then(|result| result.map_err(anyhow::Error::msg))
+                .and_then(|mut capture| {
+                    // Capture itself is read-only. Claim the mutation only when ready to publish,
+                    // allowing a dismissed form or timed-out caller to cancel while formatting.
+                    executor::begin_synchronous_command(Some((deadline, cancellation))).map_err(
+                        |error| anyhow::anyhow!("Capture stopped before export: {error:?}"),
+                    )?;
+                    let bytes = capture.text.len();
+                    if let Some(path) = &destination {
+                        write_capture(Path::new(path), capture.text.as_bytes())?;
+                        capture.text.clear();
+                    }
+                    Ok(serde_json::json!({
+                        "capture": capture,
+                        "bytes": bytes,
+                        "target": target,
+                        "source": source,
+                        "destination": destination,
+                    }))
+                });
             let outcome = match result {
                 Ok(value) => CommandOutcome::Success {
                     value,
@@ -124,6 +184,79 @@ impl AppState {
             repaint();
         });
         CommandDispatch::Pending(PendingCommandResult::Outcome(result))
+    }
+
+    pub(super) fn poll_pending_terminal_capture(
+        &mut self,
+        pending: &mut PendingAppCommand,
+        now: Instant,
+        effects: &mut Vec<AppEffect>,
+    ) -> Poll<Option<CommandOutcome>> {
+        let PendingCommandResult::CaptureStart {
+            exact,
+            target,
+            arguments,
+            export,
+        } = &pending.result
+        else {
+            return Poll::Ready(Some(failure("Capture startup request was lost")));
+        };
+        match ready!(self.poll_terminal_capture_start(
+            exact,
+            target,
+            arguments,
+            *export,
+            (pending.deadline, pending.cancellation.clone()),
+        )) {
+            CommandDispatch::Complete(outcome) => Poll::Ready(Some(outcome)),
+            CommandDispatch::Pending(result) => {
+                pending.result = result;
+                self.poll_pending_app_command(pending, now, effects)
+            }
+        }
+    }
+
+    pub(super) fn poll_terminal_capture_start(
+        &mut self,
+        exact: &ExactMuxTarget,
+        target: &CommandTarget,
+        arguments: &[String],
+        export: bool,
+        execution: (Instant, CommandCancellation),
+    ) -> Poll<CommandDispatch> {
+        match self.resolve_command_target(
+            "terminal.capture",
+            Some(ResourceKind::Terminal),
+            Some(target),
+        ) {
+            Ok((_, Some(resolved))) if &resolved == exact => {}
+            Ok(_) => {
+                return Poll::Ready(CommandDispatch::Complete(CommandOutcome::StaleTarget {
+                    message: "The requested terminal changed while starting".to_owned(),
+                }));
+            }
+            Err(outcome) => return Poll::Ready(CommandDispatch::Complete(outcome)),
+        }
+        let terminal = exact
+            .ids()
+            .2
+            .and_then(|pane| self.workspace.space_terminal_runtime(exact.scope(), pane));
+        let Some(terminal) = terminal else {
+            return Poll::Ready(CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "The requested terminal was closed while starting".to_owned(),
+            }));
+        };
+        match terminal.started() {
+            Ok(false) => Poll::Pending,
+            Err(error) => Poll::Ready(CommandDispatch::Complete(failure(error.to_string()))),
+            Ok(true) => Poll::Ready(self.dispatch_terminal_capture(
+                exact,
+                target.clone(),
+                arguments,
+                export,
+                Some(execution),
+            )),
+        }
     }
 
     /// Capture an attached backend pane that is not on screen. It has no local render state, so

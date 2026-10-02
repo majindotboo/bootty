@@ -222,7 +222,19 @@ pub enum AppEffect {
     ApplyMacosNonNativeFullscreen,
     RestoreMacosPresentation,
     OpenUrl(String),
+    ChooseProjectDirectory,
+    OpenAgentProjectSession {
+        cwd: String,
+        provider: bootty_agents::AgentKind,
+    },
     OpenSettings,
+    OpenComputerSetup,
+    OpenAgentHistory {
+        provider: bootty_agents::AgentKind,
+        cwd: String,
+        target: CommandTarget,
+    },
+    OpenConnections,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
     OpenGitChanges {
@@ -238,6 +250,7 @@ pub enum AppEffect {
 }
 
 pub struct AppState {
+    pub(super) remote_connections: crate::remote_connections::RemoteConnections,
     recovery: recovery::RecoveryState,
     image_clipboard: clipboard::ImageClipboard,
     pub(crate) localizer: crate::i18n::Localizer,
@@ -416,6 +429,7 @@ impl AppState {
         let macos_non_native_fullscreen_pending_apply = macos_non_native_fullscreen_active;
 
         Ok(Self {
+            remote_connections: crate::remote_connections::RemoteConnections::default(),
             localizer: crate::i18n::Localizer::new(&config.locale)?,
             commands,
             workspace,

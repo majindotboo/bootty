@@ -33,6 +33,12 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
+    /// The exact local owner that an explicitly enabled remote listener may address.
+    #[must_use]
+    pub fn descriptor(&self) -> Option<&InstanceDescriptor> {
+        self.lease.as_ref().map(ControlInstanceLease::descriptor)
+    }
+
     /// # Errors
     /// Returns an error if the instance lease, runtime, listener, or descriptor publication fails.
     pub fn spawn(

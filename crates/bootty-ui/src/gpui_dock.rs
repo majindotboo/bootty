@@ -7,60 +7,27 @@ use crate::commands::DockAction;
 use layout::{LayoutSaveHandle, SavedLayout};
 use registry::{PanelFactory, register, register_factory};
 
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use bootty_control::{BoundAppCommandSender, CommandTarget};
-use gpui_kit::component::{
-    dock::{
-        BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, NodeId,
-        PaneNode, PaneRef, Panel, PanelEvent, PanelId, PanelInfo, panel_handle,
-    },
-    menu::{PopupMenu, PopupMenuItem},
+use gpui_kit::component::dock::{
+    BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, NodeId, PaneNode,
+    PaneRef, Panel, PanelEvent, PanelId, PanelInfo, panel_handle,
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
     Styled, Subscription, Window, div, prelude::*,
 };
 
+use crate::gpui_browser_panel::{
+    BrowserClosed, BrowserFeedbackReady, BrowserPaletteRequested, BrowserPanel,
+    BrowserSettingsRequested,
+};
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
 use crate::{
     gpui_document_panel::{DocumentClosed, DocumentPanel},
     gpui_files_panel::{FilesPanel, OpenDocument},
 };
-
-/// Dock metadata for tool panels without persistence or activation hooks.
-macro_rules! tool_panel {
-    ($panel:ty, $name:literal, $title:literal, padding = $padding:literal) => {
-        impl gpui_kit::EventEmitter<gpui_kit::component::dock::PanelEvent> for $panel {}
-        impl gpui_kit::component::dock::BasePanel for $panel {
-            fn panel_name(&self) -> &'static str {
-                $name
-            }
-        }
-        impl gpui_kit::component::dock::Panel for $panel {
-            fn tab_name(&self, _: &gpui_kit::App) -> Option<gpui_kit::SharedString> {
-                Some($title.into())
-            }
-            fn title(
-                &mut self,
-                _: &mut gpui_kit::Window,
-                _: &mut gpui_kit::Context<Self>,
-            ) -> impl gpui_kit::IntoElement {
-                $title
-            }
-            fn inner_padding(&self, _: &gpui_kit::App) -> bool {
-                $padding
-            }
-        }
-    };
-}
-pub(crate) use tool_panel;
 
 #[derive(Clone)]
 pub struct TerminalWindowPresentation {
@@ -73,7 +40,7 @@ pub struct DockFocusChanged;
 enum InspectorPanel {
     Changes,
     Files,
-    Agents,
+    Browser,
 }
 
 /// Requests accepted while the persisted layout is still loading.
@@ -184,23 +151,23 @@ pub struct WorkspaceDock {
     retained_panels: Vec<ContextPanels>,
     document_context: Rc<RefCell<GitPanelContext>>,
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
-    panel_preferences:
-        BTreeMap<bootty_config::config::PanelKind, bootty_config::config::PanelConfig>,
-    pub(crate) always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    pub(crate) always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
     /// The single locked terminal leaf. The mux owns the window and every split inside it;
     /// Dock never adds, removes, or relocates this panel after its first placement.
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
     attachment: Entity<crate::gpui_terminal_panel::TerminalAttachmentPanel>,
     focused_group: Option<NodeId>,
+    pending_focus: Option<FocusHandle>,
     target: CommandTarget,
     sender: BoundAppCommandSender,
     restoring: Option<RestoreRequests>,
     focus: FocusHandle,
     error: Option<String>,
     pub(crate) empty_terminal: Option<(NodeId, crate::workspace_composition::EmptyTerminalState)>,
-    agents: Entity<crate::gpui_agents_panel::AgentsPanel>,
     sessions: Entity<crate::gpui_sidebar_panel::SessionsPanel>,
+    coordination: Entity<crate::gpui_orchestration::OrchestrationPanel>,
+    pub(crate) browser: Entity<BrowserPanel>,
+    browser_occluded: bool,
+    browser_menu_open: bool,
     documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>>,
     document_factory: PanelFactory,
     present: bool,
@@ -209,6 +176,7 @@ pub struct WorkspaceDock {
 }
 
 impl EventEmitter<DockFocusChanged> for WorkspaceDock {}
+impl EventEmitter<BrowserPaletteRequested> for WorkspaceDock {}
 impl Focusable for WorkspaceDock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -221,75 +189,41 @@ impl WorkspaceDock {
         context: GitPanelContext,
         owner: gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
         terminal: Entity<crate::gpui_terminal_view::GpuiTerminalView>,
-        chrome: Entity<crate::gpui::chrome::GpuiChrome>,
+        chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
         scope: bootty_mux::controller::SpaceId,
         sender: BoundAppCommandSender,
-        config_path: &std::path::Path,
+        config: &bootty_config::config::BoottyConfig,
         state_key: String,
         local_git: Option<bootty_git::GitFactsCache>,
-        panel_preferences: BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let config_path = &config.config_path;
         let legacy_key = format!(
             "{state_key}:space:{}:host:{}",
             scope.persistence_value(),
             context.host_identity
         );
-        let dock_owner = cx.weak_entity();
-        let always_show_tabs = Rc::new(RefCell::new(HashSet::new()));
-        let always_hide_tabs = Rc::new(RefCell::new(HashSet::new()));
-        let area = cx.new(|cx| {
-            let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
-                dock_owner.clone(),
-                chrome.clone(),
-                always_show_tabs.clone(),
-                always_hide_tabs.clone(),
-                cx,
-            );
-            DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
-        });
-        let titlebar = cx.new(|cx| {
-            crate::gpui_dock_skin::WorkspaceTitleBar::new(chrome.clone(), dock_owner, &area, cx)
-        });
-        let attachment = cx.new(|_| {
-            crate::gpui_terminal_panel::TerminalAttachmentPanel::new(terminal, owner.clone())
-        });
-        register(&area, attachment.clone(), cx);
-        // The terminal center is a singleton: the mux owns the window and every split inside
-        // it, so Dock restores whichever leaf the save holds onto this one panel.
-        let terminal_panel = cx.new(|cx| {
-            crate::gpui_terminal_panel::TerminalPanel::new(
-                context.target.clone(),
-                bootty_mux::workspace::ScopedWindowId::new(scope, String::new(), String::new()),
-                "Terminal".to_owned(),
-                owner,
-                window,
-                cx,
-            )
-        });
-        register(&area, terminal_panel.clone(), cx);
+        let (area, titlebar) = Self::dock_area(chrome, window, cx);
+        let (terminal_panel, attachment) = Self::terminal_panels(
+            &area,
+            terminal,
+            owner,
+            context.target.clone(),
+            scope,
+            window,
+            cx,
+        );
         // Legacy sidebar values seed unsaved layouts; saved docks own their live geometry.
         let sidebar_defaults = chrome.read(cx).sidebar_defaults();
         let sessions =
             cx.new(|cx| crate::gpui_sidebar_panel::SessionsPanel::new(chrome.clone(), cx));
         register(&area, sessions.clone(), cx);
-        let legacy_sessions = panel_handle(sessions.clone());
-        register_factory(
-            &area,
-            "bootty.sidebar",
-            Rc::new(move |_, _, _| legacy_sessions.clone()),
-            cx,
-        );
+        let (coordination, browser, browser_palette) =
+            Self::fixed_tools(&area, &sender, config, window, cx);
+        Self::register_sidebar(&area, &sessions, cx);
         let panels = ContextPanels::new(context.clone(), sender.clone(), local_git, window, cx);
         panels.register(&area, cx);
-        let agents = cx.new(|cx| {
-            crate::gpui_agents_panel::AgentsPanel::new(sender.clone(), chrome, window, cx)
-        });
-        register(&area, agents.clone(), cx);
         let document_context = Rc::new(RefCell::new(context));
         let current_document_context = document_context.clone();
         let documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>> = Rc::default();
@@ -300,10 +234,19 @@ impl WorkspaceDock {
         let document_factory =
             Self::document_factory(current_document_context, document_list, sender, dock);
         register_factory(&area, "bootty.document", document_factory.clone(), cx);
-        Self::configure_default_layout(&area, &panels, &sessions, sidebar_defaults, window, cx);
+        Self::configure_default_layout(
+            &area,
+            &panels,
+            &sessions,
+            &[panel_handle(coordination.clone())],
+            sidebar_defaults,
+            window,
+            cx,
+        );
         let path = config_path.with_file_name("native-panels.json");
         let save = Self::layout_writer(path.clone(), state_key.clone(), cx);
-        let (focus, subscriptions) = Self::subscribe_layout(&area, window, cx);
+        let (focus, mut subscriptions) = Self::subscribe_layout(&area, window, cx);
+        subscriptions.push(browser_palette);
         Self::restore_layout(path, state_key, legacy_key, window, cx);
         Self {
             panels,
@@ -313,20 +256,21 @@ impl WorkspaceDock {
             titlebar,
             // Seeded from the live config so the first settings sync only reacts to real
             // changes instead of relocating every panel out of the restored layout.
-            panel_preferences,
-            always_show_tabs,
-            always_hide_tabs,
             terminal: terminal_panel,
             attachment,
             focused_group: None,
+            pending_focus: None,
             target,
             sender: open_sender,
             restoring: Some(RestoreRequests::default()),
             focus,
             error: None,
             empty_terminal: None,
-            agents,
             sessions,
+            coordination,
+            browser,
+            browser_occluded: false,
+            browser_menu_open: false,
             documents,
             document_factory,
             present: true,
@@ -335,10 +279,163 @@ impl WorkspaceDock {
         }
     }
 
+    fn register_sidebar(
+        area: &Entity<DockArea>,
+        sessions: &Entity<crate::gpui_sidebar_panel::SessionsPanel>,
+        cx: &mut Context<Self>,
+    ) {
+        let legacy_sessions = panel_handle(sessions.clone());
+        register_factory(
+            area,
+            "bootty.sidebar",
+            Rc::new(move |_, _, _| legacy_sessions.clone()),
+            cx,
+        );
+    }
+
+    fn fixed_tools(
+        area: &Entity<DockArea>,
+        sender: &BoundAppCommandSender,
+        config: &bootty_config::config::BoottyConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<crate::gpui_orchestration::OrchestrationPanel>,
+        Entity<BrowserPanel>,
+        Subscription,
+    ) {
+        let coordination = cx.new(|cx| {
+            crate::gpui_orchestration::OrchestrationPanel::new(
+                sender.clone(),
+                Vec::new(),
+                Vec::new(),
+                window,
+                cx,
+            )
+        });
+        register(area, coordination.clone(), cx);
+        let browser = cx.new(|cx| BrowserPanel::new(config, window, cx));
+        register(area, browser.clone(), cx);
+        let browser_area = area.clone();
+        cx.observe(&browser, move |_, _, cx| {
+            browser_area.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, _: &BrowserClosed, window, cx| {
+                this.remove_tool(bootty_config::config::PanelKind::Browser, window, cx);
+                this.sync_browser_visibility(window, cx);
+                Focusable::focus_handle(&this.terminal, cx).focus(window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, _: &BrowserSettingsRequested, window, cx| {
+                let mut invocation = bootty_control::CommandInvocation::from_action(
+                    "open_setting",
+                    bootty_control::Caller::CommandPalette,
+                );
+                invocation.arguments = vec!["browser.search-engine".to_owned()];
+                this.submit_command(invocation, window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, feedback: &BrowserFeedbackReady, window, cx| {
+                let Some(target) = this.panels.context.terminal.clone() else {
+                    this.error =
+                        Some("Select a terminal before pasting browser feedback.".to_owned());
+                    cx.notify();
+                    return;
+                };
+                let mut invocation = bootty_control::CommandInvocation::from_action(
+                    "terminal.paste",
+                    bootty_control::Caller::CommandPalette,
+                );
+                invocation.target = Some(target.clone());
+                invocation.arguments = vec![feedback.0.clone()];
+                let mut focus = bootty_control::CommandInvocation::from_action(
+                    "agents.focus",
+                    bootty_control::Caller::CommandPalette,
+                );
+                focus.target = Some(target);
+                this.submit_command_then(invocation, Some(focus), window, cx);
+            },
+        )
+        .detach();
+        let browser_palette = cx.subscribe(&browser, |_, _, _: &BrowserPaletteRequested, cx| {
+            cx.emit(BrowserPaletteRequested);
+        });
+        (coordination, browser, browser_palette)
+    }
+
+    fn dock_area(
+        chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<DockArea>,
+        Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
+    ) {
+        let dock_owner = cx.weak_entity();
+        let area = cx.new(|cx| {
+            let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
+                dock_owner.clone(),
+                chrome.clone(),
+                cx,
+            );
+            let mut area = DockArea::new("workspace", Some(10), window, cx).with_renderer(skin);
+            area.set_locked(true, window, cx);
+            area
+        });
+        let titlebar = cx.new(|cx| {
+            crate::gpui_dock_skin::WorkspaceTitleBar::new(chrome.clone(), dock_owner, &area, cx)
+        });
+        (area, titlebar)
+    }
+
+    fn terminal_panels(
+        area: &Entity<DockArea>,
+        terminal: Entity<crate::gpui_terminal_view::GpuiTerminalView>,
+        owner: gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
+        target: CommandTarget,
+        scope: bootty_mux::controller::SpaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<crate::gpui_terminal_panel::TerminalPanel>,
+        Entity<crate::gpui_terminal_panel::TerminalAttachmentPanel>,
+    ) {
+        let attachment = cx.new(|_| {
+            crate::gpui_terminal_panel::TerminalAttachmentPanel::new(terminal, owner.clone())
+        });
+        register(area, attachment.clone(), cx);
+        // The mux owns the window and every split; Dock retains one terminal center.
+        let panel = cx.new(|cx| {
+            crate::gpui_terminal_panel::TerminalPanel::new(
+                target,
+                bootty_mux::workspace::ScopedWindowId::new(scope, String::new(), String::new()),
+                "Terminal".to_owned(),
+                owner,
+                window,
+                cx,
+            )
+        });
+        register(area, panel.clone(), cx);
+        (panel, attachment)
+    }
+
     fn configure_default_layout(
         area: &Entity<DockArea>,
         panels: &ContextPanels,
         sessions: &Entity<crate::gpui_sidebar_panel::SessionsPanel>,
+        extra_tools: &[Arc<dyn BasePanelView>],
         sidebar_defaults: (crate::gpui::chrome::SidebarPosition, f32, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -346,10 +443,11 @@ impl WorkspaceDock {
         let layout = DockLayout::tabs()
             .panel_view(panel_handle(panels.changes.clone()), cx)
             .panel_view(panel_handle(panels.files.clone()), cx);
-        let sidebar_placement = match sidebar_defaults.0 {
-            crate::gpui::chrome::SidebarPosition::Left => DockPlacement::Left,
-            crate::gpui::chrome::SidebarPosition::Right => DockPlacement::Right,
-        };
+        let layout = extra_tools
+            .iter()
+            .cloned()
+            .fold(layout, |layout, panel| layout.panel_view(panel, cx));
+        let sidebar_placement = DockPlacement::Left;
         area.update(cx, |area, cx| {
             area.set_center(DockLayout::tabs(), window, cx);
             area.set_dock(DockPlacement::Right, layout, window, cx);
@@ -435,17 +533,13 @@ impl WorkspaceDock {
                     // Incompatible saves leave the default layout in place.
                     if saved.layout.version == this.area.read(cx).version() {
                         this.load_layout(saved, window, cx);
-                    } else {
-                        this.restore_tab_preferences(&saved, cx);
                     }
-                } else {
-                    this.restore_tab_paths(&[], &[], cx);
                 }
                 let pending = this.restoring.take().unwrap_or_default();
                 match pending.panel {
                     Some(InspectorPanel::Changes) => this.refresh(window, cx),
                     Some(InspectorPanel::Files) => this.show_files(window, cx),
-                    Some(InspectorPanel::Agents) => this.show_agents(window, cx),
+                    Some(InspectorPanel::Browser) => this.show_browser(window, cx),
                     None => {}
                 }
                 for request in pending.commands {
@@ -561,6 +655,16 @@ impl WorkspaceDock {
         window: &Window,
         cx: &Context<Self>,
     ) {
+        self.submit_command_then(invocation, None, window, cx);
+    }
+
+    fn submit_command_then(
+        &mut self,
+        invocation: bootty_control::CommandInvocation,
+        after_success: Option<bootty_control::CommandInvocation>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
         let receiver = match self.sender.submit(
             invocation,
             std::time::Instant::now()
@@ -579,11 +683,16 @@ impl WorkspaceDock {
                 .background_executor()
                 .spawn(async move { receiver.recv() })
                 .await;
-            _ = weak.update_in(cx, |this, _, cx| {
+            _ = weak.update_in(cx, |this, window, cx| {
+                let succeeded =
+                    matches!(&result, Ok(bootty_control::CommandOutcome::Success { .. }));
                 this.error = result.map_or_else(
                     |error| Some(error.to_string()),
                     |outcome| crate::commands::command_outcome_message(&outcome),
                 );
+                if succeeded && let Some(invocation) = after_success {
+                    this.submit_command(invocation, window, cx);
+                }
                 cx.notify();
             });
         })
@@ -596,25 +705,6 @@ impl WorkspaceDock {
             .iter()
             .filter_map(gpui_kit::WeakEntity::upgrade)
             .collect()
-    }
-
-    pub(crate) fn update_agents(
-        &self,
-        entries: Vec<crate::state::agent_attention::AgentOverview>,
-        selected: Option<CommandTarget>,
-        cx: &mut Context<Self>,
-    ) {
-        self.agents.update(cx, |agents, cx| {
-            agents.update_entries(entries, selected, cx);
-        });
-    }
-
-    pub(crate) fn show_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(pending) = &mut self.restoring {
-            pending.panel = Some(InspectorPanel::Agents);
-            return;
-        }
-        self.show_tool(bootty_config::config::PanelKind::Agents, window, cx);
     }
 
     pub(crate) fn browse_files(
@@ -636,6 +726,87 @@ impl WorkspaceDock {
         }
         self.refresh_tool(bootty_config::config::PanelKind::Files, window, cx);
         self.show_tool(bootty_config::config::PanelKind::Files, window, cx);
+    }
+
+    pub(crate) const fn take_pending_focus(&mut self) -> Option<FocusHandle> {
+        self.pending_focus.take()
+    }
+
+    pub(crate) fn show_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pending) = &mut self.restoring {
+            pending.panel = Some(InspectorPanel::Browser);
+            return;
+        }
+        if self.browser.read(cx).is_empty() {
+            self.browser
+                .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        }
+        self.show_tool(bootty_config::config::PanelKind::Browser, window, cx);
+        self.sync_browser_visibility(window, cx);
+        self.pending_focus = Some(Focusable::focus_handle(&self.browser, cx));
+        // The new panel and dialog dismissal must finish mounting before taking focus.
+        cx.defer_in(window, |this, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            Focusable::focus_handle(&this.browser, cx).focus(window, cx);
+        });
+    }
+
+    pub(crate) fn new_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Reuse the initial page when opening the browser for the first time.
+        if self
+            .area
+            .read(cx)
+            .panel(PanelId::from(self.browser.entity_id()))
+            .is_some()
+            || self.browser.read(cx).is_empty()
+        {
+            self.browser
+                .update(cx, |browser, cx| browser.new_tab(None, window, cx));
+        }
+        self.show_browser(window, cx);
+    }
+
+    pub(crate) fn close_tool_tab(&self, id: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(kind) = bootty_config::config::PanelKind::ALL
+            .into_iter()
+            .find(|kind| self.tool_panel(*kind).panel_id(cx) == id)
+        {
+            self.remove_tool(kind, window, cx);
+            self.sync_browser_visibility(window, cx);
+            self.layout_changed(cx);
+        }
+    }
+
+    pub(crate) fn set_browser_occluded(
+        &mut self,
+        occluded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_occluded = occluded;
+        self.sync_browser_visibility(window, cx);
+    }
+
+    pub(crate) fn set_browser_menu_open(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_menu_open = open;
+        self.sync_browser_visibility(window, cx);
+    }
+
+    fn sync_browser_visibility(&self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let visible = self.present
+            && !self.browser_occluded
+            && !self.browser_menu_open
+            && !window.has_active_dialog(cx)
+            && !window.has_active_sheet(cx)
+            && self.panel_visible(bootty_config::config::PanelKind::Browser, cx);
+        self.browser
+            .update(cx, |browser, cx| browser.set_visible(visible, window, cx));
     }
 
     fn refresh_tool(
@@ -793,6 +964,16 @@ impl WorkspaceDock {
         }
     }
 
+    pub(crate) fn sync_agent_terminals(
+        &self,
+        workers: Vec<crate::gpui_orchestration::OrchestrationAgentSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.coordination
+            .update(cx, |panel, cx| panel.set_sessions(workers, window, cx));
+    }
+
     pub(crate) fn terminal_panel(&self) -> Entity<crate::gpui_terminal_panel::TerminalPanel> {
         self.terminal.clone()
     }
@@ -848,7 +1029,7 @@ impl WorkspaceDock {
         let changes = self.panels.changes.clone();
         let diff = self.panels.diff.clone();
         let files = self.panels.files.clone();
-        let agents = self.agents.clone();
+        let browser = self.browser.clone();
         let sessions = self.sessions.clone();
         let documents = self.documents();
         self.area.update(cx, |area, cx| {
@@ -856,7 +1037,7 @@ impl WorkspaceDock {
             evict_center_panel(area, changes, sidebar, window, cx);
             evict_center_panel(area, diff, sidebar, window, cx);
             evict_center_panel(area, files, sidebar, window, cx);
-            evict_center_panel(area, agents, sidebar, window, cx);
+            evict_center_panel(area, browser, sidebar, window, cx);
             evict_center_panel(area, sessions, sidebar, window, cx);
             for document in documents {
                 evict_center_panel(area, document, sidebar, window, cx);
@@ -932,7 +1113,8 @@ impl WorkspaceDock {
             PanelKind::Files => panel_handle(self.panels.files.clone()),
             PanelKind::Changes => panel_handle(self.panels.changes.clone()),
             PanelKind::Diff => panel_handle(self.panels.diff.clone()),
-            PanelKind::Agents => panel_handle(self.agents.clone()),
+            PanelKind::Coordination => panel_handle(self.coordination.clone()),
+            PanelKind::Browser => panel_handle(self.browser.clone()),
         }
     }
 
@@ -943,13 +1125,15 @@ impl WorkspaceDock {
         cx: &mut Context<Self>,
     ) {
         use bootty_config::config::PanelKind;
+        let restore_focus = self.panel_visible(kind, cx);
         self.area.update(cx, |area, cx| {
             match kind {
                 PanelKind::Sessions => area.remove_panel(self.sessions.clone(), window, cx),
                 PanelKind::Files => area.remove_panel(self.panels.files.clone(), window, cx),
                 PanelKind::Changes => area.remove_panel(self.panels.changes.clone(), window, cx),
                 PanelKind::Diff => area.remove_panel(self.panels.diff.clone(), window, cx),
-                PanelKind::Agents => area.remove_panel(self.agents.clone(), window, cx),
+                PanelKind::Coordination => area.remove_panel(self.coordination.clone(), window, cx),
+                PanelKind::Browser => area.remove_panel(self.browser.clone(), window, cx),
             }
             for placement in [
                 DockPlacement::Left,
@@ -963,11 +1147,20 @@ impl WorkspaceDock {
                 {
                     // Kit keeps a closed bottom dock's tab strip. An empty one has no tabs to reopen.
                     area.remove_dock(placement, window, cx);
-                } else if area.is_dock_open(placement) && area.is_empty(placement, cx) {
+                } else if placement == DockPlacement::Left
+                    && area.is_dock_open(placement)
+                    && area.is_empty(placement, cx)
+                {
                     area.toggle_dock(placement, window, cx);
                 }
             }
         });
+        if restore_focus {
+            cx.defer_in(window, |this, window, cx| {
+                crate::window::restore_keyboard_focus(window);
+                Focusable::focus_handle(&this.terminal, cx).focus(window, cx);
+            });
+        }
     }
 
     pub(crate) fn panel_visible(&self, kind: bootty_config::config::PanelKind, cx: &App) -> bool {
@@ -994,44 +1187,6 @@ impl WorkspaceDock {
         })
     }
 
-    pub(crate) fn sync_panel_settings(
-        &mut self,
-        preferences: &BTreeMap<
-            bootty_config::config::PanelKind,
-            bootty_config::config::PanelConfig,
-        >,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.restoring.is_some() || &self.panel_preferences == preferences {
-            return;
-        }
-        for kind in bootty_config::config::PanelKind::ALL {
-            let previous = self
-                .panel_preferences
-                .get(&kind)
-                .copied()
-                .unwrap_or_default();
-            let next = preferences.get(&kind).copied().unwrap_or_default();
-            if previous.dock != next.dock {
-                let panel = self.tool_panel(kind);
-                if self.area.read(cx).panel(panel.panel_id(cx)).is_some() {
-                    let visible = self.panel_visible(kind, cx);
-                    self.remove_tool(kind, window, cx);
-                    self.area.update(cx, |area, cx| {
-                        let placement = panel_placement(next.dock(kind));
-                        area.add_panel_view(panel, placement, None, window, cx);
-                        if visible && !area.is_dock_open(placement) {
-                            area.toggle_dock(placement, window, cx);
-                        }
-                    });
-                }
-            }
-        }
-        self.panel_preferences.clone_from(preferences);
-        cx.notify();
-    }
-
     fn show_tool(
         &self,
         kind: bootty_config::config::PanelKind,
@@ -1040,13 +1195,11 @@ impl WorkspaceDock {
     ) {
         let panel = self.tool_panel(kind);
         let id = panel.panel_id(cx);
-        let home = panel_placement(
-            self.panel_preferences
-                .get(&kind)
-                .copied()
-                .unwrap_or_default()
-                .dock(kind),
-        );
+        let home = if kind == bootty_config::config::PanelKind::Sessions {
+            DockPlacement::Left
+        } else {
+            DockPlacement::Right
+        };
         self.area.update(cx, |area, cx| {
             if area.panel(id).is_none() {
                 area.add_panel_view(panel, home, None, window, cx);
@@ -1181,34 +1334,12 @@ impl WorkspaceDock {
     }
 
     fn load_layout(&mut self, saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
-        let SavedLayout {
-            layout,
-            always_show_tabs,
-            always_hide_tabs,
-        } = saved;
+        let SavedLayout { layout } = saved;
         self.error = self
             .area
             .update(cx, |area, cx| area.load(layout, window, cx))
             .err()
             .map(|error| error.to_string());
-        self.restore_tab_paths(&always_show_tabs, &always_hide_tabs, cx);
-    }
-
-    fn restore_tab_preferences(&self, saved: &SavedLayout, cx: &App) {
-        self.restore_tab_paths(&saved.always_show_tabs, &saved.always_hide_tabs, cx);
-    }
-
-    fn restore_tab_paths(&self, shown: &[String], hidden: &[String], cx: &App) {
-        let groups = group_paths(self.area.read(cx));
-        let resolve = |paths: &[String]| {
-            groups
-                .iter()
-                .filter(|(path, _)| paths.contains(path))
-                .map(|(_, node)| *node)
-                .collect()
-        };
-        *self.always_show_tabs.borrow_mut() = resolve(shown);
-        *self.always_hide_tabs.borrow_mut() = resolve(hidden);
     }
 
     fn save_layout(&self, cx: &App) {
@@ -1219,29 +1350,7 @@ impl WorkspaceDock {
         let area = self.area.read(cx);
         SavedLayout {
             layout: area.dump(cx),
-            always_hide_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_hide_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
-            always_show_tabs: group_paths(area)
-                .into_iter()
-                .filter(|(_, node)| self.always_show_tabs.borrow().contains(node))
-                .map(|(path, _)| path)
-                .collect(),
         }
-    }
-
-    pub(crate) fn set_always_show_tabs(&self, node: NodeId, show: bool, cx: &mut Context<Self>) {
-        if show {
-            self.always_hide_tabs.borrow_mut().remove(&node);
-            self.always_show_tabs.borrow_mut().insert(node);
-        } else {
-            self.always_show_tabs.borrow_mut().remove(&node);
-        }
-        self.save_layout(cx);
-        self.area.update(cx, |_, cx| cx.notify());
-        cx.notify();
     }
 
     pub(crate) fn toggle_dock(
@@ -1258,29 +1367,6 @@ impl WorkspaceDock {
                 area.set_dock(placement, DockLayout::tabs(), window, cx);
             });
         }
-    }
-
-    pub(crate) fn panel_menu(
-        owner: &gpui_kit::WeakEntity<Self>,
-        node: NodeId,
-        mut menu: PopupMenu,
-    ) -> PopupMenu {
-        for descriptor in crate::commands::PANELS {
-            let crate::commands::PanelCreation::Command(action) = descriptor.creation else {
-                continue;
-            };
-            let owner = owner.clone();
-            menu = menu.item(
-                PopupMenuItem::new(descriptor.label)
-                    .icon(descriptor.icon.clone())
-                    .on_click(move |_, window, cx| {
-                        _ = owner.update(cx, |this, cx| {
-                            this.invoke_action(action, Some(node), window, cx);
-                        });
-                    }),
-            );
-        }
-        menu
     }
 
     pub(crate) fn sessions_focused(&self, window: &Window, cx: &App) -> bool {
@@ -1374,11 +1460,7 @@ impl WorkspaceDock {
         } else {
             existing
         };
-        if (action.panel().is_some()
-            || matches!(
-                action,
-                DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs
-            ))
+        if action.panel().is_some()
             && node.is_some_and(|node| {
                 self.area
                     .read(cx)
@@ -1406,17 +1488,16 @@ impl WorkspaceDock {
         match action {
             DockAction::ToggleLeft => self.toggle_dock(DockPlacement::Left, window, cx),
             DockAction::ToggleRight => self.toggle_dock(DockPlacement::Right, window, cx),
-            DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs => {
-                self.toggle_group_tabs(action, node, cx);
+            DockAction::Sidebar | DockAction::Spaces | DockAction::CodexBar => {
+                self.show_sidebar(window, cx);
             }
-            _ if let Some(node) = node => {
-                self.open_panel_at(action, node, window, cx);
-            }
-            DockAction::Sidebar | DockAction::Spaces => self.show_sidebar(window, cx),
             DockAction::Files => self.show_files(window, cx),
             DockAction::Changes => self.refresh(window, cx),
             DockAction::Diff => self.show_diff(window, cx),
-            DockAction::Agents | DockAction::CodexBar => self.show_agents(window, cx),
+            DockAction::Coordination => {
+                self.show_tool(bootty_config::config::PanelKind::Coordination, window, cx);
+            }
+            DockAction::Browser => self.show_browser(window, cx),
             DockAction::TogglePanel(_) => {
                 return bootty_control::CommandOutcome::Unavailable {
                     message: "The panel action could not be resolved.".into(),
@@ -1425,89 +1506,11 @@ impl WorkspaceDock {
         }
         bootty_control::CommandOutcome::success()
     }
-
-    fn toggle_group_tabs(&self, action: DockAction, node: Option<NodeId>, cx: &mut Context<Self>) {
-        let area = self.area.read(cx);
-        let groups = group_paths(area)
-            .into_iter()
-            .filter(|(_, node)| {
-                area.layout(DockPlacement::Center)
-                    .is_none_or(|tree| tree.find_node(*node).is_none())
-            })
-            .collect::<Vec<_>>();
-        let focused = self
-            .focused_group
-            .filter(|node| groups.iter().any(|(_, current)| current == node));
-        if let Some(node) = node
-            .or(focused)
-            .or_else(|| groups.first().map(|(_, node)| *node))
-        {
-            if action == DockAction::ToggleHiddenTabs {
-                let hidden = self.always_hide_tabs.borrow_mut().remove(&node);
-                if !hidden {
-                    self.always_hide_tabs.borrow_mut().insert(node);
-                }
-                self.set_always_show_tabs(node, false, cx);
-            } else {
-                let always = self.always_show_tabs.borrow().contains(&node);
-                self.set_always_show_tabs(node, !always, cx);
-            }
-        }
-    }
-
-    fn open_panel_at(
-        &mut self,
-        action: crate::commands::DockAction,
-        node: NodeId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let placement = [
-            DockPlacement::Center,
-            DockPlacement::Left,
-            DockPlacement::Right,
-            DockPlacement::Bottom,
-        ]
-        .into_iter()
-        .find(|placement| {
-            self.area
-                .read(cx)
-                .layout(*placement)
-                .is_some_and(|tree| tree.find_node(node).is_some())
-        });
-        let Some(placement) = placement else {
-            return;
-        };
-        let Some(kind) = action.panel() else {
-            return;
-        };
-        self.refresh_tool(kind, window, cx);
-        let panel = self.tool_panel(kind);
-        let id = panel.panel_id(cx);
-        self.area.update(cx, |area, cx| {
-            if area.panel(id).is_none() {
-                area.add_panel_view(panel, placement, None, window, cx);
-            }
-            let ix = panel_tab_index(area, placement, node, id);
-            area.move_panel(
-                id,
-                InsertTarget::Tabs {
-                    node,
-                    ix,
-                    activate: true,
-                },
-                window,
-                cx,
-            );
-            if placement != DockPlacement::Center && !area.is_dock_open(placement) {
-                area.toggle_dock(placement, window, cx);
-            }
-        });
-    }
 }
 
 impl Render for WorkspaceDock {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_browser_visibility(window, cx);
         div()
             .track_focus(&self.focus)
             .size_full()
@@ -1568,14 +1571,6 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
         }
     }
     groups
-}
-
-const fn panel_placement(dock: bootty_config::config::PanelDock) -> DockPlacement {
-    match dock {
-        bootty_config::config::PanelDock::Left => DockPlacement::Left,
-        bootty_config::config::PanelDock::Right => DockPlacement::Right,
-        bootty_config::config::PanelDock::Bottom => DockPlacement::Bottom,
-    }
 }
 
 fn panel_placement_in_area(area: &DockArea, id: PanelId) -> Option<DockPlacement> {

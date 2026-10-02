@@ -15,7 +15,7 @@ use gpui_kit::px;
 pub enum EmptyTerminalState {
     Loading,
     Unavailable(String),
-    Ready { can_create: bool },
+    Ready { can_create: bool, has_session: bool },
 }
 
 impl EmptyTerminalState {
@@ -24,10 +24,14 @@ impl EmptyTerminalState {
         has_snapshot: bool,
         unavailable_reason: Option<&str>,
         can_create: bool,
+        has_session: bool,
     ) -> Self {
         unavailable_reason.map_or(
             if has_snapshot {
-                Self::Ready { can_create }
+                Self::Ready {
+                    can_create,
+                    has_session,
+                }
             } else {
                 Self::Loading
             },

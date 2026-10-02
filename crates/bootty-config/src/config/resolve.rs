@@ -69,6 +69,7 @@ impl ConfigResolver<'_> {
             when_closing_with_no_tabs,
             on_last_window_closed,
             locale,
+            computer_use,
         );
         config.appearance = resolve_appearance(
             raw.appearance,
@@ -80,7 +81,11 @@ impl ConfigResolver<'_> {
         apply_partial_font(&mut config.font, raw.font)?;
         apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
-        config.panels = raw.panels;
+        apply_value(&mut config.browser.search_engine, raw.browser.search_engine);
+        apply_value(
+            &mut config.browser.persist_site_data,
+            raw.browser.persist_site_data,
+        );
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
@@ -190,21 +195,15 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_fields!(chrome, partial;
         left_dock_toggle,
         right_dock_toggle,
-        panel_tab_style,
-        panel_tabs,
         tabs_use_session_color,
     );
-    for (tabs, patch) in [
-        (&mut chrome.dock_tabs, partial.dock_tabs),
-        (&mut chrome.terminal_tabs, partial.terminal_tabs),
-    ] {
-        if let Some(patch) = patch {
-            apply_fields!(tabs, patch;
-                appearance,
-                close_position,
-                close_button,
-            );
-        }
+    if let Some(patch) = partial.tabs {
+        let tabs = &mut chrome.tabs;
+        apply_fields!(tabs, patch;
+            appearance,
+            close_position,
+            close_button,
+        );
     }
 
     apply_fields!(chrome, partial;

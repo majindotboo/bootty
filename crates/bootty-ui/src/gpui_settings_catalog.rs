@@ -208,7 +208,7 @@ const UI_FONT_FAMILY_DEPENDENCY: SettingsDependency = SettingsDependency {
     }],
 };
 
-const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
+const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 9] = [
     SettingsCatalogPage {
         category: SettingsCategory::General,
         id: SettingsCategory::General.id(),
@@ -240,6 +240,12 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
         search_terms: "panels|sidebar|status bar|top bar|bottom bar|dock|width|visibility",
     },
     SettingsCatalogPage {
+        category: SettingsCategory::Browser,
+        id: SettingsCategory::Browser.id(),
+        label: SettingsCategory::Browser.label(),
+        search_terms: "browser|search engine|cookies|site data|privacy|passwords",
+    },
+    SettingsCatalogPage {
         category: SettingsCategory::Terminal,
         id: SettingsCategory::Terminal.id(),
         label: SettingsCategory::Terminal.label(),
@@ -259,7 +265,7 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
     },
 ];
 
-/// The eight native-settings pages in sidebar order.
+/// The native-settings pages in sidebar order.
 #[must_use]
 pub const fn settings_catalog_pages() -> &'static [SettingsCatalogPage] {
     &SETTINGS_CATALOG_PAGES
@@ -336,6 +342,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
             "panels" | "sidebar" | "status" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
             "general" => SettingsCategory::General,
+            "browser" => SettingsCategory::Browser,
             // Keep unknown schema pages accessible in Advanced.
             _ => SettingsCategory::Advanced,
         },
@@ -451,10 +458,8 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Panels => match id {
             "chrome.left-dock-toggle" => 1,
             "chrome.right-dock-toggle" => 2,
-            "chrome.panel-tab-style" => 3,
-            "chrome.panel-tabs" => 4,
-            id if id.starts_with("chrome.dock-tabs.") => 10,
-            id if id.starts_with("chrome.terminal-tabs.") => 11,
+            "chrome.tabs-use-session-color" => 9,
+            id if id.starts_with("chrome.tabs.") => 10,
             "chrome.top-bar" => 20,
             "chrome.bottom-bar" => 21,
             "chrome.status-height" => 22,

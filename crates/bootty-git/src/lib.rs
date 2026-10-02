@@ -2,6 +2,7 @@ pub mod changes;
 pub mod facts;
 mod favorite_paths;
 pub mod project;
+pub mod project_icon;
 pub mod runner;
 pub mod worktree;
 
@@ -16,6 +17,7 @@ pub use project::{
     remove_worktree, status, suggested_session_name, toggle_favorite_project_path, trunk_branch,
     worktree_count, worktree_root,
 };
+pub use project_icon::{ProjectIcon, detect_project_icon, project_monogram};
 pub use runner::{CommandOutput, CommandRunner, SystemCommandRunner};
 
 pub use worktree::WorktreeRequest;

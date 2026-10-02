@@ -566,20 +566,15 @@ impl SettingsSession {
         self.writeback.document()
     }
 
-    pub fn install_integration(&mut self, identity: String, module: String, id: String) {
-        self.effects.push(SettingsEffect::InstallIntegration {
+    pub fn install_integration(&mut self, identity: String, _module: String, _id: String) {
+        self.integration_errors.insert(
             identity,
-            module,
-            id,
-        });
+            "Legacy agent adapters are unsupported. Open an agent terminal; no hook installation is required.".to_owned(),
+        );
     }
 
     pub fn uninstall_integration(&mut self, identity: String, module: String, id: String) {
-        self.effects.push(SettingsEffect::UninstallIntegration {
-            identity,
-            module,
-            id,
-        });
+        self.install_integration(identity, module, id);
     }
 
     /// Return the last native integration failure for a provider, if any.
