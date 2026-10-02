@@ -9,16 +9,23 @@ empty-sidebar and coordination captures were refreshed from `064cef1d` at
 `b80cea92`; the manifest identifies the revisions for the remaining interactions.
 
 The direct agent-tab capture uses `892f6f65` at 00:15 PDT on October 2.
-The relay-image capture uses `79520d63` at 01:41 PDT on October 2.
+The relay-image capture uses `79520d63` at 01:41 PDT on October 2. It predates the recovery change and is diagnostic history.
+The native-live-image capture uses `35795b86` at 03:23 PDT on October 2.
 
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
 
+- [Native live image](native-live-image.mp4), 2.4 seconds: the current native PTY
+  displays the full 2 MiB image and accepts colored input afterward. The owned
+  disposable session was closed and previous selection restored. The companion
+  GPUI acceptance checks the complete decoded pixels, image primitives and input.
+  This is native evidence, not acceptance of the unresolved rmux graphics limit.
 - [Relay image](relay-image.mp4), 3.0 seconds: display a 2 MiB RGBA image
   through the rmux terminal relay, then render the glyph probe. The owned
   disposable session was closed and the original 9 native / 2 rmux / 0 tmux
-  session counts and selection restored. This native check passed; the separate
-  exact-head CI image-corruption failure remains open.
+  session counts and selection restored. This earlier native check passed. The actual PR base fails the unchanged
+  rmux image test in 2/10 runs; the recovery stream fails in 10/10. The live
+  graphics bug is pre-existing but the measured result is worse, not fixed.
 - [Direct agent tab](agent-tab.mp4), 2.4 seconds: choose Open Pi tab from
   Cmd+K and launch the colored provider TUI beside the existing shell in the same
   session. No prompt was sent. The disposable session was closed afterward,
@@ -51,7 +58,8 @@ playback is not accelerated.
   prompt, and was closed afterward. The prior 9 native / 2 rmux / 0 tmux
   session counts were restored.
 
-![Native 2 MiB image through the rmux terminal relay](relay-image.png)
+![Current native PTY displays the full 2 MiB image](native-live-image.png)
+![Historical 2 MiB image through the rmux terminal relay](relay-image.png)
 ![Rounded project sessions, compact pacing and reset countdown](sessions.png)
 ![Empty sidebar with direct choices for tools and browser pages](empty-sidebar.png)
 ![Files in a closable top-level sidebar tab](files.png)

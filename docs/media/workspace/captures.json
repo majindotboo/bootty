@@ -247,6 +247,22 @@
       "source_commit": "79520d6398d51dd58b20b5c0c3644b0a5458d31b",
       "executable_sha256": "f26b0cdc66d60c9aff5cbcc3578584184a79d5967b67df541e46fd53478e3fcc",
       "playback_seconds": 3.033333
+    },
+    {
+      "file": "native-live-image.png",
+      "sha256": "0315998d493c789810c23da973d9e718136b33846ec4c8bda7e695fc191ed049",
+      "source_commit": "35795b86eece4561318d1f984158d7cf6b4f5a10",
+      "executable_sha256": "82667d3585cc26fc0e6293c8fd2bec7b3a864d607dcd112d06669f867f9e35bb",
+      "captured_at": "2026-10-02T10:23:37.070Z"
+    },
+    {
+      "file": "native-live-image.mp4",
+      "sha256": "55044e2e4ee437fe5a589cf7a4b240be45d01cfc4987e528a726276922fdadc3",
+      "source_commit": "35795b86eece4561318d1f984158d7cf6b4f5a10",
+      "executable_sha256": "82667d3585cc26fc0e6293c8fd2bec7b3a864d607dcd112d06669f867f9e35bb",
+      "capture_started_at": "2026-10-02T10:23:55.829Z",
+      "capture_finished_at": "2026-10-02T10:23:57.253Z",
+      "capture_method": "Two native window frames at observed 1.424-second interval, plus one-second final hold; no accelerated playback"
     }
   ]
 }
