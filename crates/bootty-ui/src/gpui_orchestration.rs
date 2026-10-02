@@ -8,8 +8,9 @@ use bootty_control::{
     CommandTarget,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
+    collapsible::Collapsible,
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState, Textarea, TextareaState},
     scroll::ScrollableElement as _,
@@ -48,6 +49,13 @@ impl SearchableListItem for Choice {
 
 type Picker = Entity<SelectState<Vec<Choice>>>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupForm {
+    Run,
+    Task,
+    Worker,
+}
+
 pub struct OrchestrationPanel {
     sender: BoundAppCommandSender,
     runs: Vec<OrchestrationRun>,
@@ -63,6 +71,7 @@ pub struct OrchestrationPanel {
     worker_name: Entity<InputState>,
     message: Entity<TextareaState>,
     pending: bool,
+    form: Option<SetupForm>,
     active: bool,
     error: Option<String>,
 }
@@ -98,6 +107,7 @@ impl OrchestrationPanel {
             worker_name: input("Worker name", window, cx),
             message: textarea("Message to the selected worker", window, cx),
             pending: false,
+            form: None,
             active: false,
             error: None,
         };
@@ -318,6 +328,7 @@ impl OrchestrationPanel {
                 .update(cx, |state, cx| state.set_selected_value(&id, window, cx));
             self.sync_details(window, cx);
             if command == "orchestration.run.create" {
+                self.form = None;
                 self.run_title
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.run_goal
@@ -340,6 +351,7 @@ impl OrchestrationPanel {
                 self.task
                     .update(cx, |state, cx| state.set_selected_value(&id, window, cx));
                 if command == "orchestration.task.create" {
+                    self.form = None;
                     self.task_title
                         .update(cx, |input, cx| input.set_value("", window, cx));
                     self.task_prompt
@@ -357,6 +369,7 @@ impl OrchestrationPanel {
                 self.sync_details(window, cx);
                 self.worker
                     .update(cx, |state, cx| state.set_selected_value(&id, window, cx));
+                self.form = None;
                 self.worker_name
                     .update(cx, |input, cx| input.set_value("", window, cx));
             } else if command == "orchestration.message.send" {
@@ -533,12 +546,44 @@ impl Panel for OrchestrationPanel {
 }
 
 impl OrchestrationPanel {
+    fn setup_form(
+        &self,
+        form: SetupForm,
+        label: &'static str,
+        content: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> Collapsible {
+        let open = self.form == Some(form);
+        Collapsible::new()
+            .open(open)
+            .child(
+                Button::new(label)
+                    .ghost()
+                    .small()
+                    .label(label)
+                    .icon(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .disabled(self.pending)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.form = if this.form == Some(form) {
+                            None
+                        } else {
+                            Some(form)
+                        };
+                        cx.notify();
+                    })),
+            )
+            .content(content)
+    }
+
     fn run_form(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .child("New run")
             .child("Title")
             .child(Input::new(&self.run_title).disabled(self.pending))
             .child("Goal")
@@ -558,7 +603,6 @@ impl OrchestrationPanel {
 
     fn task_form(&self, editable: bool, cx: &Context<Self>) -> impl IntoElement {
         section(cx)
-            .child("Add task")
             .child("Title")
             .child(Input::new(&self.task_title).disabled(self.pending))
             .child("Instructions")
@@ -580,7 +624,6 @@ impl OrchestrationPanel {
 
     fn worker_form(&self, editable: bool, cx: &Context<Self>) -> impl IntoElement {
         section(cx)
-            .child("Attach worker")
             .child("Agent terminal")
             .child(
                 Select::new(&self.session)
@@ -748,13 +791,19 @@ impl OrchestrationPanel {
                 run.workers.len(),
                 run.messages.len()
             )));
-        if !run.finished {
-            content = content
-                .child(self.task_form(editable, cx))
-                .child(self.worker_form(editable, cx));
-        }
         content = content.child(self.dispatch_form(task.map(|task| &task.state), editable, cx));
         if let Some(task) = task {
+            if let Some(worker) = task
+                .worker
+                .as_ref()
+                .and_then(|id| run.workers.iter().find(|worker| &worker.id == id))
+            {
+                content = content.child(
+                    div()
+                        .text_sm()
+                        .child(format!("Assigned to {}", worker.name)),
+                );
+            }
             content = content.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
@@ -775,7 +824,20 @@ impl OrchestrationPanel {
             }
         }
         if !run.finished {
-            content = content.child(self.message_form(editable, can_finish, cx));
+            content = content
+                .child(self.setup_form(
+                    SetupForm::Task,
+                    "Add task…",
+                    self.task_form(editable, cx),
+                    cx,
+                ))
+                .child(self.setup_form(
+                    SetupForm::Worker,
+                    "Attach worker…",
+                    self.worker_form(editable, cx),
+                    cx,
+                ))
+                .child(self.message_form(editable, can_finish, cx));
         }
         content = content.children(run.messages.iter().rev().take(8).map(|message| {
             section(cx)
@@ -836,14 +898,16 @@ impl Render for OrchestrationPanel {
         if let Some(error) = &self.error {
             content = content.child(div().text_color(cx.theme().danger).child(error.clone()));
         }
-        content = content.child(self.run_form(cx)).child(
-            section(cx).child("Run").child(
-                Select::new(&self.run)
-                    .placeholder("No runs yet")
-                    .disabled(self.pending)
-                    .w_full(),
-            ),
-        );
+        content = content
+            .child(self.setup_form(SetupForm::Run, "New run…", self.run_form(cx), cx))
+            .child(
+                section(cx).child("Run").child(
+                    Select::new(&self.run)
+                        .placeholder("No runs yet")
+                        .disabled(self.pending)
+                        .w_full(),
+                ),
+            );
         if let Some(run) = self.selected_run(cx) {
             content = self.run_content(content, run, cx);
         }
