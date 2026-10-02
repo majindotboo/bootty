@@ -62,16 +62,15 @@ impl BrowserProfile {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn supports_named_profiles() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        objc2_foundation::NSProcessInfo::processInfo()
-            .operatingSystemVersion()
-            .majorVersion
-            >= 14
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        true
-    }
+    objc2_foundation::NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        >= 14
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn supports_named_profiles() -> bool {
+    true
 }
