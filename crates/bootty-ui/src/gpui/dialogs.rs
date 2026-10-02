@@ -717,8 +717,11 @@ impl DialogView {
             return;
         }
         let transfer_focus = self.focus_target_changed(spec.as_ref(), window, cx);
-        let changed = self.spec.as_ref().map(|spec| (&spec.id, spec.role))
-            != spec.as_ref().map(|spec| (&spec.id, spec.role));
+        let changed = self
+            .spec
+            .as_ref()
+            .map(|spec| (&spec.id, spec.role, &spec.title))
+            != spec.as_ref().map(|spec| (&spec.id, spec.role, &spec.title));
         let same_query = self
             .spec
             .as_ref()
@@ -812,6 +815,7 @@ impl DialogView {
             .is_some_and(|(previous, next)| {
                 previous.id == next.id
                     && (previous.role != next.role
+                        || previous.title != next.title
                         || previous.text.is_some() != next.text.is_some())
                     && (self.focus_handle(cx).contains_focused(window, cx)
                         || self

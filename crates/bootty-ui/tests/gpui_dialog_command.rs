@@ -1163,3 +1163,67 @@ fn changing_workflow_role_resets_launch_selection(cx: &TestAppContext) {
         ));
     });
 }
+
+#[gpui_kit::test]
+fn changing_picker_step_resets_selection_and_accepts_typing(cx: &TestAppContext) {
+    let initial = DialogSpec::searchable(
+        "workflow",
+        "Start session",
+        "task",
+        vec![
+            DialogRow::action("agent", "Agent", DialogAction::new("start")),
+            DialogRow::action("project", "Choose project", DialogAction::new("choose")),
+        ],
+    );
+    let (probe, mut cx) = rooted_probe(cx, initial);
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        probe.update(app, |probe, cx| {
+            probe.dialog.update(cx, |dialog, cx| {
+                dialog.present(
+                    Some(DialogSpec::searchable(
+                        "workflow",
+                        "Choose project",
+                        "",
+                        vec![
+                            DialogRow::action(
+                                "first",
+                                "First project",
+                                DialogAction::new("choose"),
+                            ),
+                            DialogRow::action(
+                                "second",
+                                "Second project",
+                                DialogAction::new("choose"),
+                            ),
+                        ],
+                    )),
+                    window,
+                    cx,
+                );
+            });
+        });
+    });
+    cx.refresh().unwrap();
+    cx.run_until_parked();
+    cx.simulate_keystrokes("p");
+    cx.simulate_keystrokes("enter");
+    probe.update(&mut cx, |probe, _| {
+        let intents = probe.intents.borrow();
+        assert!(intents.iter().any(
+            |intent| matches!(intent, DialogIntent::TextChanged { value, .. } if value == "p")
+        ));
+        assert!(intents.iter().any(
+            |intent| matches!(intent, DialogIntent::Activate { row, .. } if row.0 == "first")
+        ));
+    });
+}
