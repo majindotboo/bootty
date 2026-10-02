@@ -7,7 +7,7 @@ use bootty_control::{
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
 };
 use gpui_kit::{
@@ -46,7 +46,13 @@ impl AgentHistory {
         cx: &mut Context<Self>,
     ) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search session history"));
-        cx.observe(&query, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&query, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.selected = None;
+                cx.notify();
+            }
+        })
+        .detach();
         let view = Self {
             provider,
             cwd,
