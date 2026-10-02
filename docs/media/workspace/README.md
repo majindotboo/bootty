@@ -1,37 +1,18 @@
 # Native workspace demonstrations
 
-Captured October 1, 2026, between 20:15 and 20:52 PDT, from the packaged
-Development app built at `ade61d879fee0428acd05507deef2d8217008cde`.
-Its executable SHA-256 was
-`75a8dfffefece34004322d8d2fe1436cb5586c7894cdd3197a0ddde3ee7bd6ae`.
-Project captures followed a repackage of the same source; their executable hash
-was `76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5`.
-[Capture manifest](captures.json) records each artifact hash and capture time.
-Annotation captures were refreshed at 21:06 PDT from `99ac4840`, with executable
-SHA-256 `5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34`.
-The computer setup capture followed at 21:24 PDT from `a3ea9ca1`, with executable
-SHA-256 `6091998583ce2a82d8a20c9a8c8166305a2dd858c1b6525a6ec78c139e559b98`.
-
-Session, empty-sidebar and file captures were refreshed at 21:51 PDT from
-`c5734d15`, alongside new Changes, Diff, Document and sidebar interaction captures.
-Executable SHA-256:
-`25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2`.
-
-Browser, settings, search, sessions and empty-sidebar captures were refreshed at
-22:39–22:40 PDT from `b80cea92`, after correcting browser chrome keyboard routing.
-Executable SHA-256:
-`35b11cdbacfd5057d4cbe70cb53123b8a8ba7b20cda1b8a1b815ea759d30c6b8`.
-The page cookie remained after two full app restarts. A separate lifecycle check
-at 22:51 PDT confirmed that private-profile cookies disappear after restarting
-and that returning to remembered site data preserves the earlier persistent
-cookie. The original configuration bytes and session counts were restored. Separate recordings cover
-native page focus after palette cancellation and browser tab shortcuts from the
-address field. Browser shortcuts preserve the terminal window and pane targets;
-after closing the last browser tab, terminal Cmd+T and Cmd+W still work.
+Captured from packaged Development builds on October 1, 2026. The
+[capture manifest](captures.json) records each artifact's source revision,
+executable hash, capture time and SHA-256. History, agent-terminal, session,
+empty-sidebar and coordination captures were refreshed from `064cef1d` at
+23:12–23:16 PDT. Project setup and tool-close recordings were refreshed from
+`7ed43235` at 23:21–23:23 PDT. Browser keyboard and private-cookie lifecycle captures use
+`b80cea92`; the manifest identifies the revisions for the remaining interactions.
 
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
 
+- [Tool close](tool-close.mp4), 2.8 seconds: close a focused Coordination tab,
+  open Cmd+K and type immediately without clicking another input.
 - [Sidebar tabs](sidebar-tabs.mp4), 9.0 seconds: open a document, type directly,
   close with Cmd+W, discard the unsaved draft, open its untracked diff and close
   the diff tab. Long titles truncate before the close button. The owned fixture
@@ -46,11 +27,14 @@ playback is not accelerated.
 - [Browser shortcuts](browser-shortcuts.mp4), 2.5 seconds: Cmd+T from the
   address field, type an unsent draft, then Cmd+W to close the peer browser tab.
   The original terminal tab and pane remain present.
-- [Project setup](project-setup.mp4), 4.6 seconds: select the detected project,
+- [Project setup](project-setup.mp4), 3.0 seconds: select the detected project,
   choose the existing checkout and launch its terminal. The disposable session
   was closed, restoring the prior session counts.
-- [Agent terminal](agent-launch.mp4), 4.2 seconds: a colored Pi terminal, Cmd+D
-  creating a split, Cmd+T creating a terminal tab, and returning to the split.
+- [History filtering](history-filter.mp4), 3.2 seconds: select a visible session,
+  filter it out, clear the filter and select it again. Resume and Fork stay
+  disabled until a visible row is selected. No conversation was resumed.
+- [Agent terminal](agent-launch.mp4), 2.4 seconds: a colored Pi terminal, Cmd+D
+  creating a split and Cmd+T creating an independent terminal tab.
   This disposable session used `--no-session --no-extensions`, received no
   prompt, and was closed afterward. The prior 9 native / 2 rmux / 0 tmux
   session counts were restored.
@@ -65,6 +49,7 @@ playback is not accelerated.
 ![Page typing resumes after palette dismissal without a click](browser-focus.png)
 ![Private-profile cookie absent after a full app restart](browser-private.png)
 ![Native provider history with account status and search](history.png)
+![Filtered history disables hidden session actions](history-filter.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
 ![Page element annotation ready for review](annotations.png)
 ![Annotation feedback edited immediately in the terminal without submitting](annotation-paste.png)
