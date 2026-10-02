@@ -1,43 +1,29 @@
 # Native workspace demonstrations
 
-Captured from isolated development apps. Screenshots show real GPUI windows;
-recordings preserve normal playback speed, with idle spans trimmed. The project
-and its changes are disposable demo data. Agent launches use ordinary backend
-terminals, including their normal tabs and splits.
+Captured October 1, 2026, from the packaged Development app built at
+`d9501b8e584cdea2306203827ac3b4c2d5ddbefb`. Its executable SHA-256 is
+`1707f3179df5873c7e9d1a1bce13c758db898a600389bc6a37d41c348457238c`.
+Later media-only changes do not change that executable.
 
-- [Project setup](project-setup.mp4), 17 seconds: project artwork, checkout, and session choices.
-- [Agent terminals](agent-launch.mp4), 16 seconds: colored provider TUI, a new terminal tab, and splits.
-- [Browser](browser.mp4): top-level, closable page tabs, compact navigation, native input and Cmd+K overlay visibility.
-- [Current browser tabs](browser-tabs.mp4), 17 seconds: open and close a page,
-  Cmd+K restoration, shared tab spacing, usage reset time and bottom Spaces.
-- [Tools](tools.mp4), 14 seconds: grouped changes, tracked diff, and Files navigation.
-- [Linux X11](linux-x11.mp4), 12 seconds, and [XWayland](linux-xwayland.mp4),
-  12 seconds: native browser input, navigation, resize, and palette restoration.
+The videos use native window captures at their observed cadence. Idle spans
+longer than two seconds are trimmed; interaction playback is not accelerated.
 
-![Sessions and quiet usage](sessions.png)
-![Shared Pill appearance for terminal and sidebar tabs](shared-pill-tabs.png)
-![Checkout selection](checkout.png)
-![Checkout launch choices](launch.png)
-![Grouped changes](changes.png)
-![Tracked diff](diff.png)
-![Session actions](session-options.png)
-![Local browser preview](browser.png)
-![Computer setup](computer.png)
-![Observed orchestration completion](orchestration.png)
-![Linux X11 browser](linux-x11.png)
-![Linux XWayland browser](linux-xwayland.png)
+- [Browser](browser.mp4), 5 seconds: literal address-bar typing, remembered site
+  data after relaunch, Cmd+K over the page, and Escape returning to the browser.
+- [Agent terminal](agent-launch.mp4), 5 seconds: a colored Pi terminal, Cmd+D
+  creating a split, Cmd+T creating a terminal tab, and returning to the split.
+  This disposable session used `--no-session --no-extensions`, received no
+  prompt, and was closed afterward. The prior 9 native / 2 rmux / 0 tmux
+  session counts were restored.
 
-The sessions, shared-tab, browser, computer-use and coordination screenshots,
-and the browser-tabs recording, show bottom icon-only Spaces with tooltip names,
-usage reset time and pacing, and the same tab appearance setting in both tab rows.
-The other demonstrations predate these spacing and footer refinements.
+![Rounded project sessions, compact pacing and reset countdown](sessions.png)
+![Empty sidebar with direct choices for tools and browser pages](empty-sidebar.png)
+![Files in a closable top-level sidebar tab](files.png)
+![Browser input and persistent site data](browser.png)
+![Native provider history with account status and search](history.png)
+![Agent terminal, split and independent terminal tab](agent-terminals.png)
 
-Computer use is disabled and the current development identity reports Screen
-Recording and Accessibility as not granted. The native helper was separately
-exercised for capture, literal Unicode input, and secure-input refusal; these
-screenshots do not claim a new permission grant. The completed coordination run
-came from a real Codex terminal executing the supplied completion command.
-
-Linux browser embedding uses an X11 display, including XWayland. Pure Wayland
-without XWayland is unsupported. Optional agent conversations have separate
-demonstrations in their own change.
+These captures demonstrate the listed interactions, not completion of desktop
+acceptance. Computer permission setup, a terminal worker coordination run,
+annotations, saved logins and project setup still need current demonstrations.
+Mobile acceptance remains paused until the desktop work is ready.
