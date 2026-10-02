@@ -133,10 +133,11 @@ pub fn apply_terminal_find_intent(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandPaletteEvent {
     Close,
     Run(Command),
+    Invoke(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -686,10 +687,63 @@ impl SpaceEditorDialog {
     }
 }
 
+enum PaletteCommand {
+    Core(Command),
+    Agent(bootty_control::CommandDescriptor),
+}
+
+impl PaletteCommand {
+    fn title(&self) -> &str {
+        match self {
+            Self::Core(command) => command.title(),
+            Self::Agent(command) => &command.title,
+        }
+    }
+    fn description(&self) -> &str {
+        match self {
+            Self::Core(command) => command.description(),
+            Self::Agent(command) => &command.description,
+        }
+    }
+    fn action(&self) -> &str {
+        match self {
+            Self::Core(command) => command.action(),
+            Self::Agent(command) => &command.id,
+        }
+    }
+    fn palette_action(&self) -> Option<&str> {
+        match self {
+            Self::Core(command) => command.palette_action(),
+            Self::Agent(command) => Some(&command.id),
+        }
+    }
+    const fn category(&self) -> crate::action_catalog::CommandCategory {
+        match self {
+            Self::Core(command) => command.category(),
+            Self::Agent(_) => crate::action_catalog::CommandCategory::Sessions,
+        }
+    }
+    fn icon(&self) -> &str {
+        match self {
+            Self::Core(command) => command.icon(),
+            Self::Agent(command) => bootty_agents::AgentKind::ALL
+                .into_iter()
+                .find(|provider| command.id.starts_with(&format!("agents.{provider}.")))
+                .map_or("bot", bootty_agents::AgentKind::icon),
+        }
+    }
+    fn run(&self) -> CommandPaletteEvent {
+        match self {
+            Self::Core(command) => CommandPaletteEvent::Run(*command),
+            Self::Agent(command) => CommandPaletteEvent::Invoke(command.id.clone()),
+        }
+    }
+}
+
 pub struct CommandPaletteDialog {
     localizer: crate::i18n::Localizer,
     list: SearchableList<usize>,
-    commands: Vec<Command>,
+    commands: Vec<PaletteCommand>,
     current: CommandPaletteState,
 }
 
@@ -726,6 +780,13 @@ impl CommandPaletteDialog {
         let bindings = keybind_map(keybinds);
         let mut commands = CommandRegistry::core()
             .palette_commands()
+            .map(PaletteCommand::Core)
+            .chain(
+                bootty_agents::terminal_command_descriptors()
+                    .into_iter()
+                    .filter(|command| command.palette)
+                    .map(PaletteCommand::Agent),
+            )
             .collect::<Vec<_>>();
         // Keep the source list in the same fixed category order as the projected groups. This
         // lets the shared Command index paths continue to map directly back to `self.commands`.
@@ -762,11 +823,11 @@ impl CommandPaletteDialog {
     }
 
     #[must_use]
-    pub fn current_action(&self) -> Option<&'static str> {
+    pub fn current_action(&self) -> Option<&str> {
         self.list
             .selected_value()
             .and_then(|index| self.commands.get(*index))
-            .map(|command| command.action())
+            .map(PaletteCommand::action)
     }
 
     pub fn spec(&self) -> DialogSpec {
@@ -774,7 +835,7 @@ impl CommandPaletteDialog {
         let mut category = None;
         let mut shown = 0_usize;
         for (visible, row) in self.list.rows().into_iter().enumerate() {
-            let Some(&command) = self.commands.get(row.source_index) else {
+            let Some(command) = self.commands.get(row.source_index) else {
                 continue;
             };
             let next_category = command.category().label();
@@ -797,7 +858,7 @@ impl CommandPaletteDialog {
                 detail: row.secondary.map(str::to_owned),
                 trailing: None,
                 keybinding: row.trailing.map(str::to_owned),
-                current: self.current.is_current(command),
+                current: matches!(command, PaletteCommand::Core(command) if self.current.is_current(*command)),
                 enabled: true,
                 destructive: false,
                 action: Some(DialogAction::new("run").with_payload(row.source_index.to_string())),
@@ -841,8 +902,8 @@ impl CommandPaletteDialog {
                 None
             }
             DialogIntent::Activate { payload, .. } => payload_index(payload)
-                .and_then(|index| self.commands.get(index).copied())
-                .map(CommandPaletteEvent::Run),
+                .and_then(|index| self.commands.get(index))
+                .map(PaletteCommand::run),
             _ => None,
         }
     }

@@ -2,7 +2,6 @@
 //!
 //! Projects accepted configuration, mux state, and native service facts into the workspace window.
 
-mod agent_launch;
 mod dialogs;
 mod settings_window;
 mod terminal_agents;
@@ -874,20 +873,6 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if invocation
-            .command
-            .strip_prefix("agents.")
-            .and_then(|command| command.split_once('.'))
-            .is_some_and(|(_, operation)| {
-                matches!(
-                    operation,
-                    "start" | "resume" | "fork" | "history" | "account.login" | "account.logout"
-                )
-            })
-        {
-            self.open_terminal_agent_command(invocation, window, cx);
-            return;
-        }
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| tools.remember_focus(window, cx));
         }

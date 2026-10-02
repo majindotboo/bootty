@@ -428,7 +428,7 @@ fn start_terminal(
         Caller::Internal,
     );
     request.target = binding_target;
-    match executor.execute(request, deadline, cancellation) {
+    match executor.execute(request, deadline, cancellation.clone()) {
         CommandOutcome::Success {
             value,
             mut warnings,
@@ -452,6 +452,17 @@ fn start_terminal(
                         "Agent terminal started; metadata could not be saved: {error}"
                     ),
                 });
+            }
+            if let Some(target) = &target {
+                let mut focus = CommandInvocation::from_action("agents.focus", Caller::Internal);
+                focus.target = Some(target.clone());
+                let outcome = executor.execute(focus, deadline, cancellation);
+                if !matches!(outcome, CommandOutcome::Success { .. }) {
+                    warnings.push(CommandWarning {
+                        code: "agent_focus_failed".into(),
+                        message: "Agent terminal started, but could not be selected.".into(),
+                    });
+                }
             }
             CommandOutcome::Success {
                 value: json!({"created":value.get("created"),"terminal_target":target,"target":target,"provider":provider.to_string(),"message":if provider==AgentKind::Pi&&operation.starts_with("account."){"Use /login or /logout in the Pi terminal"}else{""}}),
