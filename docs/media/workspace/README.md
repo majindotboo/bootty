@@ -17,12 +17,14 @@ Session, empty-sidebar and file captures were refreshed at 21:51 PDT from
 Executable SHA-256:
 `25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2`.
 
-Browser, browser settings and search captures were refreshed at 22:09 PDT from
-`0ba0d6df`, with a new page-focus capture and browser recording. Executable
-SHA-256: `81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820`.
-The local page cookie survived a full app restart and a new webview before these
-captures. The browser recording verifies typing after palette cancellation,
-which required a separate native focus restoration fix.
+Browser, settings, search, sessions and empty-sidebar captures were refreshed at
+22:39–22:40 PDT from `b80cea92`, after correcting browser chrome keyboard routing.
+Executable SHA-256:
+`35b11cdbacfd5057d4cbe70cb53123b8a8ba7b20cda1b8a1b815ea759d30c6b8`.
+The page cookie remained after two full app restarts. Separate recordings cover
+native page focus after palette cancellation and browser tab shortcuts from the
+address field. Browser shortcuts preserve the terminal window and pane targets;
+after closing the last browser tab, terminal Cmd+T and Cmd+W still work.
 
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
@@ -36,8 +38,11 @@ playback is not accelerated.
   terminal, type an edit without clicking the terminal, and clear the unsent
   text with Ctrl+C. The disposable session was closed afterward.
 
-- [Browser](browser.mp4), 4.0 seconds: type in a page field, Cmd+K, Escape,
+- [Browser](browser.mp4), 3.0 seconds: type in a page field, Cmd+K, Escape,
   continue typing without clicking, then Cmd+T and close the peer browser tab.
+- [Browser shortcuts](browser-shortcuts.mp4), 2.5 seconds: Cmd+T from the
+  address field, type an unsent draft, then Cmd+W to close the peer browser tab.
+  The original terminal tab and pane remain present.
 - [Project setup](project-setup.mp4), 4.6 seconds: select the detected project,
   choose the existing checkout and launch its terminal. The disposable session
   was closed, restoring the prior session counts.
