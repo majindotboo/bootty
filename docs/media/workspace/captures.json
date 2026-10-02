@@ -107,6 +107,13 @@
       "capture_started_at": "2026-10-02T04:06:14.309Z",
       "capture_finished_at": "2026-10-02T04:06:16.314Z",
       "sha256": "6d876fcb837de13115b8ad96a4cb5a857f888faf2019c28c4da4d2a64393ae11"
+    },
+    {
+      "file": "computer-setup.png",
+      "captured_at": "2026-10-02T04:24:32.031Z",
+      "source_commit": "a3ea9ca10b7159507ad7c4359bed45124f87b851",
+      "executable_sha256": "6091998583ce2a82d8a20c9a8c8166305a2dd858c1b6525a6ec78c139e559b98",
+      "sha256": "85bcc4052db1d7131e4d3657ec3d4e03779c88442589d1464a55712b778e1929"
     }
   ]
 }
