@@ -5,7 +5,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui_kit::base::Tab;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     dock::{
         BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockPlacement, DockSkin,
         DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
@@ -612,18 +612,24 @@ impl WorkspaceTabGroup {
             .unwrap_or_else(|| panel_identity(panel.panel_name(cx)).0.into());
         let title =
             handle.map_or_else(|| label.clone().into_any_element(), |h| h.title(window, cx));
+        let selected = !group.is_collapsed() && ix == group.active_ix();
+        let foreground =
+            crate::gpui::tabs::tab_foreground(tab_config.appearance, selected, accent, cx);
         let suffix = handle.and_then(|h| h.title_suffix(window, cx)).or_else(|| {
             (panel.panel_name(cx) != "bootty.sessions")
-                .then(|| close_panel_tab(self.owner.clone(), group, id, &label))
+                .then(|| close_panel_tab(self.owner.clone(), group, id, &label, foreground, cx))
         });
-        let selected = !group.is_collapsed() && ix == group.active_ix();
         let hover_group = SharedString::from(format!("panel-tab-hover-{id:?}"));
         let title = div()
             .id(SharedString::from(format!("panel-tab-{id:?}")))
             .flex()
             .items_center()
-            .gap_2()
-            .child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
+            .gap_1()
+            .child(
+                Icon::new(panel_identity(panel.panel_name(cx)).1)
+                    .small()
+                    .text_color(foreground),
+            )
             .child(title);
         let select = group.clone();
         let click_focus = focus.clone();
@@ -698,11 +704,18 @@ fn close_panel_tab(
     group: &TabGroupContext,
     id: gpui_kit::component::dock::PanelId,
     label: &str,
+    foreground: gpui_kit::Hsla,
+    cx: &App,
 ) -> AnyElement {
     let group = group.clone();
     Button::new("close-tab")
         .icon(IconName::Close)
-        .ghost()
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(foreground)
+                .hover(cx.theme().secondary_hover)
+                .active(cx.theme().secondary_hover),
+        )
         .xsmall()
         .size_4()
         .tooltip("Close tab")

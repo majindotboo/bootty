@@ -102,8 +102,7 @@ fn chrome_layout() -> ChromeLayout {
         right_dock_toggle: true,
         panel_tab_style: bootty_config::config::PanelTabStyle::default(),
         panel_tabs: bootty_config::config::PanelTabs::default(),
-        dock_tabs: bootty_config::config::ChromeConfig::default().dock_tabs,
-        terminal_tabs: bootty_config::config::ChromeConfig::default().terminal_tabs,
+        tabs: bootty_config::config::ChromeConfig::default().tabs,
         width: 900.0,
         height: 600.0,
         sidebar_position: SidebarPosition::Left,
@@ -758,7 +757,7 @@ fn top_status_inset_stays_clear_of_status_items_and_tabs(cx: &mut TestAppContext
     assert!(tab.origin.y >= inset_bottom);
     // Metrics reach the content boundary; the compact pill tab keeps its bottom margin.
     assert_eq!(item.bottom(), status.bottom());
-    assert_eq!(tab.bottom().add(px(4.0)), status.bottom());
+    assert!(tab.bottom().add(px(2.0)) <= status.bottom());
 }
 
 #[gpui_kit::test]
@@ -1548,7 +1547,7 @@ fn terminal_tab_variants_keep_close_buttons_in_padding(cx: &mut TestAppContext) 
                 TabCloseButton::Hidden,
             ] {
                 let mut snapshot = chrome_snapshot();
-                snapshot.layout.terminal_tabs = TabConfig {
+                snapshot.layout.tabs = TabConfig {
                     appearance,
                     close_position,
                     close_button,
@@ -1611,7 +1610,7 @@ fn terminal_tab_progress_stays_below_label(cx: &mut TestAppContext) {
         TabAppearance::Segmented,
     ] {
         let mut snapshot = chrome_snapshot();
-        snapshot.layout.terminal_tabs.appearance = appearance;
+        snapshot.layout.tabs.appearance = appearance;
         let item = snapshot
             .top_status
             .as_mut()

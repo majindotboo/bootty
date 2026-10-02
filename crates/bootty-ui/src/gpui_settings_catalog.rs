@@ -451,10 +451,8 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Panels => match id {
             "chrome.left-dock-toggle" => 1,
             "chrome.right-dock-toggle" => 2,
-            "chrome.panel-tab-style" => 3,
-            "chrome.panel-tabs" => 4,
-            id if id.starts_with("chrome.dock-tabs.") => 10,
-            id if id.starts_with("chrome.terminal-tabs.") => 11,
+            "chrome.tabs-use-session-color" => 9,
+            id if id.starts_with("chrome.tabs.") => 10,
             "chrome.top-bar" => 20,
             "chrome.bottom-bar" => 21,
             "chrome.status-height" => 22,

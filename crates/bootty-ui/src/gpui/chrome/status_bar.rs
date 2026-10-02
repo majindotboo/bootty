@@ -17,7 +17,7 @@ use super::{
 use crate::gpui::{IconSize, Rgba, sized_icon};
 use gpui_kit::component::{
     ActiveTheme as _, ElementExt as _, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     menu::ContextMenuExt,
 };
 
@@ -399,7 +399,7 @@ pub(super) fn dock_tabs(
         segment,
         chrome.snapshot.palette,
         StatusBarStyle {
-            tab_config: chrome.snapshot.layout.terminal_tabs,
+            tab_config: chrome.snapshot.layout.tabs,
             keymap_context: chrome.keymap_context(),
             key: &snapshot.key,
             background: snapshot.background,
@@ -604,28 +604,18 @@ fn render_tab(
     let focus_id_for_key = focus_id;
     let navigation_ids_for_key = tab_ids.clone();
     let activation_for_key = activation.clone();
-    let items = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            render_item(
-                segment,
-                item,
-                bar,
-                colors,
-                Some(active),
-                ItemLayout {
-                    stretch: index.saturating_add(1) == items.len(),
-                },
-                cx,
-            )
-        })
-        .collect::<Vec<_>>();
+    let items = render_tab_items(segment, items, bar, colors, active, cx);
 
     let close = tab_close_button(
         tab_context.as_ref(),
         format!("status-tab-close-{}-{}-{key}", bar.key, segment.source_slot),
         &label,
+        crate::gpui::tabs::tab_foreground(
+            bar.tab_config.appearance,
+            active,
+            color(colors.tab_accent),
+            cx,
+        ),
         cx,
     );
 
@@ -763,10 +753,38 @@ fn tab_activation(
         })
 }
 
+fn render_tab_items(
+    segment: &StatusSegmentSnapshot,
+    items: &[StatusItemSnapshot],
+    bar: StatusBarStyle<'_>,
+    colors: ChromePalette,
+    active: bool,
+    cx: &Context<GpuiChrome>,
+) -> Vec<gpui_kit::AnyElement> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            render_item(
+                segment,
+                item,
+                bar,
+                colors,
+                Some(active),
+                ItemLayout {
+                    stretch: index.saturating_add(1) == items.len(),
+                },
+                cx,
+            )
+        })
+        .collect()
+}
+
 fn tab_close_button(
     tab_context: Option<&TabContextSnapshot>,
     id: String,
     label: &str,
+    foreground: gpui_kit::Hsla,
     cx: &Context<GpuiChrome>,
 ) -> Option<gpui_kit::AnyElement> {
     tab_context.and_then(|tab_context| {
@@ -775,7 +793,12 @@ fn tab_close_button(
             let window_id = tab_context.window_id.clone();
             Button::new(SharedString::from(id.clone()))
                 .icon(gpui_kit::component::IconName::Close)
-                .ghost()
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .foreground(foreground)
+                        .hover(cx.theme().secondary_hover)
+                        .active(cx.theme().secondary_hover),
+                )
                 .xsmall()
                 .size_4()
                 .debug_selector(move || id)
@@ -925,7 +948,7 @@ fn render_item(
         .items_center()
         .gap_1()
         .overflow_hidden()
-        .text_xs()
+        .when(!tab, gpui_kit::Styled::text_xs)
         .when(!tab, |element| element.text_color(color(foreground)))
         .when(!tab, |element| {
             element.bg(if bar.segmented && item.background.is_none() {
@@ -945,7 +968,17 @@ fn render_item(
             element.border_b_1().border_color(color(colors.accent))
         })
         .when_some(item.icon.clone(), |element, icon| {
-            element.child(sized_icon(&icon, IconSize::Small, color(foreground)))
+            let tint = if tab {
+                crate::gpui::tabs::tab_foreground(
+                    bar.tab_config.appearance,
+                    active,
+                    color(colors.tab_accent),
+                    cx,
+                )
+            } else {
+                color(foreground)
+            };
+            element.child(sized_icon(&icon, IconSize::Small, tint))
         })
         .when_some(gauge, ParentElement::child)
         .child(

@@ -87,15 +87,11 @@ gap = 0
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.0
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [multiplexer]
 backend = "rmux"
@@ -509,9 +505,9 @@ An explicit `[window].fullscreen-top-offset` overrides the reserved height.
 Tab strips reveal a newly selected or keyboard-focused tab and show scroll
 buttons only in directions with more tabs. Terminal tab widths grow as needed,
 then wait for the title to remain unchanged for one second before shrinking.
-Close buttons default to the left on macOS and the right elsewhere. Override
-`close-position = "left"` or `"right"` under `[chrome.terminal-tabs]` or
-`[chrome.dock-tabs]` independently.
+Terminal and sidebar tabs share `[chrome.tabs]` for appearance, close-button side,
+and visibility. Close buttons default to always visible on the right. Set
+`close-position = "left"` or `close-button = "hover"` to change both strips.
 
 `chrome.tabs-use-session-color` defaults to `true`: active terminal and dock tabs
 use a muted tint of the selected session color. Set it to `false` to use the theme

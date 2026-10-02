@@ -222,10 +222,12 @@ pub fn readable_color(background: Rgba, preferred: Rgba) -> Rgba {
         return preferred;
     }
 
-    let target = if is_dark(background) {
-        Rgba::rgb(u8::MAX, u8::MAX, u8::MAX)
+    let white = Rgba::rgb(u8::MAX, u8::MAX, u8::MAX);
+    let black = Rgba::rgb(0, 0, 0);
+    let target = if contrast_ratio(background, white) >= contrast_ratio(background, black) {
+        white
     } else {
-        Rgba::rgb(0, 0, 0)
+        black
     };
     let mut low = 0.0;
     let mut high = 1.0;

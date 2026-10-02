@@ -255,6 +255,40 @@ fn readable_color_preserves_a_preferred_hue_when_adjusting_contrast() {
     assert_ne!(adjusted, Rgba::rgb(u8::MAX, u8::MAX, u8::MAX));
 }
 
+#[rstest]
+#[case(Rgba::rgb(0xb8, 0xbc, 0x54), Rgba::rgb(0xaa, 0xaf, 0xb7))]
+#[case(Rgba::rgb(0x70, 0x70, 0x70), Rgba::rgb(0x99, 0x99, 0x99))]
+#[case(Rgba::rgb(0x28, 0x2b, 0x33), Rgba::rgb(0x70, 0x75, 0x80))]
+#[case(Rgba::rgb(0xf0, 0xf0, 0xf0), Rgba::rgb(0xaa, 0xaa, 0xaa))]
+fn adjusted_text_remains_readable_on_colored_tab_surfaces(
+    #[case] background: Rgba,
+    #[case] preferred: Rgba,
+) {
+    let luminance = |color: Rgba| {
+        [color.red, color.green, color.blue]
+            .into_iter()
+            .zip([0.2126, 0.7152, 0.0722])
+            .map(|(byte, weight)| {
+                let value = f64::from(byte) / 255.0;
+                weight
+                    * if value <= 0.04045 {
+                        value / 12.92
+                    } else {
+                        ((value + 0.055) / 1.055).powf(2.4)
+                    }
+            })
+            .sum::<f64>()
+    };
+    let adjusted = readable_color(background, preferred);
+    let first = luminance(background);
+    let second = luminance(adjusted);
+    let contrast = (first.max(second) + 0.05) / (first.min(second) + 0.05);
+    assert!(
+        contrast >= 4.5,
+        "contrast {contrast}: {background:?} / {adjusted:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn live_ui_weight_assignment_publishes_a_new_family_to_kit(cx: &TestAppContext) {
     cx.update(|cx| {

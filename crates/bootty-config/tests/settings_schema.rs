@@ -335,25 +335,27 @@ fn legacy_sidebar_configuration_remains_loadable_for_layout_migration() {
 }
 
 #[rstest::rstest]
+#[case("tabs")]
 #[case("dock-tabs")]
 #[case("terminal-tabs")]
-fn partial_tab_settings_preserve_surface_defaults(#[case] surface: &str) {
+fn partial_tab_settings_preserve_defaults(#[case] section: &str) {
     let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
-    file.write_str(&format!("[chrome.{surface}]\nclose-position = \"left\"\n"))
+    file.write_str(&format!("[chrome.{section}]\nclose-position = \"left\"\n"))
         .unwrap();
     let config = load_config_from_path(file.path()).unwrap();
     let defaults = BoottyConfig::default();
-    let (actual, expected) = if surface == "dock-tabs" {
-        (config.chrome.dock_tabs, defaults.chrome.dock_tabs)
-    } else {
-        (config.chrome.terminal_tabs, defaults.chrome.terminal_tabs)
-    };
     assert_eq!(
-        actual.close_position,
+        config.chrome.tabs.close_position,
         bootty_config::config::TabClosePosition::Left
     );
-    assert_eq!(actual.appearance, expected.appearance);
-    assert_eq!(actual.close_button, expected.close_button);
+    assert_eq!(
+        config.chrome.tabs.appearance,
+        defaults.chrome.tabs.appearance
+    );
+    assert_eq!(
+        config.chrome.tabs.close_button,
+        defaults.chrome.tabs.close_button
+    );
 }
 
 #[rstest::rstest]

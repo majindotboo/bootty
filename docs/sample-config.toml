@@ -136,15 +136,11 @@ module = "clock"
 # align = "right"
 # module = "clock"
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [sidebar]
 # Sessions colors layer on top of the active theme.
