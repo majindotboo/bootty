@@ -270,6 +270,17 @@ fn spawn_local_rmux_daemon(
 /// Returns daemon argument, environment, runtime, or server startup errors.
 pub fn run_embedded_rmux_daemon() -> Result<Option<i32>> {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == super::pipe_output::PIPE_HELPER_FLAG)
+    {
+        let path = arguments
+            .get(1)
+            .context("pane output helper requires an endpoint")?;
+        super::pipe_output::run_pipe_helper(path.into())?;
+        return Ok(Some(0));
+    }
+
     #[cfg(unix)]
     if let Some(code) = rmux_server::run_internal_fifo_reader_helper(arguments.clone()) {
         return Ok(Some(code));

@@ -95,11 +95,23 @@ impl Drop for EmbeddedDaemon {
 
 #[rstest]
 fn rmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
+    if let Some(endpoint) = env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
+        return bootty_mux::rmux::run_pipe_helper(endpoint.into());
+    }
     if env::var_os(CHILD_ENV).is_some() {
         return run_child_acceptance();
     }
 
     let directory = assert_fs::TempDir::new_in("/tmp").context("create isolated rmux root")?;
+    let helper = directory.path().join("bootty-daemon");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact rmux_policy_publishes_real_frames_through_gpui --nocapture\n",
+            shell_quote(&env::current_exe()?.to_string_lossy()),
+        ),
+    )?;
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700))?;
     let output = Command::new(env::current_exe().context("resolve acceptance test executable")?)
         .args([
             "--exact",
@@ -107,6 +119,7 @@ fn rmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
             "--nocapture",
         ])
         .env(CHILD_ENV, "1")
+        .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
         .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", "/usr/bin:/bin")

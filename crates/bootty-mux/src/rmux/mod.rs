@@ -4,6 +4,7 @@ mod local;
 #[cfg(feature = "terminal-runtime")]
 mod pane;
 mod pane_io;
+mod pipe_output;
 mod provider;
 mod remote;
 
@@ -16,6 +17,7 @@ pub use bridge::{prepare_local_rmux_daemon, run_embedded_rmux_daemon};
 pub use local::{endpoint_path_for, socket_name};
 #[cfg(feature = "terminal-runtime")]
 pub use pane::RmuxPanePolicy;
+pub use pipe_output::run_pipe_helper;
 pub use provider::RmuxProvider;
 pub use remote::{RemoteRmuxRequest, run_remote_rmux_command};
 pub use rmux_client::INTERNAL_DAEMON_FLAG;

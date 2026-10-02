@@ -141,24 +141,23 @@ catalog-backed remote Spaces.
 
 ## Terminal path
 
-`bootty-mux` consumes the SDK's sequence-bearing `recover_output` stream for
-rmux panes. A bounded reader queue limits Bootty's pending bytes; it does not
-backpressure the daemon's PTY producer. When a reader falls
-behind the daemon's retained bytes, a typed rebase replaces the emulator state;
-bytes from separate epochs are never stitched together. Input and resize remain
-responsive while output is queued, and closed panes report their logical end.
+`bootty-mux` uses the supported SDK pipe-pane path for live rmux bytes. Each
+reader has an independent bounded queue; an EOF drains its queued tail before
+closing. Initial recovery seeds text and input modes while concurrent live bytes
+continue through the pipe. A stalled reader disconnects and reconnects rather
+than blocking another reader. Input and resize remain responsive.
 
-Recovery reconstructs text and input modes, but the public per-pane API cannot
-restore images whose bytes fell outside retention. The public subscriptions poll
-a retained cursor, so an unpaced live burst can overrun retention even with an
-active reader and an empty Bootty queue. This is a live-delivery limitation as
-well as a historical-replay limit: lossless large rmux images are unsupported.
-A read-only session attachment
-cannot replace this path: targeting a pane changes shared backend selection and
-its frames describe the entire session. Upgrade this limit when the SDK exposes
-a lossless per-pane graphics stream. Native and tmux terminal image paths retain
-their existing contracts. Native live-image acceptance verifies the complete
-2 MiB pixel buffer, GPUI image primitives and subsequent terminal input.
+The pinned SDK's pipe can lose producer bytes before Bootty's helper stdin,
+including in an already-attached live stream; it exposes no sequence or gap
+status for those bytes. Its separate recovery subscription also loses large
+live bursts, and switching to it worsened exact-image delivery in matched runs.
+The pipe transport therefore remains the live path. This preserves baseline
+behavior, not a lossless rmux graphics guarantee. Historical keyframes restore
+text and modes, not images beyond retained output. Upgrade this limit when the
+SDK exposes a lossless per-pane stream or public producer retention controls;
+no dependency internals are patched. Exact unpaced 2 MiB image placement,
+dimensions, pixels and continued-input coverage remains required. Native
+acceptance separately verifies the full pixel buffer and GPUI image primitives.
 
 The rmux pane worker owns both remote transport process trees. Closing the
 terminal ends them even while its output reader waits on a quiet SSH stream;

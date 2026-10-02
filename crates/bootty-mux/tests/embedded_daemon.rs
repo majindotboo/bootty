@@ -2,6 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader},
+    os::unix::fs::PermissionsExt as _,
     process::{Child, Command, Stdio},
     sync::{OnceLock, mpsc},
     thread,
@@ -112,7 +113,7 @@ embedded_scenarios!(
     closed_pane_accepts_teardown_updates,
     shell_exit_is_quiet,
     bounded_live_output,
-    large_image_burst_keeps_terminal_usable,
+    kitty_images_reach_terminal_frames,
     public_raw_output_reports_retained_gap,
     large_restore_progress,
 );
@@ -120,6 +121,9 @@ embedded_scenarios!(
 /// The child-process entry point. A no-op in the runner's own process.
 #[test]
 fn embedded_rmux_scenario_child() -> Result<()> {
+    if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
+        return bootty_mux::rmux::run_pipe_helper(endpoint.into());
+    }
     let Some(scenario) = std::env::var_os(SCENARIO_ENV) else {
         return Ok(());
     };
@@ -1072,7 +1076,7 @@ if expected in data:
         ditch_session(&mut backend, &session_id)
     }
 
-    pub fn large_image_burst_keeps_terminal_usable() -> Result<()> {
+    pub fn kitty_images_reach_terminal_frames() -> Result<()> {
         let (mut backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
         let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
@@ -1101,11 +1105,17 @@ if expected in data:
         terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
         wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
-        // The SDK reports/rebases after a retained-output gap. Its keyframe
-        // cannot reconstruct missing images; verify continued terminal input.
+        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
         drop(second);
         terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
+        let frame = terminal.extract_frame()?;
+        assert_eq!(frame.images.placements.len(), 1);
+        let image = frame.images.placements.first().context("rendered image")?;
+        assert_eq!(image.image_width, 1024);
+        assert_eq!(image.image_height, 512);
+        assert_eq!(image.data.len(), 1024 * 512 * 4);
+        assert_eq!(image.data.iter().position(|byte| *byte != 255), None);
         ditch_session(&mut backend, &session_id)
     }
 
@@ -1163,9 +1173,19 @@ if expected in data:
 /// environment that is the same on every machine.
 fn run_embedded_scenario(scenario: &str) -> Result<()> {
     let directory = assert_fs::TempDir::new()?;
+    let helper = directory.path().join("bootty-daemon");
+    std::fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact embedded_rmux_scenario_child --nocapture\n",
+            bootty_host::shell_quote(&std::env::current_exe()?.to_string_lossy()),
+        ),
+    )?;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", SCENARIO_CHILD_TEST])
         .env(SCENARIO_ENV, scenario)
+        .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
         .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", ISOLATED_PATH)
