@@ -7,9 +7,15 @@ Its executable SHA-256 was
 Project captures followed a repackage of the same source; their executable hash
 was `76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5`.
 [Capture manifest](captures.json) records each artifact hash and capture time.
+Annotation captures were refreshed at 21:06 PDT from `99ac4840`, with executable
+SHA-256 `5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34`.
 
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
+
+- [Annotation](annotation.mp4), 4.0 seconds: review feedback, paste it into the
+  terminal, type an edit without clicking the terminal, and clear the unsent
+  text with Ctrl+C. The disposable session was closed afterward.
 
 - [Browser](browser.mp4), 3.4 seconds: literal address-bar typing, remembered
   site data, Cmd+K over the page, and Escape returning to the browser.
@@ -29,7 +35,7 @@ playback is not accelerated.
 ![Native provider history with account status and search](history.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
 ![Page element annotation ready for review](annotations.png)
-![Annotation feedback pasted without submitting the terminal](annotation-paste.png)
+![Annotation feedback edited immediately in the terminal without submitting](annotation-paste.png)
 ![Configured browser search and site data settings](browser-settings.png)
 ![Search terms loaded through the configured engine](browser-search.png)
 ![Ordinary terminal worker and recorded completion report](coordination.png)

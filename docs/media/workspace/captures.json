@@ -11,13 +11,17 @@
     },
     {
       "file": "annotation-paste.png",
-      "captured_at": "2026-10-02T03:28:11.731612+00:00",
-      "sha256": "3335817d5ac79fe9721f17010707508423544ed0c456cb6950b5c71ea2e8385c"
+      "captured_at": "2026-10-02T04:06:15.830Z",
+      "sha256": "b6e242ecc308aa6123c0dafe4678c27dce73b4224b79d05f571b044e3651c185",
+      "source_commit": "99ac48408c88bdf398c55e3b677a5fc07fadb820",
+      "executable_sha256": "5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34"
     },
     {
       "file": "annotations.png",
-      "captured_at": "2026-10-02T03:28:10.560903+00:00",
-      "sha256": "e617c89282d8f7d796572de0a29f75edddc02c8baf9d6fdd8098ee91cd1772d5"
+      "captured_at": "2026-10-02T04:06:14.309Z",
+      "sha256": "8c8c2b43673fd27fb6e862170d4c9c6b89d0f1c1274cd64c932a8a954440460b",
+      "source_commit": "99ac48408c88bdf398c55e3b677a5fc07fadb820",
+      "executable_sha256": "5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34"
     },
     {
       "file": "browser-search.png",
@@ -95,6 +99,14 @@
       "capture_finished_at": "2026-10-02T03:52:01.675000+00:00",
       "executable_sha256": "76e7e69b8a125bb7444d5d0920d5cbb0c1e4bd203eb0c85bc98076023d0d5cf5",
       "sha256": "06d5b07fcefad5d2c4aeeb4100167f169c33febcb11abafac295b2abaf12c3e4"
+    },
+    {
+      "file": "annotation.mp4",
+      "source_commit": "99ac48408c88bdf398c55e3b677a5fc07fadb820",
+      "executable_sha256": "5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34",
+      "capture_started_at": "2026-10-02T04:06:14.309Z",
+      "capture_finished_at": "2026-10-02T04:06:16.314Z",
+      "sha256": "6d876fcb837de13115b8ad96a4cb5a857f888faf2019c28c4da4d2a64393ae11"
     }
   ]
 }
