@@ -463,6 +463,9 @@ fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext
     let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
     fill_sidebar_sessions(sidebar);
     sidebar.rows.truncate(6);
+    for (index, row) in sidebar.rows.iter_mut().enumerate() {
+        row.current = index >= 3;
+    }
     let (probe, cx) =
         cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let start = center(
