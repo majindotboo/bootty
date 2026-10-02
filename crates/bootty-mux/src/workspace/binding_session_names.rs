@@ -200,8 +200,9 @@ impl WorkspaceRuntime {
         let remote = self.active.binding.multiplexer.remote.is_some();
         let cwd = self.active.binding.session_cwd(cwd);
         let display_name = suggested_session_name(&cwd, remote);
+        let backend_name = session_names::portable_session_name(&display_name);
         let session_id = session_names::unique_session_name(
-            &display_name,
+            &backend_name,
             self.taken_session_names(None).iter().map(String::as_str),
         );
         MuxCommand::CreateProjectSession {

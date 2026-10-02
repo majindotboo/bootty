@@ -11,6 +11,46 @@ fn launch(args: &[&str]) -> AgentLaunch {
         ephemeral: false,
     }
 }
+
+#[rstest]
+#[case(vec!["--", "First line\n\tSecond line"], true)]
+#[case(vec!["--model", "first\nsecond"], false)]
+#[case(vec!["--", "first\nsecond", "extra"], false)]
+#[case(vec!["--", "first\0second"], false)]
+#[case(vec!["--", "first\u{1b}[31msecond"], false)]
+fn multiline_text_is_allowed_only_in_the_final_literal_prompt(
+    #[case] arguments: Vec<&str>,
+    #[case] valid: bool,
+) {
+    let launch = launch(&arguments);
+    assert_eq!(launch.validate().is_ok(), valid);
+    if valid {
+        for provider in AgentKind::ALL {
+            assert_eq!(launch.retained(provider).arguments, Vec::<String>::new());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[rstest]
+fn multiline_prompt_reaches_the_process_as_literal_argv() {
+    let prompt = "first line\n'quoted'; $HOME `uname`\n\tlast line";
+    let launch = AgentLaunch {
+        program: "/usr/bin/printf".to_owned(),
+        cwd: None,
+        arguments: vec!["%s".to_owned(), "--".to_owned(), prompt.to_owned()],
+        ephemeral: false,
+    };
+    let command = launch
+        .shell_command(AgentKind::Pi, LaunchShell::Posix)
+        .unwrap();
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, format!("--{prompt}").into_bytes());
+}
 #[rstest]
 #[case(AgentKind::Pi, false, vec!["--model", "model", "--session", "session"]) ]
 #[case(AgentKind::Pi, true, vec!["--model", "model", "--fork", "session"]) ]

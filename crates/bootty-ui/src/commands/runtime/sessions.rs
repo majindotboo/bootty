@@ -5,7 +5,7 @@ use std::{task::Poll, time::Instant};
 use bootty_control::{CommandCancellation, CommandOutcome, ResourceKind};
 use bootty_mux::{
     command::MuxCommand,
-    controller::{CommandSelection, SpaceId},
+    controller::SpaceId,
     executor,
     provider::PaneTopology,
     workspace::{SessionRequestError, StartingSession},
@@ -42,7 +42,10 @@ impl AppState {
                 );
                 return CommandDispatch::Complete(outcome);
             }
-            (SessionAction::Create, Some(ExactMuxTarget::Binding(scope))) => {
+            (
+                SessionAction::Create | SessionAction::Start,
+                Some(ExactMuxTarget::Binding(scope)),
+            ) => {
                 let (name, cwd, argv) = match session_create_arguments(arguments) {
                     Ok(arguments) => arguments,
                     Err(outcome) => return self.reject_command(outcome),
@@ -99,7 +102,7 @@ impl AppState {
             command,
             membership.map(Box::new),
             execution,
-            CommandSelection::Preserve,
+            action.command_selection(),
         ) else {
             return self.reject_command(CommandOutcome::StaleTarget {
                 message: "The target Space was closed".to_owned(),

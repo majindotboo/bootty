@@ -1530,6 +1530,7 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
     let mut state = app_state(config, support::backends());
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: first_cwd.to_string_lossy().into_owned(),
+        command: None,
     });
     let started = Instant::now();
     assert!((0..250).any(|tick| {
@@ -1548,6 +1549,7 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
 
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: second_cwd.to_string_lossy().into_owned(),
+        command: None,
     });
     assert_fs::fixture::ChildPath::new(config_path.clone())
         .write_str(

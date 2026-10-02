@@ -158,8 +158,13 @@ impl AppState {
             Some(Event::NewSession(NewSessionPickerEvent::CreateAgentSession {
                 cwd,
                 provider,
+                prompt,
             })) => {
-                effects.push(AppEffect::OpenAgentProjectSession { cwd, provider });
+                effects.push(AppEffect::OpenAgentProjectSession {
+                    cwd,
+                    provider,
+                    prompt,
+                });
                 self.dismiss_modal_dialog();
             }
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
@@ -527,8 +532,8 @@ impl AppState {
                     }
                 }
             }
-            NewSessionPickerEvent::CreateSession { cwd } => {
-                self.create_project_session_for_cwd(&cwd);
+            NewSessionPickerEvent::CreateSession { cwd, command } => {
+                self.create_project_session_for_cwd(&cwd, command);
                 self.dismiss_modal_dialog();
             }
         }

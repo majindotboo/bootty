@@ -63,7 +63,7 @@ impl AgentLaunch {
     }
 
     /// # Errors
-    /// Returns an error for an invalid program, oversized arguments, or control characters in launch values.
+    /// Returns an error for invalid programs, oversized values or control characters outside a literal prompt.
     pub fn validate(&self) -> Result<(), String> {
         if self.program.is_empty() || self.program.starts_with('-') {
             return Err("Agent program must be an executable name or path".to_owned());
@@ -80,11 +80,24 @@ impl AgentLaunch {
         if total > 64 * 1024 {
             return Err("Agent launch exceeds 64 KiB".to_owned());
         }
-        for value in std::iter::once(&self.program)
-            .chain(self.cwd.iter())
-            .chain(self.arguments.iter())
-        {
-            if value.len() > 8192 || value.chars().any(char::is_control) {
+        let values = std::iter::once((&self.program, false))
+            .chain(self.cwd.iter().map(|value| (value, false)))
+            .chain(self.arguments.iter().enumerate().map(|(index, value)| {
+                // Only the final positional prompt after `--` accepts ordinary
+                // text whitespace. Programs, paths and options stay single-line.
+                let prompt = index == self.arguments.len().saturating_sub(1)
+                    && index
+                        .checked_sub(1)
+                        .and_then(|index| self.arguments.get(index))
+                        .is_some_and(|separator| separator == "--");
+                (value, prompt)
+            }));
+        for (value, prompt) in values {
+            if value.len() > 8192
+                || value.chars().any(|character| {
+                    character.is_control() && !(prompt && matches!(character, '\n' | '\r' | '\t'))
+                })
+            {
                 return Err(
                     "Agent launch values must be at most 8192 bytes without control characters"
                         .to_owned(),

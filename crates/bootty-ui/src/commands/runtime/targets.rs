@@ -347,6 +347,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "forwards.open"
                         | "history.search"
                         | "session.create"
+                        | "session.start"
                 )
         }
         ResourceKind::Session => {

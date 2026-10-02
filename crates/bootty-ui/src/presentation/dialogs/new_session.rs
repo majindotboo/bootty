@@ -18,6 +18,7 @@ pub struct NewSessionDialog {
     worker: Option<NewSessionWorker>,
     project_picker: Option<ProjectPicker>,
     checkout: Option<String>,
+    draft: String,
 }
 
 enum NewSessionStep {
@@ -77,6 +78,7 @@ impl NewSessionDialog {
             worker,
             project_picker: None,
             checkout: None,
+            draft: String::new(),
         }
     }
 
@@ -143,7 +145,7 @@ impl NewSessionDialog {
         let remote = self.is_remote();
         let (rows, title, icon, hint, empty, text_hint, filter) = match &self.step {
             NewSessionStep::BranchName(draft) => return draft.spec(remote, busy),
-            NewSessionStep::Launch { cwd } => return launch_spec(cwd, remote),
+            NewSessionStep::Launch { cwd } => return launch_spec(cwd, remote, &self.draft, busy),
             NewSessionStep::Project(picker) => (
                 picker.rows(remote, !busy),
                 "New session",
@@ -244,7 +246,11 @@ impl NewSessionDialog {
                 self.select_row(row)?;
                 self.toggle_project_favorite()
             }
-            DialogIntent::Activate { row, .. } if !self.worker_busy() => {
+            DialogIntent::Activate { row, .. }
+                if !self.worker_busy()
+                    || matches!(self.step, NewSessionStep::Launch { .. })
+                        && row.0 != "choose-project" =>
+            {
                 if row.0 == "current-checkout" {
                     self.set_checkout(self.checkout.clone()?);
                     return None;
@@ -260,7 +266,7 @@ impl NewSessionDialog {
                     if self.is_remote() && row.0 != "terminal" {
                         return None;
                     }
-                    return launch_event(&row.0, cwd);
+                    return launch_event(&row.0, cwd, &self.draft);
                 }
                 self.select_row(row)?;
                 self.activate_selected(open_cwds)
@@ -281,7 +287,7 @@ impl NewSessionDialog {
             NewSessionStep::Worktree { list, .. } => {
                 list.apply(SearchableIntent::SetFilter(value.to_owned()));
             }
-            NewSessionStep::Launch { .. } => {}
+            NewSessionStep::Launch { .. } => value.clone_into(&mut self.draft),
             NewSessionStep::BranchName(draft) => {
                 value.clone_into(&mut draft.branch);
                 draft.error = None;
@@ -577,10 +583,12 @@ pub enum NewSessionPickerEvent {
     },
     CreateSession {
         cwd: String,
+        command: Option<String>,
     },
     CreateAgentSession {
         cwd: String,
         provider: bootty_agents::AgentKind,
+        prompt: String,
     },
 }
 
@@ -729,46 +737,69 @@ fn worktree_row(
     row
 }
 
-fn launch_spec(cwd: &str, remote: bool) -> DialogSpec {
+fn launch_spec(cwd: &str, remote: bool, draft: &str, catalog_loading: bool) -> DialogSpec {
     let mut terminal = picker_row(
         RowId::new("terminal"),
         "terminal",
-        "Terminal".to_owned(),
+        if draft.trim().is_empty() {
+            "Terminal"
+        } else {
+            "Command"
+        }
+        .to_owned(),
         true,
     );
-    terminal.detail = Some("Open a shell in this checkout".to_owned());
-    let mut rows = vec![terminal];
+    terminal.detail = Some(
+        if draft.trim().is_empty() {
+            "Open a shell in this checkout"
+        } else {
+            "Run the text as a command in this checkout"
+        }
+        .to_owned(),
+    );
+    let mut rows = Vec::new();
     {
         for (id, icon, label) in [
             ("codex", "openai", "Codex"),
             ("claude", "anthropic", "Claude"),
             ("pi", "pi", "Pi"),
         ] {
-            let mut row = picker_row(RowId::new(id), icon, label.to_owned(), true);
-            row.detail = Some("Open the agent in a terminal".to_owned());
+            let mut row = picker_row(RowId::new(id), icon, label.to_owned(), !remote);
+            row.detail = Some(
+                if draft.trim().is_empty() {
+                    "Open the agent in a terminal"
+                } else {
+                    "Start the task in the agent’s terminal"
+                }
+                .to_owned(),
+            );
             rows.push(row);
         }
     }
+    rows.push(terminal);
     rows.push(picker_row(
         RowId::new("choose-project"),
         "folder",
         "Choose another project…".to_owned(),
-        true,
+        !catalog_loading,
     ));
     let mut spec = DialogSpec::searchable(NEW_SESSION_ID, "Start session", "", rows);
-    spec.text = None;
+    spec.text = Some(draft.to_owned());
+    spec.text_label = Some("Task or command".to_owned());
+    spec.text_hint = Some("Describe the task, or leave empty to open a terminal…".to_owned());
     spec.icon = Some("terminal".to_owned());
     spec.footer = Some(display_project_path(cwd, remote));
     spec.hint = Some("Enter start session   Esc close".to_owned());
     spec
 }
 
-fn launch_event(id: &str, cwd: &str) -> Option<NewSessionPickerEvent> {
+fn launch_event(id: &str, cwd: &str, draft: &str) -> Option<NewSessionPickerEvent> {
     use bootty_agents::AgentKind;
     let provider = match id {
         "terminal" => {
             return Some(NewSessionPickerEvent::CreateSession {
                 cwd: cwd.to_owned(),
+                command: (!draft.trim().is_empty()).then(|| draft.to_owned()),
             });
         }
         "codex" => AgentKind::Codex,
@@ -779,6 +810,7 @@ fn launch_event(id: &str, cwd: &str) -> Option<NewSessionPickerEvent> {
     Some(NewSessionPickerEvent::CreateAgentSession {
         cwd: cwd.to_owned(),
         provider,
+        prompt: draft.to_owned(),
     })
 }
 

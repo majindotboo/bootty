@@ -97,7 +97,8 @@ fn project_row_ids_map_activation_across_groups() {
     assert_eq!(
         activate_picker_row(&mut dialog, terminal, &[]),
         Some(NewSessionPickerEvent::CreateSession {
-            cwd: favorite.to_owned()
+            cwd: favorite.to_owned(),
+            command: None,
         })
     );
 }
@@ -134,9 +135,78 @@ fn current_checkout_is_reviewable_and_project_switching_can_return(#[case] cwd: 
     assert_eq!(
         activate_picker_row(&mut dialog, terminal, &[]),
         Some(NewSessionPickerEvent::CreateSession {
-            cwd: cwd.to_owned()
+            cwd: cwd.to_owned(),
+            command: None,
         })
     );
+}
+
+#[rstest::rstest]
+#[case::shell("", "terminal")]
+#[case::command("printf 'literal task'", "terminal")]
+#[case::agent("Review the current changes", "codex")]
+fn launch_draft_survives_project_switching_and_names_its_execution(
+    #[case] draft: &str,
+    #[case] launcher: &str,
+) {
+    let mut dialog = NewSessionDialog::from_projects(Vec::new());
+    dialog.set_checkout("/projects/current".to_owned());
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: dialog.spec().id,
+            value: draft.to_owned(),
+        },
+        &[],
+    );
+    let spec = dialog.spec();
+    let switch = spec
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "choose-project")
+        .unwrap();
+    activate_picker_row(&mut dialog, switch, &[]);
+    let spec = dialog.spec();
+    let back = spec
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "current-checkout")
+        .unwrap();
+    activate_picker_row(&mut dialog, back, &[]);
+    let spec = dialog.spec();
+    assert_eq!(spec.text.as_deref(), Some(draft));
+    let row = spec.rows.iter().find(|row| row.id.0 == launcher).unwrap();
+    let expected = if launcher == "terminal" {
+        assert_eq!(
+            row.label,
+            if draft.is_empty() {
+                "Terminal"
+            } else {
+                "Command"
+            }
+        );
+        NewSessionPickerEvent::CreateSession {
+            cwd: "/projects/current".to_owned(),
+            command: (!draft.is_empty()).then(|| draft.to_owned()),
+        }
+    } else {
+        NewSessionPickerEvent::CreateAgentSession {
+            cwd: "/projects/current".to_owned(),
+            provider: bootty_agents::AgentKind::Codex,
+            prompt: draft.to_owned(),
+        }
+    };
+    assert_eq!(activate_picker_row(&mut dialog, row, &[]), Some(expected));
+}
+
+#[rstest::rstest]
+#[case("terminal")]
+#[case("codex")]
+fn selected_checkout_can_start_while_the_other_project_catalog_loads(#[case] launcher: &str) {
+    let mut dialog = NewSessionDialog::open_local(std::sync::Arc::new(|| {}));
+    dialog.set_checkout("/projects/current".to_owned());
+    let spec = dialog.spec();
+    let row = spec.rows.iter().find(|row| row.id.0 == launcher).unwrap();
+    assert!(activate_picker_row(&mut dialog, row, &[]).is_some());
 }
 
 #[test]
@@ -550,6 +620,7 @@ fn setup_launches_the_selected_native_provider_in_the_selected_checkout(
         Some(NewSessionPickerEvent::CreateAgentSession {
             cwd: "/projects/feature-checkout".to_owned(),
             provider,
+            prompt: String::new(),
         })
     );
 }

@@ -1335,16 +1335,12 @@ impl GpuiWorkspace {
                     Self::apply_simple_fullscreen(false, window);
                 }
                 AppEffect::ChooseProjectDirectory => Self::choose_project_directory(cx),
-                AppEffect::OpenAgentProjectSession { cwd, provider } => {
-                    self.invoke_gpui_command(
-                        CommandInvocation::new(
-                            format!("agents.{provider}.start"),
-                            vec![cwd],
-                            Caller::CommandPalette,
-                        ),
-                        window,
-                        cx,
-                    );
+                AppEffect::OpenAgentProjectSession {
+                    cwd,
+                    provider,
+                    prompt,
+                } => {
+                    self.open_agent_project_session(cwd, provider, &prompt, window, cx);
                 }
                 AppEffect::OpenUrl(url) => cx.open_url(&url),
                 AppEffect::Dock(request) => self.apply_dock_request(request, window, cx),
@@ -1376,6 +1372,30 @@ impl GpuiWorkspace {
                 }
             }
         }
+    }
+
+    fn open_agent_project_session(
+        &mut self,
+        cwd: String,
+        provider: bootty_agents::AgentKind,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut arguments = vec![cwd];
+        if !prompt.trim().is_empty() {
+            // A positional prompt stays literal argv; it never enters a shell command.
+            arguments.extend([String::new(), serde_json::json!(["--", prompt]).to_string()]);
+        }
+        self.invoke_gpui_command(
+            CommandInvocation::new(
+                format!("agents.{provider}.start"),
+                arguments,
+                Caller::CommandPalette,
+            ),
+            window,
+            cx,
+        );
     }
 
     fn set_terminal_text_config(

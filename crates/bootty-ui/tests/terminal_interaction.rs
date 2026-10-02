@@ -194,6 +194,7 @@ fn start_two_panes(state: &mut AppState) -> (String, String) {
     ));
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        command: None,
     });
     let deadline = Instant::now()
         .checked_add(PANE_BUDGET)

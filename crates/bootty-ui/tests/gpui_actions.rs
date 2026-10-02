@@ -50,7 +50,8 @@ fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
         let row = spec
             .rows
             .iter()
-            .find(|row| row.action.is_some())
+            .find(|row| row.id.0 == "terminal")
+            .or_else(|| spec.rows.iter().find(|row| row.action.is_some()))
             .expect("selectable choice");
         let action = row.action.as_ref().expect("choice action");
         DialogIntent::Activate {
@@ -66,7 +67,7 @@ fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
     assert_eq!(dialog.apply(&activate(worktrees), &occupied), None);
     assert!(matches!(
         dialog.apply(&activate(dialog.spec()), &occupied),
-        Some(NewSessionPickerEvent::CreateSession { cwd }) if cwd == path
+        Some(NewSessionPickerEvent::CreateSession { cwd, command: None }) if cwd == path
     ));
 }
 

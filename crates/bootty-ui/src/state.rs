@@ -226,6 +226,7 @@ pub enum AppEffect {
     OpenAgentProjectSession {
         cwd: String,
         provider: bootty_agents::AgentKind,
+        prompt: String,
     },
     OpenSettings,
     OpenComputerSetup,
@@ -1130,9 +1131,41 @@ impl AppState {
         }
         changed
     }
-    fn create_project_session_for_cwd(&mut self, cwd: &str) {
-        let command = self.workspace.project_session_command(cwd);
-        self.execute_mux_command(command);
+    fn create_project_session_for_cwd(&mut self, cwd: &str, text: Option<String>) {
+        let bootty_mux::command::MuxCommand::CreateProjectSession {
+            session_id, cwd, ..
+        } = self.workspace.project_session_command(cwd)
+        else {
+            return;
+        };
+        let mut arguments = vec![session_id, cwd];
+        if let Some(text) = text {
+            // The Command choice is shell text; the shared session command always
+            // receives literal argv, including a single executable path.
+            let shell = self
+                .config()
+                .session
+                .shell
+                .as_deref()
+                .unwrap_or(if cfg!(windows) {
+                    "powershell.exe"
+                } else {
+                    "/bin/sh"
+                });
+            arguments.push(serde_json::json!([shell, "-c", text]).to_string());
+        }
+        let outcome = self.dispatch_command(
+            bootty_control::CommandInvocation::new(
+                "session.start",
+                arguments,
+                bootty_control::Caller::CommandPalette,
+            ),
+            ViewportSnapshot::default(),
+            &mut Vec::new(),
+        );
+        if let Some(message) = crate::commands::runtime::command_outcome_message(&outcome) {
+            self.record_error(message);
+        }
     }
     fn move_selected_session(&mut self, delta: i32) -> bool {
         let Some(selected) = self

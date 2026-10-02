@@ -651,6 +651,15 @@ style sequences in half.
 
 ### Scripted sessions
 
+`session.start NAME CWD [ARGV]` uses the same validation, startup and membership
+commit as `session.create`, with `CommandSelection::Follow` to select the new
+session in its binding. The creation dialog uses this invocation for both an
+empty shell and an explicit Command draft. Agent drafts use positional literal
+argv through the registered provider start command. Switching projects keeps
+the draft; opening creation defaults to the selected checkout on the same host.
+Unselected sidebar sessions stay compact; selection reveals terminal topology,
+while progress remains visible without selection.
+
 `session.create NAME CWD [ARGV]` creates a detached backend session in the target
 Binding's Space, which need not be active. It never changes the selected session,
 the selected window or the active Space: it is submitted with
@@ -659,8 +668,10 @@ the result lands. `bootty-mux::workspace` validates the request and journals the
 Space's membership under the caller's name, so generated-name reconciliation never
 renames the session. The name must be free on the binding's server; the create
 fails rather than adopt an existing session, locally and in a remote Space. ARGV is a JSON array of strings for
-the first pane: absent or empty starts the default shell, one element runs through
-the backend's default shell, and more elements run directly. It is bounded to 64
+the first pane: absent or empty starts the default shell. Native runs literal
+argv, including a single executable path; tmux and rmux interpret one element
+through their default shell. The creation dialog converts Command text into
+explicit shell argv, so this choice has the same meaning on every backend. It is bounded to 64
 elements and 12 KiB, because tmux carries one client command in about 16 KiB. The
 result carries the `created` Session target and the first pane's `terminal`
 target.

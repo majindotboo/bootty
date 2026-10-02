@@ -55,6 +55,7 @@ fn open_native_session(state: &mut AppState, cwd: &Path, started: Instant) {
     ));
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: cwd.to_string_lossy().into_owned(),
+        command: None,
     });
     for tick in 1..5 {
         state.update_frame(frames::idle_frame(
@@ -77,6 +78,44 @@ fn creating_a_session_selects_it_and_keeps_it_selected_after_refresh() {
         assert_eq!(state.mux().selected_session(), Some(name));
         assert!(state.terminal_focused());
     }
+}
+
+#[cfg(unix)]
+#[rstest]
+fn creation_runs_an_explicit_command_in_the_selected_checkout() {
+    let directory = assert_fs::TempDir::new().expect("isolated command checkout");
+    let output = directory.path().join("command-output");
+    let mut state = native_state(directory.path());
+    state.apply_picker_event(NewSessionPickerEvent::CreateSession {
+        cwd: directory.path().to_string_lossy().into_owned(),
+        command: Some(format!(
+            "pwd > {}; printf '%s' 'literal $HOME; task' >> {}; read -r line",
+            bootty_host::shell_quote(&output.to_string_lossy()),
+            bootty_host::shell_quote(&output.to_string_lossy()),
+        )),
+    });
+    let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+    loop {
+        state.update_frame(frames::idle_frame(Instant::now()));
+        if fs::read_to_string(&output).is_ok_and(|text| text.ends_with("literal $HOME; task")) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "command did not run: {:?}",
+            state.last_error()
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        fs::read_to_string(output).unwrap(),
+        format!(
+            "{}\nliteral $HOME; task",
+            directory.path().canonicalize().unwrap().display()
+        )
+    );
+    assert!(state.terminal_focused());
+    assert!(state.mux().selected_session().is_some());
 }
 
 fn pane_count(state: &AppState) -> usize {
