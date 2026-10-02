@@ -32,6 +32,30 @@ pub struct BrowserClosed;
 pub struct BrowserSettingsRequested;
 pub struct BrowserFeedbackReady(pub String);
 
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = browser, no_json)]
+struct BrowserCommand(BrowserShortcut);
+
+pub fn init(cx: &mut App) {
+    for modifier in ["cmd", "ctrl"] {
+        cx.bind_keys(
+            [
+                ("l", BrowserShortcut::Address),
+                ("r", BrowserShortcut::Reload),
+                ("t", BrowserShortcut::NewTab),
+                ("w", BrowserShortcut::CloseTab),
+            ]
+            .map(|(key, shortcut)| {
+                gpui_kit::KeyBinding::new(
+                    &format!("{modifier}-{key}"),
+                    BrowserCommand(shortcut),
+                    Some("BoottyBrowser"),
+                )
+            }),
+        );
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum BrowserInteraction {
     #[default]
@@ -66,6 +90,24 @@ pub struct BrowserPanel {
 }
 
 impl BrowserPanel {
+    fn shortcut(&mut self, shortcut: BrowserShortcut, window: &mut Window, cx: &mut Context<Self>) {
+        match shortcut {
+            BrowserShortcut::Palette => {
+                self.stop_annotation();
+                self.interaction = BrowserInteraction::Palette;
+                cx.emit(BrowserPaletteRequested);
+            }
+            BrowserShortcut::Address => self.address.update(cx, |input, cx| {
+                crate::window::restore_keyboard_focus(window);
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            }),
+            BrowserShortcut::Reload => self.navigate(BrowserView::reload, window, cx),
+            BrowserShortcut::NewTab => self.new_tab(None, window, cx),
+            BrowserShortcut::CloseTab => self.close_tab(self.selected, window, cx),
+        }
+    }
+
     fn dispatch_chrome_command(
         &mut self,
         action: &crate::gpui_actions::InvokeCommand,
@@ -621,21 +663,7 @@ impl BrowserPanel {
         }
         if let BrowserEvent::Shortcut(shortcut) = event {
             if id == self.selected && self.visible {
-                match shortcut {
-                    BrowserShortcut::Palette => {
-                        self.stop_annotation();
-                        self.interaction = BrowserInteraction::Palette;
-                        cx.emit(BrowserPaletteRequested);
-                    }
-                    BrowserShortcut::Address => self.address.update(cx, |input, cx| {
-                        crate::window::restore_keyboard_focus(window);
-                        input.focus(window, cx);
-                        input.select_all(window, cx);
-                    }),
-                    BrowserShortcut::Reload => self.navigate(BrowserView::reload, window, cx),
-                    BrowserShortcut::NewTab => self.new_tab(None, window, cx),
-                    BrowserShortcut::CloseTab => self.close_tab(self.selected, window, cx),
-                }
+                self.shortcut(shortcut, window, cx);
             }
             return;
         }
@@ -949,6 +977,10 @@ impl Render for BrowserPanel {
             .is_none_or(|tab| tab.address == "about:blank");
         div()
             .id("browser-panel")
+            .key_context("BoottyBrowser")
+            .on_action(cx.listener(|this, action: &BrowserCommand, window, cx| {
+                this.shortcut(action.0, window, cx);
+            }))
             .on_action(cx.listener(Self::dispatch_chrome_command))
             .size_full()
             .flex()

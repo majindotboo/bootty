@@ -214,6 +214,7 @@ fn launch(
     let localizer = crate::i18n::Localizer::new(&config.locale)?;
     crate::i18n::publish(&localizer, cx);
     crate::gpui_document_panel::init(cx);
+    crate::gpui_browser_panel::init(cx);
     app_menu.replace(crate::menu::install(&localizer));
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new(
