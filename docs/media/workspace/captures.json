@@ -44,24 +44,9 @@
       "sha256": "16ac43e7db0802cdecac52085f571c967fd77066a09e7d8a75a751a84778e4c2"
     },
     {
-      "file": "empty-sidebar.png",
-      "captured_at": "2026-10-02T03:35:12.004095+00:00",
-      "sha256": "4a0d29116fd50b5259a927281cc15b92e5f07005052446b3237e7636f9b860d4"
-    },
-    {
-      "file": "files.png",
-      "captured_at": "2026-10-02T03:35:17.250051+00:00",
-      "sha256": "855741eb16553c779a8e7314b2dc926411ba242ea529a5a1036a9e91b92004dd"
-    },
-    {
       "file": "history.png",
       "captured_at": "2026-10-02T03:29:53.886061+00:00",
       "sha256": "6ec818c77c50bc7ef64f9baa321f85bc7198e5ab8129c15c7af256b1389c075b"
-    },
-    {
-      "file": "sessions.png",
-      "captured_at": "2026-10-02T03:35:11.931193+00:00",
-      "sha256": "b1e6774098329632a10e24eda85cc9fa151480a437dfe14cd0202f63bbd9092b"
     },
     {
       "file": "browser.mp4",
@@ -114,6 +99,56 @@
       "source_commit": "a3ea9ca10b7159507ad7c4359bed45124f87b851",
       "executable_sha256": "6091998583ce2a82d8a20c9a8c8166305a2dd858c1b6525a6ec78c139e559b98",
       "sha256": "85bcc4052db1d7131e4d3657ec3d4e03779c88442589d1464a55712b778e1929"
+    },
+    {
+      "file": "diff.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "82cf33070bbd37c8ef4647b9396e052a4ff734c0ae83adb80616268b4dbb742c",
+      "captured_at": "2026-10-02T04:50:08.698Z"
+    },
+    {
+      "file": "document.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "62b31b5f44a7a28139e6ccad3726b537e8c1072a26661371884ce26dd2cd4244",
+      "captured_at": "2026-10-02T04:50:27.079Z"
+    },
+    {
+      "file": "changes.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "31ac9cf0e382b0f6e36f8a67c1482c246123b0b68fe8ca714185a8f1516fc331",
+      "captured_at": "2026-10-02T04:51:07.528Z"
+    },
+    {
+      "file": "empty-sidebar.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "4a3181e534c2492bebbf80c343196cd226d752f9301abae85cc44be3bfd9b8ad",
+      "captured_at": "2026-10-02T04:51:30.008Z"
+    },
+    {
+      "file": "sessions.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "c07c324f755d70118f33d4a5ef50cdfd8af6ee2a3751b8553923b5b73cdc3baf",
+      "captured_at": "2026-10-02T04:51:30.069Z"
+    },
+    {
+      "file": "files.png",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "d47de31e228b21572ed52a0dbacd33428f2491bd6ecf1d62b4623c038fee9db2",
+      "captured_at": "2026-10-02T04:51:37.735Z"
+    },
+    {
+      "file": "sidebar-tabs.mp4",
+      "source_commit": "c5734d1557fdb2f1a442f58d2673277985a2584f",
+      "executable_sha256": "25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2",
+      "sha256": "cc195d5cfb12a4afed3e95b395a8433ce2cb7a5cd453872d6935e18f94ed1a33",
+      "capture_started_at": "2026-10-02T04:50:49.943000+00:00",
+      "capture_finished_at": "2026-10-02T04:50:56.942000+00:00"
     }
   ]
 }

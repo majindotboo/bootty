@@ -12,8 +12,18 @@ SHA-256 `5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34`.
 The computer setup capture followed at 21:24 PDT from `a3ea9ca1`, with executable
 SHA-256 `6091998583ce2a82d8a20c9a8c8166305a2dd858c1b6525a6ec78c139e559b98`.
 
+Session, empty-sidebar and file captures were refreshed at 21:51 PDT from
+`c5734d15`, alongside new Changes, Diff, Document and sidebar interaction captures.
+Executable SHA-256:
+`25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2`.
+
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
+
+- [Sidebar tabs](sidebar-tabs.mp4), 9.0 seconds: open a document, type directly,
+  close with Cmd+W, discard the unsaved draft, open its untracked diff and close
+  the diff tab. Long titles truncate before the close button. The owned fixture
+  was removed afterward; existing sessions were preserved.
 
 - [Annotation](annotation.mp4), 4.0 seconds: review feedback, paste it into the
   terminal, type an edit without clicking the terminal, and clear the unsent
@@ -33,6 +43,9 @@ playback is not accelerated.
 ![Rounded project sessions, compact pacing and reset countdown](sessions.png)
 ![Empty sidebar with direct choices for tools and browser pages](empty-sidebar.png)
 ![Files in a closable top-level sidebar tab](files.png)
+![Grouped untracked change and singular file count](changes.png)
+![Read-only diff with a truncated title and clear close button](diff.png)
+![Document input and unsaved tab indicator](document.png)
 ![Browser input and remembered site data](browser.png)
 ![Native provider history with account status and search](history.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
