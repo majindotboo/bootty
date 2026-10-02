@@ -1067,7 +1067,7 @@ fn usage_meter(
         .min_w_0()
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_0p5()
         .text_xs()
         .text_color(color(colors.muted))
         .tooltip(move |window, cx| {
@@ -1087,8 +1087,10 @@ fn usage_labels(
         .w_full()
         .min_w_0()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap_1()
+        .gap_y_0p5()
         .when_some(item.icon.as_deref(), |element, icon| {
             element.child(crate::gpui::sized_icon(
                 icon,
@@ -1123,7 +1125,9 @@ fn usage_details(
 ) -> impl IntoElement {
     div()
         .flex_none()
+        .max_w_full()
         .flex()
+        .flex_wrap()
         .justify_end()
         .items_center()
         .gap_1()

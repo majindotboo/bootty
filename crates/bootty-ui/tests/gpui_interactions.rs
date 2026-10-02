@@ -733,35 +733,37 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
     );
 }
 
+fn quota_footer_item(label: &'static str) -> SidebarFooterItem {
+    SidebarFooterItem {
+        key: format!("codex:{label}"),
+        text: format!("codex {label}"),
+        icon: Some("openai".to_owned()),
+        color: palette().text,
+        meter: Some(UsageMeterSnapshot {
+            provider: UsageProvider::Codex,
+            label: format!("{label} 23% left"),
+            window_label: label.to_owned(),
+            fill: palette().accent,
+            marker: palette().accent,
+            pace: palette().text,
+            track: palette().border,
+            meter: UsageWindow {
+                label,
+                used_percent: 77.0,
+                duration_secs: 604_800.0,
+                resets_at: Some(352_000),
+            }
+            .meter(0),
+        }),
+    }
+}
+
 #[gpui_kit::test]
-fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
+fn quota_rows_keep_full_width_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
-    snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
-        .into_iter()
-        .map(|label| SidebarFooterItem {
-            key: format!("codex:{label}"),
-            text: format!("codex {label}"),
-            icon: Some("openai".to_owned()),
-            color: palette().text,
-            meter: Some(UsageMeterSnapshot {
-                provider: UsageProvider::Codex,
-                label: format!("{label} 23% left"),
-                window_label: label.to_owned(),
-                fill: palette().accent,
-                marker: palette().accent,
-                pace: palette().text,
-                track: palette().border,
-                meter: UsageWindow {
-                    label,
-                    used_percent: 77.0,
-                    duration_secs: 604_800.0,
-                    resets_at: Some(352_000),
-                }
-                .meter(0),
-            }),
-        })
-        .collect();
+    snapshot.sidebar.as_mut().expect("sidebar").footer =
+        ["5h", "7d"].into_iter().map(quota_footer_item).collect();
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
     for font_size in [12.0, 16.0, 20.0] {
@@ -809,26 +811,32 @@ fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppConte
                     .expect("expected allowance marker");
                 assert!(labels.left() >= row.left());
                 let reset = cx.debug_bounds(reset_selector).expect("visible reset time");
-                assert!(pace.right() <= reset.left(), "quota pacing overlaps reset");
+                assert!(
+                    pace.right() <= reset.left() || pace.bottom() <= reset.top(),
+                    "quota pacing overlaps reset"
+                );
                 assert!(reset.right() <= row.right());
                 assert!(expected.left() >= track.left() && expected.right() <= track.right());
                 assert!(track.right() <= row.right());
                 assert!(
-                    track.left() >= labels.right(),
-                    "meter overlaps window label"
+                    track.size.width >= row.size.width.mul(0.8),
+                    "meter spans the sidebar"
+                );
+                assert!(
+                    track.top() >= labels.bottom(),
+                    "meter sits below the labels"
                 );
                 assert!(
                     track.size.width >= px(font_size).mul(2.0),
                     "meter remains useful"
                 );
-                assert!(track.top() < labels.bottom(), "meter shares the quota row");
                 assert!(
                     track.size.height < labels.size.height.div(4.0),
                     "meter is not thin"
                 );
                 assert!(
                     row.size.height <= px(font_size).mul(3.0),
-                    "quota row stays compact"
+                    "quota row stays compact at {width}px / {font_size}px: row={row:?}, label={labels:?}, pace={pace:?}, reset={reset:?}, track={track:?}"
                 );
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
