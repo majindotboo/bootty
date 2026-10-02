@@ -1,22 +1,26 @@
-//! Shared live pane bytes through pipe-pane, without a disk spool or cursor-ring loss.
+//! Shared live pane bytes through pipe-pane, with independent bounded readers.
 
 use std::{
     collections::hash_map::DefaultHasher,
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
-use rmux_ipc::{LocalEndpoint, LocalListener, LocalStream};
+use rmux_ipc::{LocalEndpoint, LocalListener};
 use rmux_proto::{PaneTarget, PipePaneRequest, Request, Response};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, WriteHalf};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::{backend::rmux_request, bridge::bootty_daemon_binary};
 
 pub(super) const PIPE_HELPER_FLAG: &str = "--__bootty-pane-pipe";
 const CHUNK_BYTES: usize = 16 * 1024;
+// A stalled renderer may retain 16 MiB before it disconnects and recovers. Raise
+// this only if supported image bursts routinely exceed that reader backlog.
+const READER_BACKLOG_CHUNKS: usize = 1024;
 
 #[cfg(unix)]
 type PipeStream = tokio::net::UnixStream;
@@ -170,7 +174,7 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
         std::fs::set_permissions(endpoint.as_path(), std::fs::Permissions::from_mode(0o600))?;
     }
     let _cleanup = EndpointCleanup(endpoint);
-    let mut readers: Vec<(u64, WriteHalf<LocalStream>)> = Vec::new();
+    let mut readers: Vec<(u64, tokio::sync::mpsc::Sender<Arc<[u8]>>)> = Vec::new();
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut next_reader = 0_u64;
     let mut stdin = tokio::io::stdin();
@@ -183,10 +187,18 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
                 write.write_u8(0).await?;
                 let id = next_reader;
                 next_reader = next_reader.checked_add(1).context("pane reader id exhausted")?;
-                readers.push((id, write));
+                let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Arc<[u8]>>(READER_BACKLOG_CHUNKS);
+                readers.push((id, chunks_tx));
                 let closed_tx = closed_tx.clone();
                 tokio::spawn(async move {
-                    let _ = read.read_u8().await;
+                    tokio::select! {
+                        _ = read.read_u8() => {},
+                        () = async {
+                            while let Some(bytes) = chunks_rx.recv().await {
+                                if write.write_all(&bytes).await.is_err() { break; }
+                            }
+                        } => {},
+                    }
                     let _ = closed_tx.send(id);
                 });
             }
@@ -197,12 +209,10 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
             count = stdin.read(&mut buffer), if !readers.is_empty() => {
                 let count = count?;
                 if count == 0 { break; }
-                let bytes = buffer.get(..count).context("invalid pipe read length")?;
-                for (id, mut writer) in std::mem::take(&mut readers) {
-                    if writer.write_all(bytes).await.is_ok() {
-                        readers.push((id, writer));
-                    }
-                }
+                let bytes: Arc<[u8]> = buffer.get(..count).context("invalid pipe read length")?.into();
+                // Never let a slow subscriber stall the shared daemon pipe. An
+                // overfull subscriber gets EOF instead of silently missing bytes.
+                readers.retain(|(_, writer)| writer.try_send(Arc::clone(&bytes)).is_ok());
                 if readers.is_empty() { break; }
             }
         }
