@@ -183,7 +183,7 @@ command_catalog! {
         "toggle_diff_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
     ToggleAgentsPanel:
         "Toggle Agents panel", "Show or hide the agents panel",
-        "toggle_agents_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "toggle_agents_panel", "panel-left", Layout, hidden, Write, ApplicationWindow, DockGroup;
     ToggleLeftDock:
         "Toggle left dock", "Show or hide the left dock",
         "toggle_left_dock", "panel-left", Layout, shown, Write, ApplicationWindow, None;
@@ -194,7 +194,7 @@ command_catalog! {
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowCodexBar:
-        "Show agent usage", "Open usage and quota meters in Agents",
+        "Show agent usage", "Show the quota footer in Sessions",
         "show_codexbar", "chart-no-axes-column", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSpaces:
         "Show Spaces", "Open the Space switcher in Sessions",
@@ -213,7 +213,7 @@ command_catalog! {
         "export_terminal", "download", Terminal, shown, Write, ApplicationWindow, None;
     ShowAgents:
         "Show Agents", "Open agent attention, session and navigation controls",
-        "show_agents", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
+        "show_agents", "bot", Application, hidden, Write, ApplicationWindow, DockGroup;
     ShowFiles:
         "Browse Files", "Open the Files panel for the terminal directory",
         "show_files", "folder", Application, shown, Write, ApplicationWindow, DockGroup;

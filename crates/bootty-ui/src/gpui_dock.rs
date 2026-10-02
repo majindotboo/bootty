@@ -575,7 +575,7 @@ impl WorkspaceDock {
             pending.panel = Some(InspectorPanel::Agents);
             return;
         }
-        self.show_tool(bootty_config::config::PanelKind::Agents, window, cx);
+        self.show_sidebar(window, cx);
     }
 
     pub(crate) fn browse_files(

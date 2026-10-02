@@ -365,30 +365,36 @@ impl AppState {
         self.dismiss_modal_dialog();
     }
     pub fn apply_command_palette_event(&mut self, event: CommandPaletteEvent) {
-        match event {
-            CommandPaletteEvent::Close => self.dismiss_modal_dialog(),
-            CommandPaletteEvent::Run(command) => {
-                // Resolve the user's current context before another queued caller can change it.
+        let invocation = match event {
+            CommandPaletteEvent::Close => {
                 self.dismiss_modal_dialog();
-                let Some(mut invocation) =
-                    command_invocation_from_catalog(command, Caller::CommandPalette)
-                else {
-                    return;
-                };
-                if let Some(kind) = self.commands.target_kind(&invocation.command) {
-                    let Some(target) = self.current_command_target_for(&invocation.command, kind)
-                    else {
-                        self.commands.clear_queue();
-                        self.record_notice(crate::error_catalog::ErrorNotice::NoCurrentTarget(
-                            format!("no current {kind:?} target is available"),
-                        ));
-                        return;
-                    };
-                    invocation.target = Some(target);
-                }
-                self.commands.queue(invocation);
+                return;
             }
+            CommandPaletteEvent::Run(command) => {
+                command_invocation_from_catalog(command, Caller::CommandPalette)
+            }
+            CommandPaletteEvent::Invoke(command) => Some(bootty_control::CommandInvocation::new(
+                command,
+                Vec::new(),
+                Caller::CommandPalette,
+            )),
+        };
+        // Resolve the user's current context before another queued caller can change it.
+        self.dismiss_modal_dialog();
+        let Some(mut invocation) = invocation else {
+            return;
+        };
+        if let Some(kind) = self.commands.target_kind(&invocation.command) {
+            let Some(target) = self.current_command_target_for(&invocation.command, kind) else {
+                self.commands.clear_queue();
+                self.record_notice(crate::error_catalog::ErrorNotice::NoCurrentTarget(format!(
+                    "no current {kind:?} target is available"
+                )));
+                return;
+            };
+            invocation.target = Some(target);
         }
+        self.commands.queue(invocation);
     }
     pub fn apply_theme_picker_event(
         &mut self,
@@ -720,13 +726,14 @@ impl AppState {
             .input
             .keybinds_for_backend(self.workspace.active.binding.multiplexer().backend);
         self.open_overlay(ModalDialog::CommandPalette(
-            CommandPaletteDialog::open_localized(
+            CommandPaletteDialog::open_with_catalog(
                 &bindings,
                 CommandPaletteState {
                     appearance_mode: self.config().appearance.mode,
                     sidebar_visible: self.config().chrome.sidebar,
                 },
                 &self.localizer,
+                &self.commands.catalog().list(),
             ),
         ));
     }

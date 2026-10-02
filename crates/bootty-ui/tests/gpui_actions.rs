@@ -358,6 +358,49 @@ fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
 }
 
 #[rstest]
+#[case("codex", "start", "Open Codex terminal")]
+#[case("claude", "start", "Open Claude terminal")]
+#[case("pi", "start", "Open Pi terminal")]
+#[case("codex", "tab", "Open Codex terminal tab")]
+#[case("claude", "tab", "Open Claude terminal tab")]
+#[case("pi", "tab", "Open Pi terminal tab")]
+fn palette_launches_native_terminals_from_the_shared_catalog(
+    #[case] provider: &str,
+    #[case] operation: &str,
+    #[case] title: &str,
+) {
+    let catalog = bootty_ui::commands::CommandCatalog::default();
+    let localizer = bootty_ui::i18n::Localizer::new("en").unwrap();
+    let mut palette = CommandPaletteDialog::open_with_catalog(
+        &[],
+        CommandPaletteState::default(),
+        &localizer,
+        &catalog.list(),
+    );
+    let command = format!("agents.{provider}.{operation}");
+    palette.apply(&DialogIntent::TextChanged {
+        dialog: DialogId::new(COMMAND_PALETTE_ID),
+        value: command.clone(),
+    });
+    let spec = palette.spec();
+    let row = spec
+        .rows
+        .iter()
+        .find(|row| row.enabled && row.label == title)
+        .expect("native terminal launcher is visible");
+    let action = row.action.clone().unwrap();
+    assert_eq!(
+        palette.apply(&DialogIntent::Activate {
+            dialog: DialogId::new(COMMAND_PALETTE_ID),
+            row: row.id.clone(),
+            action: action.id,
+            payload: action.payload,
+        }),
+        Some(CommandPaletteEvent::Invoke(command))
+    );
+}
+
+#[rstest]
 fn palette_filter_selects_and_runs_its_first_visible_command() {
     let mut palette = CommandPaletteDialog::open(&[], CommandPaletteState::default()).unwrap();
 
