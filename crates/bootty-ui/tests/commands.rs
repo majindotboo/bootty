@@ -1598,16 +1598,20 @@ fn authored_theme_preview_restore_save_and_apply_share_command_path() {
 
 #[cfg(unix)]
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case(false, false)]
+#[case(true, false)]
+#[case(false, true)]
+#[case(true, true)]
 fn agent_start_uses_a_backend_pty_with_literal_arguments_and_captured_directory(
     #[case] single_executable: bool,
+    #[case] new_tab: bool,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let config = test_config::config(
+    let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
+    config.session.shell = Some("/bin/sh".to_owned());
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
     let mut state = AppState::new_for_window_with_agents(
@@ -1691,7 +1695,10 @@ for line in sys.stdin: print(line,flush=True)
         &wakes,
         Caller::Socket,
         CommandInvocation::new(
-            format!("agents.{provider_kind}.start"),
+            format!(
+                "agents.{provider_kind}.{}",
+                if new_tab { "tab" } else { "start" }
+            ),
             vec![
                 directory.path().to_string_lossy().into_owned(),
                 program,
@@ -1706,13 +1713,27 @@ for line in sys.stdin: print(line,flush=True)
         "{outcome:?}"
     );
     let launched_name = format!("{name}-2");
-    assert!(
-        state
-            .mux()
-            .all_sessions()
-            .iter()
-            .any(|session| session.name == launched_name)
-    );
+    if new_tab {
+        let sessions = state.mux().all_sessions();
+        assert!(!sessions.iter().any(|session| session.name == launched_name));
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.name == name)
+                .unwrap()
+                .windows
+                .len(),
+            2
+        );
+    } else {
+        assert!(
+            state
+                .mux()
+                .all_sessions()
+                .iter()
+                .any(|session| session.name == launched_name)
+        );
+    }
     assert!(
         state
             .mux()
@@ -1720,9 +1741,50 @@ for line in sys.stdin: print(line,flush=True)
             .iter()
             .any(|session| session.name == name)
     );
-    let (mut connection, _) = listener.accept().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let connection_deadline = Instant::now()
+        .checked_add(Duration::from_secs(2))
+        .expect("startup deadline fits");
+    let mut connection = loop {
+        match listener.accept() {
+            Ok((connection, _)) => break connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                state.update_frame(frames::idle_frame(Instant::now()));
+                if Instant::now() >= connection_deadline {
+                    let capture = submit_command_from_caller(
+                        &mut state,
+                        &wakes,
+                        Caller::Socket,
+                        CommandInvocation::new(
+                            "terminal.capture",
+                            owned(&["plain", "history"]),
+                            Caller::Socket,
+                        ),
+                        Instant::now(),
+                    );
+                    panic!("provider did not report startup: {capture:?}");
+                }
+            }
+            Err(error) => panic!("provider startup: {error}"),
+        }
+    };
+    connection.set_nonblocking(true).unwrap();
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut connection, &mut bytes).unwrap();
+    let mut chunk = [0; 4096];
+    loop {
+        match std::io::Read::read(&mut connection, &mut chunk) {
+            Ok(0) => break,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < connection_deadline,
+                    "provider did not finish its startup report"
+                );
+                state.update_frame(frames::idle_frame(Instant::now()));
+            }
+            Err(error) => panic!("provider report: {error}"),
+        }
+    }
     let facts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         facts.get("literal").and_then(serde_json::Value::as_str),
@@ -2703,6 +2765,23 @@ fn issued_topology_targets_modify_the_inactive_space_without_retargeting_selecti
     );
     let phone = listed_space(&mut state, "Phone");
     let windows = phone["sessions"][0]["windows"].as_array().unwrap();
+    if command == "new_tab" {
+        let CommandOutcome::Success { value, .. } = &outcome else {
+            panic!("tab creation failed: {outcome:?}")
+        };
+        let created: CommandTarget = serde_json::from_value(value["created"].clone()).unwrap();
+        assert_eq!(created.kind, ResourceKind::Terminal);
+        assert_ne!(
+            value["created"],
+            session["windows"][0]["panes"][0]["terminal_target"]
+        );
+        assert!(
+            windows
+                .iter()
+                .flat_map(|window| window["panes"].as_array().unwrap())
+                .any(|pane| pane["terminal_target"] == value["created"])
+        );
+    }
     assert_eq!(windows.len(), expected_windows);
     assert_eq!(
         windows

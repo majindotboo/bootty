@@ -350,7 +350,12 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                 )
         }
         ResourceKind::Session => {
-            command.starts_with("pane.") || matches!(command, "session.close" | "new_tab")
+            command.starts_with("pane.")
+                || command
+                    .strip_prefix("agents.")
+                    .and_then(|command| command.split_once('.'))
+                    .is_some_and(|(_, operation)| operation == "tab")
+                || matches!(command, "session.close" | "new_tab")
         }
         ResourceKind::Pane => matches!(command, "split_right" | "split_down"),
         // Terminal input and capture address the pane through the mux and never select it.

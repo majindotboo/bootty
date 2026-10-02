@@ -380,6 +380,11 @@ impl AppState {
         completion: &MuxCommandCompletion,
     ) -> Option<BTreeMap<String, CommandTarget>> {
         let mut value = BTreeMap::new();
+        if let Some((session_id, window_id)) = &completion.created_window
+            && let Some(created) = self.mux_terminal_target(scope, session_id, window_id)
+        {
+            value.insert("created".to_owned(), created);
+        }
         if let Some(session_id) = match command {
             MuxCommand::CreateProjectSession { session_id, .. }
             | MuxCommand::CreateWorktreeSession { session_id, .. } => Some(session_id.as_str()),
@@ -406,11 +411,6 @@ impl AppState {
                     Some(window_id),
                 )?,
             );
-            if matches!(command, MuxCommand::NewWindow { .. })
-                && let Some(created) = self.mux_terminal_target(scope, session_id, window_id)
-            {
-                value.insert("created".to_owned(), created);
-            }
         }
         if !value.contains_key("focused")
             && let Some(session_id) = completion.selected_session.as_deref()

@@ -16,6 +16,7 @@ ready, working, or authenticated.
 
 ```sh
 bootty command agents.codex.start /path/to/project
+bootty command agents.codex.tab /path/to/project
 bootty command agents.list
 bootty agents.codex.prompt "Inspect the failing test" --target "TERMINAL_HANDLE@GENERATION"
 bootty agents.codex.interrupt --target "TERMINAL_HANDLE@GENERATION"
@@ -27,9 +28,15 @@ bootty command agents.codex.account.status
 bootty command agents.codex.account.login
 ```
 
-Replace `codex` with `claude` or `pi`. `start` accepts optional working directory,
+The palette also offers Open Codex tab, Open Claude tab, and Open Pi tab for the
+current session. `tab` creates a backend window, then launches the provider only
+in that new terminal. It never writes a launch command into an existing pane.
+An explicit session target can address another session without changing its
+existing terminals; opaque backends report their creation limit.
+
+Replace `codex` with `claude` or `pi`. `start` and `tab` accept optional working directory,
 executable, and JSON argv. Arguments remain literal. The GUI focuses the created
-terminal; script callers receive its issued target without changing selection.
+terminal; callers receive its issued target.
 Session names combine the provider and project, using the backend's existing
 uniqueness rules when that name is already in use.
 `prompt` pastes text and submits it through the ordinary terminal command path.

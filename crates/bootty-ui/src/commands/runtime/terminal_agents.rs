@@ -35,9 +35,17 @@ impl AppState {
             });
         };
         let binding_id = scope.persistence_value().to_string();
-        let cwd = binding
-            .mux()
-            .selected_session_anchor()
+        let cwd = exact
+            .and_then(|exact| exact.ids().0)
+            .and_then(|id| {
+                binding
+                    .mux()
+                    .all_sessions()
+                    .iter()
+                    .find(|session| session.id == id)
+            })
+            .map(|session| &session.anchor)
+            .or_else(|| binding.mux().selected_session_anchor())
             .and_then(|anchor| anchor.cwd.clone())
             .unwrap_or_else(|| crate::state::default_session_cwd(self.config()));
         let binding_target = ExactMuxTarget::Binding(scope).command_target(
@@ -98,6 +106,7 @@ impl AppState {
                 service: &service,
                 executor: &executor,
                 binding_target,
+                session_target: invocation.target.clone(),
                 binding_id: &binding_id,
                 cwd,
                 remote,
@@ -136,6 +145,7 @@ struct TerminalAgentContext<'a> {
     service: &'a TerminalAgentService,
     executor: &'a dyn AgentCommandExecutor,
     binding_target: Option<CommandTarget>,
+    session_target: Option<CommandTarget>,
     binding_id: &'a str,
     cwd: String,
     remote: bool,
@@ -311,7 +321,7 @@ fn prepare_launch(
     };
     let mut session_id = None;
     match operation {
-        "start" => {
+        "start" | "tab" => {
             if let Some(cwd) = arg(0) {
                 launch.cwd = Some(cwd);
             }
@@ -438,26 +448,32 @@ fn start_terminal(
         &bootty_mux::session_names::portable_session_name(&format!("{provider} {project}")),
         context.session_names.iter().map(String::as_str),
     );
+    let started = if operation == "tab" {
+        start_tab(&context, provider, &launch, &argv)
+    } else {
+        let encoded = match serde_json::to_string(&argv) {
+            Ok(value) => value,
+            Err(error) => return failure(&error.to_string()),
+        };
+        let mut request = CommandInvocation::new(
+            "session.create",
+            vec![name, launch.cwd.clone().unwrap_or_default(), encoded],
+            Caller::Internal,
+        );
+        request.target.clone_from(&context.binding_target);
+        context
+            .executor
+            .execute(request, context.deadline, context.cancellation.clone())
+    };
     let TerminalAgentContext {
         service,
         executor,
-        binding_target,
         binding_id,
         deadline,
         cancellation,
         ..
     } = context;
-    let encoded = match serde_json::to_string(&argv) {
-        Ok(value) => value,
-        Err(error) => return failure(&error.to_string()),
-    };
-    let mut request = CommandInvocation::new(
-        "session.create",
-        vec![name, launch.cwd.clone().unwrap_or_default(), encoded],
-        Caller::Internal,
-    );
-    request.target = binding_target;
-    match executor.execute(request, deadline, cancellation.clone()) {
+    match started {
         CommandOutcome::Success {
             value,
             mut warnings,
@@ -499,6 +515,72 @@ fn start_terminal(
             }
         }
         outcome => outcome,
+    }
+}
+
+fn start_tab(
+    context: &TerminalAgentContext<'_>,
+    provider: AgentKind,
+    launch: &AgentLaunch,
+    argv: &[String],
+) -> CommandOutcome {
+    let mut launch = launch.clone();
+    // Reuse literal shell quoting and only write into the newly created terminal.
+    if context.isolate_color_environment {
+        let Some((program, arguments)) = argv.split_first() else {
+            return failure("The agent launch has no executable");
+        };
+        launch.program.clone_from(program);
+        launch.arguments = arguments.to_vec();
+    }
+    let shell = if cfg!(windows) && !context.remote {
+        bootty_agents::LaunchShell::Windows
+    } else {
+        bootty_agents::LaunchShell::Posix
+    };
+    let command = match launch.shell_command(provider, shell) {
+        Ok(command) => command,
+        Err(error) => return failure(&error),
+    };
+    let Some(session) = context.session_target.clone() else {
+        return failure("Choose a session for the agent tab");
+    };
+    let mut create = CommandInvocation::from_action("new_tab", Caller::Internal);
+    create.target = Some(session);
+    let (value, mut warnings) =
+        match context
+            .executor
+            .execute(create, context.deadline, context.cancellation.clone())
+        {
+            CommandOutcome::Success { value, warnings } => (value, warnings),
+            outcome => return outcome,
+        };
+    let Some(target) = value
+        .get("created")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<CommandTarget>(value).ok())
+    else {
+        return failure("The new tab did not return its terminal target");
+    };
+    for (name, arguments) in [
+        ("terminal.paste", vec![command]),
+        ("terminal.submit", Vec::new()),
+    ] {
+        let mut request = CommandInvocation::new(name, arguments, Caller::Internal);
+        request.target = Some(target.clone());
+        match context
+            .executor
+            .execute(request, context.deadline, context.cancellation.clone())
+        {
+            CommandOutcome::Success {
+                warnings: extra, ..
+            } => warnings.extend(extra),
+            outcome => return outcome,
+        }
+    }
+    CommandOutcome::Success {
+        value: json!({"terminal":target,"created":target}),
+        warnings,
     }
 }
 

@@ -15,6 +15,12 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
                 vec![("cwd", false), ("program", false), ("argv", false)],
             ),
             (
+                "tab",
+                MutationClass::Write,
+                ResourceKind::Session,
+                vec![("cwd", false), ("program", false), ("argv", false)],
+            ),
+            (
                 "resume",
                 MutationClass::Write,
                 ResourceKind::Binding,
@@ -88,23 +94,27 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
                 mutation,
                 target: Some(target),
                 palette: terminal_command_in_palette(provider, operation),
-                arguments: CompactSchema {
-                    arguments: arguments
-                        .into_iter()
-                        .map(|(name, required)| ArgumentSchema {
-                            name: name.to_owned(),
-                            value_type: ValueType::String,
-                            required,
-                            choices: Vec::new(),
-                            minimum: None,
-                            maximum: None,
-                        })
-                        .collect(),
-                },
+                arguments: terminal_arguments(arguments),
             });
         }
     }
     descriptors
+}
+
+fn terminal_arguments(arguments: Vec<(&str, bool)>) -> CompactSchema {
+    CompactSchema {
+        arguments: arguments
+            .into_iter()
+            .map(|(name, required)| ArgumentSchema {
+                name: name.to_owned(),
+                value_type: ValueType::String,
+                required,
+                choices: Vec::new(),
+                minimum: None,
+                maximum: None,
+            })
+            .collect(),
+    }
 }
 
 fn terminal_command_title(provider: AgentKind, operation: &str) -> String {
@@ -115,6 +125,7 @@ fn terminal_command_title(provider: AgentKind, operation: &str) -> String {
     };
     match operation {
         "start" => format!("Open {name} terminal"),
+        "tab" => format!("Open {name} tab"),
         "history" => format!("{name} session history"),
         "resume" => format!("Resume {name} session"),
         "fork" => format!("Fork {name} session"),
@@ -130,6 +141,8 @@ fn terminal_command_title(provider: AgentKind, operation: &str) -> String {
 }
 
 fn terminal_command_in_palette(provider: AgentKind, operation: &str) -> bool {
-    matches!(operation, "start" | "history" | "resume" | "account.login")
-        || (operation == "fork" && provider != AgentKind::Pi)
+    matches!(
+        operation,
+        "start" | "tab" | "history" | "resume" | "account.login"
+    ) || (operation == "fork" && provider != AgentKind::Pi)
 }

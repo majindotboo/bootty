@@ -15,6 +15,7 @@ fn terminal_palette_offers_supported_provider_pickers(
     let descriptors = terminal_command_descriptors();
     for (operation, title, offered) in [
         ("start", format!("Open {name} terminal"), true),
+        ("tab", format!("Open {name} tab"), true),
         ("history", format!("{name} session history"), true),
         ("resume", format!("Resume {name} session"), true),
         ("fork", format!("Fork {name} session"), fork_picker),
@@ -26,6 +27,13 @@ fn terminal_palette_offers_supported_provider_pickers(
             .expect("provider command");
         assert_eq!(descriptor.title, title);
         assert_eq!(descriptor.palette, offered);
-        assert_eq!(descriptor.target, Some(ResourceKind::Binding));
+        assert_eq!(
+            descriptor.target,
+            Some(if operation == "tab" {
+                ResourceKind::Session
+            } else {
+                ResourceKind::Binding
+            })
+        );
     }
 }
