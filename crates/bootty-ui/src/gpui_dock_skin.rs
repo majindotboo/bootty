@@ -650,7 +650,14 @@ impl WorkspaceTabGroup {
                         .gap_1()
                         .min_w_0()
                         .child(Icon::new(IconName::Globe).small())
-                        .child(div().max_w_40().truncate().child(label.to_owned()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .max_w_40()
+                                .truncate()
+                                .child(label.to_owned()),
+                        )
                         .into_any_element(),
                     Some(close),
                     tab_id.clone().into(),
@@ -725,7 +732,7 @@ impl WorkspaceTabGroup {
                     .gap_1()
                     .min_w_0()
                     .child(Icon::new(icon).small())
-                    .child(title)
+                    .child(div().flex_1().min_w_0().truncate().child(title))
                     .into_any_element(),
                 suffix,
                 tab_id,
@@ -822,8 +829,9 @@ impl WorkspaceTabGroup {
             .flex()
             .items_center()
             .gap_1()
+            .min_w_0()
             .child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
-            .child(title);
+            .child(div().flex_1().min_w_0().truncate().child(title));
         let select = group.clone();
         let tab = crate::gpui::tabs::tab(
             hover_group.clone(),

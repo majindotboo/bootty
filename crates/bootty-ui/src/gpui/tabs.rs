@@ -109,6 +109,7 @@ pub fn content(
                 .h_full()
                 .flex()
                 .items_center()
+                .overflow_hidden()
                 .child(content),
         )
         .when_some(right, ParentElement::child)
