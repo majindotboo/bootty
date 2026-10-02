@@ -1182,6 +1182,7 @@ fn sidebar_footer(
                 meter: Some(UsageMeterSnapshot {
                     provider,
                     label: format!("{} {:.0}% left", window.label, meter.remaining_percent),
+                    window_label: window.label.to_owned(),
                     fill: tone_color(meter.tone),
                     marker: tone_color(meter.marker_tone),
                     pace: tone_color(meter.pace_tone),

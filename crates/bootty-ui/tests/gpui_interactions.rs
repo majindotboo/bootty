@@ -731,7 +731,7 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn quota_rows_show_pace_and_resets_over_full_width_meters(cx: &mut TestAppContext) {
+fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
@@ -744,6 +744,7 @@ fn quota_rows_show_pace_and_resets_over_full_width_meters(cx: &mut TestAppContex
             meter: Some(UsageMeterSnapshot {
                 provider: UsageProvider::Codex,
                 label: format!("{label} 23% left"),
+                window_label: label.to_owned(),
                 fill: palette().accent,
                 marker: palette().accent,
                 pace: palette().text,
@@ -803,26 +804,27 @@ fn quota_rows_show_pace_and_resets_over_full_width_meters(cx: &mut TestAppContex
                 let expected = cx
                     .debug_bounds(expected_selector)
                     .expect("expected allowance marker");
-                assert!(labels.right() <= pace.left(), "quota label overlaps pacing");
+                assert!(labels.left() >= row.left());
                 let reset = cx.debug_bounds(reset_selector).expect("visible reset time");
                 assert!(pace.right() <= reset.left(), "quota pacing overlaps reset");
                 assert!(reset.right() <= row.right());
                 assert!(expected.left() >= track.left() && expected.right() <= track.right());
                 assert!(track.right() <= row.right());
                 assert!(
-                    track.top() >= labels.bottom(),
-                    "meter belongs below quota text"
+                    track.left() >= labels.right(),
+                    "meter overlaps window label"
                 );
                 assert!(
-                    track.size.width >= row.size.width.mul(0.85),
-                    "quota meter uses the available row width"
+                    track.size.width >= px(font_size).mul(2.0),
+                    "meter remains useful"
                 );
+                assert!(track.top() < labels.bottom(), "meter shares the quota row");
                 assert!(
                     track.size.height < labels.size.height.div(4.0),
                     "meter is not thin"
                 );
                 assert!(
-                    row.size.height <= px(font_size).mul(1.75),
+                    row.size.height <= px(font_size).mul(3.0),
                     "quota row stays compact"
                 );
                 assert!(row.top() >= previous_bottom);

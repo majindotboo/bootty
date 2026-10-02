@@ -72,6 +72,7 @@ pub struct UsageMeterSnapshot {
     pub meter: crate::usage::QuotaMeter,
     pub provider: crate::usage::UsageProvider,
     pub label: String,
+    pub window_label: String,
     pub fill: Rgba,
     pub marker: Rgba,
     pub pace: Rgba,

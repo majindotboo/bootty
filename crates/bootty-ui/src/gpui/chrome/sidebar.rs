@@ -144,7 +144,11 @@ pub(super) fn render(
         radius: cx.theme().radius_lg,
     }
     .content(width, docked);
-    let status_footer = render_codexbar(snapshot, colors);
+    let status_footer = render_codexbar(
+        snapshot,
+        colors,
+        width >= f32::from(cx.theme().font_size) * 17.0,
+    );
 
     let resize_handle = resize_handle(position, cx);
 
@@ -1043,6 +1047,7 @@ fn usage_meter(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
+    inline: bool,
 ) -> gpui_kit::AnyElement {
     let mut details = format!("{} · {}", snapshot.provider.id(), snapshot.label);
     if let Some(expected) = snapshot.meter.expected_remaining_percent {
@@ -1066,8 +1071,10 @@ fn usage_meter(
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
         })
-        .child(usage_labels(snapshot, item, colors))
-        .child(usage_track(snapshot, &item.key))
+        .child(usage_labels(snapshot, item, colors, inline))
+        .when(!inline, |row| {
+            row.child(usage_details(snapshot, item, colors))
+        })
         .into_any_element()
 }
 
@@ -1075,13 +1082,14 @@ fn usage_labels(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
+    inline: bool,
 ) -> impl IntoElement {
     div()
         .w_full()
         .min_w_0()
         .flex()
         .items_center()
-        .gap_2()
+        .gap_1()
         .when_some(item.icon.as_deref(), |element, icon| {
             element.child(crate::gpui::sized_icon(
                 icon,
@@ -1095,11 +1103,32 @@ fn usage_labels(
                     let key = item.key.clone();
                     move || format!("sidebar-footer-{key}-labels")
                 })
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(snapshot.label.clone()),
+                .flex_none()
+                .child(snapshot.window_label.clone()),
         )
+        .child(usage_track(snapshot, &item.key))
+        .child(
+            div()
+                .flex_none()
+                .text_color(color(snapshot.fill))
+                .child(format!("{:.0}%", snapshot.meter.remaining_percent)),
+        )
+        .when(inline, |row| {
+            row.child(usage_details(snapshot, item, colors))
+        })
+}
+
+fn usage_details(
+    snapshot: &UsageMeterSnapshot,
+    item: &super::SidebarFooterItem,
+    colors: ChromePalette,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        .flex()
+        .justify_end()
+        .items_center()
+        .gap_1()
         .when(!snapshot.meter.pace.is_empty(), |element| {
             element.child(
                 div()
@@ -1142,9 +1171,9 @@ fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::AnyElement
     div()
         .debug_selector(move || track_selector)
         .relative()
-        .flex_none()
-        .w_full()
-        .h_0p5()
+        .flex_1()
+        .min_w_0()
+        .h_1()
         .rounded_full()
         .bg(color(snapshot.track))
         .child(
@@ -1326,6 +1355,7 @@ pub(super) fn session_menu(
 pub(super) fn render_codexbar(
     snapshot: &SidebarSnapshot,
     colors: ChromePalette,
+    inline: bool,
 ) -> Option<gpui_kit::AnyElement> {
     (!snapshot.footer.is_empty())
         .then(|| {
@@ -1334,9 +1364,9 @@ pub(super) fn render_codexbar(
                 .debug_selector(|| "bootty-gpui-sidebar-footer".to_owned())
                 .flex_none()
                 .w_full()
-                .px_1()
-                .py_2()
-                .gap_2()
+                .px_2()
+                .py_1()
+                .gap_1()
                 .border_t_1()
                 .border_color(color(snapshot.border))
                 .children(snapshot.footer.iter().map(|item| {
@@ -1351,7 +1381,7 @@ pub(super) fn render_codexbar(
                         .text_xs()
                         .text_color(color(item.color));
                     if let Some(meter) = &item.meter {
-                        row.child(usage_meter(meter, item, colors))
+                        row.child(usage_meter(meter, item, colors, inline))
                             .into_any_element()
                     } else {
                         row.child(div().min_w_0().child(item.text.clone()))
