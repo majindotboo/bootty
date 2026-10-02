@@ -1,83 +1,93 @@
-use super::{BrowserFeedbackReady, BrowserPanel};
-use bootty_browser::BrowserElement;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    input::{Textarea, TextareaState},
-    notification::Notification,
-};
-use gpui_kit::{
-    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
-    Render, Styled, WeakEntity, Window, div, prelude::*,
-};
+use super::{BrowserFeedbackReady, BrowserInteraction, BrowserPanel};
+use bootty_browser::{AnnotationAction, AnnotationTheme, BrowserElement};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, notification::Notification};
+use gpui_kit::{ClipboardItem, Context, Window};
 
-pub(super) struct AnnotationEditor {
-    element: BrowserElement,
-    comment: Entity<TextareaState>,
-    pub(super) owner: WeakEntity<BrowserPanel>,
-}
-
-impl AnnotationEditor {
-    pub(super) fn new(
+impl BrowserPanel {
+    pub(super) fn edit_annotation(
+        &mut self,
         element: BrowserElement,
-        owner: WeakEntity<BrowserPanel>,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
-    ) -> Self {
-        let comment = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("Describe the change you want")
-                .auto_grow(3, 6)
-        });
-        cx.observe(&comment, |_, _, cx| cx.notify()).detach();
-        Self {
-            element,
-            comment,
-            owner,
+    ) {
+        let theme = cx.theme();
+        let colors = AnnotationTheme {
+            background: u32::from(theme.popover.to_rgb()),
+            foreground: u32::from(theme.popover_foreground.to_rgb()),
+            muted: u32::from(theme.muted_foreground.to_rgb()),
+            border: u32::from(theme.border.to_rgb()),
+            primary: u32::from(theme.primary.to_rgb()),
+            primary_foreground: u32::from(theme.primary_foreground.to_rgb()),
+            font_size: f32::from(window.rem_size()),
+            radius: f32::from(theme.radius),
+        };
+        let result = self
+            .selected_tab()
+            .and_then(|tab| tab.view.as_ref())
+            .map(|view| view.show_annotation_editor(&colors));
+        match result {
+            Some(Ok(())) => {
+                self.annotation = Some(element);
+                self.interaction = BrowserInteraction::Editing;
+            }
+            Some(Err(error)) => {
+                if let Some(tab) = self.selected_mut() {
+                    tab.error = Some(error.to_string());
+                }
+                self.stop_annotation();
+            }
+            None => self.stop_annotation(),
         }
+        cx.notify();
     }
 
-    fn share(&self, paste: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let comment = self.comment.read(cx).value().to_string();
-        if comment.trim().is_empty() || comment.len() > 4096 {
+    pub(super) fn receive_annotation(
+        &mut self,
+        id: u64,
+        action: AnnotationAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if id != self.selected || !self.visible || !self.host_visible {
             return;
         }
-        let feedback = self.element.feedback(&comment);
+        if action == AnnotationAction::Cancel {
+            if matches!(
+                self.interaction,
+                BrowserInteraction::Selecting | BrowserInteraction::Editing
+            ) {
+                self.stop_annotation();
+                cx.notify();
+            }
+            return;
+        }
+        let Some(element) = self.annotation.as_ref() else {
+            return;
+        };
+        let current = self
+            .selected_tab()
+            .and_then(|tab| tab.view.as_ref())
+            .and_then(|view| view.current_address().ok());
+        if self.interaction != BrowserInteraction::Editing
+            || current.as_deref() != Some(&element.url)
+        {
+            self.stop_annotation();
+            cx.notify();
+            return;
+        }
+        let (comment, paste) = match action {
+            AnnotationAction::Copy(comment) => (comment, false),
+            AnnotationAction::Paste(comment) => (comment, true),
+            AnnotationAction::Cancel => return,
+        };
+        let feedback = element.feedback(&comment);
+        self.stop_annotation();
         if paste {
-            _ = self
-                .owner
-                .update(cx, |_, cx| cx.emit(BrowserFeedbackReady(feedback)));
+            cx.emit(BrowserFeedbackReady(feedback));
         } else {
             cx.write_to_clipboard(ClipboardItem::new_string(feedback));
             window.push_notification(Notification::success("Copied browser feedback"), cx);
         }
-        window.close_dialog(cx);
-        _ = self
-            .owner
-            .update(cx, |panel, cx| panel.finish_dialog(window, cx));
-    }
-}
-
-impl Focusable for AnnotationEditor {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.comment.focus_handle(cx)
-    }
-}
-
-impl Render for AnnotationEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let comment = self.comment.read(cx).value();
-        let can_share = !comment.trim().is_empty() && comment.len() <= 4096;
-        div().flex().flex_col().gap_3()
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(self.element.url.clone()))
-            .child(div().flex().flex_col().gap_1()
-                .child(div().font_semibold().child(self.element.tag.clone()))
-                .child(div().text_sm().child(self.element.selector.clone()))
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(self.element.text.clone())))
-            .child(Textarea::new(&self.comment).aria_label("Requested change"))
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Includes the page address, selected element and your comment. Pasting leaves the feedback in the selected terminal for review."))
-            .child(div().flex().justify_end().gap_2()
-                .child(Button::new("annotation-copy").outline().label("Copy feedback").disabled(!can_share).on_click(cx.listener(|this, _, window, cx| this.share(false, window, cx))))
-                .child(Button::new("annotation-paste").primary().label("Paste into terminal").disabled(!can_share).on_click(cx.listener(|this, _, window, cx| this.share(true, window, cx)))))
+        cx.notify();
     }
 }

@@ -14,6 +14,6 @@ pub use native::{
 
 pub use profile::BrowserProfile;
 
-pub use annotation::BrowserElement;
+pub use annotation::{AnnotationAction, AnnotationTheme, BrowserElement};
 
 pub use login::login_origin;

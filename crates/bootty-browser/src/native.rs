@@ -10,7 +10,10 @@ use wry::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 
-use crate::{AddressError, BrowserElement, BrowserProfile, normalize_address};
+use crate::{
+    AddressError, AnnotationAction, AnnotationTheme, BrowserElement, BrowserProfile,
+    normalize_address,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserBounds {
@@ -53,6 +56,7 @@ impl From<BrowserBounds> for Rect {
 pub enum BrowserEvent {
     PageFocused,
     ElementPicked(BrowserElement),
+    Annotation(AnnotationAction),
     Shortcut(BrowserShortcut),
     LoadStarted(String),
     LoadFinished(String),
@@ -92,9 +96,16 @@ pub enum NativeBrowserError {
 /// A main-thread native child view. Its owner drops it before releasing the parent window.
 pub struct BrowserView {
     view: WebView,
-    annotation_enabled: Rc<Cell<bool>>,
+    annotation_enabled: Rc<Cell<AnnotationMode>>,
     bounds: BrowserBounds,
     visible: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnnotationMode {
+    Idle,
+    Selecting,
+    Editing,
 }
 
 impl BrowserView {
@@ -135,7 +146,7 @@ impl BrowserView {
         let permission_events = events.clone();
         let download_events = events.clone();
         let shortcut_events = events.clone();
-        let annotation_enabled = Rc::new(Cell::new(false));
+        let annotation_enabled = Rc::new(Cell::new(AnnotationMode::Idle));
         let ipc_annotation_enabled = annotation_enabled.clone();
         let load_annotation_enabled = annotation_enabled.clone();
         let view = profile
@@ -174,7 +185,7 @@ impl BrowserView {
             .with_on_page_load_handler(move |event, url| {
                 let event = match event {
                     PageLoadEvent::Started => {
-                        load_annotation_enabled.set(false);
+                        load_annotation_enabled.set(AnnotationMode::Idle);
                         BrowserEvent::LoadStarted(url)
                     }
                     PageLoadEvent::Finished => BrowserEvent::LoadFinished(url),
@@ -213,7 +224,27 @@ impl BrowserView {
     pub fn set_annotation_mode(&self, enabled: bool) -> Result<(), NativeBrowserError> {
         self.view
             .evaluate_script(&format!("window.__boottyAnnotate?.({enabled});"))?;
-        self.annotation_enabled.set(enabled);
+        self.annotation_enabled.set(if enabled {
+            AnnotationMode::Selecting
+        } else {
+            AnnotationMode::Idle
+        });
+        Ok(())
+    }
+
+    /// Opens the page-anchored editor above the native child, using host theme tokens.
+    ///
+    /// # Errors
+    /// Reports a failed native script dispatch.
+    pub fn show_annotation_editor(
+        &self,
+        theme: &AnnotationTheme,
+    ) -> Result<(), NativeBrowserError> {
+        let theme = serde_json::to_string(theme)
+            .map_err(|error| NativeBrowserError::Platform(error.to_string()))?;
+        self.view
+            .evaluate_script(&format!("window.__boottyAnnotationEditor?.({theme});"))?;
+        self.annotation_enabled.set(AnnotationMode::Editing);
         Ok(())
     }
 
@@ -377,15 +408,28 @@ pub fn poll_platform_events() {
 #[cfg(not(target_os = "linux"))]
 pub const fn poll_platform_events() {}
 
-fn handle_ipc(message: &str, annotation_enabled: &Cell<bool>, events: &Sender<BrowserEvent>) {
+fn handle_ipc(
+    message: &str,
+    annotation_enabled: &Cell<AnnotationMode>,
+    events: &Sender<BrowserEvent>,
+) {
     if message == "browser-focus" {
         _ = events.try_send(BrowserEvent::PageFocused);
     } else if let Some(payload) = message.strip_prefix("browser-element:") {
-        if annotation_enabled.get()
+        if annotation_enabled.get() == AnnotationMode::Selecting
             && let Some(element) = BrowserElement::parse(payload)
         {
-            annotation_enabled.set(false);
+            annotation_enabled.set(AnnotationMode::Idle);
             _ = events.try_send(BrowserEvent::ElementPicked(element));
+        }
+    } else if let Some(payload) = message.strip_prefix("browser-annotation:") {
+        if let Some(action) = AnnotationAction::parse(payload)
+            && (annotation_enabled.get() == AnnotationMode::Editing
+                || (annotation_enabled.get() == AnnotationMode::Selecting
+                    && action == AnnotationAction::Cancel))
+        {
+            annotation_enabled.set(AnnotationMode::Idle);
+            _ = events.try_send(BrowserEvent::Annotation(action));
         }
     } else {
         let shortcut = match message {

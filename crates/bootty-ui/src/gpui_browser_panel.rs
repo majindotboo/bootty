@@ -82,6 +82,7 @@ pub struct BrowserPanel {
     next_id: u64,
     address: Entity<InputState>,
     interaction: BrowserInteraction,
+    annotation: Option<BrowserElement>,
     visible: bool,
     active: bool,
     host_visible: bool,
@@ -166,6 +167,7 @@ impl BrowserPanel {
             next_id: 2,
             address,
             interaction: BrowserInteraction::Idle,
+            annotation: None,
             visible: false,
             active: false,
             host_visible: false,
@@ -213,6 +215,14 @@ impl BrowserPanel {
 
     /// The shell also hides native children for overlays, which render above the GPU scene.
     pub(crate) fn set_visible(&mut self, visible: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if !visible
+            && matches!(
+                self.interaction,
+                BrowserInteraction::Selecting | BrowserInteraction::Editing
+            )
+        {
+            self.stop_annotation();
+        }
         self.host_visible = visible;
         self.sync_visibility(cx);
     }
@@ -220,10 +230,7 @@ impl BrowserPanel {
     fn sync_visibility(&mut self, cx: &mut Context<Self>) {
         let visible = self.host_visible
             && self.active
-            && !matches!(
-                self.interaction,
-                BrowserInteraction::Editing | BrowserInteraction::ManagingLogin
-            );
+            && self.interaction != BrowserInteraction::ManagingLogin;
         if self.visible == visible {
             return;
         }
@@ -537,7 +544,11 @@ impl BrowserPanel {
     }
 
     fn stop_annotation(&mut self) {
-        if self.interaction == BrowserInteraction::Selecting {
+        if matches!(
+            self.interaction,
+            BrowserInteraction::Selecting | BrowserInteraction::Editing
+        ) {
+            self.annotation = None;
             if let Some(view) = self.selected_tab().and_then(|tab| tab.view.as_ref()) {
                 _ = view.set_annotation_mode(false);
             }
@@ -574,43 +585,6 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    fn edit_annotation(
-        &mut self,
-        element: BrowserElement,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use gpui_kit::component::WindowExt as _;
-        self.interaction = BrowserInteraction::Editing;
-        self.sync_visibility(cx);
-        let owner = cx.weak_entity();
-        let editor =
-            cx.new(|cx| annotation::AnnotationEditor::new(element, owner.clone(), window, cx));
-        let cancel_owner = owner.clone();
-        let close_owner = owner.clone();
-        let content = editor.clone();
-        window.open_dialog(cx, move |dialog, window, _| {
-            let content = content.clone();
-            let cancel_owner = cancel_owner.clone();
-            let close_owner = close_owner.clone();
-            dialog
-                .title("Annotate element")
-                .w(gpui_kit::px(f32::from(window.rem_size()) * 30.0))
-                .on_cancel(move |_, window, cx| {
-                    _ = cancel_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
-                    true
-                })
-                .on_close(move |_, window, cx| {
-                    _ = close_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
-                })
-                .content(move |body, _, _| body.child(content.clone()))
-        });
-        cx.defer_in(window, move |_, window, cx| {
-            crate::window::restore_keyboard_focus(window);
-            editor.focus_handle(cx).focus(window, cx);
-        });
-    }
-
     fn finish_dialog(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.interaction = BrowserInteraction::Idle;
         self.sync_visibility(cx);
@@ -624,7 +598,7 @@ impl BrowserPanel {
         &mut self,
         id: u64,
         element: BrowserElement,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let current = self
@@ -633,6 +607,8 @@ impl BrowserPanel {
             .and_then(|view| view.current_address().ok());
         // Frame selections need explicit frame identity before they can be accepted.
         if id == self.selected
+            && self.visible
+            && self.host_visible
             && self.interaction == BrowserInteraction::Selecting
             && current.as_deref() == Some(&element.url)
         {
@@ -652,6 +628,10 @@ impl BrowserPanel {
         }
         if let BrowserEvent::ElementPicked(element) = event {
             self.receive_element(id, element, window, cx);
+            return;
+        }
+        if let BrowserEvent::Annotation(action) = event {
+            self.receive_annotation(id, action, window, cx);
             return;
         }
         if matches!(event, BrowserEvent::PageFocused) {
@@ -700,6 +680,7 @@ impl BrowserPanel {
                 BrowserEvent::Notice(message) => tab.error = Some(message),
                 BrowserEvent::PageFocused
                 | BrowserEvent::ElementPicked(_)
+                | BrowserEvent::Annotation(_)
                 | BrowserEvent::OpenTab(_)
                 | BrowserEvent::Shortcut(_) => {}
             }
@@ -710,6 +691,7 @@ impl BrowserPanel {
             }
         }
         if started {
+            self.annotation = None;
             self.interaction = BrowserInteraction::Idle;
             self.watch_load(id, window, cx);
         }
