@@ -21,7 +21,10 @@ Browser, settings, search, sessions and empty-sidebar captures were refreshed at
 22:39–22:40 PDT from `b80cea92`, after correcting browser chrome keyboard routing.
 Executable SHA-256:
 `35b11cdbacfd5057d4cbe70cb53123b8a8ba7b20cda1b8a1b815ea759d30c6b8`.
-The page cookie remained after two full app restarts. Separate recordings cover
+The page cookie remained after two full app restarts. A separate lifecycle check
+at 22:51 PDT confirmed that private-profile cookies disappear after restarting
+and that returning to remembered site data preserves the earlier persistent
+cookie. The original configuration bytes and session counts were restored. Separate recordings cover
 native page focus after palette cancellation and browser tab shortcuts from the
 address field. Browser shortcuts preserve the terminal window and pane targets;
 after closing the last browser tab, terminal Cmd+T and Cmd+W still work.
@@ -60,6 +63,7 @@ playback is not accelerated.
 ![Document input and unsaved tab indicator](document.png)
 ![Browser input and site data retained across a full app restart](browser.png)
 ![Page typing resumes after palette dismissal without a click](browser-focus.png)
+![Private-profile cookie absent after a full app restart](browser-private.png)
 ![Native provider history with account status and search](history.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
 ![Page element annotation ready for review](annotations.png)

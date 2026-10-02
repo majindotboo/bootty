@@ -172,6 +172,13 @@
       "sha256": "23dbf6694d5abf789a20e7e17d147d00cdc9d958e732bed68389efc67b58f554",
       "capture_started_at": "2026-10-02T05:37:35.453000+00:00",
       "capture_finished_at": "2026-10-02T05:37:36.925000+00:00"
+    },
+    {
+      "file": "browser-private.png",
+      "source_commit": "b80cea926fbb39da3b778a23841746a560936cf7",
+      "executable_sha256": "35b11cdbacfd5057d4cbe70cb53123b8a8ba7b20cda1b8a1b815ea759d30c6b8",
+      "sha256": "a1f033edbc494573e0bf0349f94465d41267a52ae1d8a25085162ab522475d8b",
+      "captured_at": "2026-10-02T05:51:49.156000+00:00"
     }
   ]
 }
