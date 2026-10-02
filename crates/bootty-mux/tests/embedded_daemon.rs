@@ -33,8 +33,6 @@ const REMOTE_STREAM_PAYLOAD_ENV: &str = "BOOTTY_RMUX_REMOTE_STREAM_PAYLOAD";
 const REMOTE_STREAM_CHILD_TEST: &str = "embedded_rmux_remote_pane_stream_child";
 const ISOLATED_PATH: &str = "/usr/bin:/bin";
 const POSIX_SHELL: &str = "/bin/sh";
-/// What a prepared pane prints back. No scenario prints it for another reason.
-const PANE_READY: &str = "BOOTTY_PANE_READY";
 const PANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PANE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -848,7 +846,8 @@ if expected in data:
         };
         let (mut stream, frames) = spawn_remote_pane_stream(request.encode()?)?;
         let result = (|| -> Result<()> {
-            let RemotePaneStreamFrame::Rebase(keyframe) = next_remote_pane_stream_frame(&frames)?
+            let RemotePaneStreamFrame::Rebase(keyframe) =
+                next_remote_pane_stream_frame(&frames).context("initial remote rebase")?
             else {
                 anyhow::bail!("remote pane stream sent bytes before its initial rebase")
             };
@@ -873,7 +872,7 @@ if expected in data:
 
             terminal.write_input(b"printf 'BOOTTY_RMUX_REMOTE_BYTES\\n'\r")?;
             loop {
-                match next_remote_pane_stream_frame(&frames)? {
+                match next_remote_pane_stream_frame(&frames).context("new remote output")? {
                     RemotePaneStreamFrame::End => {
                         anyhow::bail!("remote pane ended before new output")
                     }
@@ -900,7 +899,7 @@ if expected in data:
             terminal.write_input(b"\x04")?;
             loop {
                 if matches!(
-                    next_remote_pane_stream_frame(&frames)?,
+                    next_remote_pane_stream_frame(&frames).context("remote shell exit")?,
                     RemotePaneStreamFrame::End
                 ) {
                     return Ok(());
@@ -993,7 +992,11 @@ if expected in data:
                 anyhow::ensure!(!terminal.copy_mode_active()?);
                 return Ok(());
             }
-            anyhow::ensure!(std::time::Instant::now() < deadline, "shell did not exit");
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "shell did not exit; last frame: {:?}",
+                terminal.extract_frame()?.text_rows()
+            );
             thread::yield_now();
         }
     }
@@ -1224,7 +1227,8 @@ fn create_embedded_session(
         session_id: session_id.clone(),
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         tag,
-        argv: None,
+        // Explicit argv avoids login-shell rc files changing EOF behavior.
+        argv: Some(vec![POSIX_SHELL.to_owned()]),
     })?;
 
     let snapshot = backend.snapshot()?;
@@ -1371,17 +1375,21 @@ fn wait_for_terminal_text(terminal: &mut ActiveTerminal, expected: &str) -> Resu
 /// command line that was typed, and a wait for a marker is satisfied by the
 /// command asking for it rather than by the pane printing it.
 fn prepare_pane(terminal: &mut ActiveTerminal) -> Result<()> {
+    // Another reader may replay the earlier probe before its own input is live.
+    let probe = new_session_identity();
+    let marker = format!("BOOTTY_PANE_{probe}");
+    let command = format!("stty -echo; printf '%s%s\\n' 'BOOTTY_PANE_' '{probe}'\r");
     let deadline = std::time::Instant::now()
         .checked_add(PANE_TIMEOUT)
         .context("pane deadline")?;
     loop {
         // Split so the echo of this line cannot answer for the pane.
-        terminal.write_input(b"stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
+        terminal.write_input(command.as_bytes())?;
         let attempt = (std::time::Instant::now()
             .checked_add(PANE_PROBE_INTERVAL)
             .context("probe deadline")?)
         .min(deadline);
-        if poll_frames_until(terminal, attempt, |text| text.contains(PANE_READY))?.is_none() {
+        if poll_frames_until(terminal, attempt, |text| text.contains(&marker))?.is_none() {
             return Ok(());
         }
         anyhow::ensure!(
