@@ -25,6 +25,7 @@ enum NewSessionStep {
     Project(ProjectPicker),
     Worktree {
         project: ProjectPickerEntry,
+        main: String,
         list: SearchableList<WorktreePickerEntry>,
     },
     BranchName(WorktreeDraft),
@@ -40,6 +41,7 @@ struct ProjectPicker {
 
 struct WorktreeDraft {
     repo: String,
+    main: String,
     branch: String,
     folder: String,
     start_ref: String,
@@ -120,7 +122,14 @@ impl NewSessionDialog {
                 }
             }
             Ok(NewSessionOutcome::Worktrees(worktrees)) => {
-                if let NewSessionStep::Worktree { list, .. } = &mut self.step {
+                if let NewSessionStep::Worktree { main, list, .. } = &mut self.step {
+                    if let Some(path) = worktrees
+                        .iter()
+                        .find(|entry| !entry.is_new)
+                        .and_then(|entry| entry.path.as_ref())
+                    {
+                        main.clone_from(path);
+                    }
                     list.replace_entries(worktree_entries(&worktrees));
                     select_source(list, default_worktree_selection(&worktrees, &[], true));
                 }
@@ -249,7 +258,7 @@ impl NewSessionDialog {
             DialogIntent::Activate { row, .. }
                 if !self.worker_busy()
                     || matches!(self.step, NewSessionStep::Launch { .. })
-                        && row.0 != "choose-project" =>
+                        && !matches!(row.0.as_str(), "choose-project" | "choose-checkout") =>
             {
                 if row.0 == "current-checkout" {
                     self.set_checkout(self.checkout.clone()?);
@@ -262,6 +271,16 @@ impl NewSessionDialog {
                     if row.0 == "choose-project" {
                         self.step = NewSessionStep::Project(self.project_picker.take()?);
                         return None;
+                    }
+                    if row.0 == "choose-checkout" {
+                        return self.activate_project(
+                            ProjectPickerEntry {
+                                path: cwd.clone(),
+                                favorite: false,
+                                icon: None,
+                            },
+                            open_cwds,
+                        );
                     }
                     if self.is_remote() && row.0 != "terminal" {
                         return None;
@@ -319,12 +338,17 @@ impl NewSessionDialog {
             NewSessionStep::Project(picker) => {
                 self.activate_project(picker.list.selected_value()?.clone(), open_cwds)
             }
-            NewSessionStep::Worktree { project, list } => {
+            NewSessionStep::Worktree {
+                project,
+                main,
+                list,
+            } => {
                 let worktree = list.selected_value()?;
                 if worktree.is_new {
                     self.step = NewSessionStep::BranchName(WorktreeDraft {
                         repo: project.path.clone(),
-                        branch: String::new(),
+                        main: main.clone(),
+                        branch: generated_task_branch(&self.draft),
                         folder: String::new(),
                         start_ref: String::new(),
                         error: None,
@@ -345,6 +369,7 @@ impl NewSessionDialog {
         project: ProjectPickerEntry,
         open_cwds: &[String],
     ) -> Option<NewSessionPickerEvent> {
+        let mut main = project.path.clone();
         let list = if let Some(worker) = &mut self.worker {
             worker.start(NewSessionEffect::ListWorktrees(
                 project.path.clone(),
@@ -353,6 +378,13 @@ impl NewSessionDialog {
             SearchableList::new(Vec::new())
         } else {
             let worktrees = discover_worktree_picker_entries(&project.path);
+            if let Some(path) = worktrees
+                .iter()
+                .find(|entry| !entry.is_new)
+                .and_then(|entry| entry.path.as_ref())
+            {
+                main.clone_from(path);
+            }
             let mut list = SearchableList::new(worktree_entries(&worktrees));
             select_source(
                 &mut list,
@@ -360,9 +392,14 @@ impl NewSessionDialog {
             );
             list
         };
-        if let NewSessionStep::Project(picker) =
-            std::mem::replace(&mut self.step, NewSessionStep::Worktree { project, list })
-        {
+        if let NewSessionStep::Project(picker) = std::mem::replace(
+            &mut self.step,
+            NewSessionStep::Worktree {
+                project,
+                main,
+                list,
+            },
+        ) {
             self.project_picker = Some(picker);
         }
         None
@@ -530,7 +567,6 @@ impl ProjectPicker {
 
 impl WorktreeDraft {
     fn spec(&self, remote: bool, busy: bool) -> DialogSpec {
-        let repo = display_project_path(&self.repo, remote);
         let mut spec = DialogSpec::prompt(
             NEW_SESSION_ID,
             "New worktree",
@@ -557,7 +593,15 @@ impl WorktreeDraft {
                 placeholder: "HEAD — or a branch, tag or commit".to_owned(),
             },
         ];
-        spec.footer = Some(format!("Creates a sibling checkout of {repo}."));
+        let request = bootty_git::WorktreeRequest {
+            branch: self.branch.trim().to_owned(),
+            name: normalized_name(&self.folder),
+            start_ref: normalized_name(&self.start_ref),
+        };
+        spec.footer = Some(request.destination(&self.main).map_or_else(
+            |error| error,
+            |path| format!("Destination: {}", display_project_path(&path, remote)),
+        ));
         if let Some(row) = spec.rows.first_mut() {
             (if busy {
                 "Creating…"
@@ -778,6 +822,12 @@ fn launch_spec(cwd: &str, remote: bool, draft: &str, catalog_loading: bool) -> D
     }
     rows.push(terminal);
     rows.push(picker_row(
+        RowId::new("choose-checkout"),
+        "git-branch",
+        "Choose checkout or worktree…".to_owned(),
+        !catalog_loading,
+    ));
+    rows.push(picker_row(
         RowId::new("choose-project"),
         "folder",
         "Choose another project…".to_owned(),
@@ -791,6 +841,20 @@ fn launch_spec(cwd: &str, remote: bool, draft: &str, catalog_loading: bool) -> D
     spec.footer = Some(display_project_path(cwd, remote));
     spec.hint = Some("Enter start session   Esc close".to_owned());
     spec
+}
+
+fn generated_task_branch(draft: &str) -> String {
+    let words = draft
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_ascii_lowercase();
+    let slug = words
+        .get(..words.len().min(48))
+        .unwrap_or(&words)
+        .trim_end_matches('-');
+    format!("task/{}", if slug.is_empty() { "new-task" } else { slug })
 }
 
 fn launch_event(id: &str, cwd: &str, draft: &str) -> Option<NewSessionPickerEvent> {

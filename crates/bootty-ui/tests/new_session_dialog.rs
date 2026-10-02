@@ -492,10 +492,8 @@ fn worktree_form_keeps_its_project_and_normalizes_captured_fields(
         .expect("new worktree action");
     assert_eq!(activate_picker_row(&mut dialog, row, &[]), None);
     let id = dialog.spec().id;
-    assert!(
-        !dialog.spec().rows[0].enabled,
-        "empty branch cannot be submitted"
-    );
+    assert_eq!(dialog.spec().text.as_deref(), Some("task/new-task"));
+    assert!(dialog.spec().rows[0].enabled);
     dialog.apply(
         &DialogIntent::TextChanged {
             dialog: id.clone(),
@@ -661,4 +659,69 @@ fn project_picker_projects_real_artwork_with_name_and_path() {
     assert_eq!(row.label, "bootty");
     assert_eq!(row.detail.as_deref(), Some("/projects/bootty"));
     assert_eq!(row.artwork.as_deref(), Some(&artwork));
+}
+
+#[rstest::rstest]
+#[case("Fix browser focus!", "task/fix-browser-focus")]
+#[case("   🥟   ", "task/new-task")]
+#[case("Review  API / permissions", "task/review-api-permissions")]
+fn generated_worktree_has_a_reviewable_destination_and_preserves_task(
+    worktree_project: assert_fs::TempDir,
+    #[case] task: &str,
+    #[case] branch: &str,
+) {
+    let path = worktree_project.path().to_string_lossy().into_owned();
+    let mut dialog = NewSessionDialog::from_projects(Vec::new());
+    dialog.set_checkout(path.clone());
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: dialog.spec().id,
+            value: task.to_owned(),
+        },
+        &[],
+    );
+    let row = dialog
+        .spec()
+        .rows
+        .into_iter()
+        .find(|row| row.id.0 == "choose-checkout")
+        .unwrap();
+    assert_eq!(activate_picker_row(&mut dialog, &row, &[]), None);
+    let row = dialog
+        .spec()
+        .rows
+        .into_iter()
+        .find(|row| row.id.0 == "new-worktree")
+        .unwrap();
+    assert_eq!(activate_picker_row(&mut dialog, &row, &[]), None);
+    let spec = dialog.spec();
+    assert_eq!(spec.text.as_deref(), Some(branch));
+    let row = spec.rows[0].clone();
+    let request = bootty_git::WorktreeRequest {
+        branch: branch.to_owned(),
+        name: None,
+        start_ref: None,
+    };
+    assert_eq!(
+        spec.footer,
+        Some(format!(
+            "Destination: {}",
+            request
+                .destination(
+                    &worktree_project
+                        .path()
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                )
+                .unwrap()
+        ))
+    );
+    assert_eq!(
+        activate_picker_row(&mut dialog, &row, &[]),
+        Some(NewSessionPickerEvent::CreateWorktree {
+            repo: path,
+            request
+        })
+    );
 }
