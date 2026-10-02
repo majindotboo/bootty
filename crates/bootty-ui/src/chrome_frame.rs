@@ -18,6 +18,7 @@ use crate::{
 };
 use bootty_config::config::SidebarPosition as ConfigSidebarPosition;
 use bootty_mux::repository::DEFAULT_SPACE_COLOR;
+use bootty_mux::session_lifecycle::TaskLifecycle;
 
 use crate::{
     commands::ExactMuxTarget,
@@ -757,6 +758,12 @@ fn sidebar_rows(
 ) -> Vec<SidebarRow> {
     let mut projects = Vec::<(String, Vec<(usize, &SessionView)>)>::new();
     for (ix, session) in projection.mux.sessions.iter().enumerate() {
+        if matches!(
+            sidebar_task_lifecycle(state, session),
+            Some(TaskLifecycle::Settled | TaskLifecycle::Archived)
+        ) {
+            continue;
+        }
         let directory = projection
             .session_facts
             .get(&session.id)
@@ -839,7 +846,205 @@ fn sidebar_rows(
             ));
         }
     }
+    append_saved_task_rows(state, native, projection, palette, &mut rows);
     rows
+}
+
+fn sidebar_task_lifecycle(state: &AppState, session: &SessionView) -> Option<TaskLifecycle> {
+    let identity = state
+        .mux()
+        .backend_session_by_id_or_name(&session.id)?
+        .tag
+        .identity
+        .as_deref()?;
+    let binding = &state.workspace.active.binding;
+    binding
+        .task_attachment_observed(identity)
+        .then(|| binding.sessions().task_lifecycle(identity))
+        .flatten()
+}
+
+fn saved_task_row(
+    state: &AppState,
+    task: &bootty_mux::session_membership::WorkspaceSession,
+    palette: ChromePalette,
+) -> SidebarRow {
+    SidebarRow {
+        key: format!(
+            "task:{}:{}",
+            state.mux_scope().persistence_value(),
+            task.identity
+        ),
+        text: task.label().to_owned(),
+        trailing: Some("Detached".to_owned()),
+        trailing_color: Some(palette.subtext),
+        trailing_shimmer: false,
+        number: None,
+        indent: 2,
+        tree: None,
+        icon: Some("file-text".to_owned()),
+        diff: None,
+        artwork: None,
+        color: palette.text,
+        dim_color: palette.subtext,
+        kind: SidebarRowKind::Other("saved-task".to_owned()),
+        active: false,
+        current: false,
+        selectable: false,
+        target: None,
+        reorder_anchor: None,
+        context: None,
+    }
+}
+
+fn saved_task_group(base: &SidebarRow, group_key: String, title: String) -> SidebarRow {
+    SidebarRow {
+        key: group_key,
+        text: title,
+        trailing: None,
+        icon: Some("folder".to_owned()),
+        kind: SidebarRowKind::Group,
+        indent: 0,
+        ..base.clone()
+    }
+}
+
+fn append_saved_task_rows(
+    state: &AppState,
+    native: &NativeChrome,
+    projection: &ChromeProjection,
+    palette: ChromePalette,
+    rows: &mut Vec<SidebarRow>,
+) {
+    let binding = &state.workspace.active.binding;
+    for (task, lifecycle) in binding.sessions().tasks() {
+        if lifecycle != TaskLifecycle::Active || binding.task_attachment_observed(&task.identity) {
+            continue;
+        }
+        let row = saved_task_row(state, task, palette);
+        let group_key = format!("project:{}:{}", projection.mux.scope_key, task.cwd);
+        if let Some(index) = rows.iter().position(|row| row.key == group_key) {
+            let next_group = rows
+                .iter()
+                .enumerate()
+                .skip(index.saturating_add(1))
+                .find(|(_, row)| matches!(row.kind, SidebarRowKind::Group))
+                .map_or(rows.len(), |(index, _)| index);
+            if let Some(group) = rows.get_mut(index) {
+                group.trailing = None;
+            }
+            rows.insert(next_group, row);
+        } else {
+            let title = std::path::Path::new(&task.cwd)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("Tasks")
+                .to_owned();
+            rows.push(saved_task_group(&row, group_key, title));
+            rows.push(row);
+        }
+    }
+    for (lifecycle, name) in [
+        (TaskLifecycle::Settled, "Settled"),
+        (TaskLifecycle::Archived, "Archived"),
+    ] {
+        let tasks: Vec<_> = binding
+            .sessions()
+            .tasks()
+            .filter(|(_, state)| *state == lifecycle)
+            .collect();
+        let Some((first, _)) = tasks.first() else {
+            continue;
+        };
+        let base = saved_task_row(state, first, palette);
+        rows.push(saved_task_group(
+            &base,
+            format!(
+                "project:tasks:{}:{}",
+                name.to_lowercase(),
+                projection.mux.scope_key
+            ),
+            name.to_owned(),
+        ));
+        for (task, _) in tasks {
+            let attached = projection
+                .mux
+                .sessions
+                .iter()
+                .enumerate()
+                .find(|(_, session)| {
+                    binding.task_attachment_observed(&task.identity)
+                        && state
+                            .mux()
+                            .backend_session_by_id_or_name(&session.id)
+                            .is_some_and(|live| {
+                                live.tag.identity.as_deref() == Some(task.identity.as_str())
+                            })
+                });
+            if let Some((index, session)) = attached {
+                rows.extend(sidebar_session_rows(
+                    state, native, projection, session, index, name, palette,
+                ));
+            } else {
+                rows.push(saved_task_row(state, task, palette));
+            }
+        }
+    }
+}
+
+fn sidebar_native_agent(
+    state: &AppState,
+    session: &SessionView,
+) -> Option<bootty_agents::TerminalAgentRecord> {
+    let agents = state.terminal_agent_service()?;
+    let live = state.mux().backend_session_by_id_or_name(&session.id)?;
+    for window in &live.windows {
+        for pane in std::iter::once(&window.anchor).chain(&window.panes) {
+            let Some(pane) = pane.pane_id.as_deref() else {
+                continue;
+            };
+            let Some(target) = state.mux_pane_target(
+                state.mux_scope(),
+                bootty_control::ResourceKind::Terminal,
+                &live.id,
+                &window.id,
+                pane,
+            ) else {
+                continue;
+            };
+            if let Some(record) = agents.record(&target) {
+                return Some(record);
+            }
+        }
+    }
+    None
+}
+
+fn sidebar_agent_task_status(
+    state: &AppState,
+    session: &SessionView,
+    provider: bootty_agents::AgentKind,
+) -> Option<(String, Rgba, bool)> {
+    let agents = state.agent_service()?;
+    let scope = state.mux_scope().persistence_value().to_string();
+    for pane in &session.pane_ids {
+        let agent = agents.snapshot_scoped(provider, Some(&scope), Some(pane));
+        if agent.source == bootty_agents::AgentSource::None {
+            continue;
+        }
+        let label = if agent.unread() {
+            format!("● {}", agent.display_status())
+        } else {
+            agent.display_status()
+        };
+        let color = if agent.status == bootty_agents::AgentStatus::Idle {
+            state.ui_theme().palette.muted
+        } else {
+            state.ui_theme().palette.accent
+        };
+        return Some((label, color, agent.status.is_working()));
+    }
+    None
 }
 
 fn sidebar_session_rows(
@@ -864,8 +1069,13 @@ fn sidebar_session_rows(
     } else {
         &session.display_name
     };
+    let agent = sidebar_native_agent(state, session);
+    let task = sidebar_task_lifecycle(state, session).is_some() || agent.is_some();
+    let status = agent
+        .as_ref()
+        .and_then(|agent| sidebar_agent_task_status(state, session, agent.provider));
     rows.push(SidebarRow {
-        text: if title == name {
+        text: if title == name && !task {
             "Terminal".to_owned()
         } else {
             title.clone()
@@ -882,9 +1092,12 @@ fn sidebar_session_rows(
         kind: SidebarRowKind::Session,
         indent: 2,
         selectable: true,
+        trailing: status.as_ref().map(|(label, _, _)| label.clone()),
+        trailing_color: status.as_ref().map(|(_, color, _)| *color),
+        trailing_shimmer: status.is_some_and(|(_, _, working)| working),
         ..base.clone()
     });
-    for (window_ix, terminal) in session.windows.iter().enumerate() {
+    for (window_ix, terminal) in session.windows.iter().enumerate().filter(|_| !task) {
         rows.push(SidebarRow {
             key: format!("window:{}:{}", session.id, terminal.id),
             text: terminal.name.clone(),
@@ -914,9 +1127,14 @@ fn sidebar_session_rows(
     let detail = |id: &str, icon: &str, text: String| {
         sidebar_detail(&base, true, true, id, icon, text, palette.subtext)
     };
-    rows.extend(sidebar_session_details(
-        state, native, session, &facts, modules, base.color, &detail,
-    ));
+    let mut details =
+        sidebar_session_details(state, native, session, &facts, modules, base.color, &detail);
+    if task {
+        details.retain(|row| {
+            row.key.ends_with(":branch") || matches!(row.kind, SidebarRowKind::Progress { .. })
+        });
+    }
+    rows.extend(details);
     rows
 }
 

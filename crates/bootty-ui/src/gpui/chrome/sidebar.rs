@@ -149,15 +149,19 @@ pub(super) fn render(
 
     let resize_handle = resize_handle(position, cx);
 
-    let header = v_flex().w_full().gap_1().children(sidebar_header(
-        snapshot,
-        title,
-        layout,
-        header_height,
-        docked,
-        colors,
-        cx,
-    ));
+    let header = v_flex()
+        .w_full()
+        .gap_2()
+        .children(sidebar_header(
+            snapshot,
+            title,
+            layout,
+            header_height,
+            docked,
+            colors,
+            cx,
+        ))
+        .child(new_session_button(cx));
     let component_footer = v_flex()
         .w(px(width))
         .when(docked, gpui_kit::Styled::w_full)
@@ -297,21 +301,24 @@ impl SidebarRows {
                 }
                 continue;
             }
-            if !matches!(row.kind, SidebarRowKind::Session) {
+            if !task_row(&row.kind) {
                 blocks.push(self.render_row(row, false));
                 continue;
             }
             let selected = row.current || row.active;
             let mut session_rows = vec![self.render_row(row, true)];
             while rows.peek().is_some_and(|next| {
-                !matches!(next.kind, SidebarRowKind::Group | SidebarRowKind::Session)
+                !matches!(next.kind, SidebarRowKind::Group)
+                    && !task_row(&next.kind)
                     && next.target == row.target
             }) {
                 if let Some(detail) = rows.next() {
                     // Terminal topology belongs in the tab strip. Keep task
                     // progress visible and show metadata only for selection.
                     if !matches!(detail.kind, SidebarRowKind::Window { .. })
-                        && (selected || !matches!(detail.kind, SidebarRowKind::Detail))
+                        && (selected
+                            || detail.key.ends_with(":branch")
+                            || !matches!(detail.kind, SidebarRowKind::Detail))
                     {
                         session_rows.push(self.render_row(detail, true));
                     }
@@ -329,29 +336,21 @@ impl SidebarRows {
                 })
                 .relative()
                 .mx_2()
-                .my_1()
+                .my_0p5()
                 .w_auto()
                 .flex()
                 .flex_col()
+                .px_1()
                 .py_1()
                 .rounded(self.radius)
-                .border_1()
-                .border_color(
-                    color(if selected {
-                        self.colors.accent
-                    } else {
-                        self.snapshot.border
-                    })
-                    .opacity(if selected { 0.4 } else { 0.3 }),
-                )
                 .overflow_hidden()
-                .bg(color(if hovered {
-                    self.snapshot.hover
-                } else if selected {
-                    self.colors.surface
+                .bg(if selected {
+                    color(self.snapshot.current)
+                } else if hovered {
+                    color(self.snapshot.hover)
                 } else {
-                    self.colors.base
-                }))
+                    gpui_kit::Hsla::transparent_black()
+                })
                 .children(session_rows)
                 .when_some(row.target.clone(), |block, target| {
                     let owner = self.owner.clone();
@@ -472,6 +471,35 @@ fn resize_handle(position: SidebarPosition, cx: &Context<GpuiChrome>) -> gpui_ki
         .into_any_element()
 }
 
+fn new_session_button(cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
+    let new_session_owner = cx.weak_entity();
+    super::button::activated_button(
+        div()
+            .w_full()
+            .px_2()
+            .pb_1()
+            .debug_selector(|| "sidebar-new-session".to_owned()),
+        Button::new("sidebar-new-session")
+            .outline()
+            .small()
+            .w_full()
+            .icon(Icon::new(IconName::Plus).small())
+            .label("New session")
+            .accessibility_label("New session"),
+        move |_, app| {
+            _ = new_session_owner.update(app, |_, cx| {
+                cx.emit(ChromeIntent::Command(
+                    bootty_control::CommandInvocation::from_action(
+                        "new_mux_session",
+                        bootty_control::Caller::Keybinding,
+                    ),
+                ));
+            });
+        },
+    )
+    .into_any_element()
+}
+
 fn sidebar_header(
     snapshot: &SidebarSnapshot,
     title: &TitlebarSnapshot,
@@ -560,7 +588,7 @@ impl SidebarRows {
             .items_center()
             // Keep sidebar labels aligned along the same scan lane.
             .text_left()
-            .gap_1()
+            .gap_2()
             .when(is_group && row.key.starts_with("project:"), |element| {
                 element.child(
                     Icon::new(if self.collapsed_groups.contains(&row.key) {
@@ -593,10 +621,8 @@ impl SidebarRows {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(
-                        is_group || selected && matches!(row.kind, SidebarRowKind::Session),
-                        gpui_kit::base::StyledExt::font_semibold,
-                    )
+                    .when(task_row(&row.kind), gpui_kit::base::StyledExt::font_medium)
+                    .when(is_group, gpui_kit::Styled::text_xs)
                     .when(informational_row(&row.kind), gpui_kit::Styled::text_xs)
                     .text_color(color(
                         if matches!(row.kind, SidebarRowKind::Session | SidebarRowKind::Group) {
@@ -930,12 +956,16 @@ impl SidebarRows {
         let selected = row.current || row.active;
         let row_height = if matches!(row.kind, SidebarRowKind::Group) {
             GROUP_ROW_HEIGHT
-        } else if matches!(row.kind, SidebarRowKind::Session) {
+        } else if task_row(&row.kind) {
             30.0
         } else {
             22.0
         };
-        let row_indent = f32::from(row.indent) * 8.0;
+        let row_indent = if in_session_block {
+            0.0
+        } else {
+            f32::from(row.indent) * ROW_INDENT
+        };
         let pointer_hovered = row
             .target
             .as_ref()
@@ -987,8 +1017,13 @@ impl SidebarRows {
     }
 }
 
-const fn informational_row(kind: &SidebarRowKind) -> bool {
-    !matches!(kind, SidebarRowKind::Session | SidebarRowKind::Group)
+fn task_row(kind: &SidebarRowKind) -> bool {
+    matches!(kind, SidebarRowKind::Session)
+        || matches!(kind, SidebarRowKind::Other(name) if name == "saved-task")
+}
+
+fn informational_row(kind: &SidebarRowKind) -> bool {
+    !task_row(kind) && !matches!(kind, SidebarRowKind::Group)
 }
 
 fn tree_guide(row: &SidebarRow, row_height: f32) -> Option<gpui_kit::AnyElement> {

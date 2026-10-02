@@ -430,6 +430,48 @@ fn project_disclosure_hides_its_children_and_selected_sessions_reveal_their_proj
 }
 
 #[gpui_kit::test]
+fn detached_archived_tasks_are_disclosed_without_inventing_terminal_targets(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = grouped_chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let mut task = sidebar.rows.first().expect("project row").clone();
+    task.key = "task:1:saved-identity".to_owned();
+    task.text = "Fix project navigation".to_owned();
+    task.trailing = Some("Detached".to_owned());
+    task.kind = SidebarRowKind::Other("saved-task".to_owned());
+    task.indent = 2;
+    task.selectable = false;
+    task.target = None;
+    let mut shelf = task.clone();
+    shelf.key = "project:tasks:archived:1".to_owned();
+    shelf.text = "Archived".to_owned();
+    shelf.trailing = None;
+    shelf.kind = SidebarRowKind::Group;
+    shelf.indent = 0;
+    sidebar.rows.extend([shelf, task]);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    assert!(
+        cx.debug_bounds("sidebar-row-task:1:saved-identity")
+            .is_none()
+    );
+    let shelf = cx
+        .debug_bounds("sidebar-row-project:tasks:archived:1")
+        .expect("Archived disclosure");
+    cx.simulate_click(center(shelf), Modifiers::none());
+    let task = cx
+        .debug_bounds("sidebar-row-task:1:saved-identity")
+        .expect("retained detached task");
+    cx.simulate_click(center(task), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert_eq!(*probe.intents.borrow(), Vec::<ChromeIntent>::new());
+    });
+}
+
+#[gpui_kit::test]
 fn disappearing_projects_discard_their_disclosure_state(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let snapshot = grouped_chrome_snapshot();
@@ -2025,4 +2067,51 @@ fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) 
             < initial.div(2.0),
         "a short title should settle to a compact tab"
     );
+}
+
+#[gpui_kit::test]
+fn new_session_is_visible_and_activates_from_pointer_and_keyboard(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let (probe, cx) = cx.add_window_view(ChromeProbe::new);
+    let button = cx
+        .debug_bounds("sidebar-new-session")
+        .expect("visible New session control");
+    cx.simulate_click(center(button), Modifiers::none());
+    probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
+    for _ in 0..32 {
+        cx.update(gpui_kit::Window::focus_next);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui_kit::KeyUpEvent {
+            keystroke: gpui_kit::Keystroke::parse("enter").expect("Enter key"),
+        });
+        let created = probe.update(cx, |probe, _| {
+            probe.intents.borrow().iter().any(|intent| {
+                matches!(intent,
+                ChromeIntent::Command(invocation) if invocation.command == "new_mux_session")
+            })
+        });
+        if created {
+            break;
+        }
+    }
+    probe.update(cx, |probe, _| {
+        let commands = probe
+            .intents
+            .borrow()
+            .iter()
+            .filter_map(|intent| match intent {
+                ChromeIntent::Command(invocation) if invocation.command == "new_mux_session" => {
+                    Some(invocation.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands,
+            [bootty_control::CommandInvocation::from_action(
+                "new_mux_session",
+                bootty_control::Caller::Keybinding,
+            )]
+        );
+    });
 }

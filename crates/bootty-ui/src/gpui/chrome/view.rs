@@ -74,6 +74,16 @@ fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> 
 impl GpuiChrome {
     #[must_use]
     pub fn new(snapshot: ChromeSnapshot, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar_collapsed_groups = snapshot
+            .sidebar
+            .as_ref()
+            .into_iter()
+            .flat_map(|sidebar| &sidebar.rows)
+            .filter(|row| {
+                row.kind == super::SidebarRowKind::Group && row.key.starts_with("project:tasks:")
+            })
+            .map(|row| row.key.clone())
+            .collect();
         let mut chrome = Self {
             snapshot,
             docked_status: false,
@@ -81,7 +91,7 @@ impl GpuiChrome {
             focus: cx.focus_handle(),
             status_tab_focus_handles: HashMap::new(),
             pointer_hovered_session: None,
-            sidebar_collapsed_groups: HashSet::new(),
+            sidebar_collapsed_groups,
             sidebar_dragging: false,
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
@@ -241,6 +251,18 @@ impl GpuiChrome {
             self.sidebar_dragging = false;
             self.sidebar_reconcile_hover = false;
             self.pointer_hovered_session = None;
+        }
+        if let Some(sidebar) = &snapshot.sidebar {
+            for row in &sidebar.rows {
+                if row.kind == super::SidebarRowKind::Group
+                    && row.key.starts_with("project:tasks:")
+                    && !self.snapshot.sidebar.as_ref().is_some_and(|previous| {
+                        previous.rows.iter().any(|previous| previous.key == row.key)
+                    })
+                {
+                    self.sidebar_collapsed_groups.insert(row.key.clone());
+                }
+            }
         }
         if current_sidebar_session(&self.snapshot) != current_sidebar_session(snapshot) {
             self.sidebar_reveal_current.set(true);
