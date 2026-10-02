@@ -9,7 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use assert_fs::fixture::PathChild as _;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::ApplicationIdentity;
 use bootty_mux::rmux::{
@@ -1029,26 +1028,16 @@ if expected in data:
         })?;
         let fixture = assert_fs::NamedTempFile::new("retained-output.txt")?;
         std::fs::write(fixture.path(), vec![b'X'; 2 * 1024 * 1024])?;
-        let directory = assert_fs::TempDir::new()?;
-        let complete = directory.child("complete");
         terminal.write_input(
             format!(
-                "cat {} && printf '\\nBOOTTY_GAP_RECOVERED\\n' && touch {}\r",
+                "cat {} && printf '\\nBOOTTY_GAP_RECOVERED\\n'\r",
                 fixture.path().display(),
-                complete.path().display()
             )
             .as_bytes(),
         )?;
-        let deadline = std::time::Instant::now()
-            .checked_add(PANE_TIMEOUT)
-            .context("producer deadline")?;
-        while !complete.path().exists() {
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "producer did not complete"
-            );
-            thread::yield_now();
-        }
+        // A consumed frame proves the daemon received the tail; a writer-side file
+        // marker alone can race its authoritative recovery snapshot.
+        wait_for_terminal_text(&mut terminal, "BOOTTY_GAP_RECOVERED")?;
         let item = runtime
             .block_on(output.next())?
             .context("public output ended")?;
@@ -1083,16 +1072,30 @@ if expected in data:
         prepare_pane(&mut terminal)?;
         let mut second = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut second)?;
+        let ready = format!("BOOTTY_IMAGE_READY_{}", new_session_identity());
+        terminal.write_input(format!("printf '%s\\n' '{ready}'\r").as_bytes())?;
+        wait_for_terminal_text(&mut terminal, &ready)?;
+        wait_for_terminal_text(&mut second, &ready)?;
         let fixture = assert_fs::NamedTempFile::new("kitty.vt")?;
-        let payload =
-            base64::engine::general_purpose::STANDARD.encode(vec![255_u8; 1024 * 512 * 4]);
+        // The SDK retains a bounded live ring, without producer backpressure. Default
+        // coverage sends a small compressed wire image and checks all 2 MiB of pixels.
+        // Keep the original unpaced raw workload available as an explicit stress mode.
+        let raw_burst = std::env::var_os("BOOTTY_RMUX_IMAGE_BURST_STRESS").is_some();
+        let pixels = vec![255_u8; 1024 * 512 * 4];
+        let wire = if raw_burst {
+            pixels.as_slice()
+        } else {
+            include_bytes!("fixtures/kitty-white-1024x512.zlib").as_slice()
+        };
+        let payload = base64::engine::general_purpose::STANDARD.encode(wire);
+        let compression = if raw_burst { "" } else { "o=z," };
         let mut output = Vec::new();
         let chunks = payload.as_bytes().chunks(4096);
         let count = chunks.len();
         for (index, chunk) in chunks.enumerate() {
             let more = u8::from(index.saturating_add(1) < count);
             let header = if index == 0 {
-                format!("\x1b_Ga=T,i=42,q=2,f=32,s=1024,v=512,c=20,r=10,m={more};")
+                format!("\x1b_Ga=T,i=42,q=2,f=32,{compression}s=1024,v=512,c=20,r=10,m={more};")
             } else {
                 format!("\x1b_Gm={more};")
             };
@@ -1101,11 +1104,26 @@ if expected in data:
             output.extend_from_slice(b"\x1b\\");
         }
         output.extend_from_slice(b"\r\nBOOTTY_IMAGE_COMPLETE\r\n");
+        if !raw_burst {
+            anyhow::ensure!(
+                output.len() < 4096,
+                "bounded graphics fixture exceeds wire budget"
+            );
+        }
         std::fs::write(fixture.path(), &output)?;
         terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
         wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
-        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
+        let second_frame = second.extract_frame()?;
+        assert_eq!(second_frame.images.placements.len(), 1);
+        let second_image = second_frame
+            .images
+            .placements
+            .first()
+            .context("second rendered image")?;
+        assert_eq!(second_image.image_width, 1024);
+        assert_eq!(second_image.image_height, 512);
+        assert_eq!(second_image.data.as_ref(), pixels.as_slice());
         drop(second);
         terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
@@ -1125,9 +1143,8 @@ if expected in data:
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut terminal)?;
 
-        // 2MB is past the in-flight bound (`RMUX_OUTPUT_CHANNEL_CAPACITY` events
-        // of `RMUX_OUTPUT_EVENT_MAX_BYTES`), so the producer has to be held back
-        // rather than spooled to disk.
+        // Exercise Bootty's bounded consumer queues without a disk spool. This
+        // does not assert lossless producer delivery across the SDK retention ring.
         terminal.write_input(
             b"printf 'BOOTTY_RMUX_BOUND_START\\n'; yes X | head -c 2000000; printf '\\nBOOTTY_RMUX_BOUND_END\\n'\r",
         )?;

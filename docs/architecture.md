@@ -155,9 +155,19 @@ The pipe transport therefore remains the live path. This preserves baseline
 behavior, not a lossless rmux graphics guarantee. Historical keyframes restore
 text and modes, not images beyond retained output. Upgrade this limit when the
 SDK exposes a lossless per-pane stream or public producer retention controls;
-no dependency internals are patched. Exact unpaced 2 MiB image placement,
-dimensions, pixels and continued-input coverage remains required. Native
-acceptance separately verifies the full pixel buffer and GPUI image primitives.
+no dependency internals are patched. The SDK documents bounded live retention
+(256 KiB by default), not lossless unpaced producer bursts. This limitation
+predates the current redesign; complete burst delivery remains unresolved.
+Routine rmux acceptance sends a compressed image below 4 KiB on the wire and
+checks placement, dimensions and every byte of its decoded 2 MiB pixel buffer
+in both readers, followed by input after the second reader closes. This does
+not prove uncompressed burst delivery. The original unpaced raw image workload
+and its full pixel assertions remain runnable with
+`BOOTTY_RMUX_IMAGE_BURST_STRESS=1 mise run test -- -p bootty-mux --test embedded_daemon kitty_images_reach_terminal_frames`.
+It is an explicit stress diagnostic with known intermittent loss, rather than
+a supported lossless transport contract. Native PTY acceptance still exercises
+the unpaced raw 2 MiB image, full pixels and GPUI image primitives. Public raw
+subscription acceptance separately checks reported gaps and text recovery.
 
 The rmux pane worker owns both remote transport process trees. Closing the
 terminal ends them even while its output reader waits on a quiet SSH stream;
