@@ -8,6 +8,15 @@ library crates with explicit owners.
 The vault owns product language, plans, rationale, and durable decisions.
 This file describes the current production structure.
 
+`mobile/` is an independent experimental iOS companion workspace. UIKit owns
+its native host, pairing UI, and device-only credential storage. GPUI Kit
+renders live Spaces and formatted terminal captures. The companion owns only
+transient connection/view state and submits the existing command invocation
+with unchanged desktop-issued targets. `bootty-control` owns the explicitly
+enabled, certificate-paired TLS gateway to its exact local owner. The desktop
+retains command authorization, confirmations, PTYs, and mux topology.
+Its dependency pins, build path, and platform limits are in `mobile/README.md`.
+
 ## Architecture rules
 
 - Each durable fact and live mutation has one owner.
