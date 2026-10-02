@@ -1125,6 +1125,7 @@ impl WorkspaceDock {
         cx: &mut Context<Self>,
     ) {
         use bootty_config::config::PanelKind;
+        let restore_focus = self.panel_visible(kind, cx);
         self.area.update(cx, |area, cx| {
             match kind {
                 PanelKind::Sessions => area.remove_panel(self.sessions.clone(), window, cx),
@@ -1154,6 +1155,12 @@ impl WorkspaceDock {
                 }
             }
         });
+        if restore_focus {
+            cx.defer_in(window, |this, window, cx| {
+                crate::window::restore_keyboard_focus(window);
+                Focusable::focus_handle(&this.terminal, cx).focus(window, cx);
+            });
+        }
     }
 
     pub(crate) fn panel_visible(&self, kind: bootty_config::config::PanelKind, cx: &App) -> bool {
