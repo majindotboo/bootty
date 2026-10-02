@@ -144,10 +144,14 @@ catalog-backed remote Spaces.
 `bootty-mux` delivers rmux live pane bytes through its public `pipe-pane` API.
 A Bootty daemon helper shares each pane's stream over local IPC. Each reader has
 an independent 16 MiB queue; a stalled reader disconnects instead of blocking
-the pane or silently dropping bytes. The helper exits when its last reader
-leaves. No output is spooled to disk.
-The SDK keyframe restores the initial text and modes; its bounded recovery ring
-is not used for live image data. Remote pane readers use the same host-side path.
+the pane or silently dropping bytes. One blocking reader drains the daemon pipe
+into a bounded one MiB relay queue. On pipe EOF, subscribers receive their queued
+tails before IPC closes; draining stops after five seconds if a subscriber stalls.
+The helper exits when its last reader leaves. No output is spooled to disk.
+The SDK keyframe restores initial text and modes. The public pipe API still
+depends on the daemon's bounded retained output: starvation beyond that retention
+can interrupt an image transfer, which a text keyframe cannot reconstruct.
+Remote pane readers use the same host-side path.
 
 ```text
 TerminalSession

@@ -137,6 +137,79 @@ fn embedded_rmux_remote_pane_stream_child() -> Result<()> {
     Ok(())
 }
 
+#[rstest::rstest]
+#[case(1, 64 * 1024)]
+#[case(2, 2 * 1024 * 1024)]
+fn pipe_helper_delivers_complete_bytes_before_eof(
+    #[case] reader_count: usize,
+    #[case] byte_count: usize,
+) -> Result<()> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    struct Helper(Child);
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let directory = assert_fs::TempDir::new()?;
+    let endpoint = directory.path().join("output.sock");
+    let mut helper = Helper(
+        Command::new(std::env::current_exe()?)
+            .args(["--exact", SCENARIO_CHILD_TEST, "--nocapture"])
+            .env("BOOTTY_RMUX_PIPE_ENDPOINT", &endpoint)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
+    let deadline = std::time::Instant::now()
+        .checked_add(PANE_TIMEOUT)
+        .context("helper deadline")?;
+    let mut readers = Vec::new();
+    for _ in 0..reader_count {
+        let mut reader = loop {
+            match UnixStream::connect(&endpoint) {
+                Ok(reader) => break reader,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    anyhow::ensure!(helper.0.try_wait()?.is_none(), "helper exited: {error}");
+                    thread::yield_now();
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let mut ready = [255];
+        reader.read_exact(&mut ready)?;
+        pretty_assertions::assert_eq!(ready, [0]);
+        readers.push(thread::spawn(move || {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map(|_| bytes)
+        }));
+    }
+    let bytes = (0_u8..=255).cycle().take(byte_count).collect::<Vec<_>>();
+    helper
+        .0
+        .stdin
+        .take()
+        .context("helper stdin")?
+        .write_all(&bytes)?;
+    for reader in readers {
+        let actual = reader.join().expect("reader thread")?;
+        pretty_assertions::assert_eq!(actual.len(), bytes.len());
+        let mismatch = actual
+            .iter()
+            .zip(&bytes)
+            .enumerate()
+            .find(|(_, (actual, expected))| actual != expected);
+        pretty_assertions::assert_eq!(mismatch, None, "first changed byte");
+    }
+    anyhow::ensure!(helper.0.wait()?.success(), "helper failed");
+    Ok(())
+}
+
 mod scenario {
     use super::*;
     use pretty_assertions::{assert_eq, assert_ne};

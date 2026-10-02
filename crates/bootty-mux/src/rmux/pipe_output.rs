@@ -4,6 +4,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fs::{File, OpenOptions},
     hash::{Hash, Hasher},
+    io::{self, Read as _},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -18,6 +19,7 @@ use super::{backend::rmux_request, bridge::bootty_daemon_binary};
 
 pub(super) const PIPE_HELPER_FLAG: &str = "--__bootty-pane-pipe";
 const CHUNK_BYTES: usize = 16 * 1024;
+const INPUT_BACKLOG_CHUNKS: usize = 64;
 // A stalled renderer may retain 16 MiB before it disconnects and recovers. Raise
 // this only if supported image bursts routinely exceed that reader backlog.
 const READER_BACKLOG_CHUNKS: usize = 1024;
@@ -175,10 +177,31 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
     }
     let _cleanup = EndpointCleanup(endpoint);
     let mut readers: Vec<(u64, tokio::sync::mpsc::Sender<Arc<[u8]>>)> = Vec::new();
-    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut writers = tokio::task::JoinSet::new();
     let mut next_reader = 0_u64;
-    let mut stdin = tokio::io::stdin();
-    let mut buffer = vec![0; CHUNK_BYTES];
+    // Drain the daemon pipe on one reader thread instead of scheduling every
+    // read through Tokio's shared blocking pool. The bounded channel retains
+    // at most one MiB while the relay is handling subscribers.
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(INPUT_BACKLOG_CHUNKS);
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buffer = vec![0; CHUNK_BYTES];
+        loop {
+            let bytes = match stdin.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => buffer
+                    .get(..count)
+                    .map(Arc::<[u8]>::from)
+                    .ok_or_else(|| io::Error::other("invalid pipe read length")),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => Err(error),
+            };
+            let failed = bytes.is_err();
+            if input_tx.blocking_send(bytes).is_err() || failed {
+                break;
+            }
+        }
+    });
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -189,8 +212,7 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
                 next_reader = next_reader.checked_add(1).context("pane reader id exhausted")?;
                 let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<Arc<[u8]>>(READER_BACKLOG_CHUNKS);
                 readers.push((id, chunks_tx));
-                let closed_tx = closed_tx.clone();
-                tokio::spawn(async move {
+                writers.spawn(async move {
                     tokio::select! {
                         _ = read.read_u8() => {},
                         () = async {
@@ -199,17 +221,25 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
                             }
                         } => {},
                     }
-                    let _ = closed_tx.send(id);
+                    id
                 });
             }
-            Some(id) = closed_rx.recv() => {
+            Some(result) = writers.join_next() => {
+                let id = result?;
                 readers.retain(|(reader, _)| *reader != id);
                 if readers.is_empty() { break; }
             }
-            count = stdin.read(&mut buffer), if !readers.is_empty() => {
-                let count = count?;
-                if count == 0 { break; }
-                let bytes: Arc<[u8]> = buffer.get(..count).context("invalid pipe read length")?.into();
+            bytes = input_rx.recv(), if !readers.is_empty() => {
+                let Some(bytes) = bytes else {
+                    // EOF follows every queued byte. Close the queues and let
+                    // subscribers receive their tails before closing IPC.
+                    readers.clear();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                        while writers.join_next().await.is_some() {}
+                    }).await;
+                    break;
+                };
+                let bytes = bytes?;
                 // Never let a slow subscriber stall the shared daemon pipe. An
                 // overfull subscriber gets EOF instead of silently missing bytes.
                 readers.retain(|(_, writer)| writer.try_send(Arc::clone(&bytes)).is_ok());

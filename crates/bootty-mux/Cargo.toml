@@ -35,7 +35,7 @@ serde.workspace = true
 serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "io-std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 bootty-terminal = { path = "../bootty-terminal", optional = true }
 
 [dev-dependencies]
