@@ -348,6 +348,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "history.search"
                         | "session.create"
                         | "session.start"
+                        | "session.start_project"
                 )
         }
         ResourceKind::Session => {

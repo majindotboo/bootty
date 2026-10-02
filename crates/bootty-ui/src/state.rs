@@ -1132,13 +1132,7 @@ impl AppState {
         changed
     }
     fn create_project_session_for_cwd(&mut self, cwd: &str, text: Option<String>) {
-        let bootty_mux::command::MuxCommand::CreateProjectSession {
-            session_id, cwd, ..
-        } = self.workspace.project_session_command(cwd)
-        else {
-            return;
-        };
-        let mut arguments = vec![session_id, cwd];
+        let mut arguments = vec![cwd.to_owned()];
         if let Some(text) = text {
             // The Command choice is shell text; the shared session command always
             // receives literal argv, including a single executable path.
@@ -1156,7 +1150,7 @@ impl AppState {
         }
         let outcome = self.dispatch_command(
             bootty_control::CommandInvocation::new(
-                "session.start",
+                "session.start_project",
                 arguments,
                 bootty_control::Caller::CommandPalette,
             ),

@@ -7,6 +7,7 @@ command_actions! {
     SessionAction {
         Create => ("session.create", "Create Session", ["name", "cwd", "argv"], Write),
         Start => ("session.start", "Start Session", ["name", "cwd", "argv"], Write),
+        StartProject => ("session.start_project", "Start Project Session", ["cwd", "argv"], Write),
         Close => ("session.close", "Close Session", [], Destructive),
         ClosePane => ("pane.close", "Close Pane", [], Destructive),
         ListSpaces => ("spaces.list", "List Spaces", [], Read),
@@ -15,7 +16,7 @@ command_actions! {
 
 impl SessionAction {
     pub(super) const fn command_selection(self) -> bootty_mux::controller::CommandSelection {
-        if matches!(self, Self::Start) {
+        if matches!(self, Self::Start | Self::StartProject) {
             bootty_mux::controller::CommandSelection::Follow
         } else {
             bootty_mux::controller::CommandSelection::Preserve
@@ -43,6 +44,10 @@ impl SessionAction {
             ),
             Self::Start => (
                 "Create and select a new session in the target Space. Uses the same name, checkout and literal argv validation as session.create; absent argv opens a shell. Explicit shell argv runs command text portably. Other Spaces keep their selection.".to_owned(),
+                Some(ResourceKind::Binding),
+            ),
+            Self::StartProject => (
+                "Create and select a project session in the target Space. Generate a free backend name from cwd, preserving its project display label. Optional argv uses the same literal validation as session.create; absent argv opens a shell.".to_owned(),
                 Some(ResourceKind::Binding),
             ),
             Self::Close => (

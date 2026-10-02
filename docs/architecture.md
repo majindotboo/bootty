@@ -653,12 +653,15 @@ style sequences in half.
 
 `session.start NAME CWD [ARGV]` uses the same validation, startup and membership
 commit as `session.create`, with `CommandSelection::Follow` to select the new
-session in its binding. The creation dialog uses this invocation for both an
-empty shell and an explicit Command draft. Agent drafts use positional literal
+session in its binding. The creation dialog uses `session.start_project CWD [ARGV]`
+for an empty shell or explicit Command draft. That command uses the same launch
+validation and selection while generating a free backend name and preserving
+the project's display label. Agent drafts use positional literal
 argv through the registered provider start command. Switching projects keeps
 the draft; opening creation defaults to the selected checkout on the same host.
-Unselected sidebar sessions stay compact; selection reveals terminal topology,
-while progress remains visible without selection.
+Unselected sidebar sessions stay compact; selection reveals directory and branch
+metadata. Terminal topology stays in the terminal tab strip; progress remains
+visible without selection.
 
 `session.create NAME CWD [ARGV]` creates a detached backend session in the target
 Binding's Space, which need not be active. It never changes the selected session,

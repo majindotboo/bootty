@@ -73,6 +73,7 @@ struct RestoreBackend {
     sessions: Arc<Mutex<Vec<MuxSession>>>,
     create_calls: Arc<AtomicUsize>,
     release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
+    create_release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
     fail_commands: bool,
     created_panes: bool,
     pane_inputs: PaneInputs,
@@ -107,6 +108,13 @@ impl MuxBackend for RestoreBackend {
                 tag,
                 ..
             } => {
+                if let Some(release) = &self.create_release {
+                    release
+                        .lock()
+                        .expect("create release lock")
+                        .recv()
+                        .expect("release create");
+                }
                 self.create_calls.fetch_add(1, Ordering::SeqCst);
                 let mut sessions = self.sessions.lock().expect("restore backend sessions lock");
                 let session = if self.created_panes {
@@ -172,6 +180,7 @@ struct RestoreProvider {
     sessions: Arc<Mutex<Vec<MuxSession>>>,
     create_calls: Arc<AtomicUsize>,
     release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
+    create_release: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
     topology: PaneTopology,
     selection_publication: SelectionPublicationPolicy,
     stamp_sessions: bool,
@@ -192,6 +201,7 @@ fn restore_provider(
         sessions,
         create_calls,
         release: None,
+        create_release: None,
         topology: PaneTopology::Attach,
         selection_publication: SelectionPublicationPolicy::Direct,
         stamp_sessions: true,
@@ -274,6 +284,7 @@ impl MuxBackendProvider for RestoreProvider {
             sessions: Arc::clone(&self.sessions),
             create_calls: Arc::clone(&self.create_calls),
             release: self.release.clone(),
+            create_release: self.create_release.clone(),
             fail_commands: self.fail_commands,
             created_panes: self.created_panes,
             pane_inputs: Arc::clone(&self.pane_inputs),
@@ -1527,7 +1538,17 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
         .expect("second project directory");
     let first_cwd = first_project.path();
     let second_cwd = second_project.path();
-    let mut state = app_state(config, support::backends());
+    let (create_release, create_wait) = mpsc::channel();
+    let provider = RestoreProvider {
+        dispatch: MuxCommandDispatch::WorkerThread,
+        create_release: Some(Arc::new(Mutex::new(create_wait))),
+        ..restore_provider(MuxBackendKind::Native, Arc::default(), Arc::default())
+    };
+    let mut state = app_state(
+        config,
+        registry([Arc::new(provider)], [MuxBackendKind::Native]),
+    );
+    create_release.send(()).expect("allow initial create");
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: first_cwd.to_string_lossy().into_owned(),
         command: None,
@@ -1564,6 +1585,7 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
             .is_empty(),
         "profile reload must defer while the membership command is pending"
     );
+    create_release.send(()).expect("complete pending create");
 
     assert!((0..250).any(|tick| {
         state.update_frame(frames::idle_frame(

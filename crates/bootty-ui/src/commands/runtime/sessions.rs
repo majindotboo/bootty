@@ -43,17 +43,11 @@ impl AppState {
                 return CommandDispatch::Complete(outcome);
             }
             (
-                SessionAction::Create | SessionAction::Start,
+                SessionAction::Create | SessionAction::Start | SessionAction::StartProject,
                 Some(ExactMuxTarget::Binding(scope)),
-            ) => {
-                let (name, cwd, argv) = match session_create_arguments(arguments) {
-                    Ok(arguments) => arguments,
-                    Err(outcome) => return self.reject_command(outcome),
-                };
-                self.workspace
-                    .begin_session_create(scope, name, cwd, argv)
-                    .map(|prepared| (scope, prepared))
-            }
+            ) => self
+                .prepare_session_launch(action, scope, arguments)
+                .map(|prepared| (scope, prepared)),
             (SessionAction::Close, Some(ExactMuxTarget::Session(scope, session))) => {
                 let closing = MuxCommand::DitchSession {
                     session_id: session.clone(),
@@ -134,6 +128,24 @@ impl AppState {
             layout: submitted.layout,
             result: submitted.result,
         })
+    }
+
+    fn prepare_session_launch(
+        &mut self,
+        action: SessionAction,
+        scope: SpaceId,
+        arguments: &[String],
+    ) -> Result<bootty_mux::workspace::PreparedSessionRequest, SessionRequestError> {
+        if action == SessionAction::StartProject {
+            let mut create = vec!["project".to_owned()];
+            create.extend_from_slice(arguments);
+            let (_, cwd, argv) = session_create_arguments(&create)?;
+            self.workspace
+                .begin_project_session_create(scope, cwd, argv)
+        } else {
+            let (name, cwd, argv) = session_create_arguments(arguments)?;
+            self.workspace.begin_session_create(scope, name, cwd, argv)
+        }
     }
 
     /// Hold an explicit create's success until the first pane Bootty started for it runs.
@@ -345,11 +357,8 @@ impl AppState {
 /// `name`, `cwd`, and the optional argv decoded from its JSON array.
 fn session_create_arguments(
     arguments: &[String],
-) -> Result<(&str, &str, Vec<String>), CommandOutcome> {
-    let invalid = |message: String| CommandOutcome::Failed {
-        code: "invalid_arguments".to_owned(),
-        message,
-    };
+) -> Result<(&str, &str, Vec<String>), SessionRequestError> {
+    let invalid = SessionRequestError::Invalid;
     let (name, cwd, argv) = match arguments {
         [name, cwd] => (name.as_str(), cwd.as_str(), None),
         [name, cwd, argv] => (name.as_str(), cwd.as_str(), Some(argv)),
