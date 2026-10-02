@@ -5,7 +5,7 @@ use std::{
     env, fs,
     os::unix::fs::PermissionsExt as _,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
@@ -240,8 +240,48 @@ fn remote_rmux_proxy_publishes_real_frames_through_gpui() -> Result<()> {
 
     drop(terminal);
     policy.deactivate();
+    wait_for_remote_transport_exit(&transport)?;
     draw_remote_with_gpui(initial, final_frame);
     Ok(())
+}
+
+fn wait_for_remote_transport_exit(transport: &Path) -> Result<()> {
+    let mut pids = Vec::new();
+    for suffix in ["output-pid", "input-pid"] {
+        let path = transport.with_extension(suffix);
+        let pid = fs::read_to_string(&path)?.trim().parse::<u32>()?;
+        pids.push(pid);
+    }
+    let deadline = Instant::now()
+        .checked_add(FRAME_TIMEOUT)
+        .context("remote transport exit deadline")?;
+    while Instant::now() < deadline {
+        let mut alive = Vec::new();
+        for pid in &pids {
+            if Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
+                alive.push(*pid);
+            }
+        }
+        if alive.is_empty() {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    // These exact PIDs were recorded by this disposable transport fixture.
+    for pid in &pids {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    bail!("closed remote terminal left its transport alive: {pids:?}")
 }
 
 fn run_child_acceptance() -> Result<()> {
@@ -467,6 +507,7 @@ fn write_remote_transport(
             "  *\" remote-ping\") printf '%s:%s\\n' {protocol} {version}; exit 0 ;;\n",
             "esac\n",
             "if [ \"$last\" = {stream_line} ]; then\n",
+            "  printf '%s\\n' \"$$\" > \"$0.output-pid\"\n",
             "  printf '%s\\n' '{{\"Rebase\":\"G1syShtbSBtbMzg7MjsxMjszNDs1Nm1CT09UVFlfUk1VWF9SRU1PVEUgz4Dwn6WfG1swbQ\"}}'\n",
             "  while [ ! -f {input_ready} ]; do sleep 0.01; done\n",
             "  printf '%s\\n' '{{\"Bytes\":\"G1s1OzFIQk9PVFRZX1JNVVhfUkVNT1RFX0lOUFVUPWFjY2VwdGVk\"}}'\n",
@@ -475,6 +516,7 @@ fn write_remote_transport(
             "  while :; do sleep 1; done\n",
             "fi\n",
             "if [ \"$last\" = {input_line} ]; then\n",
+            "  printf '%s\\n' \"$$\" > \"$0.input-pid\"\n",
             "  if IFS= read -r input; then\n",
             "    printf '%s\\n' \"$input\" > {input_log}\n",
             "    : > {input_ready}\n",

@@ -84,6 +84,9 @@ pub struct RmuxPaneIo {
     #[cfg(feature = "terminal-runtime")]
     pub(crate) resize_tx: tokio_mpsc::UnboundedSender<TerminalSizeSpec>,
     pub(crate) result_rx: tokio_mpsc::UnboundedReceiver<std::result::Result<(), String>>,
+    #[cfg(feature = "terminal-runtime")]
+    // The worker owns transport lifetime, including a quiet output reader.
+    pub(crate) _remote_children: Vec<rmux_os::process_tree::ProcessTreeChild>,
 }
 
 enum RmuxPaneRequest {
@@ -169,6 +172,8 @@ pub fn open_rmux_pane_io(target: RmuxPaneTarget) -> Result<RmuxPaneIo> {
         #[cfg(feature = "terminal-runtime")]
         resize_tx,
         result_rx,
+        #[cfg(feature = "terminal-runtime")]
+        _remote_children: Vec::new(),
     })
 }
 

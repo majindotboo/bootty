@@ -142,18 +142,27 @@ catalog-backed remote Spaces.
 ## Terminal path
 
 `bootty-mux` consumes the SDK's sequence-bearing `recover_output` stream for
-rmux panes. A bounded reader queue applies backpressure. When a reader falls
+rmux panes. A bounded reader queue limits Bootty's pending bytes; it does not
+backpressure the daemon's PTY producer. When a reader falls
 behind the daemon's retained bytes, a typed rebase replaces the emulator state;
 bytes from separate epochs are never stitched together. Input and resize remain
 responsive while output is queued, and closed panes report their logical end.
 
 Recovery reconstructs text and input modes, but the public per-pane API cannot
-restore images whose bytes fell outside retention. Large image bursts on rmux
-are therefore unsupported across an output gap. A read-only session attachment
+restore images whose bytes fell outside retention. The public subscriptions poll
+a retained cursor, so an unpaced live burst can overrun retention even with an
+active reader and an empty Bootty queue. This is a live-delivery limitation as
+well as a historical-replay limit: lossless large rmux images are unsupported.
+A read-only session attachment
 cannot replace this path: targeting a pane changes shared backend selection and
 its frames describe the entire session. Upgrade this limit when the SDK exposes
 a lossless per-pane graphics stream. Native and tmux terminal image paths retain
-their existing contracts.
+their existing contracts. Native live-image acceptance verifies the complete
+2 MiB pixel buffer, GPUI image primitives and subsequent terminal input.
+
+The rmux pane worker owns both remote transport process trees. Closing the
+terminal ends them even while its output reader waits on a quiet SSH stream;
+transport lifetime does not depend on another output line arriving.
 
 ```text
 TerminalSession

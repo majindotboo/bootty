@@ -7,13 +7,15 @@
 use std::io::BufReader;
 use std::io::{BufRead, BufWriter, Write};
 #[cfg(feature = "terminal-runtime")]
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(feature = "terminal-runtime")]
 use bootty_host::{CommandOutput, CommandRunner, SystemCommandRunner};
+#[cfg(feature = "terminal-runtime")]
+use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use rmux_sdk::TerminalSizeSpec;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "terminal-runtime")]
@@ -178,14 +180,14 @@ pub fn open_remote_rmux_pane_io(
     let (resize_tx, resize_rx) = tokio_mpsc::unbounded_channel();
     let (result_tx, result_rx) = tokio_mpsc::unbounded_channel();
 
-    spawn_output(
+    let output_child = spawn_output(
         remote,
         session.clone(),
         pane.clone(),
         output_tx,
         result_tx.clone(),
     )?;
-    spawn_input(
+    let input_child = spawn_input(
         remote,
         session.clone(),
         pane.clone(),
@@ -199,6 +201,7 @@ pub fn open_remote_rmux_pane_io(
         input_tx,
         resize_tx,
         result_rx,
+        _remote_children: vec![output_child, input_child],
     })
 }
 
@@ -329,23 +332,25 @@ fn spawn_output(
     pane: String,
     output_tx: tokio_mpsc::Sender<RmuxPaneEvent>,
     result_tx: tokio_mpsc::UnboundedSender<std::result::Result<(), String>>,
-) -> Result<()> {
+) -> Result<ProcessTreeChild> {
     let request = RemoteRmuxRequest::PaneStream { session, pane };
     let (program, args) = remote_rmux_argv(remote, &request)?;
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("stream remote terminal pane")?;
+        .stderr(Stdio::null());
+    let mut child =
+        ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
+            .context("stream remote terminal pane")?;
     let stdout = child
+        .child_mut()
         .stdout
         .take()
         .context("remote terminal output stream has no stdout")?;
 
     thread::spawn(move || {
-        let _guard = ChildGuard(child);
         for line in BufReader::new(stdout).lines() {
             let result = line
                 .map_err(anyhow::Error::from)
@@ -369,7 +374,7 @@ fn spawn_output(
         }
         let _ = result_tx.send(Err("remote terminal output ended".to_owned()));
     });
-    Ok(())
+    Ok(child)
 }
 
 #[cfg(feature = "terminal-runtime")]
@@ -398,23 +403,25 @@ fn spawn_input(
     pane: String,
     mut input_rx: tokio_mpsc::UnboundedReceiver<Vec<u8>>,
     result_tx: tokio_mpsc::UnboundedSender<std::result::Result<(), String>>,
-) -> Result<()> {
+) -> Result<ProcessTreeChild> {
     let request = RemoteRmuxRequest::PaneInput { session, pane };
     let (program, args) = remote_rmux_argv(remote, &request)?;
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("open remote terminal input")?;
+        .stderr(Stdio::null());
+    let mut child =
+        ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
+            .context("open remote terminal input")?;
     let stdin = child
+        .child_mut()
         .stdin
         .take()
         .context("remote terminal input has no stdin")?;
 
     thread::spawn(move || {
-        let _guard = ChildGuard(child);
         let mut writer = BufWriter::new(stdin);
         while let Some(bytes) = input_rx.blocking_recv() {
             if let Err(error) = write_input_line(&mut writer, &bytes) {
@@ -423,7 +430,7 @@ fn spawn_input(
             }
         }
     });
-    Ok(())
+    Ok(child)
 }
 
 #[cfg(feature = "terminal-runtime")]
@@ -464,15 +471,4 @@ fn spawn_resize(
             let _ = result_tx.send(result.map_err(|error| error.to_string()));
         }
     });
-}
-
-#[cfg(feature = "terminal-runtime")]
-struct ChildGuard(Child);
-
-#[cfg(feature = "terminal-runtime")]
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
