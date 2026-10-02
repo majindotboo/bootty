@@ -1053,7 +1053,15 @@ impl GitChangesPanel {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} files", changes.files.len())),
+                            .child(format!(
+                                "{} {}",
+                                changes.files.len(),
+                                if changes.files.len() == 1 {
+                                    "file"
+                                } else {
+                                    "files"
+                                }
+                            )),
                     )
                     .when(added != 0 || removed != 0, |row| {
                         row.child(diff_stat_element(DiffStat::Text { added, removed }, cx))
