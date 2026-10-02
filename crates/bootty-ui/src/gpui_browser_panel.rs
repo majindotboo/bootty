@@ -66,6 +66,28 @@ pub struct BrowserPanel {
 }
 
 impl BrowserPanel {
+    fn dispatch_chrome_command(
+        &mut self,
+        action: &crate::gpui_actions::InvokeCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let invocation = action.invocation();
+        if invocation.target.is_some() || !invocation.arguments.is_empty() {
+            cx.propagate();
+            return;
+        }
+        match invocation.command.as_str() {
+            "new_tab" => self.new_tab(None, window, cx),
+            "close_surface" => self.close_tab(self.selected, window, cx),
+            _ => {
+                cx.propagate();
+                return;
+            }
+        }
+        cx.stop_propagation();
+    }
+
     pub(crate) fn new(
         config: &bootty_config::config::BoottyConfig,
         window: &mut Window,
@@ -926,6 +948,8 @@ impl Render for BrowserPanel {
             .selected_tab()
             .is_none_or(|tab| tab.address == "about:blank");
         div()
+            .id("browser-panel")
+            .on_action(cx.listener(Self::dispatch_chrome_command))
             .size_full()
             .flex()
             .flex_col()
