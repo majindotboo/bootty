@@ -1,6 +1,6 @@
 # Native workspace demonstrations
 
-Captured from packaged Development builds on October 1, 2026. The
+Captured from packaged Development builds on October 1–2, 2026. The
 [capture manifest](captures.json) records each artifact's source revision,
 executable hash, capture time and SHA-256. History, agent-terminal, session,
 empty-sidebar and coordination captures were refreshed from `064cef1d` at
@@ -8,9 +8,15 @@ empty-sidebar and coordination captures were refreshed from `064cef1d` at
 `7ed43235` at 23:21–23:23 PDT. Browser keyboard and private-cookie lifecycle captures use
 `b80cea92`; the manifest identifies the revisions for the remaining interactions.
 
+The direct agent-tab capture uses `892f6f65` at 00:15 PDT on October 2.
+
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
 
+- [Direct agent tab](agent-tab.mp4), 2.4 seconds: choose Open Pi tab from
+  Cmd+K and launch the colored provider TUI beside the existing shell in the same
+  session. No prompt was sent. The disposable session was closed afterward,
+  restoring 9 native / 2 rmux / 0 tmux sessions.
 - [Tool close](tool-close.mp4), 2.8 seconds: close a focused Coordination tab,
   open Cmd+K and type immediately without clicking another input.
 - [Sidebar tabs](sidebar-tabs.mp4), 9.0 seconds: open a document, type directly,
@@ -50,6 +56,7 @@ playback is not accelerated.
 ![Private-profile cookie absent after a full app restart](browser-private.png)
 ![Native provider history with account status and search](history.png)
 ![Filtered history disables hidden session actions](history-filter.png)
+![Provider TUI beside the existing shell in the same session](agent-tab.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
 ![Page element annotation ready for review](annotations.png)
 ![Annotation feedback edited immediately in the terminal without submitting](annotation-paste.png)

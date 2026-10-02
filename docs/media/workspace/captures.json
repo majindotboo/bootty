@@ -214,6 +214,22 @@
       "capture_started_at": "2026-10-02T06:23:02.200000+00:00",
       "capture_finished_at": "2026-10-02T06:23:04.023000+00:00",
       "sha256": "81f95e2159ef7505453c0a089a2176c75109542934ecc42c91ecd3090df3537e"
+    },
+    {
+      "file": "agent-tab.png",
+      "sha256": "127e9709ac6b90e56d73c31cc86c1862d319c74f8a823856931f13cfa7086648",
+      "source_commit": "892f6f6548c3dcffbca668324edd15c4db9c7f12",
+      "executable_sha256": "6bde59fe36ab92c84ce6c5e1ec8bd1162644634fe86914e51b600854a688b337",
+      "captured_at": "2026-10-02T07:15:10.911Z"
+    },
+    {
+      "file": "agent-tab.mp4",
+      "sha256": "7dcbb47934cafea68732d19e12cbbd39c8c5196d3bbb757f1255258e19e7a649",
+      "source_commit": "892f6f6548c3dcffbca668324edd15c4db9c7f12",
+      "executable_sha256": "6bde59fe36ab92c84ce6c5e1ec8bd1162644634fe86914e51b600854a688b337",
+      "capture_started_at": "2026-10-02T07:15:09.558Z",
+      "capture_finished_at": "2026-10-02T07:15:10.911Z",
+      "playback_seconds": 2.353
     }
   ]
 }
