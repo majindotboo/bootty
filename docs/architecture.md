@@ -141,17 +141,19 @@ catalog-backed remote Spaces.
 
 ## Terminal path
 
-`bootty-mux` delivers rmux live pane bytes through its public `pipe-pane` API.
-A Bootty daemon helper shares each pane's stream over local IPC. Each reader has
-an independent 16 MiB queue; a stalled reader disconnects instead of blocking
-the pane or silently dropping bytes. One blocking reader drains the daemon pipe
-into a bounded one MiB relay queue. On pipe EOF, subscribers receive their queued
-tails before IPC closes; draining stops after five seconds if a subscriber stalls.
-The helper exits when its last reader leaves. No output is spooled to disk.
-The SDK keyframe restores initial text and modes. The public pipe API still
-depends on the daemon's bounded retained output: starvation beyond that retention
-can interrupt an image transfer, which a text keyframe cannot reconstruct.
-Remote pane readers use the same host-side path.
+`bootty-mux` consumes the SDK's sequence-bearing `recover_output` stream for
+rmux panes. A bounded reader queue applies backpressure. When a reader falls
+behind the daemon's retained bytes, a typed rebase replaces the emulator state;
+bytes from separate epochs are never stitched together. Input and resize remain
+responsive while output is queued, and closed panes report their logical end.
+
+Recovery reconstructs text and input modes, but the public per-pane API cannot
+restore images whose bytes fell outside retention. Large image bursts on rmux
+are therefore unsupported across an output gap. A read-only session attachment
+cannot replace this path: targeting a pane changes shared backend selection and
+its frames describe the entire session. Upgrade this limit when the SDK exposes
+a lossless per-pane graphics stream. Native and tmux terminal image paths retain
+their existing contracts.
 
 ```text
 TerminalSession

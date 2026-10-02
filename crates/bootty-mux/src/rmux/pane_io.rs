@@ -3,8 +3,8 @@ use std::{collections::VecDeque, sync::OnceLock, thread};
 use anyhow::{Context, Result};
 use rmux_proto::{PaneTarget, Request, Response};
 use rmux_sdk::{
-    Pane, PaneId, PaneOutputChunk, PaneOutputStart, PaneRecoveryEvent, Rmux, SessionName,
-    TerminalSizeSpec,
+    Pane, PaneId, PaneOutputChunk, PaneOutputStart, PaneRecoveryEvent, PaneStreamEndReason, Rmux,
+    SessionName, TerminalSizeSpec,
 };
 use tokio::runtime::Builder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -311,45 +311,10 @@ async fn stream_pane_output(
     keyboard_option_tx: &tokio::sync::watch::Sender<String>,
     sgr_pixels_mouse_tx: &tokio::sync::watch::Sender<String>,
 ) -> Result<PaneStreamOutcome> {
-    let target = pane_input_target(rmux, &request.target).await?;
-    let pane_id = request
-        .target
-        .pane_id
-        .as_deref()
-        .context("pane output requires a pane id")?;
-    let mut output = super::pipe_output::PipeOutput::open(target, pane_id).await?;
-    let capture = pane.recover_output();
-    tokio::pin!(capture);
-    let mut buffer = vec![0; RMUX_OUTPUT_EVENT_MAX_BYTES];
-    // Keep bytes produced during capture before its authoritative redraw, as in
-    // the original pipe-pane restore path. Later bytes continue from that frame.
-    let mut recovery = loop {
-        tokio::select! {
-            () = request.output_tx.closed() => return Ok(PaneStreamOutcome::Closed),
-            result = &mut capture => break result?,
-            count = output.read(&mut buffer) => {
-                let count = count?;
-                if count == 0 { return Ok(PaneStreamOutcome::Closed); }
-                if request.output_tx.send(RmuxPaneEvent::Bytes(buffer.get(..count).context("invalid pipe read length")?.to_vec())).await.is_err() {
-                    return Ok(PaneStreamOutcome::Closed);
-                }
-            }
-        }
-    };
-    for event in recovery.poll_once().await? {
-        if let PaneRecoveryEvent::Rebase(mut rebase) = event {
-            restore_input_modes(&mut rebase.keyframe, keyboard_protocol, sgr_pixels_mouse);
-            if request
-                .output_tx
-                .send(RmuxPaneEvent::Rebase(rebase.keyframe))
-                .await
-                .is_err()
-            {
-                return Ok(PaneStreamOutcome::Closed);
-            }
-        }
-    }
-    drop(recovery);
+    // The pipe API silently skips retained-output gaps. Use the sequence-bearing
+    // SDK stream so a gap replaces the emulator state rather than splicing bytes.
+    // Recovery restores text and modes, not images lost before the rebase.
+    let mut recovery = pane.recover_output().await?;
     let mut pending_events = VecDeque::new();
     let mut recovery_ended = false;
     let mut transport_lost = false;
@@ -363,21 +328,33 @@ async fn stream_pane_output(
                 let Ok(permit) = permit else { break; };
                 if let Some(event) = pending_events.pop_front() { permit.send(event); }
             }
-            count = output.read(&mut buffer), if pending_events.is_empty() && !recovery_ended => {
-                let count = count?;
-                if count == 0 {
-                    transport_lost = !pane_process_exited(pane).await;
-                    recovery_ended = true;
-                    if !transport_lost { pending_events.push_back(RmuxPaneEvent::ProcessExited); }
-                } else {
-                    let bytes = buffer.get(..count).context("invalid pipe read length")?;
-                    if let Some(flags) = keyboard_protocol.observe(bytes) {
-                        let _ = keyboard_option_tx.send(flags);
+            event = recovery.next(), if pending_events.is_empty() && !recovery_ended => {
+                match event? {
+                    Some(PaneRecoveryEvent::Rebase(mut rebase)) => {
+                        restore_input_modes(&mut rebase.keyframe, keyboard_protocol, sgr_pixels_mouse);
+                        pending_events.push_back(RmuxPaneEvent::Rebase(rebase.keyframe));
                     }
-                    if let Some(enabled) = sgr_pixels_mouse.observe(bytes) {
-                        let _ = sgr_pixels_mouse_tx.send(enabled);
+                    Some(PaneRecoveryEvent::Bytes { bytes, .. }) => {
+                        if let Some(flags) = keyboard_protocol.observe(&bytes) {
+                            let _ = keyboard_option_tx.send(flags);
+                        }
+                        if let Some(enabled) = sgr_pixels_mouse.observe(&bytes) {
+                            let _ = sgr_pixels_mouse_tx.send(enabled);
+                        }
+                        queue_bytes(&mut pending_events, bytes);
                     }
-                    queue_bytes(&mut pending_events, bytes.to_vec());
+                    Some(PaneRecoveryEvent::Lifecycle(_)) => {
+                        pending_events.push_back(RmuxPaneEvent::ProcessExited);
+                    }
+                    Some(PaneRecoveryEvent::End(reason)) => {
+                        transport_lost = matches!(reason, PaneStreamEndReason::TransportLost);
+                        let error = (!matches!(reason, PaneStreamEndReason::PaneRemoved | PaneStreamEndReason::TransportLost))
+                            .then(|| format!("{reason:?}"));
+                        if !transport_lost { pending_events.push_back(RmuxPaneEvent::End(error)); }
+                        recovery_ended = true;
+                    }
+                    None => recovery_ended = true,
+                    Some(_) => anyhow::bail!("rmux returned an unsupported pane recovery event"),
                 }
             }
             Some(mut bytes) = request.input_rx.recv() => {
@@ -411,16 +388,6 @@ async fn stream_pane_output(
     } else {
         PaneStreamOutcome::Closed
     })
-}
-
-async fn pane_process_exited(pane: &Pane) -> bool {
-    match pane.info().await {
-        Ok(info) => info
-            .panes
-            .iter()
-            .all(|pane| pane.process == rmux_sdk::PaneProcessState::Exited),
-        Err(error) => pane_gone_error(&error.into()),
-    }
 }
 
 async fn restore_keyboard_protocol(pane: &Pane) -> Result<KittyKeyboardProtocol> {

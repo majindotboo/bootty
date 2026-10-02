@@ -2,13 +2,13 @@
 
 use std::{
     io::{BufRead, BufReader},
-    os::unix::fs::PermissionsExt as _,
     process::{Child, Command, Stdio},
     sync::{OnceLock, mpsc},
     thread,
 };
 
 use anyhow::{Context, Result};
+use assert_fs::fixture::PathChild as _;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::ApplicationIdentity;
 use bootty_mux::rmux::{
@@ -112,16 +112,14 @@ embedded_scenarios!(
     closed_pane_accepts_teardown_updates,
     shell_exit_is_quiet,
     bounded_live_output,
-    kitty_images_reach_terminal_frames,
+    large_image_burst_keeps_terminal_usable,
+    public_raw_output_reports_retained_gap,
     large_restore_progress,
 );
 
 /// The child-process entry point. A no-op in the runner's own process.
 #[test]
 fn embedded_rmux_scenario_child() -> Result<()> {
-    if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
-        return bootty_mux::rmux::run_pipe_helper(endpoint.into());
-    }
     let Some(scenario) = std::env::var_os(SCENARIO_ENV) else {
         return Ok(());
     };
@@ -134,79 +132,6 @@ fn embedded_rmux_remote_pane_stream_child() -> Result<()> {
         return Ok(());
     };
     run_remote_rmux_command(&payload.to_string_lossy())?;
-    Ok(())
-}
-
-#[rstest::rstest]
-#[case(1, 64 * 1024)]
-#[case(2, 2 * 1024 * 1024)]
-fn pipe_helper_delivers_complete_bytes_before_eof(
-    #[case] reader_count: usize,
-    #[case] byte_count: usize,
-) -> Result<()> {
-    use std::io::{Read as _, Write as _};
-    use std::os::unix::net::UnixStream;
-
-    struct Helper(Child);
-    impl Drop for Helper {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    let directory = assert_fs::TempDir::new()?;
-    let endpoint = directory.path().join("output.sock");
-    let mut helper = Helper(
-        Command::new(std::env::current_exe()?)
-            .args(["--exact", SCENARIO_CHILD_TEST, "--nocapture"])
-            .env("BOOTTY_RMUX_PIPE_ENDPOINT", &endpoint)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()?,
-    );
-    let deadline = std::time::Instant::now()
-        .checked_add(PANE_TIMEOUT)
-        .context("helper deadline")?;
-    let mut readers = Vec::new();
-    for _ in 0..reader_count {
-        let mut reader = loop {
-            match UnixStream::connect(&endpoint) {
-                Ok(reader) => break reader,
-                Err(error) if std::time::Instant::now() < deadline => {
-                    anyhow::ensure!(helper.0.try_wait()?.is_none(), "helper exited: {error}");
-                    thread::yield_now();
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
-        let mut ready = [255];
-        reader.read_exact(&mut ready)?;
-        pretty_assertions::assert_eq!(ready, [0]);
-        readers.push(thread::spawn(move || {
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).map(|_| bytes)
-        }));
-    }
-    let bytes = (0_u8..=255).cycle().take(byte_count).collect::<Vec<_>>();
-    helper
-        .0
-        .stdin
-        .take()
-        .context("helper stdin")?
-        .write_all(&bytes)?;
-    for reader in readers {
-        let actual = reader.join().expect("reader thread")?;
-        pretty_assertions::assert_eq!(actual.len(), bytes.len());
-        let mismatch = actual
-            .iter()
-            .zip(&bytes)
-            .enumerate()
-            .find(|(_, (actual, expected))| actual != expected);
-        pretty_assertions::assert_eq!(mismatch, None, "first changed byte");
-    }
-    anyhow::ensure!(helper.0.wait()?.success(), "helper failed");
     Ok(())
 }
 
@@ -1074,7 +999,80 @@ if expected in data:
         }
     }
 
-    pub fn kitty_images_reach_terminal_frames() -> Result<()> {
+    pub fn public_raw_output_reports_retained_gap() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(registry, &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let (mut output, mut recovery) = runtime.block_on(async {
+            let rmux = rmux_sdk::Rmux::connect(rmux_sdk::RmuxEndpoint::UnixSocket(
+                endpoint_path_for(ApplicationIdentity::Production)?,
+            ))
+            .await?;
+            let name = rmux_sdk::SessionName::new(&session_id).map_err(anyhow::Error::msg)?;
+            let pane = rmux.session(name).await?.pane(0, 0);
+            let output = pane.output_stream().await?;
+            let mut recovery = pane.recover_output().await?;
+            anyhow::ensure!(
+                matches!(
+                    recovery.next().await?,
+                    Some(rmux_sdk::PaneRecoveryEvent::Rebase(_))
+                ),
+                "recovery did not initialize its epoch"
+            );
+            anyhow::Ok((output, recovery))
+        })?;
+        let fixture = assert_fs::NamedTempFile::new("retained-output.txt")?;
+        std::fs::write(fixture.path(), vec![b'X'; 2 * 1024 * 1024])?;
+        let directory = assert_fs::TempDir::new()?;
+        let complete = directory.child("complete");
+        terminal.write_input(
+            format!(
+                "cat {} && printf '\\nBOOTTY_GAP_RECOVERED\\n' && touch {}\r",
+                fixture.path().display(),
+                complete.path().display()
+            )
+            .as_bytes(),
+        )?;
+        let deadline = std::time::Instant::now()
+            .checked_add(PANE_TIMEOUT)
+            .context("producer deadline")?;
+        while !complete.path().exists() {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "producer did not complete"
+            );
+            thread::yield_now();
+        }
+        let item = runtime
+            .block_on(output.next())?
+            .context("public output ended")?;
+        let rmux_sdk::PaneOutputChunk::Lag(lag) = item else {
+            anyhow::bail!("stalled subscriber did not report its missing bytes");
+        };
+        anyhow::ensure!(
+            lag.missed_events > 0 && lag.resume_sequence > lag.expected_sequence,
+            "incomplete lag report"
+        );
+        let item = runtime
+            .block_on(recovery.next())?
+            .context("recovery ended")?;
+        let rmux_sdk::PaneRecoveryEvent::Rebase(rebase) = item else {
+            anyhow::bail!("recovery stitched bytes across the gap");
+        };
+        assert_eq!(rebase.reason, rmux_sdk::PaneRecoveryRebaseReason::Lag);
+        anyhow::ensure!(
+            String::from_utf8_lossy(&rebase.keyframe).contains("BOOTTY_GAP_RECOVERED"),
+            "recovery omitted authoritative final text"
+        );
+        wait_for_terminal_text(&mut terminal, "BOOTTY_GAP_RECOVERED")?;
+        terminal.write_input(b"printf 'BOOTTY_AFTER_GAP\\n'\r")?;
+        wait_for_terminal_text(&mut terminal, "BOOTTY_AFTER_GAP")?;
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn large_image_burst_keeps_terminal_usable() -> Result<()> {
         let (mut backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
         let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
@@ -1103,15 +1101,11 @@ if expected in data:
         terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
         wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
-        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
+        // The SDK reports/rebases after a retained-output gap. Its keyframe
+        // cannot reconstruct missing images; verify continued terminal input.
         drop(second);
         terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
-        let frame = terminal.extract_frame()?;
-        assert_eq!(frame.images.placements.len(), 1);
-        let image = frame.images.placements.first().context("rendered image")?;
-        assert_eq!(image.image_width, 1024);
-        assert_eq!(image.image_height, 512);
         ditch_session(&mut backend, &session_id)
     }
 
@@ -1169,19 +1163,9 @@ if expected in data:
 /// environment that is the same on every machine.
 fn run_embedded_scenario(scenario: &str) -> Result<()> {
     let directory = assert_fs::TempDir::new()?;
-    let helper = directory.path().join("bootty-daemon");
-    std::fs::write(
-        &helper,
-        format!(
-            "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact embedded_rmux_scenario_child --nocapture\n",
-            bootty_host::shell_quote(&std::env::current_exe()?.to_string_lossy()),
-        ),
-    )?;
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", SCENARIO_CHILD_TEST])
         .env(SCENARIO_ENV, scenario)
-        .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
         .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", ISOLATED_PATH)
