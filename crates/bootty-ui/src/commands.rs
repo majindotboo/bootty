@@ -40,6 +40,7 @@ mod jobs;
 mod panes;
 pub(crate) mod runtime;
 mod sessions;
+mod task_lifecycle;
 mod themes;
 
 pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
@@ -50,6 +51,7 @@ pub use panes::PaneAction;
 pub use runtime::computer::ComputerCommand;
 pub use runtime::connections::ConnectionCommand;
 pub use sessions::SessionAction;
+pub use task_lifecycle::TaskAction;
 pub use themes::ThemeAction;
 
 pub(crate) use runtime::{CommandRuntime, command_outcome_message};
@@ -86,6 +88,7 @@ pub enum CoreCommandExecutor {
     File(FileAction, Vec<String>),
     Pane(PaneAction, Vec<String>),
     Session(SessionAction, Vec<String>),
+    Task(TaskAction, Vec<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +148,7 @@ enum CommandExecutorResolver {
     File(FileAction),
     Pane(PaneAction),
     Session(SessionAction),
+    Task(TaskAction),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -184,16 +188,10 @@ impl CommandRegistry {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
-        let Some(registered) = self.commands.get(&invocation.command) else {
-            return Err(CommandOutcome::Failed {
-                code: "unknown_command".to_owned(),
-                message: ErrorNotice::UnknownCommand(format!(
-                    "unknown command {}",
-                    invocation.command
-                ))
-                .raw_message(),
-            });
-        };
+        let registered = self
+            .commands
+            .get(&invocation.command)
+            .ok_or_else(|| unknown_command(&invocation.command))?;
         let descriptor = registered.descriptor.clone();
         validate_arguments(&descriptor, &invocation.arguments)?;
         let invalid_arguments = || CommandOutcome::Failed {
@@ -237,6 +235,7 @@ impl CommandRegistry {
             CommandExecutorResolver::Session(action) => {
                 CoreCommandExecutor::Session(action, arguments())
             }
+            CommandExecutorResolver::Task(action) => CoreCommandExecutor::Task(action, arguments()),
             CommandExecutorResolver::File(action) => CoreCommandExecutor::File(action, arguments()),
             CommandExecutorResolver::Theme(action) => {
                 CoreCommandExecutor::Theme(action, arguments())
@@ -312,6 +311,13 @@ impl CommandRegistry {
         register_feature_commands(&mut commands);
         register_host_commands(&mut commands);
         Self { commands }
+    }
+}
+
+fn unknown_command(command: &str) -> CommandOutcome {
+    CommandOutcome::Failed {
+        code: "unknown_command".to_owned(),
+        message: ErrorNotice::UnknownCommand(format!("unknown command {command}")).raw_message(),
     }
 }
 
@@ -743,6 +749,10 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             },
         );
     }
+    register_session_commands(commands);
+}
+
+fn register_session_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
     for action in SessionAction::ALL {
         let descriptor = action.descriptor();
         commands.insert(
@@ -750,6 +760,16 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             RegisteredCommand {
                 descriptor,
                 executor: CommandExecutorResolver::Session(action),
+            },
+        );
+    }
+    for action in TaskAction::ALL {
+        let descriptor = action.descriptor();
+        commands.insert(
+            descriptor.id.clone(),
+            RegisteredCommand {
+                descriptor,
+                executor: CommandExecutorResolver::Task(action),
             },
         );
     }

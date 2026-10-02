@@ -26,6 +26,7 @@ This file describes the current production structure.
 | Application identity and local namespace | `bootty-config` | A conflicting process identity fails startup. |
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
+| Persistent task lifecycle | `bootty-mux::SessionMembership` and `WorkspaceRepository` | Explicit promotion preserves the saved identity/content when an attachment disappears; commit precedes live publication. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
@@ -648,6 +649,12 @@ physical rows; capture responses allow 128 KiB of formatted text to leave room
 for JSON escaping, and local exports allow 2 MiB. Oversized output fails with
 its required size so callers can request fewer rows; it never cuts UTF-8 or
 style sequences in half.
+
+### Persistent task state
+
+`session.tasks` lists every saved session identity in the target binding, in saved order. Ordinary terminals have a null lifecycle. `session.task.set IDENTITY STATE` explicitly promotes an existing identity or changes its durable destination to `active`, `settled` or `archived`. These commands use the normal invocation catalog and validate the captured binding before mutation. A failed SQLite commit leaves both saved and published lifecycle unchanged.
+
+Schema revision 6 preserves existing membership rows and order with no implicit promotion. Promoted records survive attachment loss, close and detach. Reopening the application or restoring `active` never starts a process for a promoted record. Reattachment requires the exact identity and Space tags; a same-named untagged terminal cannot inherit a task. Moving a record keeps its lifecycle. Attachment observation is separate from process health or provider progress. This first increment changes saved metadata only; sidebar shelves, snooze, hide and deletion/recovery controls require a subsequent UI implementation.
 
 ### Scripted sessions
 

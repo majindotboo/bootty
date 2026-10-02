@@ -20,13 +20,14 @@ use legacy::*;
 use schema::*;
 use snapshot::*;
 
+use crate::session_lifecycle::TaskLifecycle;
 use crate::session_membership::{SessionMembership, WorkspaceSession};
 
 pub use crate::membership::BackendMembership;
 use crate::{controller::SpaceId, membership::MembershipOperation};
 use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig, default_config_path};
 
-const WORKSPACE_SNAPSHOT_REVISION: i64 = 5;
+const WORKSPACE_SNAPSHOT_REVISION: i64 = 6;
 const DEFAULT_SPACE_NAME: &str = "Default Space";
 pub const DEFAULT_SPACE_ICON: &str = "folder";
 pub const DEFAULT_SPACE_COLOR: [u8; 3] = [0x7A, 0xA2, 0xF7];
@@ -857,8 +858,9 @@ impl WorkspaceRepository {
             })?;
             tx.execute(
                 "INSERT INTO workspace_sessions
-                    (identity, space_id, backend_name, display_name, explicit, cwd, position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (identity, space_id, backend_name, display_name, explicit, cwd, position,
+                     task_lifecycle)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     session.identity,
                     scope.persistence_value(),
@@ -866,7 +868,10 @@ impl WorkspaceRepository {
                     session.display_name,
                     i64::from(session.explicit),
                     session.cwd,
-                    position
+                    position,
+                    sessions
+                        .task_lifecycle(&session.identity)
+                        .map(TaskLifecycle::storage_value)
                 ],
             )
             .map_err(|error| self.database_error("insert persisted session", error))?;
@@ -921,6 +926,7 @@ impl WorkspaceRepository {
             migrate_workspace_bindings_into_spaces(&tx)?;
             migrate_workspace_journal(&tx)?;
             create_workspace_schema(&tx)?;
+            migrate_workspace_task_lifecycle(&tx)?;
             migrate_workspace_space_icons(&tx)?;
             migrate_workspace_remote_ids(&tx)?;
             migrate_workspace_space_appearance(&tx)?;
@@ -1233,10 +1239,11 @@ fn apply_binding_membership_mutation(
             sessions.set_display_name(identity, display_name, *explicit);
         }
         BindingMembershipMutation::Ditch { identity, .. } => {
-            // The session is gone for good, so its name goes with it. Leaving the record behind is
-            // what used to make the next session started in the same directory inherit a dead
-            // session's name.
-            sessions.release(identity);
+            // Closing a terminal drops its claim. A task keeps its identity and content even
+            // without that attachment, and cannot be recovered by matching another session's name.
+            if sessions.task_lifecycle(identity).is_none() {
+                sessions.release(identity);
+            }
         }
     }
     Ok(())

@@ -64,6 +64,7 @@ use crate::repository::{
     BindingMembershipMutation, SpaceMuxOverride, SpaceRemoteOverride, WorkspaceBinding,
     WorkspacePersistenceError, WorkspaceRepository, WorkspaceSpace,
 };
+use crate::session_lifecycle::TaskLifecycle;
 use crate::session_membership::{SessionMembership, WorkspaceSession};
 
 /// The only terminal data that the host needs to interpret after a workspace frame.
@@ -350,6 +351,21 @@ impl BindingRuntime {
         &self.sessions
     }
 
+    /// Whether the last backend snapshot carries this task's identity and Space claim.
+    /// This is an attachment observation, not a statement about process or provider status.
+    #[must_use]
+    pub fn task_attachment_observed(&self, identity: &str) -> bool {
+        self.mux
+            .all_sessions()
+            .iter()
+            .any(|session| self.task_session_matches(session, identity))
+    }
+
+    fn task_session_matches(&self, session: &MuxSession, identity: &str) -> bool {
+        session.tag.identity.as_deref() == Some(identity)
+            && session.tag.space.as_deref() == Some(self.space_tag.as_str())
+    }
+
     fn new_with_binding_config(
         state: BindingStateCandidate,
         config: &BoottyConfig,
@@ -512,6 +528,11 @@ impl BindingRuntime {
         // a new session either way, but as far as the workspace is concerned it is the same one,
         // so its name, its place in the Space, and its order all survive the restart.
         for session in self.sessions.sessions().to_vec() {
+            // Task attachment recovery requires an explicit resume operation; a closed task
+            // must never restart merely because its durable record survived.
+            if self.sessions.task_lifecycle(&session.identity).is_some() {
+                continue;
+            }
             self.mux.create_project_session(
                 crate::controller::NewMuxSessionRequest {
                     session_id: session.backend_name.clone(),
@@ -525,7 +546,7 @@ impl BindingRuntime {
                 &self.multiplexer,
             );
         }
-        self.mux.apply_session_order(&self.sessions.backend_names());
+        self.apply_session_order();
     }
 
     /// The stamp for a session this binding is about to create. A fresh identity every time.
@@ -660,6 +681,15 @@ impl BindingRuntime {
             .collect::<HashSet<_>>();
         let mut restamps = Vec::new();
         for claimed in candidate.sessions.sessions() {
+            // Task identity is never inferred from a name. A replacement terminal with that
+            // name is a separate attachment, even when the backend has lost its tags.
+            if candidate
+                .sessions
+                .task_lifecycle(&claimed.identity)
+                .is_some()
+            {
+                continue;
+            }
             if carried.contains(claimed.identity.as_str()) {
                 continue;
             }
@@ -696,8 +726,22 @@ impl BindingRuntime {
 
     fn publish_session_state(&mut self, candidate: BindingStateCandidate) {
         self.sessions = candidate.sessions;
+        self.apply_session_order();
+    }
+
+    fn apply_session_order(&mut self) {
         let order = if self.tracks_session_membership() {
-            self.sessions.backend_names()
+            self.sessions
+                .sessions()
+                .iter()
+                .filter(|session| {
+                    // A terminal's saved name can recover a lost tag. A task attachment requires
+                    // its actual identity and Space claim, so a reused name cannot occupy its row.
+                    self.sessions.task_lifecycle(&session.identity).is_none()
+                        || self.task_attachment_observed(&session.identity)
+                })
+                .map(|session| session.backend_name.clone())
+                .collect()
         } else {
             self.mux.backend_session_names().to_vec()
         };
@@ -732,7 +776,7 @@ impl BindingRuntime {
             .mux
             .refresh_sessions(repaint, &self.multiplexer.clone(), interval);
         if refresh.applied && self.tracks_session_membership() {
-            self.mux.apply_session_order(&self.sessions.backend_names());
+            self.apply_session_order();
         }
         Some(interval)
     }
@@ -1310,10 +1354,7 @@ impl WorkspaceRuntime {
             &self.active.binding.multiplexer.clone(),
             mux_session_refresh_interval(true),
         );
-        self.active
-            .binding
-            .mux
-            .apply_session_order(&self.active.binding.sessions.backend_names());
+        self.active.binding.apply_session_order();
         if self.active.binding.backend_policy.persisted_sessions
             == PersistedSessionPolicy::Immediate
         {
@@ -1828,6 +1869,32 @@ impl WorkspaceRuntime {
         self.session_identity(self.active.binding.scope, session_id)
     }
 
+    /// Changes a durable task destination without starting or stopping its attachment.
+    /// The identity may refer to a task with no live backend session.
+    /// # Errors
+    /// Returns an error if the candidate cannot be committed before publication.
+    pub fn set_session_lifecycle(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+        state: TaskLifecycle,
+    ) -> Result<bool, WorkspacePersistenceError> {
+        let Some(mut candidate) = self.binding_state_candidate(scope) else {
+            return Err(WorkspacePersistenceError::operation(
+                "the Space's binding is no longer live",
+            ));
+        };
+        if !candidate.sessions.contains(identity) {
+            return Err(WorkspacePersistenceError::operation(
+                "the Space does not hold this session identity",
+            ));
+        }
+        if !candidate.sessions.set_task_lifecycle(identity, state) {
+            return Ok(false);
+        }
+        self.commit_binding_state_candidate(candidate).map(|_| true)
+    }
+
     /// # Errors
     /// Returns an error if the new session order cannot be committed.
     pub fn move_active_session(
@@ -1892,6 +1959,15 @@ impl WorkspaceRuntime {
             .identity
             .clone()
             .unwrap_or_else(crate::snapshot::new_session_identity);
+        // An explicitly detached task still has one durable owner. Adopting its known identity
+        // into another Space moves that record instead of creating a conflicting second claim.
+        let owner = self.all_bindings().find_map(|binding| {
+            (binding.scope != scope && binding.sessions.task_lifecycle(&identity).is_some())
+                .then_some(binding.scope)
+        });
+        if let Some(owner) = owner {
+            return self.move_session_to_space(owner, session_id, scope, repaint);
+        }
         let claimed = WorkspaceSession {
             identity: identity.clone(),
             backend_name: session.name.clone(),
@@ -1905,7 +1981,8 @@ impl WorkspaceRuntime {
         let Some(mut candidate) = self.binding_state_candidate(scope) else {
             return Ok(false);
         };
-        if !candidate.sessions.claim(claimed) {
+        let known_task = candidate.sessions.task_lifecycle(&identity).is_some();
+        if !candidate.sessions.claim(claimed) && !known_task {
             return Ok(false);
         }
         let binding = self.commit_binding_state_candidate(candidate)?;
@@ -1976,6 +2053,7 @@ impl WorkspaceRuntime {
         let Some(mut source_state) = self.binding_state_candidate(from) else {
             return Ok(false);
         };
+        let lifecycle = source_state.sessions.task_lifecycle(&identity);
         let Some(claimed) = source_state.sessions.release(&identity) else {
             return Ok(false);
         };
@@ -1983,6 +2061,11 @@ impl WorkspaceRuntime {
             return Ok(false);
         };
         target_state.sessions.claim(claimed);
+        if let Some(lifecycle) = lifecycle {
+            target_state
+                .sessions
+                .set_task_lifecycle(&identity, lifecycle);
+        }
         self.commit_binding_state_candidates(vec![source_state, target_state])?;
 
         if let Some(backend_session_id) = backend_session_id
@@ -2029,8 +2112,12 @@ impl WorkspaceRuntime {
         let Some(mut candidate) = self.binding_state_candidate(scope) else {
             return Ok(false);
         };
-        if candidate.sessions.release(&identity).is_none() {
+        if !candidate.sessions.contains(&identity) {
             return Ok(false);
+        }
+        // Detaching drops a terminal claim, while a task remains discoverable in its Space.
+        if candidate.sessions.task_lifecycle(&identity).is_none() {
+            candidate.sessions.release(&identity);
         }
         self.commit_binding_state_candidate(candidate)?;
 

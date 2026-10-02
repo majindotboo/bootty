@@ -307,20 +307,22 @@ impl BindingRuntime {
             .sessions()
             .iter()
             .filter_map(|claimed| {
-                reported
-                    .iter()
-                    .find(|session| session.tag.identity.as_deref() == Some(&claimed.identity))
+                reported.iter().find(|session| {
+                    session.tag.identity.as_deref() == Some(&claimed.identity)
+                        && (self.sessions.task_lifecycle(&claimed.identity).is_none()
+                            || self.task_session_matches(session, &claimed.identity))
+                })
             })
             .collect()
     }
 
     fn holds(&self, session: &MuxSession) -> bool {
         !self.tracks_session_membership()
-            || session
-                .tag
-                .identity
-                .as_deref()
-                .is_some_and(|identity| self.sessions.get(identity).is_some())
+            || session.tag.identity.as_deref().is_some_and(|identity| {
+                self.sessions.get(identity).is_some()
+                    && (self.sessions.task_lifecycle(identity).is_none()
+                        || self.task_session_matches(session, identity))
+            })
     }
 }
 

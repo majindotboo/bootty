@@ -349,6 +349,8 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.create"
                         | "session.start"
                         | "session.start_project"
+                        | "session.tasks"
+                        | "session.task.set"
                 )
         }
         ResourceKind::Session => {
