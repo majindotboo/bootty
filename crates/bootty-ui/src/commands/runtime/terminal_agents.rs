@@ -554,7 +554,7 @@ fn start_terminal(
             );
             focus_started_terminal(context, target.as_ref(), &mut warnings);
             CommandOutcome::Success {
-                value: json!({"created":value.get("created"),"terminal_target":target,"target":target,"provider":provider.to_string(),"tools":{"own_terminal_read":tools_enabled},"message":if provider==AgentKind::Pi&&operation.starts_with("account."){"Use /login or /logout in the Pi terminal"}else{""}}),
+                value: json!({"created":value.get("created"),"terminal_target":target,"target":target,"provider":provider.to_string(),"tools":{"own_terminal_read":tools_enabled,"terminal_spawn":tools_enabled},"message":if provider==AgentKind::Pi&&operation.starts_with("account."){"Use /login or /logout in the Pi terminal"}else{""}}),
                 warnings,
             }
         }
@@ -634,9 +634,20 @@ fn prepare_terminal_tools(
     if context.remote || !bootty_agents::terminal_tools_supported(provider, launch) {
         return Ok(None);
     }
-    let id = context
-        .service
-        .reserve_terminal_tools(provider, context.binding_id)?;
+    let binding_target = context
+        .binding_target
+        .clone()
+        .ok_or_else(|| "The agent binding target is unavailable".to_owned())?;
+    let cwd = launch
+        .cwd
+        .clone()
+        .ok_or_else(|| "The agent checkout is unavailable".to_owned())?;
+    let id = context.service.reserve_terminal_session_tools(
+        provider,
+        context.binding_id,
+        binding_target,
+        cwd,
+    )?;
     let attached = std::env::current_exe()
         .map_err(|error| error.to_string())
         .and_then(|executable| {

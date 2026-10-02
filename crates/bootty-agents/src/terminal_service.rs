@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentCommandExecutor, AgentKind, AgentLaunch, TerminalToolRequest,
-    terminal_tools::TerminalTools,
+    terminal_tools::{TerminalSpawnScope, TerminalTools},
 };
 
 /// Launch identity for a backend-owned terminal. This owner never starts a provider process.
@@ -98,7 +98,28 @@ impl TerminalAgentService {
         provider: AgentKind,
         binding_id: &str,
     ) -> Result<String, String> {
-        self.tools.reserve(provider, binding_id)
+        self.tools.reserve(provider, binding_id, None)
+    }
+
+    /// Reserve own-terminal read and a detached ordinary shell in this exact Space and checkout.
+    /// The child shell receives no agent tool authority. Nothing is persisted.
+    /// # Errors
+    /// Returns invalid binding/checkout or attachment limit errors.
+    pub fn reserve_terminal_session_tools(
+        &self,
+        provider: AgentKind,
+        binding_id: &str,
+        binding_target: CommandTarget,
+        cwd: String,
+    ) -> Result<String, String> {
+        self.tools.reserve(
+            provider,
+            binding_id,
+            Some(TerminalSpawnScope {
+                binding_target,
+                cwd,
+            }),
+        )
     }
 
     /// Publish an exact target only after its launch metadata has committed.
@@ -108,8 +129,13 @@ impl TerminalAgentService {
         let record = self
             .record(target)
             .ok_or_else(|| "Terminal agent metadata has not committed".to_owned())?;
-        self.tools
-            .complete(id, record.provider, &record.binding_id, target)
+        self.tools.complete(
+            id,
+            record.provider,
+            &record.binding_id,
+            target,
+            record.launch.cwd.as_deref(),
+        )
     }
 
     pub fn revoke_terminal_tools(&self, id: &str) {

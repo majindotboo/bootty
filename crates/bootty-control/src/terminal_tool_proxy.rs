@@ -8,13 +8,15 @@ use crate::CommandOutcome;
 const REQUEST_LIMIT: usize = 64 * 1024;
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 const TOOL_NAME: &str = "bootty_terminal_read";
+const SPAWN_TOOL_NAME: &str = "bootty_terminal_spawn";
 
-/// The complete operation surface of the own-terminal MCP proxy.
+/// The complete operation surface of the scoped terminal MCP proxy.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalToolOperation {
     List,
     Read,
+    Spawn,
 }
 
 /// Serve bounded newline-delimited MCP requests. The host revalidates its live attachment
@@ -94,38 +96,27 @@ fn terminal_tool_response(
         }
         "ping" => json!({}),
         "tools/list" => {
-            let enabled = match invoke(TerminalToolOperation::List) {
-                CommandOutcome::Success { value, .. } => {
-                    value.get("enabled").and_then(Value::as_bool) == Some(true)
-                }
-                _ => false,
-            };
-            let tools = if enabled {
-                vec![
-                    json!({"name":TOOL_NAME,"description":"Read this agent's own terminal screen.",
-                    "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
-                    "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}),
-                ]
-            } else {
-                Vec::new()
-            };
+            let tools = terminal_tool_catalog(invoke(TerminalToolOperation::List));
             json!({"tools":tools})
         }
         "tools/call" => {
-            if params.get("name").and_then(Value::as_str) != Some(TOOL_NAME)
-                || params.get("arguments").is_some_and(|arguments| {
-                    arguments
-                        .as_object()
-                        .is_none_or(|arguments| !arguments.is_empty())
-                })
-            {
+            let operation = match params.get("name").and_then(Value::as_str) {
+                Some(TOOL_NAME) => TerminalToolOperation::Read,
+                Some(SPAWN_TOOL_NAME) => TerminalToolOperation::Spawn,
+                _ => return Some(error(&id, -32602, "Unknown Bootty terminal tool")),
+            };
+            if params.get("arguments").is_some_and(|arguments| {
+                arguments
+                    .as_object()
+                    .is_none_or(|arguments| !arguments.is_empty())
+            }) {
                 return Some(error(
                     &id,
                     -32602,
-                    "Expected bootty_terminal_read with no arguments",
+                    "Bootty terminal tools accept no arguments",
                 ));
             }
-            let outcome = invoke(TerminalToolOperation::Read);
+            let outcome = invoke(operation);
             let (is_error, text) = match outcome {
                 CommandOutcome::Success { value, .. } => (false, value.to_string()),
                 outcome => (
@@ -140,6 +131,26 @@ fn terminal_tool_response(
         _ => return Some(error(&id, -32601, "Method not found")),
     };
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
+}
+
+fn terminal_tool_catalog(outcome: CommandOutcome) -> Vec<Value> {
+    let CommandOutcome::Success { value, .. } = outcome else {
+        return Vec::new();
+    };
+    if value.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let mut tools = vec![
+        json!({"name":TOOL_NAME,"description":"Read this agent's own terminal screen.",
+        "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+        "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}),
+    ];
+    if value.get("spawn_enabled").and_then(Value::as_bool) == Some(true) {
+        tools.push(json!({"name":SPAWN_TOOL_NAME,"description":"Create a detached ordinary shell in this agent's Space and checkout. The shell receives no Bootty agent tools.",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+    }
+    tools
 }
 
 fn error(id: &Value, code: i32, message: &str) -> Value {

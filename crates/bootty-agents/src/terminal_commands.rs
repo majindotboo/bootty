@@ -105,9 +105,9 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
 fn terminal_tool_descriptor(provider: AgentKind) -> CommandDescriptor {
     CommandDescriptor {
         id: format!("agents.{provider}.tools"),
-        title: format!("Read {provider} terminal tool"),
-        description: "Use a live own-terminal read attachment".to_owned(),
-        mutation: MutationClass::Read,
+        title: format!("Use {provider} terminal tools"),
+        description: "Use a live scoped attachment to read its own terminal or create an ordinary shell in its Space and checkout".to_owned(),
+        mutation: MutationClass::Write,
         arguments: terminal_arguments(vec![("request", true)]),
         target: None,
         palette: false,

@@ -5,7 +5,7 @@ use std::{
 };
 
 use bootty_control::{
-    Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget,
+    Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
     TerminalToolOperation,
 };
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ pub fn terminal_tools_supported(provider: AgentKind, launch: &AgentLaunch) -> bo
     })
 }
 
-/// Add only a stdio own-terminal read proxy; never alter approval or sandbox options.
+/// Add a scoped stdio terminal tool proxy; never alter approval or sandbox options.
 /// A failed attachment preserves the original launch.
 /// # Errors
 /// Returns invalid executable paths or serialization errors.
@@ -102,21 +102,39 @@ pub struct TerminalToolRequest {
     pub operation: TerminalToolOperation,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct TerminalToolLease {
     attachment_id: String,
     provider: AgentKind,
     binding_id: String,
     target: Option<CommandTarget>,
+    spawn: Option<TerminalSpawnScope>,
 }
 
-/// Live own-terminal policy. Restart deliberately disables all prior attachments.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TerminalSpawnScope {
+    pub binding_target: CommandTarget,
+    pub cwd: String,
+}
+
+/// Live scoped terminal policy. Restart deliberately disables all prior attachments.
 #[derive(Default)]
 pub struct TerminalTools(Mutex<Vec<TerminalToolLease>>);
 
 impl TerminalTools {
-    pub fn reserve(&self, provider: AgentKind, binding_id: &str) -> Result<String, String> {
-        if binding_id.is_empty() {
-            return Err("Agent tools require a binding".to_owned());
+    pub fn reserve(
+        &self,
+        provider: AgentKind,
+        binding_id: &str,
+        spawn: Option<TerminalSpawnScope>,
+    ) -> Result<String, String> {
+        if binding_id.is_empty()
+            || spawn.as_ref().is_some_and(|scope| {
+                scope.binding_target.kind != ResourceKind::Binding
+                    || !Path::new(&scope.cwd).is_absolute()
+            })
+        {
+            return Err("Agent tools require an exact binding and absolute checkout".to_owned());
         }
         let mut attachments = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if attachments.len() >= 128 {
@@ -128,6 +146,7 @@ impl TerminalTools {
             provider,
             binding_id: binding_id.to_owned(),
             target: None,
+            spawn,
         });
         drop(attachments);
         Ok(id)
@@ -139,6 +158,7 @@ impl TerminalTools {
         provider: AgentKind,
         binding_id: &str,
         target: &CommandTarget,
+        cwd: Option<&str>,
     ) -> Result<(), String> {
         let mut attachments = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let attachment = attachments
@@ -151,9 +171,14 @@ impl TerminalTools {
                 .target
                 .as_ref()
                 .is_some_and(|prior| prior != target)
+            || attachment
+                .spawn
+                .as_ref()
+                .is_some_and(|scope| Some(scope.cwd.as_str()) != cwd)
         {
             return Err(
-                "Terminal tools cannot move to another provider, Space, or terminal".to_owned(),
+                "Terminal tools cannot move to another provider, Space, terminal, or checkout"
+                    .to_owned(),
             );
         }
         attachment.target = Some(target.clone());
@@ -182,54 +207,105 @@ impl TerminalTools {
         if Instant::now() >= deadline {
             return CommandOutcome::deadline_exceeded();
         }
-        let attachments = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(attachment) = attachments.iter().find(|attachment| {
-            attachment.attachment_id == request.attachment_id
-                && attachment.provider == request.provider
-                && attachment.binding_id == request.binding_id
-        }) else {
-            return CommandOutcome::Denied {
-                message:
-                    "Terminal tools are disabled, revoked, or belong to another provider or Space"
-                        .to_owned(),
-            };
+        let attachment = match self.attachment(service, request) {
+            Ok(attachment) => attachment,
+            Err(outcome) => return outcome,
         };
-        let target = attachment.target.clone();
-        if let Some(target) = &target
-            && service.record(target).is_none_or(|record| {
-                record.provider != request.provider || record.binding_id != request.binding_id
-            })
-        {
-            return CommandOutcome::Denied {
-                message: "The agent terminal record is no longer valid".to_owned(),
-            };
-        }
-        // A pending launch may advertise this fixed tool; it cannot read until the backend
+        // A pending launch may advertise its fixed tools; it cannot call until the backend
         // returns an exact terminal and the retained record has committed.
-        if request.operation == TerminalToolOperation::List && target.is_none() {
+        if request.operation == TerminalToolOperation::List && attachment.target.is_none() {
             return CommandOutcome::Success {
-                value: json!({"enabled":true}),
+                value: json!({"enabled":true,"spawn_enabled":attachment.spawn.is_some()}),
                 warnings: Vec::new(),
             };
         }
-        let Some(target) = target else {
+        let Some(target) = &attachment.target else {
             return CommandOutcome::Unavailable {
                 message: "The agent terminal is not ready".to_owned(),
             };
         };
-        drop(attachments);
-        let mut invocation = CommandInvocation::new("terminal.read", Vec::new(), Caller::Socket);
-        invocation.target = Some(target);
-        let outcome = executor.execute(invocation, deadline, cancellation);
-        if request.operation == TerminalToolOperation::List
-            && matches!(outcome, CommandOutcome::Success { .. })
-        {
-            CommandOutcome::Success {
-                value: json!({"enabled":true}),
-                warnings: Vec::new(),
-            }
-        } else {
-            outcome
+        if request.operation == TerminalToolOperation::Spawn && attachment.spawn.is_none() {
+            return CommandOutcome::Denied {
+                message: "This attachment permits only its own terminal read".to_owned(),
+            };
         }
+        let mut invocation = CommandInvocation::new("terminal.read", Vec::new(), Caller::Socket);
+        invocation.target = Some(target.clone());
+        let outcome = executor.execute(invocation, deadline, cancellation.clone());
+        if !matches!(outcome, CommandOutcome::Success { .. }) {
+            return outcome;
+        }
+        if request.operation == TerminalToolOperation::List {
+            return CommandOutcome::Success {
+                value: json!({"enabled":true,"spawn_enabled":attachment.spawn.is_some()}),
+                warnings: Vec::new(),
+            };
+        }
+        if request.operation == TerminalToolOperation::Read {
+            return outcome;
+        }
+        // Revalidate after the live terminal probe and before submitting a mutation.
+        match self.attachment(service, request) {
+            Ok(current) if current == attachment => {}
+            Ok(_) => {
+                return CommandOutcome::Denied {
+                    message: "The terminal spawn scope changed".to_owned(),
+                };
+            }
+            Err(outcome) => return outcome,
+        }
+        let Some(scope) = attachment.spawn else {
+            return CommandOutcome::Denied {
+                message: "Terminal spawning is disabled".to_owned(),
+            };
+        };
+        let mut invocation = CommandInvocation::new(
+            "session.create",
+            vec![
+                format!("agent-{}", TerminalAgentService::new_session_id()),
+                scope.cwd,
+                "[]".to_owned(),
+            ],
+            Caller::Socket,
+        );
+        invocation.target = Some(scope.binding_target);
+        executor.execute(invocation, deadline, cancellation)
+    }
+
+    fn attachment(
+        &self,
+        service: &TerminalAgentService,
+        request: &TerminalToolRequest,
+    ) -> Result<TerminalToolLease, CommandOutcome> {
+        let attachment = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|attachment| {
+                attachment.attachment_id == request.attachment_id
+                    && attachment.provider == request.provider
+                    && attachment.binding_id == request.binding_id
+            })
+            .cloned()
+            .ok_or_else(|| CommandOutcome::Denied {
+                message:
+                    "Terminal tools are disabled, revoked, or belong to another provider or Space"
+                        .to_owned(),
+            })?;
+        if let Some(target) = &attachment.target
+            && service.record(target).is_none_or(|record| {
+                record.provider != request.provider
+                    || record.binding_id != request.binding_id
+                    || attachment.spawn.as_ref().is_some_and(|scope| {
+                        record.launch.cwd.as_deref() != Some(scope.cwd.as_str())
+                    })
+            })
+        {
+            return Err(CommandOutcome::Denied {
+                message: "The agent terminal record or checkout is no longer valid".to_owned(),
+            });
+        }
+        Ok(attachment)
     }
 }

@@ -63,6 +63,7 @@ fn every_list_and_call_rechecks_the_owner_and_reports_revocation() {
                     value: match operation {
                         TerminalToolOperation::List => json!({"enabled":true}),
                         TerminalToolOperation::Read => json!({"text":"own screen"}),
+                        TerminalToolOperation::Spawn => panic!("read-only catalog cannot spawn"),
                     },
                     warnings: Vec::new(),
                 }
@@ -105,6 +106,9 @@ fn every_list_and_call_rechecks_the_owner_and_reports_revocation() {
 #[case("bootty_terminal_read", json!({"target":"another-terminal"}))]
 #[case("bootty_terminal_read", json!({"command":"session.create"}))]
 #[case("bootty_terminal_read", json!(null))]
+#[case("bootty_terminal_spawn", json!({"cwd":"/another-checkout"}))]
+#[case("bootty_terminal_spawn", json!({"target":"another-space"}))]
+#[case("bootty_terminal_spawn", json!({"argv":["sh"]}))]
 fn target_overrides_and_arbitrary_commands_never_reach_the_owner(
     #[case] name: &str,
     #[case] arguments: Value,
@@ -116,6 +120,67 @@ fn target_overrides_and_arbitrary_commands_never_reach_the_owner(
     .unwrap()
     .unwrap();
     assert_eq!(response.pointer("/error/code").unwrap(), -32602);
+}
+
+#[rstest]
+fn spawn_catalog_and_calls_recheck_revocation() {
+    let list = message("tools/list", &json!({}));
+    let call = message(
+        "tools/call",
+        &json!({"name":"bootty_terminal_spawn","arguments":{}}),
+    );
+    let mut enabled = true;
+    let mut operations = Vec::new();
+    for requested in [&list, &call, &list, &call] {
+        let response = response(requested, |operation| {
+            operations.push(operation);
+            if enabled {
+                CommandOutcome::Success {
+                    value: json!({"enabled":true,"spawn_enabled":true,"created":true}),
+                    warnings: Vec::new(),
+                }
+            } else {
+                CommandOutcome::Denied {
+                    message: "revoked".to_owned(),
+                }
+            }
+        })
+        .unwrap()
+        .unwrap();
+        if requested == &list {
+            let tools = response
+                .pointer("/result/tools")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(tools.len(), if enabled { 2 } else { 0 });
+            if enabled {
+                let spawn = tools
+                    .iter()
+                    .find(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some("bootty_terminal_spawn")
+                    })
+                    .unwrap();
+                assert_eq!(spawn.pointer("/annotations/readOnlyHint").unwrap(), false);
+                assert_eq!(
+                    spawn.pointer("/inputSchema/additionalProperties").unwrap(),
+                    false
+                );
+            }
+        } else {
+            assert_eq!(response.pointer("/result/isError").unwrap(), !enabled);
+            enabled = false;
+        }
+    }
+    assert_eq!(
+        operations,
+        vec![
+            TerminalToolOperation::List,
+            TerminalToolOperation::Spawn,
+            TerminalToolOperation::List,
+            TerminalToolOperation::Spawn
+        ]
+    );
 }
 
 #[rstest]
