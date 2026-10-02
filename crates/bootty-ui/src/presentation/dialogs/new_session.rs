@@ -204,6 +204,7 @@ impl NewSessionDialog {
         spec.text_hint = Some(text_hint.to_owned());
         if matches!(self.step, NewSessionStep::Project(_))
             && let Some(cwd) = &self.checkout
+            && filter.is_empty()
         {
             let mut row = picker_row(
                 RowId::new("current-checkout"),

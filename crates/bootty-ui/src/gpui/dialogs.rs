@@ -717,7 +717,8 @@ impl DialogView {
             return;
         }
         let transfer_focus = self.focus_target_changed(spec.as_ref(), window, cx);
-        let changed = self.spec.as_ref().map(|spec| &spec.id) != spec.as_ref().map(|spec| &spec.id);
+        let changed = self.spec.as_ref().map(|spec| (&spec.id, spec.role))
+            != spec.as_ref().map(|spec| (&spec.id, spec.role));
         let same_query = self
             .spec
             .as_ref()
@@ -1718,6 +1719,12 @@ fn command_item(row: DialogRow, destructive_color: Hsla) -> CommandItem {
                 row.color.unwrap_or(colors.foreground)
             };
             h_flex()
+                .id(SharedString::from(format!(
+                    "dialog-command-row-{}",
+                    row.id.0
+                )))
+                .role(gpui_kit::accesskit::Role::Label)
+                .aria_label(row.label.clone())
                 .w_full()
                 .min_w_0()
                 .gap_2()

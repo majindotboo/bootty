@@ -1103,3 +1103,63 @@ fn setup_choices_start_at_terminal_after_any_checkout_selection(cx: &TestAppCont
         });
     }
 }
+
+#[gpui_kit::test]
+fn changing_workflow_role_resets_launch_selection(cx: &TestAppContext) {
+    let launch = || {
+        DialogSpec::searchable(
+            "workflow",
+            "Start session",
+            "task",
+            vec![
+                DialogRow::action("agent", "Agent", DialogAction::new("start")),
+                DialogRow::action("project", "Choose project", DialogAction::new("choose")),
+            ],
+        )
+    };
+    let (probe, mut cx) = rooted_probe(cx, launch());
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+    for spec in [
+        DialogSpec::prompt(
+            "workflow",
+            "New checkout",
+            "branch",
+            "Branch",
+            DialogAction::new("create"),
+        ),
+        launch(),
+    ] {
+        cx.update(|window, app| {
+            probe.update(app, |probe, cx| {
+                probe
+                    .dialog
+                    .update(cx, |dialog, cx| dialog.present(Some(spec), window, cx));
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+    }
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("enter");
+    probe.update(&mut cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(
+            |intent| matches!(intent, DialogIntent::Activate { row, .. } if row.0 == "agent")
+        ));
+    });
+}

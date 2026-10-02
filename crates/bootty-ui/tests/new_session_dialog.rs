@@ -725,3 +725,32 @@ fn generated_worktree_has_a_reviewable_destination_and_preserves_task(
         })
     );
 }
+
+#[rstest::rstest]
+fn filtering_projects_selects_the_match_instead_of_the_return_action() {
+    let mut dialog = NewSessionDialog::from_projects(vec![project("/projects/other", false)]);
+    dialog.set_checkout("/projects/current".to_owned());
+    let switch = dialog
+        .spec()
+        .rows
+        .into_iter()
+        .find(|row| row.id.0 == "choose-project")
+        .unwrap();
+    activate_picker_row(&mut dialog, &switch, &[]);
+    dialog.apply(
+        &DialogIntent::TextChanged {
+            dialog: dialog.spec().id,
+            value: "/projects/other".to_owned(),
+        },
+        &[],
+    );
+    let rows = dialog.spec().rows;
+    assert!(!rows.iter().any(|row| row.id.0 == "current-checkout"));
+    let row = rows
+        .iter()
+        .find(|row| row.enabled && row.action.is_some())
+        .unwrap();
+    assert_eq!(row.id.0, "project:/projects/other");
+    activate_picker_row(&mut dialog, row, &[]);
+    assert_eq!(dialog.spec().title, "Choose checkout");
+}
