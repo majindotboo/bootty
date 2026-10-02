@@ -230,6 +230,23 @@
       "capture_started_at": "2026-10-02T07:15:09.558Z",
       "capture_finished_at": "2026-10-02T07:15:10.911Z",
       "playback_seconds": 2.353
+    },
+    {
+      "file": "relay-image.png",
+      "sha256": "2e5cf6e15a76c4b500d8b2e222aed40f10e7d754143a588b5fde973244c02ff2",
+      "captured_at": "2026-10-02T08:41:11.524Z",
+      "source_commit": "79520d6398d51dd58b20b5c0c3644b0a5458d31b",
+      "executable_sha256": "f26b0cdc66d60c9aff5cbcc3578584184a79d5967b67df541e46fd53478e3fcc"
+    },
+    {
+      "file": "relay-image.mp4",
+      "sha256": "ca87d8a382348aca46bb30d4fda33ef0de17eaf966370ee88f5f0770c9c2f389",
+      "capture_started_at": "2026-10-02T08:41:10.154Z",
+      "capture_finished_at": "2026-10-02T08:41:11.524Z",
+      "capture_method": "native computer-use frames with their capture intervals and a one-second final hold",
+      "source_commit": "79520d6398d51dd58b20b5c0c3644b0a5458d31b",
+      "executable_sha256": "f26b0cdc66d60c9aff5cbcc3578584184a79d5967b67df541e46fd53478e3fcc",
+      "playback_seconds": 3.033333
     }
   ]
 }

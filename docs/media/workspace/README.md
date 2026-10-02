@@ -9,10 +9,16 @@ empty-sidebar and coordination captures were refreshed from `064cef1d` at
 `b80cea92`; the manifest identifies the revisions for the remaining interactions.
 
 The direct agent-tab capture uses `892f6f65` at 00:15 PDT on October 2.
+The relay-image capture uses `79520d63` at 01:41 PDT on October 2.
 
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
 
+- [Relay image](relay-image.mp4), 3.0 seconds: display a 2 MiB RGBA image
+  through the rmux terminal relay, then render the glyph probe. The owned
+  disposable session was closed and the original 9 native / 2 rmux / 0 tmux
+  session counts and selection restored. This native check passed; the separate
+  exact-head CI image-corruption failure remains open.
 - [Direct agent tab](agent-tab.mp4), 2.4 seconds: choose Open Pi tab from
   Cmd+K and launch the colored provider TUI beside the existing shell in the same
   session. No prompt was sent. The disposable session was closed afterward,
@@ -45,6 +51,7 @@ playback is not accelerated.
   prompt, and was closed afterward. The prior 9 native / 2 rmux / 0 tmux
   session counts were restored.
 
+![Native 2 MiB image through the rmux terminal relay](relay-image.png)
 ![Rounded project sessions, compact pacing and reset countdown](sessions.png)
 ![Empty sidebar with direct choices for tools and browser pages](empty-sidebar.png)
 ![Files in a closable top-level sidebar tab](files.png)
