@@ -27,7 +27,8 @@ use serde_json::Value;
 use crate::AgentLaunch;
 use crate::terminal_observation::{AgentObservation, ObservationSink, TerminalAgentStatus};
 
-const MAX_MESSAGE: usize = 1024 * 1024;
+// Normal startup responses exceed 12 MiB. Revisit this bound if provider metadata grows.
+const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 const MAX_PENDING: usize = 64;
 #[cfg(unix)]
 const POLL: Duration = Duration::from_millis(50);
@@ -472,12 +473,15 @@ impl CodexTerminalProtocol {
         }
         let was_disabled = self.client.disabled;
         for observed in self.client.push(bytes, true) {
-            let ObservedMessage::Json(message) = observed else {
-                observations.push(self.observation(
-                    TerminalAgentStatus::Unavailable,
-                    Some("Codex request exceeded the observation limit".to_owned()),
-                ));
-                continue;
+            let message = match observed {
+                ObservedMessage::Json(message) => message,
+                ObservedMessage::Skipped { declared_bytes } => {
+                    observations.push(self.observation(
+                        TerminalAgentStatus::Unavailable,
+                        Some(format!("Codex request exceeded the observation limit ({declared_bytes} declared bytes)")),
+                    ));
+                    continue;
+                }
             };
             match message.get("method").and_then(Value::as_str) {
                 Some("initialize") => {
@@ -495,7 +499,13 @@ impl CodexTerminalProtocol {
             if matches!(
                 message.get("method").and_then(Value::as_str),
                 Some("thread/start" | "thread/resume" | "thread/fork")
-            ) && let Some(id) = message.get("id").and_then(request_id)
+            ) && message
+                .pointer("/params/threadSource")
+                .is_none_or(|source| {
+                    // User threads may be ephemeral; feature threads must not replace them.
+                    source.is_null() || source.as_str() == Some("user")
+                })
+                && let Some(id) = message.get("id").and_then(request_id)
             {
                 if self.pending.len() < MAX_PENDING {
                     self.pending.insert(id);
@@ -524,12 +534,15 @@ impl CodexTerminalProtocol {
         }
         let was_disabled = self.server.disabled;
         for observed in self.server.push(bytes, false) {
-            let ObservedMessage::Json(message) = observed else {
-                observations.push(self.observation(
-                    TerminalAgentStatus::Unavailable,
-                    Some("Codex response exceeded the observation limit".to_owned()),
-                ));
-                continue;
+            let message = match observed {
+                ObservedMessage::Json(message) => message,
+                ObservedMessage::Skipped { declared_bytes } => {
+                    observations.push(self.observation(
+                        TerminalAgentStatus::Unavailable,
+                        Some(format!("Codex response exceeded the observation limit ({declared_bytes} declared bytes)")),
+                    ));
+                    continue;
+                }
             };
             if self.observe_initialize_reply(&message) {
                 continue;
@@ -657,7 +670,7 @@ fn thread_status(value: &Value) -> TerminalAgentStatus {
 
 enum ObservedMessage {
     Json(Value),
-    Skipped,
+    Skipped { declared_bytes: u64 },
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -847,7 +860,11 @@ impl WebSocketObserver {
         {
             self.message.clear();
             self.message_state = MessageState::Discarded;
-            values.push(ObservedMessage::Skipped);
+            values.push(ObservedMessage::Skipped {
+                declared_bytes: frame.remaining.saturating_add(
+                    u64::try_from(MAX_MESSAGE.saturating_sub(available)).map_err(|_| ())?,
+                ),
+            });
         }
         Ok(())
     }

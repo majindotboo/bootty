@@ -143,6 +143,94 @@ fn only_correlated_thread_replies_bind_identity(#[case] method: &str) {
 }
 
 #[rstest]
+#[case(json!("thread_title"))]
+#[case(json!("subagent"))]
+#[case(json!("guardian_review"))]
+#[case(json!({"user":true}))]
+fn background_threads_cannot_replace_the_interactive_conversation(#[case] source: Value) {
+    let mut protocol = connected();
+    let _ = protocol.observe_client(&frame(
+        &json!({"id":1,"method":"thread/start","params":{"threadSource":"user","ephemeral":true}}),
+        true,
+    ));
+    let _ = protocol.observe_client(&frame(
+        &json!({"id":2,"method":"thread/start","params":{"threadSource":source,"ephemeral":true}}),
+        true,
+    ));
+    // Background replies can arrive on either side of the foreground reply.
+    let background = frame(
+        &json!({"id":2,"result":{"thread":{"id":"background","status":{"type":"idle"}}}}),
+        false,
+    );
+    assert_eq!(protocol.observe_server(&background), Vec::new());
+    let foreground = protocol.observe_server(&frame(
+        &json!({"id":1,"result":{"thread":{"id":"foreground","status":{"type":"idle"}}}}),
+        false,
+    ));
+    assert_eq!(foreground[0].session_id.as_deref(), Some("foreground"));
+    assert_eq!(protocol.observe_server(&background), Vec::new());
+    assert_eq!(
+        protocol.observe_server(&frame(
+            &json!({"id":2,"error":{"code":-1,"message":"background failure"}}),
+            false,
+        )),
+        Vec::new()
+    );
+    assert_eq!(
+        protocol.observe_server(&frame(
+            &json!({"method":"thread/status/changed","params":{"threadId":"background","status":{"type":"notLoaded"}}}),
+            false,
+        )),
+        Vec::new()
+    );
+    let working = protocol.observe_server(&frame(
+        &json!({"method":"turn/started","params":{"threadId":"foreground"}}),
+        false,
+    ));
+    assert_eq!(working[0].session_id.as_deref(), Some("foreground"));
+    assert_eq!(working[0].status, TerminalAgentStatus::Working);
+}
+
+#[rstest]
+#[case("thread/resume", json!({"threadId":"next"}))]
+#[case("thread/fork", json!({"threadId":"foreground","threadSource":"user","ephemeral":true}))]
+fn explicit_user_navigation_can_change_the_observed_conversation(
+    #[case] method: &str,
+    #[case] params: Value,
+) {
+    let mut protocol = connected();
+    let _ = protocol.observe_client(&frame(
+        &json!({"id":1,"method":"thread/start","params":{"threadSource":"user"}}),
+        true,
+    ));
+    let _ = protocol.observe_server(&frame(
+        &json!({"id":1,"result":{"thread":{"id":"foreground"}}}),
+        false,
+    ));
+    let _ = protocol.observe_client(&frame(
+        &json!({"id":2,"method":method,"params":params}),
+        true,
+    ));
+    let next = protocol.observe_server(&frame(
+        &json!({"id":2,"result":{"thread":{"id":"next"}}}),
+        false,
+    ));
+    assert_eq!(next[0].session_id.as_deref(), Some("next"));
+    assert_eq!(
+        protocol.observe_server(&frame(
+            &json!({"method":"turn/started","params":{"threadId":"foreground"}}),
+            false,
+        )),
+        Vec::new()
+    );
+    let working = protocol.observe_server(&frame(
+        &json!({"method":"turn/started","params":{"threadId":"next"}}),
+        false,
+    ));
+    assert_eq!(working[0].status, TerminalAgentStatus::Working);
+}
+
+#[rstest]
 #[case(json!({"type":"active","activeFlags":[]}), TerminalAgentStatus::Working)]
 #[case(json!({"type":"active","activeFlags":["waitingOnApproval"]}), TerminalAgentStatus::Waiting)]
 #[case(json!({"type":"active","activeFlags":["waitingOnUserInput"]}), TerminalAgentStatus::Waiting)]
@@ -212,14 +300,35 @@ fn oversized_frames_fail_observation_without_allocating_the_payload() {
     assert_eq!(protocol.observe_server(b"anything"), Vec::new());
 }
 
+fn large_unmasked_header(length: u64, opcode: u8) -> Vec<u8> {
+    let mut header = vec![opcode, 0x7f];
+    header.extend(length.to_be_bytes());
+    header
+}
+
+fn observe_padding(
+    protocol: &mut CodexTerminalProtocol,
+    mut remaining: usize,
+) -> Vec<bootty_agents::AgentObservation> {
+    let padding = [b'x'; 8192];
+    let mut observations = Vec::new();
+    while remaining != 0 {
+        let count = remaining.min(padding.len());
+        observations.extend(protocol.observe_server(padding.split_at(count).0));
+        remaining = remaining.saturating_sub(count);
+    }
+    observations
+}
+
 #[rstest]
-#[case(false, 8192)]
-#[case(true, 8192)]
-#[case(false, usize::MAX)]
-#[case(true, usize::MAX)]
-fn oversized_messages_preserve_framing_and_later_exact_activity(
+#[case(false, 0, TerminalAgentStatus::Finished)]
+#[case(true, 0, TerminalAgentStatus::Finished)]
+#[case(false, 1, TerminalAgentStatus::Unavailable)]
+#[case(true, 1, TerminalAgentStatus::Unavailable)]
+fn bounded_messages_preserve_framing_and_later_exact_activity(
     #[case] fragmented: bool,
-    #[case] chunk_size: usize,
+    #[case] excess: usize,
+    #[case] expected: TerminalAgentStatus,
 ) {
     let mut protocol = connected();
     let _ = protocol.observe_client(&frame(&json!({"id":1,"method":"thread/start"}), true));
@@ -227,50 +336,63 @@ fn oversized_messages_preserve_framing_and_later_exact_activity(
         &json!({"id":1,"result":{"thread":{"id":"exact"}}}),
         false,
     ));
-    let payload = json!({
-        "method":"turn/completed", "params":{"threadId":"exact","turn":{"status":"completed"}},
-        "padding":"x".repeat(1024 * 1024),
-    })
-    .to_string()
-    .into_bytes();
-    let mut stream = if fragmented {
-        let (first, last) = payload.split_at(payload.len().checked_div(2).unwrap());
-        let mut first = raw_frame(first, false);
-        *first.first_mut().unwrap() = 0x01;
-        let mut last = raw_frame(last, false);
-        *last.first_mut().unwrap() = 0x80;
-        first.extend(last);
-        first
+    let prefix = br#"{"method":"turn/completed","params":{"threadId":"exact","turn":{"status":"completed"}},"padding":""#;
+    let suffix = br#""}"#;
+    let length = (16usize * 1024 * 1024).checked_add(excess).unwrap();
+    let padding = length
+        .checked_sub(prefix.len())
+        .unwrap()
+        .checked_sub(suffix.len())
+        .unwrap();
+    let first_padding = if fragmented {
+        padding.checked_div(2).unwrap()
     } else {
-        raw_frame(&payload, false)
+        padding
     };
-    stream.extend(frame(
+    let first_length = if fragmented {
+        prefix.len().checked_add(first_padding).unwrap()
+    } else {
+        length
+    };
+    let mut observations = protocol.observe_server(&large_unmasked_header(
+        u64::try_from(first_length).unwrap(),
+        if fragmented { 0x01 } else { 0x81 },
+    ));
+    observations.extend(protocol.observe_server(prefix));
+    observations.extend(observe_padding(&mut protocol, first_padding));
+    if fragmented {
+        let last_padding = padding.checked_sub(first_padding).unwrap();
+        observations.extend(protocol.observe_server(&large_unmasked_header(
+            u64::try_from(last_padding.checked_add(suffix.len()).unwrap()).unwrap(),
+            0x80,
+        )));
+        observations.extend(observe_padding(&mut protocol, last_padding));
+    }
+    observations.extend(protocol.observe_server(suffix));
+    observations.extend(protocol.observe_server(&frame(
         &json!({"method":"turn/started","params":{"threadId":"wrong"}}),
         false,
-    ));
-    stream.extend(frame(
+    )));
+    observations.extend(protocol.observe_server(&frame(
         &json!({"method":"turn/started","params":{"threadId":"exact"}}),
         false,
-    ));
-    let observations: Vec<_> = stream
-        .chunks(chunk_size)
-        .flat_map(|chunk| protocol.observe_server(chunk))
-        .collect();
+    )));
     assert_eq!(
         observations
             .iter()
             .map(|observation| observation.status)
             .collect::<Vec<_>>(),
-        [
-            TerminalAgentStatus::Unavailable,
-            TerminalAgentStatus::Working
-        ]
+        [expected, TerminalAgentStatus::Working]
     );
     assert!(
         observations
             .iter()
             .all(|observation| observation.session_id.as_deref() == Some("exact"))
     );
+    let detail = (excess != 0).then(|| {
+        format!("Codex response exceeded the observation limit ({length} declared bytes)")
+    });
+    assert_eq!(observations[0].detail, detail);
 }
 
 #[rstest]
@@ -281,7 +403,20 @@ fn multiple_bounded_frames_do_not_share_a_payload_budget() {
         &json!({"id":1,"result":{"thread":{"id":"exact"}}}),
         false,
     ));
-    let mut stream = frame(&json!({"padding":"x".repeat(1024 * 1024 - 100)}), false);
+    let first_length = (16usize * 1024 * 1024).checked_sub(100).unwrap();
+    let mut stream = large_unmasked_header(u64::try_from(first_length).unwrap(), 0x81);
+    let payload_start = stream.len();
+    let suffix = br#""}"#;
+    stream.extend(br#"{"padding":""#);
+    stream.resize(
+        payload_start
+            .checked_add(first_length)
+            .unwrap()
+            .checked_sub(suffix.len())
+            .unwrap(),
+        b'x',
+    );
+    stream.extend(suffix);
     stream.extend(frame(
         &json!({
             "method":"turn/completed", "params":{"threadId":"exact","turn":{"status":"completed"}},
@@ -489,8 +624,6 @@ finally:
         let _ = completed.send(result);
         bulk
     });
-    let limited = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(limited.status, TerminalAgentStatus::Unavailable);
     assert!(matches!(
         completion.try_recv(),
         Err(mpsc::TryRecvError::Empty)
@@ -513,8 +646,6 @@ finally:
     let mut provider_message = vec![0; expected_provider.len()];
     terminal.read_exact(&mut provider_message).unwrap();
     assert_eq!(provider_message, expected_provider);
-    let limited = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(limited.status, TerminalAgentStatus::Unavailable);
     let expected_completed = json!({"method":"turn/completed","params":{"threadId":"exact","turn":{"status":"completed"}}});
     let mut completed_header = [0; 2];
     terminal.read_exact(&mut completed_header).unwrap();
