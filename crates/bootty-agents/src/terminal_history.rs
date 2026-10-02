@@ -78,8 +78,9 @@ pub fn terminal_history_root(provider: AgentKind) -> Option<PathBuf> {
 /// Discover bounded, read-only metadata suitable for provider-native resume and fork.
 ///
 /// Missing roots are empty; unreadable roots return an error. Unsupported or incomplete
-/// records are skipped. The scan reads at most 16 MiB across 128 recent files and 8192
-/// directory entries. Add provider-native indexing when these limits need to grow.
+/// records are skipped. The transcript scan reads at most 16 MiB across 128 recent files and 8192
+/// directory entries. Codex titles read an additional 512 KiB of its native index.
+/// Add provider queries when these limits need to grow.
 ///
 /// # Errors
 /// Returns an error when the root is unreadable, a symlink, or not a directory.
@@ -149,7 +150,56 @@ pub fn discover_terminal_history(
             sessions.push(session);
         }
     }
+    if provider == AgentKind::Codex {
+        indexed_titles(root, &mut sessions);
+    }
     Ok(sessions)
+}
+
+// Saved titles can be outside a transcript's bounded head/tail windows.
+fn indexed_titles(root: &Path, sessions: &mut [TerminalSessionHistory]) {
+    let Some(parent) = root.parent() else { return };
+    let path = parent.join("session_index.jsonl");
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
+    if !metadata.is_file() || metadata.is_symlink() {
+        return;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
+    // Read the latest 512 KiB; use a provider query if its index grows beyond this window.
+    let offset = metadata.len().saturating_sub(512 * 1024);
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return;
+    }
+    let mut bytes = Vec::new();
+    if file.take(512 * 1024).read_to_end(&mut bytes).is_err() {
+        return;
+    }
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    if offset != 0 {
+        let _ = lines.next();
+    }
+    for line in lines {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some(id) = value.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(title) = value
+            .get("thread_name")
+            .and_then(Value::as_str)
+            .and_then(short_title)
+        else {
+            continue;
+        };
+        if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
+            session.title = title;
+        }
+    }
 }
 
 fn read_session(

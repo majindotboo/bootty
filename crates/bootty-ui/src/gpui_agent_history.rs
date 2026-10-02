@@ -237,6 +237,7 @@ impl AgentHistory {
             .ghost()
             .w_full()
             .h_auto()
+            .flex_shrink_0()
             .justify_start()
             .when(selected, |button| button.bg(cx.theme().secondary_hover))
             .accessibility_label(session.title.clone())
@@ -330,8 +331,7 @@ impl Render for AgentHistory {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .max_h(gpui_kit::rems(20.0))
-                    .min_h(gpui_kit::rems(4.0))
+                    .h(gpui_kit::rems(if visible.is_empty() { 4.0 } else { 20.0 }))
                     .when(visible.is_empty(), |list| {
                         list.child(
                             div()

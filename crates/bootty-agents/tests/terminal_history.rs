@@ -214,3 +214,43 @@ proptest! {
         prop_assert!(!title.chars().any(char::is_control));
     }
 }
+
+#[rstest]
+fn native_index_titles_override_transcript_fallback_without_inventing_sessions() {
+    let root = TempDir::new().unwrap();
+    let sessions = root.child("sessions");
+    sessions
+        .child("session.jsonl")
+        .write_str(&header(AgentKind::Codex, root.path()).to_string())
+        .unwrap();
+    root.child("session_index.jsonl")
+        .write_str(&format!(
+            "{}\n{}\n{}\n{{",
+            json!({"id":ID,"thread_name":"Previous title"}),
+            json!({"id":ID,"thread_name":"Current title"}),
+            json!({"id":"01a0e479-da0a-74e2-80d8-aa627339fdcc","thread_name":"Missing transcript"})
+        ))
+        .unwrap();
+    let records = discover_terminal_history(AgentKind::Codex, sessions.path()).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, ID);
+    assert_eq!(records[0].title, "Current title");
+}
+
+#[cfg(unix)]
+#[rstest]
+fn native_title_index_does_not_follow_a_symlink() {
+    let root = TempDir::new().unwrap();
+    let sessions = root.child("sessions");
+    sessions
+        .child("session.jsonl")
+        .write_str(&header(AgentKind::Codex, root.path()).to_string())
+        .unwrap();
+    let other = root.child("other-index");
+    other
+        .write_str(&json!({"id":ID,"thread_name":"Other file"}).to_string())
+        .unwrap();
+    std::os::unix::fs::symlink(other.path(), root.child("session_index.jsonl").path()).unwrap();
+    let records = discover_terminal_history(AgentKind::Codex, sessions.path()).unwrap();
+    assert_eq!(records[0].title, "codex");
+}
