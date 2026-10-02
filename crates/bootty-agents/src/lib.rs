@@ -10,6 +10,7 @@ mod service;
 mod terminal_commands;
 mod terminal_history;
 mod terminal_service;
+mod terminal_tools;
 
 pub use accounts::{agent_account_launch, terminal_account_status};
 pub use commands::{AgentCommandExecutor, AgentInvocation, command_descriptors};
@@ -33,6 +34,9 @@ pub use service::{AgentPaneResolver, AgentService};
 
 pub use terminal_commands::terminal_command_descriptors;
 pub use terminal_service::{TerminalAgentRecord, TerminalAgentService};
+pub use terminal_tools::{
+    TerminalToolRequest, attach_terminal_tool_arguments, terminal_tools_supported,
+};
 
 pub use terminal_history::{
     TerminalSessionHistory, TerminalSessionUsage, discover_terminal_history, terminal_history_root,

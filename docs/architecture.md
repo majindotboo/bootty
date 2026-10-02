@@ -26,7 +26,7 @@ This file describes the current production structure.
 | Application identity and local namespace | `bootty-config` | A conflicting process identity fails startup. |
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
-| Persistent task lifecycle | `bootty-mux::SessionMembership` and `WorkspaceRepository` | Explicit promotion preserves the saved identity/content when an attachment disappears; commit precedes live publication. |
+| Persistent task lifecycle | `bootty-mux::session_membership::SessionMembership` and `WorkspaceRepository` | Explicit promotion preserves the saved identity/content when an attachment disappears; commit precedes live publication. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
@@ -298,6 +298,8 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 Pi, Codex, and Claude launch as terminal programs through the selected mux backend. The backend owns their processes, tabs, splits, and terminal state. `TerminalAgentService` owns bounded provider identities, retained launch metadata, and exact terminal targets. History and account queries use provider files and commands on a background worker. Resume and fork launch the provider's terminal flow. Agents appear within backend sessions in the Sessions sidebar.
 
 Terminal registrations persist before publication. Provider session IDs remain distinct from backend target handles and generations; stale targets cannot redirect input to another pane.
+
+Local Codex and Claude terminal launches attach a process-only stdio MCP proxy for `bootty_terminal_read`. The agent service reserves a bounded ephemeral attachment and completes it only after its exact terminal metadata commits. Provider, binding and target are checked on every request; revocation, owner restart or stale targets disable it. The socket caller is preserved through the fixed `terminal.read` invocation. Explicit provider tool configuration wins. This increment has no write/spawn tools, remote attachment or Pi support; those need the same bounded identity and policy checks before expansion. No credentials or new persistent grants are stored.
 
 `OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
 

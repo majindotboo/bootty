@@ -31,6 +31,9 @@ fn run() -> Result<ExitCode> {
         return Ok(process_exit_code(code));
     }
     let cli = Cli::parse();
+    if let Some(Command::AgentTools(args)) = cli.subcommand() {
+        return bootty::agent_tools::run(args).map(|()| ExitCode::SUCCESS);
+    }
     // Correct a stale `$SHELL` to the OS login shell before any child inherits
     // it; tmux otherwise bakes the wrong shell into the server's default-shell.
     // Finder launches need the account login environment before any service starts.
@@ -57,6 +60,9 @@ fn run_command(
     backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
 ) -> Result<ExitCode> {
     match cli.subcommand() {
+        Some(Command::AgentTools(args)) => {
+            return bootty::agent_tools::run(args).map(|()| ExitCode::SUCCESS);
+        }
         Some(Command::Run(args)) => {
             return cli_runtime::run_job(cli, args).map(|()| ExitCode::SUCCESS);
         }

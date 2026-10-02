@@ -97,8 +97,21 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
                 arguments: terminal_arguments(arguments),
             });
         }
+        descriptors.push(terminal_tool_descriptor(provider));
     }
     descriptors
+}
+
+fn terminal_tool_descriptor(provider: AgentKind) -> CommandDescriptor {
+    CommandDescriptor {
+        id: format!("agents.{provider}.tools"),
+        title: format!("Read {provider} terminal tool"),
+        description: "Use a live own-terminal read attachment".to_owned(),
+        mutation: MutationClass::Read,
+        arguments: terminal_arguments(vec![("request", true)]),
+        target: None,
+        palette: false,
+    }
 }
 
 fn terminal_arguments(arguments: Vec<(&str, bool)>) -> CompactSchema {
