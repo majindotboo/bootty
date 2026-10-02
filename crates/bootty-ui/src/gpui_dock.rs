@@ -358,9 +358,14 @@ impl WorkspaceDock {
                     "terminal.paste",
                     bootty_control::Caller::CommandPalette,
                 );
-                invocation.target = Some(target);
+                invocation.target = Some(target.clone());
                 invocation.arguments = vec![feedback.0.clone()];
-                this.submit_command(invocation, window, cx);
+                let mut focus = bootty_control::CommandInvocation::from_action(
+                    "agents.focus",
+                    bootty_control::Caller::CommandPalette,
+                );
+                focus.target = Some(target);
+                this.submit_command_then(invocation, Some(focus), window, cx);
             },
         )
         .detach();
@@ -650,6 +655,16 @@ impl WorkspaceDock {
         window: &Window,
         cx: &Context<Self>,
     ) {
+        self.submit_command_then(invocation, None, window, cx);
+    }
+
+    fn submit_command_then(
+        &mut self,
+        invocation: bootty_control::CommandInvocation,
+        after_success: Option<bootty_control::CommandInvocation>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
         let receiver = match self.sender.submit(
             invocation,
             std::time::Instant::now()
@@ -668,11 +683,16 @@ impl WorkspaceDock {
                 .background_executor()
                 .spawn(async move { receiver.recv() })
                 .await;
-            _ = weak.update_in(cx, |this, _, cx| {
+            _ = weak.update_in(cx, |this, window, cx| {
+                let succeeded =
+                    matches!(&result, Ok(bootty_control::CommandOutcome::Success { .. }));
                 this.error = result.map_or_else(
                     |error| Some(error.to_string()),
                     |outcome| crate::commands::command_outcome_message(&outcome),
                 );
+                if succeeded && let Some(invocation) = after_success {
+                    this.submit_command(invocation, window, cx);
+                }
                 cx.notify();
             });
         })
