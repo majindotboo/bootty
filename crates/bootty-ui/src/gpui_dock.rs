@@ -155,6 +155,7 @@ pub struct WorkspaceDock {
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
     attachment: Entity<crate::gpui_terminal_panel::TerminalAttachmentPanel>,
     focused_group: Option<NodeId>,
+    pending_focus: Option<FocusHandle>,
     target: CommandTarget,
     sender: BoundAppCommandSender,
     restoring: Option<RestoreRequests>,
@@ -257,6 +258,7 @@ impl WorkspaceDock {
             terminal: terminal_panel,
             attachment,
             focused_group: None,
+            pending_focus: None,
             target,
             sender: open_sender,
             restoring: Some(RestoreRequests::default()),
@@ -685,6 +687,10 @@ impl WorkspaceDock {
         self.show_tool(bootty_config::config::PanelKind::Files, window, cx);
     }
 
+    pub(crate) const fn take_pending_focus(&mut self) -> Option<FocusHandle> {
+        self.pending_focus.take()
+    }
+
     pub(crate) fn show_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pending) = &mut self.restoring {
             pending.panel = Some(InspectorPanel::Browser);
@@ -696,6 +702,7 @@ impl WorkspaceDock {
         }
         self.show_tool(bootty_config::config::PanelKind::Browser, window, cx);
         self.sync_browser_visibility(window, cx);
+        self.pending_focus = Some(Focusable::focus_handle(&self.browser, cx));
         // The new panel and dialog dismissal must finish mounting before taking focus.
         cx.defer_in(window, |this, window, cx| {
             crate::window::restore_keyboard_focus(window);

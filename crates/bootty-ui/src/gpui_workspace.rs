@@ -1952,9 +1952,17 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let terminal_focus = self.state.terminal_focused().then(|| self.focus.clone());
-        self.dialogs
-            .present(projection, colors, terminal_focus, window, cx);
+        let requested_focus = projection
+            .is_none()
+            .then(|| {
+                self.tools
+                    .as_ref()
+                    .and_then(|tools| tools.update(cx, |tools, _| tools.take_pending_focus()))
+            })
+            .flatten();
+        let focus =
+            requested_focus.or_else(|| self.state.terminal_focused().then(|| self.focus.clone()));
+        self.dialogs.present(projection, colors, focus, window, cx);
     }
 
     pub(crate) fn prepare_terminal_window(
