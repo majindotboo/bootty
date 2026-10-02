@@ -24,21 +24,6 @@
       "executable_sha256": "5ed4be9a30759fa4059e022e4aec16492bc974dc9b50e817406a45a39edd8b34"
     },
     {
-      "file": "browser-search.png",
-      "captured_at": "2026-10-02T03:29:09.971370+00:00",
-      "sha256": "625394ea58bbcc04e752f61e00bbeae6518e556583ba4109a3facacab90ed88c"
-    },
-    {
-      "file": "browser-settings.png",
-      "captured_at": "2026-10-02T03:28:31.011024+00:00",
-      "sha256": "2a3ea136feca84104d777908d17699120757f7de2dd7dffb4d89c95cc3f8234e"
-    },
-    {
-      "file": "browser.png",
-      "captured_at": "2026-10-02T03:27:51.722989+00:00",
-      "sha256": "4e0087e9789bb666fec1826e4a380dc3b17d66c3239dcb89f3582c1018179a0a"
-    },
-    {
       "file": "coordination.png",
       "captured_at": "2026-10-02T03:15:57.065320+00:00",
       "sha256": "16ac43e7db0802cdecac52085f571c967fd77066a09e7d8a75a751a84778e4c2"
@@ -47,12 +32,6 @@
       "file": "history.png",
       "captured_at": "2026-10-02T03:29:53.886061+00:00",
       "sha256": "6ec818c77c50bc7ef64f9baa321f85bc7198e5ab8129c15c7af256b1389c075b"
-    },
-    {
-      "file": "browser.mp4",
-      "capture_started_at": "2026-10-02T03:29:25.786000+00:00",
-      "capture_finished_at": "2026-10-02T03:29:27.744000+00:00",
-      "sha256": "cb425f7cb39e178acd873c7ddce7d8b6e3f506c2d3a89fd1483fffb9fafb840d"
     },
     {
       "file": "agent-launch.mp4",
@@ -149,6 +128,42 @@
       "sha256": "cc195d5cfb12a4afed3e95b395a8433ce2cb7a5cd453872d6935e18f94ed1a33",
       "capture_started_at": "2026-10-02T04:50:49.943000+00:00",
       "capture_finished_at": "2026-10-02T04:50:56.942000+00:00"
+    },
+    {
+      "file": "browser.png",
+      "source_commit": "0ba0d6df22de37df244dab45240ecabad2e2c8e6",
+      "executable_sha256": "81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820",
+      "sha256": "e091cc2d61955035888cbb69c9f016957d1396a2ed3d415aa0d1ab89521ba728",
+      "captured_at": "2026-10-02T05:08:59.988Z"
+    },
+    {
+      "file": "browser-focus.png",
+      "source_commit": "0ba0d6df22de37df244dab45240ecabad2e2c8e6",
+      "executable_sha256": "81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820",
+      "sha256": "d7bb26d98dbd56d680a7c47914a9528cfd1c44935e4743e1b565d5c24ef57ac8",
+      "captured_at": "2026-10-02T05:09:01.931Z"
+    },
+    {
+      "file": "browser-settings.png",
+      "source_commit": "0ba0d6df22de37df244dab45240ecabad2e2c8e6",
+      "executable_sha256": "81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820",
+      "sha256": "2a3ea136feca84104d777908d17699120757f7de2dd7dffb4d89c95cc3f8234e",
+      "captured_at": "2026-10-02T05:09:16.227Z"
+    },
+    {
+      "file": "browser-search.png",
+      "source_commit": "0ba0d6df22de37df244dab45240ecabad2e2c8e6",
+      "executable_sha256": "81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820",
+      "sha256": "5bcc2edb8b3edd4af7ba67de0868f80cfbb64c106782ae905b833a3dcf1e9381",
+      "captured_at": "2026-10-02T05:09:43.800Z"
+    },
+    {
+      "file": "browser.mp4",
+      "source_commit": "0ba0d6df22de37df244dab45240ecabad2e2c8e6",
+      "executable_sha256": "81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820",
+      "sha256": "86dd162249803646810f68fa9d72bab0d9078393d1fb73a722ae1fcd250ccd98",
+      "capture_started_at": "2026-10-02T05:09:00.498000+00:00",
+      "capture_finished_at": "2026-10-02T05:09:03.543000+00:00"
     }
   ]
 }

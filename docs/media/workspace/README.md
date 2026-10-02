@@ -17,6 +17,13 @@ Session, empty-sidebar and file captures were refreshed at 21:51 PDT from
 Executable SHA-256:
 `25017ed7fe55f503f20cf51ca204e89d76f75f19e2cd590af8187bd5813d6ed2`.
 
+Browser, browser settings and search captures were refreshed at 22:09 PDT from
+`0ba0d6df`, with a new page-focus capture and browser recording. Executable
+SHA-256: `81a63880a22f3ad6be16da377e688f3fa9621f087ad3de3a60e185c12b979820`.
+The local page cookie survived a full app restart and a new webview before these
+captures. The browser recording verifies typing after palette cancellation,
+which required a separate native focus restoration fix.
+
 The videos use native window captures at their observed cadence. Interaction
 playback is not accelerated.
 
@@ -29,8 +36,8 @@ playback is not accelerated.
   terminal, type an edit without clicking the terminal, and clear the unsent
   text with Ctrl+C. The disposable session was closed afterward.
 
-- [Browser](browser.mp4), 3.4 seconds: literal address-bar typing, remembered
-  site data, Cmd+K over the page, and Escape returning to the browser.
+- [Browser](browser.mp4), 4.0 seconds: type in a page field, Cmd+K, Escape,
+  continue typing without clicking, then Cmd+T and close the peer browser tab.
 - [Project setup](project-setup.mp4), 4.6 seconds: select the detected project,
   choose the existing checkout and launch its terminal. The disposable session
   was closed, restoring the prior session counts.
@@ -46,7 +53,8 @@ playback is not accelerated.
 ![Grouped untracked change and singular file count](changes.png)
 ![Read-only diff with a truncated title and clear close button](diff.png)
 ![Document input and unsaved tab indicator](document.png)
-![Browser input and remembered site data](browser.png)
+![Browser input and site data retained across a full app restart](browser.png)
+![Page typing resumes after palette dismissal without a click](browser-focus.png)
 ![Native provider history with account status and search](history.png)
 ![Agent terminal, split and independent terminal tab](agent-terminals.png)
 ![Page element annotation ready for review](annotations.png)
