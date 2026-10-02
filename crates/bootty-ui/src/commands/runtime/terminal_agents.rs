@@ -18,6 +18,7 @@ impl AppState {
         exact: Option<&ExactMuxTarget>,
         deadline: Instant,
         cancellation: CommandCancellation,
+        effects: &mut Vec<crate::state::AppEffect>,
     ) -> CommandDispatch {
         let Some(service) = self.commands.terminal_agents.clone() else {
             return CommandDispatch::Complete(CommandOutcome::Unavailable {
@@ -45,6 +46,34 @@ impl AppState {
             &self.binding_target_handle(scope, binding.mux().binding_generation()),
         );
         let remote = binding.multiplexer().remote.is_some();
+        if !remote && invocation.command.ends_with(".history") {
+            let provider = AgentKind::ALL
+                .into_iter()
+                .find(|provider| invocation.command == format!("agents.{provider}.history"));
+            if let Some(provider) = provider
+                && let Some(target) = binding_target
+            {
+                if let Err(error) =
+                    bootty_mux::executor::begin_synchronous_command(Some((deadline, cancellation)))
+                {
+                    return CommandDispatch::Complete(super::command_outcome_for_mux_error(error));
+                }
+                let cwd = invocation
+                    .arguments
+                    .first()
+                    .filter(|cwd| !cwd.is_empty())
+                    .cloned()
+                    .unwrap_or(cwd);
+                effects.push(crate::state::AppEffect::OpenAgentHistory {
+                    provider,
+                    cwd,
+                    target,
+                });
+                return CommandDispatch::Complete(CommandOutcome::success());
+            }
+            return CommandDispatch::Complete(failure("The history binding is unavailable"));
+        }
+        // Remote hosts use their provider picker until the remote history query is available.
         let session_names = self.agent_session_names_in_use();
         let isolate_color_environment = cfg!(unix)
             && matches!(

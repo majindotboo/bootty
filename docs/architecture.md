@@ -686,14 +686,14 @@ are configured at creation and refreshed only when the requested material change
 
 ### Native agent launch context
 
-`bootty-agents::AgentLaunch` owns bounded argv, session operation syntax and
-shell serialization. The app captures the exact source pane, parent mux session,
-working directory and host shell before dispatch. Start, resume and fork create
-or use a visible terminal, then submit through `terminal.paste` and
-`terminal.submit`. Hook adapters return session/cwd and a sanitized launch
-context. Resume/fork always use a new tab and fail before mutation without an
-explicit or pane-reported session. Mailbox callers receive the same authoritative
-mux completion target as CLI/socket callers.
+`bootty-agents::AgentLaunch` owns bounded argv and provider session syntax.
+Native provider start, resume, fork and sign-in commands create a backend-owned
+terminal and select it through the shared command mailbox. Account and session
+history queries run off the UI thread. The local history dialog searches provider
+metadata and submits the same start/resume/fork commands as CLI/socket callers;
+it does not render conversations or own terminal topology. Remote hosts retain
+the provider terminal picker until remote history queries are available.
+Mailbox callers receive the authoritative mux completion target.
 
 Agent attention sequences and acknowledgement cursors belong to `bootty-agents`.
 `bootty-ui` projects only panes found in live bindings, captures generation-scoped

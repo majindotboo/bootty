@@ -16,6 +16,7 @@ pub mod font_mapping;
 pub mod frame_facts;
 pub mod gpui;
 pub mod gpui_actions;
+mod gpui_agent_history;
 mod gpui_background;
 mod gpui_browser_panel;
 mod gpui_computer_setup;

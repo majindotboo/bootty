@@ -229,6 +229,11 @@ pub enum AppEffect {
     },
     OpenSettings,
     OpenComputerSetup,
+    OpenAgentHistory {
+        provider: bootty_agents::AgentKind,
+        cwd: String,
+        target: CommandTarget,
+    },
     OpenConnections,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),

@@ -780,6 +780,7 @@ impl AppState {
                     context.exact_target.as_ref(),
                     deadline,
                     cancellation,
+                    effects,
                 )
             }
             CommandExecutor::Orchestration => {

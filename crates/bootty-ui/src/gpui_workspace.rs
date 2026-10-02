@@ -1325,9 +1325,7 @@ impl GpuiWorkspace {
                 AppEffect::SetUiFontWeights(weights) => {
                     crate::gpui::update_ui_font_weights(&weights, cx);
                 }
-                AppEffect::SetUiFontSize(size) => {
-                    crate::gpui::update_ui_font_size(size, cx);
-                }
+                AppEffect::SetUiFontSize(size) => crate::gpui::update_ui_font_size(size, cx),
                 AppEffect::FocusTerminal => self.focus_terminal(window, cx),
                 AppEffect::SetWindowFocus => window.activate_window(),
                 AppEffect::ApplyMacosNonNativeFullscreen => {
@@ -1359,6 +1357,11 @@ impl GpuiWorkspace {
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
                 AppEffect::OpenSettings => self.open_settings_window(window, cx),
                 AppEffect::OpenComputerSetup => self.open_computer_setup(window, cx),
+                AppEffect::OpenAgentHistory {
+                    provider,
+                    cwd,
+                    target,
+                } => self.open_agent_history(provider, cwd, target, window, cx),
                 AppEffect::OpenConnections => self.open_connections(window, cx),
                 AppEffect::OpenSetting(id) => {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
@@ -1413,6 +1416,42 @@ impl GpuiWorkspace {
             }
         })
         .detach();
+    }
+
+    fn open_agent_history(
+        &mut self,
+        provider: bootty_agents::AgentKind,
+        cwd: String,
+        target: bootty_control::CommandTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.close_overlay_dialogs();
+        self.dialogs.clear_presentation(window, cx);
+        let sender = self.state.app_command_sender(Caller::CommandPalette);
+        let view = cx.new(|cx| {
+            crate::gpui_agent_history::AgentHistory::new(provider, cwd, target, sender, window, cx)
+        });
+        let content = view.clone();
+        let owner = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let content = content.clone();
+            let owner = owner.clone();
+            dialog
+                .title(format!("{provider} session history"))
+                .w(px(f32::from(window.rem_size()) * 34.0))
+                .on_close(move |_, window, cx| {
+                    _ = owner.update(cx, |this, cx| {
+                        crate::window::restore_keyboard_focus(window);
+                        this.focus_terminal(window, cx);
+                    });
+                })
+                .content(move |body, _, _| body.child(content.clone()))
+        });
+        cx.defer_in(window, move |_, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            view.focus_handle(cx).focus(window, cx);
+        });
     }
 
     fn open_computer_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {

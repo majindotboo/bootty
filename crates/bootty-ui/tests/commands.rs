@@ -2739,3 +2739,67 @@ fn issued_topology_targets_modify_the_inactive_space_without_retargeting_selecti
         }
     }
 }
+
+#[rstest]
+#[case("codex", bootty_agents::AgentKind::Codex, Caller::Cli)]
+#[case("claude", bootty_agents::AgentKind::Claude, Caller::CommandPalette)]
+#[case("pi", bootty_agents::AgentKind::Pi, Caller::Socket)]
+fn provider_history_opens_a_native_picker_without_creating_terminal_topology(
+    #[case] provider: &str,
+    #[case] expected: bootty_agents::AgentKind,
+    #[case] caller: Caller,
+) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let (events, _receiver) = bootty_control::event_queue();
+    let mut state = AppState::new_for_window_with_agents(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        "main".to_owned(),
+        support::backends(),
+        Arc::new(|| {}),
+        None,
+        None,
+        Some(events),
+    )
+    .unwrap();
+    let now = Instant::now();
+    open_native_session(&mut state, directory.path(), now);
+    let original_selection = selection(&state);
+    let original_sessions = state.mux().all_sessions().len();
+    let response = state
+        .app_command_sender(caller)
+        .submit(
+            CommandInvocation::new(
+                format!("agents.{provider}.history"),
+                vec![directory.path().to_string_lossy().into_owned()],
+                caller,
+            ),
+            now.checked_add(Duration::from_secs(5)).unwrap(),
+            CommandCancellation::new(),
+        )
+        .unwrap();
+    let effects = state.update_frame(frames::idle_frame(now));
+    let outcome = response.try_recv().unwrap();
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let picker = effects
+        .iter()
+        .find_map(|effect| match effect {
+            bootty_ui::AppEffect::OpenAgentHistory {
+                provider,
+                cwd,
+                target,
+            } => Some((provider, cwd, target)),
+            _ => None,
+        })
+        .expect("native history picker");
+    assert_eq!(*picker.0, expected);
+    assert_eq!(picker.1, &directory.path().to_string_lossy());
+    assert_eq!(picker.2.kind, ResourceKind::Binding);
+    assert_eq!(state.mux().all_sessions().len(), original_sessions);
+    assert_eq!(selection(&state), original_selection);
+}
