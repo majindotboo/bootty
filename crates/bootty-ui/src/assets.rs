@@ -17,7 +17,8 @@ gpui_kit::assets::icon_assets!(
         Play,
         Pause,
         Volume2,
-        VolumeX
+        VolumeX,
+        MousePointer2
     ]
 );
 

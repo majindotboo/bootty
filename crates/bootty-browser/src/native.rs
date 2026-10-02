@@ -1,4 +1,5 @@
 use async_channel::Sender;
+use std::{cell::Cell, rc::Rc};
 use thiserror::Error;
 #[cfg(not(target_os = "linux"))]
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -9,7 +10,7 @@ use wry::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
 
-use crate::{AddressError, BrowserProfile, normalize_address};
+use crate::{AddressError, BrowserElement, BrowserProfile, normalize_address};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserBounds {
@@ -48,9 +49,10 @@ impl From<BrowserBounds> for Rect {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BrowserEvent {
     PageFocused,
+    ElementPicked(BrowserElement),
     Shortcut(BrowserShortcut),
     LoadStarted(String),
     LoadFinished(String),
@@ -90,6 +92,7 @@ pub enum NativeBrowserError {
 /// A main-thread native child view. Its owner drops it before releasing the parent window.
 pub struct BrowserView {
     view: WebView,
+    annotation_enabled: Rc<Cell<bool>>,
     bounds: BrowserBounds,
     visible: bool,
 }
@@ -132,6 +135,9 @@ impl BrowserView {
         let permission_events = events.clone();
         let download_events = events.clone();
         let shortcut_events = events.clone();
+        let annotation_enabled = Rc::new(Cell::new(false));
+        let ipc_annotation_enabled = annotation_enabled.clone();
+        let load_annotation_enabled = annotation_enabled.clone();
         let view = profile
             .builder()
             .with_url(&address)
@@ -155,20 +161,9 @@ impl BrowserView {
                 }, true);
             ",
             )
+            .with_initialization_script(include_str!("annotation.js"))
             .with_ipc_handler(move |request| {
-                if request.body() == "browser-focus" {
-                    _ = shortcut_events.try_send(BrowserEvent::PageFocused);
-                    return;
-                }
-                let shortcut = match request.body().as_str() {
-                    "browser-key:k" => BrowserShortcut::Palette,
-                    "browser-key:l" => BrowserShortcut::Address,
-                    "browser-key:r" => BrowserShortcut::Reload,
-                    "browser-key:t" => BrowserShortcut::NewTab,
-                    "browser-key:w" => BrowserShortcut::CloseTab,
-                    _ => return,
-                };
-                _ = shortcut_events.try_send(BrowserEvent::Shortcut(shortcut));
+                handle_ipc(request.body(), &ipc_annotation_enabled, &shortcut_events);
             })
             // The profile is scoped to the app identity; private pages never retain site data.
             .with_incognito(!persist_site_data)
@@ -180,7 +175,10 @@ impl BrowserView {
             })
             .with_on_page_load_handler(move |event, url| {
                 let event = match event {
-                    PageLoadEvent::Started => BrowserEvent::LoadStarted(url),
+                    PageLoadEvent::Started => {
+                        load_annotation_enabled.set(false);
+                        BrowserEvent::LoadStarted(url)
+                    }
                     PageLoadEvent::Finished => BrowserEvent::LoadFinished(url),
                 };
                 _ = events.try_send(event);
@@ -204,9 +202,29 @@ impl BrowserView {
             .build_as_child(window)?;
         Ok(Self {
             view,
+            annotation_enabled,
             bounds,
             visible: false,
         })
+    }
+
+    /// Enables one element selection in the main page without activating links.
+    ///
+    /// # Errors
+    /// Reports a failed native script dispatch.
+    pub fn set_annotation_mode(&self, enabled: bool) -> Result<(), NativeBrowserError> {
+        self.view
+            .evaluate_script(&format!("window.__boottyAnnotate?.({enabled});"))?;
+        self.annotation_enabled.set(enabled);
+        Ok(())
+    }
+
+    /// Returns the native page address, including navigation not yet published to the host.
+    ///
+    /// # Errors
+    /// Reports a failed native address lookup.
+    pub fn current_address(&self) -> Result<String, NativeBrowserError> {
+        Ok(self.view.url()?)
     }
 
     /// Moves the child view to panel bounds in logical window coordinates.
@@ -309,3 +327,26 @@ pub fn poll_platform_events() {
 /// Native desktop event loops already dispatch the webview callbacks on these platforms.
 #[cfg(not(target_os = "linux"))]
 pub const fn poll_platform_events() {}
+
+fn handle_ipc(message: &str, annotation_enabled: &Cell<bool>, events: &Sender<BrowserEvent>) {
+    if message == "browser-focus" {
+        _ = events.try_send(BrowserEvent::PageFocused);
+    } else if let Some(payload) = message.strip_prefix("browser-element:") {
+        if annotation_enabled.get()
+            && let Some(element) = BrowserElement::parse(payload)
+        {
+            annotation_enabled.set(false);
+            _ = events.try_send(BrowserEvent::ElementPicked(element));
+        }
+    } else {
+        let shortcut = match message {
+            "browser-key:k" => BrowserShortcut::Palette,
+            "browser-key:l" => BrowserShortcut::Address,
+            "browser-key:r" => BrowserShortcut::Reload,
+            "browser-key:t" => BrowserShortcut::NewTab,
+            "browser-key:w" => BrowserShortcut::CloseTab,
+            _ => return,
+        };
+        _ = events.try_send(BrowserEvent::Shortcut(shortcut));
+    }
+}

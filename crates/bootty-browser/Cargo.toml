@@ -8,6 +8,8 @@ async-channel.workspace = true
 thiserror.workspace = true
 url.workspace = true
 sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wry.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -20,7 +20,8 @@ use gpui_kit::{
 };
 
 use crate::gpui_browser_panel::{
-    BrowserClosed, BrowserPaletteRequested, BrowserPanel, BrowserSettingsRequested,
+    BrowserClosed, BrowserFeedbackReady, BrowserPaletteRequested, BrowserPanel,
+    BrowserSettingsRequested,
 };
 use crate::gpui_git_panel::{GitChangesPanel, GitDiffPanel, GitPanelContext, OpenDiff};
 use crate::{
@@ -339,6 +340,26 @@ impl WorkspaceDock {
                     bootty_control::Caller::CommandPalette,
                 );
                 invocation.arguments = vec!["browser.search-engine".to_owned()];
+                this.submit_command(invocation, window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, feedback: &BrowserFeedbackReady, window, cx| {
+                let Some(target) = this.panels.context.terminal.clone() else {
+                    this.error =
+                        Some("Select a terminal before pasting browser feedback.".to_owned());
+                    cx.notify();
+                    return;
+                };
+                let mut invocation = bootty_control::CommandInvocation::from_action(
+                    "terminal.paste",
+                    bootty_control::Caller::CommandPalette,
+                );
+                invocation.target = Some(target);
+                invocation.arguments = vec![feedback.0.clone()];
                 this.submit_command(invocation, window, cx);
             },
         )

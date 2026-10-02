@@ -1,11 +1,12 @@
 //! Browser tabs own native child webviews; GPUI owns their chrome and visibility.
+mod annotation;
 use bootty_browser::{
-    BrowserBounds, BrowserEvent, BrowserProfile, BrowserShortcut, BrowserView, NativeBrowserError,
-    normalize_address, resolve_address,
+    BrowserBounds, BrowserElement, BrowserEvent, BrowserProfile, BrowserShortcut, BrowserView,
+    NativeBrowserError, normalize_address, resolve_address,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariants},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputEvent, InputState},
 };
@@ -28,6 +29,15 @@ struct BrowserTab {
 pub struct BrowserPaletteRequested;
 pub struct BrowserClosed;
 pub struct BrowserSettingsRequested;
+pub struct BrowserFeedbackReady(pub String);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum AnnotationState {
+    #[default]
+    Idle,
+    Selecting,
+    Editing,
+}
 
 pub struct BrowserPanel {
     tabs: Vec<BrowserTab>,
@@ -36,6 +46,7 @@ pub struct BrowserPanel {
     selected: u64,
     next_id: u64,
     address: Entity<InputState>,
+    annotation_state: AnnotationState,
     visible: bool,
     active: bool,
     host_visible: bool,
@@ -79,6 +90,7 @@ impl BrowserPanel {
             selected: 1,
             next_id: 2,
             address,
+            annotation_state: AnnotationState::Idle,
             visible: false,
             active: false,
             host_visible: false,
@@ -131,7 +143,8 @@ impl BrowserPanel {
     }
 
     fn sync_visibility(&mut self, cx: &mut Context<Self>) {
-        let visible = self.host_visible && self.active;
+        let visible =
+            self.host_visible && self.active && self.annotation_state != AnnotationState::Editing;
         if self.visible == visible {
             return;
         }
@@ -177,6 +190,7 @@ impl BrowserPanel {
     }
 
     pub(crate) fn select_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_annotation();
         self.selected = id;
         for tab in &mut self.tabs {
             if let Some(view) = &mut tab.view
@@ -208,6 +222,7 @@ impl BrowserPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.stop_annotation();
         let id = self.next_id;
         let Some(next_id) = id.checked_add(1) else {
             return;
@@ -244,6 +259,7 @@ impl BrowserPanel {
     }
 
     pub(crate) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_annotation();
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
@@ -412,6 +428,105 @@ impl BrowserPanel {
         }));
     }
 
+    fn stop_annotation(&mut self) {
+        if self.annotation_state == AnnotationState::Selecting {
+            if let Some(view) = self.selected_tab().and_then(|tab| tab.view.as_ref()) {
+                _ = view.set_annotation_mode(false);
+            }
+            self.annotation_state = AnnotationState::Idle;
+        }
+    }
+
+    fn toggle_annotation(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.annotation_state != AnnotationState::Selecting;
+        let result = self
+            .selected_tab()
+            .and_then(|tab| tab.view.as_ref())
+            .map(|view| view.set_annotation_mode(enabled));
+        match result {
+            Some(Ok(())) => {
+                self.annotation_state = if enabled {
+                    AnnotationState::Selecting
+                } else {
+                    AnnotationState::Idle
+                }
+            }
+            Some(Err(error)) => {
+                if let Some(tab) = self.selected_mut() {
+                    tab.error = Some(error.to_string());
+                }
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
+    fn edit_annotation(
+        &mut self,
+        element: BrowserElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        self.annotation_state = AnnotationState::Editing;
+        self.sync_visibility(cx);
+        let owner = cx.weak_entity();
+        let editor =
+            cx.new(|cx| annotation::AnnotationEditor::new(element, owner.clone(), window, cx));
+        let cancel_owner = owner.clone();
+        let close_owner = owner.clone();
+        let content = editor.clone();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let content = content.clone();
+            let cancel_owner = cancel_owner.clone();
+            let close_owner = close_owner.clone();
+            dialog
+                .title("Annotate element")
+                .w(gpui_kit::px(f32::from(window.rem_size()) * 30.0))
+                .on_cancel(move |_, window, cx| {
+                    _ = cancel_owner.update(cx, |panel, cx| panel.finish_annotation(window, cx));
+                    true
+                })
+                .on_close(move |_, window, cx| {
+                    _ = close_owner.update(cx, |panel, cx| panel.finish_annotation(window, cx));
+                })
+                .content(move |body, _, _| body.child(content.clone()))
+        });
+        cx.defer_in(window, move |_, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+    }
+
+    fn finish_annotation(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.annotation_state = AnnotationState::Idle;
+        self.sync_visibility(cx);
+        cx.defer_in(window, |this, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            this.address.focus_handle(cx).focus(window, cx);
+        });
+    }
+
+    fn receive_element(
+        &mut self,
+        id: u64,
+        element: BrowserElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .selected_tab()
+            .and_then(|tab| tab.view.as_ref())
+            .and_then(|view| view.current_address().ok());
+        // Frame selections need explicit frame identity before they can be accepted.
+        if id == self.selected
+            && self.annotation_state == AnnotationState::Selecting
+            && current.as_deref() == Some(&element.url)
+        {
+            self.edit_annotation(element, window, cx);
+        }
+    }
+
     fn receive_event(
         &mut self,
         id: u64,
@@ -420,6 +535,10 @@ impl BrowserPanel {
         cx: &mut Context<Self>,
     ) {
         if !self.tabs.iter().any(|tab| tab.id == id) {
+            return;
+        }
+        if let BrowserEvent::ElementPicked(element) = event {
+            self.receive_element(id, element, window, cx);
             return;
         }
         if matches!(event, BrowserEvent::PageFocused) {
@@ -477,6 +596,7 @@ impl BrowserPanel {
                 BrowserEvent::TitleChanged(title) => tab.title = title,
                 BrowserEvent::Notice(message) => tab.error = Some(message),
                 BrowserEvent::PageFocused
+                | BrowserEvent::ElementPicked(_)
                 | BrowserEvent::OpenTab(_)
                 | BrowserEvent::Shortcut(_) => {}
             }
@@ -487,9 +607,26 @@ impl BrowserPanel {
             }
         }
         if started {
+            self.annotation_state = AnnotationState::Idle;
             self.watch_load(id, window, cx);
         }
         cx.notify();
+    }
+
+    fn annotation_button(&self, has_view: bool, cx: &Context<Self>) -> Button {
+        Button::new("browser-annotate")
+            .icon(gpui_kit::assets::IconName::MousePointer2)
+            .ghost()
+            .small()
+            .size_6()
+            .disabled(!has_view)
+            .when(
+                self.annotation_state == AnnotationState::Selecting,
+                ButtonVariants::primary,
+            )
+            .accessibility_label("Annotate page")
+            .tooltip("Select an element and add feedback")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_annotation(cx)))
     }
 
     fn render_toolbar(&self, cx: &Context<Self>) -> gpui_kit::Div {
@@ -561,6 +698,7 @@ impl BrowserPanel {
                         ),
                 )),
             )
+            .child(self.annotation_button(has_view, cx))
             .child(
                 Button::new("browser-settings")
                     .icon(IconName::Settings)
@@ -598,6 +736,7 @@ impl EventEmitter<PanelEvent> for BrowserPanel {}
 impl EventEmitter<BrowserPaletteRequested> for BrowserPanel {}
 impl EventEmitter<BrowserClosed> for BrowserPanel {}
 impl EventEmitter<BrowserSettingsRequested> for BrowserPanel {}
+impl EventEmitter<BrowserFeedbackReady> for BrowserPanel {}
 impl BasePanel for BrowserPanel {
     fn panel_name(&self) -> &'static str {
         "bootty.browser"
