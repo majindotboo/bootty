@@ -40,7 +40,7 @@ This file describes the current production structure.
 | Desktop command resolution and UI policy | `bootty-ui::commands` | UI adapters resolve intents and delegate domain work to its owner. |
 | Clipboard image transfer | `bootty-host::clipboard_image` | The daemon verifies the complete byte count and SHA-256 digest before publishing a private temporary PNG path. |
 | Local control transport and instance ownership | `bootty-control` | The singleton lease publishes one owner-local endpoint. |
-| Native agent integration state and assets | `bootty-agents` | Native providers own bounded event parsing and integration files. |
+| Native agent state and launch metadata | `bootty-agents` | Native terminal observers own exact identity, bounded activity and retained provider session metadata. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
 | Workspace composition | `bootty-ui::workspace_composition` | Reconciles the binding's terminal projection with Bootty-native panels. The terminal center is one locked singleton leaf retargeted at the selected mux window; it renders the whole split tree from the binding projection and never takes part in Dock drag, tabs, or documents. Documents live in the right dock. Dock never mirrors mux splits, Dock geometry never flows back into mux ratios, and native leaves never enter a backend command. |
 | Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes fixed homes: Sessions on the left, a terminal singleton in the center, and one labeled tool/document tab group on the right. Edges resize; panels cannot relocate or create nested groups. `native-panels.json` stores sizes, visibility and native content per window, shared across Spaces. Restoration flattens old layouts and preserves documents. |
@@ -262,17 +262,19 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
 ## Agents
 
-`bootty-agents` owns the native Pi, Codex, and Claude providers: provider state,
-explicit event parsing, command forwarding, lifecycle generations, hook and
-integration file installation, and typed agent snapshots. Providers run in visible
-terminal panes. Pi reports events through its installed adapter; Codex and Claude
-report native command-hook events. The service accepts a narrow pane-scope resolver from the UI and a
-control event publisher; it does not import mux or GPUI.
+`bootty-agents::TerminalAgentService` owns native Pi, Codex and Claude observation,
+exact terminal targets, retained launch metadata and provider account queries.
+The backend owns each interactive TUI, its tabs, splits and process lifetime.
+Codex uses a bounded local app-server relay, Claude queries its exact native
+session identity, and Pi receives events from a per-launch native extension.
+These observers retire with their owner. Hook installation is no longer offered;
+existing integration files and legacy event records are preserved.
 
-`bootty-ui` composes one agent service per desktop owner, exposes its descriptors
-through the desktop command catalog, and projects typed agent facts into chrome
-and panels. Agent workers and event publication remain asynchronous and are
-retired before a replacement can publish stale state.
+`bootty-ui` composes the service into the same command catalog used by the palette,
+CLI and socket. Start/resume/fork create a backend session; tab launch creates a
+backend window. Both receive literal argv and return an issued terminal target.
+Nested commands preserve the original caller. Palette and keybinding Open actions
+focus that returned target; other callers remain detached.
 
 Bootty does not infer agent state from process names, terminal output, screen
 contents, or transcripts. The service persists what agents reported to a
@@ -685,14 +687,12 @@ are configured at creation and refreshed only when the requested material change
 
 ### Native agent launch context
 
-`bootty-agents::AgentLaunch` owns bounded argv, session operation syntax and
-shell serialization. The app captures the exact source pane, parent mux session,
-working directory and host shell before dispatch. Start, resume and fork create
-or use a visible terminal, then submit through `terminal.paste` and
-`terminal.submit`. Hook adapters return session/cwd and a sanitized launch
-context. Resume/fork always use a new tab and fail before mutation without an
-explicit or pane-reported session. Mailbox callers receive the same authoritative
-mux completion target as CLI/socket callers.
+`bootty-agents::AgentLaunch` owns bounded literal argv and provider session syntax.
+The host captures the exact binding/session and host cwd before dispatch. Native
+panes start their explicit command before being shown; rmux and tmux create the
+process through their supported backend interfaces. A failed tab launch closes
+only its newly created pane. Resume and fork require an observed session identity;
+retained metadata strips credentials and initial prompts.
 
 Agent attention sequences and acknowledgement cursors belong to `bootty-agents`.
 `bootty-ui` projects only panes found in live bindings, captures generation-scoped

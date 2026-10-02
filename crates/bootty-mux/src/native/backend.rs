@@ -781,7 +781,9 @@ impl NativeMuxState {
                 session_id,
                 window_id,
             } => self.activate_window(&session_id, &window_id),
-            MuxCommand::NewWindow { session_id, cwd } => {
+            MuxCommand::NewWindow {
+                session_id, cwd, ..
+            } => {
                 self.new_window(&session_id, cwd.map(PathBuf::from))?;
             }
             MuxCommand::RenameWindow {

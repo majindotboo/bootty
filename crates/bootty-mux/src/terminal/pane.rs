@@ -691,6 +691,7 @@ impl BackendPaneTerminal {
             target.input_selector()
         );
         let mut terminal_config = self.terminal_config.clone();
+        terminal_config.launch.command_is_argv = true;
         terminal_config.launch.command = command;
         let runtime = self
             .policy

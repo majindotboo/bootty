@@ -13,6 +13,7 @@ use bootty_mux::{
 
 use super::{
     CommandDispatch, PendingCommandResult, command_outcome_for_mux_error, command_outcome_message,
+    serialized_command_outcome,
 };
 use crate::{
     commands::{ExactMuxTarget, SessionAction},
@@ -33,14 +34,7 @@ impl AppState {
         let mut closed_native_panes = Vec::new();
         let prepared = match (action, exact_target) {
             (SessionAction::ListSpaces, _) => {
-                let outcome = executor::begin_synchronous_command(execution).map_or_else(
-                    command_outcome_for_mux_error,
-                    |()| CommandOutcome::Success {
-                        value: self.spaces_listing(),
-                        warnings: Vec::new(),
-                    },
-                );
-                return CommandDispatch::Complete(outcome);
+                return self.list_spaces_command(execution);
             }
             (SessionAction::Create, Some(ExactMuxTarget::Binding(scope))) => {
                 let (name, cwd, argv) = match session_create_arguments(arguments) {
@@ -49,6 +43,15 @@ impl AppState {
                 };
                 self.workspace
                     .begin_session_create(scope, name, cwd, argv)
+                    .map(|prepared| (scope, prepared))
+            }
+            (SessionAction::CreateTab, Some(ExactMuxTarget::Session(scope, session))) => {
+                let (argv, cwd) = match tab_create_arguments(arguments) {
+                    Ok(arguments) => arguments,
+                    Err(outcome) => return self.reject_command(outcome),
+                };
+                self.workspace
+                    .begin_tab_create(scope, &session, cwd, argv)
                     .map(|prepared| (scope, prepared))
             }
             (SessionAction::Close, Some(ExactMuxTarget::Session(scope, session))) => {
@@ -140,7 +143,13 @@ impl AppState {
         command: &MuxCommand,
         outcome: CommandOutcome,
     ) -> CommandDispatch {
-        let MuxCommand::CreateProjectSession { session_id, .. } = command else {
+        let (MuxCommand::CreateProjectSession { session_id, .. }
+        | MuxCommand::NewWindow {
+            session_id,
+            argv: Some(_),
+            ..
+        }) = command
+        else {
             return CommandDispatch::Complete(outcome);
         };
         if !matches!(outcome, CommandOutcome::Success { .. }) {
@@ -177,24 +186,32 @@ impl AppState {
             Poll::Ready(Err(error)) => error,
         };
         let cleanup = if self.workspace.holds_starting_session(starting) {
-            let closed = self.dispatch_session_command(
-                SessionAction::Close,
-                &[],
-                Some(ExactMuxTarget::Session(
-                    starting.scope(),
-                    starting.session_id().to_owned(),
-                )),
-                None,
-            );
+            let (action, target) = if starting.created_session() {
+                (
+                    SessionAction::Close,
+                    ExactMuxTarget::Session(starting.scope(), starting.session_id().to_owned()),
+                )
+            } else {
+                (
+                    SessionAction::ClosePane,
+                    ExactMuxTarget::Pane(
+                        starting.scope(),
+                        starting.session_id().to_owned(),
+                        starting.window_id().to_owned(),
+                        starting.pane_id().to_owned(),
+                    ),
+                )
+            };
+            let closed = self.dispatch_session_command(action, &[], Some(target), None);
             match closed {
                 CommandDispatch::Complete(CommandOutcome::Success { .. }) => {
-                    "; the session was closed".to_owned()
+                    "; the new terminal was closed".to_owned()
                 }
                 CommandDispatch::Complete(failed) => format!(
-                    "; closing the session failed: {}",
+                    "; closing the new terminal failed: {}",
                     command_outcome_message(&failed).unwrap_or_default()
                 ),
-                CommandDispatch::Pending(_) => "; the session is closing".to_owned(),
+                CommandDispatch::Pending(_) => "; the new terminal is closing".to_owned(),
             }
         } else {
             String::new()
@@ -275,6 +292,18 @@ impl AppState {
             .collect()
     }
 
+    fn list_spaces_command(
+        &self,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        CommandDispatch::Complete(
+            executor::begin_synchronous_command(execution)
+                .map_or_else(command_outcome_for_mux_error, |()| {
+                    serialized_command_outcome(self.spaces_listing())
+                }),
+        )
+    }
+
     /// Every Space in order, with the targets a script needs to address it and its sessions.
     fn spaces_listing(&self) -> serde_json::Value {
         let mut spaces = self.workspace.spaces().collect::<Vec<_>>();
@@ -346,6 +375,23 @@ fn session_create_arguments(
         .map_err(|error| invalid(format!("argv must be a JSON array of strings: {error}")))?
         .unwrap_or_default();
     Ok((name, cwd, argv))
+}
+
+fn tab_create_arguments(
+    arguments: &[String],
+) -> Result<(Vec<String>, Option<&str>), CommandOutcome> {
+    let argv = arguments
+        .first()
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .ok_or_else(|| CommandOutcome::Failed {
+            code: "invalid_arguments".to_owned(),
+            message: "argv must be a JSON array of strings".to_owned(),
+        })?;
+    let cwd = arguments
+        .get(1)
+        .filter(|cwd| !cwd.is_empty())
+        .map(String::as_str);
+    Ok((argv, cwd))
 }
 
 fn session_request_outcome(error: SessionRequestError) -> CommandOutcome {

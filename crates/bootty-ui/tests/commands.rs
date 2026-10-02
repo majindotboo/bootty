@@ -247,7 +247,7 @@ fn native_agent_commands_are_static_and_explicitly_unsupported_until_composed() 
             .describe("agents.pi.start")
             .expect("Pi start descriptor")
             .target,
-        Some(ResourceKind::Terminal)
+        Some(ResourceKind::Binding)
     );
     assert!(matches!(
         catalog
@@ -261,7 +261,8 @@ fn native_agent_commands_are_static_and_explicitly_unsupported_until_composed() 
     ));
 }
 
-#[test]
+#[cfg(unix)]
+#[rstest]
 fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let config = test_config::config(
@@ -284,7 +285,26 @@ fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
     .expect("composed app state");
     let started = Instant::now();
     open_native_session(&mut state, directory.path(), started);
-    assert!(state.agent_service().is_some());
+    let program = claude_terminal_fixture(directory.path()).unwrap();
+    let launched = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new(
+            "agents.claude.start",
+            vec![
+                directory.path().to_string_lossy().into_owned(),
+                program.to_string_lossy().into_owned(),
+            ],
+            Caller::Socket,
+        ),
+        started,
+    );
+    let CommandOutcome::Success { value, .. } = launched else {
+        panic!("native agent launch failed: {launched:?}");
+    };
+    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+    let selected = state.mux().selected_session().map(str::to_owned);
 
     let callers = [
         Caller::CommandPalette,
@@ -296,8 +316,12 @@ fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
         Caller::Internal,
     ];
     for (index, caller) in callers.into_iter().enumerate() {
-        let invocation =
-            CommandInvocation::new("agents.pi.prompt", vec![format!("caller-{index}")], caller);
+        let mut invocation = CommandInvocation::new(
+            "agents.claude.prompt",
+            vec![format!("caller-{index}")],
+            caller,
+        );
+        invocation.target = Some(target.clone());
         let outcome = submit_command_from_caller(
             &mut state,
             &wakes,
@@ -315,7 +339,42 @@ fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
             matches!(outcome, CommandOutcome::Success { .. }),
             "{outcome:?}"
         );
+        assert_eq!(state.mux().selected_session(), selected.as_deref());
     }
+    let messages = directory.path().join("agent-input");
+    loop {
+        state.update_frame(frames::idle_frame(started));
+        if let Ok(text) = fs::read_to_string(&messages) {
+            let received: Vec<String> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if received.len() == callers.len() {
+                assert_eq!(
+                    received,
+                    (0..callers.len())
+                        .map(|index| format!("caller-{index}"))
+                        .collect::<Vec<_>>()
+                );
+                break;
+            }
+        }
+        wakes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("provider terminal receives submitted prompts");
+    }
+    let mut stale = target;
+    stale.generation = stale.generation.checked_add(1).unwrap();
+    let mut invocation = CommandInvocation::new(
+        "agents.claude.prompt",
+        vec!["must not arrive".to_owned()],
+        Caller::Socket,
+    );
+    invocation.target = Some(stale);
+    assert!(matches!(
+        submit_command_from_caller(&mut state, &wakes, Caller::Socket, invocation, started),
+        CommandOutcome::StaleTarget { .. }
+    ));
 }
 
 #[test]
@@ -1524,6 +1583,47 @@ fn authored_theme_preview_restore_save_and_apply_share_command_path() {
 }
 
 #[cfg(unix)]
+fn claude_terminal_fixture(directory: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let program = directory.join("claude-fixture.py");
+    fs::write(
+        &program,
+        r"#!/usr/bin/env python3
+import json, os, pathlib, sys
+directory = pathlib.Path(__file__).parent
+if sys.argv[1:3] == ['agents', '--json']:
+    source = directory / 'query-session'
+    if not source.exists():
+        source = directory / 'agent-output'
+    if source.exists():
+        observed = json.loads(source.read_text())
+        print(json.dumps([{'sessionId': observed['session_id'], 'status': 'busy',
+                           'waitingFor': observed.get('detail')}]))
+    else:
+        print('[]')
+    sys.exit(0)
+arguments = sys.argv[1:]
+session_id = arguments[1]
+arguments = arguments[2:]
+path = directory / 'agent-output'
+temporary = directory / 'agent-output.tmp'
+temporary.write_text(json.dumps({'argv': arguments, 'session_id': session_id,
+                                 'cwd': os.getcwd(), 'tty': os.isatty(0)}))
+os.replace(temporary, path)
+print('agent ready', flush=True)
+with open(directory / 'agent-input', 'a') as received:
+    for line in sys.stdin:
+        received.write(json.dumps(line.rstrip('\n')) + '\n')
+        received.flush()
+        print('received prompt', flush=True)
+",
+    )?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
+    Ok(program)
+}
+
+#[cfg(unix)]
 #[rstest]
 fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     let directory = assert_fs::TempDir::new().unwrap();
@@ -1548,19 +1648,18 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     let started = Instant::now();
     open_native_session(&mut state, directory.path(), started);
     let output = directory.path().join("agent-output");
-    let literal = "quoted ' value; $HOME `uname`";
-    let script = "printf '%s\\n%s\\n' \"$1\" \"$BOOTTY_AGENT_LAUNCH_CONTEXT\" > \"$2.tmp\"; mv \"$2.tmp\" \"$2\"; printf 'agent ready\\n'; exec cat";
-    let argv =
-        serde_json::to_string(&["-c", script, "agent", literal, output.to_str().unwrap()]).unwrap();
+    let literal = "quoted ' value; $HOME `uname`\nsecond line\tend";
+    let program = claude_terminal_fixture(directory.path()).unwrap();
+    let argv = serde_json::to_string(&[literal, output.to_str().unwrap()]).unwrap();
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
         Caller::Socket,
         CommandInvocation::new(
-            "agents.pi.start",
+            "agents.claude.start",
             vec![
                 directory.path().to_string_lossy().into_owned(),
-                "/bin/sh".to_owned(),
+                program.to_string_lossy().into_owned(),
                 argv,
             ],
             Caller::Socket,
@@ -1574,12 +1673,29 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     loop {
         state.update_frame(frames::idle_frame(started));
         if let Ok(text) = fs::read_to_string(&output) {
-            let mut lines = text.lines();
-            assert_eq!(lines.next(), Some(literal));
-            let launch: bootty_agents::AgentLaunch =
-                serde_json::from_str(lines.next().unwrap()).unwrap();
-            assert_eq!(launch.program, "/bin/sh");
-            assert_eq!(launch.arguments, Vec::<std::string::String>::new());
+            let observed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(observed["argv"][0], literal);
+            assert_eq!(observed["argv"][1], output.to_str().unwrap());
+            assert_eq!(observed["session_id"].as_str().unwrap().len(), 36);
+            assert_eq!(
+                Path::new(observed["cwd"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap(),
+                directory.path().canonicalize().unwrap()
+            );
+            assert_eq!(observed["tty"], true);
+            let CommandOutcome::Success { value, .. } = &outcome else {
+                panic!("native launch failed: {outcome:?}");
+            };
+            let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+            let record = state
+                .terminal_agent_service()
+                .unwrap()
+                .record(&target)
+                .unwrap();
+            assert_eq!(record.provider, bootty_agents::AgentKind::Claude);
+            assert_eq!(record.launch.program, program.to_string_lossy());
+            assert_eq!(record.launch.arguments, Vec::<String>::new());
             break;
         }
         wakes
@@ -1588,11 +1704,9 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty() {
     }
 }
 
-/// `agents.list` answers every agent in one bounded response, so a long final message is cut in
-/// the listing and read whole through the provider's `state` command, by the entry's target or by
-/// its pane id alone, from a Space that is not active and without activating it.
+#[cfg(unix)]
 #[rstest]
-fn a_long_final_message_is_previewed_in_the_listing_and_whole_in_state() {
+fn native_terminal_state_and_retained_history_are_bounded_and_do_not_select_another_space() {
     let directory = assert_fs::TempDir::new().unwrap();
     let elsewhere = WorkspaceRepository::open(&directory.path().join("config.toml"))
         .expect("workspace")
@@ -1609,8 +1723,7 @@ fn a_long_final_message_is_previewed_in_the_listing_and_whole_in_state() {
         .expect("valid Space")
         .id();
     let (wake, wakes) = mpsc::channel();
-    let (events, receiver) = bootty_control::event_queue();
-    drop(receiver);
+    let (events, _receiver) = bootty_control::event_queue();
     let mut state = AppState::new_for_window_with_agents(
         test_config::config(
             directory.path().join("config.toml"),
@@ -1628,45 +1741,95 @@ fn a_long_final_message_is_previewed_in_the_listing_and_whole_in_state() {
     .unwrap();
     let now = Instant::now();
     open_native_session(&mut state, directory.path(), now);
-    let pane = state.focused_pane().unwrap();
-    let message = "é".repeat(8 * 1024);
-    let outcome = state.agent_service().unwrap().ingest(
-        bootty_agents::AgentKind::Claude,
-        Some(&pane),
-        serde_json::json!({"hook_event_name": "Stop", "last_assistant_message": message}),
-        now.checked_add(Duration::from_secs(1))
-            .expect("test timestamp fits"),
-        &CommandCancellation::new(),
+    let program = claude_terminal_fixture(directory.path()).unwrap();
+    let session = "8ea5a4d1-9c09-4e2a-93e2-c4d2d9658b60";
+    let detail = "é".repeat(8 * 1024);
+    fs::write(
+        directory.path().join("query-session"),
+        serde_json::to_vec(&serde_json::json!({"session_id":session,"detail":detail})).unwrap(),
+    )
+    .unwrap();
+    let argv = serde_json::to_string(&[
+        "--session-id",
+        session,
+        "--model",
+        "configured-model",
+        "private prompt",
+    ])
+    .unwrap();
+    let outcome = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new(
+            "agents.claude.start",
+            vec![
+                directory.path().to_string_lossy().into_owned(),
+                program.to_string_lossy().into_owned(),
+                argv,
+            ],
+            Caller::Socket,
+        ),
+        now,
     );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-
-    let entries = state.agent_overview();
-    let [entry] = entries.as_slice() else {
-        panic!("one agent entry: {entries:?}");
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("native terminal launch failed: {outcome:?}");
     };
-    let preview = entry.last_message.as_deref().unwrap_or_default();
-    assert!(
-        entry.last_message_truncated
-            && !preview.is_empty()
-            && preview.len() < message.len()
-            && message.starts_with(preview),
-        "{entry:?}"
-    );
-    assert!(state.activate_space_from_ui(elsewhere));
-    let mut by_target = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
-    by_target.target = Some(entry.target.clone());
-    let by_pane = CommandInvocation::new("agents.claude.state", vec![pane], Caller::Socket);
-    for read in [by_target, by_pane] {
-        let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now);
-        let CommandOutcome::Success { value, .. } = outcome else {
-            panic!("agents.claude.state failed: {outcome:?}");
-        };
-        assert_eq!(value["last_message"].as_str(), Some(message.as_str()));
-        assert_eq!(state.active_space_id(), elsewhere);
+    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+    let service = state.terminal_agent_service().unwrap();
+    loop {
+        if service.activity(&target).unwrap().session_id.as_deref() == Some(session) {
+            break;
+        }
+        state.update_frame(frames::idle_frame(now));
+        wakes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("native identity published");
     }
+    assert!(state.activate_space_from_ui(elsewhere));
+    // Give the other Space a settled, distinct selection; its initial snapshot arrives on a frame.
+    let elsewhere_cwd = directory.path().join("elsewhere");
+    fs::create_dir(&elsewhere_cwd).unwrap();
+    open_native_session(&mut state, &elsewhere_cwd, now);
+    let selected = state.mux().selected_session().map(str::to_owned);
+    assert_eq!(selected.as_deref(), Some("elsewhere"));
+    let mut read = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
+    read.target = Some(target.clone());
+    let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now);
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("exact native state failed: {outcome:?}");
+    };
+    assert_eq!(value["target"], serde_json::to_value(&target).unwrap());
+    assert_eq!(value["observation"]["status"], "working");
+    assert_eq!(value["observation"]["session_id"], session);
+    let bounded = value["observation"]["detail"].as_str().unwrap();
+    assert_eq!(bounded.len(), 4096);
+    assert!(detail.starts_with(bounded));
+    assert_eq!(
+        value["launch"]["arguments"],
+        serde_json::json!(["--model", "configured-model"])
+    );
+    let history = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new("agents.claude.history", Vec::new(), Caller::Socket),
+        now,
+    );
+    let CommandOutcome::Success { value: history, .. } = history else {
+        panic!("retained terminal history failed: {history:?}");
+    };
+    assert_eq!(history, serde_json::json!([value]));
+    assert_eq!(state.active_space_id(), elsewhere);
+    assert_eq!(state.mux().selected_session(), selected.as_deref());
+    let mut stale = target;
+    stale.generation = stale.generation.checked_add(1).unwrap();
+    let mut read = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
+    read.target = Some(stale);
+    assert!(matches!(
+        submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now),
+        CommandOutcome::StaleTarget { .. }
+    ));
 }
 
 #[rstest]
@@ -2512,4 +2675,93 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
         listed_session_names(&listed_space(&mut state, &home_name)),
         ["project"]
     );
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case::literal(vec!["/bin/sh", "-c", "printf '%s' \"$1\" > \"$2.tmp\"; mv \"$2.tmp\" \"$2\"; printf 'ready\\n'; exec cat", "tab", "quoted ' value; $HOME `uname`\nnext line"], false)]
+#[case::missing_program(vec!["/does/not/exist"], true)]
+fn explicit_tab_starts_literal_argv_and_failure_preserves_the_session(
+    #[case] argv: Vec<&str>,
+    #[case] fails: bool,
+) {
+    let directory = assert_fs::TempDir::new().expect("private workspace");
+    let config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    let (wake, wakes) = mpsc::channel();
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+    )
+    .expect("app state");
+    let started = Instant::now();
+    open_native_session(&mut state, directory.path(), started);
+    let original = state.mux().sessions()[0].clone();
+    let output = directory.path().join("tab-output");
+    let mut arguments = argv.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    if !fails {
+        arguments.push(output.to_string_lossy().into_owned());
+    }
+    let outcome = submit_command(
+        &mut state,
+        CommandInvocation::new(
+            "terminal.create_tab",
+            vec![
+                json_argv(&arguments),
+                directory.path().to_string_lossy().into_owned(),
+            ],
+            Caller::Socket,
+        ),
+        started,
+    );
+    assert_eq!(
+        state.mux().sessions().len(),
+        1,
+        "the parent session survives"
+    );
+    assert_eq!(state.mux().sessions()[0].id, original.id);
+    if fails {
+        assert_eq!(
+            failure_kind(&outcome),
+            "session_start_failed",
+            "{outcome:?}"
+        );
+        assert_eq!(
+            state.mux().sessions()[0].windows.len(),
+            original.windows.len(),
+            "only the failed new tab is closed"
+        );
+    } else {
+        let CommandOutcome::Success { value, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        let target: CommandTarget =
+            serde_json::from_value(value["created"].clone()).expect("issued terminal");
+        assert_eq!(target.kind, ResourceKind::Terminal);
+        assert_eq!(
+            state.mux().sessions()[0].windows.len(),
+            original
+                .windows
+                .len()
+                .checked_add(1)
+                .expect("one additional window")
+        );
+        loop {
+            state.update_frame(frames::idle_frame(started));
+            if let Ok(text) = fs::read_to_string(&output) {
+                assert_eq!(text, argv[4], "argv bytes reach the new process unchanged");
+                break;
+            }
+            wakes
+                .recv_timeout(Duration::from_secs(5))
+                .expect("native tab output");
+        }
+    }
 }

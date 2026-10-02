@@ -28,6 +28,8 @@ pub enum MuxCommand {
     NewWindow {
         session_id: String,
         cwd: Option<String>,
+        #[serde(default)]
+        argv: Option<Vec<String>>,
     },
     RenameWindow {
         session_id: String,

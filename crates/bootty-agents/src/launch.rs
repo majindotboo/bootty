@@ -48,7 +48,7 @@ impl AgentLaunch {
     }
 
     /// # Errors
-    /// Returns an error for an invalid program, oversized arguments, or control characters in launch values.
+    /// Returns invalid program/cwd controls, oversized values, or NUL in literal arguments.
     pub fn validate(&self) -> Result<(), String> {
         if self.program.is_empty() || self.program.starts_with('-') {
             return Err("Agent program must be an executable name or path".to_owned());
@@ -65,10 +65,7 @@ impl AgentLaunch {
         if total > 64 * 1024 {
             return Err("Agent launch exceeds 64 KiB".to_owned());
         }
-        for value in std::iter::once(&self.program)
-            .chain(self.cwd.iter())
-            .chain(self.arguments.iter())
-        {
+        for value in std::iter::once(&self.program).chain(self.cwd.iter()) {
             if value.len() > 8192 || value.chars().any(char::is_control) {
                 return Err(
                     "Agent launch values must be at most 8192 bytes without control characters"
@@ -76,11 +73,18 @@ impl AgentLaunch {
                 );
             }
         }
+        if self
+            .arguments
+            .iter()
+            .any(|value| value.len() > 8192 || value.contains('\0'))
+        {
+            return Err("Agent arguments must be at most 8192 bytes without NUL".to_owned());
+        }
         Ok(())
     }
 
     /// Only reusable configuration options are retained. Prompts, credentials, arbitrary
-    /// config overrides and session selectors must not enter hook state or be replayed.
+    /// config overrides and session selectors must not enter retained metadata or be replayed.
     #[must_use]
     pub fn retained(&self, provider: AgentKind) -> Self {
         let valued: &[&str] = match provider {

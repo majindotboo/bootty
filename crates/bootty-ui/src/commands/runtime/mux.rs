@@ -338,6 +338,20 @@ impl AppState {
         completion: &MuxCommandCompletion,
     ) -> Option<BTreeMap<String, CommandTarget>> {
         let mut value = BTreeMap::new();
+        // Background tab creation preserves selection, so its result carries no focused window.
+        // The backend still marks the window it just created active within the target session.
+        if let MuxCommand::NewWindow { session_id, .. } = command {
+            let binding = self.workspace.binding(scope)?;
+            let window = binding
+                .mux()
+                .backend_session_by_id_or_name(session_id)?
+                .active_window_id
+                .as_deref()?;
+            value.insert(
+                "created".to_owned(),
+                self.mux_terminal_target(scope, session_id, window)?,
+            );
+        }
         if let Some(session_id) = match command {
             MuxCommand::CreateProjectSession { session_id, .. }
             | MuxCommand::CreateWorktreeSession { session_id, .. } => Some(session_id.as_str()),
@@ -364,11 +378,6 @@ impl AppState {
                     Some(window_id),
                 )?,
             );
-            if matches!(command, MuxCommand::NewWindow { .. })
-                && let Some(created) = self.mux_terminal_target(scope, session_id, window_id)
-            {
-                value.insert("created".to_owned(), created);
-            }
         }
         if !value.contains_key("focused")
             && let Some(session_id) = completion.selected_session.as_deref()

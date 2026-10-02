@@ -62,6 +62,7 @@ fn backend() -> Result<(TempDir, NativeBackend)> {
         .execute(MuxCommand::NewWindow {
             session_id: "session".into(),
             cwd: Some("/destination".into()),
+            argv: None,
         })
         .context("activate another window")?;
     Ok((directory, backend))

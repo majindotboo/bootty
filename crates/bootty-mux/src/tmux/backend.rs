@@ -459,7 +459,12 @@ impl<R: CommandRunner> TmuxBackend<R> {
         if !argv.is_empty() {
             // Ends option parsing, so a program named like a flag stays the program.
             invocation.push("--".to_owned());
-            invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            if let [program] = argv {
+                // tmux shell-interprets a single argument; quote the literal executable.
+                invocation.push(tmux_argument(&bootty_host::shell_quote(program)));
+            } else {
+                invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            }
         }
         if let Some(identity) = &tag.identity {
             invocation.extend(set_session_option_args(
@@ -561,10 +566,22 @@ impl<R: CommandRunner> TmuxBackend<R> {
                     session_id,
                 ])?;
             }
-            MuxCommand::NewWindow { session_id, cwd } => {
+            MuxCommand::NewWindow {
+                session_id,
+                cwd,
+                argv,
+            } => {
                 let mut args = vec!["new-window".to_owned(), "-t".to_owned(), session_id];
                 if let Some(cwd) = cwd {
                     args.extend(["-c".to_owned(), cwd]);
+                }
+                if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
+                    args.push("--".to_owned());
+                    if let [program] = argv.as_slice() {
+                        args.push(tmux_argument(&bootty_host::shell_quote(program)));
+                    } else {
+                        args.extend(argv.iter().map(|argument| tmux_argument(argument)));
+                    }
                 }
                 self.run_owned(&args)?;
             }

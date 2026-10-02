@@ -735,6 +735,7 @@ if expected in data:
         backend.execute(MuxCommand::NewWindow {
             session_id: session_id.clone(),
             cwd: None,
+            argv: None,
         })?;
         let second_id = backend
             .snapshot()?

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 base64.workspace = true
+getrandom.workspace = true
 bootty-control = { path = "../bootty-control" }
 bootty-write = { path = "../bootty-write" }
 serde.workspace = true

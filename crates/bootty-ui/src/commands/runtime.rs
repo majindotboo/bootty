@@ -1,5 +1,6 @@
 mod agents;
 mod targets;
+mod terminal_agents;
 
 use agents::{AgentScopeIndex, AppCommandAgentExecutor};
 
@@ -35,7 +36,7 @@ use crate::{
     error_catalog::ErrorNotice,
     state::{AppEffect, AppState, ViewportSnapshot},
 };
-use bootty_agents::{AgentCommandExecutor, AgentService};
+use bootty_agents::{AgentCommandExecutor, AgentService, TerminalAgentService};
 use bootty_control::{
     AppCommandReceiver, AppCommandSender, BoundAppCommandSender, Caller, CommandCancellation,
     CommandInvocation, CommandOutcome, CommandTarget, ControlEventSender, MutationClass,
@@ -204,6 +205,8 @@ pub struct CommandRuntime {
     receiver: AppCommandReceiver,
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
+    terminal_agents: Option<Arc<TerminalAgentService>>,
+    terminal_agent_error: Option<String>,
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
     pending: Vec<PendingAppCommand>,
     jobs: Arc<bootty_host::jobs::JobRegistry>,
@@ -219,6 +222,9 @@ impl Drop for CommandRuntime {
         if let Some(agents) = &self.agent_service {
             agents.retire();
         }
+        if let Some(agents) = self.terminal_agents.take() {
+            std::thread::spawn(move || agents.shutdown());
+        }
     }
 }
 
@@ -233,7 +239,7 @@ impl CommandRuntime {
         events: ControlEventSender,
         agent_state: &std::path::Path,
     ) -> Self {
-        let (sender, receiver) = app_command_channel(64, repaint);
+        let (sender, receiver) = app_command_channel(64, repaint.clone());
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
             sender: sender.clone(),
@@ -246,13 +252,32 @@ impl CommandRuntime {
             )
             .persisted_at(agent_state),
         );
-        Self::from_channel(
+        let (terminals, terminal_error) =
+            match TerminalAgentService::open(agent_state.with_extension("terminals.json")) {
+                Ok(service) => (Some(Arc::new(service)), None),
+                Err(mut error) => {
+                    error.truncate(error.floor_char_boundary(4096));
+                    (None, Some(error))
+                }
+            };
+        if let Some(terminals) = &terminals {
+            terminals.set_change_handler(repaint);
+        }
+        let mut runtime = Self::from_channel(
             sender,
             receiver,
             Some(agents),
             Some(scope_index),
             Some(events),
-        )
+        );
+        runtime.terminal_agents.clone_from(&terminals);
+        runtime.terminal_agent_error = terminal_error;
+        runtime.catalog = Arc::new(CommandCatalog::with_terminal_services(
+            runtime.agent_service.clone(),
+            terminals,
+            Arc::downgrade(&runtime.jobs),
+        ));
+        runtime
     }
 
     fn from_channel(
@@ -280,6 +305,8 @@ impl CommandRuntime {
                 },
             )),
             agent_service: agents,
+            terminal_agents: None,
+            terminal_agent_error: None,
             agent_scope_index,
             pending: Vec::new(),
             forwards: Vec::new(),
@@ -386,6 +413,10 @@ impl AppState {
     /// return `None` and retain the static catalog's explicit unsupported behavior.
     pub fn agent_service(&self) -> Option<Arc<AgentService>> {
         self.commands.catalog.agents()
+    }
+
+    pub fn terminal_agent_service(&self) -> Option<Arc<TerminalAgentService>> {
+        self.commands.terminal_agents.clone()
     }
 
     pub(crate) fn drain_app_commands(
@@ -705,7 +736,17 @@ impl AppState {
                 context.exact_target.as_ref(),
                 execution,
             ),
+            CommandExecutor::TerminalAgent => self.dispatch_terminal_agent(
+                context.invocation,
+                context.exact_target.as_ref(),
+                execution,
+            ),
             CommandExecutor::UncomposedAgent => {
+                if let Some(error) = &self.commands.terminal_agent_error {
+                    return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                        message: format!("Terminal agent owner could not start: {error}"),
+                    });
+                }
                 CommandDispatch::Complete(CommandOutcome::Unsupported {
                     message: "native agent service is not composed for this app instance"
                         .to_owned(),

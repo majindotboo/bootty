@@ -315,7 +315,17 @@ impl AppState {
 fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
-            command.starts_with("git.")
+            (command.starts_with("agents.")
+                && [
+                    ".start",
+                    ".resume",
+                    ".fork",
+                    ".account.login",
+                    ".account.logout",
+                ]
+                .iter()
+                .any(|suffix| command.ends_with(suffix)))
+                || command.starts_with("git.")
                 || command.starts_with("files.")
                 || matches!(
                     command,
@@ -326,7 +336,11 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.create"
                 )
         }
-        ResourceKind::Session => command.starts_with("pane.") || command == "session.close",
+        ResourceKind::Session => {
+            command.starts_with("pane.")
+                || matches!(command, "session.close" | "terminal.create_tab")
+                || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))
+        }
         // Terminal input and capture address the pane through the mux and never select it.
         ResourceKind::Terminal => {
             matches!(

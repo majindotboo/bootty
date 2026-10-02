@@ -9,7 +9,10 @@ use crate::{
     error_catalog::ErrorNotice,
     gpui::CommandAction,
 };
-use bootty_agents::{AgentKind, AgentService, command_descriptors as agent_command_descriptors};
+use bootty_agents::{
+    AgentKind, AgentService, TerminalAgentService,
+    command_descriptors as agent_command_descriptors, terminal_command_descriptors,
+};
 use bootty_control::{
     ArgumentSchema, Caller, CommandCatalogSource, CommandDescriptor, CommandInvocation,
     CommandOutcome, CompactSchema, ControlCatalog, MutationClass, ResourceKind, ValueType,
@@ -803,6 +806,7 @@ fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
 pub enum CommandExecutor {
     Core(CoreCommandExecutor),
     Agent(Arc<AgentService>),
+    TerminalAgent,
     /// The static agent catalog remains discoverable in tests and uncomposed app states.
     /// Invocation is rejected explicitly until the host supplies its event transport.
     UncomposedAgent,
@@ -819,6 +823,7 @@ pub struct ResolvedCommandInvocation {
 pub struct CommandCatalog {
     core: &'static CommandRegistry,
     agents: Option<Arc<AgentService>>,
+    terminals: Option<Arc<TerminalAgentService>>,
     control: Arc<ControlCatalog>,
 }
 
@@ -829,13 +834,16 @@ struct NativeCatalogSource {
 
 impl CommandCatalogSource for NativeCatalogSource {
     fn list(&self) -> Vec<CommandDescriptor> {
-        agent_command_descriptors()
+        let mut descriptors = agent_command_descriptors();
+        for descriptor in terminal_command_descriptors() {
+            descriptors.retain(|old| old.id != descriptor.id);
+            descriptors.push(descriptor);
+        }
+        descriptors
     }
 
     fn describe(&self, id: &str) -> Option<CommandDescriptor> {
-        agent_command_descriptors()
-            .into_iter()
-            .find(|command| command.id == id)
+        self.list().into_iter().find(|command| command.id == id)
     }
 
     fn topics(&self) -> std::collections::BTreeSet<String> {
@@ -911,6 +919,14 @@ impl CommandCatalog {
         agents: Option<Arc<AgentService>>,
         jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
     ) -> Self {
+        Self::with_terminal_services(agents, None, jobs)
+    }
+
+    pub(crate) fn with_terminal_services(
+        agents: Option<Arc<AgentService>>,
+        terminals: Option<Arc<TerminalAgentService>>,
+        jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
+    ) -> Self {
         let core = CommandRegistry::core();
         let source = Arc::new(NativeCatalogSource {
             agents: agents.clone(),
@@ -920,6 +936,7 @@ impl CommandCatalog {
             core,
             control: Arc::new(ControlCatalog::new(core.list().cloned().collect(), source)),
             agents,
+            terminals,
         }
     }
 
@@ -941,6 +958,22 @@ impl CommandCatalog {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
+        if let Some(descriptor) = terminal_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            let executor = if self.terminals.is_some() {
+                CommandExecutor::TerminalAgent
+            } else {
+                CommandExecutor::UncomposedAgent
+            };
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor,
+            });
+        }
         if let Some(descriptor) = agent_command_descriptors()
             .into_iter()
             .find(|descriptor| descriptor.id == invocation.command)

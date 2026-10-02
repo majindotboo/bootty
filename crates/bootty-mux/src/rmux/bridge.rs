@@ -255,6 +255,7 @@ fn spawn_local_rmux_daemon(
                 bootty_config::ApplicationIdentity::Development => "bootty-dev",
             },
         )
+        .env_remove("NO_COLOR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -586,9 +587,11 @@ impl RmuxBridgeState {
                 window_id,
                 name,
             } => self.rename_window(&session_id, &window_id, &name).await,
-            MuxCommand::NewWindow { session_id, cwd } => {
-                self.new_window(&session_id, cwd.as_deref()).await
-            }
+            MuxCommand::NewWindow {
+                session_id,
+                cwd,
+                argv,
+            } => self.new_window(&session_id, cwd.as_deref(), argv).await,
             MuxCommand::ActivateNextWindow { session_id } => {
                 self.activate_relative_window(&session_id, 1).await
             }
@@ -701,8 +704,7 @@ impl RmuxBridgeState {
             .size(TerminalSizeSpec::new(80, 24))
             .environment(bootty_rmux_process_environment());
         if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
-            // The command vector keeps tmux's rule: one element is shell text, more run directly.
-            request = request.command(argv);
+            request = request.argv(argv);
         }
         rmux.ensure_session(request).await?;
         // rmux has no way to set options as part of the create, so there is a window where the
@@ -760,7 +762,12 @@ impl RmuxBridgeState {
         Ok(())
     }
 
-    async fn new_window(&mut self, session_name: &str, cwd: Option<&str>) -> Result<()> {
+    async fn new_window(
+        &mut self,
+        session_name: &str,
+        cwd: Option<&str>,
+        argv: Option<Vec<String>>,
+    ) -> Result<()> {
         let rmux = self.rmux().await?;
         let name = SessionName::new(session_name).context("invalid rmux session name")?;
         let window_index = append_window_index(&list_window_rows(rmux, &name).await?);
@@ -769,6 +776,9 @@ impl RmuxBridgeState {
             with_bootty_rmux_environment!(session.new_window_with().at_index(window_index));
         if let Some(cwd) = cwd {
             builder = builder.cwd(cwd);
+        }
+        if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
+            builder = builder.spawn(argv);
         }
         builder.await?;
         Ok(())

@@ -11,6 +11,24 @@ fn launch(args: &[&str]) -> AgentLaunch {
         ephemeral: false,
     }
 }
+
+#[rstest]
+#[case("line one\nline two\tquoted '$HOME'", true)]
+#[case("embedded\0nul", false)]
+#[case("bounded", true)]
+fn literal_argument_validation_preserves_text(#[case] argument: &str, #[case] valid: bool) {
+    assert_eq!(launch(&[argument]).validate().is_ok(), valid);
+}
+
+#[rstest]
+#[case(vec!["x".repeat(8193)])]
+#[case(vec!["x".to_owned(); 65])]
+#[case(vec!["x".repeat(8192); 9])]
+fn argument_limits_remain_authoritative(#[case] arguments: Vec<String>) {
+    let mut launch = launch(&[]);
+    launch.arguments = arguments;
+    assert!(launch.validate().is_err());
+}
 #[rstest]
 #[case(AgentKind::Pi, false, vec!["--model", "model", "--session", "session"]) ]
 #[case(AgentKind::Pi, true, vec!["--model", "model", "--fork", "session"]) ]

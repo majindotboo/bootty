@@ -904,6 +904,7 @@ dependencies = [
  "base64 0.23.1",
  "bootty-control",
  "bootty-write",
+ "getrandom 0.4.3",
  "pretty_assertions",
  "proptest",
  "rstest",

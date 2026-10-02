@@ -32,9 +32,24 @@ pub struct StartingSession {
     generation: u64,
     session_id: String,
     pane_id: String,
+    window_id: String,
+    created_session: bool,
 }
 
 impl StartingSession {
+    #[must_use]
+    pub fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+    #[must_use]
+    pub fn window_id(&self) -> &str {
+        &self.window_id
+    }
+    #[must_use]
+    pub const fn created_session(&self) -> bool {
+        self.created_session
+    }
+
     /// The Space whose binding holds the session.
     #[must_use]
     pub const fn scope(&self) -> SpaceId {
@@ -73,6 +88,46 @@ impl From<WorkspacePersistenceError> for SessionRequestError {
 pub type PreparedSessionRequest = (MuxCommand, Option<BindingMembershipMutation>);
 
 impl WorkspaceRuntime {
+    /// Prepare a literal command in a new tab of an existing held session.
+    /// # Errors
+    /// Rejects invalid cwd/argv, foreign sessions and unsupported backends before mutation.
+    pub fn begin_tab_create(
+        &self,
+        scope: SpaceId,
+        session_id: &str,
+        cwd: Option<&str>,
+        argv: Vec<String>,
+    ) -> Result<PreparedSessionRequest, SessionRequestError> {
+        validate_argv(&argv)?;
+        let binding = self.live_binding(scope)?;
+        let session = binding
+            .mux
+            .backend_session_by_id_or_name(session_id)
+            .ok_or_else(|| SessionRequestError::Unavailable("the session was closed".to_owned()))?;
+        if !binding.holds(session) {
+            return Err(SessionRequestError::Invalid(
+                "this Space does not hold the session".to_owned(),
+            ));
+        }
+        if let Some(cwd) = cwd {
+            validate_cwd(cwd)?;
+            if binding.backend_policy.panes.topology == PaneTopology::ProcessLocal
+                && !Path::new(cwd).is_dir()
+            {
+                return Err(SessionRequestError::Invalid(format!(
+                    "cwd {cwd:?} is not a directory"
+                )));
+            }
+        }
+        let command = MuxCommand::NewWindow {
+            session_id: session.id.clone(),
+            cwd: cwd.map(str::to_owned),
+            argv: Some(argv),
+        };
+        preflight(binding, &command)?;
+        Ok((command, None))
+    }
+
     /// Validate an explicit session create in the Space at `scope` and journal its membership.
     ///
     /// The name must be free on the binding's server: the create never adopts or renames an
@@ -191,7 +246,22 @@ impl WorkspaceRuntime {
             return Ok(None);
         };
         let binding = self.binding(scope).ok_or(MuxCommandError::Stale)?;
+        let window_id = binding
+            .mux
+            .backend_session_by_id_or_name(&pane.session_id)
+            .and_then(|session| {
+                session.windows.iter().find(|window| {
+                    window
+                        .panes
+                        .iter()
+                        .any(|candidate| candidate.pane_id == pane.pane_id)
+                })
+            })
+            .map(|window| window.id.clone())
+            .ok_or_else(|| MuxCommandError::Failed("created pane has no window".to_owned()))?;
         Ok(Some(StartingSession {
+            window_id,
+            created_session: matches!(command, MuxCommand::CreateProjectSession { .. }),
             scope,
             generation: binding.mux.binding_generation(),
             session_id: pane.session_id,
@@ -253,13 +323,18 @@ impl WorkspaceRuntime {
         scope: SpaceId,
         command: &'command MuxCommand,
     ) -> Result<Option<(MuxPaneAnchor, &'command [String])>, MuxCommandError> {
-        let MuxCommand::CreateProjectSession {
-            session_id,
-            argv: Some(argv),
-            ..
-        } = command
-        else {
-            return Ok(None);
+        let (session_id, argv, window_created) = match command {
+            MuxCommand::CreateProjectSession {
+                session_id,
+                argv: Some(argv),
+                ..
+            } => (session_id, argv, false),
+            MuxCommand::NewWindow {
+                session_id,
+                argv: Some(argv),
+                ..
+            } => (session_id, argv, true),
+            _ => return Ok(None),
         };
         let Some(binding) = self.binding(scope) else {
             return Err(MuxCommandError::Stale);
@@ -270,7 +345,17 @@ impl WorkspaceRuntime {
         let pane = binding
             .mux
             .backend_session_by_id_or_name(session_id)
-            .and_then(|session| session.windows.first()?.panes.first().cloned())
+            .and_then(|session| {
+                let window = if window_created {
+                    session
+                        .windows
+                        .iter()
+                        .find(|window| Some(&window.id) == session.active_window_id.as_ref())?
+                } else {
+                    session.windows.first()?
+                };
+                window.panes.first().cloned()
+            })
             .ok_or_else(|| {
                 MuxCommandError::Failed(format!("session {session_id} has no pane to start"))
             })?;
