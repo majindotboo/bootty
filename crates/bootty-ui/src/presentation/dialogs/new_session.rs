@@ -16,6 +16,8 @@ use std::path::Path;
 pub struct NewSessionDialog {
     step: NewSessionStep,
     worker: Option<NewSessionWorker>,
+    project_picker: Option<ProjectPicker>,
+    checkout: Option<String>,
 }
 
 enum NewSessionStep {
@@ -73,6 +75,8 @@ impl NewSessionDialog {
                 projects,
             }),
             worker,
+            project_picker: None,
+            checkout: None,
         }
     }
 
@@ -87,7 +91,12 @@ impl NewSessionDialog {
     }
 
     pub fn set_checkout(&mut self, cwd: String) {
-        self.step = NewSessionStep::Launch { cwd };
+        self.checkout = Some(cwd.clone());
+        if let NewSessionStep::Project(picker) =
+            std::mem::replace(&mut self.step, NewSessionStep::Launch { cwd })
+        {
+            self.project_picker = Some(picker);
+        }
     }
 
     pub fn poll(&mut self) -> Option<NewSessionPickerEvent> {
@@ -95,7 +104,11 @@ impl NewSessionDialog {
         let remote = self.is_remote();
         match result {
             Ok(NewSessionOutcome::Projects(projects)) => {
-                if let NewSessionStep::Project(picker) = &mut self.step {
+                let picker = match &mut self.step {
+                    NewSessionStep::Project(picker) => Some(picker),
+                    _ => self.project_picker.as_mut(),
+                };
+                if let Some(picker) = picker {
                     picker.projects = projects;
                     picker.replace_entries(remote);
                     if !remote {
@@ -178,6 +191,18 @@ impl NewSessionDialog {
         spec.hint = Some(hint.to_owned());
         empty.clone_into(&mut spec.empty_text);
         spec.text_hint = Some(text_hint.to_owned());
+        if matches!(self.step, NewSessionStep::Project(_))
+            && let Some(cwd) = &self.checkout
+        {
+            let mut row = picker_row(
+                RowId::new("current-checkout"),
+                "arrow-left",
+                "Use selected checkout".to_owned(),
+                true,
+            );
+            row.detail = Some(display_project_path(cwd, remote));
+            spec.rows.insert(0, row);
+        }
         if let NewSessionStep::Worktree { project, .. } = &self.step {
             spec.footer = Some(display_project_path(&project.path, remote));
         }
@@ -220,10 +245,18 @@ impl NewSessionDialog {
                 self.toggle_project_favorite()
             }
             DialogIntent::Activate { row, .. } if !self.worker_busy() => {
+                if row.0 == "current-checkout" {
+                    self.set_checkout(self.checkout.clone()?);
+                    return None;
+                }
                 if row.0 == "browse-directory" && !self.is_remote() {
                     return Some(NewSessionPickerEvent::BrowseDirectory);
                 }
                 if let NewSessionStep::Launch { cwd } = &self.step {
+                    if row.0 == "choose-project" {
+                        self.step = NewSessionStep::Project(self.project_picker.take()?);
+                        return None;
+                    }
                     if self.is_remote() && row.0 != "terminal" {
                         return None;
                     }
@@ -321,7 +354,11 @@ impl NewSessionDialog {
             );
             list
         };
-        self.step = NewSessionStep::Worktree { project, list };
+        if let NewSessionStep::Project(picker) =
+            std::mem::replace(&mut self.step, NewSessionStep::Worktree { project, list })
+        {
+            self.project_picker = Some(picker);
+        }
         None
     }
 
@@ -712,6 +749,12 @@ fn launch_spec(cwd: &str, remote: bool) -> DialogSpec {
             rows.push(row);
         }
     }
+    rows.push(picker_row(
+        RowId::new("choose-project"),
+        "folder",
+        "Choose another project…".to_owned(),
+        true,
+    ));
     let mut spec = DialogSpec::searchable(NEW_SESSION_ID, "Start session", "", rows);
     spec.text = None;
     spec.icon = Some("terminal".to_owned());

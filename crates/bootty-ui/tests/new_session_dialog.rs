@@ -102,6 +102,43 @@ fn project_row_ids_map_activation_across_groups() {
     );
 }
 
+#[rstest::rstest]
+#[case("/projects/current")]
+#[case("/remote/current project")]
+fn current_checkout_is_reviewable_and_project_switching_can_return(#[case] cwd: &str) {
+    let mut dialog = NewSessionDialog::from_projects(vec![project("/projects/other", true)]);
+    dialog.set_checkout(cwd.to_owned());
+    let spec = dialog.spec();
+    assert_eq!(spec.title, "Start session");
+    assert!(
+        spec.footer
+            .as_deref()
+            .is_some_and(|path| path.ends_with(cwd))
+    );
+    let switch = spec
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "choose-project")
+        .unwrap();
+    assert_eq!(activate_picker_row(&mut dialog, switch, &[]), None);
+    let spec = dialog.spec();
+    assert!(project_row(&spec, "/projects/other").action.is_some());
+    let current = spec
+        .rows
+        .iter()
+        .find(|row| row.id.0 == "current-checkout")
+        .unwrap();
+    assert_eq!(activate_picker_row(&mut dialog, current, &[]), None);
+    let spec = dialog.spec();
+    let terminal = spec.rows.iter().find(|row| row.id.0 == "terminal").unwrap();
+    assert_eq!(
+        activate_picker_row(&mut dialog, terminal, &[]),
+        Some(NewSessionPickerEvent::CreateSession {
+            cwd: cwd.to_owned()
+        })
+    );
+}
+
 #[test]
 fn local_picker_starts_with_async_loading_state() {
     let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
