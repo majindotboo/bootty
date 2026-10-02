@@ -96,14 +96,17 @@ fn load_session_membership(
         .collect::<HashSet<_>>();
     let mut sessions = HashMap::<i64, Vec<WorkspaceSession>>::new();
     let mut identities = HashSet::new();
+    let mut task_lifecycles = HashMap::new();
     let mut statement = tx.prepare(
-        "SELECT identity, space_id, backend_name, display_name, explicit, cwd, position
+        "SELECT identity, space_id, backend_name, display_name, explicit, cwd, position,
+                task_lifecycle
          FROM workspace_sessions ORDER BY space_id, position",
     )?;
     for row in statement.query_map([], |row| {
         Ok((
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(6)?,
+            row.get::<_, Option<String>>(7)?,
             WorkspaceSession {
                 identity: row.get(0)?,
                 backend_name: row.get(2)?,
@@ -113,9 +116,14 @@ fn load_session_membership(
             },
         ))
     })? {
-        let (space_id, position, session) = row?;
+        let (space_id, position, lifecycle, session) = row?;
         if unsupported_ids.contains(&space_id) {
             continue;
+        }
+        if let Some(lifecycle) = lifecycle {
+            let lifecycle =
+                TaskLifecycle::from_storage(&lifecycle).ok_or(rusqlite::Error::InvalidQuery)?;
+            task_lifecycles.insert(session.identity.clone(), lifecycle);
         }
         if session.identity.is_empty()
             || session.backend_name.is_empty()
@@ -145,6 +153,14 @@ fn load_session_membership(
                 .remove(&space.id.persistence_value())
                 .unwrap_or_default(),
         );
+        for session in space.binding.sessions.sessions().to_vec() {
+            if let Some(lifecycle) = task_lifecycles.remove(&session.identity) {
+                space
+                    .binding
+                    .sessions
+                    .set_task_lifecycle(&session.identity, lifecycle);
+            }
+        }
     }
     if !sessions.is_empty() {
         return Err(rusqlite::Error::InvalidQuery);

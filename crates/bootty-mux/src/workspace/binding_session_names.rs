@@ -197,19 +197,57 @@ impl WorkspaceRuntime {
     }
 
     pub fn project_session_command(&self, cwd: &str) -> MuxCommand {
-        let remote = self.active.binding.multiplexer.remote.is_some();
-        let cwd = self.active.binding.session_cwd(cwd);
+        self.project_session_command_for_binding(&self.active.binding, cwd)
+    }
+
+    fn project_session_command_for_binding(
+        &self,
+        binding: &BindingRuntime,
+        cwd: &str,
+    ) -> MuxCommand {
+        let remote = binding.multiplexer.remote.is_some();
+        let cwd = binding.session_cwd(cwd);
         let display_name = suggested_session_name(&cwd, remote);
+        let backend_name = session_names::portable_session_name(&display_name);
         let session_id = session_names::unique_session_name(
-            &display_name,
+            &backend_name,
             self.taken_session_names(None).iter().map(String::as_str),
         );
         MuxCommand::CreateProjectSession {
             session_id,
             cwd,
-            tag: self.active.binding.new_session_tag(),
+            tag: binding.new_session_tag(),
             argv: None,
         }
+    }
+
+    /// Prepare a selected project session while preserving its generated display label.
+    /// # Errors
+    /// Returns unavailable binding, invalid launch or persistence errors before publication.
+    pub fn begin_project_session_create(
+        &mut self,
+        scope: crate::controller::SpaceId,
+        cwd: &str,
+        argv: Vec<String>,
+    ) -> Result<super::PreparedSessionRequest, super::SessionRequestError> {
+        super::session_requests::validate_cwd(cwd)?;
+        let binding = self.binding(scope).ok_or_else(|| {
+            super::SessionRequestError::Unavailable("The project Space is unavailable".to_owned())
+        })?;
+        let MuxCommand::CreateProjectSession {
+            session_id, cwd, ..
+        } = self.project_session_command_for_binding(binding, cwd)
+        else {
+            return Err(super::SessionRequestError::Unavailable(
+                "The project launch is unavailable".to_owned(),
+            ));
+        };
+        let generated = PendingGeneratedName {
+            name: session_id.clone(),
+            display_name: suggested_session_name(&cwd, binding.multiplexer.remote.is_some()),
+            explicit: false,
+        };
+        self.prepare_session_create(scope, &session_id, &cwd, argv, Some(&generated))
     }
 
     /// # Errors

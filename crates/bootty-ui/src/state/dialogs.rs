@@ -158,8 +158,13 @@ impl AppState {
             Some(Event::NewSession(NewSessionPickerEvent::CreateAgentSession {
                 cwd,
                 provider,
+                prompt,
             })) => {
-                effects.push(AppEffect::OpenAgentProjectSession { cwd, provider });
+                effects.push(AppEffect::OpenAgentProjectSession {
+                    cwd,
+                    provider,
+                    prompt,
+                });
                 self.dismiss_modal_dialog();
             }
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
@@ -527,8 +532,8 @@ impl AppState {
                     }
                 }
             }
-            NewSessionPickerEvent::CreateSession { cwd } => {
-                self.create_project_session_for_cwd(&cwd);
+            NewSessionPickerEvent::CreateSession { cwd, command } => {
+                self.create_project_session_for_cwd(&cwd, command);
                 self.dismiss_modal_dialog();
             }
         }
@@ -548,12 +553,21 @@ impl AppState {
     }
     pub(super) fn open_new_mux_session_dialog(&mut self) {
         self.close_overlay_dialogs();
-        self.show_overlay(ModalDialog::NewSession(
-            self.active_multiplexer().remote.clone().map_or_else(
-                || NewSessionDialog::open_local(self.repaint.clone()),
-                |remote| NewSessionDialog::open_remote(remote, self.repaint.clone()),
-            ),
-        ));
+        let mut dialog = self.active_multiplexer().remote.clone().map_or_else(
+            || NewSessionDialog::open_local(self.repaint.clone()),
+            |remote| NewSessionDialog::open_remote(remote, self.repaint.clone()),
+        );
+        if let Some(cwd) = self
+            .workspace
+            .active
+            .binding
+            .mux()
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.cwd.clone())
+        {
+            dialog.set_checkout(cwd);
+        }
+        self.show_overlay(ModalDialog::NewSession(dialog));
     }
     pub fn open_create_space_dialog_from_ui(&mut self) -> bool {
         self.close_overlay_dialogs();

@@ -8,6 +8,7 @@ mod protocol;
 mod remote;
 mod server;
 mod state;
+mod terminal_tool_proxy;
 mod wait;
 
 pub use catalog::{CommandCatalogSource, ControlCatalog};
@@ -28,5 +29,6 @@ pub use plane::ControlPlane;
 pub use protocol::{RpcError, RpcResponse};
 pub use remote::RemoteControlServer;
 pub use server::ControlServer;
+pub use terminal_tool_proxy::{TerminalToolOperation, serve_terminal_tools};
 
 pub use wait::{WaitOutcome, WaitRequest, wait_for_command};

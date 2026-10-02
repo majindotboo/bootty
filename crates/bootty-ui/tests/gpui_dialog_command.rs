@@ -173,6 +173,23 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
+fn tab_to_control(cx: &mut VisualTestContext, id: &'static str) {
+    use gpui_kit::test::TestWindowExt as _;
+
+    for _ in 0..12 {
+        let focused = cx.update(|window, app| {
+            window.render_frame(app);
+            window.find(id).focused() == Some(true)
+        });
+        if focused {
+            return;
+        }
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+    }
+    panic!("Tab traversal did not reach {id}");
+}
+
 #[gpui_kit::test]
 fn searchable_dialog_omits_generic_dialog_chrome(cx: &TestAppContext) {
     let (_, mut cx) = rooted_probe(
@@ -1102,4 +1119,244 @@ fn setup_choices_start_at_terminal_after_any_checkout_selection(cx: &TestAppCont
             );
         });
     }
+}
+
+#[gpui_kit::test]
+fn changing_workflow_role_resets_launch_selection(cx: &TestAppContext) {
+    let launch = || {
+        DialogSpec::searchable(
+            "workflow",
+            "Start session",
+            "task",
+            vec![
+                DialogRow::action("agent", "Agent", DialogAction::new("start")),
+                DialogRow::action("project", "Choose project", DialogAction::new("choose")),
+            ],
+        )
+    };
+    let (probe, mut cx) = rooted_probe(cx, launch());
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+    for spec in [
+        DialogSpec::prompt(
+            "workflow",
+            "New checkout",
+            "branch",
+            "Branch",
+            DialogAction::new("create"),
+        ),
+        launch(),
+    ] {
+        cx.update(|window, app| {
+            probe.update(app, |probe, cx| {
+                probe
+                    .dialog
+                    .update(cx, |dialog, cx| dialog.present(Some(spec), window, cx));
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+    }
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("enter");
+    probe.update(&mut cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(
+            |intent| matches!(intent, DialogIntent::Activate { row, .. } if row.0 == "agent")
+        ));
+    });
+}
+
+#[gpui_kit::test]
+fn changing_picker_step_resets_selection_and_accepts_typing(cx: &TestAppContext) {
+    let initial = DialogSpec::searchable(
+        "workflow",
+        "Start session",
+        "task",
+        vec![
+            DialogRow::action("agent", "Agent", DialogAction::new("start")),
+            DialogRow::action("project", "Choose project", DialogAction::new("choose")),
+        ],
+    );
+    let (probe, mut cx) = rooted_probe(cx, initial);
+    cx.update(|window, app| {
+        probe
+            .read(app)
+            .dialog
+            .read(app)
+            .focus_handle(app)
+            .focus(window, app);
+    });
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        probe.update(app, |probe, cx| {
+            probe.dialog.update(cx, |dialog, cx| {
+                dialog.present(
+                    Some(DialogSpec::searchable(
+                        "workflow",
+                        "Choose project",
+                        "",
+                        vec![
+                            DialogRow::action(
+                                "first",
+                                "First project",
+                                DialogAction::new("choose"),
+                            ),
+                            DialogRow::action(
+                                "second",
+                                "Second project",
+                                DialogAction::new("choose"),
+                            ),
+                        ],
+                    )),
+                    window,
+                    cx,
+                );
+            });
+        });
+    });
+    cx.refresh().unwrap();
+    cx.run_until_parked();
+    cx.simulate_keystrokes("p");
+    cx.simulate_keystrokes("enter");
+    probe.update(&mut cx, |probe, _| {
+        let intents = probe.intents.borrow();
+        assert!(intents.iter().any(
+            |intent| matches!(intent, DialogIntent::TextChanged { value, .. } if value == "p")
+        ));
+        assert!(intents.iter().any(
+            |intent| matches!(intent, DialogIntent::Activate { row, .. } if row.0 == "first")
+        ));
+    });
+}
+
+#[gpui_kit::test]
+fn session_launch_edits_multiline_prompt_and_starts_only_on_submit(cx: &TestAppContext) {
+    let mut model = bootty_ui::presentation::dialogs::NewSessionDialog::from_projects(Vec::new());
+    model.set_checkout("/projects/current".to_owned());
+    let spec = model.spec();
+    assert_eq!(spec.role, DialogRole::SessionLaunch);
+    let id = spec.id.clone();
+    let (probe, mut cx) = rooted_probe(cx, spec);
+    assert!(cx.debug_bounds("session-launch-panel").is_some());
+    assert!(cx.debug_bounds("session-launch-choose-project").is_some());
+    assert!(cx.debug_bounds("session-launch-choose-checkout").is_some());
+    click(&mut cx, "session-launch-prompt");
+    cx.simulate_input("First line");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("Second line");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert!(
+            probe.intents.borrow().contains(&DialogIntent::TextChanged {
+                dialog: id.clone(),
+                value: "First line\nSecond line".to_owned(),
+            }),
+            "{:?}",
+            probe.intents.borrow()
+        );
+        assert!(
+            !probe
+                .intents
+                .borrow()
+                .iter()
+                .any(|intent| matches!(intent, DialogIntent::Activate { .. }))
+        );
+    });
+    click(&mut cx, "session-launch-start");
+    probe.update(&mut cx, |probe, _| {
+        let activations = probe
+            .intents
+            .borrow()
+            .iter()
+            .filter(|intent| matches!(intent, DialogIntent::Activate { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        pretty_assertions::assert_eq!(
+            activations,
+            vec![DialogIntent::Activate {
+                dialog: id,
+                row: RowId::new("submit"),
+                action: ActionId::new("start-session"),
+                payload: DialogPayload::default(),
+            }]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn session_launch_provider_supports_pointer_and_keyboard_without_launching(cx: &TestAppContext) {
+    let mut model = bootty_ui::presentation::dialogs::NewSessionDialog::from_projects(Vec::new());
+    model.set_checkout("/projects/current".to_owned());
+    let spec = model.spec();
+    let id = spec.id.clone();
+    let (probe, mut cx) = rooted_probe(cx, spec);
+    click(&mut cx, "session-launch-provider-Claude");
+    tab_to_control(&mut cx, "session-launch-provider-Claude");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        let expected = DialogIntent::FieldChanged {
+            dialog: id,
+            field: "provider".to_owned(),
+            value: "Claude".to_owned(),
+        };
+        pretty_assertions::assert_eq!(
+            probe
+                .intents
+                .borrow()
+                .iter()
+                .filter(|intent| matches!(intent, DialogIntent::FieldChanged { .. }))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![expected.clone(), expected]
+        );
+        assert!(
+            !probe
+                .intents
+                .borrow()
+                .iter()
+                .any(|intent| matches!(intent, DialogIntent::Activate { .. }))
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn session_launch_start_button_confirms_from_keyboard_once(cx: &TestAppContext) {
+    let mut model = bootty_ui::presentation::dialogs::NewSessionDialog::from_projects(Vec::new());
+    model.set_checkout("/projects/current".to_owned());
+    let spec = model.spec();
+    let id = spec.id.clone();
+    let (probe, mut cx) = rooted_probe(cx, spec);
+    click(&mut cx, "session-launch-start");
+    probe.update(&mut cx, |probe, _| probe.intents.borrow_mut().clear());
+    tab_to_control(&mut cx, "session-launch-start");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        pretty_assertions::assert_eq!(
+            probe.intents.borrow().as_slice(),
+            &[DialogIntent::Activate {
+                dialog: id,
+                row: RowId::new("submit"),
+                action: ActionId::new("start-session"),
+                payload: DialogPayload::default(),
+            }]
+        );
+    });
 }

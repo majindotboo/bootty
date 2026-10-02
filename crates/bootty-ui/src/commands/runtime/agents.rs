@@ -10,8 +10,8 @@ use crate::{
 };
 use bootty_agents::{AgentCommandExecutor, AgentInvocation, AgentPaneResolver, AgentService};
 use bootty_control::{
-    AppCommandSendError, AppCommandSender, Caller, CommandCancellation, CommandInvocation,
-    CommandOutcome, ResourceKind,
+    AppCommandSendError, AppCommandSender, CommandCancellation, CommandInvocation, CommandOutcome,
+    ResourceKind,
 };
 use bootty_mux::{
     executor,
@@ -39,7 +39,7 @@ impl AgentCommandExecutor for AppCommandAgentExecutor {
         cancellation: CommandCancellation,
     ) -> CommandOutcome {
         let nested_cancellation = CommandCancellation::new();
-        let receiver = match self.sender.for_caller(Caller::Internal).submit(
+        let receiver = match self.sender.for_caller(invocation.caller).submit(
             invocation,
             deadline,
             nested_cancellation.clone(),

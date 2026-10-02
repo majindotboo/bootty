@@ -15,8 +15,8 @@ use gpui_kit::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Presentation {
     TerminalFind,
-    // Root bakes its title and chrome into open_dialog. A workflow changing its title
-    // must reopen the Root even while it keeps the same dialog id.
+    // A workflow step owns fresh focus even when its Root title is hidden.
+    // Reopen only at step boundaries, not for ordinary query/model refreshes.
     Modal { id: DialogId, title: Option<String> },
     SpaceEditor,
 }
@@ -124,6 +124,7 @@ impl WorkspaceDialogs {
         cx: &mut Context<GpuiWorkspace>,
     ) {
         let id = spec.id.clone();
+        let workflow_title = spec.title.clone();
         let browser_palette = id.0 == crate::presentation::dialogs::COMMAND_PALETTE_ID;
         self.view
             .update(cx, |view, cx| view.present(Some(spec), window, cx));
@@ -139,7 +140,7 @@ impl WorkspaceDialogs {
         let title = self.view.read(cx).root_title();
         let presentation = Presentation::Modal {
             id,
-            title: title.clone(),
+            title: Some(workflow_title),
         };
         if self.presentation.as_ref() == Some(&presentation) && window.has_active_dialog(cx) {
             return;

@@ -64,6 +64,10 @@ impl WorkspaceRuntime {
                             .sessions
                             .sessions()
                             .iter()
+                            .filter(|session| {
+                                binding.sessions.task_lifecycle(&session.identity).is_none()
+                                    || binding.task_attachment_observed(&session.identity)
+                            })
                             .map(|session| session.identity.clone()),
                     );
                 }

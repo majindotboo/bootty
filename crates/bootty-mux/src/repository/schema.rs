@@ -39,14 +39,14 @@ pub(super) fn classify_schema(
     }
     // Every revision before 5 kept the connection in a table of its own, so a database missing it
     // is corrupt rather than merely old.
-    if revision < WORKSPACE_SNAPSHOT_REVISION && !tables.contains("workspace_bindings") {
+    if revision < 5 && !tables.contains("workspace_bindings") {
         return Err(rusqlite::Error::InvalidQuery);
     }
     if !table_has_columns(conn, "workspace_spaces", &["id", "name", "position"])? {
         return Err(rusqlite::Error::InvalidQuery);
     }
 
-    if revision != WORKSPACE_SNAPSHOT_REVISION {
+    if revision < 5 {
         return Ok(WorkspaceSchemaKind::LegacyWorkspace);
     }
     for (table, columns) in [
@@ -107,6 +107,9 @@ pub(super) fn classify_schema(
         if !table_has_columns(conn, table, columns)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
+    }
+    if revision >= 6 && !table_has_columns(conn, "workspace_sessions", &["task_lifecycle"])? {
+        return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(WorkspaceSchemaKind::Current)
 }
@@ -488,5 +491,15 @@ pub(super) fn migrate_workspace_space_appearance(tx: &Transaction<'_>) -> rusqli
         &columns,
         "tint_sidebar",
         "ALTER TABLE workspace_spaces ADD COLUMN tint_sidebar INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+pub(super) fn migrate_workspace_task_lifecycle(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let columns = table_columns(tx, "workspace_sessions")?;
+    add_column_if_missing(
+        tx,
+        &columns,
+        "task_lifecycle",
+        "ALTER TABLE workspace_sessions ADD COLUMN task_lifecycle TEXT",
     )
 }

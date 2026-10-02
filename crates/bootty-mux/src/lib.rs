@@ -23,6 +23,7 @@ pub mod remote_catalog;
 pub mod remote_space;
 #[cfg(feature = "terminal-runtime")]
 pub mod repository;
+pub mod session_lifecycle;
 pub mod session_membership;
 pub mod snapshot;
 #[cfg(feature = "terminal-runtime")]

@@ -3,13 +3,18 @@ use super::{CommandDispatch, PendingCommandResult};
 use crate::{commands::ExactMuxTarget, state::AppState};
 use bootty_agents::{
     AgentCommandExecutor, AgentKind, AgentLaunch, TerminalAgentRecord, TerminalAgentService,
+    TerminalToolRequest,
 };
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, CommandWarning,
     ResourceKind,
 };
+use bootty_mux::workspace::BindingRuntime;
 use serde_json::json;
-use std::{sync::mpsc, time::Instant};
+use std::{
+    sync::{Arc, mpsc},
+    time::Instant,
+};
 
 impl AppState {
     pub(super) fn dispatch_terminal_agent(
@@ -25,6 +30,9 @@ impl AppState {
                 message: "Terminal agent metadata storage is unavailable".to_owned(),
             });
         };
+        if invocation.command.strip_suffix(".tools").is_some() {
+            return self.dispatch_terminal_tools(service, &invocation, deadline, cancellation);
+        }
         let scope = exact.map_or_else(
             || self.workspace.active.binding.scope(),
             ExactMuxTarget::scope,
@@ -35,19 +43,7 @@ impl AppState {
             });
         };
         let binding_id = scope.persistence_value().to_string();
-        let cwd = exact
-            .and_then(|exact| exact.ids().0)
-            .and_then(|id| {
-                binding
-                    .mux()
-                    .all_sessions()
-                    .iter()
-                    .find(|session| session.id == id)
-            })
-            .map(|session| &session.anchor)
-            .or_else(|| binding.mux().selected_session_anchor())
-            .and_then(|anchor| anchor.cwd.clone())
-            .unwrap_or_else(|| crate::state::default_session_cwd(self.config()));
+        let cwd = self.terminal_agent_cwd(exact, binding);
         let binding_target = ExactMuxTarget::Binding(scope).command_target(
             ResourceKind::Binding,
             binding.mux(),
@@ -116,11 +112,57 @@ impl AppState {
                 deadline,
                 cancellation,
             };
-            let outcome = execute(context, &invocation);
+            let outcome = execute(&context, &invocation);
             let _ = sender.send(outcome);
             repaint();
         });
         CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+    }
+
+    fn dispatch_terminal_tools(
+        &self,
+        service: Arc<TerminalAgentService>,
+        invocation: &CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+    ) -> CommandDispatch {
+        let request = invocation
+            .arguments
+            .first()
+            .and_then(|request| serde_json::from_str::<TerminalToolRequest>(request).ok());
+        let Some(request) = request
+            .filter(|request| invocation.command == format!("agents.{}.tools", request.provider))
+        else {
+            return CommandDispatch::Complete(CommandOutcome::Denied {
+                message: "Invalid scoped terminal tool request".to_owned(),
+            });
+        };
+        let executor = super::agents::AppCommandAgentExecutor {
+            sender: self.commands.sender.clone(),
+        };
+        self.dispatch_committed_command(Some((deadline, cancellation.clone())), move || {
+            service.invoke_terminal_tool(&request, &executor, deadline, cancellation)
+        })
+    }
+
+    fn terminal_agent_cwd(
+        &self,
+        exact: Option<&ExactMuxTarget>,
+        binding: &BindingRuntime,
+    ) -> String {
+        exact
+            .and_then(|exact| exact.ids().0)
+            .and_then(|id| {
+                binding
+                    .mux()
+                    .all_sessions()
+                    .iter()
+                    .find(|session| session.id == id)
+            })
+            .map(|session| &session.anchor)
+            .or_else(|| binding.mux().selected_session_anchor())
+            .and_then(|anchor| anchor.cwd.clone())
+            .unwrap_or_else(|| crate::state::default_session_cwd(self.config()))
     }
 
     fn agent_session_names_in_use(&self) -> Vec<String> {
@@ -156,7 +198,7 @@ struct TerminalAgentContext<'a> {
     cancellation: CommandCancellation,
 }
 
-fn execute(context: TerminalAgentContext<'_>, invocation: &CommandInvocation) -> CommandOutcome {
+fn execute(context: &TerminalAgentContext<'_>, invocation: &CommandInvocation) -> CommandOutcome {
     if context.cancellation.is_cancelled() {
         return CommandOutcome::cancelled();
     }
@@ -178,7 +220,7 @@ fn execute(context: TerminalAgentContext<'_>, invocation: &CommandInvocation) ->
     };
     match operation {
         "prompt" | "interrupt" | "abort" | "stop" => {
-            terminal_operation(&context, invocation, provider, operation)
+            terminal_operation(context, invocation, provider, operation)
         }
         "sessions" => session_history(invocation, provider, context.remote),
         "account.status" => account_status(invocation, provider, context.remote),
@@ -425,12 +467,19 @@ fn resume_arguments(
 }
 
 fn start_terminal(
-    context: TerminalAgentContext<'_>,
+    context: &TerminalAgentContext<'_>,
     provider: AgentKind,
     operation: &str,
-    launch: AgentLaunch,
+    mut launch: AgentLaunch,
     session_id: Option<String>,
 ) -> CommandOutcome {
+    let tools_requested = !operation.starts_with("account.");
+    let (attachment, attachment_error) = if tools_requested {
+        prepare_terminal_tools(context, provider, &mut launch)
+            .map_or_else(|error| (None, Some(error)), |id| (id, None))
+    } else {
+        (None, None)
+    };
     let argv = if context.isolate_color_environment {
         launch.posix_terminal_argv(context.color_override.as_deref())
     } else {
@@ -449,11 +498,16 @@ fn start_terminal(
         context.session_names.iter().map(String::as_str),
     );
     let started = if operation == "tab" {
-        start_tab(&context, provider, &launch, &argv)
+        start_tab(context, provider, &launch, &argv)
     } else {
         let encoded = match serde_json::to_string(&argv) {
             Ok(value) => value,
-            Err(error) => return failure(&error.to_string()),
+            Err(error) => {
+                if let Some(id) = &attachment {
+                    context.service.revoke_terminal_tools(id);
+                }
+                return failure(&error.to_string());
+            }
         };
         let mut request = CommandInvocation::new(
             "session.create",
@@ -465,14 +519,6 @@ fn start_terminal(
             .executor
             .execute(request, context.deadline, context.cancellation.clone())
     };
-    let TerminalAgentContext {
-        service,
-        executor,
-        binding_id,
-        deadline,
-        cancellation,
-        ..
-    } = context;
     match started {
         CommandOutcome::Success {
             value,
@@ -483,10 +529,10 @@ fn start_terminal(
                 .cloned()
                 .and_then(|value| serde_json::from_value::<CommandTarget>(value).ok());
             if let Some(target) = &target
-                && let Err(error) = service.register(TerminalAgentRecord {
+                && let Err(error) = context.service.register(TerminalAgentRecord {
                     provider,
                     target: target.clone(),
-                    binding_id: binding_id.to_owned(),
+                    binding_id: context.binding_id.to_owned(),
                     launch,
                     session_id,
                 })
@@ -498,23 +544,128 @@ fn start_terminal(
                     ),
                 });
             }
-            if let Some(target) = &target {
-                let mut focus = CommandInvocation::from_action("agents.focus", Caller::Internal);
-                focus.target = Some(target.clone());
-                let outcome = executor.execute(focus, deadline, cancellation);
-                if !matches!(outcome, CommandOutcome::Success { .. }) {
-                    warnings.push(CommandWarning {
-                        code: "agent_focus_failed".into(),
-                        message: "Agent terminal started, but could not be selected.".into(),
-                    });
-                }
-            }
+            let tools_enabled = finish_terminal_tools(
+                context.service,
+                attachment.as_deref(),
+                attachment_error.as_deref(),
+                target.as_ref(),
+                tools_requested,
+                &mut warnings,
+            );
+            focus_started_terminal(context, target.as_ref(), &mut warnings);
             CommandOutcome::Success {
-                value: json!({"created":value.get("created"),"terminal_target":target,"target":target,"provider":provider.to_string(),"message":if provider==AgentKind::Pi&&operation.starts_with("account."){"Use /login or /logout in the Pi terminal"}else{""}}),
+                value: json!({"created":value.get("created"),"terminal_target":target,"target":target,"provider":provider.to_string(),"tools":{"own_terminal_read":tools_enabled,"terminal_spawn":tools_enabled},"message":if provider==AgentKind::Pi&&operation.starts_with("account."){"Use /login or /logout in the Pi terminal"}else{""}}),
                 warnings,
             }
         }
-        outcome => outcome,
+        outcome => {
+            if let Some(id) = attachment {
+                context.service.revoke_terminal_tools(&id);
+            }
+            outcome
+        }
+    }
+}
+
+fn focus_started_terminal(
+    context: &TerminalAgentContext<'_>,
+    target: Option<&CommandTarget>,
+    warnings: &mut Vec<CommandWarning>,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    let mut focus = CommandInvocation::from_action("agents.focus", Caller::Internal);
+    focus.target = Some(target.clone());
+    let outcome = context
+        .executor
+        .execute(focus, context.deadline, context.cancellation.clone());
+    if !matches!(outcome, CommandOutcome::Success { .. }) {
+        warnings.push(CommandWarning {
+            code: "agent_focus_failed".into(),
+            message: "Agent terminal started, but could not be selected.".into(),
+        });
+    }
+}
+
+fn finish_terminal_tools(
+    service: &TerminalAgentService,
+    attachment: Option<&str>,
+    attachment_error: Option<&str>,
+    target: Option<&CommandTarget>,
+    requested: bool,
+    warnings: &mut Vec<CommandWarning>,
+) -> bool {
+    if let Some(id) = attachment {
+        return match target
+            .ok_or_else(|| "The backend did not return an exact terminal".to_owned())
+            .and_then(|target| service.complete_terminal_tools(id, target))
+        {
+            Ok(()) => true,
+            Err(error) => {
+                service.revoke_terminal_tools(id);
+                warnings.push(CommandWarning {
+                    code: "agent_tools_unavailable".to_owned(),
+                    message: error,
+                });
+                false
+            }
+        };
+    }
+    if let Some(error) = attachment_error {
+        warnings.push(CommandWarning {
+            code: "agent_tools_unavailable".to_owned(),
+            message: format!("Agent terminal started without Bootty tools: {error}"),
+        });
+    } else if requested {
+        warnings.push(CommandWarning {
+            code: "agent_tools_unsupported".to_owned(),
+            message: "Own-terminal read tools require a local Codex or Claude launch without explicit tool configuration".to_owned(),
+        });
+    }
+    false
+}
+
+fn prepare_terminal_tools(
+    context: &TerminalAgentContext<'_>,
+    provider: AgentKind,
+    launch: &mut AgentLaunch,
+) -> Result<Option<String>, String> {
+    if context.remote || !bootty_agents::terminal_tools_supported(provider, launch) {
+        return Ok(None);
+    }
+    let binding_target = context
+        .binding_target
+        .clone()
+        .ok_or_else(|| "The agent binding target is unavailable".to_owned())?;
+    let cwd = launch
+        .cwd
+        .clone()
+        .ok_or_else(|| "The agent checkout is unavailable".to_owned())?;
+    let id = context.service.reserve_terminal_session_tools(
+        provider,
+        context.binding_id,
+        binding_target,
+        cwd,
+    )?;
+    let attached = std::env::current_exe()
+        .map_err(|error| error.to_string())
+        .and_then(|executable| {
+            bootty_agents::attach_terminal_tool_arguments(
+                launch,
+                provider,
+                &executable,
+                context.binding_id,
+                &id,
+                bootty_config::ApplicationIdentity::current().cli_name(),
+            )
+        });
+    match attached {
+        Ok(()) => Ok(Some(id)),
+        Err(error) => {
+            context.service.revoke_terminal_tools(&id);
+            Err(error)
+        }
     }
 }
 

@@ -11,7 +11,10 @@ use bootty_control::{CommandTarget, ResourceKind};
 use bootty_write::{NewFileMode, WriteTarget};
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentKind, AgentLaunch};
+use crate::{
+    AgentCommandExecutor, AgentKind, AgentLaunch, TerminalToolRequest,
+    terminal_tools::{TerminalSpawnScope, TerminalTools},
+};
 
 /// Launch identity for a backend-owned terminal. This owner never starts a provider process.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -27,6 +30,7 @@ pub struct TerminalAgentService {
     path: PathBuf,
     records: Mutex<Vec<TerminalAgentRecord>>,
     revision: AtomicU64,
+    tools: TerminalTools,
 }
 
 impl TerminalAgentService {
@@ -58,6 +62,7 @@ impl TerminalAgentService {
             path,
             records: Mutex::new(records),
             revision: AtomicU64::new(1),
+            tools: TerminalTools::default(),
         })
     }
 
@@ -82,6 +87,70 @@ impl TerminalAgentService {
             .iter()
             .find(|record| record.target == *target)
             .cloned()
+    }
+
+    /// Reserve only own-terminal read tools for a native provider launch. No permission or
+    /// credential is persisted, and provider hooks are unrelated to this policy.
+    /// # Errors
+    /// Returns a missing binding or attachment limit error.
+    pub fn reserve_terminal_tools(
+        &self,
+        provider: AgentKind,
+        binding_id: &str,
+    ) -> Result<String, String> {
+        self.tools.reserve(provider, binding_id, None)
+    }
+
+    /// Reserve own-terminal read and a detached ordinary shell in this exact Space and checkout.
+    /// The child shell receives no agent tool authority. Nothing is persisted.
+    /// # Errors
+    /// Returns invalid binding/checkout or attachment limit errors.
+    pub fn reserve_terminal_session_tools(
+        &self,
+        provider: AgentKind,
+        binding_id: &str,
+        binding_target: CommandTarget,
+        cwd: String,
+    ) -> Result<String, String> {
+        self.tools.reserve(
+            provider,
+            binding_id,
+            Some(TerminalSpawnScope {
+                binding_target,
+                cwd,
+            }),
+        )
+    }
+
+    /// Publish an exact target only after its launch metadata has committed.
+    /// # Errors
+    /// Returns a missing record or revoked attachment error.
+    pub fn complete_terminal_tools(&self, id: &str, target: &CommandTarget) -> Result<(), String> {
+        let record = self
+            .record(target)
+            .ok_or_else(|| "Terminal agent metadata has not committed".to_owned())?;
+        self.tools.complete(
+            id,
+            record.provider,
+            &record.binding_id,
+            target,
+            record.launch.cwd.as_deref(),
+        )
+    }
+
+    pub fn revoke_terminal_tools(&self, id: &str) {
+        self.tools.revoke(id);
+    }
+
+    pub fn invoke_terminal_tool(
+        &self,
+        request: &TerminalToolRequest,
+        executor: &dyn AgentCommandExecutor,
+        deadline: std::time::Instant,
+        cancellation: bootty_control::CommandCancellation,
+    ) -> bootty_control::CommandOutcome {
+        self.tools
+            .invoke(self, request, executor, deadline, cancellation)
     }
 
     /// Commit retained launch metadata before publishing it. Credential argv is never retained.

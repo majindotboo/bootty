@@ -6,10 +6,10 @@
 use super::{OverlayPlacement, OverlayView};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonGroup, ButtonVariants as _},
     command::{Command, CommandEntry, CommandGroup, CommandItem, CommandState},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     v_flex,
 };
 use gpui_kit::{
@@ -218,6 +218,7 @@ impl DialogIntent {
 pub enum DialogRole {
     SearchableList,
     Prompt,
+    SessionLaunch,
     Confirm,
     TerminalFind,
     ThemePicker,
@@ -404,6 +405,7 @@ pub struct DialogView {
     /// Prompts own a real editor instead of focusing a hidden `CommandState` query.
     prompt_input: Entity<InputState>,
     prompt_input_focus: FocusHandle,
+    launch_input: Entity<TextareaState>,
     fields: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
     /// Stable focus target for a confirm surface before its buttons render.
     confirm_focus: FocusHandle,
@@ -415,6 +417,7 @@ pub struct DialogView {
     suppress_initial_selection: bool,
     _find_input_subscription: Subscription,
     _prompt_input_subscription: Subscription,
+    _launch_input_subscription: Subscription,
     _command_interceptor: Subscription,
 }
 
@@ -447,6 +450,16 @@ impl DialogView {
                 }
                 // The prompt's Confirm action owns submission and blocks Root's default close.
                 InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
+            },
+        );
+        let launch_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8));
+        let launch_input_subscription = cx.subscribe_in(
+            &launch_input,
+            window,
+            |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.change_text(input.read(cx).value().to_string(), cx);
+                }
             },
         );
         let owner = cx.weak_entity();
@@ -495,6 +508,7 @@ impl DialogView {
             command_focus: cx.focus_handle().tab_stop(true),
             prompt_input_focus: prompt_input.read(cx).focus_handle(cx),
             prompt_input,
+            launch_input,
             fields: std::collections::HashMap::new(),
             confirm_focus: cx.focus_handle().tab_stop(true),
             command_keybindings: None,
@@ -505,6 +519,7 @@ impl DialogView {
             suppress_initial_selection: false,
             _find_input_subscription: find_input_subscription,
             _prompt_input_subscription: prompt_input_subscription,
+            _launch_input_subscription: launch_input_subscription,
             _command_interceptor: command_interceptor,
         }
     }
@@ -605,7 +620,7 @@ impl DialogView {
     fn is_prompt(&self) -> bool {
         self.spec
             .as_ref()
-            .is_some_and(|spec| spec.role == DialogRole::Prompt)
+            .is_some_and(|spec| matches!(spec.role, DialogRole::Prompt | DialogRole::SessionLaunch))
     }
 
     fn is_confirm(&self) -> bool {
@@ -717,7 +732,11 @@ impl DialogView {
             return;
         }
         let transfer_focus = self.focus_target_changed(spec.as_ref(), window, cx);
-        let changed = self.spec.as_ref().map(|spec| &spec.id) != spec.as_ref().map(|spec| &spec.id);
+        let changed = self
+            .spec
+            .as_ref()
+            .map(|spec| (&spec.id, spec.role, &spec.title))
+            != spec.as_ref().map(|spec| (&spec.id, spec.role, &spec.title));
         let same_query = self
             .spec
             .as_ref()
@@ -772,6 +791,18 @@ impl DialogView {
                 }
                 self.command
                     .update(cx, |state, cx| state.set_query(query, window, cx));
+            } else if spec.role == DialogRole::SessionLaunch {
+                let value = spec.text.clone().unwrap_or_default();
+                let sync_value = self.launch_input.read(cx).value().as_ref() != value;
+                if sync_value {
+                    self.suppress_query = Some(value.clone());
+                }
+                self.launch_input.update(cx, |input, cx| {
+                    input.set_placeholder(spec.text_hint.clone().unwrap_or_default(), window, cx);
+                    if sync_value {
+                        input.set_value(value, window, cx);
+                    }
+                });
             } else if spec.role == DialogRole::Prompt {
                 let value = spec.text.clone().unwrap_or_default();
                 let sync_value = self.prompt_input.read(cx).value().as_ref() != value;
@@ -811,6 +842,7 @@ impl DialogView {
             .is_some_and(|(previous, next)| {
                 previous.id == next.id
                     && (previous.role != next.role
+                        || previous.title != next.title
                         || previous.text.is_some() != next.text.is_some())
                     && (self.focus_handle(cx).contains_focused(window, cx)
                         || self
@@ -884,9 +916,10 @@ impl DialogView {
     pub fn root_title(&self) -> Option<String> {
         self.spec.as_ref().and_then(|spec| match spec.role {
             DialogRole::SearchableList | DialogRole::TerminalFind => None,
-            DialogRole::Prompt | DialogRole::Confirm | DialogRole::ThemePicker => {
-                Some(spec.title.clone())
-            }
+            DialogRole::Prompt
+            | DialogRole::SessionLaunch
+            | DialogRole::Confirm
+            | DialogRole::ThemePicker => Some(spec.title.clone()),
         })
     }
 
@@ -936,6 +969,13 @@ impl DialogView {
             "escape" if role == DialogRole::TerminalFind => self.cancel(cx),
             "enter" if role == DialogRole::Confirm && self.confirm_focus.is_focused(window) => {
                 self.confirm_first_action(cx);
+            }
+            "enter"
+                if role == DialogRole::SessionLaunch
+                    && (event.keystroke.modifiers.platform
+                        || event.keystroke.modifiers.control) =>
+            {
+                self.prompt_submit(cx);
             }
             "tab" if role == DialogRole::ThemePicker => {
                 cx.emit(DialogIntent::CycleScope { dialog });
@@ -999,6 +1039,7 @@ impl DialogView {
     ) -> gpui_kit::AnyElement {
         match spec.role {
             DialogRole::Prompt => self.prompt_panel(spec, window, cx),
+            DialogRole::SessionLaunch => self.session_launch_panel(spec, cx),
             DialogRole::Confirm => Self::confirm_panel(spec, cx),
             DialogRole::SearchableList | DialogRole::ThemePicker => {
                 self.command_panel(spec, window, cx)
@@ -1110,6 +1151,227 @@ impl DialogView {
                     .children(extras)
                     .child(public_selector("dialog-prompt-submit", submit_button)),
             )
+            .into_any_element()
+    }
+
+    fn session_launch_panel(&self, spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let colors = gpui_kit::component::Theme::global(cx).colors;
+        let choices = spec
+            .fields
+            .iter()
+            .filter_map(|field| Self::session_launch_choice(spec, field, cx));
+        let context = spec
+            .rows
+            .iter()
+            .filter(|row| row.id.0 != "submit")
+            .map(|row| Self::session_launch_context(row, cx));
+        v_flex()
+            .id("session-launch-panel")
+            .debug_selector(|| "session-launch-panel".to_owned())
+            .w_full()
+            .gap_4()
+            .child(self.session_launch_prompt(spec))
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_4()
+                    .children(choices),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .items_start()
+                            .gap_3()
+                            .children(context),
+                    )
+                    .when_some(spec.footer.clone(), |this, path| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.muted_foreground)
+                                .child(path),
+                        )
+                    }),
+            )
+            .when_some(spec.hint.clone(), |this, hint| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.muted_foreground)
+                        .child(hint),
+                )
+            })
+            .child(Self::session_launch_actions(spec, cx))
+            .into_any_element()
+    }
+
+    fn session_launch_actions(spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let submit = spec.rows.iter().find(|row| row.id.0 == "submit");
+        let owner = cx.weak_entity();
+        let submit_row = submit.cloned();
+        let submit_enabled = submit.is_some_and(|row| row.enabled) && !spec.busy;
+        let start = move |cx: &mut App| {
+            if submit_enabled && let Some(row) = &submit_row {
+                _ = owner.update(cx, |this, cx| this.confirm(row, false, cx));
+            }
+        };
+        let start_click = start.clone();
+        let submit_button = Button::new("session-launch-start")
+            .primary()
+            .label(submit.map_or_else(|| "Start".to_owned(), |row| row.label.clone()))
+            .disabled(!submit_enabled)
+            .on_click(move |_, _, cx| start_click(cx))
+            .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| {
+                start(cx);
+                cx.stop_propagation();
+            });
+        let cancel_dialog = spec.id.clone();
+        let cancel = move |cx: &mut Context<Self>| {
+            cx.emit(DialogIntent::Dismiss {
+                dialog: cancel_dialog.clone(),
+            });
+        };
+        let cancel_click = cancel.clone();
+        h_flex()
+            .w_full()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("session-launch-cancel")
+                    .ghost()
+                    .label("Cancel")
+                    .on_click(cx.listener(move |_, _, _, cx| cancel_click(cx)))
+                    .on_action(cx.listener(
+                        move |_, _: &gpui_kit::base::actions::Confirm, _, cx| {
+                            cancel(cx);
+                            cx.stop_propagation();
+                        },
+                    )),
+            )
+            .child(public_selector("session-launch-start", submit_button))
+            .into_any_element()
+    }
+
+    fn session_launch_prompt(&self, spec: &DialogSpec) -> gpui_kit::AnyElement {
+        let label = spec
+            .text_label
+            .clone()
+            .unwrap_or_else(|| "Prompt".to_owned());
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(div().text_sm().child(label.clone()))
+            .child(public_selector(
+                "session-launch-prompt",
+                crate::gpui::focus_input(
+                    &self.launch_input,
+                    Textarea::new(&self.launch_input)
+                        .disabled(spec.busy)
+                        .w_full()
+                        .aria_label(label),
+                ),
+            ))
+            .into_any_element()
+    }
+
+    fn session_launch_choice(
+        spec: &DialogSpec,
+        field: &DialogField,
+        cx: &Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let DialogFieldKind::Choice(options) = &field.kind else {
+            return None;
+        };
+        let buttons = options.iter().map(|value| {
+            let owner = cx.weak_entity();
+            let dialog = spec.id.clone();
+            let id = field.id.clone();
+            let value = value.clone();
+            let selector = format!("session-launch-{id}-{value}");
+            let label = value.clone();
+            let selected = value == field.value;
+            let enabled = !spec.busy;
+            let select = move |cx: &mut App| {
+                if enabled {
+                    _ = owner.update(cx, |_, cx| {
+                        cx.emit(DialogIntent::FieldChanged {
+                            dialog: dialog.clone(),
+                            field: id.clone(),
+                            value: value.clone(),
+                        });
+                    });
+                }
+            };
+            let select_click = select.clone();
+            Button::new(SharedString::from(selector.clone()))
+                .debug_selector(move || selector)
+                .label(label)
+                .selected(selected)
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| select_click(cx))
+                .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| {
+                    select(cx);
+                    cx.stop_propagation();
+                })
+        });
+        Some(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().child(field.label.clone()))
+                .child(
+                    // Child callbacks preserve Button's keyboard activation in the pinned Kit.
+                    ButtonGroup::new(SharedString::from(format!("session-launch-{}", field.id)))
+                        .outline()
+                        .children(buttons),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn session_launch_context(row: &DialogRow, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let owner = cx.weak_entity();
+        let row = row.clone();
+        let project = row.id.0 == "choose-project";
+        let selector = format!("session-launch-{}", row.id.0);
+        let label = row.label.clone();
+        let enabled = row.enabled;
+        let activate = move |cx: &mut App| {
+            if enabled {
+                _ = owner.update(cx, |this, cx| this.confirm(&row, false, cx));
+            }
+        };
+        let activate_click = activate.clone();
+        let button = Button::new(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .outline()
+            .label(label)
+            .disabled(!enabled)
+            .icon(if project {
+                gpui_kit::assets::IconName::Folder
+            } else {
+                gpui_kit::assets::IconName::GitBranch
+            })
+            .on_click(move |_, _, cx| activate_click(cx))
+            .on_action(move |_: &gpui_kit::base::actions::Confirm, _, cx| {
+                activate(cx);
+                cx.stop_propagation();
+            });
+        v_flex()
+            .min_w_0()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .child(if project { "Project" } else { "Checkout" }),
+            )
+            .child(button)
             .into_any_element()
     }
 
@@ -1718,6 +1980,12 @@ fn command_item(row: DialogRow, destructive_color: Hsla) -> CommandItem {
                 row.color.unwrap_or(colors.foreground)
             };
             h_flex()
+                .id(SharedString::from(format!(
+                    "dialog-command-row-{}",
+                    row.id.0
+                )))
+                .role(gpui_kit::accesskit::Role::Label)
+                .aria_label(row.label.clone())
                 .w_full()
                 .min_w_0()
                 .gap_2()
@@ -1977,6 +2245,7 @@ impl Focusable for DialogView {
         match self.spec.as_ref().map(|spec| spec.role) {
             Some(DialogRole::TerminalFind) => self.find_input.read(cx).focus_handle(cx),
             Some(DialogRole::Prompt) => self.prompt_input_focus.clone(),
+            Some(DialogRole::SessionLaunch) => self.launch_input.focus_handle(cx),
             Some(DialogRole::Confirm) => self.confirm_focus.clone(),
             Some(DialogRole::SearchableList | DialogRole::ThemePicker) | None => {
                 if self.spec.as_ref().is_some_and(|spec| spec.text.is_none()) {
@@ -1998,6 +2267,7 @@ impl Render for DialogView {
         };
         let command_focus = self.command_focus.clone();
         let prompt_input_focus = self.prompt_input_focus.clone();
+        let launch_input_focus = self.launch_input.focus_handle(cx);
         let confirm_focus = self.confirm_focus.clone();
         div()
             .when(spec.role == DialogRole::ThemePicker, |this| {
@@ -2025,6 +2295,15 @@ impl Render for DialogView {
                     .on_action(
                         cx.listener(|this, _: &gpui_kit::base::actions::Confirm, _, cx| {
                             this.prompt_submit(cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+            })
+            .when(spec.role == DialogRole::SessionLaunch, |this| {
+                this.track_focus(&launch_input_focus)
+                    // Enter edits the multiline prompt; the Start button commits the form.
+                    .on_action(
+                        cx.listener(|_, _: &gpui_kit::base::actions::Confirm, _, cx| {
                             cx.stop_propagation();
                         }),
                     )

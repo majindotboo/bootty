@@ -18,6 +18,9 @@ use config_overrides::ConfigOverrides;
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
+    /// Serve a process-local own-terminal MCP attachment.
+    #[command(name = "agent-tools", hide = true)]
+    AgentTools(AgentToolsArgs),
     /// Launch the Bootty terminal application.
     App(Box<AppArgs>),
     /// Report how to install the complete latest Bootty release package.
@@ -70,6 +73,18 @@ pub enum Command {
     /// Invoke a command discovered from a running Bootty instance.
     #[command(external_subcommand)]
     Dynamic(Vec<String>),
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct AgentToolsArgs {
+    #[arg(long, value_parser = ["codex", "claude", "pi"])]
+    pub provider: String,
+    #[arg(long)]
+    pub binding: String,
+    #[arg(long)]
+    pub attachment: String,
+    #[arg(long)]
+    pub instance: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -253,6 +268,7 @@ impl Cli {
             self.command,
             Some(
                 Command::Commands
+                    | Command::AgentTools(_)
                     | Command::Describe { .. }
                     | Command::Invoke { .. }
                     | Command::Task(_)

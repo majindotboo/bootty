@@ -87,6 +87,17 @@ impl WorkspaceRuntime {
         cwd: &str,
         argv: Vec<String>,
     ) -> Result<PreparedSessionRequest, SessionRequestError> {
+        self.prepare_session_create(scope, name, cwd, argv, None)
+    }
+
+    pub(super) fn prepare_session_create(
+        &mut self,
+        scope: SpaceId,
+        name: &str,
+        cwd: &str,
+        argv: Vec<String>,
+        generated_name: Option<&super::PendingGeneratedName>,
+    ) -> Result<PreparedSessionRequest, SessionRequestError> {
         validate_session_name(name)?;
         validate_cwd(cwd)?;
         validate_argv(&argv)?;
@@ -121,7 +132,7 @@ impl WorkspaceRuntime {
             argv: Some(argv),
         };
         preflight(binding, &command)?;
-        let membership = self.begin_binding_membership_mutation(scope, &command, None)?;
+        let membership = self.begin_binding_membership_mutation(scope, &command, generated_name)?;
         Ok((command, membership))
     }
 
@@ -296,20 +307,22 @@ impl BindingRuntime {
             .sessions()
             .iter()
             .filter_map(|claimed| {
-                reported
-                    .iter()
-                    .find(|session| session.tag.identity.as_deref() == Some(&claimed.identity))
+                reported.iter().find(|session| {
+                    session.tag.identity.as_deref() == Some(&claimed.identity)
+                        && (self.sessions.task_lifecycle(&claimed.identity).is_none()
+                            || self.task_session_matches(session, &claimed.identity))
+                })
             })
             .collect()
     }
 
     fn holds(&self, session: &MuxSession) -> bool {
         !self.tracks_session_membership()
-            || session
-                .tag
-                .identity
-                .as_deref()
-                .is_some_and(|identity| self.sessions.get(identity).is_some())
+            || session.tag.identity.as_deref().is_some_and(|identity| {
+                self.sessions.get(identity).is_some()
+                    && (self.sessions.task_lifecycle(identity).is_none()
+                        || self.task_session_matches(session, identity))
+            })
     }
 }
 
@@ -359,7 +372,7 @@ fn validate_session_name(name: &str) -> Result<(), SessionRequestError> {
     Ok(())
 }
 
-fn validate_cwd(cwd: &str) -> Result<(), SessionRequestError> {
+pub(super) fn validate_cwd(cwd: &str) -> Result<(), SessionRequestError> {
     // A remote host's path is POSIX even when this host's is not.
     if !(cwd.starts_with('/') || Path::new(cwd).is_absolute()) || cwd.contains('\0') {
         return Err(SessionRequestError::Invalid(format!(

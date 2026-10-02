@@ -19,6 +19,7 @@ mod pane_input;
 mod recovery;
 mod sessions;
 mod shell;
+mod task_lifecycle;
 mod wsl;
 
 use std::{
@@ -854,14 +855,12 @@ impl AppState {
                 self.dispatch_terminal_capture(&exact, target, &arguments, export, execution)
             }
             CoreCommandExecutor::WslList => self.dispatch_wsl_list(execution),
-            CoreCommandExecutor::OpenLink(arguments) => {
-                let (Some(exact), Some(target)) = (exact_target, invocation.target) else {
-                    return self.reject_command(links::failure(
-                        "Link needs an attached terminal".to_owned(),
-                    ));
-                };
-                self.dispatch_link_open(target, &exact, &arguments, execution)
-            }
+            CoreCommandExecutor::OpenLink(arguments) => self.dispatch_link(
+                exact_target.as_ref(),
+                invocation.target,
+                &arguments,
+                execution,
+            ),
             CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => {
                 self.dispatch_clipboard_paste(scope, invocation.target, execution)
             }
@@ -870,6 +869,9 @@ impl AppState {
             }
             CoreCommandExecutor::Session(action, arguments) => {
                 self.dispatch_session_command(action, &arguments, exact_target, execution)
+            }
+            CoreCommandExecutor::Task(action, args) => {
+                self.dispatch_task(action, &args, exact_target.as_ref(), effects, execution)
             }
             CoreCommandExecutor::File(action, arguments) => self.dispatch_file_action(
                 scope,
@@ -902,6 +904,20 @@ impl AppState {
                 Self::dispatch_dock_command(action, group, effects, execution)
             }
         }
+    }
+
+    fn dispatch_link(
+        &mut self,
+        exact_target: Option<&ExactMuxTarget>,
+        target: Option<CommandTarget>,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (Some(exact), Some(target)) = (exact_target, target) else {
+            return self
+                .reject_command(links::failure("Link needs an attached terminal".to_owned()));
+        };
+        self.dispatch_link_open(target, exact, arguments, execution)
     }
 
     fn dispatch_dock_command(

@@ -430,6 +430,48 @@ fn project_disclosure_hides_its_children_and_selected_sessions_reveal_their_proj
 }
 
 #[gpui_kit::test]
+fn detached_archived_tasks_are_disclosed_without_inventing_terminal_targets(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = grouped_chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let mut task = sidebar.rows.first().expect("project row").clone();
+    task.key = "task:1:saved-identity".to_owned();
+    task.text = "Fix project navigation".to_owned();
+    task.trailing = Some("Detached".to_owned());
+    task.kind = SidebarRowKind::Other("saved-task".to_owned());
+    task.indent = 2;
+    task.selectable = false;
+    task.target = None;
+    let mut shelf = task.clone();
+    shelf.key = "project:tasks:archived:1".to_owned();
+    shelf.text = "Archived".to_owned();
+    shelf.trailing = None;
+    shelf.kind = SidebarRowKind::Group;
+    shelf.indent = 0;
+    sidebar.rows.extend([shelf, task]);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    assert!(
+        cx.debug_bounds("sidebar-row-task:1:saved-identity")
+            .is_none()
+    );
+    let shelf = cx
+        .debug_bounds("sidebar-row-project:tasks:archived:1")
+        .expect("Archived disclosure");
+    cx.simulate_click(center(shelf), Modifiers::none());
+    let task = cx
+        .debug_bounds("sidebar-row-task:1:saved-identity")
+        .expect("retained detached task");
+    cx.simulate_click(center(task), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert_eq!(*probe.intents.borrow(), Vec::<ChromeIntent>::new());
+    });
+}
+
+#[gpui_kit::test]
 fn disappearing_projects_discard_their_disclosure_state(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let snapshot = grouped_chrome_snapshot();
@@ -463,6 +505,9 @@ fn dropping_on_session_detail_reorders_the_whole_session(cx: &mut TestAppContext
     let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
     fill_sidebar_sessions(sidebar);
     sidebar.rows.truncate(6);
+    for (index, row) in sidebar.rows.iter_mut().enumerate() {
+        row.current = index >= 3;
+    }
     let (probe, cx) =
         cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let start = center(
@@ -730,35 +775,37 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
     );
 }
 
+fn quota_footer_item(label: &'static str) -> SidebarFooterItem {
+    SidebarFooterItem {
+        key: format!("codex:{label}"),
+        text: format!("codex {label}"),
+        icon: Some("openai".to_owned()),
+        color: palette().text,
+        meter: Some(UsageMeterSnapshot {
+            provider: UsageProvider::Codex,
+            label: format!("{label} 23% left"),
+            window_label: label.to_owned(),
+            fill: palette().accent,
+            marker: palette().accent,
+            pace: palette().text,
+            track: palette().border,
+            meter: UsageWindow {
+                label,
+                used_percent: 77.0,
+                duration_secs: 604_800.0,
+                resets_at: Some(352_000),
+            }
+            .meter(0),
+        }),
+    }
+}
+
 #[gpui_kit::test]
-fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
+fn quota_rows_keep_full_width_meters_pacing_and_reset_readable(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
-    snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
-        .into_iter()
-        .map(|label| SidebarFooterItem {
-            key: format!("codex:{label}"),
-            text: format!("codex {label}"),
-            icon: Some("openai".to_owned()),
-            color: palette().text,
-            meter: Some(UsageMeterSnapshot {
-                provider: UsageProvider::Codex,
-                label: format!("{label} 23% left"),
-                window_label: label.to_owned(),
-                fill: palette().accent,
-                marker: palette().accent,
-                pace: palette().text,
-                track: palette().border,
-                meter: UsageWindow {
-                    label,
-                    used_percent: 77.0,
-                    duration_secs: 604_800.0,
-                    resets_at: Some(352_000),
-                }
-                .meter(0),
-            }),
-        })
-        .collect();
+    snapshot.sidebar.as_mut().expect("sidebar").footer =
+        ["5h", "7d"].into_iter().map(quota_footer_item).collect();
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
     for font_size in [12.0, 16.0, 20.0] {
@@ -806,26 +853,32 @@ fn quota_rows_keep_inline_meters_pacing_and_reset_readable(cx: &mut TestAppConte
                     .expect("expected allowance marker");
                 assert!(labels.left() >= row.left());
                 let reset = cx.debug_bounds(reset_selector).expect("visible reset time");
-                assert!(pace.right() <= reset.left(), "quota pacing overlaps reset");
+                assert!(
+                    pace.right() <= reset.left() || pace.bottom() <= reset.top(),
+                    "quota pacing overlaps reset"
+                );
                 assert!(reset.right() <= row.right());
                 assert!(expected.left() >= track.left() && expected.right() <= track.right());
                 assert!(track.right() <= row.right());
                 assert!(
-                    track.left() >= labels.right(),
-                    "meter overlaps window label"
+                    track.size.width >= row.size.width.mul(0.8),
+                    "meter spans the sidebar"
+                );
+                assert!(
+                    track.top() >= labels.bottom(),
+                    "meter sits below the labels"
                 );
                 assert!(
                     track.size.width >= px(font_size).mul(2.0),
                     "meter remains useful"
                 );
-                assert!(track.top() < labels.bottom(), "meter shares the quota row");
                 assert!(
                     track.size.height < labels.size.height.div(4.0),
                     "meter is not thin"
                 );
                 assert!(
                     row.size.height <= px(font_size).mul(3.0),
-                    "quota row stays compact"
+                    "quota row stays compact at {width}px / {font_size}px: row={row:?}, label={labels:?}, pace={pace:?}, reset={reset:?}, track={track:?}"
                 );
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
@@ -2014,4 +2067,51 @@ fn tab_width_waits_for_a_stable_title_before_shrinking(cx: &mut TestAppContext) 
             < initial.div(2.0),
         "a short title should settle to a compact tab"
     );
+}
+
+#[gpui_kit::test]
+fn new_session_is_visible_and_activates_from_pointer_and_keyboard(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let (probe, cx) = cx.add_window_view(ChromeProbe::new);
+    let button = cx
+        .debug_bounds("sidebar-new-session")
+        .expect("visible New session control");
+    cx.simulate_click(center(button), Modifiers::none());
+    probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
+    for _ in 0..32 {
+        cx.update(gpui_kit::Window::focus_next);
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui_kit::KeyUpEvent {
+            keystroke: gpui_kit::Keystroke::parse("enter").expect("Enter key"),
+        });
+        let created = probe.update(cx, |probe, _| {
+            probe.intents.borrow().iter().any(|intent| {
+                matches!(intent,
+                ChromeIntent::Command(invocation) if invocation.command == "new_mux_session")
+            })
+        });
+        if created {
+            break;
+        }
+    }
+    probe.update(cx, |probe, _| {
+        let commands = probe
+            .intents
+            .borrow()
+            .iter()
+            .filter_map(|intent| match intent {
+                ChromeIntent::Command(invocation) if invocation.command == "new_mux_session" => {
+                    Some(invocation.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands,
+            [bootty_control::CommandInvocation::from_action(
+                "new_mux_session",
+                bootty_control::Caller::Keybinding,
+            )]
+        );
+    });
 }

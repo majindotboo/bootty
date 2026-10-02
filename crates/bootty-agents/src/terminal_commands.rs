@@ -97,8 +97,21 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
                 arguments: terminal_arguments(arguments),
             });
         }
+        descriptors.push(terminal_tool_descriptor(provider));
     }
     descriptors
+}
+
+fn terminal_tool_descriptor(provider: AgentKind) -> CommandDescriptor {
+    CommandDescriptor {
+        id: format!("agents.{provider}.tools"),
+        title: format!("Use {provider} terminal tools"),
+        description: "Use a live scoped attachment to read its own terminal or create an ordinary shell in its Space and checkout".to_owned(),
+        mutation: MutationClass::Write,
+        arguments: terminal_arguments(vec![("request", true)]),
+        target: None,
+        palette: false,
+    }
 }
 
 fn terminal_arguments(arguments: Vec<(&str, bool)>) -> CompactSchema {

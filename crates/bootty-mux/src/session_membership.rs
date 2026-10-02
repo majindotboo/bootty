@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use crate::session_lifecycle::TaskLifecycle;
 
 /// The `/` prefix a label shares with its siblings, or `""` for a session on its own.
 ///
@@ -41,12 +43,16 @@ impl WorkspaceSession {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionMembership {
     sessions: Vec<WorkspaceSession>,
+    task_lifecycles: HashMap<String, TaskLifecycle>,
 }
 
 impl SessionMembership {
     #[must_use]
-    pub const fn from_sessions(sessions: Vec<WorkspaceSession>) -> Self {
-        Self { sessions }
+    pub fn from_sessions(sessions: Vec<WorkspaceSession>) -> Self {
+        Self {
+            sessions,
+            task_lifecycles: HashMap::new(),
+        }
     }
 
     #[must_use]
@@ -69,6 +75,30 @@ impl SessionMembership {
     #[must_use]
     pub fn contains(&self, identity: &str) -> bool {
         self.get(identity).is_some()
+    }
+
+    /// `None` means an ordinary terminal membership, without a durable task record.
+    #[must_use]
+    pub fn task_lifecycle(&self, identity: &str) -> Option<TaskLifecycle> {
+        self.task_lifecycles.get(identity).copied()
+    }
+
+    /// Promotes an existing membership to a durable task, or changes its destination.
+    /// Task records survive attachment loss; restoring Active never starts a process.
+    pub fn set_task_lifecycle(&mut self, identity: &str, state: TaskLifecycle) -> bool {
+        if !self.contains(identity) || self.task_lifecycle(identity) == Some(state) {
+            return false;
+        }
+        self.task_lifecycles.insert(identity.to_owned(), state);
+        true
+    }
+
+    /// All durable tasks in saved order, including those without a live attachment.
+    pub fn tasks(&self) -> impl Iterator<Item = (&WorkspaceSession, TaskLifecycle)> {
+        self.sessions.iter().filter_map(|session| {
+            self.task_lifecycle(&session.identity)
+                .map(|state| (session, state))
+        })
     }
 
     /// The claimed sessions' backend names, in order, for applying that order to the backend.
@@ -107,6 +137,7 @@ impl SessionMembership {
             .sessions
             .iter()
             .position(|session| session.identity == identity)?;
+        self.task_lifecycles.remove(identity);
         Some(self.sessions.remove(position))
     }
 
@@ -146,15 +177,17 @@ impl SessionMembership {
         true
     }
 
-    /// Drops every claim whose session the backend no longer reports. An empty `alive` means the
-    /// backend has not answered yet, not that the Space emptied.
+    /// Drops ordinary terminal claims the backend no longer reports; durable tasks survive.
+    /// An empty `alive` means the backend has not answered yet, not that the Space emptied.
     pub fn retain_alive(&mut self, alive: &HashSet<&str>) -> bool {
         if alive.is_empty() {
             return false;
         }
         let before = self.sessions.len();
-        self.sessions
-            .retain(|session| alive.contains(session.identity.as_str()));
+        self.sessions.retain(|session| {
+            self.task_lifecycles.contains_key(&session.identity)
+                || alive.contains(session.identity.as_str())
+        });
         before != self.sessions.len()
     }
 

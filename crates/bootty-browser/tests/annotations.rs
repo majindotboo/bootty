@@ -62,3 +62,63 @@ proptest! {
         prop_assert_eq!(element.text, text);
     }
 }
+
+#[rstest]
+#[case("Escape", false, false, Some(bootty_browser::AnnotationAction::Cancel))]
+#[case("Escape", true, true, Some(bootty_browser::AnnotationAction::Cancel))]
+#[case("Enter", true, false, Some(bootty_browser::AnnotationAction::Paste("Change this heading".into())))]
+#[case("Enter", false, false, None)]
+#[case("Enter", true, true, None)]
+#[case("k", true, false, None)]
+fn editor_keyboard_preserves_typing_and_uses_explicit_submit(
+    #[case] key: &str,
+    #[case] command: bool,
+    #[case] shift: bool,
+    #[case] expected: Option<bootty_browser::AnnotationAction>,
+) {
+    let input = serde_json::json!({"action":"key", "value":{"key":key, "command":command, "shift":shift, "comment":"Change this heading"}});
+    assert_eq!(
+        bootty_browser::AnnotationAction::parse(&input.to_string()),
+        expected
+    );
+}
+
+#[rstest]
+#[case("copy")]
+#[case("paste")]
+fn editor_actions_reject_blank_or_oversized_comments(#[case] action: &str) {
+    for comment in [" \n\t".to_owned(), "x".repeat(4097), "🦀".repeat(1025)] {
+        let input = serde_json::json!({"action":action, "value":{"comment":comment}});
+        assert!(bootty_browser::AnnotationAction::parse(&input.to_string()).is_none());
+    }
+}
+
+#[rstest]
+#[case(serde_json::json!({"action":"cancel"}), Some(bootty_browser::AnnotationAction::Cancel))]
+#[case(serde_json::json!({"action":"cancel","execute":true}), None)]
+#[case(serde_json::json!({"action":"paste","value":{"comment":"Change this","selector":"#other"}}), None)]
+#[case(serde_json::json!({"action":"execute","comment":"Change this"}), None)]
+fn editor_dismissal_and_feedback_keep_a_closed_action_contract(
+    #[case] input: serde_json::Value,
+    #[case] expected: Option<bootty_browser::AnnotationAction>,
+) {
+    assert_eq!(
+        bootty_browser::AnnotationAction::parse(&input.to_string()),
+        expected
+    );
+}
+
+proptest! {
+    #[test]
+    fn editor_export_preserves_bounded_unicode_comment(comment in "[^\\s].{0,255}") {
+        let input = serde_json::json!({"action":"copy", "value":{"comment":comment}});
+        prop_assert_eq!(bootty_browser::AnnotationAction::parse(&input.to_string()), Some(bootty_browser::AnnotationAction::Copy(comment)));
+    }
+
+    #[test]
+    fn scrolled_selection_coordinates_remain_valid(x in -10_000_000i32..=10_000_000i32, y in -10_000_000i32..=10_000_000i32, width in 0i32..=10_000_000i32, height in 0i32..=10_000_000i32) {
+        let message = serde_json::json!({"url":"https://example.com/", "selector":"#title", "text":"Title", "tag":"h1", "bounds":[x, y, width, height]}).to_string();
+        let selection = BrowserElement::parse(&message).ok_or_else(|| TestCaseError::fail("finite offscreen geometry rejected"))?;
+        prop_assert_eq!(selection.bounds.map(f64::to_bits), [f64::from(x),f64::from(y),f64::from(width),f64::from(height)].map(f64::to_bits));
+    }
+}

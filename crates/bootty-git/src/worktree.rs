@@ -16,6 +16,26 @@ pub struct WorktreeRequest {
     pub start_ref: Option<String>,
 }
 impl WorktreeRequest {
+    /// Resolve the sibling destination from the already-observed main checkout.
+    /// # Errors
+    /// Returns an error for invalid input or a repository without a parent/name.
+    pub fn destination(&self, main: &str) -> Result<String, String> {
+        self.validate()?;
+        let main = Path::new(main);
+        let parent = main.parent().ok_or("repository has no parent directory")?;
+        let repo_name = main
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("could not read repository name")?;
+        Ok(parent
+            .join(self.name.as_ref().map_or_else(
+                || format!("{repo_name}-{}", self.branch.replace('/', "-")),
+                Clone::clone,
+            ))
+            .to_string_lossy()
+            .into_owned())
+    }
+
     /// # Errors
     /// Returns an error for an invalid branch, folder name, or starting reference.
     pub fn validate(&self) -> Result<(), String> {
@@ -305,7 +325,10 @@ impl<R: CommandRunner> Git<R> {
                 ],
             )
             .ok_or_else(|| format!("Starting ref {start_ref:?} does not resolve to a commit"))?;
-        let path = self.new_worktree_path(repo_dir, &request.branch, request.name.as_deref())?;
+        let main = self
+            .main_worktree(repo_dir)
+            .unwrap_or_else(|| repo_dir.to_owned());
+        let path = request.destination(&main)?;
         let args = vec![
             "worktree".to_owned(),
             "add".to_owned(),
@@ -346,32 +369,6 @@ impl<R: CommandRunner> Git<R> {
             return None;
         }
         Some(parse_git_worktree_list(&output.stdout))
-    }
-
-    fn new_worktree_path(
-        &self,
-        repo_dir: &str,
-        branch: &str,
-        name: Option<&str>,
-    ) -> Result<String, String> {
-        let main = self
-            .main_worktree(repo_dir)
-            .unwrap_or_else(|| repo_dir.to_owned());
-        let main = Path::new(&main);
-        let parent = main
-            .parent()
-            .ok_or_else(|| "repository has no parent directory".to_owned())?;
-        let repo_name = main
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "could not read repository name".to_owned())?;
-        Ok(parent
-            .join(name.map_or_else(
-                || format!("{}-{}", repo_name, branch.replace('/', "-")),
-                str::to_owned,
-            ))
-            .to_string_lossy()
-            .into_owned())
     }
 
     fn read(&self, cwd: &str, args: &[&str]) -> Option<String> {

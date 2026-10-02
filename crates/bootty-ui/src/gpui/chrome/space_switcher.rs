@@ -23,6 +23,7 @@ pub(super) fn render(
         .iter()
         .map(|space| space_button(space, transition, colors, cx));
     let create_owner = cx.weak_entity();
+    let tasks_owner = cx.weak_entity();
     div()
         .id("bootty-gpui-space-switcher")
         .debug_selector(|| "bootty-gpui-space-switcher".to_owned())
@@ -63,6 +64,28 @@ pub(super) fn render(
                     },
                 )),
         )
+        .child(super::button::activated_button(
+            div()
+                .debug_selector(|| "saved-tasks-open".to_owned())
+                .w_full(),
+            Button::new("saved-tasks-open")
+                .ghost()
+                .small()
+                .w_full()
+                .label("Saved tasks…")
+                .tooltip("Saved tasks for this Space"),
+            move |_, app| {
+                _ = tasks_owner.update(app, |_, cx| {
+                    cx.emit(ChromeIntent::Command(
+                        bootty_control::CommandInvocation::new(
+                            "session.tasks.show",
+                            Vec::new(),
+                            bootty_control::Caller::Keybinding,
+                        ),
+                    ));
+                });
+            },
+        ))
         .bg(color(background))
         .into_any_element()
 }

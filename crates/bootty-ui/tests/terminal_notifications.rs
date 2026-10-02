@@ -127,6 +127,7 @@ fn notifications_use_observed_time_focus_and_original_space(
     assert!(state.open_session_picker_dialog_from_ui());
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
         cwd: directory.path().to_string_lossy().into_owned(),
+        command: None,
     });
     let now = Instant::now();
     for _ in 0..4 {

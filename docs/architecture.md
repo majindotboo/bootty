@@ -26,6 +26,7 @@ This file describes the current production structure.
 | Application identity and local namespace | `bootty-config` | A conflicting process identity fails startup. |
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
+| Persistent task lifecycle | `bootty-mux::session_membership::SessionMembership` and `WorkspaceRepository` | Explicit promotion preserves the saved identity/content when an attachment disappears; commit precedes live publication. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Terminal agent identities and retained launch metadata | `bootty-agents::TerminalAgentService` | Persists exact backend targets before publishing registrations; stale generations cannot receive commands. |
 | Orchestration runs and worker reports | `bootty-agents::OrchestrationService` | Persists transitions before dispatch; reports match worker generations and attempts. |
@@ -297,6 +298,8 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 Pi, Codex, and Claude launch as terminal programs through the selected mux backend. The backend owns their processes, tabs, splits, and terminal state. `TerminalAgentService` owns bounded provider identities, retained launch metadata, and exact terminal targets. History and account queries use provider files and commands on a background worker. Resume and fork launch the provider's terminal flow. Agents appear within backend sessions in the Sessions sidebar.
 
 Terminal registrations persist before publication. Provider session IDs remain distinct from backend target handles and generations; stale targets cannot redirect input to another pane.
+
+Local Codex and Claude terminal launches attach a process-only stdio MCP proxy for `bootty_terminal_read`. The agent service reserves a bounded ephemeral attachment and completes it only after its exact terminal metadata commits. Provider, binding and target are checked on every request; revocation, owner restart or stale targets disable it. The socket caller is preserved through the fixed `terminal.read` invocation. Explicit provider tool configuration wins. This increment has no write/spawn tools, remote attachment or Pi support; those need the same bounded identity and policy checks before expansion. No credentials or new persistent grants are stored.
 
 `OrchestrationService` owns durable runs, tasks, worker attachments, and messages. It delegates prompts through the same command mailbox to existing sessions and never launches a second worker process. An accepted prompt is running, not completed: completion requires a report from the captured worker target and dispatch attempt. Interrupted work requires explicit retry.
 
@@ -649,7 +652,25 @@ for JSON escaping, and local exports allow 2 MiB. Oversized output fails with
 its required size so callers can request fewer rows; it never cuts UTF-8 or
 style sequences in half.
 
+### Persistent task state
+
+`session.tasks` lists every saved session identity in the target binding, in saved order. Ordinary terminals have a null lifecycle. `session.task.set IDENTITY STATE` explicitly promotes an existing identity or changes its durable destination to `active`, `settled` or `archived`. These commands use the normal invocation catalog and validate the captured binding before mutation. A failed SQLite commit leaves both saved and published lifecycle unchanged.
+
+Schema revision 6 preserves existing membership rows and order with no implicit promotion. Promoted records survive attachment loss, close and detach. Reopening the application or restoring `active` never starts a process for a promoted record. Reattachment requires the exact identity and Space tags; a same-named untagged terminal cannot inherit a task. Moving a record keeps its lifecycle. Attachment observation is separate from process health or provider progress. This first increment changes saved metadata only; sidebar shelves, snooze, hide and deletion/recovery controls require a subsequent UI implementation.
+
 ### Scripted sessions
+
+`session.start NAME CWD [ARGV]` uses the same validation, startup and membership
+commit as `session.create`, with `CommandSelection::Follow` to select the new
+session in its binding. The creation dialog uses `session.start_project CWD [ARGV]`
+for an empty shell or explicit Command draft. That command uses the same launch
+validation and selection while generating a free backend name and preserving
+the project's display label. Agent drafts use positional literal
+argv through the registered provider start command. Switching projects keeps
+the draft; opening creation defaults to the selected checkout on the same host.
+Unselected sidebar sessions stay compact; selection reveals directory and branch
+metadata. Terminal topology stays in the terminal tab strip; progress remains
+visible without selection.
 
 `session.create NAME CWD [ARGV]` creates a detached backend session in the target
 Binding's Space, which need not be active. It never changes the selected session,
@@ -659,8 +680,10 @@ the result lands. `bootty-mux::workspace` validates the request and journals the
 Space's membership under the caller's name, so generated-name reconciliation never
 renames the session. The name must be free on the binding's server; the create
 fails rather than adopt an existing session, locally and in a remote Space. ARGV is a JSON array of strings for
-the first pane: absent or empty starts the default shell, one element runs through
-the backend's default shell, and more elements run directly. It is bounded to 64
+the first pane: absent or empty starts the default shell. Native runs literal
+argv, including a single executable path; tmux and rmux interpret one element
+through their default shell. The creation dialog converts Command text into
+explicit shell argv, so this choice has the same meaning on every backend. It is bounded to 64
 elements and 12 KiB, because tmux carries one client command in about 16 KiB. The
 result carries the `created` Session target and the first pane's `terminal`
 target.
