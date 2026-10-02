@@ -7,6 +7,7 @@ pub struct BrowserProfile {
     directory: PathBuf,
     identifier: [u8; 16],
     context: Option<WebContext>,
+    persistent: bool,
 }
 
 impl BrowserProfile {
@@ -20,16 +21,32 @@ impl BrowserProfile {
             directory,
             identifier,
             context: None,
+            persistent: supports_named_profiles(),
         }
     }
 
-    pub(crate) fn builder(&mut self) -> WebViewBuilder<'_> {
+    /// Platform credential-store key, scoped to this identity and the exact website origin.
+    ///
+    /// # Errors
+    /// Rejects addresses that cannot safely receive saved logins.
+    pub fn credential_service(&self, address: &str) -> Result<String, crate::AddressError> {
+        use std::fmt::Write as _;
+        let origin = crate::login_origin(address)?;
+        let mut service = String::from("bootty-browser:");
+        for byte in self.identifier {
+            _ = write!(service, "{byte:02x}");
+        }
+        Ok(format!("{service}:{origin}"))
+    }
+
+    pub(crate) fn builder(&mut self, persist: bool) -> WebViewBuilder<'_> {
+        let private = !persist || !self.persistent;
         let identifier = self.identifier;
-        let builder = WebViewBuilder::new_with_web_context(self.context());
+        let builder = WebViewBuilder::new_with_web_context(self.context()).with_incognito(private);
         #[cfg(target_os = "macos")]
         {
             use wry::WebViewBuilderExtDarwin as _;
-            // macOS 14+ has a named store; macOS 13 uses the app bundle's identity.
+            // Older macOS stays private until named stores can isolate app identities.
             builder.with_data_store_identifier(identifier)
         }
         #[cfg(not(target_os = "macos"))]
@@ -42,5 +59,19 @@ impl BrowserProfile {
     fn context(&mut self) -> &mut WebContext {
         self.context
             .get_or_insert_with(|| WebContext::new(Some(self.directory.clone())))
+    }
+}
+
+fn supports_named_profiles() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_foundation::NSProcessInfo::processInfo()
+            .operatingSystemVersion()
+            .majorVersion
+            >= 14
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
     }
 }

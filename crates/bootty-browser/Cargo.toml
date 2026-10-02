@@ -12,6 +12,9 @@ serde.workspace = true
 serde_json.workspace = true
 wry.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 

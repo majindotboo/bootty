@@ -1568,7 +1568,7 @@ fn browser_specs() -> [SettingSpec; 2] {
         spec(
             &["browser", "persist-site-data"],
             "Remember cookies and site data",
-            "Keep website sign-ins between launches in this app's browser profile. Turn off for private tabs. Existing saved data is retained; changing this setting reloads open pages.",
+            "Keep website sign-ins between launches in this app's browser profile (macOS 14+). Turn off for private tabs. Existing saved data is retained; changing this setting reloads open pages.",
             "browser",
             "PRIVACY",
             SettingKind::Bool,

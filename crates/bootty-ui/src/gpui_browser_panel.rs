@@ -1,5 +1,6 @@
 //! Browser tabs own native child webviews; GPUI owns their chrome and visibility.
 mod annotation;
+mod login;
 use bootty_browser::{
     BrowserBounds, BrowserElement, BrowserEvent, BrowserProfile, BrowserShortcut, BrowserView,
     NativeBrowserError, normalize_address, resolve_address,
@@ -32,11 +33,19 @@ pub struct BrowserSettingsRequested;
 pub struct BrowserFeedbackReady(pub String);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum AnnotationState {
+enum BrowserInteraction {
     #[default]
     Idle,
     Selecting,
     Editing,
+    ManagingLogin,
+}
+
+#[derive(Clone)]
+struct LoginTarget {
+    tab: u64,
+    revision: u64,
+    origin: String,
 }
 
 pub struct BrowserPanel {
@@ -46,7 +55,7 @@ pub struct BrowserPanel {
     selected: u64,
     next_id: u64,
     address: Entity<InputState>,
-    annotation_state: AnnotationState,
+    interaction: BrowserInteraction,
     visible: bool,
     active: bool,
     host_visible: bool,
@@ -90,7 +99,7 @@ impl BrowserPanel {
             selected: 1,
             next_id: 2,
             address,
-            annotation_state: AnnotationState::Idle,
+            interaction: BrowserInteraction::Idle,
             visible: false,
             active: false,
             host_visible: false,
@@ -143,8 +152,12 @@ impl BrowserPanel {
     }
 
     fn sync_visibility(&mut self, cx: &mut Context<Self>) {
-        let visible =
-            self.host_visible && self.active && self.annotation_state != AnnotationState::Editing;
+        let visible = self.host_visible
+            && self.active
+            && !matches!(
+                self.interaction,
+                BrowserInteraction::Editing | BrowserInteraction::ManagingLogin
+            );
         if self.visible == visible {
             return;
         }
@@ -429,26 +442,26 @@ impl BrowserPanel {
     }
 
     fn stop_annotation(&mut self) {
-        if self.annotation_state == AnnotationState::Selecting {
+        if self.interaction == BrowserInteraction::Selecting {
             if let Some(view) = self.selected_tab().and_then(|tab| tab.view.as_ref()) {
                 _ = view.set_annotation_mode(false);
             }
-            self.annotation_state = AnnotationState::Idle;
+            self.interaction = BrowserInteraction::Idle;
         }
     }
 
     fn toggle_annotation(&mut self, cx: &mut Context<Self>) {
-        let enabled = self.annotation_state != AnnotationState::Selecting;
+        let enabled = self.interaction != BrowserInteraction::Selecting;
         let result = self
             .selected_tab()
             .and_then(|tab| tab.view.as_ref())
             .map(|view| view.set_annotation_mode(enabled));
         match result {
             Some(Ok(())) => {
-                self.annotation_state = if enabled {
-                    AnnotationState::Selecting
+                self.interaction = if enabled {
+                    BrowserInteraction::Selecting
                 } else {
-                    AnnotationState::Idle
+                    BrowserInteraction::Idle
                 }
             }
             Some(Err(error)) => {
@@ -468,7 +481,7 @@ impl BrowserPanel {
         cx: &mut Context<Self>,
     ) {
         use gpui_kit::component::WindowExt as _;
-        self.annotation_state = AnnotationState::Editing;
+        self.interaction = BrowserInteraction::Editing;
         self.sync_visibility(cx);
         let owner = cx.weak_entity();
         let editor =
@@ -484,11 +497,11 @@ impl BrowserPanel {
                 .title("Annotate element")
                 .w(gpui_kit::px(f32::from(window.rem_size()) * 30.0))
                 .on_cancel(move |_, window, cx| {
-                    _ = cancel_owner.update(cx, |panel, cx| panel.finish_annotation(window, cx));
+                    _ = cancel_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
                     true
                 })
                 .on_close(move |_, window, cx| {
-                    _ = close_owner.update(cx, |panel, cx| panel.finish_annotation(window, cx));
+                    _ = close_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
                 })
                 .content(move |body, _, _| body.child(content.clone()))
         });
@@ -498,8 +511,8 @@ impl BrowserPanel {
         });
     }
 
-    fn finish_annotation(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.annotation_state = AnnotationState::Idle;
+    fn finish_dialog(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.interaction = BrowserInteraction::Idle;
         self.sync_visibility(cx);
         cx.defer_in(window, |this, window, cx| {
             crate::window::restore_keyboard_focus(window);
@@ -520,7 +533,7 @@ impl BrowserPanel {
             .and_then(|view| view.current_address().ok());
         // Frame selections need explicit frame identity before they can be accepted.
         if id == self.selected
-            && self.annotation_state == AnnotationState::Selecting
+            && self.interaction == BrowserInteraction::Selecting
             && current.as_deref() == Some(&element.url)
         {
             self.edit_annotation(element, window, cx);
@@ -607,10 +620,86 @@ impl BrowserPanel {
             }
         }
         if started {
-            self.annotation_state = AnnotationState::Idle;
+            self.interaction = BrowserInteraction::Idle;
             self.watch_load(id, window, cx);
         }
         cx.notify();
+    }
+
+    fn edit_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let Some(tab) = self.selected_tab() else {
+            return;
+        };
+        let Some(address) = tab
+            .view
+            .as_ref()
+            .and_then(|view| view.current_address().ok())
+        else {
+            return;
+        };
+        let Ok(origin) = bootty_browser::login_origin(&address) else {
+            if let Some(tab) = self.selected_mut() {
+                tab.error = Some("Saved logins require HTTPS or a local development page.".into());
+            }
+            cx.notify();
+            return;
+        };
+        let Ok(service) = self.profile.credential_service(&address) else {
+            return;
+        };
+        let target = LoginTarget {
+            tab: tab.id,
+            revision: tab.load_revision,
+            origin,
+        };
+        self.stop_annotation();
+        self.interaction = BrowserInteraction::ManagingLogin;
+        self.sync_visibility(cx);
+        let owner = cx.weak_entity();
+        let editor =
+            cx.new(|cx| login::LoginEditor::new(target, service, owner.clone(), window, cx));
+        let cancel_owner = owner.clone();
+        let content = editor.clone();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let content = content.clone();
+            let cancel_owner = cancel_owner.clone();
+            let close_owner = owner.clone();
+            dialog
+                .title("Saved logins")
+                .w(gpui_kit::px(f32::from(window.rem_size()) * 30.0))
+                .on_cancel(move |_, window, cx| {
+                    _ = cancel_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
+                    true
+                })
+                .on_close(move |_, window, cx| {
+                    _ = close_owner.update(cx, |panel, cx| panel.finish_dialog(window, cx));
+                })
+                .content(move |body, _, _| body.child(content.clone()))
+        });
+        cx.defer_in(window, move |_, window, cx| {
+            crate::window::restore_keyboard_focus(window);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+    }
+
+    fn fill_saved_login(
+        &self,
+        target: &LoginTarget,
+        username: &str,
+        password: &[u8],
+    ) -> Result<async_channel::Receiver<Result<(), String>>, NativeBrowserError> {
+        let tab = self
+            .selected_tab()
+            .filter(|tab| tab.id == target.tab && tab.load_revision == target.revision)
+            .ok_or_else(|| {
+                NativeBrowserError::Platform("The page changed. Open saved logins again.".into())
+            })?;
+        let view = tab
+            .view
+            .as_ref()
+            .ok_or_else(|| NativeBrowserError::Platform("The page closed.".into()))?;
+        view.fill_login(&target.origin, username, password)
     }
 
     fn annotation_button(&self, has_view: bool, cx: &Context<Self>) -> Button {
@@ -621,12 +710,61 @@ impl BrowserPanel {
             .size_6()
             .disabled(!has_view)
             .when(
-                self.annotation_state == AnnotationState::Selecting,
+                self.interaction == BrowserInteraction::Selecting,
                 ButtonVariants::primary,
             )
             .accessibility_label("Annotate page")
             .tooltip("Select an element and add feedback")
             .on_click(cx.listener(|this, _, _, cx| this.toggle_annotation(cx)))
+    }
+
+    fn render_page_actions(
+        &self,
+        has_view: bool,
+        can_open_external: bool,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.annotation_button(has_view, cx))
+            .child(
+                Button::new("browser-logins")
+                    .icon(gpui_kit::assets::IconName::KeyRound)
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .disabled(!has_view)
+                    .accessibility_label("Saved logins")
+                    .tooltip("Saved logins")
+                    .on_click(cx.listener(|this, _, window, cx| this.edit_login(window, cx))),
+            )
+            .child(
+                Button::new("browser-settings")
+                    .icon(IconName::Settings)
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .accessibility_label("Browser settings")
+                    .tooltip("Browser settings")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(BrowserSettingsRequested))),
+            )
+            .child(
+                Button::new("browser-external")
+                    .icon(IconName::ExternalLink)
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .disabled(!can_open_external)
+                    .accessibility_label("Open in default browser")
+                    .tooltip("Open in default browser")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(tab) = this.selected_tab() {
+                            cx.open_url(&tab.address);
+                        }
+                    })),
+            )
     }
 
     fn render_toolbar(&self, cx: &Context<Self>) -> gpui_kit::Div {
@@ -698,32 +836,7 @@ impl BrowserPanel {
                         ),
                 )),
             )
-            .child(self.annotation_button(has_view, cx))
-            .child(
-                Button::new("browser-settings")
-                    .icon(IconName::Settings)
-                    .ghost()
-                    .small()
-                    .size_6()
-                    .accessibility_label("Browser settings")
-                    .tooltip("Browser settings")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(BrowserSettingsRequested))),
-            )
-            .child(
-                Button::new("browser-external")
-                    .icon(IconName::ExternalLink)
-                    .ghost()
-                    .small()
-                    .size_6()
-                    .disabled(!can_open_external)
-                    .accessibility_label("Open in default browser")
-                    .tooltip("Open in default browser")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(tab) = this.selected_tab() {
-                            cx.open_url(&tab.address);
-                        }
-                    })),
-            )
+            .child(self.render_page_actions(has_view, can_open_external, cx))
     }
 }
 

@@ -18,7 +18,8 @@ gpui_kit::assets::icon_assets!(
         Pause,
         Volume2,
         VolumeX,
-        MousePointer2
+        MousePointer2,
+        KeyRound
     ]
 );
 

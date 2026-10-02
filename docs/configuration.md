@@ -814,3 +814,11 @@ The Browser settings page chooses the address-bar search engine and whether cook
 survive app restarts. `[browser]` accepts `search-engine` (`duck_duck_go`, `google`, `bing`, or
 `brave`) and `persist-site-data` (default `true`). Turning persistence off recreates open pages in
 private mode without deleting the saved profile. Development and Production use separate profiles.
+
+Browser site data uses an identity-specific native profile. On macOS 13, embedded
+pages stay private; persistent named profiles require macOS 14 or newer.
+
+The browser toolbar opens saved logins for the current website. Logins stay in
+the OS credential store, isolated by Bootty identity and exact origin. Fill
+requires HTTPS or loopback HTTP and one visible, unambiguous sign-in form; it
+never submits the form. One saved login per origin is currently supported.

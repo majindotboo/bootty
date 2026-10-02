@@ -139,7 +139,7 @@ impl BrowserView {
         let ipc_annotation_enabled = annotation_enabled.clone();
         let load_annotation_enabled = annotation_enabled.clone();
         let view = profile
-            .builder()
+            .builder(persist_site_data)
             .with_url(&address)
             .with_bounds(bounds.into())
             .with_visible(false)
@@ -165,8 +165,6 @@ impl BrowserView {
             .with_ipc_handler(move |request| {
                 handle_ipc(request.body(), &ipc_annotation_enabled, &shortcut_events);
             })
-            // The profile is scoped to the app identity; private pages never retain site data.
-            .with_incognito(!persist_site_data)
             .with_navigation_handler(|url| normalize_address(&url).is_ok())
             .with_document_title_changed_handler(move |title| {
                 _ = title_events.try_send(BrowserEvent::TitleChanged(
@@ -225,6 +223,57 @@ impl BrowserView {
     /// Reports a failed native address lookup.
     pub fn current_address(&self) -> Result<String, NativeBrowserError> {
         Ok(self.view.url()?)
+    }
+
+    /// Fills one unambiguous sign-in form without submitting it.
+    ///
+    /// # Errors
+    /// Rejects changed origins, invalid credentials, and native script failures.
+    pub fn fill_login(
+        &self,
+        origin: &str,
+        username: &str,
+        password: &[u8],
+    ) -> Result<async_channel::Receiver<Result<(), String>>, NativeBrowserError> {
+        if crate::login_origin(&self.current_address()?)? != origin {
+            return Err(NativeBrowserError::Platform(
+                "The page changed. Open saved logins again.".into(),
+            ));
+        }
+        let password = std::str::from_utf8(password).map_err(|_| {
+            NativeBrowserError::Platform("This saved password is not valid text.".into())
+        })?;
+        if username.is_empty()
+            || password.is_empty()
+            || username.len() > 4096
+            || password.len() > 4096
+        {
+            return Err(NativeBrowserError::Platform(
+                "Enter a username and password of at most 4096 bytes each.".into(),
+            ));
+        }
+        let values = serde_json::to_string(&(origin, username, password))
+            .map_err(|error| NativeBrowserError::Platform(error.to_string()))?;
+        let script = format!("({})(...{values})", include_str!("login.js"));
+        let (sender, receiver) = async_channel::bounded(1);
+        self.view
+            .evaluate_script_with_callback(&script, move |result| {
+                let result = match serde_json::from_str::<String>(&result).as_deref() {
+                    Ok("filled") => Ok(()),
+                    Ok("The page changed. Open saved logins again.") => {
+                        Err("The page changed. Open saved logins again.".into())
+                    }
+                    Ok("Choose a page with one visible sign-in form.") => {
+                        Err("Choose a page with one visible sign-in form.".into())
+                    }
+                    Ok("Fill the username directly; this form is ambiguous.") => {
+                        Err("Fill the username directly; this form is ambiguous.".into())
+                    }
+                    _ => Err("The page could not fill this sign-in form.".into()),
+                };
+                _ = sender.try_send(result);
+            })?;
+        Ok(receiver)
     }
 
     /// Moves the child view to panel bounds in logical window coordinates.

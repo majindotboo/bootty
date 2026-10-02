@@ -54,7 +54,7 @@ impl AnnotationEditor {
         window.close_dialog(cx);
         _ = self
             .owner
-            .update(cx, |panel, cx| panel.finish_annotation(window, cx));
+            .update(cx, |panel, cx| panel.finish_dialog(window, cx));
     }
 }
 
