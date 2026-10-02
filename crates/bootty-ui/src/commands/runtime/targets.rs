@@ -350,6 +350,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.start"
                         | "session.start_project"
                         | "session.tasks"
+                        | "session.tasks.show"
                         | "session.task.set"
                 )
         }

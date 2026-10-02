@@ -236,6 +236,10 @@ pub enum AppEffect {
         target: CommandTarget,
     },
     OpenConnections,
+    OpenSavedTasks {
+        title: String,
+        target: CommandTarget,
+    },
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
     OpenGitChanges {

@@ -870,8 +870,8 @@ impl AppState {
             CoreCommandExecutor::Session(action, arguments) => {
                 self.dispatch_session_command(action, &arguments, exact_target, execution)
             }
-            CoreCommandExecutor::Task(action, arguments) => {
-                self.dispatch_task_command(action, &arguments, exact_target.as_ref(), execution)
+            CoreCommandExecutor::Task(action, args) => {
+                self.dispatch_task(action, &args, exact_target.as_ref(), effects, execution)
             }
             CoreCommandExecutor::File(action, arguments) => self.dispatch_file_action(
                 scope,

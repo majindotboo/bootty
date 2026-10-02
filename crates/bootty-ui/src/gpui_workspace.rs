@@ -4,6 +4,7 @@
 
 mod dialogs;
 mod settings_window;
+mod task_sessions;
 mod terminal_agents;
 use dialogs::WorkspaceDialogs;
 
@@ -1359,6 +1360,9 @@ impl GpuiWorkspace {
                     target,
                 } => self.open_agent_history(provider, cwd, target, window, cx),
                 AppEffect::OpenConnections => self.open_connections(window, cx),
+                AppEffect::OpenSavedTasks { title, target } => {
+                    self.open_saved_tasks(title, target, window, cx);
+                }
                 AppEffect::OpenSetting(id) => {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
                 }

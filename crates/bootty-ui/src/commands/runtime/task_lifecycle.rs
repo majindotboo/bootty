@@ -1,20 +1,21 @@
 use std::time::Instant;
 
-use bootty_control::{CommandCancellation, CommandOutcome};
-use bootty_mux::{executor, session_lifecycle::TaskLifecycle};
+use bootty_control::{CommandCancellation, CommandOutcome, ResourceKind};
+use bootty_mux::{controller::SpaceId, executor, session_lifecycle::TaskLifecycle};
 
 use super::{CommandDispatch, command_outcome_for_mux_error};
 use crate::{
     commands::{ExactMuxTarget, TaskAction},
-    state::AppState,
+    state::{AppEffect, AppState},
 };
 
 impl AppState {
-    pub(super) fn dispatch_task_command(
+    pub(super) fn dispatch_task(
         &mut self,
         action: TaskAction,
         arguments: &[String],
         target: Option<&ExactMuxTarget>,
+        effects: &mut Vec<AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let Some(ExactMuxTarget::Binding(scope)) = target else {
@@ -31,6 +32,7 @@ impl AppState {
             });
         };
         let outcome = match action {
+            TaskAction::Show => return self.show_saved_tasks_command(*scope, effects),
             TaskAction::List => CommandOutcome::Success {
                 value: binding
                     .sessions()
@@ -80,6 +82,39 @@ impl AppState {
             }
         };
         CommandDispatch::Complete(outcome)
+    }
+
+    fn show_saved_tasks_command(
+        &mut self,
+        scope: SpaceId,
+        effects: &mut Vec<AppEffect>,
+    ) -> CommandDispatch {
+        let Some(space) = self
+            .workspace
+            .spaces()
+            .find(|space| space.binding.scope() == scope)
+        else {
+            return self.reject_command(CommandOutcome::StaleTarget {
+                message: "The target Space binding is no longer live".to_owned(),
+            });
+        };
+        let mux = space.binding.mux();
+        let handle = self.binding_target_handle(scope, mux.binding_generation());
+        let Some(target) =
+            ExactMuxTarget::Binding(scope).command_target(ResourceKind::Binding, mux, &handle)
+        else {
+            return self.reject_command(CommandOutcome::StaleTarget {
+                message: "The target Space binding is no longer live".to_owned(),
+            });
+        };
+        effects.push(AppEffect::OpenSavedTasks {
+            title: space.name.clone(),
+            target,
+        });
+        CommandDispatch::Complete(CommandOutcome::Success {
+            value: serde_json::json!({"opened": true}),
+            warnings: Vec::new(),
+        })
     }
 }
 
