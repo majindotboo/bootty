@@ -318,6 +318,7 @@ impl WorkspaceDock {
             |this, _, _: &BrowserClosed, window, cx| {
                 this.remove_tool(bootty_config::config::PanelKind::Browser, window, cx);
                 this.sync_browser_visibility(window, cx);
+                Focusable::focus_handle(&this.terminal, cx).focus(window, cx);
             },
         )
         .detach();

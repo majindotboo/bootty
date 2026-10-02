@@ -31,6 +31,7 @@ pub fn focus_input<M: gpui_kit::base::input::InputModeKind>(
         .min_w_0()
         .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
             if !state.read(cx).presentation().is_disabled() {
+                crate::window::restore_keyboard_focus(window);
                 state.focus_handle(cx).focus(window, cx);
             }
         })

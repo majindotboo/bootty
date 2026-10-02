@@ -86,6 +86,26 @@ fn with_native_window(window: &mut gpui_kit::Window, action: impl FnOnce(&NSWind
     window.set_window_title(&title);
 }
 
+/// Return `AppKit` keyboard delivery to the GPU host after a native child loses focus.
+#[cfg(target_os = "macos")]
+pub(crate) fn restore_keyboard_focus(window: &mut gpui_kit::Window) {
+    with_native_window(window, |native| {
+        // GPUI installs its rendering view directly inside the content view; native
+        // browser pages are children of that host, not sibling input destinations.
+        if let Some(content) = native.contentView()
+            && let Some(host) = content
+                .subviews()
+                .into_iter()
+                .find(|view| view.acceptsFirstResponder())
+        {
+            native.makeFirstResponder(Some(&host));
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn restore_keyboard_focus(_: &mut gpui_kit::Window) {}
+
 /// Restore native resizing before GPUI captures the window's style for simple fullscreen.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_enable_window_resizing(window: &mut gpui_kit::Window) {

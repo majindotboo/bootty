@@ -111,7 +111,10 @@ fn gpui_color(color: crate::gpui::chrome::Rgba) -> Hsla {
 struct BoottyErrorNotification;
 
 fn schedule_focus(focus: FocusHandle, window: &Window, cx: &mut Context<GpuiWorkspace>) {
-    cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
+    cx.defer_in(window, move |_, window, cx| {
+        crate::window::restore_keyboard_focus(window);
+        window.focus(&focus, cx);
+    });
 }
 
 fn terminal_area(chrome: &ChromeSnapshot, docked: bool) -> SurfaceRect {
@@ -2915,6 +2918,7 @@ impl GpuiWorkspace {
             self.state.focus_pane(&pane);
         }
         self.focus = hit.view.focus_handle(cx);
+        crate::window::restore_keyboard_focus(window);
         window.focus(&self.focus, cx);
     }
 

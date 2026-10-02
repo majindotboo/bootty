@@ -217,6 +217,14 @@ impl BrowserPanel {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        if self.selected == id {
+            if let Some(tab) = self.tabs.get_mut(index)
+                && let Some(view) = &mut tab.view
+            {
+                _ = view.set_visible(false);
+            }
+            crate::window::restore_keyboard_focus(window);
+        }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.selected = 0;
@@ -385,6 +393,7 @@ impl BrowserPanel {
                 match shortcut {
                     BrowserShortcut::Palette => cx.emit(BrowserPaletteRequested),
                     BrowserShortcut::Address => self.address.update(cx, |input, cx| {
+                        crate::window::restore_keyboard_focus(window);
                         input.focus(window, cx);
                         input.select_all(window, cx);
                     }),
