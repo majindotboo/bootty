@@ -1268,73 +1268,6 @@ fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
         .into_any_element()
 }
 
-fn usage_labels(
-    snapshot: &UsageMeterSnapshot,
-    item: &super::SidebarFooterItem,
-    colors: ChromePalette,
-) -> gpui_kit::AnyElement {
-    let pace = snapshot
-        .meter
-        .expected_remaining_percent
-        .map(|expected| format!("{:+.0}%", snapshot.meter.remaining_percent - expected));
-    div()
-        .id(SharedString::from(format!("usage-labels-{}", item.key)))
-        .debug_selector({
-            let name = format!("sidebar-footer-{}-labels", item.key);
-            move || name
-        })
-        .tooltip({
-            let description = snapshot.description.clone();
-            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
-        })
-        .w_full()
-        .h(gpui_kit::rems(1.25))
-        .flex()
-        .items_center()
-        .gap_1()
-        .overflow_hidden()
-        .when_some(item.icon.as_deref(), |element, icon| {
-            element.child(crate::gpui::sized_icon(
-                icon,
-                crate::gpui::IconSize::Small,
-                color(snapshot.fill),
-            ))
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_color(color(item.color))
-                .child(snapshot.label.clone()),
-        )
-        .when_some(pace, |element, pace| {
-            element.child(
-                div()
-                    .debug_selector({
-                        let name = format!("sidebar-footer-{}-pace", item.key);
-                        move || name
-                    })
-                    .flex_none()
-                    .text_color(color(snapshot.pace))
-                    .child(pace),
-            )
-        })
-        .when(!snapshot.meter.reset.is_empty(), |element| {
-            element.child(
-                div()
-                    .debug_selector({
-                        let name = format!("sidebar-footer-{}-reset", item.key);
-                        move || name
-                    })
-                    .flex_none()
-                    .text_color(color(colors.muted))
-                    .child(format!("↻ {}", snapshot.meter.reset)),
-            )
-        })
-        .into_any_element()
-}
-
 fn usage_meter(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
@@ -1347,22 +1280,48 @@ fn usage_meter(
         .meter
         .expected_remaining_percent
         .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
+    let pace = snapshot
+        .meter
+        .expected_remaining_percent
+        .map(|expected| format!("{:+.0}%", snapshot.meter.remaining_percent - expected));
     let selector = |part: &str| {
         let name = format!("sidebar-footer-{}-{part}", item.key);
         move || name.clone()
     };
-    v_flex()
+    div()
+        .id(SharedString::from(format!("usage-meter-{}", item.key)))
+        .tooltip({
+            let description = snapshot.description.clone();
+            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
+        })
         .w_full()
         .min_w_0()
-        .gap_0p5()
-        .child(usage_labels(snapshot, item, colors))
+        .h(gpui_kit::rems(1.25))
+        .flex()
+        .items_center()
+        .gap_1()
+        .when_some(item.icon.as_deref(), |element, icon| {
+            element.child(crate::gpui::sized_icon(
+                icon,
+                crate::gpui::IconSize::Small,
+                color(snapshot.fill),
+            ))
+        })
+        .child(
+            div()
+                .debug_selector(selector("labels"))
+                .flex_none()
+                .text_color(color(item.color))
+                .child(snapshot.label.clone()),
+        )
         .child(
             div()
                 .id(SharedString::from(format!("usage-track-{}", item.key)))
                 .debug_selector(selector("track"))
                 .relative()
-                .w_full()
-                .h_0p5()
+                .flex_1()
+                .min_w_0()
+                .h(gpui_kit::rems(0.375))
                 .rounded_full()
                 .bg(color(snapshot.track))
                 .child(
@@ -1385,6 +1344,24 @@ fn usage_meter(
                     )
                 }),
         )
+        .when_some(pace, |element, pace| {
+            element.child(
+                div()
+                    .debug_selector(selector("pace"))
+                    .flex_none()
+                    .text_color(color(snapshot.pace))
+                    .child(pace),
+            )
+        })
+        .when(!snapshot.meter.reset.is_empty(), |element| {
+            element.child(
+                div()
+                    .debug_selector(selector("reset"))
+                    .flex_none()
+                    .text_color(color(colors.muted))
+                    .child(format!("↻ {}", snapshot.meter.reset.replace(' ', ""))),
+            )
+        })
         .into_any_element()
 }
 
@@ -1466,7 +1443,7 @@ pub(super) fn render_codexbar(
                 .flex_none()
                 .w_full()
                 .px_2()
-                .py_1()
+                .py_0p5()
                 .gap_1()
                 .border_t_1()
                 .border_color(color(snapshot.border))

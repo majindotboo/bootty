@@ -812,7 +812,7 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
+fn quota_rows_keep_quota_meter_pacing_and_reset_inline(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
@@ -879,17 +879,23 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
                 let track = cx.debug_bounds(track).expect("quota track");
                 let pace = cx.debug_bounds(pace).expect("pacing delta");
                 let reset = cx.debug_bounds(reset).expect("reset countdown");
-                assert_eq!(track.left(), row.left());
-                assert_eq!(track.right(), row.right());
-                assert!(track.top() >= labels.bottom());
-                assert!(pace.top() >= labels.top() && pace.bottom() <= labels.bottom());
-                assert!(reset.top() >= labels.top() && reset.bottom() <= labels.bottom());
+                assert!(labels.right() <= track.left());
+                assert!(track.right() <= pace.left());
                 assert!(pace.right() <= reset.left());
                 assert!(reset.right() <= row.right());
                 assert!(
-                    row.size.height <= px(font_size * 1.5),
-                    "one label line plus the meter"
+                    track.size.width > px(0.0),
+                    "meter stays visible at every scale"
                 );
+                assert_eq!(track.size.height, px(font_size * 0.375));
+                for part in [labels, track, pace, reset] {
+                    assert!(part.top() >= row.top() && part.bottom() <= row.bottom());
+                    assert!(
+                        (f32::from(part.center().y) - f32::from(row.center().y)).abs() <= 0.5,
+                        "quota information shares one horizontal center line"
+                    );
+                }
+                assert!(row.size.height <= px(font_size * 1.25));
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }
