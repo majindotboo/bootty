@@ -735,24 +735,29 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             });
             cx.run_until_parked();
             let mut previous_bottom = px(0.0);
-            for (row, labels, track) in [
+            for (row, labels, track, details) in [
                 (
                     "sidebar-footer-codex:5h",
                     "sidebar-footer-codex:5h-labels",
                     "sidebar-footer-codex:5h-track",
+                    "sidebar-footer-codex:5h-details",
                 ),
                 (
                     "sidebar-footer-codex:7d",
                     "sidebar-footer-codex:7d-labels",
                     "sidebar-footer-codex:7d-track",
+                    "sidebar-footer-codex:7d-details",
                 ),
             ] {
                 let row = cx.debug_bounds(row).expect("quota row");
                 let labels = cx.debug_bounds(labels).expect("quota labels");
                 let track = cx.debug_bounds(track).expect("quota track");
+                let details = cx.debug_bounds(details).expect("pace and reset timestamp");
                 assert_eq!(track.left(), row.left());
                 assert_eq!(track.right(), row.right());
                 assert!(track.top() >= labels.bottom());
+                assert!(details.top() >= track.bottom());
+                assert!(details.bottom() <= row.bottom());
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }

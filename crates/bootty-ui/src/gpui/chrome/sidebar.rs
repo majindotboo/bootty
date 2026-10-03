@@ -973,6 +973,63 @@ fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
         .into_any_element()
 }
 
+fn usage_labels(
+    snapshot: &UsageMeterSnapshot,
+    item: &super::SidebarFooterItem,
+    colors: ChromePalette,
+) -> gpui_kit::AnyElement {
+    div()
+        .id(SharedString::from(format!("usage-labels-{}", item.key)))
+        .debug_selector({
+            let name = format!("sidebar-footer-{}-labels", item.key);
+            move || name
+        })
+        .tooltip({
+            let description = snapshot.description.clone();
+            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
+        })
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_1()
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_color(color(item.color))
+                .max_w_full()
+                .flex_wrap()
+                .when_some(item.icon.as_deref(), |element, icon| {
+                    element.child(crate::gpui::sized_icon(
+                        icon,
+                        crate::gpui::IconSize::Small,
+                        color(snapshot.fill),
+                    ))
+                })
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(match snapshot.provider {
+                            crate::usage::UsageProvider::Codex => "Codex",
+                            crate::usage::UsageProvider::Claude => "Claude",
+                        }),
+                )
+                .child(snapshot.label.clone()),
+        )
+        .when(!snapshot.meter.reset.is_empty(), |element| {
+            element.child(
+                div()
+                    .text_color(color(colors.muted))
+                    .child(format!("{} to reset", snapshot.meter.reset)),
+            )
+        })
+        .into_any_element()
+}
+
 fn usage_meter(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
@@ -992,57 +1049,8 @@ fn usage_meter(
     v_flex()
         .w_full()
         .min_w_0()
-        .gap_0p5()
-        .child(
-            div()
-                .id(SharedString::from(format!("usage-labels-{}", item.key)))
-                .debug_selector(selector("labels"))
-                .tooltip({
-                    let description = snapshot.description.clone();
-                    move |window, cx| Tooltip::new(description.clone()).build(window, cx)
-                })
-                .w_full()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_1()
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(color(item.color))
-                        .when_some(item.icon.as_deref(), |element, icon| {
-                            element.child(crate::gpui::sized_icon(
-                                icon,
-                                crate::gpui::IconSize::Small,
-                                color(snapshot.fill),
-                            ))
-                        })
-                        .child(snapshot.label.clone()),
-                )
-                .when(!snapshot.meter.pace.is_empty(), |element| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .text_color(color(snapshot.pace))
-                            .child(snapshot.meter.pace.clone()),
-                    )
-                })
-                .when_some(snapshot.reset_at.as_ref(), |element, reset_at| {
-                    element.child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_color(color(colors.muted))
-                            .child(reset_at.clone()),
-                    )
-                }),
-        )
+        .gap_1()
+        .child(usage_labels(snapshot, item, colors))
         .child(
             div()
                 .id(SharedString::from(format!("usage-track-{}", item.key)))
@@ -1071,6 +1079,38 @@ fn usage_meter(
                             .bg(color(snapshot.marker)),
                     )
                 }),
+        )
+        .when(
+            !snapshot.meter.pace.is_empty() || snapshot.reset_at.is_some(),
+            |element| {
+                element.child(
+                    div()
+                        .debug_selector(selector("details"))
+                        .w_full()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_1()
+                        .when(!snapshot.meter.pace.is_empty(), |details| {
+                            details.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(color(snapshot.pace))
+                                    .max_w_full()
+                                    .child(format!("Est. {}", snapshot.meter.pace)),
+                            )
+                        })
+                        .when_some(snapshot.reset_at.as_ref(), |details, reset_at| {
+                            details.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(color(colors.muted))
+                                    .child(reset_at.clone()),
+                            )
+                        }),
+                )
+            },
         )
         .into_any_element()
 }

@@ -228,11 +228,11 @@ impl UsageWindow {
             } else {
                 deficit_tone(deficit)
             },
-            pace: match rounded_deficit {
-                1.. => format!("{rounded_deficit}% def"),
-                ..=-1 => format!("+{}%", rounded_deficit.unsigned_abs()),
-                _ => String::new(),
-            },
+            pace: expected.map_or_else(String::new, |_| match rounded_deficit {
+                1.. => format!("{rounded_deficit}% behind pace"),
+                ..=-1 => format!("{}% ahead of pace", rounded_deficit.unsigned_abs()),
+                _ => "On pace".to_owned(),
+            }),
             pace_tone: match rounded_deficit.cmp(&0) {
                 std::cmp::Ordering::Greater => deficit_tone(f64::from(rounded_deficit)),
                 std::cmp::Ordering::Less => QuotaTone::Success,
@@ -255,14 +255,9 @@ fn deficit_tone(deficit: f64) -> QuotaTone {
 
 fn format_duration(seconds: i64) -> String {
     if seconds >= 86_400 {
-        format!(
-            "{}d{:02}:{:02}",
-            seconds / 86_400,
-            seconds % 86_400 / 3600,
-            seconds % 3600 / 60
-        )
+        format!("{}d {}h", seconds / 86_400, seconds % 86_400 / 3600)
     } else if seconds >= 3600 {
-        format!("{}h{:02}", seconds / 3600, seconds % 3600 / 60)
+        format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
     } else {
         format!("{}m", seconds / 60)
     }
