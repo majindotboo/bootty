@@ -612,7 +612,20 @@ fn ditch_submits_after_worktree_removal_when_branch_deletion_fails() {
     let (_repository, main, worktree, duplicate) = repo_with_duplicate_branch();
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let started = Instant::now();
-    let mut state = native_state(directory.path());
+    let (wake, wakes) = mpsc::channel();
+    let mut state = AppState::new(
+        test_config::config(
+            directory.path().join("config.toml"),
+            MultiplexerBackendConfig::Native,
+        ),
+        support::backends(),
+        Arc::new(move || {
+            _ = wake.send(());
+        }),
+        None,
+        None,
+    )
+    .expect("app state");
     open_native_session(&mut state, &worktree, started);
     let session_id = state.mux().sessions()[0].id.clone();
 
@@ -647,22 +660,23 @@ fn ditch_submits_after_worktree_removal_when_branch_deletion_fails() {
 
     state.apply_ditch_session_event(ditch_event());
 
-    assert!(
-        (0..250).any(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(10 + tick))
-                    .expect("test timestamp fits"),
-            ));
-            std::thread::sleep(Duration::from_millis(1));
-            !state
-                .binding_session_groups()
-                .iter()
-                .flat_map(|group| group.sessions.iter())
-                .any(|session| session.id == session_id)
-        }),
-        "partial cleanup must still submit Ditch"
-    );
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("test deadline fits");
+    loop {
+        state.update_frame(frames::idle_frame(Instant::now()));
+        if !state
+            .binding_session_groups()
+            .iter()
+            .flat_map(|group| group.sessions.iter())
+            .any(|session| session.id == session_id)
+        {
+            break;
+        }
+        wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("partial cleanup must still submit Ditch and wake the app");
+    }
     assert!(!worktree.exists(), "ditch must remove the linked worktree");
     assert!(
         state
