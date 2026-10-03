@@ -1007,6 +1007,10 @@ impl CommandCatalog {
 
 fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
     let (title, description) = match action {
+        SidebarAction::ToggleGrouping => (
+            "Toggle Session Grouping",
+            "Switch between project groups and a flat session list.",
+        ),
         SidebarAction::Ignore => (
             "Ignore Sidebar Input",
             "Consume a sidebar key without changing the workspace.",
@@ -1035,7 +1039,7 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
         mutation: MutationClass::Write,
         arguments: CompactSchema::default(),
         target: Some(ResourceKind::ApplicationWindow),
-        palette: false,
+        palette: action == SidebarAction::ToggleGrouping,
     }
 }
 

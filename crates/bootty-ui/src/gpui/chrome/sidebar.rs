@@ -3,11 +3,12 @@ use num_traits::ToPrimitive as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
+    fmt::Write as _,
     rc::Rc,
 };
 
 use gpui_kit::component::{
-    ActiveTheme as _, Collapsible, Side,
+    ActiveTheme as _, Collapsible, Side, Sizable as _,
     menu::ContextMenuExt,
     shimmer::ShimmerText,
     sidebar::{Sidebar, SidebarItem},
@@ -29,7 +30,8 @@ use super::{
 use crate::gpui::theme::readable_color;
 
 const ROW_HEIGHT: f32 = 1.75;
-const SESSION_ROW_HEIGHT: f32 = 2.5;
+const SESSION_ROW_HEIGHT: f32 = 2.75;
+const PROJECT_HEADER_HEIGHT: f32 = 1.25;
 const GROUP_ROW_HEIGHT: f32 = 2.0;
 pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
@@ -255,6 +257,7 @@ impl SidebarRows {
                 .absolute()
                 .inset_0(),
             )
+            .child(self.view_control())
             .when(self.snapshot.rows.is_empty(), |element| {
                 element.child(
                     v_flex()
@@ -288,6 +291,42 @@ impl SidebarRows {
             .children(self.render_session_blocks(current_rail_color))
             .child(self.reorder_end())
             .child(self.hover_reconciliation())
+            .into_any_element()
+    }
+
+    fn view_control(&self) -> gpui_kit::AnyElement {
+        let grouped = self.snapshot.group_by_project;
+        div()
+            .w_full()
+            .flex()
+            .justify_end()
+            .px_1()
+            .py_0p5()
+            .child(
+                Button::new("sidebar-view")
+                    .debug_selector(|| "sidebar-view".to_owned())
+                    .ghost()
+                    .small()
+                    .label(if grouped { "Projects" } else { "Sessions" })
+                    .tooltip(if grouped {
+                        "Show a flat session list"
+                    } else {
+                        "Group sessions by project"
+                    })
+                    .on_click({
+                        let owner = self.owner.clone();
+                        move |_, _, cx| {
+                            _ = owner.update(cx, |_, cx| {
+                                cx.emit(ChromeIntent::Command(
+                                    bootty_control::CommandInvocation::from_action(
+                                        "ui.sidebar.toggle_grouping",
+                                        bootty_control::Caller::Internal,
+                                    ),
+                                ));
+                            });
+                        }
+                    }),
+            )
             .into_any_element()
     }
 
@@ -554,16 +593,19 @@ impl SidebarRows {
                     }),
             )
             .child(
-                v_flex()
+                div()
+                    .flex()
+                    .items_center()
                     .flex_1()
                     .min_w_0()
-                    .gap_0p5()
+                    .gap_1p5()
                     .child(
                         div()
                             .debug_selector({
                                 let key = row.key.clone();
                                 move || format!("sidebar-title-{key}")
                             })
+                            .flex_1()
                             .min_w_0()
                             .truncate()
                             .when(is_group, gpui_kit::Styled::text_xs)
@@ -579,26 +621,188 @@ impl SidebarRows {
                             })
                             .child(row_text),
                     )
-                    .when_some(row.secondary.clone(), |column, secondary| {
-                        column.child(
-                            div()
-                                .debug_selector({
-                                    let key = row.key.clone();
-                                    move || format!("sidebar-secondary-{key}")
-                                })
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(color(readable_color(
-                                    self.background(row),
-                                    self.colors.muted,
-                                )))
-                                .child(secondary),
-                        )
-                    }),
+                    .when_some(
+                        row.secondary
+                            .clone()
+                            .filter(|_| !matches!(row.kind, SidebarRowKind::Session)),
+                        |column, secondary| {
+                            column.child(
+                                div()
+                                    .debug_selector({
+                                        let key = row.key.clone();
+                                        move || format!("sidebar-secondary-{key}")
+                                    })
+                                    .min_w_0()
+                                    .max_w(relative(0.5))
+                                    .truncate()
+                                    .text_xs()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(color(readable_color(
+                                        self.background(row),
+                                        self.colors.muted,
+                                    )))
+                                    .child(secondary),
+                            )
+                        },
+                    ),
             )
             .children(self.trailing_label(row))
+            .into_any_element()
+    }
+
+    fn session_label(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .when_some(row.project.as_ref(), |column, project| {
+                column.child(
+                    div()
+                        .debug_selector({
+                            let key = row.key.clone();
+                            move || format!("sidebar-project-{key}")
+                        })
+                        .h(gpui_kit::rems(PROJECT_HEADER_HEIGHT))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(color(readable_color(
+                            self.background(row),
+                            self.colors.muted,
+                        )))
+                        .child(div().size_3p5().flex_none().map(|slot| {
+                            if let Some(artwork) = &project.artwork {
+                                slot.child(img(artwork.clone()).size_full())
+                            } else {
+                                slot.child(crate::gpui::icon(
+                                    "folder",
+                                    self.icon_size,
+                                    color(self.colors.muted),
+                                ))
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(project.name.clone()),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .h(gpui_kit::rems(1.5))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .child(self.label(row)),
+            )
+            .child(self.session_metadata(row))
+            .into_any_element()
+    }
+
+    fn session_metadata(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
+        div()
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("sidebar-metadata-{key}")
+            })
+            .w_full()
+            .h(gpui_kit::rems(1.25))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .text_color(color(readable_color(
+                self.background(row),
+                self.colors.muted,
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when_some(row.branch.as_ref(), |branch, name| {
+                        branch
+                            .child(crate::gpui::icon(
+                                "git-branch",
+                                self.icon_size * 0.85,
+                                color(self.colors.muted),
+                            ))
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let key = row.key.clone();
+                                        move || format!("sidebar-branch-{key}")
+                                    })
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(name.clone()),
+                            )
+                    }),
+            )
+            .child(self.agent_stack(row))
+            .into_any_element()
+    }
+
+    fn agent_stack(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
+        // Bound horizontal space; the tooltip retains every observed agent when the stack overflows.
+        let visible = row.agents.len().min(4);
+        let width = visible
+            .saturating_sub(1)
+            .to_f32()
+            .unwrap_or_default()
+            .mul_add(0.75, 1.125);
+        let description = row
+            .agents
+            .iter()
+            .map(|agent| agent.description.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        div()
+            .id(SharedString::from(format!("sidebar-agents-{}", row.key)))
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("sidebar-agents-{key}")
+            })
+            .flex_none()
+            .relative()
+            .h(gpui_kit::rems(1.125))
+            .w(gpui_kit::rems(if visible == 0 { 0.0 } else { width }))
+            .tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
+            .children(
+                row.agents
+                    .iter()
+                    .take(visible)
+                    .enumerate()
+                    .map(|(index, agent)| {
+                        div()
+                            .id(SharedString::from(format!("sidebar-agent-{}", agent.key)))
+                            .debug_selector({
+                                let key = agent.key.clone();
+                                move || format!("sidebar-agent-{key}")
+                            })
+                            .absolute()
+                            .left(gpui_kit::rems(index.to_f32().unwrap_or_default() * 0.75))
+                            .size(gpui_kit::rems(1.125))
+                            .rounded_full()
+                            .bg(color(self.background(row)))
+                            .border_1()
+                            .border_color(color(self.background(row)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::gpui::icon(
+                                &agent.icon,
+                                self.icon_size,
+                                color(self.snapshot.foreground),
+                            ))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -823,10 +1027,19 @@ impl SidebarRows {
             || label.clone(),
             |secondary| format!("{label} · {secondary}"),
         );
-        let accessible_label = row
+        let mut accessible_label = row
             .trailing
             .as_ref()
             .map_or_else(|| label.clone(), |status| format!("{label} · {status}"));
+        if let Some(project) = &row.project {
+            _ = write!(accessible_label, " · {}", project.name);
+        }
+        if let Some(branch) = &row.branch {
+            _ = write!(accessible_label, " · {branch}");
+        }
+        for agent in &row.agents {
+            _ = write!(accessible_label, " · {}", agent.description);
+        }
         let context_owner = self.owner.clone();
         let element = if let (Some(target), Some(context)) = (row.target.clone(), row.context) {
             element
@@ -899,7 +1112,14 @@ impl SidebarRows {
         let current = row.current;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
-            SidebarRowKind::Session if row.secondary.is_some() => SESSION_ROW_HEIGHT,
+            SidebarRowKind::Session => {
+                SESSION_ROW_HEIGHT
+                    + if row.project.is_some() {
+                        PROJECT_HEADER_HEIGHT
+                    } else {
+                        0.0
+                    }
+            }
             _ => ROW_HEIGHT,
         };
         let keyboard_focused = row.target.as_ref().is_some_and(|target| {
@@ -936,7 +1156,11 @@ impl SidebarRows {
                 color(self.background(row))
             })
             .rounded(self.radius)
-            .child(self.label(row))
+            .child(if matches!(row.kind, SidebarRowKind::Session) {
+                self.session_label(row)
+            } else {
+                self.label(row)
+            })
             .children(self.bounds_probe(row))
             .children(self.diff_button(row));
         let element = self.drag_row(element, row);

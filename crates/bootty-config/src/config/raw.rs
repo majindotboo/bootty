@@ -130,6 +130,7 @@ pub(super) struct ChromePatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct SidebarPatch {
+    pub(super) group_by_project: Option<bool>,
     pub(super) position: Option<SidebarPosition>,
     pub(super) background: Option<Color>,
     #[serde(rename = "fullscreen-background")]

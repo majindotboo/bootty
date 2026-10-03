@@ -28,6 +28,7 @@ const DEFAULT_FONT_UNDERLINE_THICKNESS: f32 = 1.0;
 impl Default for SidebarConfig {
     fn default() -> Self {
         Self {
+            group_by_project: true,
             position: SidebarPosition::Left,
             background: None,
             foreground: None,

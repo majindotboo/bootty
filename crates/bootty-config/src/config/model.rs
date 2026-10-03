@@ -438,6 +438,7 @@ pub struct ChromeConfig {
 /// falls back to the theme-derived value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarConfig {
+    pub group_by_project: bool,
     pub position: SidebarPosition,
     pub background: Option<Color>,
     pub foreground: Option<Color>,

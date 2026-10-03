@@ -233,6 +233,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_fields!(sidebar, partial;
+        group_by_project,
         position,
         background,
         foreground,

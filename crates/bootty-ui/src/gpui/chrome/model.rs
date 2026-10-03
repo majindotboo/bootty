@@ -287,6 +287,7 @@ pub struct SidebarSnapshot {
     pub rows: Vec<SidebarRow>,
     pub footer: Vec<SidebarFooterItem>,
     pub title_visible: bool,
+    pub group_by_project: bool,
     pub focused: bool,
     pub hovered_session: Option<SessionTarget>,
     pub dim_when_unfocused: f32,
@@ -303,6 +304,9 @@ pub struct SidebarRow {
     pub key: String,
     pub text: String,
     pub secondary: Option<String>,
+    pub project: Option<SidebarProject>,
+    pub branch: Option<String>,
+    pub agents: Vec<SidebarAgent>,
     pub trailing: Option<String>,
     pub trailing_icon: Option<String>,
     pub trailing_color: Option<Rgba>,
@@ -323,6 +327,19 @@ pub struct SidebarRow {
     pub target: Option<SessionTarget>,
     pub reorder_anchor: Option<String>,
     pub context: Option<SessionContextSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarProject {
+    pub name: String,
+    pub artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarAgent {
+    pub key: String,
+    pub icon: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

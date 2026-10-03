@@ -710,8 +710,10 @@ impl GpuiWorkspace {
     ) -> [Subscription; 2] {
         [
             cx.on_focus(focus, window, |this, window, cx| {
-                this.state
-                    .apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal);
+                this.state.apply_sidebar_action(
+                    crate::app_actions::SidebarAction::FocusTerminal,
+                    &mut Vec::new(),
+                );
                 this.sync_key_bindings(window, cx);
                 cx.notify();
             }),

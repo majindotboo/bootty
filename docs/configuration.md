@@ -575,6 +575,13 @@ Connection tests report results for both saved profiles and unsaved drafts.
 - Bootty config is TOML with Ghostty-inspired vocabulary; it is not Ghostty's
   config syntax.
 
+## Session list
+
+`sidebar.group-by-project` defaults to `true`. The sidebar view button and
+`ui.sidebar.toggle_grouping` switch between project groups and a flat list.
+Each session owns its branch and agent marks; switching views preserves sessions,
+selection and terminal contents.
+
 ## Workspace docks
 
 `toggle_left_dock` and `toggle_right_dock` show or hide their respective docks.

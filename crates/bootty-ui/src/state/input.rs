@@ -455,8 +455,13 @@ impl AppState {
         self.ensure_sidebar_hovered_session();
     }
 
-    pub(crate) fn apply_sidebar_action(&mut self, action: SidebarAction) -> bool {
+    pub(crate) fn apply_sidebar_action(
+        &mut self,
+        action: SidebarAction,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
         match action {
+            SidebarAction::ToggleGrouping => return self.toggle_session_grouping(effects),
             SidebarAction::Ignore => {}
             SidebarAction::PreviousSession => self.move_sidebar_hover(-1),
             SidebarAction::NextSession => self.move_sidebar_hover(1),

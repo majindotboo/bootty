@@ -1297,8 +1297,17 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
     ]
 }
 
-fn sidebar_specs() -> [SettingSpec; 7] {
+fn sidebar_specs() -> [SettingSpec; 8] {
     [
+        spec(
+            &["sidebar", "group-by-project"],
+            "Group sessions by project",
+            "Turn off to show the project on each session in one flat list.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.group_by_project)),
+        ),
         custom(
             &["sidebar", "background"],
             "colors",

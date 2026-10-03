@@ -553,16 +553,30 @@ impl AppState {
         &mut self,
         mutate: impl FnOnce(&mut ConfigDocument) -> ConfigResult<()>,
         effects: &mut Vec<AppEffect>,
-    ) {
+    ) -> bool {
         let mut document = self.config_runtime.document().clone();
         if let Err(error) = mutate(&mut document) {
             self.record_error(error);
-            return;
+            return false;
         }
         match self.commit_settings_document(document) {
-            Ok((_, _, accepted_effects)) => effects.extend(accepted_effects),
-            Err(error) => self.record_error(error),
+            Ok((_, _, accepted_effects)) => {
+                effects.extend(accepted_effects);
+                true
+            }
+            Err(error) => {
+                self.record_error(error);
+                false
+            }
         }
+    }
+
+    pub(crate) fn toggle_session_grouping(&mut self, effects: &mut Vec<AppEffect>) -> bool {
+        let grouped = !self.config().sidebar.group_by_project;
+        self.mutate_config_document(
+            |document| document.set_bool(&["sidebar", "group-by-project"], grouped),
+            effects,
+        )
     }
 
     /// Apply a dragged sidebar width to the live config without touching disk, so the layout

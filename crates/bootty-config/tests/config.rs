@@ -1511,3 +1511,14 @@ fn unreadable_config_paths_are_not_treated_as_missing(#[case] include: Option<&s
         load_config_from_path(&path).expect_err("unreadable config must not become defaults");
     assert!(error.to_string().contains("cycle.toml"));
 }
+
+#[rstest]
+#[case("", true)]
+#[case("[sidebar]\ngroup-by-project = true", true)]
+#[case("[sidebar]\ngroup-by-project = false", false)]
+fn session_grouping_preference(#[case] source: &str, #[case] expected: bool) {
+    assert_eq!(
+        load_config_source(source).unwrap().sidebar.group_by_project,
+        expected
+    );
+}

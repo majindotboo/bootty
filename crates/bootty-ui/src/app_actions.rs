@@ -131,6 +131,7 @@ impl Default for AppKeyBindings {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarAction {
+    ToggleGrouping,
     Ignore,
     PreviousSession,
     NextSession,
@@ -139,7 +140,8 @@ pub enum SidebarAction {
 }
 
 impl SidebarAction {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::ToggleGrouping,
         Self::Ignore,
         Self::PreviousSession,
         Self::NextSession,
@@ -150,6 +152,7 @@ impl SidebarAction {
     #[must_use]
     pub const fn command_id(self) -> &'static str {
         match self {
+            Self::ToggleGrouping => "ui.sidebar.toggle_grouping",
             Self::Ignore => "ui.sidebar.ignore",
             Self::PreviousSession => "ui.sidebar.previous_session",
             Self::NextSession => "ui.sidebar.next_session",

@@ -308,7 +308,7 @@ impl AppState {
         };
         if action != AgentWorkspaceAction::List && matches!(outcome, CommandOutcome::Success { .. })
         {
-            self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal);
+            self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal, effects);
             effects.push(AppEffect::FocusTerminal);
         }
         CommandDispatch::Complete(outcome)

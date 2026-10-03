@@ -6,10 +6,11 @@ use std::collections::{HashMap, HashSet};
 use crate::chrome_projection::{MuxView, SessionProgressView, SessionView, WindowView};
 use crate::gpui::chrome::{
     ChromeIntent, ChromeLayout, ChromePalette, ChromeSnapshot, NativeChromeAction, Rgba,
-    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarPosition, SidebarRow,
-    SidebarRowKind, SidebarSnapshot, SpaceKey, SpaceSnapshot, StatusAlignment, StatusBarSnapshot,
-    StatusIntent, StatusItemSnapshot, StatusProgress, StatusSegmentSnapshot, TabContextAction,
-    TabContextSnapshot, TitlebarSnapshot, UsageMeterSnapshot,
+    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarAgent, SidebarPosition,
+    SidebarProject, SidebarRow, SidebarRowKind, SidebarSnapshot, SpaceKey, SpaceSnapshot,
+    StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress,
+    StatusSegmentSnapshot, TabContextAction, TabContextSnapshot, TitlebarSnapshot,
+    UsageMeterSnapshot,
 };
 use crate::{
     clock::ClockSnapshot,
@@ -672,6 +673,7 @@ fn sidebar_snapshot(
             Vec::new()
         },
         title_visible: config.window.custom_chrome_title_visible(),
+        group_by_project: sidebar_config.group_by_project,
         focused: state.sidebar_focused(),
         hovered_session: state.sidebar_hovered_session().map(neutral_target),
         dim_when_unfocused: chrome.unfocused_sidebar_dim,
@@ -700,6 +702,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             key: "unassigned".to_owned(),
             text: "Unassigned".to_owned(),
             secondary: None,
+            project: None,
+            branch: None,
+            agents: Vec::new(),
             trailing: None,
             trailing_icon: None,
             trailing_color: None,
@@ -724,6 +729,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             key: session.session_id.clone(),
             text: session.name,
             secondary: None,
+            project: None,
+            branch: None,
+            agents: Vec::new(),
             trailing: None,
             trailing_icon: None,
             trailing_color: None,
@@ -761,16 +769,11 @@ fn sidebar_rows(
     let scope = state.mux_scope().persistence_value().to_string();
     let now = std::time::Instant::now();
     let mut rows = Vec::new();
-    let mut groups = Vec::<((Option<&str>, Option<&str>), Vec<(usize, &SessionView)>)>::new();
+    let grouped = state.config().sidebar.group_by_project;
+    let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
     for (index, session) in sessions.iter().enumerate() {
-        let group = (
-            session.cwd.as_deref(),
-            projection
-                .session_facts
-                .get(&session.id)
-                .and_then(|facts| facts.branch.as_deref()),
-        );
-        if let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
+        let group = session.cwd.as_deref();
+        if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
             indices.push((index, session));
         } else {
             groups.push((group, vec![(index, session)]));
@@ -793,25 +796,26 @@ fn sidebar_rows(
             .and_then(|cwd| cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
             .filter(|name| !name.is_empty())
             .unwrap_or("Terminal");
-        let group = (cwd.unwrap_or("").to_owned(), facts.branch.clone());
+        let group = cwd.unwrap_or("").to_owned();
         let base = sidebar_session_base(state, session, index, sessions.len(), palette);
-        if last_group.as_ref() != Some(&group) {
+        let artwork = cwd.and_then(|cwd| {
+            native.artwork.request(
+                &scope,
+                cwd,
+                state.active_multiplexer().remote.as_ref(),
+                now,
+                &state.repaint,
+            )
+        });
+        if grouped && last_group.as_ref() != Some(&group) {
             rows.push(SidebarRow {
                 key: format!("project:{}:{}", scope, session.id),
                 text: project.to_owned(),
-                trailing: facts.branch.clone(),
+                trailing: None,
                 trailing_color: Some(palette.muted),
                 color: palette.text,
                 dim_color: palette.muted,
-                artwork: cwd.and_then(|cwd| {
-                    native.artwork.request(
-                        &scope,
-                        cwd,
-                        state.active_multiplexer().remote.as_ref(),
-                        now,
-                        &state.repaint,
-                    )
-                }),
+                artwork: artwork.clone(),
                 icon: Some("folder".to_owned()),
                 kind: SidebarRowKind::Group,
                 active: false,
@@ -831,19 +835,44 @@ fn sidebar_rows(
         };
         let mut row = SidebarRow {
             text: title.to_owned(),
-            secondary: None,
+            project: (!grouped).then(|| SidebarProject {
+                name: project.to_owned(),
+                artwork,
+            }),
+            branch: facts.branch,
             icon: Some("terminal".to_owned()),
             kind: SidebarRowKind::Session,
             selectable: true,
             ..base
         };
-        if let Some(activity) = terminal_activity(state, &session.id, None) {
-            sidebar_agent_activity(&mut row, &activity, state.ui_theme().palette);
+        let activities = terminal_activities(state, &session.id, None);
+        if let Some(activity) = activities
+            .iter()
+            .max_by_key(|activity| activity_priority(activity.status))
+        {
+            sidebar_agent_activity(&mut row, activity, state.ui_theme().palette);
         }
+        row.agents = activities.iter().map(sidebar_agent).collect();
         rows.push(row);
         last_group = Some(group);
     }
     rows
+}
+
+fn sidebar_agent(activity: &bootty_agents::TerminalAgentActivity) -> SidebarAgent {
+    SidebarAgent {
+        key: activity.target.handle.clone(),
+        icon: activity.provider.icon().to_owned(),
+        description: format!(
+            "{:?} · {:?}{}",
+            activity.provider,
+            activity.status,
+            activity
+                .detail
+                .as_ref()
+                .map_or_else(String::new, |detail| format!(" · {detail}"))
+        ),
+    }
 }
 
 fn sidebar_agent_activity(
@@ -862,25 +891,23 @@ fn sidebar_agent_activity(
         S::Error => ("Error", "circle-alert", theme.destructive),
         S::Unavailable => ("Unavailable", "unplug", theme.warning),
     };
-    row.icon = Some(activity.provider.icon().to_owned());
-    let provider = match activity.provider {
-        bootty_agents::AgentKind::Codex => "Codex",
-        bootty_agents::AgentKind::Claude => "Claude",
-        bootty_agents::AgentKind::Pi => "Pi",
-    };
-    row.secondary = Some(
-        activity
-            .detail
-            .as_deref()
-            .filter(|detail| !detail.trim().is_empty())
-            .map_or_else(
-                || provider.to_owned(),
-                |detail| format!("{provider} · {}", detail.lines().next().unwrap_or(detail)),
-            ),
-    );
     row.trailing = Some(status.to_owned());
     row.trailing_icon = Some(icon.to_owned());
     row.trailing_color = Some(tone);
+}
+
+const fn activity_priority(status: bootty_agents::TerminalAgentStatus) -> u8 {
+    use bootty_agents::TerminalAgentStatus as S;
+    match status {
+        S::Error => 8,
+        S::Waiting => 7,
+        S::Working => 6,
+        S::Starting => 5,
+        S::Unavailable => 4,
+        S::Finished => 3,
+        S::Stopped => 2,
+        S::Idle => 1,
+    }
 }
 
 fn terminal_activity(
@@ -888,11 +915,25 @@ fn terminal_activity(
     session_id: &str,
     window_id: Option<&str>,
 ) -> Option<bootty_agents::TerminalAgentActivity> {
+    terminal_activities(state, session_id, window_id)
+        .into_iter()
+        .max_by_key(|activity| activity_priority(activity.status))
+}
+
+fn terminal_activities(
+    state: &AppState,
+    session_id: &str,
+    window_id: Option<&str>,
+) -> Vec<bootty_agents::TerminalAgentActivity> {
     use bootty_control::ResourceKind;
-    let agents = state.terminal_agent_service()?;
+    let Some(agents) = state.terminal_agent_service() else {
+        return Vec::new();
+    };
     let scope = state.mux_scope();
     let mux = state.mux();
-    let session = mux.backend_session_by_id_or_name(session_id)?;
+    let Some(session) = mux.backend_session_by_id_or_name(session_id) else {
+        return Vec::new();
+    };
     let binding = state.binding_target_handle(scope, mux.binding_generation());
     session
         .windows
@@ -910,16 +951,7 @@ fn terminal_activity(
                 agents.activity(&target)
             })
         })
-        .max_by_key(|activity| match activity.status {
-            bootty_agents::TerminalAgentStatus::Error => 8,
-            bootty_agents::TerminalAgentStatus::Waiting => 7,
-            bootty_agents::TerminalAgentStatus::Working => 6,
-            bootty_agents::TerminalAgentStatus::Starting => 5,
-            bootty_agents::TerminalAgentStatus::Unavailable => 4,
-            bootty_agents::TerminalAgentStatus::Finished => 3,
-            bootty_agents::TerminalAgentStatus::Stopped => 2,
-            bootty_agents::TerminalAgentStatus::Idle => 1,
-        })
+        .collect()
 }
 
 fn sidebar_session_base(
@@ -936,6 +968,9 @@ fn sidebar_session_base(
         key: session.id.clone(),
         text: String::new(),
         secondary: None,
+        project: None,
+        branch: None,
+        agents: Vec::new(),
         trailing: None,
         trailing_icon: None,
         trailing_color: None,

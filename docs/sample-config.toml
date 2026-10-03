@@ -143,6 +143,8 @@ close-position = "right" # left or right
 close-button = "always" # always, hover, hidden
 
 [sidebar]
+# Turn off for one flat list with project context on each session.
+group-by-project = true
 # Sessions colors layer on top of the active theme.
 # Any unset slot falls back to the theme-derived value.
 # background = "#11131a"

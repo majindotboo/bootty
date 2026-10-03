@@ -1001,7 +1001,17 @@ impl AppState {
                 CommandDispatch::Complete(self.reload_config_command(effects))
             }
             SynchronousCommand::Sidebar(action) => {
-                if self.apply_sidebar_action(action)
+                let applied = self.apply_sidebar_action(action, effects);
+                if !applied && action == crate::app_actions::SidebarAction::ToggleGrouping {
+                    return CommandDispatch::Complete(CommandOutcome::Failed {
+                        code: "configuration_save_failed".to_owned(),
+                        message: self.last_error.as_ref().map_or_else(
+                            || "Could not save the session list view.".to_owned(),
+                            ErrorNotice::raw_message,
+                        ),
+                    });
+                }
+                if applied
                     && matches!(
                         action,
                         crate::app_actions::SidebarAction::FocusTerminal

@@ -2800,3 +2800,67 @@ fn explicit_tab_starts_literal_argv_and_failure_preserves_the_session(
         }
     }
 }
+
+#[rstest]
+#[case(Caller::CommandPalette)]
+#[case(Caller::Socket)]
+#[case(Caller::Internal)]
+fn session_grouping_command_persists_without_changing_sessions(#[case] caller: Caller) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = native_state(directory.path());
+    let now = Instant::now();
+    open_native_session(&mut state, directory.path(), now);
+    let sessions = state
+        .mux()
+        .sessions()
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    let selected = state.mux().selected_session().map(str::to_owned);
+    assert!(state.config().sidebar.group_by_project);
+    assert!(matches!(
+        submit_action(&mut state, "ui.sidebar.toggle_grouping", caller, now),
+        CommandOutcome::Success { .. }
+    ));
+    assert!(!state.config().sidebar.group_by_project);
+    let loaded =
+        bootty_config::config::load_config_from_path(directory.path().join("config.toml")).unwrap();
+    assert!(!loaded.sidebar.group_by_project);
+    assert_eq!(
+        state
+            .mux()
+            .sessions()
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>(),
+        sessions
+    );
+    assert_eq!(state.mux().selected_session(), selected.as_deref());
+    assert!(matches!(
+        submit_action(&mut state, "ui.sidebar.toggle_grouping", caller, now),
+        CommandOutcome::Success { .. }
+    ));
+    assert!(state.config().sidebar.group_by_project);
+}
+
+#[rstest]
+fn rejected_session_view_save_keeps_the_accepted_view() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = native_state(directory.path());
+    let path = directory.path().join("config.toml");
+    if path.exists() {
+        fs::remove_file(&path).unwrap();
+    }
+    fs::create_dir(&path).unwrap();
+    let outcome = submit_action(
+        &mut state,
+        "ui.sidebar.toggle_grouping",
+        Caller::Socket,
+        Instant::now(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert!(state.config().sidebar.group_by_project);
+}
