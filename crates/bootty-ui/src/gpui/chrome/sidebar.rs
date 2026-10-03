@@ -9,14 +9,15 @@ use std::{
 
 use gpui_kit::component::{
     ActiveTheme as _, Collapsible, Side, Sizable as _,
-    menu::ContextMenuExt,
+    input::{Input, InputState},
+    menu::{ContextMenuExt, DropdownMenu as _, PopupMenuItem},
     shimmer::ShimmerText,
     sidebar::{Sidebar, SidebarItem},
     tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{
-    App, Bounds, Context, Div, Empty, FontWeight, IntoElement, MouseButton, MouseUpEvent,
+    App, Bounds, Context, Div, Empty, Entity, FontWeight, IntoElement, MouseButton, MouseUpEvent,
     ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window, canvas, div,
     img, prelude::*, px, relative,
 };
@@ -36,7 +37,6 @@ const GROUP_ROW_HEIGHT: f32 = 2.0;
 pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 const TRAFFIC_LIGHT_PADDING: f32 = 78.0;
-const CURRENT_RAIL_WIDTH: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) struct DraggedSidebar;
@@ -114,6 +114,7 @@ impl SidebarItem for BoottySidebarContent {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     snapshot: &SidebarSnapshot,
+    search: &Entity<InputState>,
     title: &TitlebarSnapshot,
     pointer_hovered_session: Option<&SessionTarget>,
     spaces: &[SpaceSnapshot],
@@ -129,18 +130,25 @@ pub(super) fn render(
 ) -> gpui_kit::AnyElement {
     let width = layout.effective_sidebar_width();
     let position = layout.sidebar_position;
-    let content = SidebarRows {
-        snapshot: snapshot.clone(),
+    let query = search.read(cx).value().trim().to_lowercase();
+    let rows = SidebarRows {
+        snapshot: SidebarSnapshot {
+            rows: filtered_rows(&snapshot.rows, &query),
+            ..snapshot.clone()
+        },
+        search: search.clone(),
+        searching: !query.is_empty(),
         pointer_hovered_session: pointer_hovered_session.cloned(),
         colors,
-        radius: cx.theme().radius,
+        radius: cx.theme().radius_tokens().xl,
         icon_size: f32::from(cx.theme().font_size) * 0.875,
         owner: cx.weak_entity(),
         row_bounds: sidebar_row_bounds.clone(),
         reveal_current: reveal_current.clone(),
         reconcile_hover,
-    }
-    .content(width, docked);
+    };
+    let toolbar = rows.search_toolbar();
+    let content = rows.content(width, docked);
     let status_footer = render_codexbar(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
@@ -176,7 +184,14 @@ pub(super) fn render(
         .text_color(color(snapshot.foreground))
         .border_l_0()
         .border_r_0()
-        .when_some(header, gpui_kit::component::sidebar::Sidebar::header)
+        .header(
+            v_flex()
+                .w(px(width))
+                .when(docked, gpui_kit::Styled::w_full)
+                .when(header.is_none(), gpui_kit::Styled::mt_neg_3)
+                .when_some(header, ParentElement::child)
+                .child(toolbar),
+        )
         .child(content)
         .footer(component_footer);
 
@@ -214,8 +229,40 @@ pub(super) fn render(
         .into_any_element()
 }
 
+fn filtered_rows(rows: &[SidebarRow], query: &str) -> Vec<SidebarRow> {
+    if query.is_empty() {
+        return rows.to_vec();
+    }
+    let mut filtered = Vec::new();
+    let mut group = None;
+    let mut group_added = false;
+    for row in rows {
+        if matches!(row.kind, SidebarRowKind::Group) {
+            group = Some(row);
+            group_added = false;
+            continue;
+        }
+        let matches = std::iter::once(row.text.as_str())
+            .chain(row.project.iter().map(|project| project.name.as_str()))
+            .chain(group.iter().map(|group| group.text.as_str()))
+            .chain(row.branch.as_deref())
+            .chain(row.agents.iter().map(|agent| agent.description.as_str()))
+            .any(|text| text.to_lowercase().contains(query));
+        if matches {
+            if !group_added && let Some(group) = group {
+                filtered.push(group.clone());
+                group_added = true;
+            }
+            filtered.push(row.clone());
+        }
+    }
+    filtered
+}
+
 struct SidebarRows {
     snapshot: SidebarSnapshot,
+    search: Entity<InputState>,
+    searching: bool,
     pointer_hovered_session: Option<SessionTarget>,
     colors: ChromePalette,
     radius: Pixels,
@@ -236,12 +283,6 @@ impl SidebarRows {
 
     fn render_content(&self, width: f32, docked: bool) -> gpui_kit::AnyElement {
         let colors = self.colors;
-        let current_rail_color = self
-            .snapshot
-            .rows
-            .iter()
-            .find(|row| row.current && matches!(&row.kind, SidebarRowKind::Session))
-            .map(|row| row.color);
         v_flex()
             .w(px(width))
             .when(docked, gpui_kit::Styled::w_full)
@@ -257,7 +298,6 @@ impl SidebarRows {
                 .absolute()
                 .inset_0(),
             )
-            .child(self.view_control())
             .when(self.snapshot.rows.is_empty(), |element| {
                 element.child(
                     v_flex()
@@ -266,7 +306,11 @@ impl SidebarRows {
                         .gap_2()
                         .text_sm()
                         .text_color(color(colors.muted))
-                        .child("No sessions")
+                        .child(if self.searching {
+                            "No matching sessions"
+                        } else {
+                            "No sessions"
+                        })
                         .child(
                             Button::new("sidebar-create-session")
                                 .debug_selector(|| "sidebar-create-session".to_owned())
@@ -288,49 +332,108 @@ impl SidebarRows {
                         ),
                 )
             })
-            .children(self.render_session_blocks(current_rail_color))
+            .children(self.render_session_blocks())
             .child(self.reorder_end())
             .child(self.hover_reconciliation())
             .into_any_element()
     }
 
-    fn view_control(&self) -> gpui_kit::AnyElement {
+    fn search_toolbar(&self) -> gpui_kit::AnyElement {
         let grouped = self.snapshot.group_by_project;
+        let create_owner = self.owner.clone();
+        let menu_owner = self.owner.clone();
         div()
+            .debug_selector(|| "sidebar-search-toolbar".to_owned())
             .w_full()
             .flex()
-            .justify_end()
-            .px_1()
-            .py_0p5()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .child(
+                div().flex_1().min_w_0().child(
+                    crate::gpui::focus_input(
+                        &self.search,
+                        Input::new(&self.search)
+                            .aria_label("Search sessions")
+                            .role(gpui_kit::Role::SearchInput)
+                            .appearance(false)
+                            .small()
+                            .prefix(crate::gpui::sized_icon(
+                                "search",
+                                crate::gpui::IconSize::Small,
+                                color(self.colors.muted),
+                            ))
+                            .cleanable(true),
+                    )
+                    .debug_selector(|| "sidebar-search".to_owned()),
+                ),
+            )
+            .child(
+                Button::new("sidebar-new-session")
+                    .debug_selector(|| "sidebar-new-session".to_owned())
+                    .ghost()
+                    .small()
+                    .size_6()
+                    .child(crate::gpui::sized_icon(
+                        "square-pen",
+                        crate::gpui::IconSize::Small,
+                        color(self.colors.subtext),
+                    ))
+                    .accessibility_label("New session")
+                    .tooltip("New session")
+                    .on_click(move |_, _, cx| {
+                        _ = create_owner.update(cx, |_, cx| {
+                            cx.emit(ChromeIntent::Command(
+                                bootty_control::CommandInvocation::from_action(
+                                    "new_mux_session",
+                                    bootty_control::Caller::Internal,
+                                ),
+                            ));
+                        });
+                    }),
+            )
             .child(
                 Button::new("sidebar-view")
                     .debug_selector(|| "sidebar-view".to_owned())
                     .ghost()
                     .small()
-                    .label(if grouped { "Projects" } else { "Sessions" })
-                    .tooltip(if grouped {
-                        "Show a flat session list"
-                    } else {
-                        "Group sessions by project"
-                    })
-                    .on_click({
-                        let owner = self.owner.clone();
-                        move |_, _, cx| {
-                            _ = owner.update(cx, |_, cx| {
-                                cx.emit(ChromeIntent::Command(
-                                    bootty_control::CommandInvocation::from_action(
-                                        "ui.sidebar.toggle_grouping",
-                                        bootty_control::Caller::Internal,
-                                    ),
-                                ));
-                            });
-                        }
+                    .size_6()
+                    .child(crate::gpui::sized_icon(
+                        "ellipsis",
+                        crate::gpui::IconSize::Small,
+                        color(self.colors.subtext),
+                    ))
+                    .accessibility_label("Session list options")
+                    .tooltip("Session list options")
+                    .dropdown_menu(move |menu, _, _| {
+                        [("Group by project", true), ("Flat session list", false)]
+                            .into_iter()
+                            .fold(menu, |menu, (label, desired)| {
+                                let owner = menu_owner.clone();
+                                menu.item(
+                                    PopupMenuItem::new(label)
+                                        .checked(grouped == desired)
+                                        .on_click(move |_, _, cx| {
+                                            if grouped != desired {
+                                                _ = owner.update(cx, |_, cx| {
+                                                    cx.emit(ChromeIntent::Command(
+                                                    bootty_control::CommandInvocation::from_action(
+                                                        "ui.sidebar.toggle_grouping",
+                                                        bootty_control::Caller::Internal,
+                                                    ),
+                                                ));
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
                     }),
             )
             .into_any_element()
     }
 
-    fn render_session_blocks(&self, current_rail_color: Option<Rgba>) -> Vec<gpui_kit::AnyElement> {
+    fn render_session_blocks(&self) -> Vec<gpui_kit::AnyElement> {
         let mut blocks = Vec::new();
         let mut rows = self.snapshot.rows.iter().peekable();
         while let Some(row) = rows.next() {
@@ -341,7 +444,7 @@ impl SidebarRows {
                 continue;
             }
             if !matches!(row.kind, SidebarRowKind::Session) {
-                blocks.push(self.render_row(row, current_rail_color, false));
+                blocks.push(self.render_row(row, false));
                 continue;
             }
             while rows.peek().is_some_and(|next| {
@@ -363,10 +466,7 @@ impl SidebarRows {
                 .rounded(self.radius)
                 .overflow_hidden()
                 .bg(color(self.background(row)))
-                .when(row.current, |block| {
-                    block.child(Self::current_rail(row, current_rail_color))
-                })
-                .child(self.render_row(row, current_rail_color, true))
+                .child(self.render_row(row, true))
                 .when_some(row.target.clone(), |block, target| {
                     let owner = self.owner.clone();
                     block.on_hover(move |hovered: &bool, _, cx| {
@@ -385,7 +485,7 @@ impl SidebarRows {
                 });
             blocks.push(
                 div()
-                    .px_1()
+                    .px_2()
                     .py_0p5()
                     .child(self.drop_target(block, row))
                     .into_any_element(),
@@ -856,35 +956,15 @@ impl SidebarRows {
             .into()
     }
 
-    fn current_rail(row: &SidebarRow, current_rail_color: Option<Rgba>) -> gpui_kit::AnyElement {
-        div()
-            .debug_selector({
-                let key = row.key.clone();
-                move || format!("sidebar-current-rail-{key}")
-            })
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .bottom(px(0.0))
-            .w(px(CURRENT_RAIL_WIDTH))
-            .bg(color(current_rail_color.unwrap_or(row.color)))
-            .into_any_element()
-    }
-
-    fn keyboard_rail(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
-        let current = row.current;
-        let colors = self.colors;
+    fn focus_outline(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
         let keyboard_focus_key = row.key.clone();
         div()
             .debug_selector(move || format!("sidebar-keyboard-focus-{keyboard_focus_key}"))
             .absolute()
-            // Keep the focus rail visible alongside the current-session rail.
-            .left(px(if current { CURRENT_RAIL_WIDTH } else { 0.0 }))
-            .top(px(3.0))
-            .bottom(px(3.0))
-            .w(px(2.0))
-            .rounded(px(1.0))
-            .bg(color(colors.accent))
+            .inset_0()
+            .border_1()
+            .rounded(self.radius)
+            .border_color(color(self.colors.accent))
             .into_any_element()
     }
 
@@ -1102,14 +1182,8 @@ impl SidebarRows {
         }
     }
 
-    fn render_row(
-        &self,
-        row: &SidebarRow,
-        current_rail_color: Option<Rgba>,
-        in_session_block: bool,
-    ) -> gpui_kit::AnyElement {
+    fn render_row(&self, row: &SidebarRow, in_session_block: bool) -> gpui_kit::AnyElement {
         let snapshot = &self.snapshot;
-        let current = row.current;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
             SidebarRowKind::Session => {
@@ -1141,11 +1215,8 @@ impl SidebarRows {
             .text_sm()
             .text_left()
             .overflow_hidden()
-            .when(current && !in_session_block, |element| {
-                element.child(Self::current_rail(row, current_rail_color))
-            })
             .when(keyboard_focused, |element| {
-                element.child(self.keyboard_rail(row))
+                element.child(self.focus_outline(row))
             })
             .when(!snapshot.focused, |row| {
                 row.opacity(1.0 - snapshot.dim_when_unfocused.clamp(0.0, 1.0))
@@ -1202,6 +1273,10 @@ fn usage_labels(
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
 ) -> gpui_kit::AnyElement {
+    let pace = snapshot
+        .meter
+        .expected_remaining_percent
+        .map(|expected| format!("{:+.0}%", snapshot.meter.remaining_percent - expected));
     div()
         .id(SharedString::from(format!("usage-labels-{}", item.key)))
         .debug_selector({
@@ -1213,42 +1288,48 @@ fn usage_labels(
             move |window, cx| Tooltip::new(description.clone()).build(window, cx)
         })
         .w_full()
+        .h(gpui_kit::rems(1.25))
         .flex()
-        .flex_wrap()
         .items_center()
-        .justify_between()
         .gap_1()
+        .overflow_hidden()
+        .when_some(item.icon.as_deref(), |element, icon| {
+            element.child(crate::gpui::sized_icon(
+                icon,
+                crate::gpui::IconSize::Small,
+                color(snapshot.fill),
+            ))
+        })
         .child(
             div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_color(color(item.color))
-                .max_w_full()
-                .flex_wrap()
-                .when_some(item.icon.as_deref(), |element, icon| {
-                    element.child(crate::gpui::sized_icon(
-                        icon,
-                        crate::gpui::IconSize::Small,
-                        color(snapshot.fill),
-                    ))
-                })
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(match snapshot.provider {
-                            crate::usage::UsageProvider::Codex => "Codex",
-                            crate::usage::UsageProvider::Claude => "Claude",
-                        }),
-                )
                 .child(snapshot.label.clone()),
         )
+        .when_some(pace, |element, pace| {
+            element.child(
+                div()
+                    .debug_selector({
+                        let name = format!("sidebar-footer-{}-pace", item.key);
+                        move || name
+                    })
+                    .flex_none()
+                    .text_color(color(snapshot.pace))
+                    .child(pace),
+            )
+        })
         .when(!snapshot.meter.reset.is_empty(), |element| {
             element.child(
                 div()
+                    .debug_selector({
+                        let name = format!("sidebar-footer-{}-reset", item.key);
+                        move || name
+                    })
+                    .flex_none()
                     .text_color(color(colors.muted))
-                    .child(format!("{} to reset", snapshot.meter.reset)),
+                    .child(format!("↻ {}", snapshot.meter.reset)),
             )
         })
         .into_any_element()
@@ -1273,7 +1354,7 @@ fn usage_meter(
     v_flex()
         .w_full()
         .min_w_0()
-        .gap_1()
+        .gap_0p5()
         .child(usage_labels(snapshot, item, colors))
         .child(
             div()
@@ -1281,7 +1362,7 @@ fn usage_meter(
                 .debug_selector(selector("track"))
                 .relative()
                 .w_full()
-                .h_1()
+                .h_0p5()
                 .rounded_full()
                 .bg(color(snapshot.track))
                 .child(
@@ -1303,38 +1384,6 @@ fn usage_meter(
                             .bg(color(snapshot.marker)),
                     )
                 }),
-        )
-        .when(
-            !snapshot.meter.pace.is_empty() || snapshot.reset_at.is_some(),
-            |element| {
-                element.child(
-                    div()
-                        .debug_selector(selector("details"))
-                        .w_full()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_1()
-                        .when(!snapshot.meter.pace.is_empty(), |details| {
-                            details.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(color(snapshot.pace))
-                                    .max_w_full()
-                                    .child(format!("Est. {}", snapshot.meter.pace)),
-                            )
-                        })
-                        .when_some(snapshot.reset_at.as_ref(), |details, reset_at| {
-                            details.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(color(colors.muted))
-                                    .child(reset_at.clone()),
-                            )
-                        }),
-                )
-            },
         )
         .into_any_element()
 }

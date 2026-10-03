@@ -1054,13 +1054,14 @@ fn sidebar_footer(
                     label: if stale {
                         format!("{} updating", window.label)
                     } else {
-                        format!("{} {:.0}% left", window.label, meter.remaining_percent)
+                        format!("{} {:.0}%", window.label, meter.remaining_percent)
                     },
                     description: format!(
-                        "{} {}: {:.0}% remaining. Pacing is an estimate. Resets {}{}.",
+                        "{} {}: {:.0}% remaining. {} (estimated). Resets {}{}.",
                         provider.id(),
                         window.label,
                         meter.remaining_percent,
+                        meter.pace,
                         reset_at.as_deref().unwrap_or("at an unknown time"),
                         if meter.reset.is_empty() {
                             String::new()

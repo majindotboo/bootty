@@ -12,7 +12,11 @@ use super::{
     sidebar, space_switcher, status_bar,
 };
 
-use gpui_kit::component::{ActiveTheme as _, menu::PopupMenuItem};
+use gpui_kit::component::{
+    ActiveTheme as _,
+    input::{InputEvent, InputState},
+    menu::PopupMenuItem,
+};
 use gpui_kit::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
@@ -30,6 +34,7 @@ pub struct GpuiChrome {
     pub(super) focus: FocusHandle,
     pub(super) status_tab_focus_handles: HashMap<String, FocusHandle>,
     pub(super) pointer_hovered_session: Option<SessionTarget>,
+    pub(super) sidebar_search: gpui_kit::Entity<InputState>,
     pub(super) sidebar_dragging: bool,
     pub(super) sidebar_reconcile_hover: bool,
     pub(super) sidebar_reveal_current: Rc<Cell<bool>>,
@@ -72,7 +77,15 @@ fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> 
 
 impl GpuiChrome {
     #[must_use]
-    pub fn new(snapshot: ChromeSnapshot, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(snapshot: ChromeSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe(&sidebar_search, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.sidebar_reveal_current.set(false);
+                cx.notify();
+            }
+        })
+        .detach();
         let mut chrome = Self {
             snapshot,
             docked_status: false,
@@ -80,6 +93,7 @@ impl GpuiChrome {
             focus: cx.focus_handle(),
             status_tab_focus_handles: HashMap::new(),
             pointer_hovered_session: None,
+            sidebar_search,
             sidebar_dragging: false,
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
@@ -163,6 +177,7 @@ impl GpuiChrome {
         let snapshot = self.snapshot.sidebar.clone()?;
         Some(sidebar::render(
             &snapshot,
+            &self.sidebar_search,
             &self.snapshot.titlebar,
             self.pointer_hovered_session.as_ref(),
             &self.snapshot.spaces,
@@ -542,6 +557,7 @@ impl GpuiChrome {
                 |element, sidebar| {
                     element.child(sidebar::render(
                         sidebar,
+                        &self.sidebar_search,
                         &titlebar,
                         pointer_hovered_session.as_ref(),
                         &spaces,
@@ -565,6 +581,7 @@ impl GpuiChrome {
                 |element, sidebar| {
                     element.child(sidebar::render(
                         sidebar,
+                        &self.sidebar_search,
                         &titlebar,
                         pointer_hovered_session.as_ref(),
                         &spaces,

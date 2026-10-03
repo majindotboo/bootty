@@ -496,9 +496,6 @@ fn compact_task_rows_keep_inset_targets_and_centered_space_controls(cx: &mut Tes
     let block = cx
         .debug_bounds("sidebar-session-session")
         .expect("session block");
-    let rail = cx
-        .debug_bounds("sidebar-current-rail-session")
-        .expect("current session rail");
     let shell = cx
         .debug_bounds("bootty-gpui-sidebar-shell")
         .expect("sidebar shell");
@@ -508,12 +505,9 @@ fn compact_task_rows_keep_inset_targets_and_centered_space_controls(cx: &mut Tes
     assert_eq!(hitbox.size.width, row.size.width);
     assert_eq!(block.origin.x, row.origin.x);
     assert_eq!(block.size.width, row.size.width);
-    assert_eq!(rail.origin.x, block.origin.x);
-    assert_eq!(rail.size.width, px(4.0));
 
     assert_eq!(cx.debug_bounds("sidebar-row-session:cwd"), None);
     assert_eq!(block.size.height, row.size.height);
-    assert_eq!(rail.size.height, block.size.height);
 
     let first_space = cx.debug_bounds("space-1").expect("first space");
     let second_space = cx.debug_bounds("space-2").expect("second space");
@@ -725,6 +719,67 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = task_row_snapshot(false);
+    snapshot.sidebar.as_mut().unwrap().rows[1].text = "Fix rendering".to_owned();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    let input = cx.debug_bounds("sidebar-search").expect("session search");
+    let create = cx.debug_bounds("sidebar-new-session").expect("create icon");
+    let menu = cx.debug_bounds("sidebar-view").expect("grouping menu icon");
+    assert!(input.right() <= create.left() && create.right() <= menu.left());
+    cx.simulate_click(center(input), Modifiers::none());
+    cx.simulate_input("RENDER");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar-row-task-1").is_some());
+    assert!(cx.debug_bounds("sidebar-row-task-0").is_none());
+    snapshot.sidebar.as_mut().unwrap().group_by_project = true;
+    cx.update(|window, cx| {
+        probe
+            .read(cx)
+            .chrome
+            .clone()
+            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar-row-task-1").is_some());
+    assert!(cx.debug_bounds("sidebar-row-task-0").is_none());
+    probe.update(cx, |probe, _| {
+        assert!(
+            probe.intents.borrow().is_empty(),
+            "search never activates a session"
+        );
+    });
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar-row-task-0").is_some());
+    cx.simulate_click(center(create), Modifiers::none());
+    probe.update(cx, |probe, _| assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "new_mux_session")));
+}
+
+#[gpui_kit::test]
+fn sidebar_grouping_menu_uses_the_shared_command_and_restores_focus(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let (probe, cx) = cx.add_window_view(ChromeProbe::new);
+    let button = cx.debug_bounds("sidebar-view").expect("session options");
+    cx.simulate_click(center(button), Modifiers::none());
+    cx.run_until_parked();
+    draw_chrome(cx);
+    cx.simulate_keystrokes("down down enter");
+    cx.run_until_parked();
+    probe.update(cx, |probe, _| assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "ui.sidebar.toggle_grouping")));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    draw_chrome(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    probe.update(cx, |probe, _| assert_eq!(probe.intents.borrow().len(), 1));
+}
+
+#[gpui_kit::test]
 fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
@@ -769,7 +824,7 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             color: palette().text,
             meter: Some(UsageMeterSnapshot {
                 provider: UsageProvider::Codex,
-                label: format!("{label} 23% left"),
+                label: format!("{label} 23%"),
                 reset_at: Some("Oct 6 14:00".to_owned()),
                 description: "Codex remaining quota and estimated pace".to_owned(),
                 fill: palette().accent,
@@ -803,29 +858,38 @@ fn quota_rows_keep_labels_above_full_width_meters(cx: &mut TestAppContext) {
             });
             cx.run_until_parked();
             let mut previous_bottom = px(0.0);
-            for (row, labels, track, details) in [
+            for (row, labels, track, pace, reset) in [
                 (
                     "sidebar-footer-codex:5h",
                     "sidebar-footer-codex:5h-labels",
                     "sidebar-footer-codex:5h-track",
-                    "sidebar-footer-codex:5h-details",
+                    "sidebar-footer-codex:5h-pace",
+                    "sidebar-footer-codex:5h-reset",
                 ),
                 (
                     "sidebar-footer-codex:7d",
                     "sidebar-footer-codex:7d-labels",
                     "sidebar-footer-codex:7d-track",
-                    "sidebar-footer-codex:7d-details",
+                    "sidebar-footer-codex:7d-pace",
+                    "sidebar-footer-codex:7d-reset",
                 ),
             ] {
                 let row = cx.debug_bounds(row).expect("quota row");
                 let labels = cx.debug_bounds(labels).expect("quota labels");
                 let track = cx.debug_bounds(track).expect("quota track");
-                let details = cx.debug_bounds(details).expect("pace and reset timestamp");
+                let pace = cx.debug_bounds(pace).expect("pacing delta");
+                let reset = cx.debug_bounds(reset).expect("reset countdown");
                 assert_eq!(track.left(), row.left());
                 assert_eq!(track.right(), row.right());
                 assert!(track.top() >= labels.bottom());
-                assert!(details.top() >= track.bottom());
-                assert!(details.bottom() <= row.bottom());
+                assert!(pace.top() >= labels.top() && pace.bottom() <= labels.bottom());
+                assert!(reset.top() >= labels.top() && reset.bottom() <= labels.bottom());
+                assert!(pace.right() <= reset.left());
+                assert!(reset.right() <= row.right());
+                assert!(
+                    row.size.height <= px(font_size * 1.5),
+                    "one label line plus the meter"
+                );
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }
