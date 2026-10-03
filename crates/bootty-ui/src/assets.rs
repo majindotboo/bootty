@@ -43,6 +43,11 @@ pub const IBM_PLEX_SANS_LICENSE: &[u8] =
     include_bytes!("../assets/fonts/ibm-plex-sans/license.txt");
 
 const BOOTTY_ASSETS: &[(&str, &[u8])] = &[
+    ("icons/pi.svg", include_bytes!("../assets/icons/pi.svg")),
+    (
+        "icons/pi-LICENSE",
+        include_bytes!("../assets/icons/pi-LICENSE"),
+    ),
     (
         "icons/bootty.png",
         include_bytes!("../assets/bootty-mascot.png"),

@@ -69,3 +69,19 @@ fn font_directory_listing_matches_asset_source_prefixes() {
     assert_eq!(lilex.len(), 5);
     assert_eq!(plex.len(), 5);
 }
+
+#[rstest]
+#[case("icons/pi.svg")]
+#[case("icons/pi-LICENSE")]
+fn pi_provider_artwork_is_embedded(#[case] path: &str) {
+    let assets = BoottyAssets;
+    let bytes = assets.load(path).unwrap().expect("embedded Pi artwork");
+    assert!(!bytes.is_empty());
+    assert!(
+        assets
+            .list("icons/")
+            .unwrap()
+            .iter()
+            .any(|asset| asset == path)
+    );
+}

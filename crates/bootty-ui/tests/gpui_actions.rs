@@ -358,16 +358,13 @@ fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
 }
 
 #[rstest]
-#[case("codex", "start", "Open Codex terminal")]
-#[case("claude", "start", "Open Claude terminal")]
-#[case("pi", "start", "Open Pi terminal")]
-#[case("codex", "tab", "Open Codex terminal tab")]
-#[case("claude", "tab", "Open Claude terminal tab")]
-#[case("pi", "tab", "Open Pi terminal tab")]
+#[case("codex", "Open Codex terminal", "openai")]
+#[case("claude", "Open Claude terminal", "claude")]
+#[case("pi", "Open Pi terminal", "pi")]
 fn palette_launches_native_terminals_from_the_shared_catalog(
     #[case] provider: &str,
-    #[case] operation: &str,
     #[case] title: &str,
+    #[case] icon: &str,
 ) {
     let catalog = bootty_ui::commands::CommandCatalog::default();
     let localizer = bootty_ui::i18n::Localizer::new("en").unwrap();
@@ -377,6 +374,15 @@ fn palette_launches_native_terminals_from_the_shared_catalog(
         &localizer,
         &catalog.list(),
     );
+    let provider_commands = catalog
+        .list()
+        .into_iter()
+        .filter(|descriptor| {
+            descriptor.id.starts_with(&format!("agents.{provider}.")) && descriptor.palette
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(provider_commands.len(), 1);
+    assert_eq!(provider_commands[0].id, format!("agents.{provider}.tab"));
     assert!(
         !palette
             .spec()
@@ -385,7 +391,7 @@ fn palette_launches_native_terminals_from_the_shared_catalog(
             .any(|row| row.label.ends_with(" session history")),
         "history queries need a view before they can be offered in the palette"
     );
-    let command = format!("agents.{provider}.{operation}");
+    let command = format!("agents.{provider}.tab");
     palette.apply(&DialogIntent::TextChanged {
         dialog: DialogId::new(COMMAND_PALETTE_ID),
         value: command.clone(),
@@ -396,6 +402,8 @@ fn palette_launches_native_terminals_from_the_shared_catalog(
         .iter()
         .find(|row| row.enabled && row.label == title)
         .expect("native terminal launcher is visible");
+    assert_eq!(row.icon.as_deref(), Some(icon));
+    assert!(bootty_gpui::has_icon(icon));
     let action = row.action.clone().unwrap();
     assert_eq!(
         palette.apply(&DialogIntent::Activate {

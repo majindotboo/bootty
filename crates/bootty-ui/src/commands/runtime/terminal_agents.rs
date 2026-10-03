@@ -349,7 +349,7 @@ fn start_terminal(
         provider.default_program(),
         context.names.iter().map(String::as_str),
     );
-    let create = if operation == "tab" {
+    let create = if operation == "tab" || account {
         let mut create = CommandInvocation::new(
             "terminal.create_tab",
             vec![argv, prepared.launch.cwd.clone().unwrap_or_default()],
@@ -400,10 +400,12 @@ fn start_terminal(
             ),
         }),
     }
-    if matches!(
-        invocation.caller,
-        Caller::CommandPalette | Caller::Keybinding | Caller::BuiltinKeybinding
-    ) {
+    if account
+        || matches!(
+            invocation.caller,
+            Caller::CommandPalette | Caller::Keybinding | Caller::BuiltinKeybinding
+        )
+    {
         let mut focus = CommandInvocation::from_action("agents.focus", invocation.caller);
         focus.target = Some(target);
         let outcome = commands.execute(focus, deadline, cancellation);

@@ -81,7 +81,7 @@ impl AgentKind {
     #[must_use]
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::Pi => "bot",
+            Self::Pi => "pi",
             Self::Codex => "openai",
             Self::Claude => "claude",
         }

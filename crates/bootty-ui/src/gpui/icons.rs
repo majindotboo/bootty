@@ -53,6 +53,13 @@ pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
             .size(px(normalize_size(size)))
             .into_any_element();
     }
+    if slug == "pi" {
+        return gpui_kit::svg()
+            .path("icons/pi.svg")
+            .size(px(normalize_size(size)))
+            .text_color(tint)
+            .into_any_element();
+    }
     let Some(resolved) = resolve(slug) else {
         return gpui_kit::Empty.into_any_element();
     };
@@ -146,7 +153,7 @@ impl Element for IconElement {
 /// Return whether `slug` resolves to an icon in the embedded icon inventory.
 #[must_use]
 pub fn has_icon(slug: &str) -> bool {
-    resolve(slug).is_some()
+    slug == "pi" || resolve(slug).is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

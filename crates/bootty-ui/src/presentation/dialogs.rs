@@ -728,10 +728,20 @@ impl PaletteCommand {
         }
     }
 
-    const fn icon(&self) -> &str {
+    fn icon(&self) -> &str {
         match self {
             Self::Core(command) => command.icon(),
-            Self::Catalog(_) => "bot",
+            Self::Catalog(command) if command.id == "ui.sidebar.toggle_grouping" => "list",
+            Self::Catalog(command) => match command
+                .id
+                .strip_prefix("agents.")
+                .and_then(|id| id.split_once('.').map(|(provider, _)| provider))
+            {
+                Some("codex") => bootty_agents::AgentKind::Codex.icon(),
+                Some("claude") => bootty_agents::AgentKind::Claude.icon(),
+                Some("pi") => bootty_agents::AgentKind::Pi.icon(),
+                _ => "bot",
+            },
         }
     }
 
