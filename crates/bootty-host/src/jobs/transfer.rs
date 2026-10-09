@@ -67,17 +67,30 @@ impl TransferProgress {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
-enum WireRequest {
-    Upload { path: String, bytes: u64 },
-    Download { path: String },
+pub enum WireRequest {
+    Upload {
+        path: String,
+        bytes: u64,
+    },
+    Download {
+        path: String,
+    },
+    PreparePrivate {
+        directory: crate::private_files::PrivateFileDirectory,
+    },
+    UploadPrivate {
+        directory: crate::private_files::PrivateFileDirectory,
+        name: String,
+        bytes: u64,
+    },
 }
-#[derive(Serialize, Deserialize)]
-struct Receipt {
-    bytes: u64,
-    sha256: String,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receipt {
+    pub bytes: u64,
+    pub sha256: String,
 }
 
-fn source(path: &str) -> Result<(File, Metadata)> {
+pub fn source(path: &str) -> Result<(File, Metadata)> {
     ensure!(
         Path::new(path).is_absolute(),
         "Source path must be absolute on its host"
@@ -113,7 +126,7 @@ fn destination(path: &str) -> Result<tempfile::NamedTempFile> {
         )
         .context("stage destination")
 }
-fn unchanged(file: &File, before: &Metadata) -> Result<()> {
+pub fn unchanged(file: &File, before: &Metadata) -> Result<()> {
     let after = file.metadata()?;
     ensure!(
         before.len() == after.len() && before.modified()? == after.modified()?,
@@ -128,7 +141,7 @@ fn publish(file: tempfile::NamedTempFile, path: &str) -> Result<()> {
         .context("publish destination without replacing an existing file")?;
     Ok(())
 }
-fn copy_bytes(
+pub fn copy_bytes(
     mut input: impl Read,
     mut output: impl Write,
     total: u64,
@@ -163,7 +176,7 @@ fn copy_bytes(
     }
     Ok(Receipt { bytes, sha256 })
 }
-fn line<T: serde::de::DeserializeOwned>(input: &mut impl std::io::BufRead) -> Result<T> {
+pub fn line<T: serde::de::DeserializeOwned>(input: &mut impl std::io::BufRead) -> Result<T> {
     let mut line = String::new();
     let size = input.take(16 * 1024).read_line(&mut line)?;
     ensure!(
@@ -172,7 +185,7 @@ fn line<T: serde::de::DeserializeOwned>(input: &mut impl std::io::BufRead) -> Re
     );
     serde_json::from_str(&line).context("decode transfer response")
 }
-fn write_line(value: &impl Serialize, output: &mut impl Write) -> Result<()> {
+pub fn write_line(value: &impl Serialize, output: &mut impl Write) -> Result<()> {
     serde_json::to_writer(&mut *output, value)?;
     output.write_all(b"\n")?;
     output.flush()?;
@@ -382,6 +395,45 @@ pub fn serve_transfer(payload: &str) -> Result<()> {
             let sent = copy_bytes(&mut file, &mut output, metadata.len(), |_| Ok(()))?;
             unchanged(&file, &metadata)?;
             write_line(&sent, &mut output)
+        }
+        WireRequest::PreparePrivate { directory } => {
+            let path = directory.prepare()?;
+            write_line(&path, &mut output)
+        }
+        WireRequest::UploadPrivate {
+            directory,
+            name,
+            bytes,
+        } => {
+            ensure!(
+                bytes <= crate::private_files::MAX_PRIVATE_FILE_BYTES,
+                "Private upload exceeds 50 MiB"
+            );
+            crate::private_files::validate_file_name(&name)?;
+            let path = directory.prepare()?.join(name);
+            let mut staged = tempfile::Builder::new()
+                .prefix(".bootty-transfer-")
+                .tempfile_in(path.parent().context("Private upload parent")?)?;
+            let received = copy_bytes(&mut input, &mut staged, bytes, |_| Ok(()))?;
+            let sent: Receipt = line(&mut input)?;
+            ensure!(sent == received, "Upload checksum mismatch");
+            let mut end = [0; 1];
+            ensure!(input.read(&mut end)? == 0, "Unexpected bytes after upload");
+            drop(input);
+            if path.try_exists()? || std::fs::symlink_metadata(&path).is_ok() {
+                crate::private_files::verify_existing(&path, &received)?;
+            } else {
+                publish(staged, path.to_str().context("Private upload path")?)?;
+                #[cfg(unix)]
+                File::open(path.parent().context("Private upload parent")?)?.sync_all()?;
+            }
+            write_line(
+                &crate::private_files::PrivateFileReceipt {
+                    path,
+                    receipt: received,
+                },
+                &mut output,
+            )
         }
     }
 }

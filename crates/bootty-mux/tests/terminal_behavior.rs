@@ -17,9 +17,9 @@ use bootty_mux::{
     command::MuxCommand,
     controller::SpaceId,
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
+        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
     repository::{SpaceMuxOverride, SpaceRemoteOverride},
     snapshot::{MuxPaneAnchor, MuxSnapshot},
@@ -609,8 +609,7 @@ impl MuxAppBackendProvider for StaleCacheProvider {
         MuxAppBackendPolicy {
             panes: self.behavior,
             progress: TerminalProgressPolicy::TerminalOsc,
-            persisted_sessions: PersistedSessionPolicy::Never,
-            generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
             terminal_residency: if self.behavior.topology == PaneTopology::ProcessLocal {
                 TerminalResidency::WorkspaceShared
             } else {
@@ -892,5 +891,78 @@ fn failed_cached_runtime_is_retired_without_blocking_live_config_publication() -
         false,
     )?;
     assert_eq!(starts.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+#[rstest]
+fn selecting_an_inactive_binding_target_preserves_the_active_space_and_its_selection() -> Result<()>
+{
+    let directory = assert_fs::TempDir::new()?;
+    let mut config = BoottyConfig {
+        config_path: directory.path().join("config.toml"),
+        ..BoottyConfig::default()
+    };
+    config.multiplexer.backend = MultiplexerBackendConfig::Native;
+    let starts = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(MuxBackendRegistry::from_app_providers(
+        [Arc::new(StaleCacheProvider::native(Arc::clone(&starts)))],
+        [MuxBackendKind::Native],
+    )?);
+    let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
+    let variant = AppearanceVariant::Light;
+    let mut workspace =
+        WorkspaceRuntime::open(&config, "main", registry, variant, Arc::clone(&repaint))?;
+    let parent_scope = workspace.active_space_id();
+    workspace.activate_target(parent_scope, "parent", None, &repaint)?;
+    let captured_scope = workspace
+        .create_space(
+            "Captured",
+            "folder",
+            [0, 0, 0],
+            false,
+            SpaceMuxOverride::default(),
+            &config,
+            variant,
+        )?
+        .expect("valid captured Space");
+    workspace.activate_target(captured_scope, "child", None, &repaint)?;
+    assert_eq!(workspace.active_space_id(), parent_scope);
+    assert_eq!(
+        workspace.active.binding.mux().selected_session(),
+        Some("parent")
+    );
+    assert_eq!(
+        workspace
+            .binding(captured_scope)
+            .expect("captured Binding")
+            .mux()
+            .selected_session(),
+        Some("child")
+    );
+    anyhow::ensure!(
+        workspace
+            .activate_target(
+                SpaceId::from_persistence(i64::MAX),
+                "foreign",
+                None,
+                &repaint
+            )
+            .is_err(),
+        "a closed Binding target must fail"
+    );
+    assert_eq!(workspace.active_space_id(), parent_scope);
+    assert_eq!(
+        workspace.active.binding.mux().selected_session(),
+        Some("parent")
+    );
+    assert_eq!(
+        workspace
+            .binding(captured_scope)
+            .expect("captured Binding")
+            .mux()
+            .selected_session(),
+        Some("child")
+    );
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
     Ok(())
 }

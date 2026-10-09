@@ -62,6 +62,7 @@ fn backend() -> Result<(TempDir, NativeBackend)> {
         .execute(MuxCommand::NewWindow {
             session_id: "session".into(),
             cwd: Some("/destination".into()),
+            argv: None,
         })
         .context("activate another window")?;
     Ok((directory, backend))
@@ -156,5 +157,39 @@ fn only_close_removes_a_window_with_its_last_pane(
             .context("window count")?
     );
     assert_eq!(after.windows[0].panes, before.windows[0].panes);
+    Ok(())
+}
+
+#[rstest]
+fn closing_the_last_native_window_ends_its_attachment_and_preserves_other_sessions(
+    backend: Result<(TempDir, NativeBackend)>,
+) -> Result<()> {
+    let (_directory, mut backend) = backend?;
+    let before = backend.snapshot()?;
+    let closing = before
+        .sessions
+        .iter()
+        .find(|session| session.id == "session")
+        .context("closing session")?;
+    let foreign = before
+        .sessions
+        .iter()
+        .find(|session| session.id == "foreign")
+        .context("foreign session")?;
+    for pane in closing.windows.iter().flat_map(|window| &window.panes) {
+        backend.execute(PaneOperation::Close.command(pane.pane_id.clone().context("pane id")?))?;
+    }
+    let after = backend.snapshot()?;
+    assert_eq!(after.sessions.len(), 1);
+    assert_eq!(after.sessions[0].id, "foreign");
+    let mut remaining = foreign.clone();
+    remaining.active = true;
+    remaining.windows[0].active = true;
+    assert_eq!(
+        after.sessions,
+        [remaining],
+        "only the fallback selection changes"
+    );
+    assert_eq!(after.active_session_id.as_deref(), Some("foreign"));
     Ok(())
 }

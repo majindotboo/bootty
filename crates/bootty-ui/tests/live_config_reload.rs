@@ -644,6 +644,7 @@ glyph-protocol = false
 #[cfg(unix)]
 fn pane(session_id: &str, pane_id: &str) -> MuxPaneAnchor {
     MuxPaneAnchor {
+        native_agent: None,
         session_id: session_id.to_owned(),
         pane_id: Some(pane_id.to_owned()),
         cwd: None,

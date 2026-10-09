@@ -32,9 +32,9 @@ use bootty_mux::{
     command::MuxCommand,
     controller::{CommandSelection, SpaceId},
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
+        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
     snapshot::{MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow},
     terminal::{
@@ -296,12 +296,6 @@ impl MuxAppBackendProvider for RestoreProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::BackendSnapshot,
-            persisted_sessions: if self.kind == MuxBackendKind::Herdr {
-                PersistedSessionPolicy::Never
-            } else {
-                PersistedSessionPolicy::AfterEmptyInitialSnapshot
-            },
-            generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: self.selection_publication,
         }
@@ -355,6 +349,8 @@ fn claimed_session(
         display_name: String::new(),
         explicit: false,
         cwd: cwd.to_owned(),
+        state: bootty_mux::session_membership::SessionState::default(),
+        terminal_snapshot: None,
     }
 }
 
@@ -377,6 +373,7 @@ fn claim_first_space(
 fn mux_session(id: &str, cwd: String, tag: MuxSessionTag, active: bool) -> MuxSession {
     MuxSession {
         anchor: MuxPaneAnchor {
+            native_agent: None,
             session_id: id.to_owned(),
             cwd: Some(cwd),
             ..MuxPaneAnchor::default()
@@ -483,6 +480,7 @@ fn session_with_pane(id: &str) -> MuxSession {
 
 fn session_on_pane(id: &str, pane_id: &str, cwd: Option<String>) -> MuxSession {
     let pane = MuxPaneAnchor {
+        native_agent: None,
         session_id: id.to_owned(),
         pane_id: Some(pane_id.to_owned()),
         cwd,
@@ -517,6 +515,7 @@ fn submit_command(
     let (response, outcomes) = mpsc::channel();
     commands
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation,
             deadline: started
                 .checked_add(Duration::from_secs(1))
@@ -1124,6 +1123,7 @@ fn a_failed_session_membership_commit_preserves_the_live_runtime_and_database(
     let (response, outcomes) = mpsc::channel();
     commands
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation: CommandInvocation::from_action("new_tab", Caller::Socket),
             // The budget bounds a genuine hang. It stays far above the scheduler jitter that a
             // fully parallel test run adds to a pane spawn.
@@ -2415,6 +2415,7 @@ fn submit_and_wait(state: &mut AppState, invocation: CommandInvocation) -> Comma
     state
         .app_command_sender(Caller::Socket)
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation,
             deadline,
             cancellation: CommandCancellation::new(),
@@ -2856,6 +2857,7 @@ fn a_starting_native_create_never_answers_for_or_closes_a_recreated_session(
         state
             .app_command_sender(Caller::Socket)
             .try_send(AppCommandRequest {
+                creation_receipt: None,
                 invocation,
                 deadline,
                 cancellation: CommandCancellation::new(),
@@ -2946,6 +2948,7 @@ fn an_asynchronous_mux_failure_answers_a_socket_caller_without_a_window_notice(
     state
         .app_command_sender(Caller::Socket)
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation: targeted(
                 "session.create",
                 vec![

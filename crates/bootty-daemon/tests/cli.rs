@@ -777,6 +777,50 @@ fn daemon_discovers_remote_projects_with_the_shared_heuristics() {
 }
 
 #[test]
+fn daemon_adds_remote_project_favorites_idempotently() {
+    let directory = assert_fs::TempDir::new().expect("tempdir");
+    let home = directory.path();
+    let project = home.join("src/project");
+    create_fixture_dir(&project).expect("project");
+    let path = project.to_string_lossy().into_owned();
+
+    let add = || {
+        Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .args(["remote-project", "add", "--path"])
+            .arg(&path)
+            .output()
+            .expect("add remote project favorite")
+    };
+    let first = add();
+    assert_success(&first);
+    assert_eq!(String::from_utf8_lossy(&first.stdout).trim(), "true");
+
+    let favorites = home.join(".config/tmux/.session-favorites");
+    let content = std::fs::read(&favorites).expect("favorite bytes");
+    let second = add();
+    assert_success(&second);
+    assert_eq!(String::from_utf8_lossy(&second.stdout).trim(), "false");
+    assert_eq!(std::fs::read(favorites).expect("favorite bytes"), content);
+
+    let listed = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .args(["remote-project", "list"])
+        .output()
+        .expect("list remote projects");
+    assert_success(&listed);
+    let projects: Vec<bootty_git::ProjectPickerEntry> =
+        serde_json::from_slice(&listed.stdout).expect("project JSON");
+    assert!(
+        projects
+            .iter()
+            .any(|entry| entry.path == path && entry.favorite)
+    );
+}
+
+#[test]
 fn daemon_marks_canonical_worktree_aliases_as_occupied() {
     let directory = assert_fs::TempDir::new().expect("tempdir");
     let project = directory.path().join("project");

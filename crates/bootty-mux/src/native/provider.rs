@@ -6,9 +6,9 @@ use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxCommandDispatch,
+        PaneBehavior, PaneTopology, SelectionPublicationPolicy, TerminalProgressPolicy,
+        TerminalResidency,
     },
     terminal::BackendPanePolicy,
 };
@@ -44,8 +44,7 @@ impl MuxAppBackendProvider for NativeProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::TerminalOsc,
-            persisted_sessions: PersistedSessionPolicy::Immediate,
-            generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
             terminal_residency: TerminalResidency::WorkspaceShared,
             selection_publication: SelectionPublicationPolicy::Direct,
         }

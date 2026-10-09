@@ -83,6 +83,50 @@ fn captured_output_stops_at_its_bound(#[case] cancellable: bool, #[case] stderr:
 const HELPER_ENV: &str = "BOOTTY_MUX_PROCESS_HELPER";
 
 #[cfg(target_os = "macos")]
+#[rstest::rstest]
+#[case(0)]
+#[case(7)]
+fn disowned_commands_return_their_output_and_exit_status(#[case] code: i32) {
+    let output = SystemCommandRunner
+        .run_disowned(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "printf 'stdout\\n'; printf 'stderr\\n' >&2; exit \"$1\"".into(),
+                "probe".into(),
+                code.to_string(),
+            ],
+        )
+        .expect("detached command");
+    assert_eq!(output.success, code == 0);
+    assert_eq!(output.stdout, "stdout\n");
+    assert_eq!(output.stderr, "stderr\n");
+}
+
+#[cfg(target_os = "macos")]
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn disowned_command_output_is_bounded(#[case] stderr: bool) {
+    let error = SystemCommandRunner
+        .run_disowned(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                format!(
+                    "head -c 16777217 /dev/zero{}",
+                    if stderr { " >&2" } else { "" }
+                ),
+            ],
+        )
+        .expect_err("oversized detached output");
+    assert!(
+        format!("{error:#}").contains("command output exceeds the 16 MiB capture limit"),
+        "{error:#}"
+    );
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn disowned_commands_resolve_programs_and_preserve_the_bootty_environment() {
     use std::os::unix::fs::PermissionsExt;

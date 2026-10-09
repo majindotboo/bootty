@@ -109,6 +109,17 @@ pub trait MuxBackend {
     fn send_pane_input(&self, _pane_id: &str, _input: &PaneInput) -> Result<()> {
         bail!("this backend cannot deliver input to a pane directly")
     }
+    /// Replace one pane's process with literal argv while retaining backend topology.
+    /// # Errors
+    /// Returns unsupported operation, invalid argv or backend process startup errors.
+    fn respawn_pane_command(
+        &self,
+        _pane_id: &str,
+        _argv: &[String],
+        _cwd: Option<&str>,
+    ) -> Result<()> {
+        bail!("this backend cannot respawn a pane directly")
+    }
     /// Read one pane's text addressed by its backend pane id.
     ///
     /// # Errors

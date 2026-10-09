@@ -4,6 +4,7 @@ edition.workspace = true
 autobenches = false
 
 [dependencies]
+bootty-control = { path = "../bootty-control" }
 num-traits.workspace = true
 serde.workspace = true
 tempfile.workspace = true
@@ -15,6 +16,9 @@ regex.workspace = true
 unicode-segmentation.workspace = true
 png.workspace = true
 portable-pty.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+filedescriptor.workspace = true
 
 [dev-dependencies]
 assert_fs.workspace = true

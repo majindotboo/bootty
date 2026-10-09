@@ -1,5 +1,38 @@
 use std::{collections::HashSet, path::Path};
 
+pub const SESSION_NAME_MAX_BYTES: usize = 256;
+
+/// Keep generated names valid across native, rmux, and tmux backends.
+#[cfg(feature = "terminal-runtime")]
+pub(crate) fn generated_session_name(candidate: &str) -> String {
+    let mut name: String = candidate
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, ':' | '.' | '\\' | '#') {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if name.starts_with(['-', '$', '@', '%', '=']) {
+        name.insert(0, '_');
+    }
+    truncate_session_name(&mut name, SESSION_NAME_MAX_BYTES);
+    if name.is_empty() {
+        "bootty".clone_into(&mut name);
+    }
+    name
+}
+
+fn truncate_session_name(name: &mut String, max_bytes: usize) {
+    let mut end = name.len().min(max_bytes);
+    while !name.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    name.truncate(end);
+}
+
 /// Derive the default session name for a local path.
 #[must_use]
 pub fn session_name_for_path(path: &str) -> String {
@@ -33,15 +66,14 @@ where
     }
 
     let (group, leaf) = candidate.rsplit_once('/').unwrap_or(("", candidate));
+    let base = if group.is_empty() { leaf } else { candidate };
     // u128 has more suffixes than any addressable set can contain.
     let mut suffix = 2_u128;
     loop {
-        let suffixed_leaf = format!("{leaf}-{suffix}");
-        let name = if group.is_empty() {
-            suffixed_leaf
-        } else {
-            format!("{group}/{suffixed_leaf}")
-        };
+        let tail = format!("-{suffix}");
+        let mut name = base.to_owned();
+        truncate_session_name(&mut name, SESSION_NAME_MAX_BYTES.saturating_sub(tail.len()));
+        name.push_str(&tail);
         if !existing.contains(name.as_str()) {
             return name;
         }

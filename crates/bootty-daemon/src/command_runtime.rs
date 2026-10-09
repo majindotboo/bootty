@@ -66,7 +66,11 @@ pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()>
             let id = required_option(arguments, "--id")?;
             let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
             let payload = required_option(arguments, "--payload")?;
-            let command = bootty_mux::remote_space::decode_command(&payload)?;
+            let command = if payload == "-" {
+                bootty_mux::remote_space::read_stream_command(std::io::stdin().lock())?
+            } else {
+                bootty_mux::remote_space::decode_command(&payload)?
+            };
             catalog.execute(&id, backend, command)?;
         }
         "pane" => {
@@ -105,6 +109,13 @@ pub fn run_remote_project(args: &[String]) -> Result<()> {
             println!(
                 "{}",
                 bootty_git::toggle_favorite_project_path(home.as_deref(), &path)?
+            );
+        }
+        "add" => {
+            let path = required_option(arguments, "--path")?;
+            println!(
+                "{}",
+                bootty_git::add_favorite_project_path(home.as_deref(), &path)?
             );
         }
         _ => bail!("unknown remote-project command {command:?}"),

@@ -7,8 +7,8 @@
 use num_traits::ToPrimitive as _;
 
 use crate::config::{
-    MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, RestoreOnStartup, WhenClosingWithNoTabs,
-    WindowDecoration, WindowFullscreen,
+    BrowserSearchEngine, MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, RestoreOnStartup,
+    WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 
 use super::{
@@ -100,6 +100,20 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
         &["panels", "recovery", "button"],
         &["panels", "shell", "dock"],
         &["panels", "shell", "button"],
+        &["panels", "sessions", "dock"],
+        &["panels", "files", "dock"],
+        &["panels", "changes", "dock"],
+        &["panels", "diff", "dock"],
+        &["panels", "agents", "dock"],
+        &["panels", "agents", "button"],
+        &["chrome", "panel-tab-style"],
+        &["chrome", "panel-tabs"],
+        &["chrome", "dock-tabs", "appearance"],
+        &["chrome", "dock-tabs", "close-position"],
+        &["chrome", "dock-tabs", "close-button"],
+        &["chrome", "terminal-tabs", "appearance"],
+        &["chrome", "terminal-tabs", "close-position"],
+        &["chrome", "terminal-tabs", "close-button"],
         &["font-feature"],
         &["chrome", "status-bar"],
         &["chrome", "status-segment"],
@@ -117,8 +131,7 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
 pub(super) fn specs() -> Vec<SettingSpec> {
     let mut specs = Vec::new();
     specs.extend(dock_header_specs());
-    specs.extend(dock_tabs_specs());
-    specs.extend(terminal_tabs_specs());
+    specs.extend(tabs_specs());
     specs.extend(interface_preferences_specs());
     specs.extend(application_lifecycle_specs());
     specs.extend(open_behavior_specs());
@@ -141,7 +154,32 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(sidebar_specs());
     specs.extend(backend_specs());
     specs.extend(ssh_profiles_specs());
+    specs.extend(agent_provider_specs());
+    specs.extend(agent_defaults_specs());
+    specs.push(spec(
+        &["agents", "quick-model"],
+        "Quick model",
+        "Codex model used to name sessions and worktrees from their first prompt.",
+        "providers",
+        "PROVIDERS",
+        SettingKind::Text {
+            placeholder: "gpt-6-luna".into(),
+            optional: false,
+        },
+        SettingDefault::Field(|config| SettingValue::Text(config.agents.quick_model.clone())),
+    ));
+    specs.push(spec(
+        &["agents", "allow-spawn"],
+        "Allow agents to create and supervise children",
+        "Allow attached agents to create child sessions in their captured workspace and account, control only shells they created under that grant, and native parents to interrupt or stop their own native children. Child tools receive no spawning, supervision or capture access.",
+        "permissions",
+        "AGENT TOOLS",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.allow_spawn)),
+    ));
     specs.extend(input_specs());
+    specs.extend(browser_specs());
+    specs.extend(computer_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
     specs.extend(panel_specs());
@@ -171,30 +209,6 @@ fn panel_specs() -> Vec<SettingSpec> {
     macro_rules! panel {
         ($kind:ident, $name:literal, $label:literal) => {
             specs.push(spec(
-                &["panels", $name, "dock"],
-                "Dock",
-                "Where this panel opens.",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelDock::Left, "Left"),
-                        (&crate::config::PanelDock::Right, "Right"),
-                        (&crate::config::PanelDock::Bottom, "Bottom"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config
-                            .panel(crate::config::PanelKind::$kind)
-                            .dock(crate::config::PanelKind::$kind),
-                    ))
-                }),
-            ));
-            specs.push(spec(
                 &["panels", $name, "button"],
                 "Status bar button",
                 "Show a button that toggles this panel.",
@@ -222,165 +236,118 @@ fn panel_specs() -> Vec<SettingSpec> {
     panel!(Files, "files", "Files");
     panel!(Changes, "changes", "Changes");
     panel!(Diff, "diff", "Diff");
-    panel!(Agents, "agents", "Agents");
     specs
 }
 
-fn dock_header_specs() -> [SettingSpec; 4] {
+fn computer_specs() -> [SettingSpec; 3] {
+    [
+        spec(
+            &["computer", "enabled"],
+            "Enable computer use",
+            "Allow local desktop commands.",
+            "permissions",
+            "COMPUTER USE",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.computer.enabled)),
+        ),
+        spec(
+            &["computer", "capture-enabled"],
+            "Screenshots",
+            "Requires Screen Recording permission.",
+            "permissions",
+            "COMPUTER USE",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.computer.capture_enabled)),
+        ),
+        spec(
+            &["computer", "input-enabled"],
+            "Keyboard and mouse",
+            "Requires Accessibility permission.",
+            "permissions",
+            "COMPUTER USE",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.computer.input_enabled)),
+        ),
+    ]
+}
+
+fn browser_specs() -> [SettingSpec; 2] {
+    [
+        spec(
+            &["browser", "search-engine"],
+            "Search engine",
+            "Choose the search engine used for browser address-bar queries.",
+            "browser",
+            "SEARCH",
+            SettingKind::Choice {
+                options: [
+                    (&BrowserSearchEngine::DuckDuckGo, "DuckDuckGo"),
+                    (&BrowserSearchEngine::Google, "Google"),
+                    (&BrowserSearchEngine::Bing, "Bing"),
+                    (&BrowserSearchEngine::Brave, "Brave"),
+                ]
+                .into_iter()
+                .map(|(value, label)| SettingOption::of(value, label))
+                .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(token(&config.browser.search_engine))
+            }),
+        ),
+        spec(
+            &["browser", "persist-site-data"],
+            "Persist site data",
+            "Keep browser site data between launches.",
+            "browser",
+            "SITE DATA",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.browser.persist_site_data)),
+        ),
+    ]
+}
+
+fn dock_header_specs() -> [SettingSpec; 2] {
     [
         spec(
             &["chrome", "left-dock-toggle"],
-            "Show left dock button",
-            "Hide the header button while keeping the dock command available.",
+            "Show left sidebar button",
+            "Hide the header button while keeping the sidebar command available.",
             "appearance",
-            "DOCKS",
+            "SIDEBARS",
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.chrome.left_dock_toggle)),
         ),
         spec(
             &["chrome", "right-dock-toggle"],
-            "Show right dock button",
-            "Hide the header button while keeping the dock command available.",
+            "Show right sidebar button",
+            "Hide the header button while keeping the sidebar command available.",
             "appearance",
-            "DOCKS",
+            "SIDEBARS",
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.chrome.right_dock_toggle)),
         ),
-        spec(
-            &["chrome", "panel-tab-style"],
-            "Fixed dock tab labels",
-            "Label style for tabs in the narrow left and right docks. Main Dock tabs use icons and text.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Icons,
-                        "Icons only",
-                        "Show icons; hover for panel names.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::IconsAndText,
-                        "Icons and text",
-                        "Show each panel’s icon and name.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabStyle::Text,
-                        "Text only",
-                        "Show panel names without icons.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.panel_tab_style))
-            }),
-        ),
-        spec(
-            &["chrome", "panel-tabs"],
-            "Fixed dock tabs",
-            "Tab visibility for the fixed left and right docks. Main and bottom Dock tabs stay visible unless hidden for that group.",
-            "appearance",
-            "DOCKS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Automatic,
-                        "Hide for a single panel",
-                        "Show tabs only when a group has multiple panels.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Always,
-                        "Always show",
-                        "Keep tabs visible even for a single panel.",
-                    ),
-                    SettingOption::described(
-                        &crate::config::PanelTabs::Never,
-                        "Always hide",
-                        "Hide tabs and switch panels with commands.",
-                    ),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.chrome.panel_tabs))),
-        ),
     ]
 }
 
-fn dock_tabs_specs() -> [SettingSpec; 3] {
-    [
-        spec(
-            &["chrome", "dock-tabs", "appearance"],
-            "Tab style",
-            "Choose the appearance of dock tabs.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
-                    SettingOption::of(&crate::config::TabAppearance::Underline, "Underline"),
-                    SettingOption::of(&crate::config::TabAppearance::Pill, "Pill"),
-                    SettingOption::of(&crate::config::TabAppearance::Outline, "Outline"),
-                    SettingOption::of(&crate::config::TabAppearance::Segmented, "Segmented"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.appearance))
-            }),
-        ),
-        spec(
-            &["chrome", "dock-tabs", "close-position"],
-            "Close button side",
-            "Place the close button on the left or right side of each tab.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
-                    SettingOption::of(&crate::config::TabClosePosition::Right, "Right"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.close_position))
-            }),
-        ),
-        spec(
-            &["chrome", "dock-tabs", "close-button"],
-            "Show close button",
-            "Show close buttons always, on hover, or never.",
-            "panels",
-            "DOCK TABS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
-                    SettingOption::of(&crate::config::TabCloseButton::Hover, "On hover"),
-                    SettingOption::of(&crate::config::TabCloseButton::Hidden, "Hidden"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.dock_tabs.close_button))
-            }),
-        ),
-    ]
-}
-
-fn terminal_tabs_specs() -> [SettingSpec; 4] {
+fn tabs_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["chrome", "tabs-use-session-color"],
             "Use session color for tabs",
             "Tint active tabs with the selected session's color. Turn off to use the theme accent.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Bool,
             SettingDefault::Field(|config| {
                 SettingValue::Bool(config.chrome.tabs_use_session_color)
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "appearance"],
+            &["chrome", "tabs", "appearance"],
             "Tab style",
-            "Choose the appearance of terminal tabs.",
+            "Choose the appearance of terminal and sidebar tabs.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabAppearance::Classic, "Classic"),
@@ -391,15 +358,15 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.appearance))
+                SettingValue::Token(token(&config.chrome.tabs.appearance))
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "close-position"],
+            &["chrome", "tabs", "close-position"],
             "Close button side",
             "Place the close button on the left or right side of each tab.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabClosePosition::Left, "Left"),
@@ -407,15 +374,15 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.close_position))
+                SettingValue::Token(token(&config.chrome.tabs.close_position))
             }),
         ),
         spec(
-            &["chrome", "terminal-tabs", "close-button"],
+            &["chrome", "tabs", "close-button"],
             "Show close button",
             "Show close buttons always, on hover, or never.",
             "panels",
-            "TERMINAL TABS",
+            "TABS",
             SettingKind::Choice {
                 options: vec![
                     SettingOption::of(&crate::config::TabCloseButton::Always, "Always"),
@@ -424,7 +391,7 @@ fn terminal_tabs_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.chrome.terminal_tabs.close_button))
+                SettingValue::Token(token(&config.chrome.tabs.close_button))
             }),
         ),
     ]
@@ -1422,8 +1389,46 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
     ]
 }
 
-fn sidebar_specs() -> [SettingSpec; 7] {
+fn sidebar_specs() -> [SettingSpec; 10] {
     [
+        spec(
+            &["sidebar", "group-by-project"],
+            "Group sessions by project",
+            "Turn off to show the project on each session in one flat list.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.group_by_project)),
+        ),
+        spec(
+            &["sidebar", "sort-order"],
+            "Session order",
+            "Keep manual order or put sessions with recent accepted input first.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Choice {
+                options: [("manual", "Manual"), ("recent-activity", "Recent activity")]
+                    .into_iter()
+                    .map(|(token, label)| SettingOption {
+                        token: token.into(),
+                        label: label.into(),
+                        description: None,
+                    })
+                    .collect(),
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Token(config.sidebar.sort_order.token().to_owned())
+            }),
+        ),
+        spec(
+            &["sidebar", "animate-working"],
+            "Animate Working ring",
+            "Rotate the ring while an agent is working. Reduced motion keeps it still.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.animate_working)),
+        ),
         custom(
             &["sidebar", "background"],
             "colors",
@@ -1724,4 +1729,86 @@ fn custom_runtime_specs() -> [SettingSpec; 4] {
             SettingEditor::Extensions,
         ),
     ]
+}
+
+fn agent_provider_specs() -> impl Iterator<Item = SettingSpec> {
+    [
+        &["agents", "*", "enabled"][..],
+        &["agents", "*", "program"][..],
+        &["agents", "*", "selected"][..],
+        &["agents", "*", "profiles", "*", "name"][..],
+        &["agents", "*", "profiles", "*", "directory"][..],
+        &["agents", "*", "profiles", "*", "arguments"][..],
+    ]
+    .into_iter()
+    .map(|path| custom(path, "providers", "PROVIDERS", SettingEditor::Providers))
+}
+
+fn agent_defaults_specs() -> Vec<SettingSpec> {
+    let mut specs = vec![spec(
+        &["agents", "default-provider"],
+        "Default provider",
+        "Provider selected for a fresh agent draft.",
+        "providers",
+        "DEFAULTS",
+        SettingKind::Choice {
+            options: [("codex", "Codex"), ("claude", "Claude"), ("pi", "Pi")]
+                .into_iter()
+                .map(|(token, label)| SettingOption {
+                    token: token.into(),
+                    label: label.into(),
+                    description: None,
+                })
+                .collect(),
+        },
+        SettingDefault::Field(|config| SettingValue::Token(config.agents.default_provider.clone())),
+    )];
+    macro_rules! defaults {
+        ($provider:ident, $id:literal, $label:literal) => {
+            specs.push(spec(
+                &["agents", $id, "default-model"],
+                concat!($label, " model"),
+                "Preferred advertised model; empty resolves the account's recommended model.",
+                "providers",
+                "DEFAULTS",
+                text("Recommended model", false),
+                SettingDefault::Field(|config| {
+                    SettingValue::Text(config.agents.$provider.default_model.clone())
+                }),
+            ));
+            specs.push(spec(
+                &["agents", $id, "default-effort"],
+                concat!($label, " effort"),
+                "Preferred supported effort; empty resolves the model's advertised default.",
+                "providers",
+                "DEFAULTS",
+                text("Recommended effort", false),
+                SettingDefault::Field(|config| {
+                    SettingValue::Text(config.agents.$provider.default_effort.clone())
+                }),
+            ));
+        };
+    }
+    defaults!(codex, "codex", "Codex");
+    defaults!(claude, "claude", "Claude");
+    defaults!(pi, "pi", "Pi");
+    specs.push(spec(
+        &["agents", "codex", "fast-mode"],
+        "Codex fast mode",
+        "Request the provider's fast service tier for new Codex conversations.",
+        "providers",
+        "DEFAULTS",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.codex.fast_mode)),
+    ));
+    specs.push(spec(
+        &["agents", "claude", "fast-mode"],
+        "Claude fast mode",
+        "Enable the provider's fast mode for new Claude conversations.",
+        "providers",
+        "DEFAULTS",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.claude.fast_mode)),
+    ));
+    specs
 }

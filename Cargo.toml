@@ -35,6 +35,7 @@ fluent-bundle = "0.16"
 unic-langid = "0.9"
 unicode-segmentation = "1.13.3"
 url = "2.5.8"
+wry = "0.57"
 chrono = "0.4.45"
 ab_glyph = "0.2"
 anyhow = "1"
@@ -100,17 +101,20 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 ] }
 png = "0.18"
 portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "2658f629cd7251ce63a1698f238da2585676aa4e" }
+filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "2658f629cd7251ce63a1698f238da2585676aa4e" }
 pretty_assertions = "1.4.1"
 proptest = "1"
 proptest-derive = "0.8.0"
 # Keep Cargo.lock on rustix 1.1.4 until rmux-client stops importing rustix::runtime.
-rmux-client = "0.10"
-rmux-sdk = "0.10"
+# The v0.10.0 pipe subscriber drops overwritten bytes. Keep this bounded lossless
+# patch pinned until an upstream release preserves pipe output under backpressure.
+rmux-client = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
+rmux-sdk = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
 keepawake = "0.6"
-rmux-ipc = "0.10"
-rmux-os = "0.10"
-rmux-proto = "0.10"
-rmux-server = { version = "0.10", default-features = false }
+rmux-ipc = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
+rmux-os = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
+rmux-proto = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
+rmux-server = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6", default-features = false }
 rstest = "0.27"
 rustybuzz = "0.20"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -127,6 +131,14 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 plist = "1.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros"] }
+bytes = "1.11"
+h2 = "0.4.19"
+http = "1.5"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring"] }
+crossterm = { version = "0.29", default-features = false, features = ["windows"] }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 tokio = "1.53.1"
 toml_edit = { version = "0.25", features = ["serde"] }
 unicode-width = "0.2"
@@ -137,15 +149,16 @@ winreg = "0.56"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.dev]
-debug = "limited"
-# macOS would otherwise leave every codegen unit's object file in `target/debug/deps` forever: the
-# executable's debug map points into them, so nothing ever removes them, and one rebuild of this
-# workspace leaves hundreds behind. That directory is also where test binaries live, and the first
-# CoreText call in a process enumerates the directory its executable sits in to look for bundled
-# fonts — so an unbounded pile of objects turned into seconds of startup for every test that touches
-# a font. Collect the debug info into one .dSYM per binary instead, which keeps debugging intact and
-# leaves the directory bounded.
-split-debuginfo = "packed"
+# Hundreds of test binaries multiply debug maps and incremental graphs. Keep the
+# normal edit/test cycle small; use the profiling profile when symbols are needed.
+debug = false
+incremental = false
+split-debuginfo = "off"
+
+[profile.test]
+debug = false
+incremental = false
+split-debuginfo = "off"
 
 [profile.profiling]
 inherits = "release"

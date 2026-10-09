@@ -7,10 +7,11 @@ use bootty_host::{CommandOutput, CommandRunner, SystemCommandRunner};
 use bootty_mux::{
     backend::{MuxBackend, PaneCapture, PaneInput},
     command::{MuxCommand, MuxDirection},
-    snapshot::MuxSessionTag,
+    session_snapshot::{SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow},
+    snapshot::{MuxPaneLayout, MuxPaneSplitDirection, MuxSessionTag},
     tmux::TmuxBackend,
 };
-use pretty_assertions::assert_eq;
+use pretty_assertions::{assert_eq, assert_ne};
 use rstest::rstest;
 use std::{collections::BTreeMap, process::Command};
 
@@ -356,6 +357,383 @@ fn tmux_explicit_create_delivers_argv_exactly_and_never_reuses_a_name() -> Resul
     Ok(())
 }
 
+#[rstest]
+#[case::right(MuxPaneSplitDirection::Right)]
+#[case::down(MuxPaneSplitDirection::Down)]
+fn tmux_restores_windows_splits_directories_and_focus_without_adopting_live_work(
+    #[case] direction: MuxPaneSplitDirection,
+) -> Result<()> {
+    let server = PrivateTmux {
+        directory: assert_fs::TempDir::new()?,
+    };
+    server.run_checked(&["new-session", "-d", "-s", "unrelated", "/bin/sh", "-i"])?;
+    server.run_checked(&["set-option", "-g", "default-shell", "/bin/sh"])?;
+    server.run_checked(&["set-option", "-gw", "automatic-rename", "off"])?;
+    let unrelated = server.processes()?;
+    let pane = |id: &str| -> Result<SavedTerminalPane> {
+        let cwd = server.directory.path().join(format!("{id} cwd # literal"));
+        std::fs::create_dir(&cwd)?;
+        Ok(SavedTerminalPane {
+            native_agent: (id != "a").then(|| format!("native:codex:{id}")),
+            id: id.into(),
+            backend_id: format!("old-{id}"),
+            cwd: cwd.canonicalize()?.to_string_lossy().into_owned(),
+            cols: 80,
+            rows: 24,
+            text: format!(
+                "\x1b[31mRESTORED_{id} 🥟\x1b[0m\ntouch '{}'\n",
+                server.directory.path().join("must-not-execute").display()
+            ),
+            omitted_lines: 0,
+        })
+    };
+    let saved = SavedTerminalSession {
+        captured_at: 1,
+        session_id: "logical".into(),
+        backend_id: "$old".into(),
+        active_window_id: Some("second".into()),
+        windows: vec![
+            SavedTerminalWindow {
+                id: "first".into(),
+                backend_id: "@old-first".into(),
+                title: "First window".into(),
+                focused_pane_id: "b".into(),
+                layout: Some(MuxPaneLayout::Split {
+                    direction: direction.clone(),
+                    ratio_millis: 333,
+                    first: Box::new(MuxPaneLayout::Pane("a".into())),
+                    second: Box::new(MuxPaneLayout::Pane("b".into())),
+                }),
+                panes: vec![pane("a")?, pane("b")?],
+            },
+            SavedTerminalWindow {
+                id: "second".into(),
+                backend_id: "@old-second".into(),
+                title: "Second window".into(),
+                focused_pane_id: "c".into(),
+                layout: None,
+                panes: vec![pane("c")?],
+            },
+        ],
+    };
+    let tag = MuxSessionTag {
+        identity: Some(saved.session_id.clone()),
+        space: Some("saved-space".into()),
+    };
+    let restore = MuxCommand::RestoreSession {
+        session_id: "restored".into(),
+        tag: tag.clone(),
+        snapshot: saved.clone(),
+    };
+    let mut backend = TmuxBackend::with_runner("tmux", server);
+    backend.execute(restore.clone())?;
+    let snapshot = backend.snapshot()?;
+    let restored = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.name == "restored")
+        .context("restored session")?;
+    assert_eq!(restored.tag, tag);
+    assert_eq!(restored.windows.len(), 2);
+    for (actual, expected) in restored.windows.iter().zip(&saved.windows) {
+        assert_eq!(actual.name, expected.title);
+        assert_eq!(actual.panes.len(), expected.panes.len());
+        assert_eq!(
+            actual
+                .panes
+                .iter()
+                .map(|pane| &pane.native_agent)
+                .collect::<Vec<_>>(),
+            expected
+                .panes
+                .iter()
+                .map(|pane| &pane.native_agent)
+                .collect::<Vec<_>>()
+        );
+        for (actual, expected) in actual.panes.iter().zip(&expected.panes) {
+            let id = actual.pane_id.as_deref().context("restored pane id")?;
+            let capture = backend.capture_pane(
+                id,
+                PaneCapture {
+                    history: true,
+                    ansi: true,
+                    max_lines: 1000,
+                },
+            )?;
+            anyhow::ensure!(
+                capture
+                    .text
+                    .contains(&format!("RESTORED_{} 🥟", expected.id)),
+                "saved rows missing from tmux history: {}",
+                capture.text
+            );
+            anyhow::ensure!(
+                capture.text.contains("\x1b[31m"),
+                "saved SGR style was lost: {}",
+                capture.text
+            );
+        }
+        assert_eq!(
+            actual
+                .panes
+                .iter()
+                .map(|pane| &pane.native_agent)
+                .collect::<Vec<_>>(),
+            expected
+                .panes
+                .iter()
+                .map(|pane| &pane.native_agent)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual
+                .panes
+                .iter()
+                .map(|p| p.cwd.as_deref())
+                .collect::<Vec<_>>(),
+            expected
+                .panes
+                .iter()
+                .map(|p| Some(p.cwd.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+    let first = &restored.windows[0];
+    assert_eq!(first.anchor.pane_id, first.panes[1].pane_id);
+    assert_eq!(
+        restored.active_window_id.as_deref(),
+        Some(restored.windows[1].id.as_str())
+    );
+    let MuxPaneLayout::Split {
+        direction: actual_direction,
+        ratio_millis,
+        first: left,
+        second: right,
+    } = first.layout.as_ref().context("restored split")?
+    else {
+        anyhow::bail!("split was lost");
+    };
+    assert_eq!(*actual_direction, direction);
+    // tmux rounds layout ratios to integer cells; a 48-row split has at most 22/1000 error.
+    anyhow::ensure!(
+        ratio_millis.abs_diff(333) <= 22,
+        "restored ratio: {ratio_millis}"
+    );
+    assert_eq!(
+        left.as_ref(),
+        &MuxPaneLayout::Pane(first.panes[0].pane_id.clone().context("first pane")?)
+    );
+    assert_eq!(
+        right.as_ref(),
+        &MuxPaneLayout::Pane(first.panes[1].pane_id.clone().context("second pane")?)
+    );
+    let processes = backend.runner().processes()?;
+    anyhow::ensure!(
+        !backend
+            .runner()
+            .directory
+            .path()
+            .join("must-not-execute")
+            .exists(),
+        "restored text was executed as shell input"
+    );
+    for (pane, pid) in unrelated {
+        assert_eq!(processes.get(&pane), Some(&pid));
+    }
+    anyhow::ensure!(
+        backend.execute(restore).is_err(),
+        "a retry must not adopt an existing session"
+    );
+    assert_eq!(backend.snapshot()?, snapshot);
+    assert_eq!(backend.runner().processes()?, processes);
+    Ok(())
+}
+
+#[rstest]
+#[case(2, 2, "tiny saved 🥟")]
+#[case(80, 24, "")]
+fn tmux_restores_single_pane_with_tiny_or_empty_history(
+    #[case] cols: u16,
+    #[case] rows: u16,
+    #[case] text: &str,
+) -> Result<()> {
+    let server = PrivateTmux {
+        directory: assert_fs::TempDir::new()?,
+    };
+    server.run_checked(&["new-session", "-d", "-s", "unrelated", "/bin/sh", "-i"])?;
+    server.run_checked(&["set-option", "-g", "default-shell", "/bin/sh"])?;
+    let unrelated = server.processes()?;
+    let saved = SavedTerminalSession {
+        captured_at: 1,
+        session_id: "logical".into(),
+        backend_id: "$old".into(),
+        active_window_id: Some("window".into()),
+        windows: vec![SavedTerminalWindow {
+            id: "window".into(),
+            backend_id: "@old".into(),
+            title: "restored".into(),
+            focused_pane_id: "pane".into(),
+            layout: None,
+            panes: vec![SavedTerminalPane {
+                id: "pane".into(),
+                backend_id: "%old".into(),
+                cwd: "/tmp".into(),
+                cols,
+                rows,
+                text: text.into(),
+                omitted_lines: 0,
+                native_agent: None,
+            }],
+        }],
+    };
+    let mut backend = TmuxBackend::with_runner("tmux", server);
+    backend.execute(MuxCommand::RestoreSession {
+        session_id: "restored".into(),
+        tag: MuxSessionTag {
+            identity: Some("logical".into()),
+            space: None,
+        },
+        snapshot: saved,
+    })?;
+    let snapshot = backend.snapshot()?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.name == "restored")
+        .context("restored session")?;
+    let pane = session.windows[0]
+        .anchor
+        .pane_id
+        .as_deref()
+        .context("restored pane")?;
+    if !text.is_empty() {
+        let capture = backend.capture_pane(
+            pane,
+            PaneCapture {
+                history: true,
+                ansi: false,
+                max_lines: 1000,
+            },
+        )?;
+        // Reflow the two-cell pane back to a readable width before checking its Unicode text.
+        backend.runner().run_checked(&[
+            "resize-window",
+            "-t",
+            &session.windows[0].id,
+            "-x",
+            "80",
+            "-y",
+            "24",
+        ])?;
+        let wide = backend.capture_pane(
+            pane,
+            PaneCapture {
+                history: true,
+                ansi: false,
+                max_lines: 1000,
+            },
+        )?;
+        anyhow::ensure!(
+            wide.text.contains(text),
+            "saved history was lost: {} / {}",
+            capture.text,
+            wide.text
+        );
+    }
+    for (id, pid) in unrelated {
+        assert_eq!(backend.runner().processes()?.get(&id), Some(&pid));
+    }
+    Ok(())
+}
+
 fn selected_window(server: &PrivateTmux) -> Result<String> {
     server.run_checked(&["display-message", "-p", "-t", "io", "#{window_index}"])
+}
+
+#[rstest]
+fn tmux_direct_respawn_keeps_pane_identity_and_literal_argv() -> Result<()> {
+    let directory = assert_fs::TempDir::new()?;
+    let cwd = directory.path().join("#{pane_current_path}; literal");
+    std::fs::create_dir(&cwd)?;
+    let cwd = cwd.canonicalize()?;
+    let output = directory.path().join("resumed-argv");
+    let server = PrivateTmux {
+        directory: assert_fs::TempDir::new()?,
+    };
+    server.run_checked(&["new-session", "-d", "-s", "resume", "/bin/sh", "-i"])?;
+    server.run_checked(&["split-window", "-h", "-t", "resume", "/bin/sh", "-i"])?;
+    let ids = server
+        .run_checked(&["list-panes", "-t", "resume", "-F", "#{pane_id}"])?
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let before = server.processes()?;
+    let backend = TmuxBackend::with_runner("tmux", server);
+    let literals = [
+        "a;",
+        "$(literal)",
+        "multi\nline 'single' \"double\" $HOME",
+        "",
+        "-x",
+        "last;",
+    ];
+    let mut argv = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        "printf '%s\\0' \"$PWD\" \"$@\" > \"$0\"; printf 'DIRECT_RESUME_READY\\n'; exec /bin/cat"
+            .to_owned(),
+        output.to_string_lossy().into_owned(),
+    ];
+    argv.extend(literals.map(str::to_owned));
+    backend.respawn_pane_command(&ids[0], &argv, Some(&cwd.to_string_lossy()))?;
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(3))
+        .context("process startup deadline")?;
+    let expected = std::iter::once(cwd.to_string_lossy().into_owned())
+        .chain(literals.map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\0")
+        + "\0";
+    loop {
+        if std::fs::read_to_string(&output).unwrap_or_default() == expected {
+            break;
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "direct argv not delivered: {:?}",
+            std::fs::read_to_string(&output)
+        );
+        std::thread::yield_now();
+    }
+    let after = backend.runner().processes()?;
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>()
+    );
+    assert_ne!(before[&ids[0]], after[&ids[0]]);
+    assert_eq!(
+        before[&ids[1]], after[&ids[1]],
+        "unrelated process retained"
+    );
+    backend.send_pane_input(
+        &ids[0],
+        &PaneInput::Write(b"AFTER_DIRECT_RESUME\n".to_vec()),
+    )?;
+    let capture = PaneCapture {
+        history: true,
+        max_lines: 100,
+        ansi: false,
+    };
+    loop {
+        let text = backend.capture_pane(&ids[0], capture)?.text;
+        if text.contains("AFTER_DIRECT_RESUME") {
+            break;
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "respawned pane input unavailable: {text:?}"
+        );
+        std::thread::yield_now();
+    }
+    Ok(())
 }

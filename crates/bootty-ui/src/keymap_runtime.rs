@@ -218,6 +218,8 @@ fn compile_context(context: &KeymapContext) -> Result<RuntimeContext, String> {
         KeymapContext::Global => return Ok(RuntimeContext { predicate: None }),
         KeymapContext::Sidebar => "Sidebar",
         KeymapContext::Command => "Command",
+        KeymapContext::SurfaceChooser => "SurfaceChooser",
+        KeymapContext::ComposerCompletion => "ComposerCompletion",
         KeymapContext::Terminal => "Terminal",
         KeymapContext::Herdr => "Terminal && backend == herdr",
         KeymapContext::Native => "Terminal && backend == native",

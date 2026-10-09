@@ -132,7 +132,11 @@ impl AppState {
             ExactMuxAction::NewTab => {
                 let window = position.and_then(|position| windows.get(position).copied());
                 let cwd = new_window_cwd(binding, &session, window);
-                Some(MuxCommand::NewWindow { session_id, cwd })
+                Some(MuxCommand::NewWindow {
+                    session_id,
+                    cwd,
+                    argv: None,
+                })
             }
             ExactMuxAction::MoveWindow(delta) => {
                 let position = position?;

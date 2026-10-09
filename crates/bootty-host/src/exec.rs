@@ -1,11 +1,14 @@
-use std::{path::PathBuf, process::Command};
+use bootty_config::ApplicationIdentity;
+use std::{borrow::Cow, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_DAEMON_PROGRAM: &str = "bootty-daemon";
-pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "14";
+// Older daemons accept restore requests but omit tmux's saved output rows.
+pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "21";
+#[must_use]
 pub fn remote_exec_program() -> &'static str {
     static PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
@@ -24,24 +27,38 @@ pub struct RemoteCommand {
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
     pub(crate) terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cwd: Option<String>,
 }
 
 pub fn proxy_command_line(program: &str, args: &[String], terminal: bool) -> Result<String> {
     let args = proxy_command_args(program, args, terminal)?;
-    Ok(format!("{} {}", remote_exec_program(), args.join(" ")))
+    Ok(remote_program_line(&args))
 }
 
 pub fn proxy_command_args(program: &str, args: &[String], terminal: bool) -> Result<Vec<String>> {
+    proxy_command_args_in(program, args, terminal, None)
+}
+
+pub fn proxy_command_args_in(
+    program: &str,
+    args: &[String],
+    terminal: bool,
+    cwd: Option<&str>,
+) -> Result<Vec<String>> {
     let payload = serde_json::to_vec(&RemoteCommand {
         program: program.to_owned(),
         args: args.to_vec(),
         terminal,
+        cwd: cwd.map(str::to_owned),
     })
     .context("encode remote command")?;
-    Ok(vec![
+    let mut arguments = remote_identity_args(ApplicationIdentity::for_process());
+    arguments.extend([
         REMOTE_EXEC_SUBCOMMAND.to_owned(),
         URL_SAFE_NO_PAD.encode(payload),
-    ])
+    ]);
+    Ok(arguments)
 }
 
 pub fn decode_remote_command(payload: &str) -> Result<RemoteCommand> {
@@ -69,7 +86,17 @@ pub fn run_remote_command(payload: &str) -> Result<i32> {
         PathBuf::from(&command.program)
     };
     let mut child = Command::new(program);
-    child.args(&command.args);
+    child.args(
+        daemon_program_args(
+            &command.program,
+            &command.args,
+            ApplicationIdentity::for_process(),
+        )
+        .as_ref(),
+    );
+    if let Some(cwd) = command.cwd {
+        child.current_dir(cwd);
+    }
     if command.terminal {
         // Host execution does not depend on the terminal engine. The terminal adapter may add
         // a vendored terminfo path when it launches an attach client.
@@ -79,4 +106,57 @@ pub fn run_remote_command(payload: &str) -> Result<i32> {
         .status()
         .with_context(|| format!("run remote command {}", command.program))?;
     Ok(status.code().unwrap_or(1))
+}
+
+// Preserve explicit wire caller identities; otherwise inherit the invoking app.
+pub fn daemon_program_args<'a>(
+    program: &str,
+    args: &'a [String],
+    identity: ApplicationIdentity,
+) -> Cow<'a, [String]> {
+    if program == REMOTE_DAEMON_PROGRAM
+        && args
+            .first()
+            .is_none_or(|arg| arg != "--application-identity")
+        && identity == ApplicationIdentity::Development
+    {
+        let mut prefixed = remote_identity_args(identity);
+        prefixed.extend_from_slice(args);
+        Cow::Owned(prefixed)
+    } else {
+        Cow::Borrowed(args)
+    }
+}
+
+fn remote_identity_args(identity: ApplicationIdentity) -> Vec<String> {
+    match identity {
+        ApplicationIdentity::Production => Vec::new(),
+        ApplicationIdentity::Development => {
+            vec!["--application-identity".into(), "bootty-dev".into()]
+        }
+    }
+}
+
+// A development client keeps its own namespace on a differently built daemon host.
+pub fn remote_program_command(args: &[String]) -> (String, Vec<String>) {
+    let identity = ApplicationIdentity::for_process();
+    if identity == ApplicationIdentity::Development {
+        let mut prefixed = vec![
+            format!(
+                "{}={}",
+                bootty_config::DEVELOPMENT_NAMESPACE_ENV,
+                identity.namespace()
+            ),
+            remote_exec_program().to_owned(),
+        ];
+        prefixed.extend_from_slice(args);
+        ("/usr/bin/env".to_owned(), prefixed)
+    } else {
+        (remote_exec_program().to_owned(), args.to_vec())
+    }
+}
+
+pub fn remote_program_line(args: &[String]) -> String {
+    let (program, args) = remote_program_command(args);
+    format!("{program} {}", args.join(" "))
 }

@@ -42,21 +42,6 @@ pub enum TerminalProgressPolicy {
 
 #[cfg(feature = "terminal-runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PersistedSessionPolicy {
-    Immediate,
-    AfterEmptyInitialSnapshot,
-    Never,
-}
-
-#[cfg(feature = "terminal-runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GeneratedSessionNamePolicy {
-    Reconcile,
-    PreserveBackend,
-}
-
-#[cfg(feature = "terminal-runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalResidency {
     WorkspaceShared,
     BindingScoped,
@@ -74,8 +59,6 @@ pub enum SelectionPublicationPolicy {
 pub struct MuxAppBackendPolicy {
     pub panes: PaneBehavior,
     pub progress: TerminalProgressPolicy,
-    pub persisted_sessions: PersistedSessionPolicy,
-    pub generated_session_names: GeneratedSessionNamePolicy,
     pub terminal_residency: TerminalResidency,
     pub selection_publication: SelectionPublicationPolicy,
 }

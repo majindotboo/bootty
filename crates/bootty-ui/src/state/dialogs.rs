@@ -15,7 +15,7 @@ use crate::presentation::dialogs::{
     RenameTabEvent, SessionPickerDialog, SessionPickerEvent, SpaceEditorDialog, SpaceEditorEvent,
     SpacePickerDialog, SpacePickerEvent, ThemePickerDialog, ThemePickerEvent, default_space_icon,
 };
-use bootty_mux::workspace::{RenameSessionOutcome, ScopedSessionTarget};
+use bootty_mux::workspace::ScopedSessionTarget;
 impl AppState {
     /// Projects the accepted modal state without giving the renderer product ownership.
     pub fn dialog_projection(&mut self) -> Option<DialogProjection> {
@@ -299,17 +299,10 @@ impl AppState {
                     self.record_notice(crate::error_catalog::ErrorNotice::SessionNameEmpty);
                     return;
                 }
-                match self
-                    .workspace
-                    .rename_active_session(&session_id, &name, &self.repaint)
-                {
-                    Ok(RenameSessionOutcome::Missing | RenameSessionOutcome::Started) => {}
-                    Ok(RenameSessionOutcome::Pending) => return,
-                    Err(error) => {
-                        self.record_error(error);
-                        return;
-                    }
-                }
+                self.execute_mux_command(bootty_mux::command::MuxCommand::RenameSession {
+                    session_id,
+                    name,
+                });
                 self.dismiss_modal_dialog();
             }
         }

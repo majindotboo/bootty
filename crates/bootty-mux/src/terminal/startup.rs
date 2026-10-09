@@ -27,6 +27,7 @@ use super::pane::TerminalRuntime;
 
 enum QueuedStartupCommand {
     RawInput(Vec<u8>),
+    RestoreHistory(String),
     Paste(String),
     Key(KeyInput),
     Focus(bool),
@@ -166,6 +167,7 @@ fn apply_queued_startup_command(
 ) -> Result<()> {
     match command {
         QueuedStartupCommand::RawInput(bytes) => terminal.write_input(&bytes),
+        QueuedStartupCommand::RestoreHistory(text) => terminal.restore_history(&text),
         QueuedStartupCommand::Paste(text) => terminal.write_paste(&text),
         QueuedStartupCommand::Key(input) => terminal.encode_key(input),
         QueuedStartupCommand::Focus(gained) => terminal.encode_focus(gained),
@@ -238,6 +240,10 @@ impl TerminalRuntime for StartingNativeTerminal {
 
     fn started(&mut self) -> Result<bool> {
         Ok(self.ready_terminal()?.is_some())
+    }
+
+    fn restore_history(&mut self, text: &str) -> Result<()> {
+        self.queue_or_apply(QueuedStartupCommand::RestoreHistory(text.to_owned()))
     }
 
     fn tty_name(&self) -> Option<&str> {

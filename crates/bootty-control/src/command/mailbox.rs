@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use super::{Caller, CommandCancellation, CommandInvocation, CommandOutcome};
+use super::{Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget};
 
 pub type WakeCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -15,6 +15,7 @@ pub struct AppCommandRequest {
     pub deadline: Instant,
     pub cancellation: CommandCancellation,
     pub response: mpsc::Sender<CommandOutcome>,
+    pub creation_receipt: Option<mpsc::Sender<CommandTarget>>,
 }
 
 #[derive(Clone)]
@@ -85,12 +86,36 @@ impl BoundAppCommandSender {
         deadline: Instant,
         cancellation: CommandCancellation,
     ) -> Result<Receiver<CommandOutcome>, AppCommandSendError> {
+        self.submit_with_receipt(invocation, deadline, cancellation, None)
+    }
+
+    /// Observe an accepted terminal independently of the command's final persistence result.
+    /// # Errors
+    /// Returns `Overloaded` or `Shutdown` under the same conditions as `submit`.
+    pub fn submit_observed_creation(
+        &self,
+        invocation: CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+        creation_receipt: mpsc::Sender<CommandTarget>,
+    ) -> Result<Receiver<CommandOutcome>, AppCommandSendError> {
+        self.submit_with_receipt(invocation, deadline, cancellation, Some(creation_receipt))
+    }
+
+    fn submit_with_receipt(
+        &self,
+        invocation: CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+        creation_receipt: Option<mpsc::Sender<CommandTarget>>,
+    ) -> Result<Receiver<CommandOutcome>, AppCommandSendError> {
         let (response, receiver) = mpsc::channel();
         self.try_send(AppCommandRequest {
             invocation,
             deadline,
             cancellation,
             response,
+            creation_receipt,
         })?;
         Ok(receiver)
     }

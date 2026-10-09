@@ -16,6 +16,9 @@ use crate::{
     text_file::save_text_file_if_digest,
 };
 
+mod completion;
+pub use completion::FileCompletionPage;
+
 /// Base64 keeps a complete document below the control protocol's 1 MiB request/response limit.
 /// Larger files need a streaming editor transport rather than larger UI-owned buffers.
 pub const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
@@ -26,6 +29,10 @@ const DIRECTORY_PAGE_SIZE: usize = 200;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileRequest {
+    Complete {
+        base: String,
+        query: String,
+    },
     Resolve {
         path: String,
         base: Option<String>,
@@ -36,6 +43,10 @@ pub enum FileRequest {
     },
     Read {
         path: String,
+    },
+    OpenReader {
+        path: String,
+        root: String,
     },
     Save {
         path: String,
@@ -90,6 +101,7 @@ impl FileSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FileResponse {
+    Completions(FileCompletionPage),
     Location {
         path: String,
         is_directory: bool,
@@ -97,6 +109,7 @@ pub enum FileResponse {
     Directory(DirectoryPage),
     Document(FileSnapshot),
     Media(crate::media::MediaDescriptor),
+    Source(crate::file_reader::FileDescriptor),
     Saved {
         digest: String,
         durability_warning: Option<String>,
@@ -111,9 +124,13 @@ impl FileRequest {
     /// Returns path, filesystem, revision conflict, document validation, or transport limit errors.
     pub fn execute(&self) -> Result<FileResponse> {
         let response = match self {
+            Self::Complete { base, query } => {
+                FileResponse::Completions(completion::complete(base, query)?)
+            }
             Self::Resolve { path, base } => resolve_location(path, base.as_deref())?,
             Self::List { path, offset } => FileResponse::Directory(list_directory(path, *offset)?),
             Self::Read { path } => read_document(path)?,
+            Self::OpenReader { path, root } => open_reader(path, root)?,
             Self::Save {
                 path,
                 expected_digest,
@@ -290,6 +307,23 @@ fn path_string(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .context("the file path is not UTF-8")
+}
+
+fn open_reader(path: &str, root: &str) -> Result<FileResponse> {
+    let path = require_absolute(path)?;
+    let root = require_absolute(root)?.canonicalize()?;
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        bail!("File reader requires a regular root-local source");
+    }
+    let path = path.canonicalize()?;
+    if !path.starts_with(&root) {
+        bail!("File reader source is outside the captured root");
+    }
+    let path = path.to_str().context("File reader path is not UTF-8")?;
+    let file = crate::file_reader::open_file(path)?;
+    Ok(FileResponse::Source(crate::file_reader::describe(
+        path, &file,
+    )?))
 }
 
 fn read_document(path: &str) -> Result<FileResponse> {

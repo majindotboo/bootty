@@ -16,16 +16,16 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[rstest]
-#[case::inline("chrome = { sidebar = false, dock-tabs = { appearance = 'pill' } }\n")]
-#[case::section("[chrome]\nsidebar = false\n[chrome.dock-tabs]\nappearance = 'pill'\n")]
+#[case::inline("chrome = { sidebar = false, tabs = { appearance = 'pill' } }\n")]
+#[case::section("[chrome]\nsidebar = false\n[chrome.tabs]\nappearance = 'pill'\n")]
 fn writeback_updates_and_removes_values_in_either_table_form(#[case] source: &str) {
     let directory = assert_fs::TempDir::new().expect("temporary config directory");
     let path = directory.path().join("config.toml");
     fs::write(&path, source).expect("write config");
 
     update_config_document(&path, |document| {
-        document.set_str(&["chrome", "dock-tabs", "appearance"], "classic")?;
-        document.set_str(&["chrome", "terminal-tabs", "appearance"], "pill")?;
+        document.set_str(&["chrome", "tabs", "appearance"], "classic")?;
+        document.set_str(&["chrome", "tabs", "close-button"], "hover")?;
         document.remove(&["chrome", "sidebar"])
     })
     .expect("edit nested config tables");
@@ -34,12 +34,12 @@ fn writeback_updates_and_removes_values_in_either_table_form(#[case] source: &st
         .expect("reload document")
         .expect("existing config");
     assert_eq!(
-        document.str_at(&["chrome", "dock-tabs", "appearance"]),
+        document.str_at(&["chrome", "tabs", "appearance"]),
         Some("classic")
     );
     assert_eq!(
-        document.str_at(&["chrome", "terminal-tabs", "appearance"]),
-        Some("pill")
+        document.str_at(&["chrome", "tabs", "close-button"]),
+        Some("hover")
     );
     assert!(!document.contains(&["chrome", "sidebar"]));
     let config = load_config_from_path(&path).expect("reload written config");

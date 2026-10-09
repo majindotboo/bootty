@@ -141,6 +141,7 @@ impl<R: CommandRunner> MuxBackend for HerdrBackend<R> {
 fn synthetic_session(name: String, active: bool) -> MuxSession {
     let window_id = format!("herdr:{name}");
     let anchor = MuxPaneAnchor {
+        native_agent: None,
         session_id: name.clone(),
         pane_id: None,
         pane_pid: None,
@@ -181,7 +182,8 @@ impl RemoteHerdrRunner {
 
 impl CommandRunner for RemoteHerdrRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        let (program, args) = self.remote.command(program, args);
+        self.remote.ensure_daemon()?;
+        let (program, args) = self.remote.proxy_command(program, args)?;
         SystemCommandRunner.run(&program, &args)
     }
 }
