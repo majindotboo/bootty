@@ -1154,18 +1154,17 @@ fn agent_composer_centers_in_a_tall_full_surface_and_keeps_prompt_focus(cx: &Tes
         composer.contains(&input.center()),
         "prompt is outside composer"
     );
-    let provider = cx
-        .debug_bounds("dialog-field-choice-control-provider")
-        .expect("visible provider choice");
+    let model = cx
+        .debug_bounds("model-picker-trigger")
+        .expect("visible combined provider and model choice");
     assert!(
-        provider.size.width > px(0.0) && provider.size.height > px(0.0),
-        "provider choice collapsed: {provider:?}"
+        model.size.width > px(0.0) && model.size.height > px(0.0),
+        "combined provider and model choice collapsed: {model:?}"
     );
     assert!(
-        composer.contains(&provider.center()),
-        "provider choice is outside composer"
+        composer.contains(&model.center()),
+        "combined provider and model choice is outside composer"
     );
-
     cx.simulate_input("run the tests");
     cx.run_until_parked();
     probe.update(&mut cx, |probe, _| {
@@ -1497,13 +1496,13 @@ fn composer_provider_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
             );
         });
     });
-    cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    cx.simulate_keystrokes("down enter");
-    cx.run_until_parked();
+    assert!(cx.debug_bounds("model-picker-content").is_some());
+    click(&mut cx, "model-agent-provider:Claude");
     probe.read_with(&cx, |probe, _| {
         assert!(probe.intents.borrow().iter().any(|intent| matches!(intent, DialogIntent::FieldChanged { field, .. } if field == "provider")), "focus action must reach the real menu and select a provider");
     });
+    assert!(cx.debug_bounds("model-picker-content").is_some());
 }
 
 #[gpui_kit::test]
@@ -1566,8 +1565,8 @@ fn composer_model_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
             );
         });
     });
-    cx.simulate_keystrokes("space");
     cx.run_until_parked();
+    assert!(cx.debug_bounds("model-picker-content").is_some());
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     probe.read_with(&cx, |probe, _| {

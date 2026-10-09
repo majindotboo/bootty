@@ -181,15 +181,13 @@ impl DialogView {
                     };
                     picker.state.focus_handle(cx).focus(window, cx);
                 }
-                ComposerControl::Model => {
+                ComposerControl::Model | ComposerControl::Provider => {
                     let Some(picker) = &self.model_picker else {
                         return false;
                     };
-                    return crate::gpui::focus_control_child(
-                        &picker.state.focus_handle(cx),
-                        window,
-                        cx,
-                    );
+                    picker
+                        .state
+                        .update(cx, |picker, cx| picker.open(window, cx));
                 }
                 _ => {
                     if !spec.fields.iter().any(|field| field.id == control.field()) {
