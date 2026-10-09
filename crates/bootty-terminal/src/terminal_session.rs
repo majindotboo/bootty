@@ -91,6 +91,8 @@ pub struct TerminalSessionConfig {
     /// parser. Other encoded input continues through the attached PTY.
     pub super_key_input_tx: Option<Sender<Vec<u8>>>,
     pub benchmark_trace: Option<BenchmarkTrace>,
+    /// Saved text and styles initialized before the worker consumes any live process output.
+    pub restored_history: Option<std::sync::Arc<str>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionLaunchConfig {
@@ -101,6 +103,8 @@ pub struct SessionLaunchConfig {
     /// command line for the shell to run with `-c`; more are a program, found on the child's
     /// `PATH`, and its arguments, run directly. Shell integration applies only to the shell.
     pub command: Vec<String>,
+    /// Explicit backend session argv stays literal even when it contains only the executable.
+    pub command_is_argv: bool,
     pub working_directory: Option<PathBuf>,
     /// The mux pane this terminal is the front end for, exported as `BOOTTY_PANE`. Only backends
     /// that spawn the pane's own PTY know it, so it stays unset for a tmux attach, where tmux
@@ -120,6 +124,7 @@ impl Default for SessionLaunchConfig {
             shell: None,
             args: Vec::new(),
             command: Vec::new(),
+            command_is_argv: false,
             working_directory: None,
             pane_id: None,
             env: Vec::new(),
@@ -307,7 +312,14 @@ impl<T> PendingWorkerResponse<T> {
     /// Returns an error if the worker disconnects or exceeds the response deadline.
     /// A completion timeout means the claimed operation may already have run.
     pub fn receive(self, operation: &'static str) -> Result<T> {
-        match self.receiver.recv_timeout(WORKER_RESPONSE_TIMEOUT) {
+        self.receive_for(operation, WORKER_RESPONSE_TIMEOUT)
+    }
+
+    /// Wait on a background thread with its operation's queue budget. UI callers use `receive`.
+    /// # Errors
+    /// Returns disconnection or timeout; claimed work retains its completion deadline.
+    pub fn receive_for(self, operation: &'static str, timeout: Duration) -> Result<T> {
+        match self.receiver.recv_timeout(timeout) {
             Ok(response) => Ok(response),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
                 "terminal worker stopped before {operation}"
@@ -363,6 +375,7 @@ enum TerminalCommand {
     },
     Input(TerminalInputCommand),
     RawInput(Vec<u8>),
+    RestoreHistory(Vec<u8>),
     MouseViewportScroll {
         delta: isize,
     },
@@ -379,6 +392,7 @@ enum TerminalCommand {
     },
     Capture {
         options: CaptureOptions,
+        checkpoint: bool,
         done: WorkerRequest<std::result::Result<TerminalCapture, String>>,
     },
     FormatSelection {
@@ -447,11 +461,24 @@ impl TerminalSession {
         config: TerminalSessionConfig,
         repaint_wakeup: RepaintWakeup,
     ) -> Result<Self> {
+        let restored_history = config
+            .restored_history
+            .as_deref()
+            .map(crate::terminal_history::styled_history_bytes)
+            .transpose()?;
         let pty_size = physical_pty_size(geometry, render_cell, display_scale);
         let (pty_master, child, tty_name) =
             crate::terminal_launch::spawn(pty_size, &config.launch)?.into_parts();
         let mut reader = pty_master.try_clone_reader()?;
-        let pty_writer = Arc::new(Mutex::new(pty_master.take_writer()?));
+        // portable-pty's Unix writer sends newline + Ctrl+D on drop. An attachment must
+        // close without injecting input into a persistent backend pane.
+        #[cfg(unix)]
+        let writer: Box<dyn Write + Send> = Box::new(filedescriptor::FileDescriptor::dup(
+            &pty_master.as_raw_fd().context("terminal PTY descriptor")?,
+        )?);
+        #[cfg(not(unix))]
+        let writer = pty_master.take_writer()?;
+        let pty_writer = Arc::new(Mutex::new(writer));
         let (pty_tx, pty_rx) = mpsc::sync_channel(MAX_READER_QUEUE_CHUNKS);
         let (command_tx, command_rx) = mpsc::channel();
         let pty_wakeup = command_tx.clone();
@@ -494,6 +521,7 @@ impl TerminalSession {
             cursor: config.cursor,
             features: config.features,
             max_scrollback: config.max_scrollback,
+            restored_history,
             macos_option_as_alt: config.macos_option_as_alt,
             pty_master,
             pty_rx,
@@ -776,7 +804,28 @@ impl TerminalSession {
     ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
         options.validate().map_err(anyhow::Error::msg)?;
         let (done, response) = worker_request();
-        self.send_command(TerminalCommand::Capture { options, done })?;
+        self.send_command(TerminalCommand::Capture {
+            options,
+            checkpoint: false,
+            done,
+        })?;
+        Ok(response)
+    }
+
+    /// Queue a bounded whole-row styled checkpoint without blocking the caller.
+    /// # Errors
+    /// Returns invalid options or a stopped terminal worker.
+    pub fn capture_checkpoint(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        options.validate().map_err(anyhow::Error::msg)?;
+        let (done, response) = worker_request();
+        self.send_command(TerminalCommand::Capture {
+            options,
+            checkpoint: true,
+            done,
+        })?;
         Ok(response)
     }
 
@@ -859,6 +908,14 @@ impl TerminalSession {
         self.latest_frame.load()
     }
 
+    /// Restore bounded text and styles into the renderer without delivering input to the process.
+    /// # Errors
+    /// Rejects non-style controls, oversized text and a stopped terminal worker.
+    pub fn restore_history(&mut self, text: &str) -> Result<()> {
+        let bytes = crate::terminal_history::styled_history_bytes(text)?;
+        self.send_command(TerminalCommand::RestoreHistory(bytes))
+    }
+
     fn send_command(&self, command: TerminalCommand) -> Result<()> {
         self.check_worker_error()?;
         self.command_tx
@@ -883,6 +940,7 @@ struct TerminalWorkerConfig {
     cursor: TerminalCursorConfig,
     features: TerminalFeatureConfig,
     max_scrollback: usize,
+    restored_history: Option<Vec<u8>>,
     macos_option_as_alt: MacosOptionAsAlt,
     pty_master: Box<dyn MasterPty + Send>,
     pty_rx: Receiver<Vec<u8>>,
@@ -934,6 +992,9 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
                 return;
             }
         };
+        if let Some(history) = &config.restored_history {
+            engine.write_vt_without_pty_responses(history);
+        }
         engine.set_display_scale(config.display_scale);
         engine.set_render_cell_metrics(config.render_cell);
         let callback_writer = config.pty_writer.clone();
@@ -1242,6 +1303,10 @@ impl TerminalWorker {
                 done.send(());
             }
             TerminalCommand::RawInput(bytes) => self.raw_input_command(&bytes, stats),
+            TerminalCommand::RestoreHistory(bytes) => {
+                self.engine.write_vt_without_pty_responses(&bytes);
+                stats.terminal_changed = true;
+            }
             TerminalCommand::MouseViewportScroll { delta } => {
                 self.mark_input_fast_path();
                 self.engine.scroll_viewport_delta(delta);
@@ -1263,7 +1328,11 @@ impl TerminalWorker {
             TerminalCommand::SelectionUpdate(event) => self.selection_update_command(event, stats),
             TerminalCommand::SelectionEnd(event) => self.selection_end_command(event, stats),
             TerminalCommand::Prompt { text, done } => self.prompt_command(text, done, stats),
-            TerminalCommand::Capture { options, done } => self.capture_command(options, done),
+            TerminalCommand::Capture {
+                options,
+                checkpoint,
+                done,
+            } => self.capture_command(options, checkpoint, done),
             TerminalCommand::FormatSelection { format, done } => {
                 self.format_selection_command(format, done);
             }
@@ -1333,14 +1402,16 @@ impl TerminalWorker {
     fn capture_command(
         &self,
         options: CaptureOptions,
+        checkpoint: bool,
         done: WorkerRequest<std::result::Result<TerminalCapture, String>>,
     ) {
         if done.try_claim() {
-            done.send(
-                self.engine
-                    .capture(options)
-                    .map_err(|error| error.to_string()),
-            );
+            let result = if checkpoint {
+                self.engine.capture_checkpoint(options)
+            } else {
+                self.engine.capture(options)
+            };
+            done.send(result.map_err(|error| error.to_string()));
         }
     }
 
@@ -2026,4 +2097,26 @@ pub fn should_publish_frame_after_work(
     }
     elapsed_since_last_publish >= WORKER_READY_FRAME_INTERVAL
         || elapsed_since_last_terminal_change >= WORKER_SETTLED_FRAME_DELAY
+}
+
+/// Normalize bounded saved presentation text without permitting terminal control sequences.
+/// # Errors
+/// Rejects oversized text and controls other than whitespace.
+pub fn plain_history_bytes(text: &str) -> Result<Vec<u8>> {
+    if text.len() > crate::terminal_history::MAX_HISTORY_BYTES
+        || text
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        anyhow::bail!("saved terminal history is not bounded plain text");
+    }
+    let mut bytes = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
+        .into_bytes();
+    if !bytes.is_empty() && !bytes.ends_with(b"\r\n") {
+        bytes.extend_from_slice(b"\r\n");
+    }
+    Ok(bytes)
 }

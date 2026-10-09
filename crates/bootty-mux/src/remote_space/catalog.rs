@@ -130,6 +130,7 @@ pub fn execute(
             bail!("session does not belong to remote Space {space_id}")
         }
     }
+    crate::remote_catalog::validate_creation_scope(&command, space_id)?;
     runtime.backend.execute(command)
 }
 
@@ -216,6 +217,17 @@ pub fn toggle_remote_project_favorite_with_runner<R: CommandRunner>(
         &["remote-project", "favorite", "--path", path],
         runner,
     )?;
+    Ok(serde_json::from_str(&output)?)
+}
+
+/// # Errors
+/// Returns remote command failures or invalid favorite responses.
+pub fn add_remote_project_favorite_with_runner<R: CommandRunner>(
+    remote: &RemoteConfig,
+    path: &str,
+    runner: &R,
+) -> Result<bool> {
+    let output = run_remote_config(remote, &["remote-project", "add", "--path", path], runner)?;
     Ok(serde_json::from_str(&output)?)
 }
 

@@ -82,6 +82,31 @@ pub fn toggle_favorite_project_path(home: Option<&Path>, project_path: &str) -> 
     favorite_paths::toggle_favorite_project_path_at(&path, home, project_path)
 }
 
+/// # Errors
+/// Returns an I/O error if the project directory or favorites file cannot be accessed.
+/// Returns `true` when the project was added, or `false` when it was already favorited.
+pub fn add_favorite_project_path(home: Option<&Path>, project_path: &str) -> io::Result<bool> {
+    if !Path::new(project_path).is_absolute() || project_path.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "project path must be absolute and contain no control characters",
+        ));
+    }
+    if !Path::new(project_path).is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "project directory no longer exists",
+        ));
+    }
+    let Some(path) = home.map(favorite_project_paths_file) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "home directory is unavailable",
+        ));
+    };
+    favorite_paths::add_favorite_project_path_at(&path, home, project_path)
+}
+
 fn push_project_entry(entries: &mut Vec<ProjectPickerEntry>, path: &Path, favorite: bool) {
     if !path.is_dir() {
         return;

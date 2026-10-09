@@ -21,13 +21,38 @@ pub enum MuxSplitDirection {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MuxCommand {
+    ActivatePane {
+        session_id: String,
+        window_id: String,
+        pane_id: String,
+    },
+    /// Associate native content with a real, exact backend pane without changing selection.
+    SetPaneNativeAgent {
+        session_id: String,
+        pane_id: String,
+        agent_id: Option<String>,
+    },
     ActivateWindow {
         session_id: String,
         window_id: String,
     },
+    RestoreSession {
+        session_id: String,
+        tag: MuxSessionTag,
+        snapshot: crate::session_snapshot::SavedTerminalSession,
+    },
+    CreatePane {
+        session_id: String,
+        pane_id: Option<String>,
+        direction: MuxSplitDirection,
+        cwd: Option<String>,
+        argv: Vec<String>,
+    },
     NewWindow {
         session_id: String,
         cwd: Option<String>,
+        #[serde(default)]
+        argv: Option<Vec<String>>,
     },
     RenameWindow {
         session_id: String,
@@ -157,7 +182,11 @@ impl MuxCommand {
     #[must_use]
     pub fn session_id(&self) -> &str {
         match self {
-            Self::ActivateWindow { session_id, .. }
+            Self::ActivatePane { session_id, .. }
+            | Self::SetPaneNativeAgent { session_id, .. }
+            | Self::ActivateWindow { session_id, .. }
+            | Self::RestoreSession { session_id, .. }
+            | Self::CreatePane { session_id, .. }
             | Self::NewWindow { session_id, .. }
             | Self::RenameWindow { session_id, .. }
             | Self::ActivateNextWindow { session_id }
@@ -188,7 +217,9 @@ impl MuxCommand {
     /// The existing session whose ownership must be checked before a remote mutation.
     pub(crate) fn existing_session_id(&self) -> Option<&str> {
         match self {
-            Self::CreateProjectSession { .. } | Self::CreateWorktreeSession { .. } => None,
+            Self::CreateProjectSession { .. }
+            | Self::CreateWorktreeSession { .. }
+            | Self::RestoreSession { .. } => None,
             _ => Some(self.session_id()),
         }
     }
@@ -201,7 +232,9 @@ impl MuxCommand {
     pub const fn is_repeatable(&self) -> bool {
         matches!(
             self,
-            Self::ActivateWindow { .. }
+            Self::ActivatePane { .. }
+                | Self::SetPaneNativeAgent { .. }
+                | Self::ActivateWindow { .. }
                 | Self::ActivateWindowIndex { .. }
                 | Self::RenameWindow { .. }
                 | Self::RenameSession { .. }
@@ -230,21 +263,26 @@ impl MuxCommand {
             Self::MoveWindow { .. } | Self::MoveWindowPreservingSelection { .. } => {
                 BindingOperation::MoveWindow
             }
-            Self::SplitPane { .. } => BindingOperation::SplitPane,
+            Self::SplitPane { .. } | Self::CreatePane { .. } => BindingOperation::SplitPane,
             Self::MergeWindows { .. } => BindingOperation::MergeWindows,
             Self::SwapPanes { .. } => BindingOperation::SwapPanes,
             Self::MovePane { .. } => BindingOperation::MovePane,
             Self::ExtractPane { .. } => BindingOperation::ExtractPane,
-            Self::SelectPane { .. }
+            Self::ActivatePane { .. }
+            | Self::SelectPane { .. }
             | Self::SelectNextPane { .. }
             | Self::SelectPreviousPane { .. } => BindingOperation::NavigatePane,
             Self::KillPane { .. } | Self::ClosePane { .. } => BindingOperation::ClosePane,
             Self::TogglePaneZoom { .. } => BindingOperation::TogglePaneZoom,
-            Self::CreateProjectSession { .. } => BindingOperation::CreateProjectSession,
+            Self::CreateProjectSession { .. } | Self::RestoreSession { .. } => {
+                BindingOperation::CreateProjectSession
+            }
             Self::CreateWorktreeSession { .. } => BindingOperation::CreateWorktreeSession,
             Self::RenameSession { .. } => BindingOperation::RenameSession,
             Self::DitchSession { .. } => BindingOperation::DitchSession,
-            Self::StampSession { .. } => BindingOperation::StampSession,
+            Self::StampSession { .. } | Self::SetPaneNativeAgent { .. } => {
+                BindingOperation::StampSession
+            }
         }
     }
 }

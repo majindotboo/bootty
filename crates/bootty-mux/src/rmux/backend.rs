@@ -8,7 +8,9 @@ use rmux_proto::{
 use rmux_sdk::{Rmux, SessionName};
 
 use super::bridge::resize_rmux_window;
-use super::bridge::{rmux_capture_pane, rmux_execute, rmux_send_pane_input, rmux_snapshot};
+use super::bridge::{
+    rmux_capture_pane, rmux_execute, rmux_respawn_pane_command, rmux_send_pane_input, rmux_snapshot,
+};
 
 use crate::{
     backend::{MuxBackend, PaneCapture, PaneInput, PaneText},
@@ -93,6 +95,15 @@ impl<C: MuxBackend> MuxBackend for RmuxBackend<C> {
         Self::execute(self, command)
     }
 
+    fn respawn_pane_command(
+        &self,
+        pane_id: &str,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        self.control.respawn_pane_command(pane_id, argv, cwd)
+    }
+
     fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
         self.control.send_pane_input(pane_id, input)
     }
@@ -144,6 +155,15 @@ impl MuxBackend for RmuxControl {
 
     // Both address the pane by its stable id, so neither needs a local attachment nor moves the
     // session's selection.
+    fn respawn_pane_command(
+        &self,
+        pane_id: &str,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        rmux_respawn_pane_command(pane_id, argv.to_vec(), cwd.map(str::to_owned))
+    }
+
     fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
         rmux_send_pane_input(pane_id, input.clone())
     }
@@ -176,6 +196,7 @@ pub struct RmuxPaneRow {
     pub(crate) active: bool,
     pub(crate) cwd: Option<String>,
     pub(crate) process: Option<String>,
+    pub(crate) native_agent: Option<String>,
 }
 
 pub async fn list_window_rows(_rmux: &Rmux, name: &SessionName) -> Result<Vec<RmuxWindowRow>> {
@@ -209,10 +230,15 @@ pub async fn list_pane_rows(_rmux: &Rmux, name: &SessionName) -> Result<Vec<Rmux
     let Response::ListPanes(response) = response else {
         anyhow::bail!("rmux returned an unexpected list-panes response");
     };
-    String::from_utf8_lossy(&response.output.stdout)
+    let mut panes = String::from_utf8_lossy(&response.output.stdout)
         .lines()
         .map(parse_pane_row)
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let options = server_user_options().await?;
+    for pane in &mut panes {
+        pane.native_agent = options.get(&native_agent_option(&pane.pane_id)).cloned();
+    }
+    Ok(panes)
 }
 
 pub async fn rmux_request(request: Request) -> Result<Response> {
@@ -270,6 +296,7 @@ fn parse_pane_row(line: &str) -> Result<RmuxPaneRow> {
         active,
         cwd,
         process,
+        native_agent: None,
     })
 }
 
@@ -325,6 +352,7 @@ pub fn session_from_rows(
                 .map(|pane| anchor_for_pane_row(name, pane))
                 .or_else(|| window_panes.first().cloned())
                 .unwrap_or_else(|| MuxPaneAnchor {
+                    native_agent: None,
                     session_id: name.to_owned(),
                     pane_id: None,
                     pane_pid: None,
@@ -363,6 +391,7 @@ pub fn session_from_rows(
         .map(|window| window.anchor.clone())
         .or_else(|| windows.first().map(|window| window.anchor.clone()))
         .unwrap_or_else(|| MuxPaneAnchor {
+            native_agent: None,
             session_id: name.to_owned(),
             pane_id: None,
             pane_pid: None,
@@ -527,10 +556,43 @@ pub async fn stamp_session_tag(name: &SessionName, tag: &MuxSessionTag) -> Resul
 
 fn anchor_for_pane_row(session_name: &str, pane: &RmuxPaneRow) -> MuxPaneAnchor {
     MuxPaneAnchor {
+        native_agent: pane.native_agent.clone(),
         session_id: session_name.to_owned(),
         pane_id: Some(pane.pane_id.clone()),
         pane_pid: None,
         cwd: pane.cwd.clone(),
         process: pane.process.clone(),
     }
+}
+
+fn native_agent_option(pane: &str) -> String {
+    format!(
+        "{}_pane_{}",
+        crate::snapshot::PANE_NATIVE_AGENT_OPTION,
+        pane.trim_start_matches('%')
+    )
+}
+
+pub async fn stamp_native_agent(
+    rmux: &Rmux,
+    session: &SessionName,
+    pane: &str,
+    agent: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        agent.is_none_or(crate::snapshot::native_agent_identity_is_valid),
+        "invalid native conversation identity"
+    );
+    let panes = list_pane_rows(rmux, session).await?;
+    anyhow::ensure!(
+        panes.iter().any(|held| held.pane_id == pane),
+        "native panel pane is no longer in its captured session"
+    );
+    anyhow::ensure!(
+        !panes.iter().any(|held| held.pane_id != pane
+            && agent.is_some()
+            && held.native_agent.as_deref() == agent),
+        "the native conversation already occupies another pane"
+    );
+    set_server_option(&native_agent_option(pane), agent).await
 }

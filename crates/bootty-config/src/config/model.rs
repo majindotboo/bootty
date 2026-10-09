@@ -80,6 +80,48 @@ pub struct MultiplexerConfig {
     pub remote_space_id: Option<String>,
 }
 
+/// Search provider used by the built-in browser's address bar.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum BrowserSearchEngine {
+    #[default]
+    DuckDuckGo,
+    Google,
+    Bing,
+    Brave,
+}
+
+impl BrowserSearchEngine {
+    /// Base URL used for searches. The browser adds and encodes the query parameter.
+    #[must_use]
+    pub const fn address(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "https://duckduckgo.com/",
+            Self::Google => "https://www.google.com/search",
+            Self::Bing => "https://www.bing.com/search",
+            Self::Brave => "https://search.brave.com/search",
+        }
+    }
+}
+
+/// User policy for local desktop capture and input, separate from OS permissions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputerConfig {
+    pub enabled: bool,
+    pub capture_enabled: bool,
+    pub input_enabled: bool,
+}
+
+/// Settings for Bootty's built-in browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrowserConfig {
+    pub search_engine: BrowserSearchEngine,
+    pub persist_site_data: bool,
+}
+
 /// Validation failure for an operational multiplexer binding.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum MultiplexerConfigError {
@@ -137,10 +179,13 @@ pub struct BoottyConfig {
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
+    pub agents: super::AgentProvidersConfig,
     /// Raw extension settings retained for compatibility and unsupported-source display, keyed by
     /// module stem then setting key. The native host does not interpret or execute this table.
     pub extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub input: InputConfig,
+    pub browser: BrowserConfig,
+    pub computer: ComputerConfig,
     pub session: SessionConfig,
     pub diagnostics: DiagnosticsConfig,
     pub window: WindowConfig,
@@ -401,8 +446,7 @@ pub struct ChromeConfig {
     pub panel_tab_style: PanelTabStyle,
     pub panel_tabs: PanelTabs,
     pub tabs_use_session_color: bool,
-    pub dock_tabs: TabConfig,
-    pub terminal_tabs: TabConfig,
+    pub tabs: TabConfig,
 
     pub sidebar: bool,
     /// Whether to show the module bar above the terminal.
@@ -439,6 +483,9 @@ pub struct ChromeConfig {
 /// falls back to the theme-derived value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarConfig {
+    pub group_by_project: bool,
+    pub sort_order: SidebarSortOrder,
+    pub animate_working: bool,
     pub position: SidebarPosition,
     pub background: Option<Color>,
     pub foreground: Option<Color>,
@@ -460,6 +507,24 @@ pub enum SidebarPosition {
     #[default]
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarSortOrder {
+    #[default]
+    Manual,
+    RecentActivity,
+}
+
+impl SidebarSortOrder {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::RecentActivity => "recent-activity",
+        }
+    }
 }
 
 /// One status-bar segment: a Luau module (builtin default or user file) plus optional style. The

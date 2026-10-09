@@ -46,6 +46,49 @@ fn focus_after_reconcile(
 }
 
 impl BindingRuntime {
+    /// Native content occupies the backend's real pane rectangles, including opaque tmux clients.
+    #[must_use]
+    pub fn native_agent_pane_rects(
+        &self,
+        area: SurfaceRect,
+        gap: f32,
+    ) -> Vec<(String, String, SurfaceRect)> {
+        let Some(window) = self
+            .mux
+            .selected_session_windows()
+            .iter()
+            .find(|window| Some(window.id.as_str()) == self.mux.selected_window())
+        else {
+            return Vec::new();
+        };
+        let rects = window
+            .layout
+            .as_ref()
+            .and_then(PaneLayout::from_mux_layout)
+            .map_or_else(
+                || {
+                    window
+                        .anchor
+                        .pane_id
+                        .clone()
+                        .map_or_default(|id| vec![(id, area)])
+                },
+                |layout| layout.rects(area, gap),
+            );
+        rects
+            .into_iter()
+            .filter_map(|(id, rect)| {
+                let agent = window
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id.as_deref() == Some(&id))?
+                    .native_agent
+                    .clone()?;
+                Some((id, agent, rect))
+            })
+            .collect()
+    }
+
     pub fn uses_native_terminal_layout(&self) -> bool {
         self.backend_policy.panes.topology != PaneTopology::Attach
     }
@@ -95,6 +138,7 @@ impl BindingRuntime {
         if self.mux.unavailable_reason().is_some() {
             return Ok(());
         }
+        self.retain_restored_generation();
         let phase = bootty_terminal::latency::start();
         self.prune_pane_layouts();
         bootty_terminal::latency::trace_slow("panes.prune_pane_layouts", phase, 2.0);
@@ -148,7 +192,24 @@ impl BindingRuntime {
             window_id.as_deref(),
             selected_backend(&config),
             config.hide_tmux_status,
-        )
+        )?;
+        for mapping in self.restored_sessions.values_mut() {
+            let mut applied = Vec::new();
+            for (id, text) in &mapping.history {
+                if let Some(runtime) = self
+                    .terminal_owner
+                    .terminal
+                    .scoped_terminal_runtime(self.scope, id)
+                {
+                    runtime.restore_history(text)?;
+                    applied.push(id.clone());
+                }
+            }
+            for id in applied {
+                mapping.history.remove(&id);
+            }
+        }
+        Ok(())
     }
 
     fn reconcile_window_layout(
@@ -485,18 +546,21 @@ impl BindingRuntime {
     }
 
     pub fn close_focused_pane(&mut self, repaint: &RepaintHandle, pane_id: &str) {
-        let session_id = self.mux.selected_session().unwrap_or("local").to_owned();
-        let config = self.multiplexer.clone();
-        self.mux.execute_command(
-            repaint,
-            &config,
-            MuxCommand::ClosePane {
-                session_id,
-                pane_id: Some(pane_id.to_owned()),
-            },
-        );
+        let window = self.window_id_for_pane(pane_id);
+        if let Some(window) = &window {
+            let config = self.multiplexer.clone();
+            self.mux.execute_command(
+                repaint,
+                &config,
+                MuxCommand::ClosePane {
+                    session_id: window.session_id.clone(),
+                    pane_id: Some(pane_id.to_owned()),
+                },
+            );
+        }
         self.terminal_owner.terminal.discard_pane(pane_id);
-        let window = self.current_window_id();
-        self.remove_pane_from_layout(&window, pane_id, true);
+        if let Some(window) = window {
+            self.remove_pane_from_layout(&window, pane_id, true);
+        }
     }
 }

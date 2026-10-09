@@ -3,9 +3,8 @@
 use bootty_mux::{
     MuxBackendKind, MuxBindingConfig, SshTarget,
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, PaneBehavior, PaneTopology,
-        PersistedSessionPolicy, SelectionPublicationPolicy, TerminalProgressPolicy,
-        TerminalResidency,
+        MuxAppBackendPolicy, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
 };
 use pretty_assertions::assert_eq;
@@ -26,8 +25,7 @@ fn binding(backend: MuxBackendKind) -> MuxBindingConfig {
     MuxAppBackendPolicy {
         panes: PaneBehavior { topology: PaneTopology::Attach, cache_terminals: true, resize_cached_terminals: true },
         progress: TerminalProgressPolicy::TerminalOsc,
-        persisted_sessions: PersistedSessionPolicy::Never,
-        generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
+
         terminal_residency: TerminalResidency::BindingScoped,
         selection_publication: SelectionPublicationPolicy::Direct,
     },
@@ -37,8 +35,7 @@ fn binding(backend: MuxBackendKind) -> MuxBindingConfig {
     MuxAppBackendPolicy {
         panes: PaneBehavior { topology: PaneTopology::ProcessLocal, cache_terminals: true, resize_cached_terminals: false },
         progress: TerminalProgressPolicy::TerminalOsc,
-        persisted_sessions: PersistedSessionPolicy::Immediate,
-        generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
         terminal_residency: TerminalResidency::WorkspaceShared,
         selection_publication: SelectionPublicationPolicy::Direct,
     },
@@ -48,8 +45,7 @@ fn binding(backend: MuxBackendKind) -> MuxBindingConfig {
     MuxAppBackendPolicy {
         panes: PaneBehavior { topology: PaneTopology::BackendReconciled, cache_terminals: true, resize_cached_terminals: false },
         progress: TerminalProgressPolicy::TerminalOsc,
-        persisted_sessions: PersistedSessionPolicy::AfterEmptyInitialSnapshot,
-        generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
+
         terminal_residency: TerminalResidency::BindingScoped,
         selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
     },
@@ -59,8 +55,7 @@ fn binding(backend: MuxBackendKind) -> MuxBindingConfig {
     MuxAppBackendPolicy {
         panes: PaneBehavior { topology: PaneTopology::Attach, cache_terminals: true, resize_cached_terminals: true },
         progress: TerminalProgressPolicy::BackendSnapshot,
-        persisted_sessions: PersistedSessionPolicy::Never,
-        generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
         terminal_residency: TerminalResidency::BindingScoped,
         selection_publication: SelectionPublicationPolicy::Direct,
     },
@@ -82,8 +77,7 @@ fn each_backend_owns_its_application_behavior_policy(
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::TerminalOsc,
-            persisted_sessions: PersistedSessionPolicy::Immediate,
-            generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
             terminal_residency: TerminalResidency::WorkspaceShared,
             selection_publication: SelectionPublicationPolicy::Direct,
         }

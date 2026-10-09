@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
 
 /// The `/` prefix a label shares with its siblings, or `""` for a session on its own.
 ///
@@ -7,22 +7,112 @@ fn label_group(label: &str) -> &str {
     label.split_once('/').map_or("", |(group, _)| group)
 }
 
+/// Saved work state, independent of the backend's process and attachment state.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycle {
+    #[default]
+    Active,
+    Settled,
+}
+
+/// Durable presentation state. Archive and deletion retain every other value for restore.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+// These independent flags survive archive/delete so restoring preserves prior presentation.
+#[allow(clippy::struct_excessive_bools)]
+pub struct SessionState {
+    pub lifecycle: SessionLifecycle,
+    pub pinned: bool,
+    pub archived: bool,
+    pub deleted: bool,
+    pub hidden: bool,
+    pub snoozed_until: Option<i64>,
+    /// Absolute UTC seconds of accepted input; absent for work with no recorded activity.
+    pub last_activity_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionView {
+    Active,
+    Settled,
+    Archived,
+    Snoozed,
+    Hidden,
+    Deleted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStateChange {
+    SetLifecycle(SessionLifecycle),
+    SetPinned(bool),
+    Archive,
+    RestoreArchive,
+    SnoozeUntil(i64),
+    ClearSnooze,
+    SetHidden(bool),
+    Delete,
+    RestoreDeleted,
+    RecordActivity { at: i64, now: i64 },
+    AcceptInput { at: i64, now: i64 },
+}
+
+impl SessionState {
+    /// `now` is supplied by the caller as absolute UTC seconds; this owner never starts a timer.
+    #[must_use]
+    pub fn view(self, now: i64) -> SessionView {
+        if self.deleted {
+            SessionView::Deleted
+        } else if self.archived {
+            SessionView::Archived
+        } else if self.hidden {
+            SessionView::Hidden
+        } else if self.is_snoozed(now) {
+            SessionView::Snoozed
+        } else {
+            match self.lifecycle {
+                SessionLifecycle::Active => SessionView::Active,
+                SessionLifecycle::Settled => SessionView::Settled,
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn is_snoozed(self, now: i64) -> bool {
+        self.snoozed_until.is_some_and(|until| until > now)
+    }
+
+    #[must_use]
+    pub fn is_overdue(self, now: i64) -> bool {
+        !self.deleted
+            && !self.archived
+            && !self.hidden
+            && self.snoozed_until.is_some_and(|until| until <= now)
+    }
+
+    #[must_use]
+    pub fn is_visible(self, now: i64) -> bool {
+        matches!(self.view(now), SessionView::Active | SessionView::Settled)
+    }
+}
+
 /// One session a Space claims, keyed by the identity the multiplexer carries for it.
 ///
 /// Nothing here keys on a name: a name is only ever a hint or a label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceSession {
     pub identity: String,
-    /// The name the backend last reported: the label when bootty has no name of its own, and the
-    /// hint for re-finding a session whose server restarted and dropped every tag.
+    /// The backend's last reported name, used to address its attachment.
     pub backend_name: String,
     /// What bootty calls the session, or empty for "whatever the backend calls it". This is why a
     /// shared server's `-2` suffix never reaches the sidebar.
     pub display_name: String,
     /// Whether the user chose `display_name` instead of bootty generating it from the directory.
     pub explicit: bool,
-    /// Where the session started, so bootty can recreate it on a backend that does not persist.
+    /// The saved project directory used when restoring terminal state.
     pub cwd: String,
+    pub state: SessionState,
+    pub terminal_snapshot: Option<std::sync::Arc<crate::session_snapshot::SavedTerminalSession>>,
 }
 
 impl WorkspaceSession {
@@ -146,16 +236,68 @@ impl SessionMembership {
         true
     }
 
-    /// Drops every claim whose session the backend no longer reports. An empty `alive` means the
-    /// backend has not answered yet, not that the Space emptied.
-    pub fn retain_alive(&mut self, alive: &HashSet<&str>) -> bool {
-        if alive.is_empty() {
+    #[cfg(feature = "terminal-runtime")]
+    pub(crate) fn set_terminal_snapshot(
+        &mut self,
+        identity: &str,
+        snapshot: crate::session_snapshot::SavedTerminalSession,
+    ) -> bool {
+        let Some(session) = self.session_mut(identity) else {
+            return false;
+        };
+        if session.terminal_snapshot.as_deref() == Some(&snapshot) {
             return false;
         }
-        let before = self.sessions.len();
-        self.sessions
-            .retain(|session| alive.contains(session.identity.as_str()));
-        before != self.sessions.len()
+        session.terminal_snapshot = Some(std::sync::Arc::new(snapshot));
+        true
+    }
+
+    /// Change saved work state without changing membership or backend topology.
+    pub fn set_state(&mut self, identity: &str, change: SessionStateChange) -> bool {
+        let Some(session) = self.session_mut(identity) else {
+            return false;
+        };
+        let previous = session.state;
+        match change {
+            SessionStateChange::SetLifecycle(lifecycle) => {
+                session.state.lifecycle = lifecycle;
+                if lifecycle == SessionLifecycle::Settled {
+                    session.state.pinned = false;
+                }
+            }
+            SessionStateChange::SetPinned(pinned) => {
+                session.state.pinned = pinned;
+                if pinned {
+                    session.state.lifecycle = SessionLifecycle::Active;
+                    session.state.snoozed_until = None;
+                }
+            }
+            SessionStateChange::Archive => session.state.archived = true,
+            SessionStateChange::RestoreArchive => session.state.archived = false,
+            SessionStateChange::SnoozeUntil(until) => session.state.snoozed_until = Some(until),
+            SessionStateChange::ClearSnooze => session.state.snoozed_until = None,
+            SessionStateChange::SetHidden(hidden) => session.state.hidden = hidden,
+            SessionStateChange::Delete => session.state.deleted = true,
+            SessionStateChange::RestoreDeleted => session.state.deleted = false,
+            SessionStateChange::RecordActivity { at, now } => {
+                if at >= 0
+                    && at <= now
+                    && session.state.last_activity_at.is_none_or(|last| at > last)
+                {
+                    session.state.last_activity_at = Some(at);
+                }
+            }
+            SessionStateChange::AcceptInput { at, now } => {
+                if at >= 0
+                    && at <= now
+                    && session.state.last_activity_at.is_none_or(|last| at >= last)
+                {
+                    session.state.last_activity_at = Some(at);
+                    session.state.lifecycle = SessionLifecycle::Active;
+                }
+            }
+        }
+        session.state != previous
     }
 
     /// Moves `source` before `before`, or to the end when `before` is `None`.

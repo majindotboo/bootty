@@ -12,21 +12,21 @@ use std::{
 };
 use thiserror::Error;
 
-mod legacy;
+mod projects;
 mod schema;
 mod snapshot;
 
-use legacy::*;
 use schema::*;
 use snapshot::*;
 
-use crate::session_membership::{SessionMembership, WorkspaceSession};
+use crate::session_membership::{SessionMembership, SessionState, WorkspaceSession};
 
 pub use crate::membership::BackendMembership;
 use crate::{controller::SpaceId, membership::MembershipOperation};
-use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig, default_config_path};
+use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig};
+pub use projects::{ProjectSettings, RegisteredProject};
 
-const WORKSPACE_SNAPSHOT_REVISION: i64 = 5;
+const WORKSPACE_SNAPSHOT_REVISION: i64 = 7;
 const DEFAULT_SPACE_NAME: &str = "Default Space";
 pub const DEFAULT_SPACE_ICON: &str = "folder";
 pub const DEFAULT_SPACE_COLOR: [u8; 3] = [0x7A, 0xA2, 0xF7];
@@ -164,6 +164,7 @@ pub struct WorkspaceBinding {
     hide_tmux_status: bool,
     unavailable: bool,
     selection: Option<WorkspaceBindingSelection>,
+    selected_session_identity: Option<String>,
     sessions: SessionMembership,
 }
 
@@ -196,6 +197,11 @@ impl WorkspaceBinding {
     #[must_use]
     pub const fn selection(&self) -> Option<&WorkspaceBindingSelection> {
         self.selection.as_ref()
+    }
+
+    #[must_use]
+    pub fn selected_session_identity(&self) -> Option<&str> {
+        self.selected_session_identity.as_deref()
     }
 
     #[must_use]
@@ -300,18 +306,61 @@ impl WorkspaceSpace {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WorkspaceRepository {
     path: PathBuf,
 }
 
 impl WorkspaceRepository {
     /// # Errors
-    /// Returns database creation, migration, or stored-state validation errors.
+    /// Returns database creation, unsupported-schema, or stored-state validation errors.
     pub fn open(config_path: &Path) -> WorkspaceResult<(Self, WorkspaceSnapshot)> {
         let path = sqlite_path(config_path);
-        let snapshot = Self::load_or_migrate(&path)?;
+        let snapshot = Self::load_snapshot(&path)?;
         Ok((Self { path }, snapshot))
+    }
+
+    pub(crate) fn commit_terminal_snapshot(
+        &self,
+        scope: SpaceId,
+        identity: &str,
+        previous: Option<&crate::session_snapshot::SavedTerminalSession>,
+        snapshot: &crate::session_snapshot::SavedTerminalSession,
+    ) -> WorkspaceResult<()> {
+        snapshot
+            .validate()
+            .map_err(WorkspacePersistenceError::operation)?;
+        if snapshot.session_id != identity {
+            return Err(WorkspacePersistenceError::operation(
+                "checkpoint logical identity does not match its owner",
+            ));
+        }
+        if previous.is_some_and(|previous| previous.captured_at > snapshot.captured_at) {
+            return Err(WorkspacePersistenceError::operation(
+                "terminal checkpoint predates its committed state",
+            ));
+        }
+        let encode = |value: &crate::session_snapshot::SavedTerminalSession| {
+            serde_json::to_string(value).map_err(|error| {
+                WorkspacePersistenceError::operation(format!("encode terminal snapshot: {error}"))
+            })
+        };
+        let encoded = encode(snapshot)?;
+        let previous = previous.map(encode).transpose()?;
+        let mut conn = open_db(&self.path)
+            .map_err(|error| self.database_error("open terminal checkpoint", error))?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| self.database_error("begin terminal checkpoint", error))?;
+        let changed = tx.execute("UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2 AND space_id = ?3 AND terminal_snapshot IS ?4", params![encoded, identity, scope.persistence_value(), previous]).map_err(|error| self.database_error("save terminal checkpoint", error))?;
+        if changed != 1 {
+            return Err(WorkspacePersistenceError::operation(
+                "terminal checkpoint owner or prior state changed",
+            ));
+        }
+        tx.execute("UPDATE workspace_spaces SET selected_session_identity = ?1 WHERE id = ?2 AND selected_session_id = ?3", params![identity, scope.persistence_value(), snapshot.backend_id]).map_err(|error| self.database_error("save checkpoint selection", error))?;
+        tx.commit()
+            .map_err(|error| self.database_error("commit terminal checkpoint", error))
     }
 
     fn database_error(&self, operation: &str, error: rusqlite::Error) -> WorkspacePersistenceError {
@@ -399,6 +448,7 @@ impl WorkspaceRepository {
                 hide_tmux_status,
                 unavailable: false,
                 selection: None,
+                selected_session_identity: None,
                 sessions: SessionMembership::default(),
             },
         };
@@ -527,6 +577,27 @@ impl WorkspaceRepository {
              ON CONFLICT(window_key) DO UPDATE SET selected_space_id = excluded.selected_space_id",
             params![window_key, space_id.persistence_value()],
         )?;
+        Ok(())
+    }
+
+    /// Save a selected logical identity alongside its exact observed backend selection.
+    /// # Errors
+    /// Returns changed ownership or database errors before live selection publication.
+    pub fn set_binding_saved_selection(
+        &mut self,
+        scope: SpaceId,
+        identity: Option<&str>,
+        session_id: &str,
+        window_id: Option<&str>,
+    ) -> WorkspaceResult<()> {
+        let conn = open_db(&self.path)
+            .map_err(|error| self.database_error("open saved selection", error))?;
+        let changed = conn.execute("UPDATE workspace_spaces SET selected_session_identity = ?1, selected_session_id = ?3, selected_window_id = ?4, unavailable = 0 WHERE id = ?2 AND (?1 IS NULL OR EXISTS (SELECT 1 FROM workspace_sessions WHERE identity = ?1 AND space_id = ?2))", params![identity, scope.persistence_value(), session_id, window_id]).map_err(|error| self.database_error("save selected identity", error))?;
+        if changed != 1 {
+            return Err(WorkspacePersistenceError::operation(
+                "selected task is not held by the Space",
+            ));
+        }
         Ok(())
     }
 
@@ -821,6 +892,8 @@ impl WorkspaceRepository {
                     || session.backend_name.contains('\0')
                     || session.display_name.contains('\0')
                     || session.cwd.contains('\0')
+                    || session.state.snoozed_until.is_some_and(|until| until < 0)
+                    || session.state.last_activity_at.is_some_and(|at| at < 0)
                     || !identities.insert(session.identity.as_str())
                 {
                     return Err(WorkspacePersistenceError::new(
@@ -846,19 +919,43 @@ impl WorkspaceRepository {
                 scope.persistence_value()
             )));
         }
+        // Checkpoint writes are independent of lifecycle edits; never overwrite a newer
+        // committed checkpoint with the UI's earlier receipt publication.
+        let snapshots = {
+            let mut statement = tx
+                .prepare("SELECT identity, terminal_snapshot FROM workspace_sessions")
+                .map_err(|error| self.database_error("read terminal checkpoints", error))?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(|error| self.database_error("read terminal checkpoints", error))?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()
+                .map_err(|error| self.database_error("read terminal checkpoints", error))?
+        };
         tx.execute(
             "DELETE FROM workspace_sessions WHERE space_id = ?1",
             [scope.persistence_value()],
         )
         .map_err(|error| self.database_error("replace persisted sessions", error))?;
         for (position, session) in sessions.sessions().iter().enumerate() {
+            if let Some(snapshot) = &session.terminal_snapshot {
+                snapshot
+                    .validate()
+                    .map_err(WorkspacePersistenceError::operation)?;
+                if snapshot.session_id != session.identity {
+                    return Err(WorkspacePersistenceError::operation(
+                        "checkpoint logical identity does not match its owner",
+                    ));
+                }
+            }
             let position = i64::try_from(position).map_err(|_| {
                 WorkspacePersistenceError::new("session position exceeds the database range")
             })?;
             tx.execute(
                 "INSERT INTO workspace_sessions
-                    (identity, space_id, backend_name, display_name, explicit, cwd, position)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (identity, space_id, backend_name, display_name, explicit, cwd, position, session_state, terminal_snapshot)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     session.identity,
                     scope.persistence_value(),
@@ -866,7 +963,11 @@ impl WorkspaceRepository {
                     session.display_name,
                     i64::from(session.explicit),
                     session.cwd,
-                    position
+                    position,
+                    serde_json::to_string(&session.state).map_err(|error| {
+                        WorkspacePersistenceError::new(format!("encode session state: {error}"))
+                    })?,
+                    snapshots.get(&session.identity).cloned().unwrap_or(session.terminal_snapshot.as_deref().map(serde_json::to_string).transpose().map_err(|error| WorkspacePersistenceError::new(format!("encode terminal snapshot: {error}")))?)
                 ],
             )
             .map_err(|error| self.database_error("insert persisted session", error))?;
@@ -896,7 +997,7 @@ impl WorkspaceRepository {
         }
     }
 
-    fn load_or_migrate(path: &Path) -> WorkspaceResult<WorkspaceSnapshot> {
+    fn load_snapshot(path: &Path) -> WorkspaceResult<WorkspaceSnapshot> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 WorkspacePersistenceError::new(format!(
@@ -908,30 +1009,40 @@ impl WorkspaceRepository {
         let result = (|| {
             let mut conn = open_db(path)?;
             let revision: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if revision > WORKSPACE_SNAPSHOT_REVISION {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
             let schema = classify_schema(&conn, revision)?;
-            if schema.uses_legacy_binding_cardinality() {
-                migrate_workspace_binding_cardinality(&conn)?;
-            }
+            let seed_projects = !user_tables(&conn)?.contains("workspace_projects");
             let tx = conn.transaction()?;
-            // Before the current schema is created, so revision 3's tables are still there to read.
-            migrate_workspace_sessions_to_identities(&tx)?;
-            migrate_workspace_bindings_into_spaces(&tx)?;
-            migrate_workspace_journal(&tx)?;
             create_workspace_schema(&tx)?;
-            migrate_workspace_space_icons(&tx)?;
-            migrate_workspace_remote_ids(&tx)?;
-            migrate_workspace_space_appearance(&tx)?;
+            if !table_columns(&tx, "workspace_projects")?.contains("settings") {
+                tx.execute_batch("ALTER TABLE workspace_projects ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';")?;
+            }
+            if seed_projects {
+                tx.execute_batch("INSERT OR IGNORE INTO workspace_projects (space_id, cwd) SELECT space_id, cwd FROM workspace_sessions WHERE cwd != '';")?;
+            }
+            if schema == WorkspaceSchemaKind::SavedIdentities {
+                tx.execute_batch(
+                    "ALTER TABLE workspace_sessions ADD COLUMN session_state TEXT NOT NULL DEFAULT '{}';",
+                )?;
+            }
+            if schema == WorkspaceSchemaKind::TaskLifecycle {
+                schema::migrate_task_lifecycle(&tx)?;
+            }
+            if matches!(
+                schema,
+                WorkspaceSchemaKind::SavedIdentities
+                    | WorkspaceSchemaKind::Lifecycle
+                    | WorkspaceSchemaKind::TaskLifecycle
+            ) {
+                tx.execute_batch("ALTER TABLE workspace_sessions ADD COLUMN terminal_snapshot TEXT; ALTER TABLE workspace_spaces ADD COLUMN selected_session_identity TEXT;")?;
+            }
             let space_count = tx.query_row("SELECT COUNT(*) FROM workspace_spaces", [], |row| {
                 row.get::<_, i64>(0)
             })?;
             if space_count == 0 {
-                if !schema.allows_default_creation() {
+                if schema != WorkspaceSchemaKind::Fresh {
                     return Err(rusqlite::Error::InvalidQuery);
                 }
-                create_default_binding(&tx, path)?;
+                create_default_binding(&tx)?;
             }
             let LoadedSpaces {
                 spaces,
@@ -973,7 +1084,7 @@ impl WorkspaceRepository {
             })
         })();
         result.map_err(|error| {
-            WorkspacePersistenceError::new(format!("load or migrate {}: {error}", path.display()))
+            WorkspacePersistenceError::new(format!("load {}: {error}", path.display()))
         })
     }
 }
@@ -1027,7 +1138,7 @@ fn validate_binding_membership_mutation(
     let valid = match mutation {
         BindingMembershipMutation::Create {
             display_name, cwd, ..
-        } => valid_text(display_name) && !cwd.contains('\0'),
+        } => !display_name.contains('\0') && !cwd.contains('\0'),
         BindingMembershipMutation::Rename { display_name, .. } => valid_text(display_name),
         BindingMembershipMutation::Ditch { .. } => true,
     };
@@ -1213,6 +1324,8 @@ fn apply_binding_membership_mutation(
                 display_name: display_name.clone(),
                 explicit: *explicit,
                 cwd: cwd.clone(),
+                state: SessionState::default(),
+                terminal_snapshot: None,
             });
             sessions.observe_backend_name(identity, session_name);
             sessions.set_display_name(identity, display_name, *explicit);
@@ -1232,11 +1345,8 @@ fn apply_binding_membership_mutation(
             sessions.observe_backend_name(identity, new_name);
             sessions.set_display_name(identity, display_name, *explicit);
         }
-        BindingMembershipMutation::Ditch { identity, .. } => {
-            // The session is gone for good, so its name goes with it. Leaving the record behind is
-            // what used to make the next session started in the same directory inherit a dead
-            // session's name.
-            sessions.release(identity);
+        BindingMembershipMutation::Ditch { .. } => {
+            // Closing a terminal attachment does not delete its saved session.
         }
     }
     Ok(())
@@ -1258,7 +1368,7 @@ pub(crate) fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn create_default_binding(tx: &Transaction<'_>, path: &Path) -> rusqlite::Result<WorkspaceBinding> {
+fn create_default_binding(tx: &Transaction<'_>) -> rusqlite::Result<WorkspaceBinding> {
     let remote_id = new_remote_space_id(tx)?;
     tx.execute(
         "INSERT INTO workspace_spaces
@@ -1274,7 +1384,6 @@ fn create_default_binding(tx: &Transaction<'_>, path: &Path) -> rusqlite::Result
         ],
     )?;
     let space_id = tx.last_insert_rowid();
-    migrate_legacy_metadata(tx, space_id, path)?;
     Ok(WorkspaceBinding {
         scope: SpaceId::from_persistence(space_id),
         backend_override: None,
@@ -1282,6 +1391,7 @@ fn create_default_binding(tx: &Transaction<'_>, path: &Path) -> rusqlite::Result
         hide_tmux_status: false,
         unavailable: false,
         selection: None,
+        selected_session_identity: None,
         sessions: SessionMembership::default(),
     })
 }

@@ -58,6 +58,7 @@ const RMUX_MAX_COLLECT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
 const RMUX_MAX_COLLECT_CHUNKS_PER_TICK: usize = 256;
 const RMUX_PENDING_FRAME_WAIT: Duration = Duration::from_millis(8);
 const RMUX_INITIAL_FRAME_AGE: Duration = Duration::from_millis(16);
+const RMUX_RECOVERY_RESET_PREFIX: &[u8] = b"\x1b[?2026l\x1b[?1049l\x1b[?6l\x1b[?7h\x1b[r\x1b[0m\x1b]8;;\x1b\\\x1b[?25l\x1b[2J\x1b[3J\x1b[H";
 
 struct RmuxNativeTerminal {
     command_tx: tokio_mpsc::UnboundedSender<RmuxTerminalCommand>,
@@ -65,6 +66,7 @@ struct RmuxNativeTerminal {
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
     closed: Arc<AtomicBool>,
+    initial_frame_ready: Arc<AtomicBool>,
     error_rx: mpsc::Receiver<String>,
     geometry: TerminalGeometry,
     display_scale: f32,
@@ -109,6 +111,7 @@ enum RmuxTerminalCommand {
     ApplyLiveConfig(TerminalLiveConfig),
     Input(TerminalInputCommand),
     InputBytes(Vec<u8>),
+    RestoreHistory(Vec<u8>),
     MouseViewportScroll {
         delta: isize,
     },
@@ -121,6 +124,7 @@ enum RmuxTerminalCommand {
     SelectionEnd(Option<TerminalSelectionEvent>),
     Capture {
         options: CaptureOptions,
+        checkpoint: bool,
         done: WorkerRequest<std::result::Result<TerminalCapture, String>>,
     },
     FormatSelection {
@@ -160,6 +164,7 @@ struct RmuxWorkerConfig {
     latest_drain: Arc<Mutex<DrainStats>>,
     pending_output_len: Arc<AtomicUsize>,
     closed: Arc<AtomicBool>,
+    initial_frame_ready: Arc<AtomicBool>,
     error_tx: mpsc::Sender<String>,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     waiting_initial_remote_frame: bool,
@@ -189,6 +194,7 @@ struct RmuxWorker {
     pending_output: OutputBacklog,
     pending_output_len: Arc<AtomicUsize>,
     closed: Arc<AtomicBool>,
+    initial_frame_ready: Arc<AtomicBool>,
     error_tx: mpsc::Sender<String>,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     side_effect_tx: Option<mpsc::Sender<TerminalSideEffectEvent>>,
@@ -205,6 +211,7 @@ struct RmuxWorker {
     last_hold: PublishHold,
     cursor_hold: CursorHold,
     waiting_initial_remote_frame: bool,
+    restored_history: Option<Vec<u8>>,
     command_disconnected: bool,
     output_closed: bool,
 }
@@ -237,6 +244,7 @@ impl RmuxNativeTerminal {
         let latest_drain = Arc::new(Mutex::new(DrainStats::default()));
         let pending_output_len = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicBool::new(false));
+        let initial_frame_ready = Arc::new(AtomicBool::new(false));
         spawn_rmux_terminal_worker(RmuxWorkerConfig {
             pane_io,
             geometry,
@@ -248,6 +256,7 @@ impl RmuxNativeTerminal {
             latest_drain: Arc::clone(&latest_drain),
             pending_output_len: Arc::clone(&pending_output_len),
             closed: Arc::clone(&closed),
+            initial_frame_ready: Arc::clone(&initial_frame_ready),
             error_tx,
             repaint_wakeup,
             waiting_initial_remote_frame: true,
@@ -258,6 +267,7 @@ impl RmuxNativeTerminal {
             latest_drain,
             pending_output_len,
             closed,
+            initial_frame_ready,
             error_rx,
             geometry,
             display_scale,
@@ -539,6 +549,17 @@ impl TerminalRuntime for RmuxNativeTerminal {
         Ok(self.closed.load(Ordering::Relaxed))
     }
 
+    fn started(&mut self) -> Result<bool> {
+        self.check_worker_error()?;
+        Ok(self.initial_frame_ready.load(Ordering::Acquire))
+    }
+
+    fn restore_history(&mut self, text: &str) -> Result<()> {
+        self.send_command(RmuxTerminalCommand::RestoreHistory(
+            bootty_terminal::terminal_history::styled_history_bytes(text)?,
+        ))
+    }
+
     fn tty_name(&self) -> Option<&str> {
         None
     }
@@ -561,7 +582,28 @@ impl TerminalRuntime for RmuxNativeTerminal {
         self.check_worker_error()?;
         let (done, response) = worker_request();
         self.command_tx
-            .send(RmuxTerminalCommand::Capture { options, done })
+            .send(RmuxTerminalCommand::Capture {
+                options,
+                checkpoint: false,
+                done,
+            })
+            .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))?;
+        Ok(response)
+    }
+
+    fn capture_checkpoint(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        options.validate().map_err(anyhow::Error::msg)?;
+        self.check_worker_error()?;
+        let (done, response) = worker_request();
+        self.command_tx
+            .send(RmuxTerminalCommand::Capture {
+                options,
+                checkpoint: true,
+                done,
+            })
             .map_err(|_| anyhow::anyhow!("rmux terminal worker stopped"))?;
         Ok(response)
     }
@@ -714,6 +756,19 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
                 return;
             }
         };
+        let restored_history = match config
+            .terminal_config
+            .restored_history
+            .as_deref()
+            .map(bootty_terminal::terminal_history::styled_history_bytes)
+            .transpose()
+        {
+            Ok(history) => history,
+            Err(error) => {
+                let _ = startup_tx.send(Err(error.to_string()));
+                return;
+            }
+        };
         let mut engine = match TerminalEngine::new_with_terminal_options(
             config.geometry,
             config.terminal_config.colors,
@@ -756,6 +811,7 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
             pending_output: OutputBacklog::with_capacity(RMUX_MAX_COLLECT_CHUNKS_PER_TICK),
             pending_output_len: config.pending_output_len,
             closed: config.closed,
+            initial_frame_ready: config.initial_frame_ready,
             error_tx: config.error_tx,
             repaint_wakeup: config.repaint_wakeup,
             side_effect_tx: config.terminal_config.side_effect_tx,
@@ -774,6 +830,7 @@ fn spawn_rmux_terminal_worker(config: RmuxWorkerConfig) -> Result<()> {
             last_hold: PublishHold::None,
             cursor_hold: CursorHold::default(),
             waiting_initial_remote_frame: config.waiting_initial_remote_frame,
+            restored_history,
             command_disconnected: false,
             pending_command: None,
             pending_event: None,
@@ -942,6 +999,14 @@ impl RmuxWorker {
         (did_work, terminal_changed)
     }
 
+    fn restore_history(&mut self, bytes: Vec<u8>) -> bool {
+        if !self.waiting_initial_remote_frame {
+            self.engine.write_vt_without_pty_responses(&bytes);
+        }
+        self.restored_history = Some(bytes);
+        true
+    }
+
     fn apply_command(&mut self, command: RmuxTerminalCommand) -> bool {
         match command {
             RmuxTerminalCommand::DisplayScale(display_scale) => {
@@ -969,6 +1034,7 @@ impl RmuxWorker {
                 self.apply_terminal_change(|engine| engine.apply_live_config(config))
             }
             RmuxTerminalCommand::Input(input) => self.apply_input_command(&input),
+            RmuxTerminalCommand::RestoreHistory(bytes) => self.restore_history(bytes),
             RmuxTerminalCommand::InputBytes(bytes) => {
                 self.mark_input_fast_path();
                 self.engine.scroll_viewport_bottom();
@@ -997,10 +1063,11 @@ impl RmuxWorker {
             RmuxTerminalCommand::SelectionEnd(event) => {
                 self.apply_input_change(|engine| engine.end_selection(event))
             }
-            RmuxTerminalCommand::Capture { options, done } => {
-                self.respond(done, |worker| worker.engine.capture(options));
-                false
-            }
+            RmuxTerminalCommand::Capture {
+                options,
+                checkpoint,
+                done,
+            } => self.capture(options, checkpoint, done),
             RmuxTerminalCommand::FormatSelection { format, done } => {
                 self.respond(done, |worker| worker.engine.format_selection(format));
                 false
@@ -1040,6 +1107,26 @@ impl RmuxWorker {
                 false
             }
         }
+    }
+
+    fn capture(
+        &mut self,
+        options: CaptureOptions,
+        checkpoint: bool,
+        done: WorkerRequest<Result<TerminalCapture, String>>,
+    ) -> bool {
+        self.respond(done, |worker| {
+            anyhow::ensure!(
+                worker.initial_frame_ready.load(Ordering::Acquire),
+                "rmux terminal is waiting for its first recovered frame"
+            );
+            if checkpoint {
+                worker.engine.capture_checkpoint(options)
+            } else {
+                worker.engine.capture(options)
+            }
+        });
+        false
     }
 
     fn apply_input_command(&mut self, input: &TerminalInputCommand) -> bool {
@@ -1101,9 +1188,32 @@ impl RmuxWorker {
                     self.cursor_hold.reset();
                     collected_chunks = collected_chunks.saturating_add(1);
                     collected_bytes = collected_bytes.saturating_add(keyframe.len());
-                    self.engine.write_vt_without_pty_responses(&keyframe);
+                    // The pinned rmux keyframe resets history before reconstructing live rows.
+                    // Reapply the saved prefix only after reset clears its previous copy.
+                    if let Some(history) = self.restored_history.as_ref() {
+                        if let Some(body) = keyframe.strip_prefix(RMUX_RECOVERY_RESET_PREFIX) {
+                            self.engine
+                                .write_vt_without_pty_responses(RMUX_RECOVERY_RESET_PREFIX);
+                            self.engine.write_vt_without_pty_responses(history);
+                            // Park every saved row in scrollback before live cursor positions
+                            // reconstruct the viewport; later output cannot overwrite the seed.
+                            for _ in 0..self.geometry.rows {
+                                self.engine.write_vt_without_pty_responses(b"\r\n");
+                            }
+                            self.engine.write_vt_without_pty_responses(b"\x1b[H");
+                            self.engine.write_vt_without_pty_responses(body);
+                        } else {
+                            self.send_error(
+                                &"rmux recovery keyframe has an unsupported reset prefix",
+                            );
+                            self.engine.write_vt_without_pty_responses(&keyframe);
+                        }
+                    } else {
+                        self.engine.write_vt_without_pty_responses(&keyframe);
+                    }
                     self.engine.scroll_viewport_bottom();
                     self.waiting_initial_remote_frame = false;
+                    self.initial_frame_ready.store(true, Ordering::Release);
                     self.force_next_frame_publish = true;
                     self.mark_unpublished_frame();
                 }

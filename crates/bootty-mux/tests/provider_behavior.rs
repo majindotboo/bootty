@@ -19,9 +19,9 @@ use bootty_mux::{
     command::{MuxCommand, MuxSplitDirection},
     controller::{MuxCommandCompletion, MuxController, RepaintHandle, SpaceId},
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
+        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
     snapshot::{MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow},
     target::{ExactMuxTarget, exact_mux_target},
@@ -39,6 +39,12 @@ struct Calls {
     snapshots: AtomicUsize,
     executes: AtomicUsize,
     snapshot_queries: Option<mpsc::Sender<SnapshotQuery>>,
+    command_queries: Option<mpsc::Sender<CommandQuery>>,
+}
+
+struct CommandQuery {
+    command: MuxCommand,
+    response: mpsc::Sender<()>,
 }
 
 struct SnapshotQuery {
@@ -77,8 +83,13 @@ impl MuxBackend for Backend {
             })
             .ok_or_else(|| anyhow!("dynamic refresh failure"))
     }
-    fn execute(&mut self, _command: MuxCommand) -> Result<()> {
+    fn execute(&mut self, command: MuxCommand) -> Result<()> {
         self.calls.executes.fetch_add(1, Ordering::SeqCst);
+        if let Some(queries) = &self.calls.command_queries {
+            let (response, receiver) = mpsc::channel();
+            queries.send(CommandQuery { command, response })?;
+            receiver.recv()?;
+        }
         Ok(())
     }
 }
@@ -131,8 +142,7 @@ impl MuxAppBackendProvider for Provider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::BackendSnapshot,
-            persisted_sessions: PersistedSessionPolicy::Never,
-            generated_session_names: GeneratedSessionNamePolicy::Reconcile,
+
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: SelectionPublicationPolicy::Direct,
         }
@@ -146,7 +156,13 @@ impl MuxAppBackendProvider for Provider {
     }
 
     fn capabilities(&self, scope: SpaceId) -> BindingCapabilityDescriptor {
-        BindingCapabilityDescriptor::new(scope, [BindingOperation::SplitPane])
+        BindingCapabilityDescriptor::new(
+            scope,
+            [
+                BindingOperation::SplitPane,
+                BindingOperation::NavigateWindow,
+            ],
+        )
     }
 }
 
@@ -552,6 +568,8 @@ proptest! {
         let pane = ExactMuxTarget::Pane(scope, ids.session.clone(), ids.window.clone(), ids.pane.clone());
         let resources = [
             (ResourceKind::Binding, ExactMuxTarget::Binding(scope)),
+            (ResourceKind::Terminal, ExactMuxTarget::Binding(scope)),
+            (ResourceKind::Terminal, ExactMuxTarget::Session(scope, ids.session.clone())),
             (ResourceKind::Session, ExactMuxTarget::Session(scope, ids.session.clone())),
             (ResourceKind::MuxWindow, ExactMuxTarget::window(scope, &ids.session, &ids.window)),
             (ResourceKind::Pane, pane.clone()),
@@ -570,7 +588,7 @@ proptest! {
         *provider.calls.snapshot.lock().unwrap() = MuxSnapshot::default();
         controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
         for (exact, target) in &captured {
-            if target.kind != ResourceKind::Binding {
+            if !matches!(exact, ExactMuxTarget::Binding(_)) {
                 prop_assert_eq!(exact.command_target(target.kind, &controller, binding), None);
                 prop_assert_eq!(exact_mux_target(scope, &controller, target, binding), None);
             }
@@ -579,7 +597,7 @@ proptest! {
         controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
         for (exact, old) in captured {
             let current = exact.command_target(old.kind, &controller, binding).unwrap();
-            if old.kind != ResourceKind::Binding {
+            if !matches!(exact, ExactMuxTarget::Binding(_)) {
                 prop_assert!(current.generation > old.generation);
                 prop_assert_eq!(exact_mux_target(scope, &controller, &old, binding), None);
             }
@@ -641,4 +659,123 @@ fn session_switch_selects_its_known_window_before_refresh(#[case] kind: MuxBacke
         "two"
     );
     assert_eq!(provider.calls.snapshots.load(Ordering::SeqCst), snapshots);
+}
+
+#[rstest::rstest]
+#[case(MuxBackendKind::Native)]
+#[case(MuxBackendKind::Rmux)]
+#[case(MuxBackendKind::Tmux)]
+fn rapid_tab_selection_survives_older_commands_and_refreshes(#[case] kind: MuxBackendKind) {
+    let (command_tx, commands) = mpsc::channel();
+    let (snapshot_tx, snapshots) = mpsc::channel();
+    let provider = Arc::new(Provider {
+        kind,
+        caller_thread: AtomicBool::new(false),
+        calls: Arc::new(Calls {
+            command_queries: Some(command_tx),
+            snapshot_queries: Some(snapshot_tx),
+            ..Calls::default()
+        }),
+        fail_snapshot_at: usize::MAX,
+    });
+    let registry = Arc::new(MuxBackendRegistry::from_app_providers([provider], [kind]).unwrap());
+    let mut controller = MuxController::new(SpaceId::from_persistence(42), registry, None);
+    let config = MuxBindingConfig {
+        backend: kind,
+        ..Default::default()
+    };
+    let (wake, wakes) = mpsc::channel();
+    let repaint: RepaintHandle = Arc::new(move || {
+        let _ = wake.send(());
+    });
+    let mut snapshot = ResourceIds {
+        session: "session".into(),
+        window: "one".into(),
+        pane: "pane".into(),
+    }
+    .snapshot();
+    snapshot.sessions[0].windows[0].index = 1;
+    let mut other = snapshot.sessions[0].windows[0].clone();
+    other.id = "five".into();
+    other.index = 5;
+    other.active = false;
+    snapshot.sessions[0].windows.push(other);
+
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    receive(&snapshots)
+        .response
+        .send(Ok(snapshot.clone()))
+        .unwrap();
+    receive(&wakes);
+    controller.refresh_sessions(&repaint, &config, Duration::MAX);
+    // This poll starts before navigation but returns the first command's intermediate window.
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    let older_snapshot = receive(&snapshots);
+    for index in [5, 1] {
+        controller.execute_command(
+            &repaint,
+            &config,
+            MuxCommand::ActivateWindowIndex {
+                session_id: "session".into(),
+                index,
+            },
+        );
+    }
+    assert_eq!(controller.selected_window(), Some("one"));
+    snapshot.sessions[0].active_window_id = Some("five".into());
+    older_snapshot.response.send(Ok(snapshot.clone())).unwrap();
+    receive(&wakes);
+    assert!(
+        !controller
+            .refresh_sessions(&repaint, &config, Duration::ZERO)
+            .applied
+    );
+    assert_eq!(controller.selected_window(), Some("one"));
+
+    for index in [5, 1] {
+        let command = receive(&commands);
+        assert_eq!(
+            command.command,
+            MuxCommand::ActivateWindowIndex {
+                session_id: "session".into(),
+                index,
+            }
+        );
+        command.response.send(()).unwrap();
+        receive(&wakes);
+        assert_eq!(controller.poll_command(), Some(Ok(())));
+        assert_eq!(controller.selected_window(), Some("one"));
+        if index == 5 {
+            controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+            assert!(matches!(
+                snapshots.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+    }
+    snapshot.sessions[0].active_window_id = Some("one".into());
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    receive(&snapshots)
+        .response
+        .send(Ok(snapshot.clone()))
+        .unwrap();
+    receive(&wakes);
+    assert!(
+        controller
+            .refresh_sessions(&repaint, &config, Duration::MAX)
+            .applied
+    );
+    assert_eq!(controller.selected_window(), Some("one"));
+
+    // Backend navigation after the burst still follows the external selection.
+    snapshot.sessions[0].active_window_id = Some("five".into());
+    controller.refresh_sessions(&repaint, &config, Duration::ZERO);
+    receive(&snapshots).response.send(Ok(snapshot)).unwrap();
+    receive(&wakes);
+    assert!(
+        controller
+            .refresh_sessions(&repaint, &config, Duration::MAX)
+            .applied
+    );
+    assert_eq!(controller.selected_window(), Some("five"));
 }

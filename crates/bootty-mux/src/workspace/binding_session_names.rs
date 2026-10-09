@@ -1,18 +1,6 @@
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-
 use super::{BindingRuntime, PendingGeneratedName, WorkspaceRuntime};
-use crate::{
-    RepaintHandle, command::MuxCommand, controller::NewMuxSessionRequest,
-    provider::GeneratedSessionNamePolicy,
-};
+use crate::{RepaintHandle, command::MuxCommand, controller::NewMuxSessionRequest};
 use crate::{repository::WorkspacePersistenceError, session_names};
-
-pub enum RenameSessionOutcome {
-    Missing,
-    Pending,
-    Started,
-}
 
 fn resolve_session_cwd(cwd: &str, remote: bool) -> String {
     if remote {
@@ -50,6 +38,14 @@ impl BindingRuntime {
     }
 
     pub fn poll_membership_command(&mut self) {
+        // Reserve generated names only until the backend reports their attachment.
+        self.pending_generated_names.retain(|_, pending| {
+            !self
+                .mux
+                .all_sessions()
+                .iter()
+                .any(|session| session.name == pending.name)
+        });
         let Some(result) = self.mux.poll_command() else {
             return;
         };
@@ -78,110 +74,6 @@ fn session_root(cwd: &str) -> String {
 }
 
 impl WorkspaceRuntime {
-    fn generated_names_signature(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for session in self.active.binding.mux.all_sessions() {
-            (&session.id, &session.name, &session.anchor.cwd).hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    /// Name every claimed session after its project, and ask the backend to use that name.
-    ///
-    /// A shared server may add a uniqueness suffix to what it was asked for; that stays the
-    /// backend's business, since what bootty shows is stored against the identity. Sessions the
-    /// user renamed elsewhere are already explicit by now, and explicit names are left alone.
-    /// # Errors
-    /// Returns membership reconciliation or persistence errors.
-    pub fn reconcile_generated_session_names(
-        &mut self,
-        repaint: &RepaintHandle,
-    ) -> Result<(), WorkspacePersistenceError> {
-        let remote = self.active.binding.multiplexer.remote.is_some();
-        let mut candidate = self.active_reconciled_binding_state_candidate();
-        let mut pending_generated_names = self.active.binding.pending_generated_names.clone();
-        if self.active.binding.backend_policy.generated_session_names
-            == GeneratedSessionNamePolicy::PreserveBackend
-        {
-            return self.commit_binding_state_candidate(candidate).map(|_| ());
-        }
-        let signature = self.generated_names_signature();
-        if self.active.binding.generated_names_signature == Some(signature) {
-            return self.commit_binding_state_candidate(candidate).map(|_| ());
-        }
-
-        let sessions = self.active.binding.mux.sessions().to_vec();
-        // A rename bootty asked for is only still pending while the backend has not shown it.
-        pending_generated_names
-            .retain(|_, pending| !sessions.iter().any(|session| session.name == pending.name));
-        let mut planned_names = pending_generated_names
-            .values()
-            .map(|pending| pending.name.clone())
-            .collect::<HashSet<_>>();
-        let taken_names = self.taken_session_names(None);
-        let mut renames = Vec::new();
-
-        for session in &sessions {
-            let Some(identity) = session.tag.identity.as_deref() else {
-                continue;
-            };
-            let Some(claimed) = candidate.sessions.get(identity) else {
-                continue;
-            };
-            let cwd = session.anchor.cwd.as_deref().map_or_else(
-                || claimed.cwd.clone(),
-                |cwd| self.active.binding.session_cwd(cwd),
-            );
-            let explicit = claimed.explicit;
-            let suggested = suggested_session_name(&cwd, remote);
-
-            if explicit {
-                continue;
-            }
-            candidate
-                .sessions
-                .set_display_name(identity, &suggested, false);
-
-            let existing_names = taken_names
-                .iter()
-                .map(String::as_str)
-                .filter(|name| *name != session.name)
-                .chain(planned_names.iter().map(String::as_str));
-            let desired = session_names::unique_session_name(&suggested, existing_names);
-            // Already called what it should be, suffix and all.
-            if desired == session.name
-                || session_names::is_uniquified_session_name(&session.name, &suggested)
-            {
-                continue;
-            }
-            planned_names.insert(desired.clone());
-            pending_generated_names.insert(
-                session.id.clone(),
-                PendingGeneratedName {
-                    name: desired.clone(),
-                    display_name: suggested,
-                    explicit: false,
-                },
-            );
-            renames.push((session.id.clone(), desired));
-        }
-
-        self.commit_binding_state_candidate(candidate)?;
-        self.active.binding.pending_generated_names = pending_generated_names;
-        self.active.binding.generated_names_signature = Some(signature);
-        if renames.is_empty() {
-            return Ok(());
-        }
-        let config = self.active.binding.multiplexer.clone();
-        for (session_id, name) in renames {
-            self.active
-                .binding
-                .mux
-                .rename_session(&session_id, name, repaint, &config);
-        }
-        Ok(())
-    }
-
     fn taken_session_names(&self, keep: Option<&str>) -> Vec<String> {
         self.all_bindings()
             .flat_map(|binding| {
@@ -196,12 +88,17 @@ impl WorkspaceRuntime {
             .collect()
     }
 
+    #[must_use]
+    pub fn project_session_title(&self, cwd: &str) -> String {
+        suggested_session_name(cwd, self.active.binding.multiplexer.remote.is_some())
+    }
+
     pub fn project_session_command(&self, cwd: &str) -> MuxCommand {
-        let remote = self.active.binding.multiplexer.remote.is_some();
         let cwd = self.active.binding.session_cwd(cwd);
-        let display_name = suggested_session_name(&cwd, remote);
+        let display_name = self.project_session_title(&cwd);
+        let candidate = session_names::generated_session_name(&display_name);
         let session_id = session_names::unique_session_name(
-            &display_name,
+            &candidate,
             self.taken_session_names(None).iter().map(String::as_str),
         );
         MuxCommand::CreateProjectSession {
@@ -265,55 +162,123 @@ impl WorkspaceRuntime {
         Ok(true)
     }
 
+    /// Edit a saved purpose title without changing backend topology or names.
     /// # Errors
-    /// Returns membership validation or persistence errors while renaming the session.
-    pub fn rename_active_session(
+    /// Rejects invalid titles and commits before publishing the change.
+    pub fn set_session_title(
         &mut self,
-        session_id: &str,
-        display_name: &str,
-        repaint: &RepaintHandle,
-    ) -> Result<RenameSessionOutcome, WorkspacePersistenceError> {
-        let Some(session) = self
-            .active
-            .binding
-            .mux
-            .session_by_id_or_name(session_id)
-            .cloned()
-        else {
-            return Ok(RenameSessionOutcome::Missing);
-        };
-        let taken = self.taken_session_names(Some(session.name.as_str()));
-        let backend_name =
-            session_names::unique_session_name(display_name, taken.iter().map(String::as_str));
-        let command = MuxCommand::RenameSession {
-            session_id: session.id.clone(),
-            name: backend_name.clone(),
-        };
-        let pending_name = PendingGeneratedName {
-            name: backend_name.clone(),
-            display_name: display_name.to_owned(),
-            explicit: true,
-        };
-        let membership = self
-            .begin_active_binding_membership_mutation(&command, Some(&pending_name))?
-            .is_some();
-        if !membership && self.active.binding.tracks_session_membership() {
-            return Ok(RenameSessionOutcome::Pending);
-        }
-        self.active
-            .binding
-            .pending_generated_names
-            .insert(session.id.clone(), pending_name);
-        let config = self.active.binding.multiplexer.clone();
-        self.active
-            .binding
-            .mux
-            .rename_session(&session.id, backend_name, repaint, &config);
-        if self.active.binding.tracks_session_membership()
-            && self.active.binding.membership_completion_is_immediate()
+        scope: crate::controller::SpaceId,
+        identity: &str,
+        title: &str,
+    ) -> Result<bool, WorkspacePersistenceError> {
+        validate_session_title(title)?;
+        if self
+            .repository
+            .pending_binding_membership_mutations(scope)?
+            .iter()
+            .any(|operation| operation.mutation().identity() == identity)
         {
-            self.active.binding.membership_reconciliation_ready = true;
+            return Err(WorkspacePersistenceError::operation(
+                "this session has a pending terminal operation",
+            ));
         }
-        Ok(RenameSessionOutcome::Started)
+        let Some(mut candidate) = self.binding_state_candidate(scope) else {
+            return Err(WorkspacePersistenceError::operation(
+                "the Space no longer exists",
+            ));
+        };
+        if !candidate.sessions.contains(identity) {
+            return Err(WorkspacePersistenceError::operation(
+                "this Space does not hold the saved session",
+            ));
+        }
+        if !candidate
+            .sessions
+            .set_display_name(identity, title.trim(), true)
+        {
+            return Ok(false);
+        }
+        self.commit_binding_state_candidate(candidate).map(|_| true)
     }
+
+    /// Commit saved lifecycle and visibility independently of a backend attachment.
+    /// # Errors
+    /// Rejects foreign identities, invalid deadlines, pending operations and failed writes.
+    pub fn set_session_state(
+        &mut self,
+        scope: crate::controller::SpaceId,
+        identity: &str,
+        change: crate::session_membership::SessionStateChange,
+    ) -> Result<bool, WorkspacePersistenceError> {
+        use crate::session_membership::SessionStateChange;
+
+        if matches!(change, SessionStateChange::SnoozeUntil(until) if until < 0) {
+            return Err(WorkspacePersistenceError::operation(
+                "snooze deadline must be non-negative absolute UTC seconds",
+            ));
+        }
+        if matches!(change, SessionStateChange::RecordActivity { at, now } | SessionStateChange::AcceptInput { at, now } if at < 0 || at > now)
+        {
+            return Err(WorkspacePersistenceError::operation(
+                "activity must be non-negative UTC seconds no later than the accepted clock",
+            ));
+        }
+        if self
+            .repository
+            .pending_binding_membership_mutations(scope)?
+            .iter()
+            .any(|operation| operation.mutation().identity() == identity)
+        {
+            return Err(WorkspacePersistenceError::operation(
+                "this session has a pending terminal operation",
+            ));
+        }
+        let Some(mut candidate) = self.binding_state_candidate(scope) else {
+            return Err(WorkspacePersistenceError::operation(
+                "the Space no longer exists",
+            ));
+        };
+        let Some(saved) = candidate.sessions.get(identity) else {
+            return Err(WorkspacePersistenceError::operation(
+                "this Space does not hold the saved session",
+            ));
+        };
+        if saved.state.deleted
+            && !matches!(
+                change,
+                SessionStateChange::Delete | SessionStateChange::RestoreDeleted
+            )
+        {
+            return Err(WorkspacePersistenceError::operation(
+                "restore the deleted session before changing its state",
+            ));
+        }
+        if change == SessionStateChange::Delete {
+            if self
+                .binding(scope)
+                .and_then(|binding| binding.session_attachment(identity))
+                .is_some()
+            {
+                return Err(WorkspacePersistenceError::operation(
+                    "Close the session before deleting its saved history. Archive keeps it recoverable.",
+                ));
+            }
+            candidate.sessions.release(identity);
+            return self.commit_binding_state_candidate(candidate).map(|_| true);
+        }
+        if !candidate.sessions.set_state(identity, change) {
+            return Ok(false);
+        }
+        self.commit_binding_state_candidate(candidate).map(|_| true)
+    }
+}
+
+/// One title boundary for saved edits and explicit creation.
+pub(super) fn validate_session_title(title: &str) -> Result<(), WorkspacePersistenceError> {
+    if title.trim().is_empty() || title.len() > 256 || title.chars().any(char::is_control) {
+        return Err(WorkspacePersistenceError::operation(
+            "session title must be 1–256 bytes without control characters",
+        ));
+    }
+    Ok(())
 }

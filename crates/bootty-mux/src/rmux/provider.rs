@@ -11,9 +11,8 @@ use crate::{
     capability::BindingCapabilityDescriptor,
     controller::SpaceId,
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, PaneBehavior,
-        PaneTopology, PersistedSessionPolicy, SelectionPublicationPolicy, TerminalProgressPolicy,
-        TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, PaneBehavior, PaneTopology,
+        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
     },
     terminal::BackendPanePolicy,
 };
@@ -64,8 +63,7 @@ impl MuxAppBackendProvider for RmuxProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::TerminalOsc,
-            persisted_sessions: PersistedSessionPolicy::AfterEmptyInitialSnapshot,
-            generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
+
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
         }

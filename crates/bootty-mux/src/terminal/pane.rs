@@ -121,6 +121,7 @@ pub struct BackendPaneTerminal {
     terminal_config: TerminalSessionConfig,
     repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     native_terminals: HashMap<ScopedMuxPaneTarget, Box<dyn TerminalRuntime>>,
+    restored_pane_history: HashMap<(SpaceId, String), Arc<str>>,
     /// The active native window's panes (focused + the parked siblings rendered alongside it). Empty
     /// for non-native backends, which render a single attach surface.
     native_window_targets: Vec<ScopedMuxPaneTarget>,
@@ -153,6 +154,12 @@ pub trait TerminalRuntime: TerminalFrameSource + Send {
     fn started(&mut self) -> Result<bool> {
         Ok(true)
     }
+    /// Restore validated text and styles without writing to the pane process.
+    /// # Errors
+    /// Returns unsupported or renderer worker errors.
+    fn restore_history(&mut self, _text: &str) -> Result<()> {
+        anyhow::bail!("this terminal cannot restore presentation history")
+    }
     fn tty_name(&self) -> Option<&str>;
     /// # Errors
     /// Returns terminal worker or engine errors while discarding pending output.
@@ -179,6 +186,15 @@ pub trait TerminalRuntime: TerminalFrameSource + Send {
         _options: CaptureOptions,
     ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
         anyhow::bail!("This terminal has no capture runtime")
+    }
+    /// Capture a bounded checkpoint; owned terminal runtimes reduce whole rows to fit.
+    /// # Errors
+    /// Returns unsupported capture or terminal worker errors.
+    fn capture_checkpoint(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        self.capture(options)
     }
     /// # Errors
     /// Returns terminal worker or selection formatting errors.
@@ -403,6 +419,10 @@ impl TerminalRuntime for TerminalSession {
         Self::child_exited(self)
     }
 
+    fn restore_history(&mut self, text: &str) -> Result<()> {
+        Self::restore_history(self, text)
+    }
+
     fn tty_name(&self) -> Option<&str> {
         Self::tty_name(self)
     }
@@ -430,6 +450,12 @@ impl TerminalRuntime for TerminalSession {
         options: CaptureOptions,
     ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
         Self::capture(self, options)
+    }
+    fn capture_checkpoint(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        Self::capture_checkpoint(self, options)
     }
 
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
@@ -547,6 +573,7 @@ impl BackendPaneTerminal {
             terminal_config,
             repaint_wakeup,
             native_terminals: HashMap::new(),
+            restored_pane_history: HashMap::new(),
             native_window_targets: Vec::new(),
             native_window_spawn_geometry: None,
             native_window_id: None,
@@ -654,6 +681,32 @@ impl BackendPaneTerminal {
         )
     }
 
+    pub(crate) fn terminal_colors(&self) -> bootty_terminal::terminal_engine::TerminalColorConfig {
+        self.terminal_config.colors.clone()
+    }
+
+    #[must_use]
+    pub fn pending_scoped_restored_history(
+        &self,
+        scope: SpaceId,
+        pane_id: &str,
+    ) -> Option<Arc<str>> {
+        self.restored_pane_history
+            .get(&(scope, pane_id.to_owned()))
+            .cloned()
+    }
+
+    /// Seed one controller before its first backend keyframe, including a pane shown later.
+    pub fn queue_scoped_restored_history(
+        &mut self,
+        scope: SpaceId,
+        pane_id: &str,
+        history: Arc<str>,
+    ) {
+        self.restored_pane_history
+            .insert((scope, pane_id.to_owned()), history);
+    }
+
     pub fn set_terminal_config(&mut self, terminal_config: TerminalSessionConfig) {
         self.terminal_config = terminal_config;
     }
@@ -670,6 +723,77 @@ impl BackendPaneTerminal {
         pane: MuxPaneAnchor,
         command: Vec<String>,
     ) -> Result<()> {
+        self.start_scoped_native_pane(scope, pane, command, None)
+    }
+
+    /// Start a restored shell with styled history present before its first output.
+    /// # Errors
+    /// Returns invalid history or pane startup errors.
+    pub fn start_scoped_restored_native(
+        &mut self,
+        scope: SpaceId,
+        pane: MuxPaneAnchor,
+        history: &str,
+    ) -> Result<()> {
+        self.start_scoped_native_pane(scope, pane, Vec::new(), Some(std::sync::Arc::from(history)))
+    }
+
+    /// Replace only the caller's admitted cold pane, retaining its renderer and topology identity.
+    /// # Errors
+    /// Returns unsupported native replacement, invalid history, or process startup errors.
+    pub fn replace_scoped_restored_native(
+        &mut self,
+        scope: SpaceId,
+        pane: MuxPaneAnchor,
+        command: Vec<String>,
+        cwd: Option<String>,
+        history: std::sync::Arc<str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.behavior.topology == PaneTopology::ProcessLocal && self.behavior.cache_terminals,
+            "this backend cannot replace a native pane process"
+        );
+        let target = ScopedMuxPaneTarget::from_anchor(Some(scope), pane.clone());
+        let mut launch_pane = pane;
+        if cwd.is_some() {
+            launch_pane.cwd = cwd;
+        }
+        let launch_target = ScopedMuxPaneTarget::from_anchor(Some(scope), launch_pane);
+        let mut config = self.terminal_config.clone();
+        config.launch.command_is_argv = true;
+        config.launch.command = command;
+        config.restored_history = Some(history);
+        let runtime = self
+            .policy
+            .start_terminal(PaneStartRequest {
+                target: &launch_target,
+                geometry: self.geometry,
+                spawn_geometry: self.native_window_spawn_geometry.unwrap_or(self.geometry),
+                display_scale: self.display_scale,
+                render_cell: self.render_cell,
+                terminal_config: &config,
+                repaint_wakeup: &self.repaint_wakeup,
+            })?
+            .ok_or_else(|| anyhow::anyhow!("the backend started no replacement terminal"))?;
+        let active = self.active_target.as_ref() == Some(&target);
+        self.discard_target(&target);
+        self.native_runtime_restarts.remove(&target);
+        if active {
+            self.active_target = Some(target);
+            self.set_active_terminal(runtime);
+        } else {
+            self.native_terminals.insert(target, runtime);
+        }
+        Ok(())
+    }
+
+    fn start_scoped_native_pane(
+        &mut self,
+        scope: SpaceId,
+        pane: MuxPaneAnchor,
+        command: Vec<String>,
+        history: Option<std::sync::Arc<str>>,
+    ) -> Result<()> {
         anyhow::ensure!(
             self.behavior.topology == PaneTopology::ProcessLocal && self.behavior.cache_terminals,
             "this backend cannot start a pane before it is shown"
@@ -681,7 +805,7 @@ impl BackendPaneTerminal {
         );
         let started = self.active_target.as_ref() == Some(&target)
             || self.native_terminals.contains_key(&target);
-        if started && command.is_empty() {
+        if started && command.is_empty() && history.is_none() {
             // The default shell is what showing the pane started; nothing is missing.
             return Ok(());
         }
@@ -691,7 +815,9 @@ impl BackendPaneTerminal {
             target.input_selector()
         );
         let mut terminal_config = self.terminal_config.clone();
+        terminal_config.launch.command_is_argv = true;
         terminal_config.launch.command = command;
+        terminal_config.restored_history = history;
         let runtime = self
             .policy
             .start_terminal(PaneStartRequest {
@@ -763,13 +889,20 @@ impl BackendPaneTerminal {
             return Ok(Some(terminal));
         }
 
+        let mut config = self.terminal_config.clone();
+        if let Some(scope) = target.scope {
+            config.restored_history = self
+                .restored_pane_history
+                .remove(&(scope, target.input_selector().to_owned()))
+                .or(config.restored_history);
+        }
         let request = PaneStartRequest {
             target,
             geometry: self.geometry,
             spawn_geometry,
             display_scale: self.display_scale,
             render_cell: self.render_cell,
-            terminal_config: &self.terminal_config,
+            terminal_config: &config,
             repaint_wakeup: &self.repaint_wakeup,
         };
         self.policy.start_terminal(request)
@@ -1369,6 +1502,12 @@ impl TerminalRuntime for BackendPaneTerminal {
         options: CaptureOptions,
     ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
         self.terminal.capture(options)
+    }
+    fn capture_checkpoint(
+        &mut self,
+        options: CaptureOptions,
+    ) -> Result<PendingWorkerResponse<std::result::Result<TerminalCapture, String>>> {
+        self.terminal.capture_checkpoint(options)
     }
 
     fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {

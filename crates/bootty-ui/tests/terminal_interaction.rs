@@ -22,9 +22,9 @@ use bootty_mux::{
     backend::MuxBackend,
     controller::SpaceId,
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
+        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
     terminal::BackendPanePolicy,
 };
@@ -105,8 +105,6 @@ impl MuxAppBackendProvider for RmuxHostPolicyProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::TerminalOsc,
-            persisted_sessions: PersistedSessionPolicy::AfterEmptyInitialSnapshot,
-            generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
         }
@@ -162,6 +160,7 @@ fn submit(state: &mut AppState, action: &str) -> Option<CommandOutcome> {
     state
         .app_command_sender(Caller::Socket)
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation: CommandInvocation::from_action(action, Caller::Socket),
             deadline: started
                 .checked_add(PANE_BUDGET)
@@ -1071,6 +1070,7 @@ fn native_terminal_progress_updates_active_binding_presentation() {
     let mut state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
         .expect("start app state");
     let pane = bootty_mux::snapshot::MuxPaneAnchor {
+        native_agent: None,
         session_id: "facts".to_owned(),
         pane_id: Some("%1".to_owned()),
         cwd: None,

@@ -47,6 +47,13 @@ impl From<Output> for CommandBytes {
 const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub trait CommandRunner {
+    /// Run in the captured host directory without changing the application's directory.
+    /// # Errors
+    /// Returns unsupported operation, setup, cancellation, execution or decoding errors.
+    fn run_in(&self, _cwd: &str, _program: &str, _args: &[String]) -> Result<CommandOutput> {
+        bail!("command runner does not support a working directory")
+    }
+
     /// Capture non-UTF-8 command output without a lossy text conversion.
     /// # Errors
     /// Returns unsupported operation, process setup, execution, cancellation, or output limit errors.
@@ -80,11 +87,24 @@ pub trait CommandRunner {
 pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
+    fn run_in(&self, cwd: &str, program: &str, args: &[String]) -> Result<CommandOutput> {
+        cancellable_command_output(
+            program,
+            args,
+            &CommandCancellation::default(),
+            None,
+            None,
+            None,
+            Some(cwd),
+        )
+    }
+
     fn run_bytes(&self, program: &str, args: &[String]) -> Result<CommandBytes> {
         cancellable_command_bytes(
             program,
             args,
             &CommandCancellation::default(),
+            None,
             None,
             None,
             None,
@@ -97,6 +117,7 @@ impl CommandRunner for SystemCommandRunner {
             program,
             args,
             &CommandCancellation::default(),
+            None,
             None,
             None,
             None,
@@ -116,6 +137,7 @@ impl CommandRunner for SystemCommandRunner {
             None,
             None,
             Some(input),
+            None,
         )
     }
 
@@ -189,6 +211,18 @@ impl CancellableCommandRunner {
 }
 
 impl CommandRunner for CancellableCommandRunner {
+    fn run_in(&self, cwd: &str, program: &str, args: &[String]) -> Result<CommandOutput> {
+        cancellable_command_output(
+            program,
+            args,
+            &self.cancellation,
+            self.deadline,
+            self.cancellation_check.as_deref(),
+            None,
+            Some(cwd),
+        )
+    }
+
     fn run_bytes(&self, program: &str, args: &[String]) -> Result<CommandBytes> {
         cancellable_command_bytes(
             program,
@@ -196,6 +230,7 @@ impl CommandRunner for CancellableCommandRunner {
             &self.cancellation,
             self.deadline,
             self.cancellation_check.as_deref(),
+            None,
             None,
         )
         .map(CommandBytes::from)
@@ -208,6 +243,7 @@ impl CommandRunner for CancellableCommandRunner {
             &self.cancellation,
             self.deadline,
             self.cancellation_check.as_deref(),
+            None,
             None,
         )
     }
@@ -224,6 +260,7 @@ impl CommandRunner for CancellableCommandRunner {
             self.deadline,
             self.cancellation_check.as_deref(),
             Some(input),
+            None,
         )
     }
 }
@@ -235,6 +272,7 @@ fn cancellable_command_output(
     deadline: Option<Instant>,
     cancellation_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     input: Option<Vec<u8>>,
+    cwd: Option<&str>,
 ) -> Result<CommandOutput> {
     let output = cancellable_command_bytes(
         program,
@@ -243,6 +281,7 @@ fn cancellable_command_output(
         deadline,
         cancellation_check,
         input,
+        cwd,
     )?;
     command_output(program, Ok(output))
 }
@@ -254,11 +293,15 @@ fn cancellable_command_bytes(
     deadline: Option<Instant>,
     cancellation_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
     input: Option<Vec<u8>>,
+    cwd: Option<&str>,
 ) -> Result<Output> {
     if is_cancelled(cancellation, deadline, cancellation_check) {
         bail!("command canceled")
     }
     let mut command = Command::new(program);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     command
         .args(args)
         .stdin(if input.is_some() {
@@ -403,11 +446,18 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
     let label = format!("dev.bootty.disowned.{}.{}", std::process::id(), id);
     let mut script = macos_shell_environment_prelude();
     script.push_str(LAUNCHD_SUBMIT_SCRIPT);
+    let directory = tempfile::tempdir().context("prepare detached command output")?;
+    let stdout = tempfile::NamedTempFile::new_in(directory.path())?;
+    let stderr = tempfile::NamedTempFile::new_in(directory.path())?;
 
     let output = command_output(
         "launchctl",
         Command::new(&launchctl)
-            .args(["submit", "-l", &label, "--", &shell, "-c"])
+            .args(["submit", "-l", &label, "-o"])
+            .arg(stdout.path())
+            .arg("-e")
+            .arg(stderr.path())
+            .args(["--", &shell, "-c"])
             .arg(script)
             .args(["bootty-disowned", &resolved_program])
             .args(args)
@@ -417,10 +467,38 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
         return Ok(output);
     }
 
-    let status = wait_for_launchd_exit(&launchctl, &label, DISOWNED_COMMAND_TIMEOUT)
-        .with_context(|| format!("wait for disowned {program}"));
+    let status = wait_for_launchd_exit_with_capture(
+        &launchctl,
+        &label,
+        DISOWNED_COMMAND_TIMEOUT,
+        &[stdout.path(), stderr.path()],
+    )
+    .with_context(|| format!("wait for disowned {program}"));
     let _ = Command::new(&launchctl).args(["remove", &label]).output();
-    status.map(command_status_output)
+    let status = status?;
+    let stdout = read_disowned_output(&stdout)?;
+    let stderr = read_disowned_output(&stderr)?;
+    Ok(CommandOutput {
+        success: status == 0,
+        stdout,
+        stderr: if status != 0 && stderr.is_empty() {
+            format!("process exited with status {status}")
+        } else {
+            stderr
+        },
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn read_disowned_output(file: &tempfile::NamedTempFile) -> Result<String> {
+    let mut bytes = Vec::new();
+    file.as_file()
+        .take(MAX_CAPTURE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len())? > MAX_CAPTURE_BYTES {
+        bail!("command output exceeds the 16 MiB capture limit")
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(target_os = "macos")]
@@ -471,9 +549,25 @@ fn shell_single_quote(value: &str) -> String {
 /// # Errors
 /// Returns launchctl execution, status parsing, or timeout errors.
 pub fn wait_for_launchd_exit(launchctl: &str, label: &str, timeout: Duration) -> Result<i32> {
+    wait_for_launchd_exit_with_capture(launchctl, label, timeout, &[])
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_launchd_exit_with_capture(
+    launchctl: &str,
+    label: &str,
+    timeout: Duration,
+    captures: &[&Path],
+) -> Result<i32> {
     let start = Instant::now();
     let mut observed_pid = false;
     while start.elapsed() < timeout {
+        // launchd writes to private files, so stop an overflowing job while it is live.
+        for path in captures {
+            if std::fs::metadata(path)?.len() > MAX_CAPTURE_BYTES {
+                bail!("command output exceeds the 16 MiB capture limit")
+            }
+        }
         let output = Command::new(launchctl).args(["list", label]).output()?;
         let text = String::from_utf8_lossy(&output.stdout);
         if text.contains("\"PID\"") {
@@ -496,20 +590,6 @@ fn parse_launchd_exit_status(text: &str) -> Result<i32> {
                 .and_then(|value| value.trim_end_matches(';').parse().ok())
         })
         .context("missing LastExitStatus")
-}
-
-#[cfg(target_os = "macos")]
-fn command_status_output(status: i32) -> CommandOutput {
-    let success = status == 0;
-    CommandOutput {
-        success,
-        stdout: String::new(),
-        stderr: if success {
-            String::new()
-        } else {
-            format!("process exited with status {status}")
-        },
-    }
 }
 
 #[cfg(target_os = "macos")]

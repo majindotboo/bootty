@@ -57,10 +57,9 @@ impl WslRemote {
         args: &[String],
         terminal: bool,
     ) -> Result<(String, Vec<String>)> {
-        Ok(self.command(
-            remote_exec_program(),
-            &proxy_command_args(program, args, terminal)?,
-        ))
+        let (program, args) =
+            crate::exec::remote_program_command(&proxy_command_args(program, args, terminal)?);
+        Ok(self.command(&program, &args))
     }
     /// # Errors
     /// Returns installer lock, daemon discovery, or WSL installation errors.

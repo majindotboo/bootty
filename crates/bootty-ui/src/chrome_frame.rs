@@ -488,8 +488,8 @@ pub fn snapshot(
             right_dock_toggle: chrome.right_dock_toggle,
             panel_tab_style: chrome.panel_tab_style,
             panel_tabs: chrome.panel_tabs,
-            dock_tabs: chrome.dock_tabs,
-            terminal_tabs: chrome.terminal_tabs,
+            dock_tabs: chrome.tabs,
+            terminal_tabs: chrome.tabs,
 
             width,
             height,

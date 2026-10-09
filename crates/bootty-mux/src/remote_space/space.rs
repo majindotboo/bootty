@@ -7,7 +7,7 @@ use crate::{
     snapshot::MuxSnapshot,
 };
 
-use super::space_protocol::{PaneRequest, encode_command};
+use super::space_protocol::{PaneRequest, encode_stream_command};
 use bootty_host::remote::{REMOTE_DAEMON_PROGRAM, RemoteHost, remote_daemon_failure};
 use bootty_host::{CommandRunner, SystemCommandRunner};
 
@@ -28,10 +28,13 @@ impl RemoteSpaceBackend {
         }
     }
 
-    fn run(&self, args: &[String]) -> Result<String> {
+    fn run(&self, args: &[String], input: Option<Vec<u8>>) -> Result<String> {
         self.remote.ensure_daemon()?;
         let (program, args) = self.remote.proxy_command(REMOTE_DAEMON_PROGRAM, args)?;
-        let output = SystemCommandRunner.run(&program, &args)?;
+        let output = input.map_or_else(
+            || SystemCommandRunner.run(&program, &args),
+            |input| SystemCommandRunner.run_with_input(&program, &args, input),
+        )?;
         if output.success {
             return Ok(output.stdout);
         }
@@ -44,30 +47,35 @@ impl RemoteSpaceBackend {
 
 impl MuxBackend for RemoteSpaceBackend {
     fn snapshot(&self) -> Result<MuxSnapshot> {
-        let output = self.run(&[
-            REMOTE_SPACE_SUBCOMMAND.to_owned(),
-            "snapshot".to_owned(),
-            "--id".to_owned(),
-            self.space_id.clone(),
-            "--backend".to_owned(),
-            backend_name(self.backend).to_owned(),
-        ])?;
+        let output = self.run(
+            &[
+                REMOTE_SPACE_SUBCOMMAND.to_owned(),
+                "snapshot".to_owned(),
+                "--id".to_owned(),
+                self.space_id.clone(),
+                "--backend".to_owned(),
+                backend_name(self.backend).to_owned(),
+            ],
+            None,
+        )?;
         serde_json::from_str(&output).context("decode remote Space snapshot")
     }
 
-    // An explicit create's `argv` needs daemon protocol 14. The daemon path is versioned by that
-    // protocol, so this client never reaches an older daemon that would drop the field.
+    // Protocol 21 streams commands; the versioned path never reaches a topology-only daemon.
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
-        self.run(&[
-            REMOTE_SPACE_SUBCOMMAND.to_owned(),
-            "execute".to_owned(),
-            "--id".to_owned(),
-            self.space_id.clone(),
-            "--backend".to_owned(),
-            backend_name(self.backend).to_owned(),
-            "--payload".to_owned(),
-            encode_command(&command)?,
-        ])?;
+        self.run(
+            &[
+                REMOTE_SPACE_SUBCOMMAND.to_owned(),
+                "execute".to_owned(),
+                "--id".to_owned(),
+                self.space_id.clone(),
+                "--backend".to_owned(),
+                backend_name(self.backend).to_owned(),
+                "--payload".to_owned(),
+                "-".to_owned(),
+            ],
+            Some(encode_stream_command(&command)?),
+        )?;
         Ok(())
     }
 

@@ -6,6 +6,26 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[rstest]
+#[case::disable("[sidebar]\nanimate-working = false\n", false)]
+#[case::restore_default("", true)]
+fn working_ring_animation_reload_applies_explicit_and_default_values(
+    #[case] source: &str,
+    #[case] expected: bool,
+) {
+    let directory = TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str(&format!("[sidebar]\nanimate-working = {}\n", !expected))
+        .unwrap();
+    let mut runtime = ConfigRuntime::new(load_config_from_path(file.path()).unwrap()).unwrap();
+    assert_eq!(runtime.current().sidebar.animate_working, !expected);
+    file.write_str(source).unwrap();
+    let (change, ()) = runtime.reload(|_| Ok(())).unwrap();
+    assert_eq!(change.previous().sidebar.animate_working, !expected);
+    assert_eq!(change.current().sidebar.animate_working, expected);
+    assert_eq!(runtime.current().sidebar.animate_working, expected);
+}
+
+#[rstest]
 #[case(false)]
 #[case(true)]
 fn rejected_candidate_retains_live_state_until_accepted(#[case] reload: bool) {

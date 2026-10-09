@@ -1,5 +1,8 @@
 //! Host transport shared by terminal backends, files, Git and clipboard uploads.
-use crate::{CommandOutput, CommandRunner, SystemCommandRunner, ssh::SshRemote, wsl::WslRemote};
+use crate::{
+    CommandOutput, CommandRunner, SystemCommandRunner, exec::proxy_command_args_in, ssh::SshRemote,
+    wsl::WslRemote,
+};
 use anyhow::Result;
 use bootty_config::config::RemoteConfig;
 
@@ -72,6 +75,29 @@ impl RemoteHost {
         }
     }
     /// # Errors
+    /// Returns an error if the directory-scoped command cannot be encoded.
+    pub fn proxy_command_in(
+        &self,
+        cwd: &str,
+        program: &str,
+        args: &[String],
+    ) -> Result<(String, Vec<String>)> {
+        if let Self::Ssh(remote) = self
+            && let Some(command) =
+                crate::remote_link::proxy_command(remote, program, args, false, Some(cwd))?
+        {
+            return Ok(command);
+        }
+        let args = proxy_command_args_in(program, args, false, Some(cwd))?;
+        Ok(match self {
+            Self::Ssh(remote) => remote.raw_command(&crate::exec::remote_program_line(&args)),
+            Self::Wsl(remote) => {
+                let (program, args) = crate::exec::remote_program_command(&args);
+                remote.command(&program, &args)
+            }
+        })
+    }
+    /// # Errors
     /// Returns an error if the selected transport cannot encode the PTY command.
     pub fn proxy_tty_command(
         &self,
@@ -104,6 +130,12 @@ impl<R> RemoteCommandRunner<R> {
     }
 }
 impl<R: CommandRunner> CommandRunner for RemoteCommandRunner<R> {
+    fn run_in(&self, cwd: &str, program: &str, args: &[String]) -> Result<CommandOutput> {
+        self.remote.ensure_daemon_with(&self.runner)?;
+        let (program, args) = self.remote.proxy_command_in(cwd, program, args)?;
+        self.runner.run(&program, &args)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         self.remote.ensure_daemon_with(&self.runner)?;
         let (program, args) = self.remote.proxy_command(program, args)?;

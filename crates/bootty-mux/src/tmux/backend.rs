@@ -11,10 +11,12 @@ use super::control::TmuxControlRunner;
 use crate::{
     backend::{MuxBackend, PaneCapture, PaneInput, PaneText, private_paste_buffer},
     command::{MuxCommand, MuxDirection, MuxSplitDirection},
+    session_snapshot::{SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow},
     snapshot::{
         MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow, MuxWindowProgress,
         SESSION_IDENTITY_OPTION, SESSION_SPACE_OPTION,
     },
+    tmux_compatible_layout::{parse_with_checksum, restore_window_layout},
 };
 #[cfg(feature = "terminal-runtime")]
 use crate::{
@@ -28,6 +30,8 @@ use crate::{
 #[cfg(feature = "terminal-runtime")]
 use bootty_host::remote::RemoteHost;
 
+/// tmux's public create-command output format; these fields are expanded by the server.
+const TMUX_CREATED_IDS_FORMAT: &str = "#{session_id}\x1f#{window_id}\x1f#{pane_id}";
 const TMUX_FIELD_SEPARATOR: char = '\x1f';
 /// Line tags for the combined session/pane snapshot. Sessions and panes come from one tmux
 /// invocation, so each line says which list it belongs to.
@@ -134,11 +138,7 @@ impl BackendPanePolicy for TmuxPanePolicy {
         request: PaneStartRequest<'_>,
     ) -> Result<Option<Box<dyn TerminalRuntime>>> {
         self.sync_passthrough_override(Some(request.target));
-        let identity = if self.remote.is_some() {
-            bootty_config::ApplicationIdentity::Production
-        } else {
-            bootty_config::ApplicationIdentity::for_process()
-        };
+        let identity = bootty_config::ApplicationIdentity::for_process();
         let mut args = local_server_args(identity);
         args.extend([
             "-T".to_owned(),
@@ -249,13 +249,13 @@ fn take_pane_allow_passthrough(
 
 #[cfg(feature = "terminal-runtime")]
 fn run_tmux(remote: Option<&RemoteHost>, args: &[&str], what: &str) -> Result<String> {
-    let command_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let mut command_args = local_server_args(bootty_config::ApplicationIdentity::for_process());
+    command_args.extend(args.iter().map(|arg| (*arg).to_owned()));
     let (program, args) = if let Some(remote) = remote {
-        remote.command("tmux", &command_args)
+        remote.ensure_daemon()?;
+        remote.proxy_command("tmux", &command_args)?
     } else {
-        let mut args = local_server_args(bootty_config::ApplicationIdentity::for_process());
-        args.extend(command_args);
-        ("tmux".to_owned(), args)
+        ("tmux".to_owned(), command_args)
     };
     let output = Command::new(resolve_launch_program(&program)?)
         .args(&args)
@@ -360,6 +360,7 @@ impl TmuxBackend<DefaultTmuxRunner> {
 
 #[cfg(not(feature = "terminal-runtime"))]
 impl TmuxBackend<DefaultTmuxRunner> {
+    #[must_use]
     pub fn new() -> Self {
         Self::with_runner("tmux", SystemCommandRunner)
     }
@@ -454,12 +455,17 @@ impl<R: CommandRunner> TmuxBackend<R> {
             "-s".to_owned(),
             tmux_argument(session_id),
             "-c".to_owned(),
-            tmux_argument(cwd),
+            tmux_argument(&cwd.replace('#', "##")),
         ];
         if !argv.is_empty() {
             // Ends option parsing, so a program named like a flag stays the program.
             invocation.push("--".to_owned());
-            invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            if let [program] = argv {
+                // tmux shell-interprets a single argument; quote the literal executable.
+                invocation.push(tmux_argument(&bootty_host::shell_quote(program)));
+            } else {
+                invocation.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            }
         }
         if let Some(identity) = &tag.identity {
             invocation.extend(set_session_option_args(
@@ -476,6 +482,268 @@ impl<R: CommandRunner> TmuxBackend<R> {
             ));
         }
         self.run_disowned_owned(&invocation)
+    }
+
+    fn restore_session(
+        &self,
+        session_name: &str,
+        tag: &MuxSessionTag,
+        saved: &SavedTerminalSession,
+    ) -> Result<()> {
+        saved.validate().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            tag.identity.as_deref() == Some(saved.session_id.as_str()),
+            "restore identity does not match the saved session"
+        );
+        let first_window = saved
+            .windows
+            .first()
+            .context("saved session has no windows")?;
+        let first_pane = first_window
+            .panes
+            .first()
+            .context("saved window has no panes")?;
+        let placeholders = first_window
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("%{index}"))
+            .collect::<Vec<_>>();
+        let (cols, rows, _) = restore_window_layout(first_window, &placeholders)?;
+        let mut args = vec![
+            "new-session".into(),
+            "-d".into(),
+            "-P".into(),
+            "-F".into(),
+            TMUX_CREATED_IDS_FORMAT.into(),
+            "-s".into(),
+            tmux_argument(session_name),
+            "-n".into(),
+            tmux_argument(&first_window.title),
+            "-c".into(),
+            tmux_argument(&first_pane.cwd.replace('#', "##")),
+            "-x".into(),
+            cols.max(5).to_string(),
+            "-y".into(),
+            rows.max(5).to_string(),
+        ];
+        if !first_pane.text.is_empty() {
+            // Wait without running user startup; restore_window replaces this bootstrap pane.
+            args.extend(["--", "/bin/sh", "-c", "read -r _"].map(str::to_owned));
+        }
+        // Only a successful create provides authority to remove this session on failure.
+        let output = self.runner.run_disowned(&self.program, &args)?;
+        let created = require_success(&self.program, &args, output)?;
+        let (session_id, window_id, pane_id) = restored_tmux_ids(&created)?;
+        let result = (|| -> Result<()> {
+            self.run_owned(&stamp_session_args(&session_id, tag))?;
+            let shell = self.default_shell(&session_id)?;
+            self.restore_window(first_window, &window_id, &pane_id, &shell)?;
+            let mut active_window = (saved.active_window_id.as_deref()
+                == Some(first_window.id.as_str()))
+            .then_some(window_id);
+            for window in saved.windows.iter().skip(1) {
+                let pane = window.panes.first().context("saved window has no panes")?;
+                let mut args = vec![
+                    "new-window".into(),
+                    "-d".into(),
+                    "-P".into(),
+                    "-F".into(),
+                    TMUX_CREATED_IDS_FORMAT.into(),
+                    "-t".into(),
+                    format!("{session_id}:"),
+                    "-n".into(),
+                    tmux_argument(&window.title),
+                    "-c".into(),
+                    tmux_argument(&pane.cwd.replace('#', "##")),
+                ];
+                if !pane.text.is_empty() {
+                    args.extend(["--", "/bin/sh", "-c", "read -r _"].map(str::to_owned));
+                }
+                let output = self.run_recovering(&args)?;
+                let created = require_success(&self.program, &args, output)?;
+                let (_, window_id, pane_id) = restored_tmux_ids(&created)?;
+                self.restore_window(window, &window_id, &pane_id, &shell)?;
+                if saved.active_window_id.as_deref() == Some(window.id.as_str()) {
+                    active_window = Some(window_id);
+                }
+            }
+            if let Some(window_id) = active_window {
+                self.run_owned(&["select-window".into(), "-t".into(), window_id])?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Err(rollback) =
+                self.run_owned_allow_server_exit(&["kill-session".into(), "-t".into(), session_id])
+            {
+                return Err(
+                    error.context(format!("restored session rollback failed: {rollback:#}"))
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn default_shell(&self, session: &str) -> Result<String> {
+        let args = ["show-options", "-A", "-v", "-t", session, "default-shell"].map(str::to_owned);
+        let shell = require_success(&self.program, &args, self.run_recovering(&args)?)?;
+        let shell = shell.trim();
+        anyhow::ensure!(
+            std::path::Path::new(shell).is_absolute(),
+            "tmux default shell is unavailable"
+        );
+        Ok(shell.to_owned())
+    }
+
+    fn restore_pane_history(
+        &self,
+        pane: &SavedTerminalPane,
+        id: &str,
+        rows: u16,
+        shell: &str,
+    ) -> Result<()> {
+        if pane.text.is_empty() {
+            return Ok(());
+        }
+        let mut history = bootty_control::terminal_history::styled_history_bytes(&pane.text)?;
+        // Move the entire viewport into backend history before respawn clears the screen.
+        history.extend_from_slice(format!("\x1b[{rows}S").as_bytes());
+        let args = vec![
+            "display-message".into(),
+            "-I".into(),
+            "-t".into(),
+            id.to_owned(),
+        ];
+        let output = self.runner.run_with_input(&self.program, &args, history)?;
+        require_success(&self.program, &args, output)?;
+        self.run_owned(&[
+            "respawn-pane".into(),
+            "-t".into(),
+            id.to_owned(),
+            "-c".into(),
+            tmux_argument(&pane.cwd.replace('#', "##")),
+            "--".into(),
+            tmux_argument(shell),
+            "-l".into(),
+        ])?;
+        Ok(())
+    }
+
+    fn resize_restored_window(&self, window: &str, cols: u16, rows: u16) -> Result<()> {
+        self.run_owned(&[
+            "resize-window".into(),
+            "-t".into(),
+            window.into(),
+            "-x".into(),
+            cols.to_string(),
+            "-y".into(),
+            rows.to_string(),
+        ])
+    }
+
+    fn restore_window(
+        &self,
+        saved: &SavedTerminalWindow,
+        window_id: &str,
+        first_pane_id: &str,
+        shell: &str,
+    ) -> Result<()> {
+        let placeholders = saved
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("%{index}"))
+            .collect::<Vec<_>>();
+        let (cols, rows, _) = restore_window_layout(saved, &placeholders)?;
+        self.resize_restored_window(window_id, cols.max(5), rows.max(5))?;
+        let mut pane_ids = Vec::new();
+        for (index, pane) in saved.panes.iter().enumerate() {
+            if index == 0 && pane.text.is_empty() {
+                pane_ids.push(first_pane_id.to_owned());
+                continue;
+            }
+            // Splitting the last-created pane preserves saved pane order. The final custom tree
+            // supplies both split axes and ratios after every pane has a real backend id.
+            let parent = pane_ids.last().map_or(first_pane_id, String::as_str);
+            let mut args = vec![
+                "split-window".into(),
+                "-d".into(),
+                "-f".into(),
+                if cols >= rows {
+                    "-h".into()
+                } else {
+                    "-v".into()
+                },
+                "-P".into(),
+                "-F".into(),
+                TMUX_CREATED_IDS_FORMAT.into(),
+                "-t".into(),
+                parent.to_owned(),
+                "-c".into(),
+                tmux_argument(&pane.cwd.replace('#', "##")),
+            ];
+            if !pane.text.is_empty() {
+                // Only split-window supports empty panes on all supported tmux versions.
+                args.extend(["--".into(), String::new()]);
+            }
+            let output = self.run_recovering(&args)?;
+            let created = require_success(&self.program, &args, output)?;
+            let (_, _, pane_id) = restored_tmux_ids(&created)?;
+            pane_ids.push(pane_id);
+            if index == 0 {
+                // This receipt belongs to the newly created restore, never an existing pane.
+                self.run_owned(&["kill-pane".into(), "-t".into(), first_pane_id.into()])?;
+            }
+            // Rebalance while creating so a deep temporary chain cannot exhaust its split size.
+            let count = u32::try_from(saved.panes.len())?;
+            let temporary_layout = if u32::from(rows) >= count.saturating_mul(3) {
+                "even-vertical"
+            } else if u32::from(cols) >= count.saturating_mul(3) {
+                "even-horizontal"
+            } else {
+                "tiled"
+            };
+            self.run_owned(&[
+                "select-layout".into(),
+                "-t".into(),
+                window_id.into(),
+                temporary_layout.into(),
+            ])?;
+        }
+        for (pane, id) in saved.panes.iter().zip(&pane_ids) {
+            if let Some(agent) = &pane.native_agent {
+                self.run_owned(&[
+                    "set-option".into(),
+                    "-p".into(),
+                    "-t".into(),
+                    id.clone(),
+                    crate::snapshot::PANE_NATIVE_AGENT_OPTION.into(),
+                    agent.clone(),
+                ])?;
+            }
+        }
+        if cols < 5 || rows < 5 {
+            self.resize_restored_window(window_id, cols, rows)?;
+        }
+        let (_, _, layout) = restore_window_layout(saved, &pane_ids)?;
+        self.run_owned(&[
+            "select-layout".into(),
+            "-t".into(),
+            window_id.into(),
+            layout,
+        ])?;
+        for (pane, id) in saved.panes.iter().zip(&pane_ids) {
+            self.restore_pane_history(pane, id, rows, shell)?;
+        }
+        let focused = saved
+            .panes
+            .iter()
+            .position(|pane| pane.id == saved.focused_pane_id)
+            .and_then(|index| pane_ids.get(index))
+            .context("saved focused pane is absent")?;
+        self.run_owned(&["select-pane".into(), "-t".into(), focused.clone()])
     }
 
     fn move_window(&self, window_id: String, delta: i32) -> Result<()> {
@@ -519,7 +787,7 @@ impl<R: CommandRunner> TmuxBackend<R> {
             "list-panes",
             "-a",
             "-F",
-            "p\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_pb_state}\x1f#{pane_pb_progress}\x1f#{pane_current_path}\x1f#{pane_current_command}",
+            "p\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_pb_state}\x1f#{pane_pb_progress}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{window_layout}\x1f#{@bootty_native_agent}",
         ])? else {
             return Ok(MuxSnapshot::default());
         };
@@ -528,10 +796,123 @@ impl<R: CommandRunner> TmuxBackend<R> {
     }
     /// # Errors
     /// Returns invalid target, transport, or tmux command errors.
+    fn activate_pane(&self, session_id: &str, window_id: String, pane_id: String) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        anyhow::ensure!(
+            snapshot
+                .sessions
+                .iter()
+                .any(
+                    |session| (session.id == session_id || session.name == session_id)
+                        && session.windows.iter().any(|window| window.id == window_id
+                            && window
+                                .panes
+                                .iter()
+                                .any(|pane| pane.pane_id.as_deref() == Some(&pane_id)))
+                ),
+            "the pane is no longer in its captured window"
+        );
+        self.run_owned(&[
+            "select-window".into(),
+            "-t".into(),
+            window_id,
+            ";".into(),
+            "select-pane".into(),
+            "-t".into(),
+            pane_id,
+        ])?;
+        Ok(())
+    }
+
+    fn set_native_agent(
+        &self,
+        session_id: &str,
+        pane_id: String,
+        agent_id: Option<String>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            agent_id
+                .as_deref()
+                .is_none_or(crate::snapshot::native_agent_identity_is_valid),
+            "invalid native conversation identity"
+        );
+        let snapshot = self.snapshot()?;
+        anyhow::ensure!(
+            snapshot
+                .sessions
+                .iter()
+                .any(
+                    |session| (session.id == session_id || session.name == session_id)
+                        && session
+                            .windows
+                            .iter()
+                            .flat_map(|window| &window.panes)
+                            .any(|pane| pane.pane_id.as_deref() == Some(&pane_id))
+                ),
+            "native panel pane is no longer in its captured session"
+        );
+        anyhow::ensure!(
+            !snapshot
+                .sessions
+                .iter()
+                .filter(|session| session.id == session_id || session.name == session_id)
+                .flat_map(|session| &session.windows)
+                .flat_map(|window| &window.panes)
+                .any(|pane| pane.pane_id.as_deref() != Some(&pane_id)
+                    && agent_id.is_some()
+                    && pane.native_agent == agent_id),
+            "the native conversation already occupies another pane"
+        );
+        let mut args = vec![
+            "set-option".to_owned(),
+            "-p".to_owned(),
+            "-t".to_owned(),
+            pane_id,
+        ];
+        if agent_id.is_none() {
+            args.push("-u".to_owned());
+        }
+        args.push(crate::snapshot::PANE_NATIVE_AGENT_OPTION.to_owned());
+        args.extend(agent_id);
+        self.run_owned(&args)?;
+        Ok(())
+    }
+
+    fn new_window(
+        &self,
+        session_id: String,
+        cwd: Option<String>,
+        argv: Option<Vec<String>>,
+    ) -> Result<()> {
+        let mut command_args = vec!["new-window".to_owned(), "-t".to_owned(), session_id];
+        if let Some(cwd) = cwd {
+            command_args.extend(["-c".to_owned(), tmux_argument(&cwd.replace('#', "##"))]);
+        }
+        if let Some(argv) = argv.filter(|argv| !argv.is_empty()) {
+            command_args.push("--".to_owned());
+            if let [program] = argv.as_slice() {
+                command_args.push(tmux_argument(&bootty_host::shell_quote(program)));
+            } else {
+                command_args.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            }
+        }
+        self.run_owned(&command_args)?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns invalid targets, transport failures, or backend command failures.
     pub fn execute(&mut self, command: MuxCommand) -> Result<()> {
         match command {
             MuxCommand::ActivateWindow { window_id, .. } => {
                 self.run_owned(&["select-window".into(), "-t".into(), window_id])?;
+            }
+            MuxCommand::RestoreSession {
+                session_id,
+                tag,
+                snapshot,
+            } => {
+                self.restore_session(&session_id, &tag, &snapshot)?;
             }
             MuxCommand::CreateProjectSession {
                 session_id,
@@ -548,6 +929,16 @@ impl<R: CommandRunner> TmuxBackend<R> {
             } => {
                 self.create_session(&session_id, &cwd, &tag, &[])?;
             }
+            MuxCommand::ActivatePane {
+                session_id,
+                window_id,
+                pane_id,
+            } => self.activate_pane(&session_id, window_id, pane_id)?,
+            MuxCommand::SetPaneNativeAgent {
+                session_id,
+                pane_id,
+                agent_id,
+            } => self.set_native_agent(&session_id, pane_id, agent_id)?,
             MuxCommand::StampSession { session_id, tag } => {
                 self.run_owned(&stamp_session_args(&session_id, &tag))?;
             }
@@ -561,13 +952,11 @@ impl<R: CommandRunner> TmuxBackend<R> {
                     session_id,
                 ])?;
             }
-            MuxCommand::NewWindow { session_id, cwd } => {
-                let mut args = vec!["new-window".to_owned(), "-t".to_owned(), session_id];
-                if let Some(cwd) = cwd {
-                    args.extend(["-c".to_owned(), cwd]);
-                }
-                self.run_owned(&args)?;
-            }
+            MuxCommand::NewWindow {
+                session_id,
+                cwd,
+                argv,
+            } => self.new_window(session_id, cwd, argv)?,
             MuxCommand::RenameWindow {
                 window_id, name, ..
             } => {
@@ -610,6 +999,41 @@ impl<R: CommandRunner> TmuxBackend<R> {
         Ok(())
     }
 
+    fn create_pane(
+        &self,
+        session_id: &str,
+        pane_id: Option<&str>,
+        direction: MuxSplitDirection,
+        cwd: Option<&str>,
+        argv: &[String],
+    ) -> Result<()> {
+        if let Some(pane_id) = pane_id {
+            self.validate_panes(session_id, &[pane_id], false)?;
+        }
+        let mut command_args = vec![
+            "split-window".to_owned(),
+            match direction {
+                MuxSplitDirection::Right => "-h",
+                MuxSplitDirection::Down => "-v",
+            }
+            .to_owned(),
+            "-t".to_owned(),
+            tmux_argument(pane_id.unwrap_or(session_id)),
+        ];
+        if let Some(cwd) = cwd {
+            command_args.extend(["-c".to_owned(), tmux_argument(&cwd.replace('#', "##"))]);
+        }
+        if !argv.is_empty() {
+            command_args.push("--".to_owned());
+            if let [program] = argv {
+                command_args.push(tmux_argument(&bootty_host::shell_quote(program)));
+            } else {
+                command_args.extend(argv.iter().map(|argument| tmux_argument(argument)));
+            }
+        }
+        self.run_owned(&command_args)
+    }
+
     fn execute_pane_command(&self, command: MuxCommand) -> Result<()> {
         match command {
             MuxCommand::SplitPane {
@@ -627,6 +1051,21 @@ impl<R: CommandRunner> TmuxBackend<R> {
                     "-t".into(),
                     pane_id.unwrap_or(session_id),
                 ])?;
+            }
+            MuxCommand::CreatePane {
+                session_id,
+                pane_id,
+                direction,
+                cwd,
+                argv,
+            } => {
+                self.create_pane(
+                    &session_id,
+                    pane_id.as_deref(),
+                    direction,
+                    cwd.as_deref(),
+                    &argv,
+                )?;
             }
             // tmux has no atomic whole-window join. Keep this unavailable until its partial
             // completion can be represented explicitly; individual pane moves remain supported.
@@ -802,6 +1241,30 @@ impl<R: CommandRunner> MuxBackend for TmuxBackend<R> {
 
     // Every pane operation addresses the stable `%id`, so the session's current window and pane
     // selection stay where the user left them.
+    fn respawn_pane_command(
+        &self,
+        pane_id: &str,
+        argv: &[String],
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            argv.len() >= 2,
+            "tmux direct respawn requires multiargument argv"
+        );
+        let mut arguments = vec![
+            "respawn-pane".to_owned(),
+            "-k".to_owned(),
+            "-t".to_owned(),
+            pane_id.to_owned(),
+        ];
+        if let Some(cwd) = cwd {
+            arguments.extend(["-c".to_owned(), tmux_argument(&cwd.replace('#', "##"))]);
+        }
+        arguments.push("--".to_owned());
+        arguments.extend(argv.iter().map(|argument| tmux_argument(argument)));
+        self.run_owned(&arguments)
+    }
+
     fn send_pane_input(&self, pane_id: &str, input: &PaneInput) -> Result<()> {
         match input {
             PaneInput::Write(bytes) if bytes.is_empty() => Ok(()),
@@ -1134,6 +1597,7 @@ fn parse_tmux_snapshot(session_listing: &str, pane_listing: &str) -> Result<MuxS
             name,
             active: attached,
             anchor: MuxPaneAnchor {
+                native_agent: None,
                 session_id: id,
                 pane_id,
                 pane_pid: pane_process_id,
@@ -1202,7 +1666,11 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
         let progress = tmux_pane_progress(fields.next(), fields.next());
         let cwd = fields.next().and_then(nonempty);
         let process = fields.next().and_then(nonempty);
+        let layout = fields
+            .next()
+            .and_then(|value| parse_with_checksum(&value).ok());
 
+        let native_agent = fields.next().and_then(nonempty);
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
             continue;
         };
@@ -1218,6 +1686,7 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
                 session_id,
                 pane_id,
                 pane_pid: None,
+                native_agent,
                 cwd,
                 process,
             };
@@ -1233,6 +1702,7 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             session_id,
             pane_id,
             pane_pid: None,
+            native_agent,
             cwd,
             process,
         };
@@ -1244,7 +1714,7 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             // Expose real pane identities for commands. Attach policy still renders one surface;
             // the active anchor and tmux itself own its display and split geometry.
             panes: vec![anchor.clone()],
-            layout: None,
+            layout,
             anchor,
             progress,
         });
@@ -1252,4 +1722,25 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
     for session in sessions {
         session.windows.sort_by_key(|window| window.index);
     }
+}
+
+fn restored_tmux_ids(stdout: &str) -> Result<(String, String, String)> {
+    let mut fields = tmux_fields(stdout.trim(), 1).into_iter();
+    let session = fields
+        .next()
+        .filter(|value| value.starts_with('$'))
+        .context("tmux create omitted session identity")?;
+    let window = fields
+        .next()
+        .filter(|value| value.starts_with('@'))
+        .context("tmux create omitted window identity")?;
+    let pane = fields
+        .next()
+        .filter(|value| value.starts_with('%'))
+        .context("tmux create omitted pane identity")?;
+    anyhow::ensure!(
+        fields.next().is_none(),
+        "tmux create returned extra identity fields"
+    );
+    Ok((session, window, pane))
 }

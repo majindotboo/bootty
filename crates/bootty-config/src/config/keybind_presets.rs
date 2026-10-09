@@ -70,7 +70,7 @@ pub(super) const fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+7=select_session:7",
         "cmd+8=select_session:8",
         "cmd+9=select_session:9",
-        "cmd+alt+x=ditch_session",
+        "cmd+alt+x=settle_session",
     ]
 }
 
@@ -119,7 +119,7 @@ pub(super) const fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+7=select_session:7",
         "ctrl+shift+8=select_session:8",
         "ctrl+shift+9=select_session:9",
-        "ctrl+shift+alt+x=ditch_session",
+        "ctrl+shift+alt+x=settle_session",
     ]
 }
 
@@ -166,7 +166,7 @@ pub(super) const fn common_keybinds_windows() -> &'static [&'static str] {
         "ctrl+shift+7=select_session:7",
         "ctrl+shift+8=select_session:8",
         "ctrl+shift+9=select_session:9",
-        "ctrl+shift+alt+x=ditch_session",
+        "ctrl+shift+alt+x=settle_session",
     ]
 }
 
@@ -194,8 +194,8 @@ pub(super) const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     ("k", "select_pane:up"),
     ("l", "select_pane:right"),
     ("s", "new_mux_session"),
-    ("x", "ditch_session"),
-    ("shift+x", "ditch_session"),
+    ("x", "settle_session"),
+    ("shift+x", "settle_session"),
     ("r", "rename_session"),
     ("[", "copy_mode"),
     ("?", "show_keybinds"),
@@ -360,7 +360,7 @@ pub(super) const fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
         "cmd+p=session_picker",
         "cmd+q=quit",
         "ctrl+cmd+w=close_window",
-        "cmd+shift+w=ditch_session",
+        "cmd+shift+w=settle_session",
         "cmd+w=close_surface",
         "cmd+shift+n=new_window",
         "ctrl+cmd+f=toggle_fullscreen",
@@ -368,6 +368,7 @@ pub(super) const fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
         "cmd+shift+e=toggle_sidebar_focus",
         "cmd+shift+j=focus_terminal",
         "cmd+o=new_mux_session",
+        "cmd+n=new_mux_session",
         "cmd+Home=scroll_to_top",
         "cmd+End=scroll_to_bottom",
         "cmd+y=copy_mode",
@@ -497,7 +498,6 @@ pub(super) const fn tmux_keybinds() -> &'static [&'static str] {
         "cmd+i=csi:90;9~",
         "cmd+l=csi:90;10~",
         "cmd+shift+i=csi:90;11~",
-        "cmd+k=csi:90;12~",
         "cmd+alt+v=csi:90;13~",
         "cmd+d=csi:90;14~",
         "cmd+shift+d=csi:90;15~",
@@ -557,6 +557,11 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
         }
         KeybindPreset::Ghostty => owned_keybinds(ghostty_common_keybinds()),
     };
+    keybinds.push(if cfg!(target_os = "macos") {
+        "cmd+k=command_palette".to_owned()
+    } else {
+        "ctrl+shift+k=command_palette".to_owned()
+    });
     keybinds.push(if cfg!(target_os = "macos") {
         "cmd+alt+b=toggle_right_dock".to_owned()
     } else {

@@ -69,6 +69,18 @@ pub const SESSION_IDENTITY_OPTION: &str = "@bootty_id";
 /// The multiplexer option holding [`MuxSessionTag::space`]. See [`SESSION_IDENTITY_OPTION`].
 pub const SESSION_SPACE_OPTION: &str = "@bootty_space";
 
+/// Stable native conversation identity on a real backend pane. Credentials stay in its provider.
+pub const PANE_NATIVE_AGENT_OPTION: &str = "@bootty_native_agent";
+
+#[must_use]
+pub fn native_agent_identity_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b":_-./".contains(&byte))
+}
+
 /// Mints a session identity. Random, because two bootty installs can share one server.
 #[must_use]
 pub fn new_session_identity() -> String {
@@ -131,6 +143,8 @@ pub struct MuxPaneAnchor {
     pub pane_pid: Option<u32>,
     pub cwd: Option<String>,
     pub process: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_agent: Option<String>,
 }
 
 #[must_use]

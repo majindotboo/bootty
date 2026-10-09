@@ -14,6 +14,7 @@ pub mod terminal;
 pub mod terminal_capture;
 pub mod terminal_engine;
 pub mod terminal_frame;
+pub mod terminal_history;
 pub mod terminal_image;
 pub mod terminal_input;
 pub mod terminal_input_model;

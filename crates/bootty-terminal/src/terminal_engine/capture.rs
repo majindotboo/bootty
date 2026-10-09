@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use libghostty_vt::{
     fmt::Format,
     screen::Screen,
@@ -53,10 +53,11 @@ impl TerminalEngine {
         };
         // Never truncate encoded styles or a UTF-8 codepoint. The caller can request fewer rows.
         if size > options.max_bytes {
-            bail!(
-                "Capture needs {size} bytes, exceeding the {} byte limit; request fewer lines",
-                options.max_bytes
-            );
+            return Err(crate::terminal_history::HistorySizeLimit {
+                bytes: size,
+                max_bytes: options.max_bytes,
+            }
+            .into());
         }
         let mut bytes = vec![0; size];
         let written = self
@@ -74,5 +75,12 @@ impl TerminalEngine {
             omitted_lines: start,
             text: String::from_utf8(bytes)?,
         })
+    }
+
+    /// Capture the latest whole rows that fit the persisted styled history budget.
+    /// # Errors
+    /// Rejects invalid limits, unsafe formatted state or a single row beyond the byte budget.
+    pub fn capture_checkpoint(&self, options: CaptureOptions) -> Result<TerminalCapture> {
+        crate::terminal_history::capture_checkpoint(options, |options| self.capture(options))
     }
 }

@@ -1776,7 +1776,7 @@ impl AppState {
             .active
             .binding
             .clear_pending_generated_names();
-        if let Err(error) = self.workspace.reconcile_binding_states(&self.repaint) {
+        if let Err(error) = self.workspace.reconcile_binding_states() {
             warnings.push(error.to_string());
         }
         if self.config_runtime.has_new_session_config_changes() {

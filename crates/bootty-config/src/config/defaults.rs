@@ -1,9 +1,10 @@
 use super::model::{
     AppearanceBranchConfig, AppearanceConfig, AppearanceMode, BackendKeybindConfig, BoottyConfig,
-    ChromeConfig, CursorConfig, DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset,
-    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerConfig, OnLastWindowClosed,
-    OpenBehavior, RestoreOnStartup, SegmentAlign, SessionConfig, SidebarConfig, SidebarPosition,
-    StatusSegment, WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
+    BrowserConfig, BrowserSearchEngine, ChromeConfig, ComputerConfig, CursorConfig,
+    DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset, MacosOptionAsAltConfig,
+    MacosTitlebarStyle, MultiplexerConfig, OnLastWindowClosed, OpenBehavior, RestoreOnStartup,
+    SegmentAlign, SessionConfig, SidebarConfig, SidebarPosition, SidebarSortOrder, StatusSegment,
+    WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
 };
 use super::theme_catalog::{
     DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, default_dark_colors, default_light_colors,
@@ -28,6 +29,9 @@ const DEFAULT_FONT_UNDERLINE_THICKNESS: f32 = 1.0;
 impl Default for SidebarConfig {
     fn default() -> Self {
         Self {
+            group_by_project: true,
+            sort_order: SidebarSortOrder::Manual,
+            animate_working: true,
             position: SidebarPosition::Left,
             background: None,
             foreground: None,
@@ -44,6 +48,14 @@ impl Default for SidebarConfig {
             ],
             session_modules_configured: false,
             modules: vec!["sessions".to_owned(), "codexbar".to_owned()],
+        }
+    }
+}
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            search_engine: BrowserSearchEngine::DuckDuckGo,
+            persist_site_data: true,
         }
     }
 }
@@ -103,13 +115,10 @@ impl Default for ChromeConfig {
             panel_tab_style: super::model::PanelTabStyle::default(),
             panel_tabs: super::model::PanelTabs::default(),
             tabs_use_session_color: true,
-            dock_tabs: super::model::TabConfig {
+            tabs: super::model::TabConfig {
                 appearance: super::model::TabAppearance::Segmented,
-                ..Default::default()
-            },
-            terminal_tabs: super::model::TabConfig {
-                appearance: super::model::TabAppearance::Pill,
-                ..Default::default()
+                close_position: super::model::TabClosePosition::Right,
+                close_button: super::model::TabCloseButton::Always,
             },
             sidebar: true,
             top_bar: true,
@@ -238,8 +247,11 @@ impl Default for BoottyConfig {
             sidebar: SidebarConfig::default(),
             multiplexer: MultiplexerConfig::default(),
             ssh_profiles: BTreeMap::new(),
+            agents: super::AgentProvidersConfig::default(),
             extensions: BTreeMap::new(),
             input: InputConfig::default(),
+            browser: BrowserConfig::default(),
+            computer: ComputerConfig::default(),
             session: SessionConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             window: WindowConfig {

@@ -24,6 +24,7 @@ pub mod remote_space;
 #[cfg(feature = "terminal-runtime")]
 pub mod repository;
 pub mod session_membership;
+pub mod session_snapshot;
 pub mod snapshot;
 #[cfg(feature = "terminal-runtime")]
 pub mod terminal;

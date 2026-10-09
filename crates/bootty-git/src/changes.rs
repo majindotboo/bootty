@@ -191,7 +191,7 @@ impl<R: CommandRunner> Git<R> {
             .map_err(|error| error.to_string())
     }
 
-    fn checked_output(&self, root: &str, args: &[&str]) -> Result<String, String> {
+    pub(crate) fn checked_output(&self, root: &str, args: &[&str]) -> Result<String, String> {
         let output = self.changes_output(root, args)?;
         if output.success {
             Ok(output.stdout)
@@ -428,7 +428,7 @@ impl<R: CommandRunner> Git<R> {
             ],
         )
     }
-    fn require_clean(&self, root: &str) -> Result<String, String> {
+    pub(crate) fn require_clean(&self, root: &str) -> Result<String, String> {
         let changes = self.changes(root)?;
         if !changes.files.is_empty() {
             return Err("working tree must be clean before switching branches".into());

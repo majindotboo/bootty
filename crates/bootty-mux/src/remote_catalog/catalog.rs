@@ -23,6 +23,27 @@ mod legacy_import;
 
 pub const CATALOG_VERSION: u32 = 3;
 
+pub fn validate_creation_scope(command: &MuxCommand, space_id: &str) -> Result<()> {
+    match command {
+        MuxCommand::RestoreSession { tag, snapshot, .. } => {
+            snapshot.validate().map_err(anyhow::Error::msg)?;
+            if tag.space.as_deref() != Some(space_id)
+                || tag.identity.as_deref() != Some(snapshot.session_id.as_str())
+            {
+                bail!("restored session does not belong to the authorized Space");
+            }
+        }
+        MuxCommand::CreateProjectSession { tag, .. }
+        | MuxCommand::CreateWorktreeSession { tag, .. }
+            if tag.space.as_deref() != Some(space_id) =>
+        {
+            bail!("created session does not belong to the authorized Space");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
@@ -349,6 +370,7 @@ impl Catalog {
     ) -> Result<()> {
         let backend_kind = self.space_backend(space_id, expected)?;
         let _lease = self.backend_lease(backend_kind)?;
+        validate_creation_scope(&command, space_id)?;
         // A command may only touch a session this Space holds. Asking the session itself is the
         // whole check, and it cannot disagree with what the client sees.
         if let Some(session_id) = command.existing_session_id() {

@@ -110,13 +110,15 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
             );
             command
         }
-        [line] => {
+        [line] if !config.command_is_argv => {
             let mut command = CommandBuilder::new(shell);
             command.args(["-c", line.as_str()]);
             command
         }
         argv => CommandBuilder::from_argv(argv.iter().map(OsString::from).collect()),
     };
+    // Parent automation color preferences do not describe this interactive PTY.
+    command.env_remove("NO_COLOR");
     for (name, value) in locale_env_entries() {
         command.env(name, value);
     }

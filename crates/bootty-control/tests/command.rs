@@ -139,6 +139,7 @@ fn request(caller: Caller) -> (AppCommandRequest, mpsc::Receiver<CommandOutcome>
     let (response, receiver) = mpsc::channel();
     (
         AppCommandRequest {
+            creation_receipt: None,
             invocation: CommandInvocation::new("test", Vec::new(), caller),
             deadline: Instant::now(),
             cancellation: CommandCancellation::new(),

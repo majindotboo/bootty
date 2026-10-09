@@ -28,7 +28,11 @@ pub(super) struct PipeOutput {
 }
 
 impl PipeOutput {
-    pub(super) async fn open(target: PaneTarget, pane_id: &str) -> Result<Self> {
+    pub(super) async fn open(
+        target: PaneTarget,
+        pane_id: &str,
+        pane: &rmux_sdk::Pane,
+    ) -> Result<Option<Self>> {
         let mut hash = DefaultHasher::new();
         super::local::endpoint_path()?.hash(&mut hash);
         pane_id.hash(&mut hash);
@@ -40,7 +44,7 @@ impl PipeOutput {
         let lock_path = std::env::temp_dir().join(format!("{label}.lock"));
         let lock = tokio::task::spawn_blocking(move || lock_initialization(&lock_path)).await??;
         match connect(&endpoint).await {
-            Ok(stream) => return Ok(Self { stream }),
+            Ok(stream) => return Ok(Some(Self { stream })),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -70,18 +74,24 @@ impl PipeOutput {
         let stream = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match connect(&endpoint).await {
-                    Ok(stream) => break Ok::<_, anyhow::Error>(stream),
+                    Ok(stream) => break Ok::<_, anyhow::Error>(Some(stream)),
                     Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                         break Err(error.into());
                     }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(_) => {
+                        // Closing the captured pane during helper startup is normal teardown.
+                        if !pane.exists().await? {
+                            break Ok(None);
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 }
             }
         })
         .await
         .context("pane output helper did not start")??;
         drop(lock);
-        Ok(Self { stream })
+        Ok(stream.map(|stream| Self { stream }))
     }
 
     pub(super) async fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {

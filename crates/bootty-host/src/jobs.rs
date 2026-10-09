@@ -14,7 +14,7 @@ use std::{
 
 mod process;
 mod remote;
-mod transfer;
+pub(crate) mod transfer;
 pub use remote::serve;
 pub use transfer::{TransferDirection, TransferProgress, TransferSpec, serve_transfer};
 

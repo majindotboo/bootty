@@ -367,7 +367,9 @@ fn spawn_output(
                 }
             }
         }
-        let _ = result_tx.send(Err("remote terminal output ended".to_owned()));
+        // EOF closes this controller transport, not the backend pane. The binding
+        // retries closed runtimes; malformed frames and failed input remain errors.
+        let _ = output_tx.blocking_send(RmuxPaneEvent::End(None));
     });
     Ok(())
 }

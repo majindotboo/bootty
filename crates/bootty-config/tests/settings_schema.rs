@@ -45,6 +45,31 @@ fn load_with(path: &[&str], toml_value: &str) -> Result<BoottyConfig, Box<dyn st
         .map_err(|error| format!("{source}\nfailed to load: {error}").into())
 }
 
+#[rstest::rstest]
+#[case(true)]
+#[case(false)]
+fn working_ring_animation_is_a_sidebar_switch(#[case] enabled: bool) {
+    let defaults = BoottyConfig::default();
+    assert!(defaults.sidebar.animate_working);
+    let schema = SettingsSchema::builtin();
+    let spec = schema
+        .get("sidebar.animate-working")
+        .expect("animation setting");
+    assert_eq!(spec.page, "sidebar");
+    assert!(matches!(spec.kind, SettingKind::Bool));
+    assert_eq!(
+        spec.default_value(&defaults),
+        Some(SettingValue::Bool(true))
+    );
+    let config = load_with(&["sidebar", "animate-working"], &enabled.to_string())
+        .expect("boolean animation preference");
+    assert_eq!(config.sidebar.animate_working, enabled);
+    assert_eq!(
+        spec.default_value(&config),
+        Some(SettingValue::Bool(enabled))
+    );
+}
+
 #[test]
 fn every_spec_default_matches_the_config_default() {
     let defaults = BoottyConfig::default();
@@ -335,23 +360,75 @@ fn legacy_sidebar_configuration_remains_loadable_for_layout_migration() {
 }
 
 #[rstest::rstest]
+#[case("tabs")]
 #[case("dock-tabs")]
 #[case("terminal-tabs")]
-fn partial_tab_settings_preserve_surface_defaults(#[case] surface: &str) {
+fn partial_tab_settings_preserve_defaults(#[case] section: &str) {
     let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
-    file.write_str(&format!("[chrome.{surface}]\nclose-position = \"left\"\n"))
+    file.write_str(&format!("[chrome.{section}]\nclose-position = \"left\"\n"))
         .unwrap();
     let config = load_config_from_path(file.path()).unwrap();
     let defaults = BoottyConfig::default();
-    let (actual, expected) = if surface == "dock-tabs" {
-        (config.chrome.dock_tabs, defaults.chrome.dock_tabs)
-    } else {
-        (config.chrome.terminal_tabs, defaults.chrome.terminal_tabs)
-    };
     assert_eq!(
-        actual.close_position,
+        config.chrome.tabs.close_position,
         bootty_config::config::TabClosePosition::Left
     );
-    assert_eq!(actual.appearance, expected.appearance);
-    assert_eq!(actual.close_button, expected.close_button);
+    assert_eq!(
+        config.chrome.tabs.appearance,
+        defaults.chrome.tabs.appearance
+    );
+    assert_eq!(
+        config.chrome.tabs.close_button,
+        defaults.chrome.tabs.close_button
+    );
+}
+
+#[rstest::rstest]
+#[case("chrome.panel-tab-style")]
+#[case("chrome.panel-tabs")]
+#[case("panels.sessions.dock")]
+#[case("panels.files.dock")]
+#[case("panels.changes.dock")]
+#[case("panels.diff.dock")]
+#[case("panels.agents.dock")]
+#[case("panels.agents.button")]
+fn retired_placement_and_tab_preferences_do_not_offer_settings_controls(#[case] path: &str) {
+    let schema = SettingsSchema::builtin();
+    assert!(schema.allows_path(&path.split('.').collect::<Vec<_>>()));
+    assert!(schema.get(path).is_none());
+}
+
+#[rstest::rstest]
+#[case("manual", bootty_config::config::SidebarSortOrder::Manual)]
+#[case(
+    "recent-activity",
+    bootty_config::config::SidebarSortOrder::RecentActivity
+)]
+fn session_sort_order_loads_through_the_scalar_setting(
+    #[case] token: &str,
+    #[case] expected: bootty_config::config::SidebarSortOrder,
+) {
+    let defaults = BoottyConfig::default();
+    assert_eq!(
+        defaults.sidebar.sort_order,
+        bootty_config::config::SidebarSortOrder::Manual
+    );
+    let schema = SettingsSchema::builtin();
+    let spec = schema
+        .get("sidebar.sort-order")
+        .expect("sort order setting");
+    assert_eq!(spec.page, "sidebar");
+    assert!(matches!(spec.kind, SettingKind::Choice { .. }));
+    assert_eq!(
+        spec.default_value(&defaults),
+        Some(SettingValue::Token("manual".to_owned()))
+    );
+    let config =
+        load_with(&["sidebar", "sort-order"], &format!("\"{token}\"")).expect("sort token");
+    assert_eq!(config.sidebar.sort_order, expected);
+    assert_eq!(
+        spec.default_value(&config),
+        Some(SettingValue::Token(token.to_owned()))
+    );
+    assert!(load_with(&["sidebar", "sort-order"], "\"focus-time\"").is_err());
 }

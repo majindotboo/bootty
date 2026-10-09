@@ -312,12 +312,12 @@ async fn stream_pane_output(
     sgr_pixels_mouse_tx: &tokio::sync::watch::Sender<String>,
 ) -> Result<PaneStreamOutcome> {
     let target = pane_input_target(rmux, &request.target).await?;
-    let pane_id = request
-        .target
-        .pane_id
-        .as_deref()
-        .context("pane output requires a pane id")?;
-    let mut output = super::pipe_output::PipeOutput::open(target, pane_id).await?;
+    let pane_id = request.target.pane_id.as_deref();
+    let pane_id = pane_id.context("pane output requires a pane id")?;
+    let Some(mut output) = super::pipe_output::PipeOutput::open(target, pane_id, pane).await?
+    else {
+        return Ok(PaneStreamOutcome::Closed);
+    };
     let capture = pane.recover_output();
     tokio::pin!(capture);
     let mut buffer = vec![0; RMUX_OUTPUT_EVENT_MAX_BYTES];
@@ -974,6 +974,24 @@ pub(super) async fn send_rmux_backend_pane_input(
             .send_key("Enter")
             .await?),
     }
+}
+
+pub(super) async fn respawn_rmux_backend_pane(
+    rmux: &Rmux,
+    pane_id: &str,
+    argv: &[String],
+    cwd: Option<&str>,
+) -> Result<()> {
+    let (target, _) = locate_rmux_pane(rmux, pane_id).await?;
+    let pane = pane_for_target(rmux, &target).await?;
+    pane.respawn(rmux_sdk::PaneRespawnOptions {
+        kill: true,
+        start_directory: cwd.map(std::path::PathBuf::from),
+        process: rmux_sdk::ProcessSpec::argv(argv.iter().cloned()),
+        keep_alive_on_exit: None,
+    })
+    .await?;
+    Ok(())
 }
 
 /// Read one pane's text by its id, whether or not anything shows it.

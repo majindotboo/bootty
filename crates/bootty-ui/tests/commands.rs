@@ -887,6 +887,7 @@ fn submit_command(
     let (response, outcomes) = mpsc::channel();
     commands
         .try_send(AppCommandRequest {
+            creation_receipt: None,
             invocation,
             deadline: started
                 .checked_add(Duration::from_secs(1))

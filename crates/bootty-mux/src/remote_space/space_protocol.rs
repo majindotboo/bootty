@@ -14,6 +14,8 @@ use crate::{
 };
 
 const MAX_COMMAND_PAYLOAD: usize = 1024 * 1024;
+// A full 8 MiB saved session can grow under JSON escaping; history never goes in argv.
+const MAX_STREAM_COMMAND_PAYLOAD: usize = 32 * 1024 * 1024;
 /// A 1 MiB control request, JSON-escaped once more.
 const MAX_PANE_REQUEST: u64 = 8 * 1024 * 1024;
 
@@ -35,6 +37,35 @@ pub fn decode_command(payload: &str) -> Result<MuxCommand> {
     let bytes = URL_SAFE_NO_PAD
         .decode(payload)
         .context("decode remote Space command")?;
+    if bytes.len() > MAX_COMMAND_PAYLOAD {
+        bail!("remote Space command is too large");
+    }
+    serde_json::from_slice(&bytes).context("parse remote Space command")
+}
+
+/// Encode a bounded command for the daemon's stdin, retaining full saved presentation.
+/// # Errors
+/// Returns serialization errors or a command beyond the streamed request budget.
+pub fn encode_stream_command(command: &MuxCommand) -> Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(command).context("encode remote Space command")?;
+    if bytes.len() > MAX_STREAM_COMMAND_PAYLOAD {
+        bail!("remote Space command is too large");
+    }
+    Ok(bytes)
+}
+
+/// Read a bounded command without relying on the host's command-line length limit.
+/// # Errors
+/// Rejects oversized, unreadable or malformed commands.
+pub fn read_stream_command(reader: impl Read) -> Result<MuxCommand> {
+    let mut bytes = Vec::new();
+    reader
+        .take(u64::try_from(MAX_STREAM_COMMAND_PAYLOAD)?.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .context("read remote Space command")?;
+    if bytes.len() > MAX_STREAM_COMMAND_PAYLOAD {
+        bail!("remote Space command is too large");
+    }
     serde_json::from_slice(&bytes).context("parse remote Space command")
 }
 

@@ -384,6 +384,7 @@ fn detect_target<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<Rem
         };
     }
 
+    let unix_failure = ping_failure(&output);
     let (program, args) =
         remote.raw_command("cmd.exe /d /s /c \"echo Windows&&echo %PROCESSOR_ARCHITECTURE%\"");
     let output = runner.run(&program, &args)?;
@@ -396,8 +397,9 @@ fn detect_target<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<Rem
         return Ok(RemoteTarget::WindowsX64);
     }
     bail!(
-        "could not detect a supported operating system on {}",
-        remote.host()
+        "could not inspect the operating system on {}: {unix_failure}; Windows probe: {}",
+        remote.host(),
+        ping_failure(&output)
     )
 }
 

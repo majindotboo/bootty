@@ -98,6 +98,9 @@ macro_rules! embedded_scenarios {
 embedded_scenarios!(
     recovery_keeps_pending_cursor_escape,
     session_lifecycle,
+    saved_session_topology,
+    direct_respawn_keeps_pane_identity_and_literal_argv,
+    hidden_restored_window_checkpoint_keeps_styled_history,
     explicit_create_runs_argv_and_never_reuses_a_name,
     a_hidden_session_takes_pane_io_through_the_backend,
     pane_navigation_and_zoom,
@@ -115,6 +118,7 @@ embedded_scenarios!(
     shell_exit_is_quiet,
     bounded_live_output,
     kitty_images_reach_terminal_frames,
+    closing_reader_during_large_output_keeps_other_reader_live,
     large_restore_progress,
 );
 
@@ -382,6 +386,671 @@ mod scenario {
                 .iter()
                 .any(|session| session.id == session_id)
         );
+        Ok(())
+    }
+
+    pub fn direct_respawn_keeps_pane_identity_and_literal_argv() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let directory = assert_fs::TempDir::new()?;
+        let cwd = directory.path().join("#{pane_current_path}; literal");
+        std::fs::create_dir(&cwd)?;
+        let cwd = cwd.canonicalize()?;
+        let output = directory.path().join("resumed-argv");
+        let before = backend.snapshot()?;
+        let literals = [
+            "a;",
+            "$(literal)",
+            "multi\nline 'single' \"double\" $HOME",
+            "",
+            "-x",
+            "last;",
+        ];
+        let mut argv = vec![POSIX_SHELL.to_owned(), "-c".to_owned(),
+            "printf '%s\\0' \"$PWD\" \"$@\" > \"$0\"; printf 'DIRECT_RESUME_READY\\n'; exec /bin/cat".to_owned(),
+            output.to_string_lossy().into_owned()];
+        argv.extend(literals.map(str::to_owned));
+        backend.respawn_pane_command(
+            pane.pane_id.as_deref().context("pane")?,
+            &argv,
+            Some(&cwd.to_string_lossy()),
+        )?;
+        let mut terminal = open_terminal_with_window_config(
+            std::sync::Arc::clone(&registry),
+            std::slice::from_ref(&pane),
+            &pane,
+            &window_id,
+            TerminalSessionConfig {
+                max_scrollback: 1024,
+                restored_history: Some(std::sync::Arc::from(
+                    "\x1b[38;2;210;80;170mSAVED_AGENT_HISTORY\x1b[0m\n",
+                )),
+                ..Default::default()
+            },
+        )?;
+        wait_for_terminal_text(&mut terminal, "DIRECT_RESUME_READY")?;
+        let expected = std::iter::once(cwd.to_string_lossy().into_owned())
+            .chain(literals.map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join("\0")
+            + "\0";
+        assert_eq!(std::fs::read_to_string(output)?, expected);
+        let after = backend.snapshot()?;
+        let shape = |snapshot: &bootty_mux::snapshot::MuxSnapshot| {
+            snapshot
+                .sessions
+                .iter()
+                .map(|session| {
+                    (
+                        session.id.clone(),
+                        session
+                            .windows
+                            .iter()
+                            .map(|window| {
+                                (
+                                    window.id.clone(),
+                                    window
+                                        .panes
+                                        .iter()
+                                        .map(|pane| pane.pane_id.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&before), shape(&after));
+        check_direct_resume_history(&mut terminal)?;
+        drop(terminal);
+        check_late_resume_history(registry, &pane, &window_id)?;
+        ditch_session(&mut backend, &session_id)
+    }
+
+    fn check_direct_resume_history(terminal: &mut ActiveTerminal) -> Result<()> {
+        for cols in [96, 80] {
+            terminal.resize_native_layout_window(cols, 24)?;
+            let marker = format!("AFTER_RESIZE_{cols}");
+            terminal.write_input(format!("{marker}\n").as_bytes())?;
+            wait_for_terminal_text(terminal, &marker)?;
+            let captured = terminal
+                .capture(bootty_terminal::terminal_capture::CaptureOptions {
+                    scope: bootty_terminal::terminal_capture::CaptureScope::History,
+                    ..Default::default()
+                })?
+                .receive("history after resize")?
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(captured.text.matches("SAVED_AGENT_HISTORY").count(), 1);
+            anyhow::ensure!(captured.text.contains("DIRECT_RESUME_READY"));
+        }
+        terminal.write_input(b"AFTER_DIRECT_RESUME\n")?;
+        wait_for_terminal_text(terminal, "AFTER_DIRECT_RESUME")?;
+        let capture = terminal
+            .capture(bootty_terminal::terminal_capture::CaptureOptions {
+                scope: bootty_terminal::terminal_capture::CaptureScope::History,
+                format: bootty_terminal::terminal_capture::CaptureFormat::Ansi,
+                ..Default::default()
+            })?
+            .receive("retained styled history")?
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            capture.text.contains("SAVED_AGENT_HISTORY"),
+            "respawn lost restored history: {:?}",
+            capture.text
+        );
+        anyhow::ensure!(
+            capture.text.contains("38;2;210;80;170"),
+            "respawn lost saved colors"
+        );
+        anyhow::ensure!(
+            capture.text.find("SAVED_AGENT_HISTORY") < capture.text.find("DIRECT_RESUME_READY"),
+            "saved history must precede fresh output"
+        );
+        Ok(())
+    }
+
+    fn check_late_resume_history(
+        registry: std::sync::Arc<MuxBackendRegistry>,
+        pane: &bootty_mux::snapshot::MuxPaneAnchor,
+        window_id: &str,
+    ) -> Result<()> {
+        // Normal panes can receive saved history after their first frame; resize retains it.
+        let mut terminal = open_terminal_with_window_config(
+            registry,
+            std::slice::from_ref(pane),
+            pane,
+            window_id,
+            TerminalSessionConfig {
+                max_scrollback: 1024,
+                ..Default::default()
+            },
+        )?;
+        wait_for_terminal_text(&mut terminal, "DIRECT_RESUME_READY")?;
+        terminal.restore_history("\x1b[38;2;210;80;170mLATE_SAVED_HISTORY\x1b[0m\n")?;
+        terminal.resize_native_layout_window(96, 24)?;
+        terminal.write_input(b"AFTER_LATE_RESTORE\n")?;
+        wait_for_terminal_text(&mut terminal, "AFTER_LATE_RESTORE")?;
+        let capture = terminal
+            .capture(bootty_terminal::terminal_capture::CaptureOptions {
+                scope: bootty_terminal::terminal_capture::CaptureScope::History,
+                format: bootty_terminal::terminal_capture::CaptureFormat::Ansi,
+                ..Default::default()
+            })?
+            .receive("late restored history")?
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(capture.text.matches("LATE_SAVED_HISTORY").count(), 1);
+        anyhow::ensure!(capture.text.contains("38;2;210;80;170"));
+        anyhow::ensure!(capture.text.contains("DIRECT_RESUME_READY"));
+        drop(terminal);
+        Ok(())
+    }
+
+    pub fn hidden_restored_window_checkpoint_keeps_styled_history() -> Result<()> {
+        use bootty_config::config::{BoottyConfig, MultiplexerBackendConfig};
+        use bootty_mux::repository::WorkspaceRepository;
+        start_embedded_rmux_daemon_for_tests()?;
+        let directory = assert_fs::TempDir::new()?;
+        let mut config = BoottyConfig {
+            config_path: directory.path().join("config.toml"),
+            ..Default::default()
+        };
+        config.multiplexer.backend = MultiplexerBackendConfig::Rmux;
+        let (mut workspace, scope) = restore_hidden_workspace(&config, directory.path())?;
+        let binding = workspace.binding(scope).context("restored Binding")?;
+        let generation = binding.mux().binding_generation();
+        let session = binding
+            .session_attachment("saved-logical")
+            .context("restored task")?
+            .clone();
+        assert_eq!(session.windows.len(), 2);
+        let hidden = session
+            .windows
+            .first()
+            .context("hidden first window")?
+            .panes
+            .first()
+            .and_then(|pane| pane.pane_id.clone())
+            .context("hidden pane")?;
+        anyhow::ensure!(
+            workspace.space_terminal_runtime(scope, &hidden).is_none(),
+            "must exercise capture before hidden reader admission"
+        );
+        let backend = RmuxBackend::new();
+        backend.send_pane_input(
+            &hidden,
+            &PaneInput::Write(b"printf '%s%s\\n' 'FRESH_' 'HIDDEN_OUTPUT'\r".to_vec()),
+        )?;
+        let started = std::time::Instant::now();
+        while !backend
+            .capture_pane(
+                &hidden,
+                PaneCapture {
+                    history: true,
+                    ansi: true,
+                    max_lines: 10000,
+                },
+            )?
+            .text
+            .contains("FRESH_HIDDEN_OUTPUT")
+        {
+            anyhow::ensure!(
+                started.elapsed() < PANE_TIMEOUT,
+                "hidden shell produced no output"
+            );
+            thread::yield_now();
+        }
+        let captures = capture_hidden_restored_panes(&workspace, scope, &session, &hidden)?;
+        let receipt = workspace
+            .prepare_session_checkpoint(scope, "saved-logical", generation, 2)?
+            .save(captures)?;
+        anyhow::ensure!(workspace.publish_session_checkpoint(receipt)?);
+        let (_, reloaded) = WorkspaceRepository::open(&config.config_path)?;
+        let persisted = reloaded
+            .spaces()
+            .first()
+            .context("reloaded Space")?
+            .binding()
+            .sessions()
+            .get("saved-logical")
+            .and_then(|session| session.terminal_snapshot.as_ref())
+            .context("reloaded checkpoint")?;
+        assert_eq!(persisted.windows.len(), 2);
+        let text = &persisted
+            .windows
+            .first()
+            .context("persisted first window")?
+            .panes
+            .first()
+            .context("persisted hidden pane")?
+            .text;
+        anyhow::ensure!(
+            text.contains("HIDDEN_COLD_HISTORY_a") && text.contains("FRESH_HIDDEN_OUTPUT")
+        );
+        let mut backend = RmuxBackend::new();
+        ditch_session(&mut backend, &session.id)
+    }
+
+    fn restore_hidden_workspace(
+        config: &bootty_config::config::BoottyConfig,
+        cwd: &std::path::Path,
+    ) -> Result<(
+        bootty_mux::workspace::WorkspaceRuntime,
+        bootty_mux::controller::SpaceId,
+    )> {
+        use bootty_config::config::AppearanceVariant;
+        use bootty_mux::{
+            controller::CommandSelection,
+            executor,
+            repository::WorkspaceRepository,
+            session_membership::{SessionMembership, SessionState, WorkspaceSession},
+            workspace::WorkspaceRuntime,
+        };
+        let (mut repository, spaces) = WorkspaceRepository::open(&config.config_path)?;
+        let scope = spaces.spaces().first().context("test Space")?.id();
+        let mut saved = saved_terminal_snapshot("absent-source", &cwd.to_string_lossy());
+        for pane in saved
+            .windows
+            .iter_mut()
+            .flat_map(|window| &mut window.panes)
+        {
+            use std::fmt::Write as _;
+            let mut text = String::new();
+            for index in 0..1500 {
+                writeln!(text, "\x1b[38;2;210;80;170mretained row {index:04}\x1b[0m")?;
+            }
+            writeln!(
+                text,
+                "\x1b[38;2;210;80;170mHIDDEN_COLD_HISTORY_{}\x1b[0m",
+                pane.id
+            )?;
+            pane.text = text;
+        }
+        repository.commit_binding_state(
+            scope,
+            &SessionMembership::from_sessions(vec![WorkspaceSession {
+                identity: saved.session_id.clone(),
+                backend_name: "absent-source".into(),
+                display_name: "Cold history".into(),
+                explicit: true,
+                cwd: cwd.to_string_lossy().into_owned(),
+                state: SessionState::default(),
+                terminal_snapshot: Some(std::sync::Arc::new(saved)),
+            }]),
+        )?;
+        let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
+        let registry = std::sync::Arc::new(MuxBackendRegistry::desktop()?);
+        let mut workspace = WorkspaceRuntime::open(
+            config,
+            "main",
+            registry,
+            AppearanceVariant::Dark,
+            std::sync::Arc::clone(&repaint),
+        )?;
+        let (command, membership) = workspace
+            .begin_session_reopen(scope, "saved-logical")
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let pending = executor::submit_authoritative_command_for_scope(
+            &mut workspace,
+            &repaint,
+            scope,
+            command,
+            membership.map(Box::new),
+            None,
+            CommandSelection::Follow,
+        )
+        .context("restore submitted")?;
+        let result = pending.result.recv_timeout(PANE_TIMEOUT)?;
+        let (result, sync_error) = executor::complete_authoritative_command(
+            &mut workspace,
+            scope,
+            &pending.command,
+            pending.membership.as_deref(),
+            result,
+            pending.layout.as_ref(),
+        )?;
+        result.map_err(|error| anyhow::anyhow!("{error}"))?;
+        anyhow::ensure!(
+            sync_error.is_none(),
+            "restore renderer sync: {sync_error:?}"
+        );
+        Ok((workspace, scope))
+    }
+
+    fn capture_hidden_restored_panes(
+        workspace: &bootty_mux::workspace::WorkspaceRuntime,
+        scope: bootty_mux::controller::SpaceId,
+        session: &bootty_mux::snapshot::MuxSession,
+        hidden: &str,
+    ) -> Result<Vec<bootty_mux::session_snapshot::SessionPaneCapture>> {
+        use bootty_mux::session_snapshot::SessionPaneCapture;
+        use bootty_terminal::terminal_capture::{CaptureFormat, CaptureOptions, CaptureScope};
+        let options = CaptureOptions {
+            scope: CaptureScope::History,
+            format: CaptureFormat::Ansi,
+            max_bytes: 12 * 1024,
+            ..Default::default()
+        };
+        let mut captures = Vec::new();
+        for pane in session.windows.iter().flat_map(|window| &window.panes) {
+            let id = pane.pane_id.as_deref().context("capture pane")?;
+            let (sender, receiver) = mpsc::channel();
+            workspace
+                .binding(scope)
+                .context("capture Binding")?
+                .capture_checkpoint_pane(id, options, move |result| {
+                    let _ = sender.send(result);
+                });
+            let capture = receiver
+                .recv_timeout(PANE_TIMEOUT)?
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            if id == hidden {
+                assert_eq!(capture.text.matches("HIDDEN_COLD_HISTORY_a").count(), 1);
+                anyhow::ensure!(capture.text.contains("38;2;210;80;170"));
+                anyhow::ensure!(capture.text.contains("FRESH_HIDDEN_OUTPUT"));
+                anyhow::ensure!(
+                    capture.text.find("HIDDEN_COLD_HISTORY_a")
+                        < capture.text.find("FRESH_HIDDEN_OUTPUT")
+                );
+                anyhow::ensure!(capture.text.len() <= options.max_bytes);
+                anyhow::ensure!(
+                    capture.omitted_lines > 0,
+                    "large old history must retain a bounded recent tail"
+                );
+            }
+            captures.push(SessionPaneCapture {
+                pane_id: id.to_owned(),
+                cwd: pane.cwd.clone(),
+                cols: capture.cols,
+                rows: capture.rows,
+                text: capture.text,
+                omitted_lines: capture.omitted_lines,
+            });
+        }
+        Ok(captures)
+    }
+
+    pub fn saved_session_topology() -> Result<()> {
+        let (mut backend, _registry, original_id, _, _) = create_embedded_session(unscoped_tag())?;
+        let directory = assert_fs::TempDir::new()?;
+        let literal_directory = directory.path().join("#{pane_current_path}");
+        std::fs::create_dir(&literal_directory)?;
+        let cwd = literal_directory
+            .canonicalize()?
+            .to_string_lossy()
+            .into_owned();
+        let saved = saved_terminal_snapshot(&original_id, &cwd);
+        let tag = MuxSessionTag {
+            identity: Some("saved-logical".into()),
+            space: Some("saved-space".into()),
+        };
+        let restored_name = format!("restored-{}", std::process::id());
+        backend.execute(MuxCommand::RestoreSession {
+            session_id: restored_name.clone(),
+            tag: tag.clone(),
+            snapshot: saved.clone(),
+        })?;
+        let snapshot = backend.snapshot()?;
+        let restored = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == restored_name)
+            .context("restored session")?;
+        assert_eq!(restored.tag, tag);
+        verify_saved_terminal_topology(restored, &cwd)?;
+        let missing_cwd = directory
+            .path()
+            .join("absent")
+            .to_string_lossy()
+            .into_owned();
+        let partial_name = verify_saved_restore_rejections(
+            &mut backend,
+            &restored_name,
+            tag,
+            saved,
+            &missing_cwd,
+        )?;
+        let snapshot = backend.snapshot()?;
+        anyhow::ensure!(
+            !snapshot
+                .sessions
+                .iter()
+                .any(|session| session.id == partial_name),
+            "partial restore session survived rollback"
+        );
+        anyhow::ensure!(
+            snapshot
+                .sessions
+                .iter()
+                .any(|session| session.id == original_id),
+            "rollback removed the original unrelated session"
+        );
+        anyhow::ensure!(
+            snapshot
+                .sessions
+                .iter()
+                .any(|session| session.id == restored_name),
+            "rollback removed the existing restored session"
+        );
+        ditch_session(&mut backend, &restored_name)?;
+        ditch_session(&mut backend, &original_id)
+    }
+
+    fn verify_saved_restore_rejections(
+        backend: &mut RmuxBackend,
+        restored_name: &str,
+        tag: MuxSessionTag,
+        saved: bootty_mux::session_snapshot::SavedTerminalSession,
+        missing_cwd: &str,
+    ) -> Result<String> {
+        let snapshot = backend.snapshot()?;
+        let first_pane = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == restored_name)
+            .context("restore before invalid pane cwd")?
+            .windows
+            .first()
+            .context("first restored window")?
+            .panes
+            .first()
+            .context("first restored pane")?;
+        require_rejected_command(
+            backend,
+            MuxCommand::CreatePane {
+                session_id: restored_name.to_owned(),
+                pane_id: first_pane.pane_id.clone(),
+                direction: MuxSplitDirection::Down,
+                cwd: Some(missing_cwd.to_owned()),
+                argv: Vec::new(),
+            },
+            "a missing cwd created a pane in a fallback directory",
+        )?;
+        let retained = backend.snapshot()?;
+        assert_eq!(
+            retained
+                .sessions
+                .iter()
+                .find(|session| session.id == restored_name)
+                .context("retained restore after invalid pane cwd")?
+                .windows
+                .first()
+                .context("retained first window")?
+                .panes
+                .len(),
+            2
+        );
+        // An explicit retry cannot adopt the existing restore or change its saved identity.
+        require_rejected_command(
+            backend,
+            MuxCommand::RestoreSession {
+                session_id: restored_name.to_owned(),
+                tag: tag.clone(),
+                snapshot: saved.clone(),
+            },
+            "existing restore name was adopted",
+        )?;
+        assert_eq!(
+            backend
+                .snapshot()?
+                .sessions
+                .iter()
+                .find(|session| session.id == restored_name)
+                .context("retained restore")?
+                .tag,
+            tag
+        );
+        let mut invalid = saved;
+        let invalid_cwd = &mut invalid
+            .windows
+            .get_mut(1)
+            .context("saved second window")?
+            .panes
+            .first_mut()
+            .context("saved second-window pane")?
+            .cwd;
+        missing_cwd.clone_into(invalid_cwd);
+        let partial_name = format!("partial-{}", std::process::id());
+        require_rejected_command(
+            backend,
+            MuxCommand::RestoreSession {
+                session_id: partial_name.clone(),
+                tag,
+                snapshot: invalid,
+            },
+            "invalid cwd did not reject partial restore",
+        )?;
+        Ok(partial_name)
+    }
+
+    fn require_rejected_command(
+        backend: &mut RmuxBackend,
+        command: MuxCommand,
+        failure: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(backend.execute(command).is_err(), "{failure}");
+        Ok(())
+    }
+
+    fn saved_terminal_snapshot(
+        original_id: &str,
+        cwd: &str,
+    ) -> bootty_mux::session_snapshot::SavedTerminalSession {
+        use bootty_mux::session_snapshot::{
+            SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow,
+        };
+        use bootty_mux::snapshot::{MuxPaneLayout, MuxPaneSplitDirection};
+        let pane = |id: &str| SavedTerminalPane {
+            native_agent: Some(format!("native:codex:{id}")),
+            id: id.into(),
+            backend_id: id.into(),
+            cwd: cwd.to_owned(),
+            cols: 80,
+            rows: 24,
+            text: "plain history belongs to the renderer".into(),
+            omitted_lines: 0,
+        };
+        SavedTerminalSession {
+            captured_at: 1,
+            session_id: "saved-logical".into(),
+            backend_id: original_id.to_owned(),
+            active_window_id: Some("second".into()),
+            windows: vec![
+                SavedTerminalWindow {
+                    id: "first".into(),
+                    backend_id: "first".into(),
+                    title: "saved first".into(),
+                    focused_pane_id: "b".into(),
+                    panes: vec![pane("a"), pane("b")],
+                    layout: Some(MuxPaneLayout::Split {
+                        direction: MuxPaneSplitDirection::Right,
+                        ratio_millis: 333,
+                        first: Box::new(MuxPaneLayout::Pane("a".into())),
+                        second: Box::new(MuxPaneLayout::Pane("b".into())),
+                    }),
+                },
+                SavedTerminalWindow {
+                    id: "second".into(),
+                    backend_id: "second".into(),
+                    title: "saved second".into(),
+                    focused_pane_id: "c".into(),
+                    panes: vec![pane("c")],
+                    layout: None,
+                },
+            ],
+        }
+    }
+
+    fn verify_saved_terminal_topology(
+        restored: &bootty_mux::snapshot::MuxSession,
+        cwd: &str,
+    ) -> Result<()> {
+        use bootty_mux::snapshot::{MuxPaneLayout, MuxPaneSplitDirection};
+        assert_eq!(
+            restored
+                .windows
+                .iter()
+                .map(|window| window.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["saved first", "saved second"]
+        );
+        assert_eq!(
+            restored
+                .windows
+                .iter()
+                .map(|window| window.panes.len())
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            restored
+                .windows
+                .iter()
+                .flat_map(|window| &window.panes)
+                .map(|pane| pane.native_agent.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("native:codex:a"),
+                Some("native:codex:b"),
+                Some("native:codex:c")
+            ]
+        );
+        let first = restored.windows.first().context("first restored window")?;
+        let second_window = restored.windows.get(1).context("second restored window")?;
+        let first_pane = first.panes.first().context("first restored pane")?;
+        let second_pane = first.panes.get(1).context("second restored pane")?;
+        assert_eq!(first.anchor.pane_id, second_pane.pane_id);
+        let MuxPaneLayout::Split {
+            direction,
+            ratio_millis,
+            first: first_layout,
+            second,
+        } = first.layout.as_ref().context("saved split")?
+        else {
+            anyhow::bail!("saved split was dropped")
+        };
+        assert_eq!(direction, &MuxPaneSplitDirection::Right);
+        anyhow::ensure!(
+            ratio_millis.abs_diff(333) <= 5,
+            "saved split ratio changed: {ratio_millis}"
+        );
+        assert_eq!(
+            first_layout.as_ref(),
+            &MuxPaneLayout::Pane(first_pane.pane_id.clone().context("first id")?)
+        );
+        assert_eq!(
+            second.as_ref(),
+            &MuxPaneLayout::Pane(second_pane.pane_id.clone().context("second id")?)
+        );
+        assert_eq!(
+            restored.active_window_id.as_deref(),
+            Some(second_window.id.as_str())
+        );
+        for window in &restored.windows {
+            for pane in &window.panes {
+                assert_eq!(pane.cwd.as_deref(), Some(cwd));
+            }
+        }
         Ok(())
     }
 
@@ -735,6 +1404,7 @@ if expected in data:
         backend.execute(MuxCommand::NewWindow {
             session_id: session_id.clone(),
             cwd: None,
+            argv: None,
         })?;
         let second_id = backend
             .snapshot()?
@@ -993,7 +1663,16 @@ if expected in data:
                 anyhow::ensure!(!terminal.copy_mode_active()?);
                 return Ok(());
             }
-            anyhow::ensure!(std::time::Instant::now() < deadline, "shell did not exit");
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "shell did not exit; last frame: {:?}",
+                terminal
+                    .extract_frame()?
+                    .text
+                    .iter()
+                    .collect::<String>()
+                    .trim_end()
+            );
             thread::yield_now();
         }
     }
@@ -1006,8 +1685,10 @@ if expected in data:
         let mut second = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut second)?;
         let fixture = assert_fs::NamedTempFile::new("kitty.vt")?;
-        let payload =
-            base64::engine::general_purpose::STANDARD.encode(vec![255_u8; 1024 * 512 * 4]);
+        let image_bytes = (0_usize..1024 * 512 * 4)
+            .map(|index| (index ^ (index >> 8) ^ (index >> 16)).to_le_bytes()[0])
+            .collect::<Vec<_>>();
+        let payload = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
         let mut output = Vec::new();
         let chunks = payload.as_bytes().chunks(4096);
         let count = chunks.len();
@@ -1025,9 +1706,42 @@ if expected in data:
         output.extend_from_slice(b"\r\nBOOTTY_IMAGE_COMPLETE\r\n");
         std::fs::write(fixture.path(), &output)?;
         terminal.write_input(format!("cat {}\r", fixture.path().display()).as_bytes())?;
-        wait_for_terminal_text(&mut terminal, "BOOTTY_IMAGE_COMPLETE")?;
-        wait_for_terminal_text(&mut second, "BOOTTY_IMAGE_COMPLETE")?;
-        assert_eq!(second.extract_frame()?.images.placements.len(), 1);
+        // Both bounded consumers must drain while the producer is running.
+        let deadline = std::time::Instant::now()
+            .checked_add(PANE_TIMEOUT)
+            .context("image stream deadline")?;
+        loop {
+            terminal.drain_pty();
+            second.drain_pty();
+            let first_ready = terminal
+                .extract_frame()?
+                .text
+                .iter()
+                .collect::<String>()
+                .contains("BOOTTY_IMAGE_COMPLETE");
+            let second_ready = second
+                .extract_frame()?
+                .text
+                .iter()
+                .collect::<String>()
+                .contains("BOOTTY_IMAGE_COMPLETE");
+            if first_ready && second_ready {
+                break;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "image stream did not complete for both readers"
+            );
+            thread::yield_now();
+        }
+        let second_frame = second.extract_frame()?;
+        assert_eq!(second_frame.images.placements.len(), 1);
+        let second_image = second_frame
+            .images
+            .placements
+            .first()
+            .context("second rendered image")?;
+        assert_eq!(second_image.data.as_slice(), image_bytes);
         drop(second);
         terminal.write_input(b"printf 'BOOTTY_READER_REMAINS\\n'\r")?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_READER_REMAINS")?;
@@ -1036,6 +1750,23 @@ if expected in data:
         let image = frame.images.placements.first().context("rendered image")?;
         assert_eq!(image.image_width, 1024);
         assert_eq!(image.image_height, 512);
+        assert_eq!(image.data.as_slice(), image_bytes);
+        ditch_session(&mut backend, &session_id)
+    }
+
+    pub fn closing_reader_during_large_output_keeps_other_reader_live() -> Result<()> {
+        let (mut backend, registry, session_id, window_id, pane) =
+            create_embedded_session(unscoped_tag())?;
+        let mut terminal = open_terminal(std::sync::Arc::clone(&registry), &pane, &window_id)?;
+        prepare_pane(&mut terminal)?;
+        let second = open_terminal(registry, &pane, &window_id)?;
+        // Exceed the pipe's in-flight bound without spending the test on millions of line scrolls.
+        terminal.write_input(
+            b"head -c 8000000 /dev/zero | tr '\\000' X; printf '\\nBOOTTY_READER_CLOSED_COMPLETE\\n'\r",
+        )?;
+        wait_for_terminal_text(&mut terminal, "X")?;
+        drop(second);
+        wait_for_terminal_text(&mut terminal, "BOOTTY_READER_CLOSED_COMPLETE")?;
         ditch_session(&mut backend, &session_id)
     }
 
@@ -1252,6 +1983,22 @@ fn open_terminal_with_window(
     focused: &bootty_mux::snapshot::MuxPaneAnchor,
     window_id: &str,
 ) -> Result<ActiveTerminal> {
+    open_terminal_with_window_config(
+        registry,
+        panes,
+        focused,
+        window_id,
+        TerminalSessionConfig::default(),
+    )
+}
+
+fn open_terminal_with_window_config(
+    registry: std::sync::Arc<MuxBackendRegistry>,
+    panes: &[bootty_mux::snapshot::MuxPaneAnchor],
+    focused: &bootty_mux::snapshot::MuxPaneAnchor,
+    window_id: &str,
+    config: TerminalSessionConfig,
+) -> Result<ActiveTerminal> {
     let mut terminal = ActiveTerminal::new(
         TerminalGeometry {
             cols: 80,
@@ -1264,7 +2011,7 @@ fn open_terminal_with_window(
             backend: MuxBackendKind::Rmux,
             ..MuxBindingConfig::default()
         },
-        TerminalSessionConfig::default(),
+        config,
         std::sync::Arc::new(|| {}),
     )?;
     terminal.sync_native_window(
@@ -1375,8 +2122,10 @@ fn prepare_pane(terminal: &mut ActiveTerminal) -> Result<()> {
         .checked_add(PANE_TIMEOUT)
         .context("pane deadline")?;
     loop {
-        // Split so the echo of this line cannot answer for the pane.
-        terminal.write_input(b"stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
+        // Bash readline flushes queued input when returning to its prompt. Use the
+        // canonical POSIX reader so the readiness receipt also covers queued Ctrl-D.
+        // Split the marker so this line's echo cannot answer for the pane.
+        terminal.write_input(b"if [ -n \"${BASH_VERSION-}\" ]; then set +o emacs; fi; stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
         let attempt = (std::time::Instant::now()
             .checked_add(PANE_PROBE_INTERVAL)
             .context("probe deadline")?)

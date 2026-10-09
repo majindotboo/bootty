@@ -107,6 +107,10 @@ impl SshRemote {
     /// # Errors
     /// Returns an error if the daemon command payload cannot be encoded.
     pub fn proxy_command(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
+        if let Some(command) = crate::remote_link::proxy_command(self, program, args, false, None)?
+        {
+            return Ok(command);
+        }
         Ok(self.build_line(
             proxy_command_line(program, args, false)?,
             &["-o", "BatchMode=yes"],
@@ -121,6 +125,9 @@ impl SshRemote {
         program: &str,
         args: &[String],
     ) -> Result<(String, Vec<String>)> {
+        if let Some(command) = crate::remote_link::proxy_command(self, program, args, true, None)? {
+            return Ok(command);
+        }
         Ok(self.build_line(proxy_command_line(program, args, true)?, &["-t"]))
     }
 
