@@ -97,9 +97,6 @@ black = "auto"
 tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
-panel-tab-style = "icons" # fixed left/right docks: icons, icons-and-text, text
-# Controls single-panel tabs only in the fixed left/right docks. Main and bottom tabs stay visible.
-panel-tabs = "automatic" # automatic, always, never
 # Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
 # independently when its configured modules should be visible.
 top-bar = true
@@ -139,17 +136,19 @@ module = "clock"
 # align = "right"
 # module = "clock"
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [sidebar]
+# Turn off for one flat list with project context on each session.
+group-by-project = true
+# Manual order is the default; recent-activity uses accepted session input.
+sort-order = "manual"
+# Rotate the Working ring unless reduced motion is enabled.
+animate-working = true
 # Sessions colors layer on top of the active theme.
 # Any unset slot falls back to the theme-derived value.
 # background = "#11131a"
@@ -203,7 +202,11 @@ hide-tmux-status = false
 #       "bindings": { "ctrl-k": "new_tab" }
 #     },
 #   ]
+# The SurfaceChooser context exposes ui.surface.next/previous/confirm/cancel
+# and ui.surface.agent/terminal/claude/codex/pi/edit_profiles for new tabs/splits.
+# Arrow, Vim and Emacs navigation defaults can be changed in the same keymap.
 # Bootty resolves the preset and compatibility arrays below first, then applies
+# Every preset binds Cmd+K to the command palette (Ctrl+Shift+K outside macOS).
 # keymap.json last. Existing TOML arrays remain supported and live-reloaded; new
 # edits should use the Keymap editor or keymap.json.
 #
@@ -257,7 +260,7 @@ keybind = [
   "cmd+7=select_session:7",
   "cmd+8=select_session:8",
   "cmd+9=select_session:9",
-  "cmd+alt+x=ditch_session",
+  "cmd+alt+x=settle_session",
 ]
 
 # Sidebar-local keybinds apply only while the sidebar owns keyboard focus.
@@ -291,6 +294,10 @@ modifier-remap = [
   # "right_command=left_alt",
 ]
 
+[browser]
+search-engine = "duckduckgo" # duckduckgo, google, bing, or brave
+persist-site-data = true
+
 [input.backend-keybind]
 # Empty by default so Herdr receives its own complete keymap, including Ctrl-B.
 herdr = []
@@ -318,8 +325,8 @@ native = [
   "ctrl+space>v=split_right",
   "ctrl+space>-=split_down",
   "ctrl+space>s=new_mux_session",
-  "ctrl+space>x=ditch_session",
-  "ctrl+space>shift+x=ditch_session",
+  "ctrl+space>x=settle_session",
+  "ctrl+space>shift+x=settle_session",
   "ctrl+space>1=select_session:1",
   "ctrl+space>2=select_session:2",
   "ctrl+space>3=select_session:3",
@@ -439,24 +446,58 @@ palette = [
   # "#cba6f7",
 ]
 
-# Tool panel defaults. Dock: left/right/bottom. Button: none/top/bottom.
+# Optional tool buttons: none/top/bottom. Sessions live on the left; tools on the right.
 
 [panels.sessions]
-dock = "left"
 button = "none"
 
 [panels.files]
-dock = "right"
 button = "none"
 
 [panels.changes]
-dock = "right"
 button = "none"
 
 [panels.diff]
-dock = "right"
 button = "none"
 
-[panels.agents]
-dock = "right"
-button = "none"
+# Agent launch preferences. Credentials remain in the provider's own account store.
+[agents]
+# Parents can control only shells/native children created under this exact live grant.
+default-provider = "codex"
+allow-spawn = false
+quick-model = "gpt-6-luna"
+
+[agents.codex]
+default-model = "" # Resolves the advertised recommended model.
+default-effort = "" # Resolves the model's supported default.
+fast-mode = false
+enabled = true
+program = ""
+selected = ""
+
+[agents.claude]
+default-model = "" # Resolves the advertised recommended model.
+default-effort = "" # Resolves the model's supported default.
+fast-mode = false
+enabled = true
+program = ""
+selected = ""
+
+[agents.pi]
+default-model = "" # Resolves the advertised recommended model.
+default-effort = "" # Resolves the model's supported default.
+enabled = true
+program = ""
+selected = ""
+
+# [agents.codex.profiles.work]
+# name = "Work"
+# directory = "/absolute/path/to/codex-work"
+# arguments = ["--model", "gpt-6.1-sol"]
+
+# Local desktop computer use is separate from macOS Screen Recording and Accessibility.
+# These switches never request an OS grant. Status and window listing remain readable.
+[computer]
+enabled = false
+capture-enabled = false
+input-enabled = false

@@ -49,6 +49,42 @@ impl AppState {
                     message,
                 });
             }
+        } else if action == SessionAction::EditProject {
+            let [cwd] = arguments else {
+                return self.reject_command(CommandOutcome::Failed {
+                    code: "invalid_arguments".into(),
+                    message: "Choose one project".into(),
+                });
+            };
+            let Some(binding) = self.workspace.binding(scope) else {
+                return self.reject_command(CommandOutcome::StaleTarget {
+                    message: "Project Space is unavailable".into(),
+                });
+            };
+            let target = ExactMuxTarget::Binding(scope).command_target(
+                ResourceKind::Binding,
+                binding.mux(),
+                &self.binding_target_handle(scope, binding.mux().binding_generation()),
+            );
+            let Some(target) = target else {
+                return self.reject_command(CommandOutcome::StaleTarget {
+                    message: "Project Space changed".into(),
+                });
+            };
+            let project = self
+                .workspace
+                .registered_projects(scope)
+                .find(|project| project.cwd == *cwd)
+                .cloned()
+                .unwrap_or_else(|| bootty_mux::repository::RegisteredProject {
+                    scope,
+                    cwd: cwd.clone(),
+                    collapsed: false,
+                    settings: bootty_mux::repository::ProjectSettings::default(),
+                });
+            self.open_project_settings(
+                crate::presentation::project_editor::ProjectSettingsEditor::new(target, project),
+            );
         } else if action != SessionAction::ListProjects {
             let [cwd] = arguments else {
                 return self.reject_command(CommandOutcome::Failed {
@@ -99,6 +135,7 @@ impl AppState {
             action,
             SessionAction::ListProjects
                 | SessionAction::RegisterProject
+                | SessionAction::EditProject
                 | SessionAction::ConfigureProject
                 | SessionAction::ToggleProjectCollapsed
         ) {

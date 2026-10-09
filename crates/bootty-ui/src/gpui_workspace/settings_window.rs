@@ -40,6 +40,7 @@ pub(super) enum SettingsWindowTarget {
     Theme,
     Setting(String),
     Keymap(Option<String>),
+    Project(Box<crate::presentation::project_editor::ProjectSettingsEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +72,8 @@ pub(super) struct GpuiSettingsWindow {
     workspace: WeakEntity<GpuiWorkspace>,
     close_prompt_pending: bool,
     close_after_theme_restore: bool,
+    project: Option<Entity<super::project_settings::ProjectSettingsView>>,
+    project_subscription: Option<Subscription>,
 }
 
 const SETTINGS_CONTENT_MIN_WIDTH_REMS: f32 = 25.0;
@@ -101,10 +104,14 @@ fn activate_settings_window(
     establish_settings_window_shadow(window);
     match root.active_tab {
         SettingsWindowTab::Settings => {
-            root.settings.update(cx, |settings, cx| {
-                settings.show_settings(cx);
-                settings.focus(window, cx);
-            });
+            if let Some(project) = &root.project {
+                project.update(cx, |project, cx| project.focus(window, cx));
+            } else {
+                root.settings.update(cx, |settings, cx| {
+                    settings.show_settings(cx);
+                    settings.focus(window, cx);
+                });
+            }
         }
         SettingsWindowTab::Theme => {
             if let Some(theme) = &root.theme {
@@ -187,6 +194,8 @@ impl GpuiSettingsWindow {
             workspace,
             close_prompt_pending: false,
             close_after_theme_restore: false,
+            project: None,
+            project_subscription: None,
         }
     }
 
@@ -203,9 +212,9 @@ impl GpuiSettingsWindow {
             return;
         }
         self.active_tab = match &target {
-            SettingsWindowTarget::Settings | SettingsWindowTarget::Setting(_) => {
-                SettingsWindowTab::Settings
-            }
+            SettingsWindowTarget::Settings
+            | SettingsWindowTarget::Setting(_)
+            | SettingsWindowTarget::Project(_) => SettingsWindowTab::Settings,
             SettingsWindowTarget::Theme => SettingsWindowTab::Theme,
             SettingsWindowTarget::Keymap(_) => SettingsWindowTab::Keymap,
         };
@@ -228,6 +237,8 @@ impl GpuiSettingsWindow {
         }
         match target {
             SettingsWindowTarget::Settings => {
+                self.project = None;
+                self.project_subscription = None;
                 self.active_tab = SettingsWindowTab::Settings;
                 self.settings.update(cx, |settings, cx| {
                     settings.show_settings(cx);
@@ -267,6 +278,29 @@ impl GpuiSettingsWindow {
                         keymap.focus(window, cx);
                     }
                 });
+            }
+            SettingsWindowTarget::Project(project) => {
+                self.active_tab = SettingsWindowTab::Settings;
+                if let Some(workspace) = self.workspace.upgrade() {
+                    let sender = workspace
+                        .read(cx)
+                        .state
+                        .app_command_sender(bootty_control::Caller::Internal);
+                    let view = cx.new(|cx| {
+                        super::project_settings::ProjectSettingsView::new(
+                            *project, sender, window, cx,
+                        )
+                    });
+                    self.project_subscription = Some(cx.subscribe_in(
+                        &view,
+                        window,
+                        |this, _, _: &gpui_kit::DismissEvent, window, cx| {
+                            this.focus_target(SettingsWindowTarget::Settings, window, cx);
+                        },
+                    ));
+                    view.update(cx, |view, cx| view.focus(window, cx));
+                    self.project = Some(view);
+                }
             }
         }
         cx.notify();
@@ -808,7 +842,10 @@ impl Render for GpuiSettingsWindow {
         );
 
         let body = match (active_tab, active_editor) {
-            (SettingsWindowTab::Settings, _) => self.settings.clone().into_any_element(),
+            (SettingsWindowTab::Settings, _) => self.project.as_ref().map_or_else(
+                || self.settings.clone().into_any_element(),
+                |project| project.clone().into_any_element(),
+            ),
             (SettingsWindowTab::File(_), Some(editor)) => editor.into_any_element(),
             (SettingsWindowTab::Keymap, _) => self.keymap.clone().into_any_element(),
             (SettingsWindowTab::Theme, _) => self.theme.as_ref().map_or_else(

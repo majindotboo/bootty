@@ -1,230 +1,226 @@
 # Agent integrations
 
-Bootty manages visible agent sessions. It does not hide an agent behind a
-headless RPC subprocess.
+Bootty launches Codex, Claude Code and Pi in real backend terminals. Their TUIs
+own prompts, transcripts, approval dialogs and authentication. Bootty retains
+bounded launch metadata and observes supported provider interfaces to show
+activity beside sessions, including sessions that are not selected.
 
-Bootty does not infer agent state from process names, terminal output, screen
-content, or transcript files. An agent reports, or Bootty shows nothing.
+`bootty-agents` owns the provider registry, observation lifetimes and retained
+metadata. The mux backend owns the terminal process, tabs and splits. The
+palette, keybindings, CLI, socket and integrations use the same
+`CommandInvocation` path and the same host-issued resource targets.
 
-## Which session an event belongs to
+## Launch and control
 
-An agent runs in a session, so every reported event names the pane it came
-from and the sidebar shows one row per session.
+For each provider, `agents.<provider>.start` opens a session and
+`agents.<provider>.tab` opens a tab in an existing session. Provider names are
+`codex`, `claude` and `pi`. Both commands accept optional `cwd`, `program` and
+`argv` arguments. `argv` is a JSON array of literal arguments: quotes, spaces,
+newlines and shell metacharacters are passed to the executable without shell
+expansion. Executable and argument bounds are checked before backend creation.
 
-Bootty exports `BOOTTY_PANE` into every pane it spawns itself, carrying the
-same pane id the mux snapshot reports as `session.pane_id`. tmux exports that
-id as `TMUX_PANE` inside its own panes.
+`start` accepts an exact Binding target; `tab` accepts an exact Session target.
+Native, rmux and tmux use the shared backend creation path. Herdr retains its
+opaque attachment boundary and does not expose inner tab or pane creation.
+Palette and keybinding launches select the returned terminal. CLI and socket
+launches return its target without changing desktop selection.
 
-Each adapter reads `${TMUX_PANE:-${BOOTTY_PANE:-}}` and passes it as the
-second argument of its `ingest` command. An event with no pane lands on no
-session row.
+`agents.<provider>.state`, `prompt`, `follow_up`, `steer`, `abort`, `interrupt`
+and `stop` require the exact Terminal target issued by the host. The target
+must still be live and registered for that provider. A stale generation is
+rejected. Commands can address a terminal in another Space without selecting
+that Space. Prompt delivery uses terminal paste and submit; it does not start a
+second conversation process. Interrupt sends Escape to Claude or Ctrl-C to
+Codex and Pi. Stop closes the backend pane and requires the normal destructive
+command confirmation.
 
-Pane ids are only unique on one server: local tmux and local rmux can both have
-a `%1`. So each adapter also passes the server its pane runs on as the fourth
-argument: tmux's `$TMUX`, or the `$RMUX` Bootty's rmux panes set while leaving
-`$TMUX` empty (`socket,pid,session`). Bootty derives each local binding's socket
-from its configuration and compares resolved paths, since tmux names its socket
-through a resolved directory such as macOS's `/private/tmp`. Among the Spaces
-listing the pane, only those on the reported server decide. A hook reaches the
-app only through the local `bootty`, so a server no local Space names, such as
-a remote host's, resolves to no Space. Adapters installed before this argument
-existed omit it and resolve by pane id alone, as before.
+Provider options such as model, profile, thinking, sandbox and approval settings
+remain literal native CLI options in `argv`. Retained metadata keeps only
+reusable options. Prompts, credentials, arbitrary config overrides and transient
+session selectors are excluded from that metadata.
 
-A pane id belongs to the Space whose own sessions contain it. Spaces bound to
-one tmux server all list every session on that server, so ownership decides. A
-pane that still matches several Spaces lands on no session row.
+## Observed activity
 
-A record follows its pane. Each keeps the server its hook reported, and whenever
-pane ownership changes Bootty moves records to the Space that owns their pane
-now: after a session moves to another Space, or once a pane whose hook arrived
-before Bootty listed it is discovered. A record is dropped only when its pane is
-gone from its server's listing, or its Space closes.
+The public activity snapshot identifies its exact Terminal target and provider.
+Its states are Starting, Idle, Working, Waiting, Finished, Stopped, Error and
+Unavailable. A missing connection or unavailable native query is reported as
+Unavailable; process presence alone does not prove that an agent is working or
+waiting. Provider identities come from actual protocol responses or native
+queries, never from a working directory, a recent file or terminal text.
 
-State mutations claim pending requests under the state lock after scope resolution.
-Cancellation before that claim leaves state unchanged; event publication failure
-after the mutation returns the committed snapshot with a warning.
+### Codex
 
-The native provider owns its adapter and bounded protocol state. Install or
-remove it from the provider's entry in Settings. Bootty writes the adapter and
-updates the tool's configuration. Existing custom Lua/Luau files are preserved
-and reported as unsupported; they are never executed.
+For a local native backend pane, Bootty owns a private Codex app-server and
+starts the interactive TUI with Codex's supported `--remote` transport. A
+transparent local relay forwards the native protocol and correlates actual
+thread creation, resume and fork responses. Thread and turn lifecycle events
+supply activity; a successful initialization handshake supplies Idle readiness
+before a thread exists. Approval requests supply Waiting without answering or
+changing the user's grants.
 
-## Pi
+The private server has the same lifetime as the process-local pane's app owner.
+It is not attached to a persistent rmux or tmux TUI: closing Bootty must not
+terminate a surviving turn. Those backends launch the original Codex TUI
+arguments and report observation Unavailable. Bootty does not start, stop or
+reconfigure the user's shared Codex daemon to work around this limit.
 
-The native Pi provider starts Pi in the selected visible terminal:
+The private relay currently requires Unix sockets. A platform without that
+supported observation transport reports an explicit launch error for the
+observed path rather than pretending a handshake succeeded.
 
-```sh
-pi
-```
+### Claude Code
 
-Use these commands through the Bootty CLI or socket:
+A fresh observed Claude terminal receives a native `--session-id` UUID. An
+explicit resumed identity uses the provider's exact session ID. Bootty queries
+`claude agents --json --all` and matches that complete identity. Native busy,
+waiting and idle states drive activity; an observed working-to-idle transition
+marks Finished. If the exact session is absent or the query fails, observation
+is Unavailable. An ambiguous resume selector is rejected rather than assigned
+to another conversation.
 
-```sh
-bootty command agents.pi.start /path/to/worktree
-bootty command agents.pi.prompt "Inspect the failing test"
-bootty command agents.pi.steer "Check the persistence path first"
-bootty command agents.pi.follow_up "Run the focused contract"
-bootty command agents.pi.abort --yes
-bootty command agents.pi.state
-bootty command agents.pi.stop --yes
-```
+The query uses the installed executable and existing provider authentication.
+Launching a TUI does not establish that the account is signed in.
 
-With an explicit target, `start` launches in that visible terminal. Without a
-target, it creates a new visible tab first. `prompt`, `steer`, `follow_up`, and
-`abort` operate on the selected terminal, or on an explicit target in any Space
-without moving focus. `abort` sends Escape to Claude Code, which interrupts the
-turn, and Ctrl-C to Pi and Codex.
+### Pi
 
-A script can also start an agent in a session of its own, in any Space, without
-moving focus: `spaces.list` returns each Space's Binding target, and
-`session.create NAME CWD '["claude","..."]' --target BINDING` returns the new
-pane's `terminal` target for `terminal.capture` and
-`agents.<provider>.prompt --target`. See
-[architecture](architecture.md#scripted-sessions).
+Bootty supplies a private extension only to the launched Pi process using its
+native extension argument. No extension is installed globally. The supported
+SDK provides the actual session ID and session file, agent lifecycle events,
+and prompt start/end events. These drive Working, Waiting and completed,
+failed or aborted outcomes. Nested prompts remain Waiting until the final
+prompt ends.
 
-Install the Pi extension from the `agents.pi` module in Settings to publish
-native events from existing interactive Pi sessions.
+The extension publishes bounded snapshots through a private local Unix socket.
+Its identity token and files belong to that launch and are removed when the
+observer retires. Unsupported platforms report the observation limitation
+explicitly. Dropping an observer does not terminate a backend-owned Pi process.
 
-A project can use `.pi/extensions/bootty.ts` after Pi trusts that project.
+## Accounts
 
-The adapter calls `agents.pi.ingest` through the live Bootty owner, with the
-pane Pi runs in as the second argument and its server as the fourth.
+`agents.<provider>.account.status` uses the installed provider's supported
+account query. It returns the provider, an authenticated boolean when the
+query establishes it, and a bounded explanation. It does not return tokens or
+infer authentication from an available model. Pi requires a provider ID for its
+native auth check and does not refresh credentials during a status read.
 
-The adapter uses one active publisher and a bounded event queue.
+`account.login` and `account.logout` open the provider's own interactive terminal
+flow in an exact binding. Codex uses its device login or logout command; Claude
+uses its native auth commands; Pi opens its TUI with its own `/login` and
+`/logout` menus.
+Completing that terminal flow is the provider's responsibility. Bootty does not
+claim authentication success merely because the terminal opened.
 
-It coalesces `tool_execution_update` events for the same tool call.
+## Native conversations
 
-It reports any dropped event count through `extension_error`.
+New session opens a prompt-first native conversation. New native agent tab adds
+one to the current saved session. Codex, Pi and Claude use their installed
+providers' public protocols: Codex app-server, Pi RPC and Claude stream-json.
+The selected account, project, task and conversation identity stay captured for
+the lifetime of that conversation. Local and remote conversations use the same
+captured provider protocol; the remote daemon owns the provider process transport.
 
-## Codex
+Session naming also updates the exact newly created conversation's tab title.
+Delayed names apply only while each captured title remains unchanged; sibling
+conversations retain their own titles. Submitting a prompt preserves the title
+supplied at creation or by a later rename.
 
-The native Codex provider starts Codex in the selected visible
-terminal:
+Native Codex launches use a process-local `default_mode_request_user_input` feature
+override so supported SDKs can ask questions in Default mode. This does not change
+the provider account's configuration or permission policy.
 
-```sh
-codex
-```
+The transcript, composer, approval requests and questions live in a selectable
+backend pane beside terminals. Close stops that pane and provider while retaining
+the saved conversation and history.
+Interrupt cancels its current turn. Opening a stopped conversation automatically
+reattaches its exact provider selector: a Codex thread, Pi session file or Claude
+session UUID. Pi's launch extension checkpoints its public session header and
+entries before a fresh identity is published, then Pi reattaches that same file.
+This preserves side chats that have not received their first message. The private
+checkpoint command is excluded from composer completion. A rejected
+prompt retains the draft and does not change the saved title. Claude history is
+bounded to the turns retained by Bootty until a public history interface exists.
 
-Use these commands through the Bootty CLI or socket:
+Codex approvals show the command, working directory and reason. Allow once retains
+no grant. Allow for this session uses Codex's session approval cache; Always allow
+applies only the exact proposed command-prefix rule displayed in the request.
+Provider-restricted decisions, altered rules and expired requests are rejected.
 
-```sh
-bootty command agents.codex.start /path/to/worktree
-bootty command agents.codex.prompt "Inspect the failing test"
-bootty command agents.codex.steer "Check the persistence path first"
-bootty command agents.codex.interrupt --yes
-bootty command agents.codex.state
-bootty command agents.codex.stop --yes
-```
+Permission changes during a turn are saved for the next turn. The current prompt
+and approval keep their captured policy. After the turn becomes idle, Bootty
+reattaches the same provider conversation with the saved policy and a fresh tool
+lease before accepting its next prompt.
 
-Install the Codex hooks from the `agents.codex` module in Settings. The module
-owns both the hook script and the native hook configuration Bootty merges.
+Provider request waits pause while an owned question or approval is pending.
+Answering or cancelling resumes the remaining transport budget. The provider's
+actual reply still owns prompt acceptance; a visible dialog never invents turn success.
+Pi extension commands can open a question before acknowledging their prompt.
+Bootty returns the observed waiting state to the command caller immediately and
+keeps an owned reply worker until answer, cancellation or shutdown. This prevents
+the caller's deadline from expiring during human input; a later provider rejection
+still appears as a conversation error.
 
-The hook reads one native hook JSON object from stdin.
+Bootty tools attach privately at launch using the existing provider policy and
+captured caller, Binding and terminal identity. Focus changes do not retarget
+them. Native conversations also attach `list_agents`, `get_agent_status` and `list_models`
+before provider initialization. These read the persisted conversation identity
+and its exact provider account. Agent listing returns compact lifecycle metadata
+only in the captured Space; status/model reads cannot choose another agent or account.
+`list_providers` and `inspect_provider` expose only that captured provider's persisted
+model, effort, fast mode and permission choices. They omit executable, account and
+project paths, and do not authenticate or change policy. Legacy unspecified policy
+remains unspecified; available choices use explicit modes supported by the provider.
+Terminal agents keep their terminal-scoped catalog. Inherited child leases cannot
+list siblings or advertise computer input/capture. Root resume renews the lease;
+restored children keep their provider identity without renewing the former parent's grant.
+Disabling the provider or revoking its authority
+revokes the lease and child access. Private attachment arguments and credentials
+are excluded from saved launch metadata. Computer capture and input each require
+their existing grants.
 
-The hook calls `agents.codex.ingest` through the live Bootty owner, with the
-pane it ran in as the second argument and its server as the fourth.
+`computer.capture` returns the exact application window as a validated PNG MCP
+image with capture geometry. `computer.snapshot` retains its file export behavior.
+Image responses have a separate bounded envelope; ordinary tool requests and
+text responses retain their smaller limit.
+Codex and Pi accept correlated image-tool results and bounded provider history.
+Pi codemode image echoes must match the pixels from an observed capture in that
+exact parent call. Only fingerprints are retained for the live turn; historical
+image replies come from the correlated provider-owned history response and confer
+no capture authority.
+Claude tool-result echoes above 1 MiB remain unsupported until its public protocol
+has a verified correlated format.
 
-## Claude Code
+Native prompts accept host-admitted PNGs through the same conversation owner.
+Captured image references remain in history; encoded pixels are transport-only.
+Provider rejection retains the pending draft and its attachments.
 
-Claude Code reports through command hooks, like Codex, and can also be started
-in the selected visible terminal.
+Typed spawning tools create child work in the captured destination. Native parents
+create native provider children in real mux tasks on their same local or remote
+host. The provider executable, account, project, model and permissions come from
+the accepted parent record; children start with fresh provider identities. Dependent work
+starts only after its prerequisite's exact first turn succeeds. Failed or
+interrupted turns retain their conversation for review. Recovery goes through
+the shared invocation owner once. A stale destination requires explicit Restart.
 
-`agents.claude.state` inspects what the hooks reported:
+## Retained sessions and limits
 
-```sh
-bootty command agents.claude.state
-bootty command agents.claude.state %3
-bootty command agents.claude.start /path/to/worktree
-```
+`agents.<provider>.history` reads bounded conversation metadata from the selected
+provider account, scoped to the current project or all projects. Stored titles
+take precedence; Claude and Pi conversations without a title use a short first-user-message
+preview from the bounded file prefix. Discovery does not rewrite or launch a conversation.
+`resume` and `fork` accept an explicit provider session selector and launch the
+provider's own TUI with its supported native arguments. The provider owns the
+conversation history and displays it in that TUI. The metadata list is not a
+transcript renderer or a complete provider-wide history index.
 
-Install the Claude Code hooks from the `agents.claude` module in Settings. The
-module owns both the hook script and the native hook configuration Bootty
-merges.
+Restored active records are marked Unavailable until a new supported observation
+is established. Explicitly stopped records retain Stopped and their observed
+provider identities. Bootty does not infer a surviving TUI's identity after restart.
+Remote backend launches use the backend's literal argv path; native observation
+remains Unavailable until a supported host bridge exists. No local query is
+used to claim a remote terminal's activity or account state.
 
-The hook reads one native hook JSON object from stdin and calls
-`agents.claude.ingest` through the live Bootty owner.
-
-A permission or question `Notification` is what tells Bootty that Claude Code is
-waiting on the person. Claude Code also notifies when an idle session has waited
-for input (`idle_prompt`); that reports idle, not waiting. `Stop` records the
-turn's final text from `last_assistant_message`, and every event records the
-transcript path.
-
-## Resume, fork, and launch context
-
-All three providers expose `agents.<provider>.resume [session] [cwd] [program]
-[argv-json]` and `agents.<provider>.fork` with the same arguments. Pi uses
-`--session`/`--fork`, Codex uses its `resume`/`fork` subcommands, and Claude uses
-`--resume` with optional `--fork-session`. An omitted session ID is accepted only
-when the selected pane reported one. Resume and fork always create a new visible
-tab in the captured parent session and never type into the source agent.
-
-The optional argv value is a JSON string array, so arguments retain their exact
-boundaries. Launch values are bounded and reject controls and option-shaped
-session IDs. POSIX launches use single-quoted argv; local Windows launches use a
-UTF-16LE encoded PowerShell command. The adapter reports working directory,
-session identity and reusable launch options. Bootty retains only known model,
-profile, sandbox, approval and UI options; it drops prompts, arbitrary config,
-credentials and old session selectors. Sessions launched with a persistence-off
-flag cannot be resumed or forked from reported context. Explicit arguments can
-still choose a different executable or options.
-
-Start accepts the same optional argv JSON after cwd and program. The returned
-success includes the target and sanitized launch context and means that the
-command was submitted to its visible PTY; native events remain the authority for
-agent lifecycle state.
-
-## Limits and cleanup
-
-Agent processes are owned by the visible mux pane that launched them. Closing
-that pane stops its agent process tree. Reloading an integration does not stop
-the interactive session.
-
-Agent-specific JSON schemas, lifecycle rules, and installed hook adapters are
-owned by the native `bootty-agents` crate. Existing custom Lua and Luau files
-are preserved but unsupported; Settings reports them.
-
-## Attention and navigation
-
-The Agents Dock panel lists reported sessions across live local, SSH and WSL
-bindings. Focus, resume, fork and mark-read actions use the same command path as
-`agents.list`, `agents.focus`, `agents.next` and `agents.<provider>.acknowledge`.
-Targets include a pane generation; closed or replaced panes fail as stale.
-Entries also carry `source` (`existing`, or `restored` after a restart), the
-provider `session_id`, its transcript or session file
-(`session_file`), `last_event`, the start of the last turn's final text
-(`last_message`, at most 1 KiB, with `last_message_truncated` when cut) and when
-that turn ended (`turn_ended_at`, Unix milliseconds as a string). The listing is
-one control response, so `agents.<provider>.state` on an entry's target returns
-that pane's whole state, including the full final text (up to 64 KiB).
-
-Reported state survives a restart. Each window keeps it in a private
-`agent-state-<window>.json` beside the workspace database, written at most once
-a second and on shutdown. Restored entries report `source: restored` until
-their pane reports again, because the agent may have moved on while Bootty was
-down. A restored entry names the pane id it was reported for; if the backend
-reuses that id after its own server restarts, the entry shows until the new
-occupant reports or the pane closes.
-Resume and fork first focus the captured host, then create the new tab there.
-
-Completion, input requests and errors receive monotonically increasing attention
-sequences. Acknowledging a displayed sequence cannot clear a newer event. A
-focused visible terminal acknowledges its own events; background panes retain an
-unread marker. `session.agent_notifications` controls desktop alerts (`never`,
-`unfocused`, or `always`). Duplicate status reports do not notify again.
-
-Codex hooks include permission requests, tool completion and interruption. A
-permission request reports an approval boundary; another hook may approve it
-without displaying a human prompt, so the state clears when execution resumes.
-See the [Codex hook contract](https://learn.chatgpt.com/docs/hooks).
-
-The application tray aggregates reported agents across open Bootty windows. Its
-unread count and menu update from the same projection as the Dock panel. A menu
-entry focuses its captured pane in its originating window; entries from an older
-menu revision are discarded. The native menu is capped at 128 agent rows, with
-links to each window's full Agents panel. Closing the last reporting window
-removes the tray; the tray never changes close or quit behavior.
-
-macOS and Windows use native status/tray icons. Linux uses StatusNotifierItem on
-a background service thread, with coalesced updates and shutdown when the owner
-drops. A desktop without a tray service retains all window controls.
+Settings does not offer bundled hook installation. Existing user provider
+configuration and custom Lua or Luau files are preserved; custom scripts are
+reported as unsupported and are not executed. Existing ingress wire values
+remain accepted by the legacy library boundary, but primary terminal launch and
+activity do not depend on that ingress.
