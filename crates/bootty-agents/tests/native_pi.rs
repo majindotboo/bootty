@@ -1539,3 +1539,33 @@ fn pi_interrupt_cancels_pending_ui_before_waiting_for_abort(#[case] method: &str
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
     session.stop();
 }
+
+#[rstest]
+#[case::failed("error", Some("Model is unsupported for this account"))]
+#[case::completed("stop", None)]
+fn resumed_pi_retains_the_last_provider_failure(
+    #[case] stop_reason: &str,
+    #[case] error: Option<&str>,
+) {
+    let root = TempDir::new().unwrap();
+    let config = config(root.path()).unwrap();
+    fs::write(root.path().join("history.json"), json!([
+        {"role":"user","timestamp":1,"content":"hi"},
+        {"role":"assistant","timestamp":2,"content":[],"stopReason":stop_reason,"errorMessage":error}
+    ]).to_string()).unwrap();
+    let session = NativeAgentSession::spawn(config).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    assert_eq!(snapshot.error.as_deref(), error);
+    if let Some(error) = error {
+        assert!(
+            snapshot
+                .transcript
+                .iter()
+                .any(|item| item.role == "assistant" && item.text == error)
+        );
+    }
+    session.send_prompt("next message").unwrap();
+    assert_eq!(session.snapshot().error, None);
+    session.stop();
+}

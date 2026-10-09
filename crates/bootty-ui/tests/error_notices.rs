@@ -9,7 +9,7 @@ use rstest::rstest;
 )]
 #[case(
     "connect to rmux daemon: connection refused",
-    "The terminal is unavailable. Try reconnecting."
+    "Connect to rmux daemon: connection refused."
 )]
 #[case("command deadline expired", "The command took too long. Try again.")]
 #[case(
