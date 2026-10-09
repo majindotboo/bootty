@@ -35,9 +35,7 @@ use bootty_ui::gpui::{InputEvent, Key, Modifiers, Point, PointerButton};
 use bootty_ui::product_dialogs::terminal_find::{
     FindDirection, TerminalFindModel, TerminalFindOutput,
 };
-use bootty_ui::{
-    AppEffect, AppState, CursorIcon, ModalDialog, presentation::dialogs::NewSessionPickerEvent,
-};
+use bootty_ui::{AppEffect, AppState, CursorIcon, ModalDialog};
 
 #[path = "support/frames.rs"]
 mod frames;
@@ -105,6 +103,7 @@ impl MuxAppBackendProvider for RmuxHostPolicyProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::TerminalOsc,
+
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
         }
@@ -144,6 +143,7 @@ fn state_with_script_on_backend(
         ..BoottyConfig::default()
     };
     config.session.shell = Some(script.path().to_string_lossy().into_owned());
+    config.session.working_directory = Some(std::env::temp_dir());
     let backends = if backend == MultiplexerBackendConfig::Rmux {
         rmux_host_policy_backends()
     } else {
@@ -155,13 +155,23 @@ fn state_with_script_on_backend(
 }
 
 fn submit(state: &mut AppState, action: &str) -> Option<CommandOutcome> {
+    submit_invocation(
+        state,
+        CommandInvocation::from_action(action, Caller::Socket),
+    )
+}
+
+fn submit_invocation(
+    state: &mut AppState,
+    invocation: CommandInvocation,
+) -> Option<CommandOutcome> {
     let started = Instant::now();
     let (response, outcomes) = mpsc::channel();
     state
         .app_command_sender(Caller::Socket)
         .try_send(AppCommandRequest {
             creation_receipt: None,
-            invocation: CommandInvocation::from_action(action, Caller::Socket),
+            invocation,
             deadline: started
                 .checked_add(PANE_BUDGET)
                 .expect("pane deadline fits"),
@@ -182,35 +192,101 @@ fn submit(state: &mut AppState, action: &str) -> Option<CommandOutcome> {
     None
 }
 
+fn create_terminal_surface(state: &mut AppState, action: &str) {
+    let opened = submit(state, action);
+    assert!(
+        matches!(opened, Some(CommandOutcome::Success { .. })),
+        "{action}: {opened:?}"
+    );
+    let request = state
+        .pending_new_surface()
+        .expect("surface chooser is open")
+        .id;
+    let created = submit_invocation(
+        state,
+        CommandInvocation::new(
+            "surface.choose",
+            vec![request.to_string(), "terminal".to_owned()],
+            Caller::Socket,
+        ),
+    )
+    .expect("terminal creation completes");
+    let CommandOutcome::Success { value, .. } = created else {
+        panic!(
+            "{action} terminal creation failed: {created:?}; last error: {:?}",
+            state.last_error()
+        );
+    };
+    let target = value
+        .get("terminal")
+        .or_else(|| value.get("created"))
+        .expect("canonical created terminal target")
+        .clone();
+    // The headless fixture performs the focus that the host's accepted surface attachment owns.
+    let mut focus = CommandInvocation::new("agents.focus", Vec::new(), Caller::Socket);
+    focus.target = Some(serde_json::from_value(target).expect("issued terminal target"));
+    let focused = submit_invocation(state, focus);
+    assert!(
+        matches!(focused, Some(CommandOutcome::Success { .. })),
+        "{focused:?}"
+    );
+}
+
 fn start_two_panes(state: &mut AppState) -> (String, String) {
     assert!(matches!(
         submit(state, "new_mux_session"),
         Some(CommandOutcome::Success { .. })
     ));
-    assert!(matches!(
-        state.modal_dialog(),
-        Some(ModalDialog::NewSession(_))
-    ));
-    state.apply_picker_event(NewSessionPickerEvent::CreateSession {
-        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-    });
+    let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
+        panic!("new session form is open");
+    };
+    let id = dialog.spec().id;
+    state.apply_dialog_intent(
+        &bootty_gpui::DialogIntent::FieldChanged {
+            dialog: id,
+            field: "mode".to_owned(),
+            value: "Terminal".to_owned(),
+        },
+        &mut Vec::new(),
+    );
     let deadline = Instant::now()
         .checked_add(PANE_BUDGET)
         .expect("pane deadline fits");
-    while Instant::now() < deadline && state.focused_pane().is_none() {
+    let mut submitted = false;
+    while Instant::now() < deadline
+        && (state.modal_dialog().is_some() || state.focused_pane().is_none())
+    {
         state.update_frame(frames::frame(Instant::now(), Vec::new()));
+        // Rendering owns dialog-result polling, including successful Start dismissal.
+        let _ = state.dialog_projection();
+        if !submitted && let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() {
+            let spec = dialog.spec();
+            if spec.rows[0].enabled {
+                state.apply_dialog_intent(
+                    &bootty_gpui::DialogIntent::Activate {
+                        dialog: spec.id,
+                        row: spec.rows[0].id.clone(),
+                        action: bootty_gpui::ActionId::new("start-session"),
+                        payload: bootty_gpui::DialogPayload::None,
+                    },
+                    &mut Vec::new(),
+                );
+                submitted = true;
+            }
+        }
         thread::sleep(Duration::from_millis(5));
     }
+    let start_projection = state.dialog_projection();
+    assert!(
+        state.modal_dialog().is_none(),
+        "Terminal Start did not complete; last error: {:?}; dialog: {start_projection:?}",
+        state.last_error(),
+    );
     assert!(
         state.focused_pane().is_some(),
         "new session has no pane target"
     );
-    let split = submit(state, "split_right");
-    assert!(
-        matches!(split, Some(CommandOutcome::Success { .. })),
-        "split right failed: {split:?}; last error: {:?}",
-        state.last_error()
-    );
+    create_terminal_surface(state, "split_right");
     let focused = state.focused_pane().expect("focused native pane");
     let other = state
         .pane_rects(SurfaceRect::from_min_size(0.0, 0.0, 200.0, 100.0), 4.0)
@@ -689,10 +765,7 @@ fn queued_pointer_input_is_discarded_when_its_terminal_window_changes() {
     let (first, second) = start_two_panes(&mut state);
     wait_for_pane_text(&mut state, &first, "ready");
     wait_for_pane_text(&mut state, &second, "ready");
-    assert!(matches!(
-        submit(&mut state, "new_tab"),
-        Some(CommandOutcome::Success { .. })
-    ));
+    create_terminal_surface(&mut state, "new_tab");
     let target = state.focused_pane().unwrap();
     wait_for_pane_text(&mut state, &target, "ready");
     let surface = TerminalSurface::for_rect(

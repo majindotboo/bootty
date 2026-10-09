@@ -369,6 +369,8 @@ impl AppState {
                 return 0;
             }
         };
+        self.revoke_current_terminal_agent_recovery();
+        let activity = self.current_terminal_activity_identity();
         if let Err(error) = self
             .workspace
             .active
@@ -378,6 +380,13 @@ impl AppState {
         {
             self.record_error(error);
             return 0;
+        }
+        if let Some((scope, identity)) = activity {
+            self.record_session_activity(
+                scope,
+                &identity,
+                crate::clock::ClockSnapshot::now().epoch,
+            );
         }
         1
     }
@@ -455,8 +464,25 @@ impl AppState {
         self.ensure_sidebar_hovered_session();
     }
 
-    pub(crate) fn apply_sidebar_action(&mut self, action: SidebarAction) -> bool {
+    pub(crate) fn apply_sidebar_action(
+        &mut self,
+        action: SidebarAction,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
         match action {
+            SidebarAction::ToggleGrouping => return self.toggle_session_grouping(effects),
+            SidebarAction::SortManual => {
+                return self.set_session_sort_order(
+                    bootty_config::config::SidebarSortOrder::Manual,
+                    effects,
+                );
+            }
+            SidebarAction::SortRecentActivity => {
+                return self.set_session_sort_order(
+                    bootty_config::config::SidebarSortOrder::RecentActivity,
+                    effects,
+                );
+            }
             SidebarAction::Ignore => {}
             SidebarAction::PreviousSession => self.move_sidebar_hover(-1),
             SidebarAction::NextSession => self.move_sidebar_hover(1),
@@ -465,8 +491,34 @@ impl AppState {
         }
         true
     }
+    pub(super) fn sidebar_navigation_targets(&self) -> Vec<ScopedSessionTarget> {
+        let mut targets = self.session_navigation_targets();
+        if self.config().sidebar.group_by_project {
+            targets.retain(|target| {
+                let Some(binding) = self.workspace.binding(target.scope) else {
+                    return false;
+                };
+                let cwd = binding
+                    .mux()
+                    .session_by_id_or_name(&target.session_id)
+                    .and_then(|session| session.anchor.cwd.as_deref())
+                    .or_else(|| {
+                        binding
+                            .sessions()
+                            .get(&target.session_id)
+                            .map(|saved| saved.cwd.as_str())
+                    });
+                !self
+                    .workspace
+                    .registered_projects(target.scope)
+                    .any(|project| project.collapsed && Some(project.cwd.as_str()) == cwd)
+            });
+        }
+        targets
+    }
+
     fn ensure_sidebar_hovered_session(&mut self) {
-        let targets = self.session_navigation_targets();
+        let targets = self.sidebar_navigation_targets();
         if self
             .sidebar_hovered_session
             .as_ref()
@@ -481,11 +533,12 @@ impl AppState {
             .mux()
             .selected_session()
             .and_then(|selected| self.session_target_matching(selected))
+            .filter(|target| targets.contains(target))
             .or_else(|| targets.into_iter().next());
     }
     fn move_sidebar_hover(&mut self, delta: isize) {
         self.ensure_sidebar_hovered_session();
-        let targets = self.session_navigation_targets();
+        let targets = self.sidebar_navigation_targets();
         let Some(current) = self
             .sidebar_hovered_session
             .as_ref()
@@ -506,7 +559,7 @@ impl AppState {
         };
         self.sidebar_hovered_session = targets.get(next).cloned();
     }
-    fn activate_sidebar_hovered_session(&mut self) -> bool {
+    pub(super) fn activate_sidebar_hovered_session(&mut self) -> bool {
         self.ensure_sidebar_hovered_session();
         let activated = self.sidebar_hovered_session.clone().is_some_and(|target| {
             let unclaimed = target.scope == self.workspace.active.binding.scope()
@@ -514,7 +567,28 @@ impl AppState {
                     .unclaimed_sessions()
                     .iter()
                     .any(|session| session.session_id == target.session_id);
-            if unclaimed {
+            let detached = self.workspace.binding(target.scope).is_some_and(|binding| {
+                binding.sessions().contains(&target.session_id)
+                    && binding.session_attachment(&target.session_id).is_none()
+            });
+            if detached && let Some(invocation) = self.saved_native_conversation_invocation(&target)
+            {
+                self.commands.queue(invocation);
+                (self.repaint)();
+                true
+            } else if detached {
+                let Some(invocation) = self.saved_session_invocation(
+                    target.scope,
+                    "session.reopen",
+                    vec![target.session_id],
+                ) else {
+                    return false;
+                };
+                matches!(
+                    self.dispatch_command(invocation, ViewportSnapshot::default(), &mut Vec::new()),
+                    bootty_control::CommandOutcome::Success { .. }
+                )
+            } else if unclaimed {
                 self.adopt_and_activate_scoped_session(&target)
             } else {
                 self.activate_scoped_session_from_ui(&target)
@@ -523,15 +597,33 @@ impl AppState {
         self.input_focus = InputFocus::Terminal;
         activated
     }
+    pub(crate) fn set_displayed_sessions(&mut self, sessions: Vec<ScopedSessionTarget>) {
+        self.displayed_sessions = Some(sessions);
+    }
+
     pub(super) fn session_navigation_targets(&self) -> Vec<ScopedSessionTarget> {
         let mut targets = self
             .binding_session_groups()
             .into_iter()
             .flat_map(|group| {
-                group
+                let mut targets = group
                     .sessions
                     .into_iter()
-                    .map(move |session| ScopedSessionTarget::new(group.scope, session.id))
+                    .map(|session| ScopedSessionTarget::new(group.scope, session.id))
+                    .collect::<Vec<_>>();
+                if let Some(binding) = self.workspace.binding(group.scope) {
+                    targets.extend(
+                        binding
+                            .sessions()
+                            .sessions()
+                            .iter()
+                            .filter(|saved| binding.session_attachment(&saved.identity).is_none())
+                            .map(|saved| {
+                                ScopedSessionTarget::new(group.scope, saved.identity.clone())
+                            }),
+                    );
+                }
+                targets
             })
             .collect::<Vec<_>>();
         targets.extend(self.unclaimed_sessions().into_iter().map(|session| {
@@ -563,6 +655,14 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
         pane_id: Option<&str>,
     ) {
+        let records_activity = matches!(&command, TerminalInputCommand::Text(text) | TerminalInputCommand::Paste(text) if !text.is_empty())
+            || matches!(&command, TerminalInputCommand::Key(_));
+        if records_activity {
+            self.revoke_current_terminal_agent_recovery();
+        }
+        let activity = records_activity
+            .then(|| self.current_terminal_activity_identity())
+            .flatten();
         let terminal: &mut dyn TerminalRuntime = match pane_id {
             Some(pane_id) => {
                 let Some(terminal) = self
@@ -582,9 +682,28 @@ impl AppState {
         let (result, hides_pointer) = Self::apply_terminal_input_to_runtime(terminal, command);
         if let Err(error) = result {
             self.record_error(error);
-        } else if hides_pointer {
-            self.hide_mouse_pointer_for_terminal_typing(effects);
+        } else {
+            if let Some((scope, identity)) = activity {
+                self.record_session_activity(
+                    scope,
+                    &identity,
+                    crate::clock::ClockSnapshot::now().epoch,
+                );
+            }
+            if hides_pointer {
+                self.hide_mouse_pointer_for_terminal_typing(effects);
+            }
         }
+    }
+
+    fn current_terminal_activity_identity(
+        &self,
+    ) -> Option<(bootty_mux::controller::SpaceId, String)> {
+        let scope = self.workspace.active.binding.scope();
+        let session = self.workspace.active.binding.mux().selected_session()?;
+        self.workspace
+            .session_identity(scope, session)
+            .map(|identity| (scope, identity))
     }
 
     fn apply_terminal_input_to_runtime(

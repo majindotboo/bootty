@@ -133,10 +133,11 @@ pub fn apply_terminal_find_intent(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandPaletteEvent {
     Close,
     Run(Command),
+    Invoke(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +164,10 @@ pub enum RenameSessionEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenameTabEvent {
     Close,
+    RenameNative {
+        target: bootty_control::CommandTarget,
+        name: String,
+    },
     Rename {
         session_id: String,
         window_id: String,
@@ -689,8 +694,67 @@ impl SpaceEditorDialog {
 pub struct CommandPaletteDialog {
     localizer: crate::i18n::Localizer,
     list: SearchableList<usize>,
-    commands: Vec<Command>,
+    commands: Vec<PaletteCommand>,
     current: CommandPaletteState,
+}
+
+enum PaletteCommand {
+    Core(Command),
+    Catalog(bootty_control::CommandDescriptor),
+}
+
+impl PaletteCommand {
+    const fn category(&self) -> crate::action_catalog::CommandCategory {
+        match self {
+            Self::Core(command) => command.category(),
+            Self::Catalog(_) => crate::action_catalog::CommandCategory::Sessions,
+        }
+    }
+
+    fn action(&self) -> &str {
+        match self {
+            Self::Core(command) => command.action(),
+            Self::Catalog(command) => &command.id,
+        }
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Self::Core(command) => command.title(),
+            Self::Catalog(command) => &command.title,
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self {
+            Self::Core(command) => command.description(),
+            Self::Catalog(command) => &command.description,
+        }
+    }
+
+    fn icon(&self) -> &str {
+        match self {
+            Self::Core(command) => command.icon(),
+            Self::Catalog(command) if command.id == "ui.sidebar.toggle_grouping" => "list",
+            Self::Catalog(command) => match command
+                .id
+                .strip_prefix("agents.")
+                .and_then(|id| id.split_once('.').map(|(provider, _)| provider))
+            {
+                Some("codex") => bootty_agents::AgentKind::Codex.icon(),
+                Some("claude") => bootty_agents::AgentKind::Claude.icon(),
+                Some("pi") => bootty_agents::AgentKind::Pi.icon(),
+                _ => "bot",
+            },
+        }
+    }
+
+    const fn core(&self) -> Option<Command> {
+        match self {
+            Self::Core(command) => Some(*command),
+            Self::Catalog(_) => None,
+        }
+    }
 }
 
 /// Synchronous application facts that the command palette can show as checked.
@@ -723,10 +787,38 @@ impl CommandPaletteDialog {
         current: CommandPaletteState,
         localizer: &crate::i18n::Localizer,
     ) -> Self {
+        Self::open_with_catalog(keybinds, current, localizer, &[])
+    }
+
+    #[must_use]
+    pub fn open_with_catalog(
+        keybinds: &[String],
+        current: CommandPaletteState,
+        localizer: &crate::i18n::Localizer,
+        descriptors: &[bootty_control::CommandDescriptor],
+    ) -> Self {
         let bindings = keybind_map(keybinds);
         let mut commands = CommandRegistry::core()
             .palette_commands()
+            .map(PaletteCommand::Core)
             .collect::<Vec<_>>();
+        commands.extend(
+            descriptors
+                .iter()
+                .filter(|command| {
+                    command.palette
+                        && !CommandRegistry::core()
+                            .palette_commands()
+                            .any(|core| core.id() == command.id)
+                        && !command
+                            .arguments
+                            .arguments
+                            .iter()
+                            .any(|argument| argument.required)
+                })
+                .cloned()
+                .map(PaletteCommand::Catalog),
+        );
         // Keep the source list in the same fixed category order as the projected groups. This
         // lets the shared Command index paths continue to map directly back to `self.commands`.
         commands.sort_by_key(|command| command.category().rank());
@@ -747,7 +839,8 @@ impl CommandPaletteDialog {
                 ));
                 entry.keywords.push(command.title().to_owned());
                 entry.trailing = command
-                    .palette_action()
+                    .core()
+                    .and_then(Command::palette_action)
                     .and_then(|action| bindings.get(action).cloned());
                 entry.keywords.push(command.action().to_owned());
                 entry
@@ -766,7 +859,8 @@ impl CommandPaletteDialog {
         self.list
             .selected_value()
             .and_then(|index| self.commands.get(*index))
-            .map(|command| command.action())
+            .and_then(PaletteCommand::core)
+            .map(Command::action)
     }
 
     pub fn spec(&self) -> DialogSpec {
@@ -774,7 +868,7 @@ impl CommandPaletteDialog {
         let mut category = None;
         let mut shown = 0_usize;
         for (visible, row) in self.list.rows().into_iter().enumerate() {
-            let Some(&command) = self.commands.get(row.source_index) else {
+            let Some(command) = self.commands.get(row.source_index) else {
                 continue;
             };
             let next_category = command.category().label();
@@ -796,7 +890,9 @@ impl CommandPaletteDialog {
                 detail: row.secondary.map(str::to_owned),
                 trailing: None,
                 keybinding: row.trailing.map(str::to_owned),
-                current: self.current.is_current(command),
+                current: command
+                    .core()
+                    .is_some_and(|command| self.current.is_current(command)),
                 enabled: true,
                 destructive: false,
                 action: Some(DialogAction::new("run").with_payload(row.source_index.to_string())),
@@ -840,8 +936,13 @@ impl CommandPaletteDialog {
                 None
             }
             DialogIntent::Activate { payload, .. } => payload_index(payload)
-                .and_then(|index| self.commands.get(index).copied())
-                .map(CommandPaletteEvent::Run),
+                .and_then(|index| self.commands.get(index))
+                .map(|command| match command {
+                    PaletteCommand::Core(command) => CommandPaletteEvent::Run(*command),
+                    PaletteCommand::Catalog(command) => {
+                        CommandPaletteEvent::Invoke(command.id.clone())
+                    }
+                }),
             _ => None,
         }
     }
@@ -1215,7 +1316,19 @@ impl DitchSessionDialog {
             text: None,
             text_label: None,
             fields: Vec::new(),
+            spaces: Vec::new(),
+            completion: None,
+            applications: Vec::new(),
+            attachments: Vec::new(),
+            models: Vec::new(),
+            projects: Vec::new(),
+            project_labels: std::collections::BTreeMap::new(),
+            selected_project: None,
+            models_loading: false,
+            model_error: None,
+            selected_model: None,
             busy: false,
+            multiline: false,
             text_hint: None,
             rows,
             empty_text: String::new(),
@@ -1327,9 +1440,9 @@ impl RenameSessionDialog {
     pub fn spec(&self) -> DialogSpec {
         let mut spec = DialogSpec::prompt(
             RENAME_SESSION_ID,
-            "Rename Session",
+            "Edit session title",
             &self.name,
-            "new session name…",
+            "Purpose of this session…",
             DialogAction::new("submit"),
         );
         spec.icon = Some("square-pen".to_owned());
@@ -1364,17 +1477,34 @@ impl RenameSessionDialog {
 }
 
 pub struct RenameTabDialog {
-    session_id: String,
-    window_id: String,
+    destination: RenameTabDestination,
     name: String,
+}
+
+enum RenameTabDestination {
+    Mux {
+        session_id: String,
+        window_id: String,
+    },
+    Native(bootty_control::CommandTarget),
 }
 
 impl RenameTabDialog {
     #[must_use]
     pub const fn open(session_id: String, window_id: String, name: String) -> Self {
         Self {
-            session_id,
-            window_id,
+            destination: RenameTabDestination::Mux {
+                session_id,
+                window_id,
+            },
+            name,
+        }
+    }
+
+    #[must_use]
+    pub const fn open_native(target: bootty_control::CommandTarget, name: String) -> Self {
+        Self {
+            destination: RenameTabDestination::Native(target),
             name,
         }
     }
@@ -1389,7 +1519,11 @@ impl RenameTabDialog {
             DialogAction::new("submit"),
         );
         spec.icon = Some("square-pen".to_owned());
-        spec.footer = Some("Clear the field to follow terminal title codes again".to_owned());
+        if matches!(self.destination, RenameTabDestination::Mux { .. }) {
+            spec.footer = Some("Clear the field to follow terminal title codes again".to_owned());
+        } else if let Some(row) = spec.rows.first_mut() {
+            row.enabled = !self.name.trim().is_empty();
+        }
         spec
     }
 
@@ -1403,10 +1537,20 @@ impl RenameTabDialog {
                 self.name.clone_from(value);
                 None
             }
-            DialogIntent::Activate { .. } => Some(RenameTabEvent::Rename {
-                session_id: self.session_id.clone(),
-                window_id: self.window_id.clone(),
-                name: self.name.trim().to_owned(),
+            DialogIntent::Activate { .. } => Some(match &self.destination {
+                RenameTabDestination::Mux {
+                    session_id,
+                    window_id,
+                } => RenameTabEvent::Rename {
+                    session_id: session_id.clone(),
+                    window_id: window_id.clone(),
+                    name: self.name.trim().to_owned(),
+                },
+                RenameTabDestination::Native(_) if self.name.trim().is_empty() => return None,
+                RenameTabDestination::Native(target) => RenameTabEvent::RenameNative {
+                    target: target.clone(),
+                    name: self.name.trim().to_owned(),
+                },
             }),
             _ => None,
         }

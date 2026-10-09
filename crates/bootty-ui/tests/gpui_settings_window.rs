@@ -331,7 +331,7 @@ fn settings_content_exposes_its_accessible_group_identity(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn settings_expose_the_eight_zed_shaped_pages_in_product_order(cx: &mut TestAppContext) {
+fn settings_expose_the_product_pages_in_order(cx: &mut TestAppContext) {
     init_zed_ui(cx);
     let (_, cx) = cx.add_window_view(|_, cx| {
         SettingsWindowProbe::with_snapshot(snapshot_with_category(SettingsCategory::General), cx)
@@ -343,6 +343,7 @@ fn settings_expose_the_eight_zed_shaped_pages_in_product_order(cx: &mut TestAppC
         ("settings-category-window-and-layout", "Window & Layout"),
         ("settings-category-panels", "Panels"),
         ("settings-category-terminal", "Terminal"),
+        ("settings-category-providers", "Providers"),
         ("settings-category-remotes", "Remotes"),
         ("settings-category-advanced", "Advanced"),
     ];
@@ -608,25 +609,20 @@ fn section_navigation_stops_at_the_real_content_end(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn selected_root_disclosure_collapses_and_expands_section_children(cx: &mut TestAppContext) {
+fn category_navigation_only_shows_sections_of_the_selected_page(cx: &mut TestAppContext) {
     init_zed_ui(cx);
     let (_, cx) = cx.add_window_view(|_, cx| {
         SettingsWindowProbe::with_snapshot(snapshot_with_category(SettingsCategory::General), cx)
     });
     assert!(cx.debug_bounds("settings-section-general").is_some());
-    let root = cx
-        .debug_bounds("settings-category-general")
-        .expect("General root is visible");
-    cx.simulate_click(disclosure_center(root), Modifiers::none());
-    cx.refresh().expect("collapse General");
+    assert!(cx.debug_bounds("settings-section-colors").is_none());
+    let appearance = cx
+        .debug_bounds("settings-category-appearance")
+        .expect("Appearance category remains visible");
+    cx.simulate_click(bounds_center(appearance), Modifiers::none());
+    cx.refresh().expect("switch settings category");
     assert!(cx.debug_bounds("settings-section-general").is_none());
-
-    let root = cx
-        .debug_bounds("settings-category-general")
-        .expect("General root remains visible");
-    cx.simulate_click(disclosure_center(root), Modifiers::none());
-    cx.refresh().expect("expand General");
-    assert!(cx.debug_bounds("settings-section-general").is_some());
+    assert!(cx.debug_bounds("settings-section-colors").is_some());
 }
 
 #[gpui_kit::test]
@@ -875,6 +871,7 @@ fn edit_config_button_requests_the_host_owned_file_editor(cx: &mut TestAppContex
     });
 }
 
+#[allow(clippy::too_many_lines)]
 fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
     GpuiSettingsSnapshot {
         category,
@@ -948,6 +945,18 @@ fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
                     "Terminal",
                     "terminal shell environment",
                     vec![toggle_row("terminal.login-shell", "Login shell")],
+                )],
+            ),
+            page(
+                SettingsCategory::Providers,
+                vec![section(
+                    "providers:codex",
+                    "Codex",
+                    "provider account profile update",
+                    vec![action_row(
+                        "agents.codex.provider.status",
+                        "Check installation",
+                    )],
                 )],
             ),
             page(
@@ -1051,16 +1060,130 @@ fn bounds_center_y(bounds: Bounds<gpui_kit::Pixels>) -> f32 {
     height.mul_add(0.5, top)
 }
 
-fn disclosure_center(bounds: Bounds<gpui_kit::Pixels>) -> gpui_kit::Point<gpui_kit::Pixels> {
-    let left: f32 = bounds.origin.x.into();
-    let top: f32 = bounds.origin.y.into();
-    let height: f32 = bounds.size.height.into();
-    point(px(left + 15.0), px(height.mul_add(0.5, top)))
-}
-
 fn assert_close(actual: f32, expected: f32, tolerance: f32) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "expected {expected}px ± {tolerance}px, got {actual}px"
     );
+}
+
+#[gpui_kit::test]
+fn provider_details_expand_independently_and_search_reveals_account_controls(
+    cx: &mut TestAppContext,
+) {
+    init_zed_ui(cx);
+    let snapshot = provider_accounts_snapshot();
+    let (probe, cx) = cx.add_window_view(|_, cx| SettingsWindowProbe::with_snapshot(snapshot, cx));
+    for (card, toggle, program) in [
+        (
+            "settings-provider-codex",
+            "settings-toggle-agents.codex.enabled",
+            "settings-item-agents.codex.program",
+        ),
+        (
+            "settings-provider-claude",
+            "settings-toggle-agents.claude.enabled",
+            "settings-item-agents.claude.program",
+        ),
+        (
+            "settings-provider-pi",
+            "settings-toggle-agents.pi.enabled",
+            "settings-item-agents.pi.program",
+        ),
+    ] {
+        assert!(cx.debug_bounds(card).is_some());
+        assert!(cx.debug_bounds(toggle).is_some());
+        assert!(cx.debug_bounds(program).is_none());
+    }
+    let expand = cx.debug_bounds("settings-provider-expand-codex").unwrap();
+    cx.simulate_click(expand.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.refresh().unwrap();
+    let disabled_login = cx
+        .debug_bounds("settings-action-agents.codex.account.login")
+        .expect("action remains discoverable");
+    cx.simulate_click(disabled_login.center(), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert!(
+            probe.intents.borrow().is_empty(),
+            "disabled sign-in emits nothing"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-item-agents.codex.program")
+            .is_some()
+    );
+    let expand = cx.debug_bounds("settings-provider-expand-claude").unwrap();
+    cx.simulate_click(expand.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.refresh().unwrap();
+    assert!(
+        cx.debug_bounds("settings-item-agents.codex.program")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-item-agents.claude.program")
+            .is_some()
+    );
+    probe.update(cx, |probe, cx| {
+        probe
+            .settings
+            .update(cx, |settings, cx| settings.apply_search("Authenticate", cx));
+    });
+    cx.run_until_parked();
+    cx.refresh().unwrap();
+    for login in [
+        "settings-action-agents.codex.account.login",
+        "settings-action-agents.claude.account.login",
+        "settings-action-agents.pi.account.login",
+    ] {
+        assert!(cx.debug_bounds(login).is_some());
+    }
+}
+
+fn provider_accounts_snapshot() -> GpuiSettingsSnapshot {
+    let items = ["codex", "claude", "pi"]
+        .into_iter()
+        .map(|provider| SettingsPageItem::Dependent {
+            parent: SettingsRow::Value {
+                id: format!("agents.{provider}.enabled"),
+                label: provider.to_owned(),
+                help: "Installed · Account not verified".to_owned(),
+                value: ScalarValue::Bool(true),
+                control: SettingsControl::Toggle,
+                enabled: true,
+            },
+            children: vec![
+                SettingsRow::Value {
+                    id: format!("agents.{provider}.program"),
+                    label: "Executable".to_owned(),
+                    help: "Provider executable".to_owned(),
+                    value: ScalarValue::Text(String::new()),
+                    control: SettingsControl::Text {
+                        placeholder: provider.to_owned(),
+                        optional: true,
+                    },
+                    enabled: true,
+                },
+                SettingsRow::Action {
+                    id: format!("agents.{provider}.account.login"),
+                    label: "Sign in".to_owned(),
+                    help: "Authenticate in a terminal tab".to_owned(),
+                    button: "Sign in…".to_owned(),
+                    enabled: false,
+                },
+            ],
+        })
+        .collect();
+    GpuiSettingsSnapshot {
+        category: SettingsCategory::Providers,
+        pages: vec![SettingsPage {
+            category: SettingsCategory::Providers,
+            title: "Providers".to_owned(),
+            search_terms: "agents accounts".to_owned(),
+            items,
+        }],
+        search: String::new(),
+        write_error: None,
+    }
 }

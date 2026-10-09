@@ -70,7 +70,7 @@ impl AppState {
         };
         Poll::Ready(Some(PendingCommandResult::Mux {
             scope: submitted.scope,
-            command: submitted.command,
+            command: Box::new(submitted.command),
             membership: submitted.membership,
             layout: submitted.layout,
             result: submitted.result,
@@ -113,7 +113,7 @@ impl AppState {
         };
         CommandDispatch::Pending(PendingCommandResult::Mux {
             scope: submitted.scope,
-            command: submitted.command,
+            command: Box::new(submitted.command),
             membership: submitted.membership,
             layout: submitted.layout,
             result: submitted.result,
@@ -151,7 +151,7 @@ impl AppState {
         );
         PendingCommandResult::Mux {
             scope: submitted.scope,
-            command: submitted.command,
+            command: Box::new(submitted.command),
             membership: submitted.membership,
             layout: submitted.layout,
             result: submitted.result,
@@ -202,24 +202,58 @@ impl AppState {
         self.commands
             .pending
             .iter()
-            .any(|pending| match &pending.result {
-                PendingCommandResult::DitchCleanup {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                }
-                | PendingCommandResult::Mux {
-                    scope: pending_scope,
-                    command: pending_command,
-                    ..
-                } => *pending_scope == scope && pending_command == command,
-                // Its create already landed; only its pane is still starting.
-                PendingCommandResult::SessionStart { .. }
-                | PendingCommandResult::Outcome(_)
-                | PendingCommandResult::Forward { .. }
-                | PendingCommandResult::Clipboard { .. }
-                | PendingCommandResult::Link { .. } => false,
-            })
+            .any(|pending| self.pending_mux_command_matches(&pending.result, scope, command))
+    }
+
+    fn pending_mux_command_matches(
+        &self,
+        pending: &PendingCommandResult,
+        scope: SpaceId,
+        command: &MuxCommand,
+    ) -> bool {
+        match pending {
+            PendingCommandResult::DitchCleanup {
+                scope: pending_scope,
+                command: pending_command,
+                ..
+            }
+            | PendingCommandResult::Mux {
+                scope: pending_scope,
+                command: pending_command,
+                ..
+            } => *pending_scope == scope && pending_command.as_ref() == command,
+            PendingCommandResult::SessionCheckpointClose { target, .. } => {
+                let MuxCommand::DitchSession { session_id } = command else {
+                    return false;
+                };
+                self.mux_resource_target(scope, ResourceKind::Session, session_id, None)
+                    .as_ref()
+                    == Some(target)
+            }
+            PendingCommandResult::NativePanelFocus {
+                command: pending, ..
+            }
+            | PendingCommandResult::NativePanelClose {
+                command: pending, ..
+            }
+            | PendingCommandResult::SurfaceCreation {
+                command: pending, ..
+            }
+            | PendingCommandResult::SurfaceRestore {
+                command: pending, ..
+            } => self.pending_mux_command_matches(&pending.result, scope, command),
+            // Its create already landed; only its pane is still starting.
+            PendingCommandResult::SessionStart { .. }
+            | PendingCommandResult::SessionAgentAssociation { .. }
+            | PendingCommandResult::SessionCheckpointCompletion { .. }
+            | PendingCommandResult::TerminalAgentRestore { .. }
+            | PendingCommandResult::TerminalAgent { .. }
+            | PendingCommandResult::Outcome(_)
+            | PendingCommandResult::NativeResume { .. }
+            | PendingCommandResult::Forward { .. }
+            | PendingCommandResult::Clipboard { .. }
+            | PendingCommandResult::Link { .. } => false,
+        }
     }
 
     pub(crate) fn submit_prepared_ditch_session_command(
@@ -234,7 +268,9 @@ impl AppState {
             Some((deadline, cancellation.clone())),
         );
         self.commands.pending.push(PendingAppCommand {
+            creation_receipt: None,
             label: "Session cleanup".to_owned(),
+            user_initiated_annotation_capture: false,
             deadline,
             cancellation,
             response: None,
@@ -264,13 +300,15 @@ impl AppState {
             repaint();
         });
         self.commands.pending.push(PendingAppCommand {
+            creation_receipt: None,
             label: "Session cleanup".to_owned(),
+            user_initiated_annotation_capture: false,
             deadline,
             cancellation,
             response: None,
             result: PendingCommandResult::DitchCleanup {
                 scope,
-                command,
+                command: Box::new(command),
                 membership,
                 result,
             },
@@ -319,6 +357,44 @@ impl AppState {
                     }
                     return outcome;
                 };
+                if scope == self.mux_scope()
+                    && matches!(
+                        command,
+                        MuxCommand::ActivateWindow { .. }
+                            | MuxCommand::ActivateWindowIndex { .. }
+                            | MuxCommand::ActivateLastWindow { .. }
+                            | MuxCommand::ActivatePane { .. }
+                            | MuxCommand::RestoreSession { .. }
+                    )
+                {
+                    self.dismiss_session_creation();
+                }
+                if matches!(
+                    command,
+                    MuxCommand::ActivateWindow { .. }
+                        | MuxCommand::ActivatePane { .. }
+                        | MuxCommand::RestoreSession { .. }
+                ) && let Some(target) = value.get("terminal")
+                {
+                    match self.resolve_command_target(
+                        "terminal.capture",
+                        Some(ResourceKind::Terminal),
+                        Some(target),
+                    ) {
+                        Ok((_, Some(exact))) => {
+                            if let Err(outcome) = self.activate_terminal_target(&exact) {
+                                return outcome;
+                            }
+                        }
+                        Ok(_) => {
+                            return CommandOutcome::StaleTarget {
+                                message: "The reopened session has no admitted terminal target"
+                                    .to_owned(),
+                            };
+                        }
+                        Err(outcome) => return outcome,
+                    }
+                }
                 serialized_command_outcome(value)
             }
             Err(error) => {
@@ -338,9 +414,65 @@ impl AppState {
         completion: &MuxCommandCompletion,
     ) -> Option<BTreeMap<String, CommandTarget>> {
         let mut value = BTreeMap::new();
+        if let MuxCommand::CreatePane {
+            session_id,
+            pane_id,
+            ..
+        } = command
+        {
+            let target = self.created_pane_target(scope, session_id, pane_id.as_deref())?;
+            value.insert("created".to_owned(), target);
+        }
+        if let MuxCommand::ActivateWindow {
+            session_id,
+            window_id,
+        }
+        | MuxCommand::ActivatePane {
+            session_id,
+            window_id,
+            ..
+        } = command
+        {
+            value.insert(
+                "terminal".to_owned(),
+                if let MuxCommand::ActivatePane { pane_id, .. } = command {
+                    let binding = self.workspace.binding(scope)?;
+                    let handle =
+                        self.binding_target_handle(scope, binding.mux().binding_generation());
+                    ExactMuxTarget::Pane(
+                        scope,
+                        session_id.clone(),
+                        window_id.clone(),
+                        pane_id.clone(),
+                    )
+                    .command_target(
+                        ResourceKind::Terminal,
+                        binding.mux(),
+                        &handle,
+                    )?
+                } else {
+                    self.mux_terminal_target(scope, session_id, window_id)?
+                },
+            );
+        }
+        // Background tab creation preserves selection, so its result carries no focused window.
+        // The backend still marks the window it just created active within the target session.
+        if let MuxCommand::NewWindow { session_id, .. } = command {
+            let binding = self.workspace.binding(scope)?;
+            let window = binding
+                .mux()
+                .backend_session_by_id_or_name(session_id)?
+                .active_window_id
+                .as_deref()?;
+            value.insert(
+                "created".to_owned(),
+                self.mux_terminal_target(scope, session_id, window)?,
+            );
+        }
         if let Some(session_id) = match command {
             MuxCommand::CreateProjectSession { session_id, .. }
-            | MuxCommand::CreateWorktreeSession { session_id, .. } => Some(session_id.as_str()),
+            | MuxCommand::CreateWorktreeSession { session_id, .. }
+            | MuxCommand::RestoreSession { session_id, .. } => Some(session_id.as_str()),
             _ => None,
         } {
             value.insert(
@@ -364,11 +496,6 @@ impl AppState {
                     Some(window_id),
                 )?,
             );
-            if matches!(command, MuxCommand::NewWindow { .. })
-                && let Some(created) = self.mux_terminal_target(scope, session_id, window_id)
-            {
-                value.insert("created".to_owned(), created);
-            }
         }
         if !value.contains_key("focused")
             && let Some(session_id) = completion.selected_session.as_deref()
@@ -379,5 +506,36 @@ impl AppState {
             );
         }
         Some(value)
+    }
+
+    fn created_pane_target(
+        &self,
+        scope: SpaceId,
+        session_id: &str,
+        parent: Option<&str>,
+    ) -> Option<CommandTarget> {
+        let runtime = self.workspace.binding(scope)?;
+        let session = runtime.mux().backend_session_by_id_or_name(session_id)?;
+        let window = session.windows.iter().find(|window| {
+            parent.map_or_else(
+                || Some(window.id.as_str()) == session.active_window_id.as_deref(),
+                |parent| {
+                    std::iter::once(&window.anchor)
+                        .chain(&window.panes)
+                        .any(|anchor| anchor.pane_id.as_deref() == Some(parent))
+                },
+            )
+        })?;
+        if window.anchor.pane_id.as_deref() == parent {
+            return None;
+        }
+        let handle = self.binding_target_handle(scope, runtime.mux().binding_generation());
+        crate::commands::ExactMuxTarget::Pane(
+            scope,
+            session.id.clone(),
+            window.id.clone(),
+            window.anchor.pane_id.clone()?,
+        )
+        .command_target(ResourceKind::Terminal, runtime.mux(), &handle)
     }
 }

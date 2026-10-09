@@ -1,19 +1,17 @@
-use super::{CommandDispatch, PendingCommandResult};
+use super::CommandDispatch;
 use crate::{AppState, recovery::fingerprint};
-use bootty_agents::LaunchShell;
-use bootty_control::{
-    Caller, CommandCancellation, CommandInvocation, CommandOutcome, ResourceKind,
-};
+use bootty_control::{CommandCancellation, CommandInvocation, CommandOutcome, ResourceKind};
 use bootty_mux::executor;
-use std::{path::Path, sync::mpsc, time::Instant};
+use std::{path::Path, time::Instant};
 impl AppState {
     pub(super) fn dispatch_recovery(
-        &self,
-        action: &str,
-        args: &[String],
+        &mut self,
+        invocation: &CommandInvocation,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let (deadline, cancellation) = executor::command_execution(execution);
+        let action = invocation.command.as_str();
+        let args = invocation.arguments.as_slice();
         if matches!(action, "recovery.resume" | "recovery.fork") {
             let Some(id) = args.first() else {
                 return CommandDispatch::Complete(CommandOutcome::Failed {
@@ -21,7 +19,13 @@ impl AppState {
                     message: "An archive ID is required".to_owned(),
                 });
             };
-            return self.relaunch_archive(id, action.ends_with("fork"), deadline, cancellation);
+            return self.relaunch_archive(
+                id,
+                action.ends_with("fork"),
+                invocation.caller,
+                deadline,
+                cancellation,
+            );
         }
         let store = self.recovery_store();
         let args = args.to_vec();
@@ -62,9 +66,10 @@ impl AppState {
         })
     }
     fn relaunch_archive(
-        &self,
+        &mut self,
         id: &str,
         fork: bool,
+        caller: bootty_control::Caller,
         deadline: Instant,
         cancellation: CommandCancellation,
     ) -> CommandDispatch {
@@ -99,10 +104,9 @@ impl AppState {
             .all_sessions()
             .iter()
             .find(|s| s.id == archive.session)
-            .or_else(|| binding.mux().all_sessions().first())
         else {
             return CommandDispatch::Complete(CommandOutcome::Unavailable {
-                message: "The original host has no session for a recovered tab".into(),
+                message: "The archive's original session is not open".into(),
             });
         };
         let Some(target) =
@@ -112,90 +116,43 @@ impl AppState {
                 message: "The recovery session is no longer addressable".into(),
             });
         };
-        let shell = if cfg!(windows) && binding.multiplexer().remote.is_none() {
-            LaunchShell::Windows
-        } else {
-            LaunchShell::Posix
-        };
-        let mut launch = agent.launch;
-        match launch.session_arguments(agent.provider, &agent.session, fork) {
-            Ok(arguments) => launch.arguments = arguments,
-            Err(e) => return CommandDispatch::Complete(CommandOutcome::Unavailable { message: e }),
-        }
-        let command = match launch.shell_command(agent.provider, shell) {
-            Ok(command) => command,
-            Err(e) => {
-                return CommandDispatch::Complete(CommandOutcome::Failed {
-                    code: "invalid_recovery".into(),
-                    message: e,
+        let exact = match self.resolve_command_target(
+            "terminal.create_tab",
+            Some(ResourceKind::Session),
+            Some(&target),
+        ) {
+            Ok((_, Some(exact))) => exact,
+            Ok(_) => {
+                return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                    message: "The original recovery destination is unavailable".to_owned(),
                 });
             }
+            Err(outcome) => return CommandDispatch::Complete(outcome),
         };
-        self.start_recovered_tab(target, command, id.to_owned(), deadline, cancellation)
-    }
-
-    fn start_recovered_tab(
-        &self,
-        target: bootty_control::CommandTarget,
-        command: String,
-        archive_id: String,
-        deadline: Instant,
-        cancellation: CommandCancellation,
-    ) -> CommandDispatch {
-        let sender = self.app_command_sender(Caller::Internal);
-        let repaint = self.repaint.clone();
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let run = || -> Result<serde_json::Value, CommandOutcome> {
-                let submit =
-                    |invocation: CommandInvocation| -> Result<CommandOutcome, CommandOutcome> {
-                        let response = sender
-                            .submit(invocation, deadline, cancellation.clone())
-                            .map_err(|e| CommandOutcome::Failed {
-                                code: "recovery_mailbox".into(),
-                                message: format!("recovery mailbox: {e:?}"),
-                            })?;
-                        response
-                            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                            .map_err(|_| CommandOutcome::deadline_exceeded())
-                    };
-                let mut tab = CommandInvocation::from_action("new_tab", Caller::Internal);
-                tab.target = Some(target);
-                let outcome = submit(tab)?;
-                let CommandOutcome::Success { value, .. } = outcome else {
-                    return Err(outcome);
-                };
-                let created: bootty_control::CommandTarget =
-                    serde_json::from_value(value.get("created").cloned().unwrap_or_default())
-                        .map_err(|e| CommandOutcome::Failed {
-                            code: "recovery_target".into(),
-                            message: e.to_string(),
-                        })?;
-                let mut paste = CommandInvocation::from_action("terminal.paste", Caller::Internal);
-                paste.target = Some(created.clone());
-                paste.arguments = vec![command];
-                let outcome = submit(paste)?;
-                if !matches!(outcome, CommandOutcome::Success { .. }) {
-                    return Err(outcome);
-                }
-                let mut enter = CommandInvocation::from_action("terminal.submit", Caller::Internal);
-                enter.target = Some(created.clone());
-                let outcome = submit(enter)?;
-                if !matches!(outcome, CommandOutcome::Success { .. }) {
-                    return Err(outcome);
-                }
-                Ok(serde_json::json!({"started":true,"target":created,"archive":archive_id}))
-            };
-            let outcome = match run() {
-                Ok(value) => CommandOutcome::Success {
-                    value,
-                    warnings: Vec::new(),
-                },
-                Err(outcome) => outcome,
-            };
-            let _ = tx.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(rx))
+        let mut launch = agent.launch;
+        if launch.account_directory.is_none() {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "This archive has no captured native account directory".to_owned(),
+            });
+        }
+        match launch.session_arguments(agent.provider, &agent.session, fork) {
+            Ok(arguments) => launch.arguments = arguments,
+            Err(error) => {
+                return CommandDispatch::Complete(CommandOutcome::Unavailable { message: error });
+            }
+        }
+        let operation = if fork { "fork" } else { "resume" };
+        let mut invocation = CommandInvocation::new(
+            format!("agents.{}.{operation}", agent.provider),
+            vec![agent.session],
+            caller,
+        );
+        invocation.target = Some(target);
+        self.dispatch_captured_terminal_agent(
+            invocation,
+            &exact,
+            Some((deadline, cancellation)),
+            launch,
+        )
     }
 }

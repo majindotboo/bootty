@@ -60,3 +60,95 @@ fn empty_font_stack_removes_the_override_and_catalog_survives_snapshot() {
         ["Berkeley Mono", "Symbols Nerd Font"]
     );
 }
+
+#[rstest]
+fn provider_profile_edits_submit_atomically_and_removal_preserves_account_files() {
+    use assert_fs::prelude::*;
+    use bootty_config::config::{commit_config_document, load_config_from_path};
+    use bootty_ui::gpui::ScalarValue;
+    let directory = assert_fs::TempDir::new().unwrap();
+    let config = directory.child("config.toml");
+    config.write_str("").unwrap();
+    let account = directory.child("account/credentials.txt");
+    account.write_str("dummy credential fixture").unwrap();
+    let mut session = SettingsSession::new(
+        AcceptedSettings {
+            revision: 1,
+            config: Arc::new(load_config_from_path(config.path()).unwrap()),
+            document: load_or_create_config_document(config.path()).unwrap(),
+            schema: Arc::new(SettingsSchema::new(
+                SettingsSchema::builtin().specs().to_vec(),
+            )),
+        },
+        Catalogs::default(),
+    );
+    assert!(session.set_custom_value(
+        "agents.codex.profiles.work.name",
+        &ScalarValue::Text("Work".to_owned())
+    ));
+    assert!(
+        session.set_custom_value(
+            "agents.codex.profiles.work.directory",
+            &ScalarValue::Text(
+                account
+                    .path()
+                    .parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        )
+    );
+    assert!(session.set_string_list(
+        "agents.codex.profiles.work.arguments",
+        &["--model".to_owned(), "literal model".to_owned()]
+    ));
+    assert!(session.set_custom_value(
+        "agents.codex.selected",
+        &ScalarValue::Text("work".to_owned())
+    ));
+    let effects = session.take_effects();
+    let [SettingsEffect::SubmitDocument(document)] = effects.as_slice() else {
+        panic!("one atomic profile submission")
+    };
+    let (accepted, ()) =
+        commit_config_document(config.path(), document.clone(), |_| Ok(())).unwrap();
+    assert_eq!(
+        accepted
+            .config
+            .agents
+            .codex
+            .selected_profile()
+            .unwrap()
+            .arguments,
+        ["--model", "literal model"]
+    );
+    session.apply_outcome(
+        bootty_ui::settings_session::SettingsOutcome::DocumentAccepted {
+            source: bootty_ui::settings_session::SettingsWriteSource::Document,
+            accepted: Box::new(AcceptedSettings {
+                revision: 2,
+                config: Arc::new(accepted.config),
+                document: accepted.document,
+                schema: Arc::new(SettingsSchema::new(
+                    SettingsSchema::builtin().specs().to_vec(),
+                )),
+            }),
+            warning: None,
+        },
+    );
+    assert!(session.set_custom_value("agents.codex.selected", &ScalarValue::Text(String::new())));
+    assert!(session.remove_custom_value("agents.codex.profiles.work"));
+    let effects = session.take_effects();
+    let [SettingsEffect::SubmitDocument(document)] = effects.as_slice() else {
+        panic!("one atomic removal submission")
+    };
+    let (accepted, ()) =
+        commit_config_document(config.path(), document.clone(), |_| Ok(())).unwrap();
+    assert_eq!(accepted.config.agents.codex.selected_profile(), None);
+    assert!(accepted.config.agents.codex.profiles.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(account.path()).unwrap(),
+        "dummy credential fixture"
+    );
+}

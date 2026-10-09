@@ -1,6 +1,7 @@
 pub mod agent_attention;
 mod clipboard;
 mod recovery;
+pub use recovery::SessionCheckpointTicket;
 mod themes;
 use bootty_mux::pane_layout::Divider;
 use std::{
@@ -44,6 +45,8 @@ mod input;
 mod keybinds;
 mod mux_actions;
 mod notifications;
+mod terminal_agent_recovery;
+mod terminal_history;
 pub use dialog_runtime::ModalDialog;
 pub use mux_actions::ExactMuxAction;
 mod recorded_chord;
@@ -192,7 +195,21 @@ pub struct OpenFilesRequest {
 /// Host actions requested by a frame update, applied by the active window adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppEffect {
+    OpenSurfaceChooser(crate::surface_creation::PendingNewSurface),
+    OpenSurfaceAgentForm(crate::surface_creation::PendingNewSurface),
+    CloseSurfaceChooser(u64),
+    NavigateSurfaceChooser {
+        id: u64,
+        action: crate::commands::SurfaceChooserAction,
+    },
+    AttachNewSurface {
+        request_id: u64,
+        target: bootty_control::CommandTarget,
+    },
     Dock(crate::commands::DockRequest),
+    NativeConversation(bootty_control::CommandTarget),
+    CloseNativeConversation(bootty_control::CommandTarget),
+    Browser(crate::commands::BrowserRequest),
     CloseWindow,
     OpenWindow,
     OpenSpaceWindow(bootty_mux::controller::SpaceId),
@@ -223,6 +240,7 @@ pub enum AppEffect {
     RestoreMacosPresentation,
     OpenUrl(String),
     OpenSettings,
+    OpenThemeSettings,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
     OpenGitChanges {
@@ -232,17 +250,25 @@ pub enum AppEffect {
         host: String,
     },
     CommandAction(crate::gpui::CommandAction),
+    ComposerAction(crate::commands::ComposerRequest),
     /// Open settings to the keybindings page focused on the given action name,
     /// adding an editable row for it if none exists yet.
     ConfigureKeybind(String),
 }
 
 pub struct AppState {
+    pub(super) pending_new_surface: Option<crate::surface_creation::PendingNewSurface>,
+    pub(super) next_surface_request_id: u64,
+    pub(super) creating_surface_request: Option<(u64, bootty_control::CommandCancellation)>,
+    pub(super) pending_surface_caller: Option<bootty_control::Caller>,
     recovery: recovery::RecoveryState,
+    terminal_agent_recoveries: Vec<mpsc::Receiver<bootty_control::CommandOutcome>>,
     image_clipboard: clipboard::ImageClipboard,
     pub(crate) localizer: crate::i18n::Localizer,
     pub(super) window_state_key: String,
+    pub(crate) native_computer_window: Option<std::num::NonZeroU32>,
     pub(super) commands: CommandRuntime,
+    pub(super) session_activity_receipt: std::cell::RefCell<Option<(CommandTarget, String, i64)>>,
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
     pub(super) last_error: Option<ErrorNotice>,
@@ -282,7 +308,8 @@ pub struct AppState {
     last_mouse_hover_pos: Option<Point>,
     dialogs: DialogRuntime,
     sidebar_hovered_session: Option<ScopedSessionTarget>,
-    theme_picker_restore_config: Option<BoottyConfig>,
+    displayed_sessions: Option<Vec<ScopedSessionTarget>>,
+    theme_picker_restore_config: Option<(BoottyConfig, AppearanceVariant)>,
     macos_non_native_fullscreen_active: bool,
     macos_non_native_fullscreen_pending_apply: bool,
     window_chrome: WindowChromeFacts,
@@ -412,18 +439,26 @@ impl AppState {
             repaint.clone(),
         )?;
         commands.refresh_agent_scopes(&workspace);
+        commands.sync_terminal_tools_policy(config);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
         let macos_non_native_fullscreen_pending_apply = macos_non_native_fullscreen_active;
 
         Ok(Self {
+            pending_new_surface: None,
+            next_surface_request_id: 1,
+            creating_surface_request: None,
+            pending_surface_caller: None,
             localizer: crate::i18n::Localizer::new(&config.locale)?,
             commands,
+            session_activity_receipt: std::cell::RefCell::new(None),
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
             last_error: keymap_diagnostic.map(ErrorNotice::from_text),
             last_drain: DrainStats::default(),
             recovery: recovery::RecoveryState::new(&window_state_key, repaint.clone())?,
+            terminal_agent_recoveries: Vec::new(),
             window_state_key,
+            native_computer_window: None,
             image_clipboard: clipboard::ImageClipboard::default(),
             notifications: notifications::TerminalNotifications::default(),
             agent_notifications: agent_attention::AgentNotifications::default(),
@@ -450,6 +485,7 @@ impl AppState {
             last_mouse_hover_pos: None,
             dialogs: DialogRuntime::default(),
             sidebar_hovered_session: None,
+            displayed_sessions: None,
             theme_picker_restore_config: None,
             macos_non_native_fullscreen_active,
             macos_non_native_fullscreen_pending_apply,
@@ -466,7 +502,9 @@ impl AppState {
 
     pub fn keymap_focus(&self) -> KeymapFocus {
         if let Some(dialog) = self.modal_dialog() {
-            return if matches!(dialog, ModalDialog::SpaceEditor(_)) {
+            return if matches!(dialog, ModalDialog::SpaceEditor(_))
+                || matches!(dialog, ModalDialog::NewSession(dialog) if dialog.is_creation_form())
+            {
                 KeymapFocus::Other
             } else {
                 KeymapFocus::Command
@@ -553,16 +591,41 @@ impl AppState {
         &mut self,
         mutate: impl FnOnce(&mut ConfigDocument) -> ConfigResult<()>,
         effects: &mut Vec<AppEffect>,
-    ) {
+    ) -> bool {
         let mut document = self.config_runtime.document().clone();
         if let Err(error) = mutate(&mut document) {
             self.record_error(error);
-            return;
+            return false;
         }
         match self.commit_settings_document(document) {
-            Ok((_, _, accepted_effects)) => effects.extend(accepted_effects),
-            Err(error) => self.record_error(error),
+            Ok((_, _, accepted_effects)) => {
+                effects.extend(accepted_effects);
+                true
+            }
+            Err(error) => {
+                self.record_error(error);
+                false
+            }
         }
+    }
+
+    pub(crate) fn toggle_session_grouping(&mut self, effects: &mut Vec<AppEffect>) -> bool {
+        let grouped = !self.config().sidebar.group_by_project;
+        self.mutate_config_document(
+            |document| document.set_bool(&["sidebar", "group-by-project"], grouped),
+            effects,
+        )
+    }
+
+    pub(crate) fn set_session_sort_order(
+        &mut self,
+        order: bootty_config::config::SidebarSortOrder,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
+        self.mutate_config_document(
+            |document| document.set_str(&["sidebar", "sort-order"], order.token()),
+            effects,
+        )
     }
 
     /// Apply a dragged sidebar width to the live config without touching disk, so the layout
@@ -662,11 +725,16 @@ impl AppState {
         effects.push(AppEffect::RequestRepaint);
     }
     fn restore_theme_picker_preview(&mut self) -> bool {
-        let Some(config) = self.theme_picker_restore_config.clone() else {
+        let Some((original, variant)) = self.theme_picker_restore_config.as_ref() else {
             return false;
         };
+        // A preview owns only appearance. Live zoom, layout and other current settings survive.
+        let mut config = self.config().clone();
+        config.appearance.clone_from(&original.appearance);
+        let variant = config.appearance.mode.variant(*variant);
         self.config_runtime.replace_preview_config(config);
-        self.publish_live_terminal_config(self.active_appearance_variant);
+        self.active_appearance_variant = variant;
+        self.publish_live_terminal_config(variant);
         true
     }
 
@@ -684,6 +752,9 @@ impl AppState {
         self.theme_picker_restore_config.is_some() && self.dialogs.is_theme_picker()
     }
     pub fn set_appearance_variant(&mut self, variant: AppearanceVariant) {
+        if let Some((_, restore_variant)) = &mut self.theme_picker_restore_config {
+            *restore_variant = variant;
+        }
         if self.active_appearance_variant == variant {
             return;
         }
@@ -992,6 +1063,10 @@ impl AppState {
     pub const fn record_pane_area(&mut self, area: SurfaceRect) {
         self.last_pane_area = Some(area);
     }
+    pub(crate) fn set_sidebar_session_cursor(&mut self, target: ScopedSessionTarget) {
+        self.sidebar_hovered_session = Some(target);
+    }
+
     pub fn activate_scoped_session_from_ui(&mut self, target: &ScopedSessionTarget) -> bool {
         let started = crate::diagnostics::latency_start();
         // A session that belongs to another Space is switched to there, not dragged over here: its
@@ -1007,6 +1082,7 @@ impl AppState {
             return false;
         }
         self.sync_terminal_panes_now();
+        self.dismiss_session_creation();
         self.sidebar_hovered_session = Some(target.clone());
         (self.repaint)();
         crate::diagnostics::trace_phase("session.activate_and_sync", started);
@@ -1068,6 +1144,7 @@ impl AppState {
                     return false;
                 }
                 self.sync_terminal_panes_now();
+                self.dismiss_session_creation();
             }
             MuxCommand::ClosePane {
                 session_id,
@@ -1115,10 +1192,6 @@ impl AppState {
             self.sync_terminal_panes_now();
         }
         changed
-    }
-    fn create_project_session_for_cwd(&mut self, cwd: &str) {
-        let command = self.workspace.project_session_command(cwd);
-        self.execute_mux_command(command);
     }
     fn move_selected_session(&mut self, delta: i32) -> bool {
         let Some(selected) = self
@@ -1583,15 +1656,9 @@ impl AppState {
             terminal_cell_height,
             terminal_scale_factor,
         );
-        let frame_config = self.config().clone();
-        let workspace_frame = self.workspace.advance_frame(
-            &frame_config,
-            self.active_appearance_variant,
-            &self.repaint,
-            now,
-            window_focused,
-        );
-        self.commands.refresh_agent_scopes(&self.workspace);
+        let workspace_frame = self.advance_workspace_frame(now, window_focused);
+        self.restore_terminal_agents(now);
+        self.reconcile_agent_ownership();
         if let Some(after) = workspace_frame.next_wake {
             effects.push(AppEffect::RepaintAfter(after));
         }
@@ -1629,6 +1696,7 @@ impl AppState {
     ) {
         self.commands.refresh_agent_scopes(&self.workspace);
         self.drain_app_commands(viewport, effects);
+        self.reconcile_orchestration();
         self.sync_agent_attention(window_focused, effects);
 
         // A command-palette choice from the previous frame runs as soon as viewport/effects are
@@ -1636,6 +1704,22 @@ impl AppState {
         if let Some(invocation) = self.commands.take_queued() {
             let _ = self.dispatch_command(invocation, viewport, effects);
         }
+    }
+
+    fn advance_workspace_frame(
+        &mut self,
+        now: Instant,
+        window_focused: bool,
+    ) -> bootty_mux::workspace::WorkspaceFrameOutcome {
+        let config = self.config().clone();
+        self.sync_pending_session_completion_scopes();
+        self.workspace.advance_frame(
+            &config,
+            self.active_appearance_variant,
+            &self.repaint,
+            now,
+            window_focused,
+        )
     }
 
     fn update_terminal_metrics(
@@ -1724,6 +1808,14 @@ impl AppState {
         change: crate::config_runtime::AcceptedConfigChange,
         effects: &mut Vec<AppEffect>,
     ) {
+        if let Some((restore_config, restore_variant)) = &mut self.theme_picker_restore_config {
+            // Accepted writes/reloads supersede a temporary preview, including theme changes.
+            restore_config.clone_from(&change.config);
+            *restore_variant = change.config.appearance.mode.variant(*restore_variant);
+        }
+        self.commands.sync_terminal_tools_policy(&change.config);
+        self.commands
+            .sync_browser_capture_policy(change.config.computer);
         if self.localizer.locale() != self.config().locale {
             match crate::i18n::Localizer::new(&self.config().locale) {
                 Ok(localizer) => self.localizer = localizer,
@@ -1750,6 +1842,7 @@ impl AppState {
         }
 
         let mut warnings = Vec::new();
+        self.sync_pending_session_completion_scopes();
         let profile_reload_error = if change.ssh_profiles_changed {
             self.workspace
                 .rebuild_profile_bindings(

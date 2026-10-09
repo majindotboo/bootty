@@ -9,7 +9,11 @@ use crate::{
     error_catalog::ErrorNotice,
     gpui::CommandAction,
 };
-use bootty_agents::{AgentKind, AgentService, command_descriptors as agent_command_descriptors};
+use bootty_agents::{
+    AgentKind, AgentService, TerminalAgentService,
+    command_descriptors as agent_command_descriptors, native_command_descriptors,
+    terminal_command_descriptors,
+};
 use bootty_control::{
     ArgumentSchema, Caller, CommandCatalogSource, CommandDescriptor, CommandInvocation,
     CommandOutcome, CompactSchema, ControlCatalog, MutationClass, ResourceKind, ValueType,
@@ -33,21 +37,31 @@ macro_rules! command_actions {
     };
 }
 
+mod browser;
+mod composer;
+mod computer;
 mod dock;
 mod files;
 mod git;
+pub use composer::ComposerRequest;
 mod jobs;
+mod orchestration;
 mod panes;
 pub(crate) mod runtime;
 mod sessions;
+mod surfaces;
 mod themes;
 
+pub use browser::{BrowserAction, BrowserRequest};
+pub use computer::ComputerCommand;
 pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
 pub use files::FileAction;
 pub use git::GitAction;
 pub use jobs::JobAction;
+pub use orchestration::{RunCommand, RunNodeRequest, capture_run_plan};
 pub use panes::PaneAction;
 pub use sessions::SessionAction;
+pub use surfaces::{SurfaceChooserAction, SurfaceCommand};
 pub use themes::ThemeAction;
 
 pub(crate) use runtime::{CommandRuntime, command_outcome_message};
@@ -66,8 +80,13 @@ pub fn command_invocation_from_catalog(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCommandExecutor {
+    Surface(SurfaceCommand),
+    Composer(crate::gpui::CommandAction),
     Synchronous(SynchronousCommand),
     Dock(DockAction, Option<u64>),
+    Browser(BrowserAction, Option<u64>),
+    Computer(ComputerCommand),
+    Orchestration(RunCommand),
     Keybind(KeybindAction),
     OpenLink(Vec<String>),
     AgentWorkspace(AgentWorkspaceAction),
@@ -114,10 +133,15 @@ struct RegisteredCommand {
 
 #[derive(Clone, Copy, Debug)]
 enum CommandExecutorResolver {
+    Surface,
     Dock(DockAction),
+    Browser,
+    Computer,
+    Orchestration,
     Keybind,
     Sidebar(SidebarAction),
     Command(crate::gpui::CommandAction),
+    Composer(crate::gpui::CommandAction),
     CurrentResource,
     PasteTerminal,
     OpenLink,
@@ -178,25 +202,32 @@ impl CommandRegistry {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
-        let Some(registered) = self.commands.get(&invocation.command) else {
-            return Err(CommandOutcome::Failed {
-                code: "unknown_command".to_owned(),
-                message: ErrorNotice::UnknownCommand(format!(
-                    "unknown command {}",
-                    invocation.command
-                ))
-                .raw_message(),
-            });
-        };
-        let descriptor = registered.descriptor.clone();
+        let registered = self.registered(&invocation.command)?;
+        let mut descriptor = registered.descriptor.clone();
         validate_arguments(&descriptor, &invocation.arguments)?;
+        let executor = Self::resolve_executor(registered.executor, &invocation, &mut descriptor)?;
+        Ok(ResolvedCommandInvocation {
+            descriptor,
+            executor: CommandExecutor::Core(executor),
+            invocation,
+        })
+    }
+
+    fn resolve_executor(
+        resolver: CommandExecutorResolver,
+        invocation: &CommandInvocation,
+        descriptor: &mut CommandDescriptor,
+    ) -> Result<CoreCommandExecutor, CommandOutcome> {
         let invalid_arguments = || CommandOutcome::Failed {
             code: "invalid_arguments".to_owned(),
             message: format!("Invalid arguments for {}", invocation.command),
         };
         let first_argument = || invocation.arguments.first().ok_or_else(invalid_arguments);
         let arguments = || invocation.arguments.clone();
-        let executor = match registered.executor {
+        let executor = match resolver {
+            CommandExecutorResolver::Surface => {
+                CoreCommandExecutor::Surface(surfaces::resolve(invocation)?)
+            }
             CommandExecutorResolver::Dock(action) => CoreCommandExecutor::Dock(
                 action,
                 invocation
@@ -206,13 +237,22 @@ impl CommandRegistry {
                     .transpose()
                     .map_err(|_| invalid_arguments())?,
             ),
-            CommandExecutorResolver::Keybind => resolve_keybind_command(&invocation)?,
+            CommandExecutorResolver::Browser => {
+                let (action, page) = browser::resolve(invocation)?;
+                CoreCommandExecutor::Browser(action, page)
+            }
+            CommandExecutorResolver::Computer => resolve_computer(invocation, descriptor)?,
+            CommandExecutorResolver::Orchestration => {
+                CoreCommandExecutor::Orchestration(RunCommand::parse(invocation)?)
+            }
+            CommandExecutorResolver::Keybind => resolve_keybind_command(invocation)?,
             CommandExecutorResolver::Sidebar(action) => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Sidebar(action))
             }
             CommandExecutorResolver::Command(action) => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Command(action))
             }
+            CommandExecutorResolver::Composer(action) => CoreCommandExecutor::Composer(action),
             CommandExecutorResolver::CurrentResource => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::CurrentResource(
                     resource_kind(first_argument()?).ok_or_else(invalid_arguments)?,
@@ -267,11 +307,17 @@ impl CommandRegistry {
                 KeybindAction::Write(first_argument()?.as_bytes().to_vec()),
             ),
         };
-        Ok(ResolvedCommandInvocation {
-            descriptor,
-            executor: CommandExecutor::Core(executor),
-            invocation,
-        })
+        Ok(executor)
+    }
+
+    fn registered(&self, command: &str) -> Result<&RegisteredCommand, CommandOutcome> {
+        self.commands
+            .get(command)
+            .ok_or_else(|| CommandOutcome::Failed {
+                code: "unknown_command".to_owned(),
+                message: ErrorNotice::UnknownCommand(format!("unknown command {command}"))
+                    .raw_message(),
+            })
     }
 
     fn from_core_commands() -> Self {
@@ -292,6 +338,10 @@ impl CommandRegistry {
                 });
         }
         register_navigation_commands(&mut commands);
+        browser::register_commands(&mut commands);
+        surfaces::register_commands(&mut commands);
+        computer::register_commands(&mut commands);
+        orchestration::register_commands(&mut commands);
         register_resource_commands(&mut commands);
         register_capture_commands(&mut commands);
         register_agents_commands(&mut commands);
@@ -303,6 +353,10 @@ impl CommandRegistry {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One finite registry defines navigation and composer commands"
+)]
 fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
     for action in SidebarAction::ALL {
         let descriptor = sidebar_descriptor(action);
@@ -360,6 +414,53 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
                     palette: false,
                 },
                 executor: CommandExecutorResolver::Command(action),
+            },
+        );
+    }
+    for (name, action, title) in [
+        (
+            "previous",
+            CommandAction::Previous,
+            "Previous Composer Suggestion",
+        ),
+        ("next", CommandAction::Next, "Next Composer Suggestion"),
+        (
+            "confirm",
+            CommandAction::Confirm,
+            "Insert Composer Suggestion",
+        ),
+        (
+            "cancel",
+            CommandAction::Cancel,
+            "Dismiss Composer Suggestions",
+        ),
+    ]
+    .into_iter()
+    .chain(
+        crate::gpui::ComposerControl::ALL
+            .into_iter()
+            .map(|control| {
+                (
+                    control.command(),
+                    CommandAction::Focus(control),
+                    control.title(),
+                )
+            }),
+    ) {
+        let id = format!("ui.composer.{name}");
+        commands.insert(
+            id.clone(),
+            RegisteredCommand {
+                descriptor: CommandDescriptor {
+                    id,
+                    title: title.into(),
+                    description: "Use the active composer controls or completion menu.".into(),
+                    mutation: MutationClass::Write,
+                    arguments: CompactSchema::default(),
+                    target: Some(ResourceKind::ApplicationWindow),
+                    palette: matches!(action, CommandAction::Focus(_)),
+                },
+                executor: CommandExecutorResolver::Composer(action),
             },
         );
     }
@@ -803,6 +904,8 @@ fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
 pub enum CommandExecutor {
     Core(CoreCommandExecutor),
     Agent(Arc<AgentService>),
+    TerminalAgent,
+    NativeAgent,
     /// The static agent catalog remains discoverable in tests and uncomposed app states.
     /// Invocation is rejected explicitly until the host supplies its event transport.
     UncomposedAgent,
@@ -819,6 +922,7 @@ pub struct ResolvedCommandInvocation {
 pub struct CommandCatalog {
     core: &'static CommandRegistry,
     agents: Option<Arc<AgentService>>,
+    terminals: Option<Arc<TerminalAgentService>>,
     control: Arc<ControlCatalog>,
 }
 
@@ -829,13 +933,17 @@ struct NativeCatalogSource {
 
 impl CommandCatalogSource for NativeCatalogSource {
     fn list(&self) -> Vec<CommandDescriptor> {
-        agent_command_descriptors()
+        let mut descriptors = agent_command_descriptors();
+        descriptors.extend(native_command_descriptors());
+        for descriptor in terminal_command_descriptors() {
+            descriptors.retain(|old| old.id != descriptor.id);
+            descriptors.push(descriptor);
+        }
+        descriptors
     }
 
     fn describe(&self, id: &str) -> Option<CommandDescriptor> {
-        agent_command_descriptors()
-            .into_iter()
-            .find(|command| command.id == id)
+        self.list().into_iter().find(|command| command.id == id)
     }
 
     fn topics(&self) -> std::collections::BTreeSet<String> {
@@ -911,6 +1019,14 @@ impl CommandCatalog {
         agents: Option<Arc<AgentService>>,
         jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
     ) -> Self {
+        Self::with_terminal_services(agents, None, jobs)
+    }
+
+    pub(crate) fn with_terminal_services(
+        agents: Option<Arc<AgentService>>,
+        terminals: Option<Arc<TerminalAgentService>>,
+        jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
+    ) -> Self {
         let core = CommandRegistry::core();
         let source = Arc::new(NativeCatalogSource {
             agents: agents.clone(),
@@ -920,6 +1036,7 @@ impl CommandCatalog {
             core,
             control: Arc::new(ControlCatalog::new(core.list().cloned().collect(), source)),
             agents,
+            terminals,
         }
     }
 
@@ -941,6 +1058,33 @@ impl CommandCatalog {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
+        if let Some(descriptor) = native_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor: CommandExecutor::NativeAgent,
+            });
+        }
+        if let Some(descriptor) = terminal_command_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == invocation.command)
+        {
+            validate_arguments(&descriptor, &invocation.arguments)?;
+            let executor = if self.terminals.is_some() {
+                CommandExecutor::TerminalAgent
+            } else {
+                CommandExecutor::UncomposedAgent
+            };
+            return Ok(ResolvedCommandInvocation {
+                descriptor,
+                invocation,
+                executor,
+            });
+        }
         if let Some(descriptor) = agent_command_descriptors()
             .into_iter()
             .find(|descriptor| descriptor.id == invocation.command)
@@ -974,6 +1118,15 @@ impl CommandCatalog {
 
 fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
     let (title, description) = match action {
+        SidebarAction::ToggleGrouping => (
+            "Toggle Session Grouping",
+            "Switch between project groups and a flat session list.",
+        ),
+        SidebarAction::SortManual => ("Sort Sessions Manually", "Keep the saved session order."),
+        SidebarAction::SortRecentActivity => (
+            "Sort Sessions by Recent Activity",
+            "Put sessions with recent accepted input first.",
+        ),
         SidebarAction::Ignore => (
             "Ignore Sidebar Input",
             "Consume a sidebar key without changing the workspace.",
@@ -1002,7 +1155,12 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
         mutation: MutationClass::Write,
         arguments: CompactSchema::default(),
         target: Some(ResourceKind::ApplicationWindow),
-        palette: false,
+        palette: matches!(
+            action,
+            SidebarAction::ToggleGrouping
+                | SidebarAction::SortManual
+                | SidebarAction::SortRecentActivity
+        ),
     }
 }
 
@@ -1100,4 +1258,20 @@ fn resource_kind(value: &str) -> Option<ResourceKind> {
         "terminal" => Some(ResourceKind::Terminal),
         _ => None,
     }
+}
+
+fn resolve_computer(
+    invocation: &CommandInvocation,
+    descriptor: &mut CommandDescriptor,
+) -> Result<CoreCommandExecutor, CommandOutcome> {
+    let command = computer::resolve(invocation)?;
+    if matches!(
+        command,
+        ComputerCommand::HostCapture
+            | ComputerCommand::HostSnapshot
+            | ComputerCommand::HostSnapshotRegion(_)
+    ) {
+        descriptor.target = Some(ResourceKind::ApplicationWindow);
+    }
+    Ok(CoreCommandExecutor::Computer(command))
 }

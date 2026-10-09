@@ -31,7 +31,6 @@ fn session(id: &str, name: &str) -> MuxSession {
         name: name.to_owned(),
         active: false,
         anchor: MuxPaneAnchor {
-            native_agent: None,
             session_id: id.to_owned(),
             ..Default::default()
         },

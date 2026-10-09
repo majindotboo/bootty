@@ -26,7 +26,8 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
         vec![
             (SettingsCategory::General, "general", "General"),
             (SettingsCategory::Appearance, "appearance", "Appearance"),
-            (SettingsCategory::Keymap, "keymap", "Keymap"),
+            (SettingsCategory::Theme, "theme", "Theme"),
+            (SettingsCategory::Keymap, "keymap", "Keyboard"),
             (
                 SettingsCategory::WindowAndLayout,
                 "window-and-layout",
@@ -34,6 +35,9 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
             ),
             (SettingsCategory::Panels, "panels", "Panels"),
             (SettingsCategory::Terminal, "terminal", "Terminal"),
+            (SettingsCategory::Browser, "browser", "Browser"),
+            (SettingsCategory::Providers, "providers", "Providers"),
+            (SettingsCategory::Permissions, "permissions", "Permissions"),
             (SettingsCategory::Remotes, "remotes", "Remotes"),
             (SettingsCategory::Advanced, "advanced", "Advanced"),
         ]
@@ -45,9 +49,20 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
 #[case(Some("permission denied"))]
 fn advanced_configuration_keeps_locations_and_write_errors_visible(
     #[case] write_error: Option<&str>,
+    #[values(None, Some("/tmp"), Some("/tmp/boot"))] home: Option<&str>,
 ) {
-    let rows =
-        advanced_configuration_rows(std::path::Path::new("/tmp/bootty/config.toml"), write_error);
+    let rows = advanced_configuration_rows(
+        std::path::Path::new("/tmp/bootty/config.toml"),
+        home.map(std::path::Path::new),
+        write_error,
+    );
+    let directory = if home == Some("/tmp") {
+        "~/bootty"
+    } else {
+        "/tmp/bootty"
+    };
+    let file = format!("{directory}/config.toml");
+    let themes = format!("{directory}/themes");
 
     let paths = rows
         .iter()
@@ -66,12 +81,12 @@ fn advanced_configuration_keeps_locations_and_write_errors_visible(
     assert_eq!(
         paths,
         vec![
-            ("config.path", "Config file", "/tmp/bootty/config.toml"),
-            ("config.directory", "Config directory", "/tmp/bootty"),
+            ("config.path", "Config file", file.as_str()),
+            ("config.directory", "Config directory", directory),
             (
                 "config.themes-directory",
                 "Themes directory",
-                "/tmp/bootty/themes"
+                themes.as_str()
             ),
         ]
     );
@@ -132,7 +147,7 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         "theme" | "colors.*" => NativeSettingsSurface::Replacement("appearance branches"),
 
         // Remotes are edited as one lifecycle-aware form rather than independent schema leaves.
-        _ if editor == SettingEditor::Remotes => {
+        _ if matches!(editor, SettingEditor::Remotes | SettingEditor::Providers) => {
             NativeSettingsSurface::AggregateEditor(editor.name())
         }
 
@@ -269,6 +284,12 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("ssh-profiles.*.proxy-jump".to_owned(), "remotes"),
             ("ssh-profiles.*.program".to_owned(), "remotes"),
             ("ssh-profiles.*.args".to_owned(), "remotes"),
+            ("agents.*.enabled".to_owned(), "providers"),
+            ("agents.*.program".to_owned(), "providers"),
+            ("agents.*.selected".to_owned(), "providers"),
+            ("agents.*.profiles.*.name".to_owned(), "providers"),
+            ("agents.*.profiles.*.directory".to_owned(), "providers"),
+            ("agents.*.profiles.*.arguments".to_owned(), "providers"),
         ]
     );
     assert_eq!(
@@ -334,7 +355,7 @@ fn appearance_mode_owns_the_branch_theme_children() {
         assert!(setting_is_visible_in_native_settings(child));
         assert_eq!(
             settings_category_for(child, "colors"),
-            SettingsCategory::Appearance
+            SettingsCategory::Theme
         );
     }
     assert_eq!(settings_dependency_for("appearance.light.theme"), None);
@@ -476,12 +497,12 @@ fn ui_terminal_font_selection_does_not_hide_unrelated_font_metrics(#[case] id: &
 #[case("when_closing_with_no_tabs", "general", SettingsCategory::General)]
 #[case("on_last_window_closed", "general", SettingsCategory::General)]
 #[case("multiplexer.backend", "general", SettingsCategory::General)]
-#[case("appearance.mode", "colors", SettingsCategory::Appearance)]
+#[case("appearance.mode", "colors", SettingsCategory::Theme)]
 #[case("font.ui-family", "text", SettingsCategory::Appearance)]
 #[case("font.family", "text", SettingsCategory::Appearance)]
 #[case("cursor.style", "appearance", SettingsCategory::Appearance)]
-#[case("sidebar.background", "colors", SettingsCategory::Appearance)]
-#[case("chrome.pane-divider-color", "colors", SettingsCategory::Appearance)]
+#[case("sidebar.background", "colors", SettingsCategory::Theme)]
+#[case("chrome.pane-divider-color", "colors", SettingsCategory::Theme)]
 #[case(
     "input.hide-mouse-pointer-while-typing",
     "appearance",

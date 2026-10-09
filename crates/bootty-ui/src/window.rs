@@ -77,13 +77,73 @@ fn with_native_window(window: &mut gpui_kit::Window, action: impl FnOnce(&NSWind
     let lookup_title = format!("bootty-window-{:?}", window.window_handle().window_id());
     window.set_window_title(&lookup_title);
     let windows = NSApplication::sharedApplication(mtm).windows();
-    if let Some(native) = windows
+    let mut matching = windows
         .into_iter()
-        .find(|native| native.title().to_string() == lookup_title)
+        .filter(|native| native.title().to_string() == lookup_title);
+    if let Some(native) = matching.next()
+        && matching.next().is_none()
     {
         action(&native);
     }
     window.set_window_title(&title);
+}
+
+/// Observe the exact owned native window, without selecting a frontmost or similarly named app.
+#[cfg(target_os = "macos")]
+pub(crate) fn native_computer_window_id(
+    window: &mut gpui_kit::Window,
+) -> Option<std::num::NonZeroU32> {
+    let mut id = None;
+    with_native_window(window, |native| {
+        id = u32::try_from(native.windowNumber())
+            .ok()
+            .and_then(std::num::NonZeroU32::new);
+    });
+    id
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) const fn native_computer_window_id(
+    _window: &mut gpui_kit::Window,
+) -> Option<std::num::NonZeroU32> {
+    None
+}
+
+/// Observe the actual content-view offset used by Wry's child, in native window-frame points.
+/// The capture worker resolves the frame-local rectangle against a fresh exact window token.
+#[cfg(target_os = "macos")]
+pub(crate) fn native_browser_capture_region(
+    window: &mut gpui_kit::Window,
+    bounds: bootty_browser::BrowserBounds,
+) -> Option<(std::num::NonZeroU32, bootty_computer::HostCaptureRegion)> {
+    let mut observed = None;
+    with_native_window(window, |native| {
+        let Some(id) = u32::try_from(native.windowNumber())
+            .ok()
+            .and_then(std::num::NonZeroU32::new)
+        else {
+            return;
+        };
+        let Some(content) = native.contentView() else {
+            return;
+        };
+        let frame = native.frame();
+        let content = content.frame();
+        observed = Some((
+            id,
+            bootty_computer::HostCaptureRegion {
+                frame_width: frame.size.width,
+                frame_height: frame.size.height,
+                rect: bootty_computer::DisplayBounds {
+                    x: content.origin.x + bounds.x,
+                    y: frame.size.height - content.origin.y - content.size.height + bounds.y,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
+            },
+        ));
+    });
+    observed
 }
 
 /// Restore native resizing before GPUI captures the window's style for simple fullscreen.

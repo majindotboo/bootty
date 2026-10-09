@@ -15,6 +15,7 @@ use gpui_kit::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Presentation {
     TerminalFind,
+    NewSession,
     // Root bakes its title and chrome into open_dialog. A workflow changing its title
     // must reopen the Root even while it keeps the same dialog id.
     Modal { id: DialogId, title: Option<String> },
@@ -23,7 +24,7 @@ enum Presentation {
 
 impl Presentation {
     const fn is_modal(&self) -> bool {
-        !matches!(self, Self::TerminalFind)
+        !matches!(self, Self::TerminalFind | Self::NewSession)
     }
 }
 
@@ -34,15 +35,29 @@ struct SpaceEditorView {
 
 pub(super) struct WorkspaceDialogs {
     pub view: Entity<DialogView>,
+    pub creation_view: Entity<DialogView>,
+    creation_visible: bool,
     pub overlay: Entity<OverlayHost>,
     presentation: Option<Presentation>,
     space_editor: Option<SpaceEditorView>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl WorkspaceDialogs {
-    pub fn new(window: &mut Window, cx: &mut Context<GpuiWorkspace>) -> Self {
-        let view = cx.new(|cx| DialogView::new(window, cx));
+    pub(super) fn new_session_surface(&self) -> Option<Entity<DialogView>> {
+        self.creation_visible.then(|| self.creation_view.clone())
+    }
+
+    pub fn new(
+        sender: bootty_control::BoundAppCommandSender,
+        window: &mut Window,
+        cx: &mut Context<GpuiWorkspace>,
+    ) -> Self {
+        let view = cx.new(|cx| {
+            let mut view = DialogView::new(window, cx);
+            view.set_completion_sender(sender.clone());
+            view
+        });
         let dialog_subscription = cx.subscribe(&view, |this, _, intent: &DialogIntent, cx| {
             let mut effects = Vec::new();
             if intent.dialog_id().0 == crate::presentation::dialogs::TERMINAL_FIND_ID {
@@ -53,6 +68,18 @@ impl WorkspaceDialogs {
             this.pending_effects.extend(effects);
             cx.notify();
         });
+        let creation_view = cx.new(|cx| {
+            let mut view = DialogView::new(window, cx);
+            view.set_completion_sender(sender);
+            view
+        });
+        let creation_subscription =
+            cx.subscribe(&creation_view, |this, _, intent: &DialogIntent, cx| {
+                let mut effects = Vec::new();
+                this.state.apply_dialog_intent(intent, &mut effects);
+                this.pending_effects.extend(effects);
+                cx.notify();
+            });
         let overlay = cx.new(|_| OverlayHost::new());
         let overlay_subscription =
             cx.subscribe(&overlay, |this, _, _: &gpui_kit::DismissEvent, cx| {
@@ -64,35 +91,61 @@ impl WorkspaceDialogs {
             });
         Self {
             view,
+            creation_view,
+            creation_visible: false,
             overlay,
             presentation: None,
             space_editor: None,
-            _subscriptions: [dialog_subscription, overlay_subscription],
+            _subscriptions: [
+                dialog_subscription,
+                creation_subscription,
+                overlay_subscription,
+            ],
         }
     }
 
     pub fn present(
         &mut self,
         projection: Option<DialogProjection>,
+        underlay: Option<DialogSpec>,
         colors: Colors,
         terminal_focus: Option<FocusHandle>,
         window: &mut Window,
         cx: &mut Context<GpuiWorkspace>,
     ) {
+        let opening_creation = !self.creation_visible;
+        self.creation_visible = underlay.is_some()
+            || matches!(&projection,
+            Some(DialogProjection::Dialog(spec)) if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline);
+        if !self.creation_visible {
+            self.creation_view
+                .update(cx, |view, cx| view.present(None, window, cx));
+        }
+        if let Some(spec) = underlay {
+            self.creation_view
+                .update(cx, |view, cx| view.present(Some(spec), window, cx));
+        }
         match projection {
-            Some(DialogProjection::Dialog(spec)) => self.present_dialog(*spec, window, cx),
+            Some(DialogProjection::Dialog(spec)) => {
+                self.present_dialog(*spec, opening_creation, window, cx);
+            }
             Some(DialogProjection::SpaceEditor(snapshot)) => {
                 self.present_space_editor(*snapshot, colors, window, cx);
             }
             None => {
+                let closing = self.presentation.is_some();
                 self.view
                     .update(cx, |view, cx| view.present(None, window, cx));
-                let closed_modal = self
-                    .presentation
-                    .as_ref()
-                    .is_some_and(Presentation::is_modal)
-                    && window.has_active_dialog(cx);
+                let closed_modal = self.presentation == Some(Presentation::NewSession)
+                    || self
+                        .presentation
+                        .as_ref()
+                        .is_some_and(Presentation::is_modal)
+                        && window.has_active_dialog(cx);
                 self.clear_presentation(window, cx);
+                if closing {
+                    cx.notify();
+                }
                 if closed_modal && let Some(focus) = terminal_focus {
                     // A picker may select a new terminal while Root remembers the old trigger.
                     schedule_focus(focus, window, cx);
@@ -116,10 +169,25 @@ impl WorkspaceDialogs {
     fn present_dialog(
         &mut self,
         spec: DialogSpec,
+        opening_creation: bool,
         window: &mut Window,
         cx: &mut Context<GpuiWorkspace>,
     ) {
         let id = spec.id.clone();
+        let new_session = id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline;
+        if new_session {
+            self.creation_view
+                .update(cx, |view, cx| view.present(Some(spec), window, cx));
+            if self.presentation != Some(Presentation::NewSession) {
+                self.clear_presentation(window, cx);
+                self.presentation = Some(Presentation::NewSession);
+                if opening_creation {
+                    schedule_focus(self.creation_view.focus_handle(cx), window, cx);
+                }
+                cx.notify();
+            }
+            return;
+        }
         self.view
             .update(cx, |view, cx| view.present(Some(spec), window, cx));
         if self.view.read(cx).is_non_modal() {
@@ -153,11 +221,16 @@ impl WorkspaceDialogs {
                 .when_some(title.clone(), Dialog::title)
                 .close_button(show_root_chrome)
                 .on_cancel(move |_, _, cx| {
-                    let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.state.close_overlay_dialogs();
-                        cx.notify();
-                    });
-                    true
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            if !workspace.state.modal_dialog_dismissible() {
+                                return false;
+                            }
+                            workspace.state.close_overlay_dialogs();
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(true)
                 })
                 .content(move |content, _, _| {
                     content

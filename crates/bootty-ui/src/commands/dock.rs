@@ -93,6 +93,7 @@ impl DockAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelCreation {
     Command(DockAction),
+    Browser,
     Context,
 }
 
@@ -141,6 +142,13 @@ pub const PANELS: &[PanelDescriptor] = &[
         description: "Inspect agent sessions, attention state, and usage quotas.",
         icon: gpui_kit::component::IconName::Bot,
         creation: PanelCreation::Command(DockAction::Agents),
+    },
+    PanelDescriptor {
+        name: "bootty.browser.page",
+        label: "Browser",
+        description: "Open a website or local development server.",
+        icon: gpui_kit::component::IconName::Globe,
+        creation: PanelCreation::Browser,
     },
     PanelDescriptor {
         name: "bootty.terminal",
