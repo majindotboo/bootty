@@ -2382,11 +2382,8 @@ fn invoke(
         return failure("Missing native session target".to_owned());
     };
     let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
-    let result = match invocation
-        .command
-        .strip_prefix("agents.native.")
-        .unwrap_or_default()
-    {
+    let operation = invocation.command.strip_prefix("agents.native.");
+    let result = match operation.unwrap_or_default() {
         "prompt" => resolve_native_prompt(service, invocation, deadline, cancellation)
             .and_then(|prompt| {
                 check_native_input(deadline, cancellation)?;
@@ -2424,6 +2421,9 @@ fn invoke(
         "completions" => service
             .completions(target)
             .and_then(|catalog| serde_json::to_value(catalog).map_err(|e| e.to_string())),
+        "models-info" => service
+            .model_catalog(target)
+            .and_then(|catalog| serde_json::to_value(catalog).map_err(|error| error.to_string())),
         "models" => service
             .models(target)
             .and_then(|models| serde_json::to_value(models).map_err(|error| error.to_string())),
@@ -2624,9 +2624,23 @@ fn query_launch_metadata(
             serde_json::to_value(names).map_err(|error| error.to_string())
         } else if invocation.command == "agents.native.catalog-info" {
             let config = discover_launch_config(invocation, captured)?;
-            let mut catalog = bootty_agents::NativeAgentSession::discover_catalog(config.clone())?;
+            let mut catalog = match invocation
+                .arguments
+                .get(6)
+                .filter(|value| value.as_str() == "refresh")
+                .map_or_else(|| service.cached_provider_catalog(&config), |_| None)
+            {
+                Some(catalog) => catalog,
+                None => bootty_agents::NativeAgentSession::discover_catalog(config.clone())?,
+            };
             service.mark_model_favorites(&config, &mut catalog.models);
-            service.cache_model_catalog(&config, &catalog.models)?;
+            service.cache_provider_catalog_for_invocation(
+                &config,
+                invocation,
+                &captured.context.preferences,
+                captured.remote.as_ref(),
+                &catalog,
+            )?;
             serde_json::to_value(catalog).map_err(|error| error.to_string())
         } else if invocation.command == "agents.native.catalog-completions" {
             discover_launch_config(invocation, captured)

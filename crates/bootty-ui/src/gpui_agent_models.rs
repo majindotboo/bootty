@@ -23,13 +23,18 @@ pub fn reasoning_label(value: &str) -> String {
 impl NativeAgentSessionView {
     pub(super) fn load_models(&mut self, window: &Window, cx: &Context<Self>) {
         if !self.provider_enabled()
-            || self.record.snapshot.status != NativeSessionStatus::Idle
+            || !matches!(
+                self.record.snapshot.status,
+                NativeSessionStatus::Idle
+                    | NativeSessionStatus::Working
+                    | NativeSessionStatus::Waiting
+            )
             || self.models.is_some()
         {
             return;
         }
         self.models = Some(Vec::new());
-        self.model_command("models", Vec::new(), window, cx);
+        self.model_command("models-info", Vec::new(), window, cx);
     }
 
     fn model_command(
@@ -83,9 +88,20 @@ impl NativeAgentSessionView {
                     return;
                 }
                 match result {
-                    Ok(CommandOutcome::Success { value, .. })
-                        if matches!(operation.as_str(), "models" | "favorite") =>
-                    {
+                    Ok(CommandOutcome::Success { value, .. }) if operation == "models-info" => {
+                        match serde_json::from_value::<bootty_agents::NativeProviderCatalog>(value)
+                        {
+                            Ok(catalog) => {
+                                this.models = Some(catalog.models);
+                                this.provider_permissions = catalog.permissions;
+                                this.error = None;
+                            }
+                            Err(error) => {
+                                this.error = Some(format!("Invalid provider catalog: {error}"));
+                            }
+                        }
+                    }
+                    Ok(CommandOutcome::Success { value, .. }) if operation == "favorite" => {
                         match serde_json::from_value::<Vec<bootty_agents::NativeModelOption>>(value)
                         {
                             Ok(models) if !models.is_empty() => {
@@ -252,9 +268,9 @@ impl NativeAgentSessionView {
                     Button::new("native-model")
                         .ghost()
                         .small()
-                        .disabled(self.pending.contains("models") || busy)
-                        .loading(self.pending.contains("models"))
-                        .accessibility_label(if self.pending.contains("models") {
+                        .disabled(self.pending.contains("models-info") || busy)
+                        .loading(self.pending.contains("models-info"))
+                        .accessibility_label(if self.pending.contains("models-info") {
                             "Loading models"
                         } else if self.error.is_some() {
                             "Retry loading models"
@@ -284,10 +300,17 @@ impl NativeAgentSessionView {
     }
 
     pub(super) fn render_permission_control(&self, cx: &Context<Self>) -> impl IntoElement {
-        let mode = self.record.config.permissions;
+        let mode = if self.record.config.permissions
+            == bootty_agents::NativePermissionMode::ProviderDefault
+        {
+            self.provider_permissions
+                .unwrap_or(bootty_agents::NativePermissionMode::ProviderDefault)
+        } else {
+            self.record.config.permissions
+        };
         let provider = self.record.config.provider;
         let label = if mode == bootty_agents::NativePermissionMode::ProviderDefault {
-            "Configured permissions"
+            "Policy unavailable"
         } else {
             mode.label()
         };

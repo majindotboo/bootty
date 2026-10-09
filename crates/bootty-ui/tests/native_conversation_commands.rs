@@ -1197,7 +1197,9 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
         .ok_or("dialog deadline overflow")?;
     // The public dialog starts discovery and enables Start only after observing its completion.
     let spec = loop {
-        let _ = dialog.poll();
+        if dialog.poll().is_some() {
+            continue;
+        }
         let spec = dialog.spec();
         if spec.rows.first().is_some_and(|row| row.enabled) {
             break spec;

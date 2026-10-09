@@ -11,7 +11,7 @@ use bootty_git::{
     discover_worktree_picker_entries, toggle_favorite_project_path,
 };
 use bootty_mux::RepaintHandle;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 pub struct NewSessionDialog {
@@ -21,9 +21,11 @@ pub struct NewSessionDialog {
     purpose: NewSessionPurpose,
     form: Option<crate::presentation::new_session_form::NewSessionForm>,
     launch: Option<PendingCreation>,
-    catalog_request: Option<bootty_control::CommandInvocation>,
-    catalog_reply: Option<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
     existing_native_ids: HashSet<String>,
+    catalog_queue: VecDeque<bootty_control::CommandInvocation>,
+    catalog_requested: HashSet<String>,
+    catalog_refresh_after: HashSet<String>,
+    catalog_pending: HashMap<String, PendingCatalog>,
     naming: Option<PendingNames>,
     starting: bool,
     launch_direction: LaunchDirection,
@@ -37,6 +39,11 @@ struct PendingNames {
     action: String,
     reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     cancellation: bootty_control::CommandCancellation,
+}
+
+struct PendingCatalog {
+    invocation: bootty_control::CommandInvocation,
+    reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
 }
 
 struct PendingCreation {
@@ -160,9 +167,11 @@ impl NewSessionDialog {
             purpose,
             form: None,
             launch: None,
-            catalog_request: None,
-            catalog_reply: None,
             existing_native_ids: HashSet::new(),
+            catalog_queue: VecDeque::new(),
+            catalog_requested: HashSet::new(),
+            catalog_refresh_after: HashSet::new(),
+            catalog_pending: HashMap::new(),
             naming: None,
             starting: false,
             launch_direction: LaunchDirection::Foreground,
@@ -211,9 +220,11 @@ impl NewSessionDialog {
             purpose: NewSessionPurpose::CreateSession,
             form: Some(form),
             launch: None,
-            catalog_request: None,
-            catalog_reply: None,
             existing_native_ids: HashSet::new(),
+            catalog_queue: VecDeque::new(),
+            catalog_requested: HashSet::new(),
+            catalog_refresh_after: HashSet::new(),
+            catalog_pending: HashMap::new(),
             naming: None,
             starting: false,
             launch_direction: LaunchDirection::Foreground,
@@ -363,9 +374,30 @@ impl NewSessionDialog {
 
     pub fn catalog_started(
         &mut self,
+        invocation: bootty_control::CommandInvocation,
         reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     ) {
-        self.catalog_reply = Some(reply);
+        if let Some(key) = catalog_request_key(&invocation) {
+            self.catalog_pending
+                .insert(key, PendingCatalog { invocation, reply });
+        }
+    }
+
+    pub fn catalog_failed(
+        &mut self,
+        invocation: &bootty_control::CommandInvocation,
+        error: String,
+    ) {
+        if invocation.command == "agents.native.catalog-info" {
+            if let Some(key) = catalog_identity_key(invocation) {
+                self.catalog_requested.remove(&key);
+            }
+            if let Some(form) = &mut self.form {
+                form.set_provider_catalog_for(invocation, Err(error));
+            }
+        } else if let Some(form) = &mut self.form {
+            form.model_error = Some(error);
+        }
     }
 
     pub fn naming_started(
@@ -417,36 +449,124 @@ impl NewSessionDialog {
         if !matches!(self.step, NewSessionStep::Form) || self.is_in_flight() {
             return None;
         }
-        let form = self.form.as_mut()?;
-        let request = form.model_catalog_invocation();
-        if request != self.catalog_request {
-            self.catalog_request.clone_from(&request);
-            self.catalog_reply = None;
-            form.model_options.clear();
-            form.provider_permissions = None;
-            form.model_error = None;
-            form.models_loading = request.is_some();
-            return request.map(NewSessionPickerEvent::Catalog);
+        let ready = self.catalog_pending.iter_mut().find_map(|(key, pending)| {
+            match pending.reply.try_recv() {
+                Ok(outcome) => Some((key.clone(), pending.invocation.clone(), Ok(outcome))),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((
+                    key.clone(),
+                    pending.invocation.clone(),
+                    Err("Provider catalog owner stopped".to_owned()),
+                )),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            }
+        });
+        if let Some((request_key, invocation, outcome)) = ready {
+            self.catalog_pending.remove(&request_key);
+            if invocation.command == "agents.native.catalog-info"
+                && let Some(identity) = catalog_identity_key(&invocation)
+                && self.catalog_refresh_after.remove(&identity)
+            {
+                let refresh = refresh_invocation(invocation);
+                self.catalog_queue.push_front(refresh);
+            } else {
+                self.apply_catalog_reply(&invocation, outcome);
+            }
+            return None;
         }
-        let reply = match self.catalog_reply.as_ref()?.try_recv() {
-            Ok(reply) => reply,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.catalog_reply = None;
-                form.set_provider_catalog(Err("Provider catalog owner stopped".to_owned()));
-                return None;
+
+        let form = self.form.as_mut()?;
+        form.hydrate_model_catalog();
+        for invocation in form.model_catalog_invocations() {
+            let Some(key) = catalog_identity_key(&invocation) else {
+                continue;
+            };
+            if self.catalog_requested.insert(key) {
+                let request = if form.cached_provider_catalog(&invocation).is_some() {
+                    refresh_invocation(invocation)
+                } else {
+                    invocation
+                };
+                self.catalog_queue.push_back(request);
             }
-        };
-        self.catalog_reply = None;
-        let models = match reply {
-            bootty_control::CommandOutcome::Success { value, .. } => {
-                serde_json::from_value(value).map_err(|error| error.to_string())
-            }
-            outcome => Err(crate::commands::command_outcome_message(&outcome)
+        }
+        self.catalog_queue
+            .pop_front()
+            .map(NewSessionPickerEvent::Catalog)
+    }
+
+    fn apply_catalog_reply(
+        &mut self,
+        invocation: &bootty_control::CommandInvocation,
+        outcome: Result<bootty_control::CommandOutcome, String>,
+    ) {
+        let result = match outcome {
+            Ok(bootty_control::CommandOutcome::Success { value, .. }) => Ok(value),
+            Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
                 .unwrap_or_else(|| "Provider catalog unavailable".to_owned())),
+            Err(error) => Err(error),
         };
-        form.set_provider_catalog(models);
-        None
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        if invocation.command == "agents.native.catalog-favorite" {
+            let mut base = invocation.clone();
+            "agents.native.catalog-info".clone_into(&mut base.command);
+            base.arguments.truncate(6);
+            match result {
+                Ok(value) => match serde_json::from_value(value) {
+                    Ok(models) => form.set_favorite_models_for(&base, models),
+                    Err(error)
+                        if form
+                            .model_catalog_invocation()
+                            .as_ref()
+                            .and_then(catalog_identity_key)
+                            == catalog_identity_key(&base) =>
+                    {
+                        form.model_error = Some(error.to_string());
+                    }
+                    Err(_) => {}
+                },
+                Err(error)
+                    if form
+                        .model_catalog_invocation()
+                        .as_ref()
+                        .and_then(catalog_identity_key)
+                        == catalog_identity_key(&base) =>
+                {
+                    form.model_error = Some(error);
+                }
+                Err(_) => {}
+            }
+            return;
+        }
+        let catalog = result
+            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
+        form.set_provider_catalog_for(invocation, catalog);
+    }
+
+    fn reload_model_catalog(&mut self) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let Some(invocation) = form.model_catalog_invocation() else {
+            return;
+        };
+        let Some(identity) = catalog_identity_key(&invocation) else {
+            return;
+        };
+        let has_pending = self.catalog_pending.values().any(|pending| {
+            pending.invocation.command == "agents.native.catalog-info"
+                && catalog_identity_key(&pending.invocation).as_deref() == Some(identity.as_str())
+        });
+        if has_pending {
+            self.catalog_refresh_after.insert(identity);
+            return;
+        }
+        self.catalog_queue
+            .retain(|queued| catalog_identity_key(queued).as_deref() != Some(identity.as_str()));
+        let refresh = refresh_invocation(invocation);
+        self.catalog_requested.insert(identity);
+        self.catalog_queue.push_front(refresh);
     }
 
     pub fn failed(&mut self, error: String) {
@@ -890,8 +1010,9 @@ impl NewSessionDialog {
                 }
                 if field == "model-favorite" {
                     let form = self.form.as_ref()?;
-                    if self.catalog_reply.is_some()
-                        || !form.model_options.iter().any(|model| model.id == *value)
+                    if self.catalog_pending.values().any(|pending| {
+                        pending.invocation.command == "agents.native.catalog-favorite"
+                    }) || !form.model_options.iter().any(|model| model.id == *value)
                     {
                         return None;
                     }
@@ -946,7 +1067,7 @@ impl NewSessionDialog {
                 if !self.worker_busy() && !self.is_in_flight() =>
             {
                 if action.0 == "reload-models" {
-                    self.catalog_request = None;
+                    self.reload_model_catalog();
                     return None;
                 }
                 self.start_form(&action.0)
@@ -1501,4 +1622,29 @@ fn select_source<T>(list: &mut SearchableList<T>, source: usize) {
     {
         list.apply(SearchableIntent::Select(visible));
     }
+}
+
+fn catalog_identity_key(invocation: &bootty_control::CommandInvocation) -> Option<String> {
+    let mut identity = invocation.clone();
+    if identity.command == "agents.native.catalog-info"
+        && identity
+            .arguments
+            .get(6)
+            .is_some_and(|argument| argument == "refresh")
+    {
+        identity.arguments.truncate(6);
+    }
+    serde_json::to_string(&identity).ok()
+}
+
+fn catalog_request_key(invocation: &bootty_control::CommandInvocation) -> Option<String> {
+    serde_json::to_string(invocation).ok()
+}
+
+fn refresh_invocation(
+    mut invocation: bootty_control::CommandInvocation,
+) -> bootty_control::CommandInvocation {
+    invocation.arguments.truncate(6);
+    invocation.arguments.push("refresh".to_owned());
+    invocation
 }

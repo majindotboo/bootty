@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_control::{CommandTarget, ResourceKind};
+use bootty_control::{CommandInvocation, CommandTarget, ResourceKind};
 use bootty_write::{NewFileMode, WriteTarget};
 use serde::{Deserialize, Serialize};
 
@@ -144,6 +144,10 @@ struct Store {
     records: Vec<NativeSessionRecord>,
     #[serde(default)]
     model_favorites: Vec<ModelFavorite>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_catalogs: BTreeMap<String, crate::NativeProviderCatalog>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_catalog_aliases: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,8 +171,8 @@ enum CreationOrigin {
     },
 }
 
-/// App-owned native session catalog. All mutations run on workers. Only provider ids/configuration
-/// persist; credentials remain with the provider. Opening a restored session resumes its identity.
+/// App-owned native sessions and bounded provider model catalogs. Credentials remain with providers.
+/// Opening a restored session resumes its existing provider identity.
 pub struct NativeAgentService {
     path: PathBuf,
     attachment_store: NativeAttachmentStore,
@@ -178,7 +182,6 @@ pub struct NativeAgentService {
     change_handler: Arc<Mutex<Option<NativeChangeHandler>>>,
     revision: Arc<AtomicU64>,
     publication: mpsc::SyncSender<()>,
-    model_catalogs: Mutex<BTreeMap<String, Vec<crate::NativeModelOption>>>,
     shutdown: Arc<AtomicBool>,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
@@ -214,6 +217,7 @@ impl NativeAgentService {
         if store.model_favorites.len() > 256 {
             return Err("Model favorites exceed 256 choices".to_owned());
         }
+        validate_model_catalog_cache(&store)?;
         let mut identities = std::collections::BTreeSet::new();
         for record in &mut store.records {
             record.config.validate_stored()?;
@@ -284,7 +288,6 @@ impl NativeAgentService {
             change_handler,
             revision,
             publication,
-            model_catalogs: Mutex::new(BTreeMap::new()),
             shutdown,
             clock,
         })
@@ -600,6 +603,20 @@ impl NativeAgentService {
         Ok(models)
     }
 
+    /// Read the model and permission metadata for this live provider account.
+    /// # Errors
+    /// Returns stale/stopped targets or unsupported/provider discovery errors.
+    pub fn model_catalog(
+        &self,
+        target: &CommandTarget,
+    ) -> Result<crate::NativeProviderCatalog, String> {
+        let session = self.resolve(target)?;
+        let mut catalog = session.catalog()?;
+        self.mark_model_favorites(&session.config, &mut catalog.models);
+        self.cache_provider_catalog(&session.config, &catalog)?;
+        Ok(catalog)
+    }
+
     /// Read advertised commands and skills through the exact live provider owner.
     /// # Errors
     /// Returns stale targets, missing provider capabilities or transport failures.
@@ -641,15 +658,82 @@ impl NativeAgentService {
         config: &NativeSessionConfig,
         models: &[crate::NativeModelOption],
     ) -> Result<(), String> {
+        let mut catalog =
+            self.cached_provider_catalog(config)
+                .unwrap_or_else(|| crate::NativeProviderCatalog {
+                    models: Vec::new(),
+                    permissions: None,
+                });
+        catalog.models = models.to_vec();
+        self.cache_provider_catalog(config, &catalog)
+    }
+
+    /// Retain a complete provider catalog under its captured account and project identity.
+    /// # Errors
+    /// Returns an invalid captured launch identity.
+    pub fn cache_provider_catalog(
+        &self,
+        config: &NativeSessionConfig,
+        catalog: &crate::NativeProviderCatalog,
+    ) -> Result<(), String> {
+        self.cache_catalog(config, catalog, None)
+    }
+
+    /// Retain a catalog and its exact launch-invocation lookup alias atomically.
+    /// # Errors
+    /// Returns an invalid captured launch identity or a durable storage error.
+    pub fn cache_provider_catalog_for_invocation(
+        &self,
+        config: &NativeSessionConfig,
+        invocation: &CommandInvocation,
+        preferences: &bootty_config::config::AgentProviderConfig,
+        remote: Option<&bootty_config::config::RemoteConfig>,
+        catalog: &crate::NativeProviderCatalog,
+    ) -> Result<(), String> {
+        let alias = model_catalog_invocation_key(invocation, preferences, remote)
+            .ok_or("Invalid catalog invocation")?;
+        self.cache_catalog(config, catalog, Some(alias))
+    }
+
+    fn cache_catalog(
+        &self,
+        config: &NativeSessionConfig,
+        catalog: &crate::NativeProviderCatalog,
+        alias: Option<String>,
+    ) -> Result<(), String> {
         let key = model_catalog_key(config).map_err(|error| error.to_string())?;
-        let mut catalogs = lock(&self.model_catalogs);
-        // Only recent account catalogs belong in memory; explicit catalog reload refreshes them.
-        if catalogs.len() >= 16 && !catalogs.contains_key(&key) {
-            catalogs.pop_first();
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let catalog_matches = candidate.model_catalogs.get(&key).is_some_and(|cached| {
+            cached.permissions == catalog.permissions && cached.models == catalog.models
+        });
+        let alias_matches = alias
+            .as_ref()
+            .is_none_or(|alias| candidate.model_catalog_aliases.get(alias) == Some(&key));
+        if catalog_matches && alias_matches {
+            return Ok(());
         }
-        catalogs.insert(key, models.to_vec());
-        drop(catalogs);
-        Ok(())
+        // Keep provider catalogs small and bounded beside the existing durable session state.
+        if candidate.model_catalogs.len() >= 16
+            && !candidate.model_catalogs.contains_key(&key)
+            && let Some((evicted, _)) = candidate.model_catalogs.pop_first()
+        {
+            candidate
+                .model_catalog_aliases
+                .retain(|_, target| target != &evicted);
+        }
+        candidate
+            .model_catalogs
+            .insert(key.clone(), catalog.clone());
+        if let Some(alias) = alias {
+            if candidate.model_catalog_aliases.len() >= 16
+                && !candidate.model_catalog_aliases.contains_key(&alias)
+            {
+                candidate.model_catalog_aliases.pop_first();
+            }
+            candidate.model_catalog_aliases.insert(alias, key);
+        }
+        self.commit(candidate)
     }
 
     #[must_use]
@@ -657,8 +741,30 @@ impl NativeAgentService {
         &self,
         config: &NativeSessionConfig,
     ) -> Option<Vec<crate::NativeModelOption>> {
+        self.cached_provider_catalog(config)
+            .map(|catalog| catalog.models)
+    }
+
+    #[must_use]
+    pub fn cached_provider_catalog(
+        &self,
+        config: &NativeSessionConfig,
+    ) -> Option<crate::NativeProviderCatalog> {
         let key = model_catalog_key(config).ok()?;
-        lock(&self.model_catalogs).get(&key).cloned()
+        lock(&self.store).model_catalogs.get(&key).cloned()
+    }
+
+    #[must_use]
+    pub fn cached_provider_catalog_for_invocation(
+        &self,
+        invocation: &CommandInvocation,
+        preferences: &bootty_config::config::AgentProviderConfig,
+        remote: Option<&bootty_config::config::RemoteConfig>,
+    ) -> Option<crate::NativeProviderCatalog> {
+        let alias = model_catalog_invocation_key(invocation, preferences, remote)?;
+        let store = lock(&self.store);
+        let key = store.model_catalog_aliases.get(&alias)?;
+        store.model_catalogs.get(key).cloned()
     }
 
     pub fn mark_model_favorites(
@@ -1799,6 +1905,26 @@ impl NativeAgentService {
     }
 }
 
+fn validate_model_catalog_cache(store: &Store) -> Result<(), String> {
+    if store.model_catalogs.len() > 16
+        || store
+            .model_catalogs
+            .keys()
+            .any(|key| key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || store.model_catalog_aliases.len() > 16
+        || store.model_catalog_aliases.iter().any(|(alias, key)| {
+            alias.len() != 64
+                || !alias.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || key.len() != 64
+                || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !store.model_catalogs.contains_key(key)
+        })
+    {
+        return Err("Invalid native model catalog cache".to_owned());
+    }
+    Ok(())
+}
+
 fn model_catalog_key(config: &NativeSessionConfig) -> Result<String, serde_json::Error> {
     let mut account = config.clone();
     account.session_id = None;
@@ -1806,9 +1932,49 @@ fn model_catalog_key(config: &NativeSessionConfig) -> Result<String, serde_json:
     account.fresh_session_id = None;
     account.model = None;
     account.reasoning_effort = None;
-    account.permissions = crate::NativePermissionMode::ProviderDefault;
     account.fast_mode = false;
-    serde_json::to_string(&account)
+    let encoded = serde_json::to_vec(&account)?;
+    Ok(catalog_cache_digest(&encoded))
+}
+
+fn model_catalog_invocation_key(
+    invocation: &CommandInvocation,
+    preferences: &bootty_config::config::AgentProviderConfig,
+    remote: Option<&bootty_config::config::RemoteConfig>,
+) -> Option<String> {
+    if invocation.command != "agents.native.catalog-info" {
+        return None;
+    }
+    let mut identity = invocation.clone();
+    if identity
+        .target
+        .as_ref()
+        .is_some_and(|target| target.kind == ResourceKind::Binding)
+    {
+        // Cached metadata follows provider/account/project, not process-local control targets.
+        identity.target = None;
+    }
+    if identity
+        .arguments
+        .get(6)
+        .is_some_and(|argument| argument == "refresh")
+    {
+        identity.arguments.truncate(6);
+    }
+    serde_json::to_vec(&(identity, preferences, remote))
+        .ok()
+        .map(|encoded| catalog_cache_digest(&encoded))
+}
+
+fn catalog_cache_digest(encoded: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    use std::fmt::Write as _;
+    let mut key = String::with_capacity(64);
+    for byte in Sha256::digest(encoded) {
+        _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 fn validate_pending_message(message: Option<&str>, has_attachments: bool) -> Result<(), String> {

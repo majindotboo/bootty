@@ -18,7 +18,7 @@ pub struct NativeModelOption {
 }
 
 /// Catalog and effective permissions from the captured provider account and project.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NativeProviderCatalog {
     pub models: Vec<NativeModelOption>,
     /// Unrecognized policies remain inherited rather than being approximated.
@@ -117,6 +117,22 @@ impl NativeAgentSession {
     /// Returns unsupported discovery, malformed catalogs, or provider transport errors.
     pub fn models(&self) -> Result<Vec<NativeModelOption>, String> {
         self.model_catalog(true)
+    }
+
+    /// Read choices and the effective policy from this session's exact provider process.
+    /// # Errors
+    /// Returns provider catalog or transport errors.
+    pub fn catalog(&self) -> Result<NativeProviderCatalog, String> {
+        Ok(NativeProviderCatalog {
+            models: self.models()?,
+            permissions: if self.config.provider == AgentKind::Pi {
+                None
+            } else if self.config.permissions == NativePermissionMode::ProviderDefault {
+                self.configured_permissions()
+            } else {
+                Some(self.config.permissions)
+            },
+        })
     }
 
     fn model_catalog(&self, bound: bool) -> Result<Vec<NativeModelOption>, String> {

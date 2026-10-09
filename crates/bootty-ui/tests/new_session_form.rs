@@ -504,7 +504,9 @@ fn ready_session_dialog(
         .checked_add(Duration::from_secs(2))
         .ok_or_else(|| anyhow::anyhow!("discovery deadline overflow"))?;
     loop {
-        let _ = dialog.poll();
+        if dialog.poll().is_some() {
+            continue;
+        }
         if dialog.spec().rows.first().is_some_and(|row| row.enabled) {
             return Ok(dialog);
         }
@@ -848,7 +850,9 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
     let mut dialog = NewSessionDialog::open_registered_form(form, &repaint, repository);
     let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
     while dialog.spec().projects.len() != 2 || !dialog.spec().rows[0].enabled {
-        dialog.poll();
+        if dialog.poll().is_some() {
+            continue;
+        }
         if dialog.spec().projects.len() == 2 && dialog.spec().rows[0].enabled {
             break;
         }
@@ -874,16 +878,14 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
 }
 
 #[rstest]
-fn permission_choices_follow_provider_capabilities_and_use_the_shared_invocation(
-    mut form: NewSessionForm,
-) {
+fn permission_choices_reset_with_provider_and_use_the_shared_invocation(mut form: NewSessionForm) {
     form.change_text("Keep this prompt");
     form.change_field("permissions", "Auto");
     assert_eq!(
         form.invocation(&form.draft.cwd).unwrap().arguments[14],
         "auto"
     );
-    form.change_field("provider", "Pi");
+    form.change_field("provider", "Claude");
     assert_eq!(
         form.draft.permissions,
         bootty_agents::NativePermissionMode::ProviderDefault
@@ -897,7 +899,7 @@ fn permission_choices_follow_provider_capabilities_and_use_the_shared_invocation
     let bootty_ui::gpui::DialogFieldKind::Choice(options) = &permissions.kind else {
         panic!("Permission menu")
     };
-    assert!(!options.iter().any(|option| option == "Auto"));
+    assert!(options.iter().any(|option| option == "Auto"));
     assert!(options.iter().any(|option| option == "Supervised"));
     form.change_field("permissions", "Supervised");
     assert_eq!(
@@ -1097,4 +1099,135 @@ fn permission_defaults_follow_the_selected_account_without_overriding_its_policy
         None
     );
     assert_eq!(form.draft.prompt, "Keep the draft");
+}
+
+#[rstest]
+fn provider_catalogs_restore_only_for_the_exact_provider_profile_and_target(
+    mut form: NewSessionForm,
+) {
+    use bootty_agents::{NativeModelOption, NativePermissionMode, NativeProviderCatalog};
+
+    let model = |id: &str| NativeModelOption {
+        id: id.to_owned(),
+        display_name: id.to_owned(),
+        reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: true,
+        is_legacy: false,
+        is_favorite: false,
+    };
+    let catalog = |id: &str, permissions| NativeProviderCatalog {
+        models: vec![model(id)],
+        permissions,
+    };
+
+    let codex_default = form
+        .model_catalog_invocation()
+        .expect("current catalog target");
+    form.set_provider_catalog_for(
+        &codex_default,
+        Ok(catalog(
+            "codex-default",
+            Some(NativePermissionMode::FullAccess),
+        )),
+    );
+    form.change_field("provider", "Claude");
+    assert_eq!(
+        form.model_options,
+        Vec::<bootty_agents::NativeModelOption>::new()
+    );
+    let claude = form
+        .model_catalog_invocation()
+        .expect("Claude catalog target");
+    form.set_provider_catalog_for(
+        &claude,
+        Ok(catalog(
+            "claude-default",
+            Some(NativePermissionMode::AutoAcceptEdits),
+        )),
+    );
+    form.change_field("provider", "Codex");
+    assert_eq!(form.model_options[0].id, "codex-default");
+    assert_eq!(
+        form.permission_selection(),
+        NativePermissionMode::FullAccess
+    );
+
+    form.change_field("profile", "Work (work)");
+    assert_eq!(
+        form.model_options,
+        Vec::<bootty_agents::NativeModelOption>::new()
+    );
+    let codex_work = form
+        .model_catalog_invocation()
+        .expect("profile catalog target");
+    assert_ne!(codex_work, codex_default);
+    form.set_provider_catalog_for(
+        &codex_work,
+        Ok(catalog(
+            "codex-work",
+            Some(NativePermissionMode::Supervised),
+        )),
+    );
+    assert_eq!(form.model_options[0].id, "codex-work");
+
+    form.set_directory("/project/other".to_owned());
+    assert_eq!(
+        form.model_options,
+        Vec::<bootty_agents::NativeModelOption>::new()
+    );
+    let other_project = form
+        .model_catalog_invocation()
+        .expect("project catalog target");
+    assert_ne!(other_project, codex_work);
+    assert!(form.models_loading);
+}
+
+#[rstest]
+fn pi_uses_provider_default_and_hides_permission_selection(mut form: NewSessionForm) {
+    use bootty_agents::NativePermissionMode;
+
+    form.change_field("provider", "Pi");
+    assert_eq!(
+        form.draft.permissions,
+        NativePermissionMode::ProviderDefault
+    );
+    form.draft.permissions = NativePermissionMode::Supervised;
+    assert!(
+        form.spec(false)
+            .fields
+            .iter()
+            .all(|field| field.id != "permissions")
+    );
+    assert_eq!(
+        form.invocation(&form.draft.cwd)
+            .expect("Pi launch")
+            .arguments
+            .get(14),
+        None
+    );
+}
+
+#[rstest]
+fn refreshing_a_warm_catalog_preserves_choices_on_failure(mut form: NewSessionForm) {
+    let invocation = form.model_catalog_invocation().unwrap();
+    form.set_provider_catalog_for(
+        &invocation,
+        Ok(bootty_agents::NativeProviderCatalog {
+            models: vec![bootty_agents::NativeModelOption {
+                id: "current".into(),
+                display_name: "Current model".into(),
+                reasoning_efforts: vec!["medium".into()],
+                default_reasoning_effort: Some("medium".into()),
+                is_default: true,
+                is_legacy: false,
+                is_favorite: false,
+            }],
+            permissions: Some(bootty_agents::NativePermissionMode::FullAccess),
+        }),
+    );
+    form.set_provider_catalog_for(&invocation, Err("Provider unavailable".into()));
+    assert_eq!(form.model_options[0].id, "current");
+    assert!(!form.models_loading);
+    assert_eq!(form.model_error.as_deref(), Some("Provider unavailable"));
 }
