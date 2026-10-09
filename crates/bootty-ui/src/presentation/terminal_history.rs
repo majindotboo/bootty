@@ -13,6 +13,7 @@ use crate::product_dialogs::searchable::{SearchableEntry, SearchableIntent, Sear
 
 const HISTORY_ID: &str = "terminal-agent-history";
 
+#[derive(Clone)]
 pub struct TerminalHistoryContext {
     pub provider: AgentKind,
     pub binding: CommandTarget,
@@ -28,16 +29,22 @@ pub enum TerminalHistoryEvent {
         invocation: CommandInvocation,
         opening: bool,
     },
+    Opened(serde_json::Value),
     Close,
 }
 
 pub struct TerminalHistoryDialog {
     context: TerminalHistoryContext,
+    providers: Vec<TerminalHistoryContext>,
+    query_index: usize,
+    accounts: std::collections::HashMap<AgentKind, std::path::PathBuf>,
+    entries: Vec<TerminalHistoryEntry>,
+    provider_filter: Option<AgentKind>,
+    provider_errors: std::collections::HashMap<AgentKind, String>,
     all_projects: bool,
     list: SearchableList<TerminalHistoryEntry>,
     pending: Option<(Receiver<CommandOutcome>, bool)>,
     error: Option<String>,
-    account_directory: Option<std::path::PathBuf>,
     omitted_entries: usize,
 }
 
@@ -52,15 +59,30 @@ struct HistoryResponse {
 impl TerminalHistoryDialog {
     #[must_use]
     pub fn new(context: TerminalHistoryContext) -> Self {
+        let all_projects = context.cwd.is_none();
         Self {
             context,
-            all_projects: false,
+            providers: Vec::new(),
+            query_index: 0,
+            accounts: std::collections::HashMap::new(),
+            entries: Vec::new(),
+            provider_filter: None,
+            provider_errors: std::collections::HashMap::new(),
+            all_projects,
             list: SearchableList::new(Vec::new()),
             pending: None,
             error: None,
-            account_directory: None,
             omitted_entries: 0,
         }
+    }
+
+    /// Browse all configured providers in one captured host, without starting an agent.
+    #[must_use]
+    pub fn all_providers(contexts: Vec<TerminalHistoryContext>) -> Option<Self> {
+        let mut dialog = Self::new(contexts.first()?.clone());
+        dialog.providers = contexts;
+        dialog.all_projects = true;
+        Some(dialog)
     }
 
     #[must_use]
@@ -70,24 +92,32 @@ impl TerminalHistoryDialog {
 
     pub fn query(&mut self) -> Option<TerminalHistoryEvent> {
         self.error = None;
+        self.provider_errors.clear();
         self.omitted_entries = 0;
         self.list.replace_entries(Vec::new());
+        self.entries.clear();
+        self.query_index = 0;
+        self.provider_query()
+    }
+
+    fn provider_query(&self) -> Option<TerminalHistoryEvent> {
+        let context = self
+            .providers
+            .get(self.query_index)
+            .unwrap_or(&self.context);
         let cwd = if self.all_projects {
             String::new()
         } else if let Some(cwd) = &self.context.cwd {
             cwd.clone()
         } else {
-            self.error = Some(
-                "The current session has no project directory. Choose All projects.".to_owned(),
-            );
             return None;
         };
         let mut invocation = CommandInvocation::new(
-            format!("agents.{}.history", self.context.provider),
-            vec![cwd, self.context.profile.clone()],
+            format!("agents.{}.history", context.provider),
+            vec![cwd, context.profile.clone()],
             Caller::Internal,
         );
-        if let Some(account) = &self.account_directory {
+        if let Some(account) = self.accounts.get(&context.provider) {
             invocation
                 .arguments
                 .push(account.to_string_lossy().into_owned());
@@ -103,9 +133,9 @@ impl TerminalHistoryDialog {
         self.pending = Some((response, opening));
     }
 
-    pub fn failed(&mut self, message: String) {
+    pub fn failed(&mut self, message: &str) {
         self.pending = None;
-        self.error = Some(message);
+        self.error = Some(bootty_agents::native_error_message(message));
     }
 
     pub fn poll(&mut self) -> Option<TerminalHistoryEvent> {
@@ -124,29 +154,70 @@ impl TerminalHistoryDialog {
             CommandOutcome::Success { value, .. } if !opening => {
                 match serde_json::from_value::<HistoryResponse>(value) {
                     Ok(response) => {
-                        self.account_directory = Some(response.account_directory);
-                        self.omitted_entries = response.omitted_entries;
-                        self.list.replace_entries(
-                            response.entries.into_iter().map(history_entry).collect(),
-                        );
+                        let provider = self
+                            .providers
+                            .get(self.query_index)
+                            .unwrap_or(&self.context)
+                            .provider;
+                        self.accounts.insert(provider, response.account_directory);
+                        self.omitted_entries = self
+                            .omitted_entries
+                            .saturating_add(response.omitted_entries);
+                        self.entries.extend(response.entries);
+                        self.refresh_entries();
                     }
                     Err(_) => {
-                        self.failed("Provider history returned unsupported metadata".to_owned());
+                        self.failed("Provider history returned unsupported metadata");
                     }
                 }
-                None
+                self.next_provider()
             }
-            CommandOutcome::Success { .. } => Some(TerminalHistoryEvent::Close),
+            CommandOutcome::Success { value, .. } => Some(TerminalHistoryEvent::Opened(value)),
             outcome => {
-                self.error = crate::commands::command_outcome_message(&outcome);
-                None
+                if opening || self.providers.is_empty() {
+                    self.error = crate::commands::command_outcome_message(&outcome)
+                        .map(|message| bootty_agents::native_error_message(&message));
+                } else if let Some(context) = self.providers.get(self.query_index) {
+                    self.provider_errors.insert(
+                        context.provider,
+                        format!(
+                            "{} history could not load. Check its account in Settings.",
+                            context.provider
+                        ),
+                    );
+                }
+                if opening { None } else { self.next_provider() }
             }
         }
+    }
+
+    fn next_provider(&mut self) -> Option<TerminalHistoryEvent> {
+        self.query_index = self.query_index.saturating_add(1);
+        (self.query_index < self.providers.len())
+            .then(|| self.provider_query())
+            .flatten()
+    }
+
+    fn refresh_entries(&mut self) {
+        self.entries
+            .sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
+        self.list.replace_entries(
+            self.entries
+                .iter()
+                .filter(|entry| {
+                    self.provider_filter
+                        .is_none_or(|provider| entry.provider == provider)
+                })
+                .cloned()
+                .map(history_entry)
+                .collect(),
+        );
     }
 
     #[must_use]
     pub fn spec(&self) -> DialogSpec {
         let busy = self.pending.is_some();
+        let error = self.visible_error();
         let mut rows = self
             .list
             .rows()
@@ -160,15 +231,15 @@ impl TerminalHistoryDialog {
                 );
                 row.detail = entry.secondary.map(str::to_owned);
                 row.trailing = entry.trailing.map(str::to_owned);
-                row.icon = Some(self.context.provider.icon().to_owned());
+                row.icon = Some(entry.value.provider.icon().to_owned());
                 row.enabled = !busy;
                 row
             })
             .collect::<Vec<_>>();
-        if rows.is_empty() || self.error.is_some() || busy {
+        if rows.is_empty() || error.is_some() || busy {
             let mut status = DialogRow::action(
                 "status",
-                self.error.clone().unwrap_or_else(|| {
+                error.unwrap_or_else(|| {
                     if self.is_in_flight() {
                         "Opening session…"
                     } else if busy {
@@ -192,7 +263,7 @@ impl TerminalHistoryDialog {
             },
             DialogAction::new("toggle-scope"),
         );
-        scope.enabled = !busy;
+        scope.enabled = !busy && self.context.cwd.is_some();
         scope.icon = Some("folder".to_owned());
         rows.push(scope);
         if self.omitted_entries > 0 {
@@ -209,16 +280,64 @@ impl TerminalHistoryDialog {
         }
         let mut spec = DialogSpec::searchable(
             HISTORY_ID,
-            format!("{} history", self.context.provider),
+            if !self.providers.is_empty() {
+                "History".to_owned()
+            } else if self.context.session.kind == bootty_control::ResourceKind::Binding {
+                format!("Resume {} session", self.context.provider)
+            } else {
+                format!("{} history", self.context.provider)
+            },
             self.list.filter(),
             rows,
         );
         spec.hint = Some("Enter open selected session   Esc close".to_owned());
         spec.text_hint = Some("Search conversations…".to_owned());
-        spec.footer = Some(format!(
+        if !self.providers.is_empty() {
+            spec.placement = crate::gpui::DialogPlacement::FullView;
+            spec.fields.push(crate::gpui::DialogField {
+                id: "provider".into(),
+                label: "Provider".into(),
+                placeholder: String::new(),
+                value: self
+                    .provider_filter
+                    .map_or_else(|| "All providers".into(), |provider| provider.to_string()),
+                kind: crate::gpui::DialogFieldKind::Choice(vec![
+                    "All providers".into(),
+                    "codex".into(),
+                    "claude".into(),
+                    "pi".into(),
+                ]),
+            });
+        }
+        spec.footer = Some(self.footer());
+        spec
+    }
+
+    fn visible_error(&self) -> Option<String> {
+        self.error.clone().or_else(|| {
+            self.provider_filter.map_or_else(
+                || {
+                    self.providers
+                        .iter()
+                        .find_map(|context| self.provider_errors.get(&context.provider).cloned())
+                },
+                |provider| self.provider_errors.get(&provider).cloned(),
+            )
+        })
+    }
+
+    fn footer(&self) -> String {
+        format!(
             "{} · {} · {}",
-            self.context.provider,
-            if self.context.profile.is_empty() {
+            if self.providers.is_empty() {
+                self.context.provider.to_string()
+            } else {
+                self.provider_filter
+                    .map_or_else(|| "All providers".into(), |provider| provider.to_string())
+            },
+            if !self.providers.is_empty() {
+                "Configured accounts"
+            } else if self.context.profile.is_empty() {
                 "Default account"
             } else {
                 &self.context.profile
@@ -231,8 +350,7 @@ impl TerminalHistoryDialog {
                     |cwd| project_label(Path::new(cwd)),
                 )
             }
-        ));
-        spec
+        )
     }
 
     pub fn apply(&mut self, intent: &DialogIntent) -> Option<TerminalHistoryEvent> {
@@ -245,12 +363,22 @@ impl TerminalHistoryDialog {
                 self.list.apply(SearchableIntent::SetFilter(value.clone()));
                 None
             }
+            DialogIntent::FieldChanged { field, value, .. } if field == "provider" => {
+                self.provider_filter = match value.as_str() {
+                    "codex" => Some(AgentKind::Codex),
+                    "claude" => Some(AgentKind::Claude),
+                    "pi" => Some(AgentKind::Pi),
+                    _ => None,
+                };
+                self.refresh_entries();
+                None
+            }
             DialogIntent::SelectionChanged { row, .. } => {
                 self.select(row);
                 None
             }
             DialogIntent::Activate { action, row, .. } if self.pending.is_none() => {
-                if action.0 == "toggle-scope" {
+                if action.0 == "toggle-scope" && self.context.cwd.is_some() {
                     self.all_projects = !self.all_projects;
                     return self.query();
                 }
@@ -259,6 +387,13 @@ impl TerminalHistoryDialog {
                 }
                 self.select(row);
                 let entry = self.list.selected_value()?;
+                if self.context.session.kind == bootty_control::ResourceKind::Binding {
+                    let invocation = self.native_resume_invocation(entry)?;
+                    return Some(TerminalHistoryEvent::Request {
+                        invocation,
+                        opening: true,
+                    });
+                }
                 let mut invocation = CommandInvocation::new(
                     format!("agents.{}.resume", self.context.provider),
                     vec![
@@ -279,6 +414,65 @@ impl TerminalHistoryDialog {
             }
             _ => None,
         }
+    }
+
+    fn native_resume_invocation(&self, entry: &TerminalHistoryEntry) -> Option<CommandInvocation> {
+        use sha2::{Digest as _, Sha256};
+        use std::fmt::Write as _;
+        let context = self
+            .providers
+            .iter()
+            .find(|context| context.provider == entry.provider)
+            .unwrap_or(&self.context);
+        let account = Sha256::digest(
+            format!(
+                "{}\n{}",
+                entry.account_directory.display(),
+                entry.session_id
+            )
+            .as_bytes(),
+        );
+        let fingerprint = account.iter().fold(String::new(), |mut text, byte| {
+            _ = write!(text, "{byte:02x}");
+            text
+        });
+        let short: String = fingerprint.chars().take(8).collect();
+        let identity = format!(
+            "import-{}-{fingerprint}-{}",
+            entry.provider, entry.session_id
+        );
+        let title = entry
+            .title
+            .as_deref()
+            .unwrap_or("Untitled conversation")
+            .chars()
+            .take(64)
+            .collect();
+        let mut invocation = CommandInvocation::new(
+            "agents.native.start",
+            vec![
+                entry.provider.to_string(),
+                entry.cwd.to_string_lossy().into_owned(),
+                context.program.clone(),
+                serde_json::to_string(&context.arguments).ok()?,
+                format!("agent-{}-{short}", entry.provider),
+                context.profile.clone(),
+                identity,
+                title,
+                String::new(),
+                entry.account_directory.to_string_lossy().into_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "false".into(),
+                serde_json::to_string(entry).ok()?,
+            ],
+            Caller::Internal,
+        );
+        invocation.target = Some(self.context.binding.clone());
+        Some(invocation)
     }
 
     fn select(&mut self, row: &RowId) {

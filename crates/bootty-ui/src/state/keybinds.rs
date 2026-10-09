@@ -103,6 +103,10 @@ impl AppState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One match owns application action routing"
+    )]
     fn apply_app_action(
         &mut self,
         action: AppAction,
@@ -123,6 +127,18 @@ impl AppState {
             }
             AppAction::NewNativeAgentTab => {
                 self.open_native_agent_tab_dialog();
+            }
+            AppAction::AgentHistory => {
+                let outcome = self.open_agent_history();
+                if let Some(message) = crate::commands::command_outcome_message(&outcome) {
+                    self.record_error(message);
+                }
+            }
+            AppAction::ResumeAgentSession(provider) => {
+                let outcome = self.open_saved_agent_session(provider);
+                if let Some(message) = crate::commands::command_outcome_message(&outcome) {
+                    self.record_error(message);
+                }
             }
 
             AppAction::SessionPicker => {

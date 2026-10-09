@@ -2818,6 +2818,7 @@ impl GpuiWorkspace {
             return None;
         }
         self.dialogs.new_session_surface().map(|view| {
+            let full_view = view.read(cx).is_full_view();
             div()
                 .id("new-session-surface")
                 .size_full()
@@ -2827,7 +2828,13 @@ impl GpuiWorkspace {
                 .overflow_y_scroll()
                 .p_6()
                 .bg(cx.theme().background)
-                .child(div().w_full().max_w(gpui_kit::rems(44.0)).child(view))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(gpui_kit::rems(44.0))
+                        .when(full_view, |body| body.size_full().max_w_full().min_h_0())
+                        .child(view),
+                )
                 .into_any_element()
         })
     }

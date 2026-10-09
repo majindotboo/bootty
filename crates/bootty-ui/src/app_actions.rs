@@ -26,6 +26,8 @@ pub enum AppAction {
     NewWindow,
     AddProject,
     NewMuxSession,
+    ResumeAgentSession(bootty_agents::AgentKind),
+    AgentHistory,
     NewNativeAgentTab,
     SessionPicker,
     CommandPalette,
@@ -413,6 +415,16 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::NewWindow => Keybind::App(AppAction::NewWindow),
         Binding::AddProject => Keybind::App(AppAction::AddProject),
         Binding::NewMuxSession => Keybind::App(AppAction::NewMuxSession),
+        Binding::AgentHistory => Keybind::App(AppAction::AgentHistory),
+        Binding::ResumeCodexSession => Keybind::App(AppAction::ResumeAgentSession(
+            bootty_agents::AgentKind::Codex,
+        )),
+        Binding::ResumeClaudeSession => Keybind::App(AppAction::ResumeAgentSession(
+            bootty_agents::AgentKind::Claude,
+        )),
+        Binding::ResumePiSession => {
+            Keybind::App(AppAction::ResumeAgentSession(bootty_agents::AgentKind::Pi))
+        }
         Binding::NewNativeAgentTab => Keybind::App(AppAction::NewNativeAgentTab),
         Binding::SessionPicker => Keybind::App(AppAction::SessionPicker),
         Binding::CommandPalette => Keybind::App(AppAction::CommandPalette),

@@ -72,6 +72,84 @@ fn query_scope_switch_keeps_exact_account_and_binding(mut dialog: TerminalHistor
 }
 
 #[rstest]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Claude)]
+#[case(AgentKind::Pi)]
+fn saved_agent_opens_without_a_terminal_and_keeps_the_provider_handle(#[case] provider: AgentKind) {
+    let binding = CommandTarget {
+        kind: ResourceKind::Binding,
+        handle: "captured-space".into(),
+        generation: 7,
+    };
+    let mut dialog = TerminalHistoryDialog::new(TerminalHistoryContext {
+        provider,
+        binding: binding.clone(),
+        session: binding.clone(),
+        cwd: None,
+        profile: "work".into(),
+        program: "/provider/program".into(),
+        arguments: Vec::new(),
+    });
+    let Some(TerminalHistoryEvent::Request { invocation, .. }) = dialog.query() else {
+        panic!("Query")
+    };
+    assert_eq!(invocation.target, Some(binding.clone()));
+    assert_eq!(invocation.arguments, ["", "work"]);
+    let entry = TerminalHistoryEntry {
+        provider,
+        session_id: "external-session".into(),
+        title: Some("Previous work".into()),
+        created_at: None,
+        updated_at: None,
+        cwd: "/original/project".into(),
+        account_directory: "/account/work".into(),
+        resume_id: if provider == AgentKind::Pi {
+            "/account/work/sessions/external-session.jsonl".into()
+        } else {
+            "external-session".into()
+        },
+    };
+    let (sender, receiver) = mpsc::channel();
+    dialog.started(receiver, false);
+    sender
+        .send(CommandOutcome::Success {
+            value: serde_json::json!({"entries":[entry],"account_directory":"/account/work"}),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    assert!(dialog.poll().is_none());
+    let Some(TerminalHistoryEvent::Request {
+        invocation,
+        opening,
+    }) = dialog.apply(&activate("open-history", "0"))
+    else {
+        panic!("Open")
+    };
+    assert!(opening);
+    assert_eq!(invocation.command, "agents.native.start");
+    assert_eq!(invocation.target, Some(binding));
+    assert_eq!(invocation.arguments[1], "/original/project");
+    assert_eq!(invocation.arguments[8], "");
+    assert_eq!(
+        serde_json::from_str::<TerminalHistoryEntry>(&invocation.arguments[16]).unwrap(),
+        entry
+    );
+    let completed = serde_json::json!({"native":{"id":"accepted-conversation","generation":1}});
+    let (sender, receiver) = mpsc::channel();
+    dialog.started(receiver, true);
+    sender
+        .send(CommandOutcome::Success {
+            value: completed.clone(),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    let Some(TerminalHistoryEvent::Opened(value)) = dialog.poll() else {
+        panic!("Accepted conversation must reach the shared focus path")
+    };
+    assert_eq!(value, completed);
+}
+
+#[rstest]
 fn selection_never_launches_and_open_keeps_saved_identity_account_and_session(
     mut dialog: TerminalHistoryDialog,
 ) {
@@ -215,5 +293,191 @@ fn empty_history_still_freezes_account_before_scope_changes(mut dialog: Terminal
     assert_eq!(
         invocation.target.as_ref().map(|target| target.generation),
         Some(7)
+    );
+}
+
+#[rstest]
+fn unified_history_filters_and_resumes_with_each_providers_captured_account() {
+    let binding = CommandTarget {
+        kind: ResourceKind::Binding,
+        handle: "history-host".into(),
+        generation: 9,
+    };
+    let providers = [AgentKind::Codex, AgentKind::Claude, AgentKind::Pi];
+    let mut dialog = TerminalHistoryDialog::all_providers(
+        providers
+            .into_iter()
+            .map(|provider| TerminalHistoryContext {
+                provider,
+                binding: binding.clone(),
+                session: binding.clone(),
+                cwd: Some("/project".into()),
+                profile: format!("{provider}-profile"),
+                program: format!("/bin/{provider}"),
+                arguments: vec!["--configured".into()],
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut request = dialog.query();
+    for (index, provider) in providers.into_iter().enumerate() {
+        let Some(TerminalHistoryEvent::Request {
+            invocation,
+            opening,
+        }) = request
+        else {
+            panic!("provider query")
+        };
+        assert!(!opening);
+        assert_eq!(invocation.command, format!("agents.{provider}.history"));
+        assert_eq!(invocation.target, Some(binding.clone()));
+        assert_eq!(
+            invocation.arguments,
+            [String::new(), format!("{provider}-profile")]
+        );
+        let entry = TerminalHistoryEntry {
+            provider,
+            session_id: format!("saved-{provider}"),
+            title: Some(format!("Work with {provider}")),
+            created_at: None,
+            updated_at: Some(i64::try_from(index).unwrap()),
+            cwd: "/project".into(),
+            account_directory: format!("/account/{provider}").into(),
+            resume_id: if provider == AgentKind::Pi {
+                "/account/pi/saved.jsonl".into()
+            } else {
+                format!("saved-{provider}")
+            },
+        };
+        let (sender, receiver) = mpsc::channel();
+        dialog.started(receiver, false);
+        sender.send(CommandOutcome::Success {value: serde_json::json!({"entries":[entry], "account_directory":format!("/account/{provider}")}), warnings: Vec::new()}).unwrap();
+        request = dialog.poll();
+    }
+    assert!(request.is_none());
+    assert_eq!(dialog.spec().title, "History");
+    assert_eq!(
+        dialog.spec().placement,
+        bootty_ui::gpui::DialogPlacement::FullView
+    );
+    assert_eq!(
+        dialog
+            .spec()
+            .rows
+            .iter()
+            .filter(|row| row
+                .action
+                .as_ref()
+                .is_some_and(|action| action.id.0 == "open-history"))
+            .count(),
+        3
+    );
+    for provider in providers {
+        assert!(
+            dialog
+                .apply(&DialogIntent::FieldChanged {
+                    dialog: DialogId::new("terminal-agent-history"),
+                    field: "provider".into(),
+                    value: provider.to_string()
+                })
+                .is_none()
+        );
+        let Some(TerminalHistoryEvent::Request {
+            invocation,
+            opening,
+        }) = dialog.apply(&activate("open-history", "0"))
+        else {
+            panic!("resume")
+        };
+        assert!(opening);
+        assert_eq!(invocation.target, Some(binding.clone()));
+        assert_eq!(invocation.arguments[0], provider.to_string());
+        assert_eq!(invocation.arguments[2], format!("/bin/{provider}"));
+        assert_eq!(invocation.arguments[5], format!("{provider}-profile"));
+        let resumed: TerminalHistoryEntry =
+            serde_json::from_str(&invocation.arguments[16]).unwrap();
+        assert_eq!(resumed.provider, provider);
+        assert_eq!(
+            resumed.account_directory,
+            std::path::PathBuf::from(format!("/account/{provider}"))
+        );
+    }
+    let Some(TerminalHistoryEvent::Request { invocation, .. }) =
+        dialog.apply(&activate("toggle-scope", "scope"))
+    else {
+        panic!("scope query")
+    };
+    assert_eq!(
+        invocation.arguments,
+        ["/project", "codex-profile", "/account/codex"]
+    );
+}
+
+#[rstest]
+fn unified_history_provider_failures_do_not_leak_into_other_filters() {
+    let binding = CommandTarget {
+        kind: ResourceKind::Binding,
+        handle: "history-host".into(),
+        generation: 9,
+    };
+    let mut dialog = TerminalHistoryDialog::all_providers(
+        [AgentKind::Codex, AgentKind::Claude]
+            .into_iter()
+            .map(|provider| TerminalHistoryContext {
+                provider,
+                binding: binding.clone(),
+                session: binding.clone(),
+                cwd: None,
+                profile: String::new(),
+                program: provider.default_program().into(),
+                arguments: Vec::new(),
+            })
+            .collect(),
+    )
+    .unwrap();
+    assert!(dialog.query().is_some());
+    let (sender, receiver) = mpsc::channel();
+    dialog.started(receiver, false);
+    sender
+        .send(CommandOutcome::Success {
+            value: serde_json::json!({"entries":[], "account_directory":"/codex"}),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    assert!(dialog.poll().is_some());
+    let (sender, receiver) = mpsc::channel();
+    dialog.started(receiver, false);
+    sender
+        .send(CommandOutcome::Failed {
+            code: "provider_error".into(),
+            message: "private provider payload".into(),
+        })
+        .unwrap();
+    assert!(dialog.poll().is_none());
+    assert!(
+        dialog
+            .spec()
+            .rows
+            .iter()
+            .any(|row| row.label.contains("claude history could not load"))
+    );
+    assert!(
+        !dialog
+            .spec()
+            .rows
+            .iter()
+            .any(|row| row.label.contains("private"))
+    );
+    dialog.apply(&DialogIntent::FieldChanged {
+        dialog: DialogId::new("terminal-agent-history"),
+        field: "provider".into(),
+        value: "codex".into(),
+    });
+    assert!(
+        !dialog
+            .spec()
+            .rows
+            .iter()
+            .any(|row| row.label.contains("could not load"))
     );
 }

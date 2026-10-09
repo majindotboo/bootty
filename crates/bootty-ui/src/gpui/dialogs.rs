@@ -25,6 +25,7 @@ use std::{cell::RefCell, rc::Rc};
 
 mod attachments;
 mod completion;
+mod history;
 mod model_picker;
 mod project_picker;
 
@@ -351,6 +352,7 @@ pub enum DialogPlacement {
     Center,
     TopRight,
     BottomRight,
+    FullView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1219,6 +1221,13 @@ impl DialogView {
     }
 
     #[must_use]
+    pub fn is_full_view(&self) -> bool {
+        self.spec
+            .as_ref()
+            .is_some_and(|spec| spec.placement == DialogPlacement::FullView)
+    }
+
+    #[must_use]
     pub fn root_id(&self) -> Option<DialogId> {
         self.spec.as_ref().map(|spec| spec.id.clone())
     }
@@ -1349,6 +1358,9 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
+        if spec.placement == DialogPlacement::FullView {
+            return self.history_panel(spec, window, cx);
+        }
         match spec.role {
             DialogRole::Prompt => self.prompt_panel(spec, window, cx),
             DialogRole::Confirm => Self::confirm_panel(spec, cx),
@@ -2533,7 +2545,16 @@ impl DialogView {
                         .child(empty_text.clone())
                 }
             })
-            .max_h(gpui_kit::rems(24.0))
+            .when(spec.placement != DialogPlacement::FullView, |command| {
+                command.max_h(gpui_kit::rems(24.0))
+            })
+            .when(spec.placement == DialogPlacement::FullView, |command| {
+                command
+                    .h_full()
+                    .max_h(window.viewport_size().height)
+                    .min_h_0()
+                    .bg(cx.theme().background)
+            })
             .footer({
                 let hint = spec
                     .hint
@@ -3112,7 +3133,9 @@ impl OverlayView for DialogView {
         match self.spec.as_ref().map(|spec| spec.placement) {
             Some(DialogPlacement::TopRight) => OverlayPlacement::TopRight,
             Some(DialogPlacement::BottomRight) => OverlayPlacement::BottomRight,
-            Some(DialogPlacement::Center) | None => OverlayPlacement::Center,
+            Some(DialogPlacement::Center | DialogPlacement::FullView) | None => {
+                OverlayPlacement::Center
+            }
         }
     }
 }
@@ -3153,6 +3176,9 @@ impl Render for DialogView {
         let confirm_focus = self.confirm_focus.clone();
         let panel = self.panel(&spec, window, cx);
         let body = div()
+            .when(spec.placement == DialogPlacement::FullView, |this| {
+                this.size_full().min_h_0()
+            })
             .when(Self::is_agent_session_spec(&spec), |this| {
                 this.w_full().max_w(rems(44.0)).max_h_full().min_h_0()
             })

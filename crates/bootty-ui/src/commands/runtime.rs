@@ -1242,6 +1242,10 @@ impl AppState {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One match routes the typed core executors"
+    )]
     fn dispatch_core_command(
         &mut self,
         executor: CoreCommandExecutor,
@@ -1320,6 +1324,14 @@ impl AppState {
             ),
             CoreCommandExecutor::Synchronous(executor) => {
                 self.dispatch_synchronous_command(executor, effects, execution)
+            }
+            CoreCommandExecutor::Keybind(KeybindAction::App(
+                crate::app_actions::AppAction::AgentHistory,
+            )) => {
+                if let Err(error) = executor::begin_synchronous_command(execution) {
+                    return CommandDispatch::Complete(command_outcome_for_mux_error(error));
+                }
+                CommandDispatch::Complete(self.open_agent_history_at(exact_target.as_ref()))
             }
             CoreCommandExecutor::Keybind(action) => self.dispatch_resolved_keybind_command(
                 action,

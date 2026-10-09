@@ -954,7 +954,7 @@ impl AppState {
         }
     }
 
-    fn focus_created_session(&mut self, value: &serde_json::Value) {
+    pub(super) fn focus_created_session(&mut self, value: &serde_json::Value) {
         if let Some(native) = value.get("native")
             && let Ok(record) =
                 serde_json::from_value::<bootty_agents::NativeSessionRecord>(native.clone())

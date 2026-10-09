@@ -282,6 +282,16 @@ impl AppState {
                 message: "Provider permission changes require a host caller".into(),
             });
         }
+        match self.existing_saved_conversation(&service, &invocation) {
+            Ok(Some(target)) => {
+                let mut focus =
+                    CommandInvocation::new("agents.native.focus", Vec::new(), invocation.caller);
+                focus.target = Some(target);
+                return self.dispatch_native_visibility(service, &focus, effects, execution);
+            }
+            Ok(None) => {}
+            Err(outcome) => return CommandDispatch::Complete(outcome),
+        }
         if matches!(
             operation,
             "start"
@@ -879,6 +889,44 @@ impl AppState {
             layout: submitted.layout,
             result: submitted.result,
         })
+    }
+
+    fn existing_saved_conversation(
+        &self,
+        service: &NativeAgentService,
+        invocation: &CommandInvocation,
+    ) -> Result<Option<CommandTarget>, CommandOutcome> {
+        let Some(saved) = invocation
+            .arguments
+            .get(16)
+            .filter(|value| !value.is_empty() && invocation.command == "agents.native.start")
+        else {
+            return Ok(None);
+        };
+        // Validate the captured destination even when another Space already owns the conversation.
+        self.native_launch_destination(invocation)?;
+        let entry: bootty_agents::TerminalHistoryEntry = serde_json::from_str(saved)
+            .map_err(|error| failure(format!("Invalid saved session: {error}")))?;
+        Ok(service
+            .sessions()
+            .into_iter()
+            .find(|record| {
+                record.config.remote.is_none()
+                    && record.config.provider == entry.provider
+                    && record
+                        .snapshot
+                        .session_id
+                        .as_ref()
+                        .or(record.config.session_id.as_ref())
+                        == Some(&entry.session_id)
+                    && record
+                        .config
+                        .account_directory
+                        .as_deref()
+                        .map(std::path::Path::new)
+                        == Some(entry.account_directory.as_path())
+            })
+            .map(|record| record.target()))
     }
 
     fn native_operation_enabled(

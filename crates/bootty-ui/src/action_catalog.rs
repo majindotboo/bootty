@@ -230,6 +230,18 @@ command_catalog! {
         "New Session",
         "Pick a directory or worktree and start a session",
         "new_mux_session", "square-plus", Sessions, shown, Write, ApplicationWindow, None;
+    AgentHistory:
+        "History", "Browse and continue saved conversations across agent providers",
+        "agent_history", "history", Sessions, shown, Write, Binding, None;
+    ResumeCodexSession:
+        "Resume Codex session…", "Continue a saved Codex conversation from any application",
+        "resume_codex_session", "history", Sessions, hidden, Write, Binding, None;
+    ResumeClaudeSession:
+        "Resume Claude session…", "Continue a saved Claude conversation from any application",
+        "resume_claude_session", "history", Sessions, hidden, Write, Binding, None;
+    ResumePiSession:
+        "Resume Pi session…", "Continue a saved Pi conversation from any terminal",
+        "resume_pi_session", "history", Sessions, hidden, Write, Binding, None;
     SwitchSession:
         "Switch Session", "Fuzzy-find and jump to an open session",
         "session_picker", "terminal", Sessions, shown, Write, Binding, None;

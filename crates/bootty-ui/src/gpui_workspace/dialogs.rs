@@ -116,7 +116,7 @@ impl WorkspaceDialogs {
         let opening_creation = !self.creation_visible;
         self.creation_visible = underlay.is_some()
             || matches!(&projection,
-            Some(DialogProjection::Dialog(spec)) if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline);
+            Some(DialogProjection::Dialog(spec)) if spec.placement == crate::gpui::DialogPlacement::FullView || spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline);
         if !self.creation_visible {
             self.creation_view
                 .update(cx, |view, cx| view.present(None, window, cx));
@@ -174,17 +174,19 @@ impl WorkspaceDialogs {
         cx: &mut Context<GpuiWorkspace>,
     ) {
         let id = spec.id.clone();
-        let new_session = id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline;
+        let new_session = spec.placement == crate::gpui::DialogPlacement::FullView
+            || id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline;
         if new_session {
+            let changed = self.creation_view.read(cx).root_id().as_ref() != Some(&id);
             self.creation_view
                 .update(cx, |view, cx| view.present(Some(spec), window, cx));
             if self.presentation != Some(Presentation::NewSession) {
                 self.clear_presentation(window, cx);
                 self.presentation = Some(Presentation::NewSession);
-                if opening_creation {
-                    schedule_focus(self.creation_view.focus_handle(cx), window, cx);
-                }
                 cx.notify();
+            }
+            if opening_creation || changed {
+                schedule_focus(self.creation_view.focus_handle(cx), window, cx);
             }
             return;
         }

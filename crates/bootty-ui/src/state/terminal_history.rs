@@ -15,35 +15,73 @@ impl AppState {
         provider: AgentKind,
         exact: Option<&ExactMuxTarget>,
     ) -> CommandOutcome {
+        self.open_provider_history(provider, exact, false, false)
+    }
+
+    pub(crate) fn open_saved_agent_session(&mut self, provider: AgentKind) -> CommandOutcome {
+        let exact = ExactMuxTarget::Binding(self.mux_scope());
+        self.open_provider_history(provider, Some(&exact), true, false)
+    }
+
+    pub(crate) fn open_agent_history(&mut self) -> CommandOutcome {
+        let exact = ExactMuxTarget::Binding(self.mux_scope());
+        self.open_agent_history_at(Some(&exact))
+    }
+
+    pub(crate) fn open_agent_history_at(
+        &mut self,
+        exact: Option<&ExactMuxTarget>,
+    ) -> CommandOutcome {
+        self.open_provider_history(AgentKind::Codex, exact, true, true)
+    }
+
+    fn open_provider_history(
+        &mut self,
+        provider: AgentKind,
+        exact: Option<&ExactMuxTarget>,
+        native: bool,
+        all_providers: bool,
+    ) -> CommandOutcome {
         if !self.dialogs.is_dismissible() {
             return CommandOutcome::Unavailable {
                 message: "Wait for the current session to finish starting".to_owned(),
             };
         }
-        let Some(ExactMuxTarget::Session(scope, id)) = exact else {
+        let Some(exact) = exact else {
             return CommandOutcome::Unavailable {
                 message: "Select a session before opening provider history".to_owned(),
             };
         };
-        let Some(binding) = self.workspace.binding(*scope) else {
+        let scope = exact.scope();
+        let Some(binding) = self.workspace.binding(scope) else {
             return CommandOutcome::StaleTarget {
                 message: "The history destination is no longer available".to_owned(),
             };
         };
         let mux = binding.mux();
-        let Some(session) = self.mux_resource_target(*scope, ResourceKind::Session, id, None)
-        else {
-            return CommandOutcome::StaleTarget {
-                message: "The selected session is no longer available".to_owned(),
-            };
-        };
-        let handle = self.binding_target_handle(*scope, mux.binding_generation());
+        let handle = self.binding_target_handle(scope, mux.binding_generation());
         let Some(target) =
-            ExactMuxTarget::Binding(*scope).command_target(ResourceKind::Binding, mux, &handle)
+            ExactMuxTarget::Binding(scope).command_target(ResourceKind::Binding, mux, &handle)
         else {
             return CommandOutcome::StaleTarget {
                 message: "The history host is no longer available".to_owned(),
             };
+        };
+        let session = if native {
+            target.clone()
+        } else {
+            let ExactMuxTarget::Session(_, id) = exact else {
+                return CommandOutcome::Unavailable {
+                    message: "Select a terminal session".into(),
+                };
+            };
+            let Some(session) = self.mux_resource_target(scope, ResourceKind::Session, id, None)
+            else {
+                return CommandOutcome::StaleTarget {
+                    message: "The selected session is no longer available".into(),
+                };
+            };
+            session
         };
         let Some(preferences) = self.config().agents.provider(&provider.to_string()) else {
             return CommandOutcome::Unsupported {
@@ -55,8 +93,11 @@ impl AppState {
             provider,
             binding: target,
             session,
-            cwd: mux
-                .backend_session_by_id_or_name(id)
+            cwd: exact
+                .ids()
+                .0
+                .or_else(|| all_providers.then(|| mux.selected_session()).flatten())
+                .and_then(|id| mux.backend_session_by_id_or_name(id))
                 .and_then(|session| session.anchor.cwd.clone()),
             profile: preferences.selected.clone(),
             program: if preferences.program.is_empty() {
@@ -66,7 +107,17 @@ impl AppState {
             },
             arguments: profile.map_or_else(Vec::new, |profile| profile.arguments.clone()),
         };
-        let mut dialog = TerminalHistoryDialog::new(context);
+        let mut dialog = if all_providers {
+            let contexts = self.history_contexts(&context);
+            let Some(dialog) = TerminalHistoryDialog::all_providers(contexts) else {
+                return CommandOutcome::Unsupported {
+                    message: "No agent providers are configured".into(),
+                };
+            };
+            dialog
+        } else {
+            TerminalHistoryDialog::new(context)
+        };
         let request = dialog.query();
         self.close_overlay_dialogs();
         self.dialogs
@@ -80,8 +131,33 @@ impl AppState {
         }
     }
 
+    fn history_contexts(&self, context: &TerminalHistoryContext) -> Vec<TerminalHistoryContext> {
+        [AgentKind::Codex, AgentKind::Claude, AgentKind::Pi]
+            .into_iter()
+            .filter_map(|provider| {
+                let preferences = self.config().agents.provider(&provider.to_string())?;
+                let mut context = context.clone();
+                context.provider = provider;
+                context.profile.clone_from(&preferences.selected);
+                context.program = if preferences.program.is_empty() {
+                    provider.default_program().to_owned()
+                } else {
+                    preferences.program.clone()
+                };
+                context.arguments = preferences
+                    .selected_profile()
+                    .map_or_else(Vec::new, |profile| profile.arguments.clone());
+                Some(context)
+            })
+            .collect()
+    }
+
     pub(super) fn apply_terminal_history_event(&mut self, event: TerminalHistoryEvent) {
         match event {
+            TerminalHistoryEvent::Opened(value) => {
+                self.focus_created_session(&value);
+                self.dismiss_modal_dialog();
+            }
             TerminalHistoryEvent::Close => {
                 self.dismiss_modal_dialog();
             }
@@ -100,7 +176,7 @@ impl AppState {
                     match result {
                         Ok(response) => dialog.started(response, opening),
                         Err(error) => {
-                            dialog.failed(format!("Provider command could not start: {error:?}"));
+                            dialog.failed(&format!("Provider command could not start: {error:?}"));
                         }
                     }
                 }
