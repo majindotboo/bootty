@@ -439,6 +439,10 @@ impl RmuxPanePolicy {
 }
 
 impl BackendPanePolicy for RmuxPanePolicy {
+    fn can_capture_without_renderer(&self) -> bool {
+        true
+    }
+
     fn remote_target(&self) -> Option<crate::RemoteTarget> {
         self.remote.as_ref().map(RemoteHost::target)
     }

@@ -33,6 +33,7 @@ struct NativeLaunch {
     context: super::terminal_agents::LaunchContext,
     quick_model: String,
     terminal: Option<CommandTarget>,
+    split: Option<bootty_mux::pane_layout::SplitDirection>,
     tools_owner: Arc<TerminalAgentService>,
 }
 
@@ -285,6 +286,7 @@ impl AppState {
             operation,
             "start"
                 | "tab"
+                | "pane"
                 | "list"
                 | "activities"
                 | "catalog"
@@ -1255,6 +1257,7 @@ impl AppState {
             context,
             quick_model: self.config().agents.quick_model.clone(),
             terminal,
+            split: None,
             tools_owner,
         })
     }
@@ -1262,16 +1265,42 @@ impl AppState {
     fn capture_native_launch(
         &self,
         invocation: &CommandInvocation,
-        exact: bootty_mux::controller::SpaceId,
+        destination: &ExactMuxTarget,
         binding_id: &str,
     ) -> Result<NativeLaunch, CommandOutcome> {
+        let exact = destination.scope();
         let binding = self
             .workspace
             .binding(exact)
             .ok_or_else(|| CommandOutcome::StaleTarget {
                 message: "Conversation Space is unavailable".to_owned(),
             })?;
-        let captured_task = if invocation.command == "agents.native.tab" {
+        let split = if invocation.command == "agents.native.pane" {
+            Some(match invocation.arguments.get(15).map(String::as_str) {
+                Some("right") => bootty_mux::pane_layout::SplitDirection::Right,
+                Some("down") => bootty_mux::pane_layout::SplitDirection::Down,
+                _ => return Err(failure("Choose a split direction".into())),
+            })
+        } else {
+            None
+        };
+        let captured_task = if split.is_some() {
+            let (Some(session), Some(_), Some(_)) = destination.ids() else {
+                return Err(failure("An agent split requires an existing pane".into()));
+            };
+            if self.workspace.session_identity(exact, session).as_ref()
+                != invocation.arguments.get(6)
+            {
+                return Err(CommandOutcome::Denied {
+                    message: "The split pane belongs to another task".into(),
+                });
+            }
+            let handle = self.binding_target_handle(exact, binding.mux().binding_generation());
+            let terminal = destination
+                .command_target(ResourceKind::Terminal, binding.mux(), &handle)
+                .ok_or_else(|| failure("The captured split pane is unavailable".into()))?;
+            Some((destination.clone(), terminal))
+        } else if invocation.command == "agents.native.tab" {
             match self.native_task_target(
                 binding_id,
                 invocation.arguments.get(6).map_or("", String::as_str),
@@ -1329,8 +1358,33 @@ impl AppState {
             context,
             quick_model: self.config().agents.quick_model.clone(),
             terminal: captured_task.map(|(_, terminal)| terminal),
+            split,
             tools_owner,
         })
+    }
+
+    fn native_launch_destination(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Result<ExactMuxTarget, CommandOutcome> {
+        let pane = invocation.command == "agents.native.pane";
+        match self.resolve_command_target(
+            &invocation.command,
+            Some(if pane {
+                ResourceKind::Terminal
+            } else {
+                ResourceKind::Binding
+            }),
+            invocation.target.as_ref(),
+        ) {
+            Ok((_, Some(exact))) if pane || matches!(exact, ExactMuxTarget::Binding(_)) => {
+                Ok(exact)
+            }
+            Ok(_) => Err(CommandOutcome::StaleTarget {
+                message: "Choose an exact Space".to_owned(),
+            }),
+            Err(outcome) => Err(outcome),
+        }
     }
 
     fn dispatch_native_start_or_list(
@@ -1339,19 +1393,11 @@ impl AppState {
         invocation: CommandInvocation,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let exact = match self.resolve_command_target(
-            &invocation.command,
-            Some(ResourceKind::Binding),
-            invocation.target.as_ref(),
-        ) {
-            Ok((_, Some(ExactMuxTarget::Binding(scope)))) => scope,
-            Ok(_) => {
-                return CommandDispatch::Complete(CommandOutcome::StaleTarget {
-                    message: "Choose an exact Space".to_owned(),
-                });
-            }
+        let destination = match self.native_launch_destination(&invocation) {
+            Ok(destination) => destination,
             Err(outcome) => return CommandDispatch::Complete(outcome),
         };
+        let exact = destination.scope();
         if self.workspace.binding(exact).is_none() {
             return CommandDispatch::Complete(CommandOutcome::StaleTarget {
                 message: "Conversation Space is unavailable".to_owned(),
@@ -1372,7 +1418,7 @@ impl AppState {
                     .collect::<Vec<_>>()
             )));
         }
-        let captured = match self.capture_native_launch(&invocation, exact, &binding_id) {
+        let captured = match self.capture_native_launch(&invocation, &destination, &binding_id) {
             Ok(captured) => captured,
             Err(outcome) => return CommandDispatch::Complete(outcome),
         };
@@ -1627,7 +1673,10 @@ fn start(
             "Native start requires a valid captured task identity and title".to_owned(),
         );
     }
-    let tab = invocation.command == "agents.native.tab";
+    let tab = matches!(
+        invocation.command.as_str(),
+        "agents.native.tab" | "agents.native.pane"
+    );
     if !tab
         && service.activities().iter().any(|record| {
             record.binding_id == binding_id
@@ -1669,7 +1718,10 @@ fn start_prepared(
         Ok(paths) => paths,
         Err(error) => return failure(error),
     };
-    let tab = invocation.command == "agents.native.tab";
+    let tab = matches!(
+        invocation.command.as_str(),
+        "agents.native.tab" | "agents.native.pane"
+    );
     let PreparedNativeLaunch {
         config,
         tools,
@@ -1691,7 +1743,10 @@ fn start_prepared(
             parent,
             captured.context.session.as_ref(),
             &config.cwd,
-            None,
+            captured.split.map(|direction| match direction {
+                bootty_mux::pane_layout::SplitDirection::Right => "right",
+                bootty_mux::pane_layout::SplitDirection::Down => "down",
+            }),
             invocation.caller,
             deadline,
             cancellation,
@@ -2120,7 +2175,10 @@ fn prepare_native_launch(
         None,
         &captured.context.preferences,
     )?;
-    if invocation.command == "agents.native.tab" {
+    if matches!(
+        invocation.command.as_str(),
+        "agents.native.tab" | "agents.native.pane"
+    ) {
         launch.cwd = Some(arg(1));
     }
     let selection = invocation

@@ -53,6 +53,11 @@ pub struct PaneLayoutResizeRequest<'a> {
 }
 
 pub trait BackendPanePolicy: Send {
+    /// The backend can checkpoint its own panes before a display stream is ready.
+    fn can_capture_without_renderer(&self) -> bool {
+        false
+    }
+
     fn remote_target(&self) -> Option<crate::RemoteTarget>;
     /// # Errors
     /// Returns executable resolution, PTY, connection, or terminal startup errors.
@@ -683,6 +688,11 @@ impl BackendPaneTerminal {
 
     pub(crate) fn terminal_colors(&self) -> bootty_terminal::terminal_engine::TerminalColorConfig {
         self.terminal_config.colors.clone()
+    }
+
+    #[must_use]
+    pub fn can_capture_without_renderer(&self) -> bool {
+        self.policy.can_capture_without_renderer()
     }
 
     #[must_use]

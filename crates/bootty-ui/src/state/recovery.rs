@@ -623,7 +623,11 @@ impl AppState {
             return false;
         };
         let topology = binding.backend_policy().panes.topology;
-        if topology == bootty_mux::provider::PaneTopology::Attach {
+        if topology == bootty_mux::provider::PaneTopology::Attach
+            || (topology == bootty_mux::provider::PaneTopology::BackendReconciled
+                && binding.terminal().can_capture_without_renderer()
+                && !binding.has_restored_terminal_pane(&spec.pane))
+        {
             return false;
         }
         self.workspace
@@ -645,13 +649,19 @@ impl AppState {
             max_bytes: crate::recovery::MAX_TEXT,
             ..Default::default()
         };
-        let local = self.workspace.binding(spec.scope).is_some_and(|binding| {
-            binding.backend_policy().panes.topology != bootty_mux::provider::PaneTopology::Attach
-        });
-        if local
+        let topology = self
+            .workspace
+            .binding(spec.scope)
+            .map(|binding| binding.backend_policy().panes.topology);
+        let backend_capture = self
+            .workspace
+            .binding(spec.scope)
+            .is_some_and(|binding| binding.terminal().can_capture_without_renderer());
+        if topology != Some(bootty_mux::provider::PaneTopology::Attach)
             && let Some(runtime) = self
                 .workspace
                 .space_terminal_runtime(spec.scope, &spec.pane)
+            && (!backend_capture || runtime.started()?)
         {
             let cwd = runtime
                 .current_working_directory()?
@@ -692,6 +702,7 @@ impl AppState {
                 .capture_checkpoint(options)
                 .map(|capture| (capture, cwd));
         }
+        // Backend-owned panes can checkpoint before their display stream's first frame.
         let binding = self
             .workspace
             .binding(spec.scope)
