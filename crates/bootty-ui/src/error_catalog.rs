@@ -65,8 +65,6 @@ pub enum ErrorNotice {
     RemoteSpaceBackendChanged { actual: String, expected: String },
     #[error("remote Space catalog version is not supported")]
     RemoteSpaceCatalogVersionUnsupported(String),
-    #[error("the previous remote project operation is still stopping")]
-    RemoteProjectOperationStopping,
     #[error("remote project task stopped")]
     RemoteProjectTaskStopped,
     #[error("the previous remote Space operation is still stopping")]
