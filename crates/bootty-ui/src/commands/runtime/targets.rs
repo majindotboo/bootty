@@ -325,6 +325,14 @@ impl AppState {
 }
 
 // These commands explicitly support a target outside the active Space.
+const CROSS_BINDING_NATIVE_DISCOVERY: [&str; 5] = [
+    "agents.native.catalog",
+    "agents.native.catalog-info",
+    "agents.native.catalog-favorite",
+    "agents.native.catalog-completions",
+    "agents.native.names",
+];
+
 fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
@@ -340,6 +348,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                 ]
                 .iter()
                 .any(|suffix| command.ends_with(suffix)))
+                || CROSS_BINDING_NATIVE_DISCOVERY.contains(&command)
                 || matches!(
                     command,
                     "runs.create" | "runs.dispatch" | "runs.cancel" | "runs.retry" | "runs.restart"

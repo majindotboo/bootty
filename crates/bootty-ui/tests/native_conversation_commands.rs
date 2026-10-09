@@ -3533,9 +3533,13 @@ fn native_mux_placement_is_published_before_provider_initialization() -> TestRes
 }
 
 #[rstest]
-fn model_catalog_and_favorites_reuse_the_captured_provider_discovery() -> TestResult<()> {
+#[case::active(false)]
+#[case::inactive(true)]
+fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(
+    #[case] inactive: bool,
+) -> TestResult<()> {
     let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
+    let binding = host.binding(inactive)?;
     let mut query = CommandInvocation::new(
         "agents.native.catalog",
         vec![
@@ -3551,6 +3555,15 @@ fn model_catalog_and_favorites_reuse_the_captured_provider_discovery() -> TestRe
     query.target = Some(binding);
     let models = success(host.submit(query.clone())?)?;
     assert_eq!(models[0]["id"], "qa-model");
+    let mut info = query.clone();
+    info.command = "agents.native.catalog-info".into();
+    assert_eq!(success(host.submit(info.clone())?)?["models"], models);
+    let target = info.target.as_mut().ok_or("catalog target")?;
+    target.generation = target.generation.saturating_add(1);
+    assert!(matches!(
+        host.submit(info)?,
+        CommandOutcome::StaleTarget { .. }
+    ));
     fs::write(
         &host.program,
         "#!/usr/bin/env python3\nraise SystemExit(1)\n",
