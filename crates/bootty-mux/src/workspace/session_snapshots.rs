@@ -727,6 +727,15 @@ impl super::BindingRuntime {
             .find(|window| window.id == mapped)
     }
 
+    /// A restored pane's saved prefix belongs to its renderer after admission.
+    #[must_use]
+    pub fn has_restored_terminal_pane(&self, pane: &str) -> bool {
+        self.restored_sessions.values().any(|mapping| {
+            mapping.generation == self.mux.binding_generation()
+                && mapping.panes.values().any(|held| held == pane)
+        })
+    }
+
     /// Resolve a saved pane key only within the same exact tagged task attachment.
     #[must_use]
     pub fn restored_terminal_pane(

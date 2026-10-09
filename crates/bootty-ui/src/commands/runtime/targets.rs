@@ -402,7 +402,10 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
             ) || command.ends_with(".acknowledge")
                 || matches!(
                     command,
-                    "agents.claude.pane" | "agents.codex.pane" | "agents.pi.pane"
+                    "agents.claude.pane"
+                        | "agents.codex.pane"
+                        | "agents.pi.pane"
+                        | "agents.native.pane"
                 )
                 || (command.starts_with("agents.")
                     && (command.ends_with(".associate")

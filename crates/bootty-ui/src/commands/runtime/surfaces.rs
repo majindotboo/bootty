@@ -473,12 +473,29 @@ impl AppState {
                     argv.unwrap_or_else(|| "[]".to_owned()),
                     caller,
                 ),
-            SurfaceCommand::CreateAgent { arguments, .. } => {
+            SurfaceCommand::CreateAgent { mut arguments, .. } => {
                 if arguments.get(1) != Some(&request.cwd)
                     || (!request.task_identity.is_empty()
                         && arguments.get(6) != Some(&request.task_identity))
                 {
                     return Err(stale("The agent form no longer matches its captured task"));
+                }
+                if matches!(request.placement, SurfacePlacement::Split(_)) {
+                    if arguments.len() > 15 {
+                        return Err(CommandOutcome::Failed {
+                            code: "invalid_arguments".to_owned(),
+                            message: "The agent form has too many launch arguments".to_owned(),
+                        });
+                    }
+                    let (direction, target) = self.surface_terminal_destination(request, scope)?;
+                    let direction =
+                        direction.ok_or_else(|| stale("A split requires a direction"))?;
+                    arguments.resize(15, String::new());
+                    arguments.push(direction.to_owned());
+                    let mut delegated =
+                        CommandInvocation::new("agents.native.pane", arguments, caller);
+                    delegated.target = Some(target);
+                    return Ok(delegated);
                 }
                 let operation = if request.task_identity.is_empty() {
                     "agents.native.start"

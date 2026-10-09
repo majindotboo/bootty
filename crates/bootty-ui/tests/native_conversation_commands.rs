@@ -107,6 +107,7 @@ for line in source:
   reply(held_start,{'thread':{'id':thread,'turns':[]}});held_start=None;reply(ident,{})
  elif method == 'model/list': reply(ident,{'data':[{'model':'qa-model','displayName':'QA Model','isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'medium'}],'defaultReasoningEffort':'medium'}],'nextCursor':None})
  elif method == 'thread/fork': reply(ident,{'thread':{'id':'fork-'+str(os.getpid())}})
+ elif method == 'thread/items/list': reply(ident,{'data':[],'nextCursor':None})
  elif method == 'turn/start':
   assert params['threadId'] == thread
   turn+=1
@@ -160,6 +161,14 @@ impl Host {
     }
 
     fn new_with_spawn(enabled: bool, allow_spawn: bool) -> TestResult<Self> {
+        Self::new_with_backend(enabled, allow_spawn, MultiplexerBackendConfig::Native)
+    }
+
+    fn new_with_backend(
+        enabled: bool,
+        allow_spawn: bool,
+        backend: MultiplexerBackendConfig,
+    ) -> TestResult<Self> {
         let directory = assert_fs::TempDir::new()?;
         let program = provider(directory.path())?;
         let config_path = directory.path().join("config.toml");
@@ -174,7 +183,7 @@ impl Host {
                 false,
             )?
             .ok_or("Other Space was not created")?;
-        let mut config = test_config::config(config_path, MultiplexerBackendConfig::Native);
+        let mut config = test_config::config(config_path, backend);
         config.session.working_directory = Some(directory.path().to_owned());
         config.session.shell = Some("/bin/sh".to_owned());
         config.agents.allow_spawn = allow_spawn;
@@ -3133,6 +3142,122 @@ fn verify_palette_native_split_cancel(
         *before,
         "cancelling the native split leaves terminal topology unchanged"
     );
+    Ok(())
+}
+
+#[rstest]
+#[case("split_right")]
+#[case("split_down")]
+fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
+    #[case] command: &str,
+    #[values(false, true)] conversation_parent: bool,
+    #[values(
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux
+    )]
+    backend: MultiplexerBackendConfig,
+) -> TestResult<()> {
+    let mut host = Host::new_with_backend(true, true, backend)?;
+    let binding = host.binding(false)?;
+    let name = format!(
+        "split-{}",
+        host.directory
+            .path()
+            .file_name()
+            .ok_or("fixture directory")?
+            .to_string_lossy()
+            .trim_start_matches('.')
+    );
+    let identity = format!("{name}-task");
+    let started = host.start(&binding, &name, &identity, "")?;
+    let native = record(&started)?;
+    success(host.submit(native_command(
+        "agents.native.history",
+        &native.target(),
+        &["latest"],
+        Caller::Internal,
+    ))?)?;
+    let parent = if conversation_parent {
+        native.target()
+    } else {
+        serde_json::from_value(started["terminal"].clone())?
+    };
+    let before = host
+        .state
+        .mux()
+        .all_sessions()
+        .iter()
+        .find(|session| session.name == name)
+        .ok_or("parent session")?
+        .windows
+        .clone();
+    let mut split = CommandInvocation::from_action(command, Caller::Keybinding);
+    split.target = Some(parent);
+    success(host.submit(split)?)?;
+    let request = host
+        .state
+        .pending_new_surface()
+        .ok_or("split chooser")?
+        .clone();
+    success(host.submit(CommandInvocation::new(
+        "surface.choose",
+        vec![request.id.to_string(), "agent".into()],
+        Caller::Keybinding,
+    ))?)?;
+    let created = record(&success(host.submit(CommandInvocation::new(
+        "surface.create_agent",
+        vec![
+            request.id.to_string(),
+            "codex".into(),
+            request.cwd,
+            host.program.clone(),
+            "[]".into(),
+            "split-child".into(),
+            "captured".into(),
+            request.task_identity,
+            "Split child".into(),
+            "reply in the split".into(),
+        ],
+        Caller::Keybinding,
+    ))?)?)?;
+    let windows = &host
+        .state
+        .mux()
+        .all_sessions()
+        .iter()
+        .find(|session| session.name == name)
+        .ok_or("parent session")?
+        .windows;
+    assert_eq!(windows.len(), before.len());
+    assert_eq!(windows[0].id, before[0].id);
+    assert_eq!(windows[0].panes.len(), 2);
+    assert!(
+        windows[0]
+            .panes
+            .iter()
+            .any(|pane| pane.native_agent.as_deref() == Some(native.id.as_str()))
+    );
+    assert!(
+        windows[0]
+            .panes
+            .iter()
+            .any(|pane| pane.native_agent.as_deref() == Some(created.id.as_str()))
+    );
+    assert_eq!(created.task_identity, native.task_identity);
+    let spaces = host.spaces()?;
+    let target = spaces
+        .as_array()
+        .ok_or("Spaces")?
+        .iter()
+        .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
+        .find(|session| session["name"] == name)
+        .ok_or("created session")?["target"]
+        .clone();
+    let mut close = CommandInvocation::new("session.close", vec![], Caller::Socket);
+    close.target = Some(serde_json::from_value(target)?);
+    close.confirmation = Some(close.confirmation());
+    success(host.submit(close)?)?;
     Ok(())
 }
 

@@ -568,7 +568,16 @@ impl RmuxBridgeState {
         let mut sessions = Vec::with_capacity(names.len());
         for name in names {
             let tag = tags.remove(&name.to_string()).unwrap_or_default();
-            sessions.push(snapshot_session(rmux, &name, tag).await?);
+            match snapshot_session(rmux, &name, tag).await {
+                Ok(session) => sessions.push(session),
+                Err(error) => {
+                    // A concurrent close can remove a listed session before its rows are read.
+                    // Omit it only after the SDK confirms absence; retain every other failure.
+                    if !matches!(rmux.has_session(name).await, Ok(false)) {
+                        return Err(error);
+                    }
+                }
+            }
         }
         Ok(MuxSnapshot {
             active_session_id: sessions

@@ -131,6 +131,8 @@ the provider account's configuration or permission policy.
 The transcript, composer, approval requests and questions live in a selectable
 backend pane beside terminals. Close stops that pane and provider while retaining
 the saved conversation and history.
+Choosing Agent in the split chooser creates its backend pane beside the captured
+parent, in the requested direction. The parent task and window stay unchanged.
 Interrupt cancels its current turn. Opening a stopped conversation automatically
 reattaches its exact provider selector: a Codex thread, Pi session file or Claude
 session UUID. Pi's launch extension checkpoints its public session header and

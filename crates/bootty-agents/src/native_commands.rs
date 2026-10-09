@@ -11,7 +11,12 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
     let launch_arguments = launch_arguments();
     [
         ("start", launch_arguments.clone(), ResourceKind::Binding),
-        ("tab", launch_arguments, ResourceKind::Binding),
+        ("tab", launch_arguments.clone(), ResourceKind::Binding),
+        (
+            "pane",
+            launch_arguments.into_iter().chain(["direction"]).collect(),
+            ResourceKind::Terminal,
+        ),
         ("list", vec![], ResourceKind::Binding),
         ("activities", vec![], ResourceKind::Binding),
         (
@@ -200,7 +205,11 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "selection"
                     ) || name == "permissions" && operation != "permissions"
                         || name == "response" && operation == "fork"),
-                    choices: Vec::new(),
+                    choices: if name == "direction" && operation == "pane" {
+                        vec!["right".into(), "down".into()]
+                    } else {
+                        Vec::new()
+                    },
                     minimum: None,
                     maximum: None,
                 })
