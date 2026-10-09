@@ -1426,7 +1426,16 @@ impl RmuxBridgeState {
         let names = self.list_session_names().await?;
         let rmux = self.rmux().await?;
         for name in names {
-            let rows = list_window_rows(rmux, &name).await?;
+            let rows = match list_window_rows(rmux, &name).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    // An unrelated session can close during stable window lookup.
+                    if matches!(rmux.has_session(name).await, Ok(false)) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             if let Some(row) = rows.iter().find(|row| row.id == window_id) {
                 return Ok(Some((row.session_name.clone(), row.index)));
             }

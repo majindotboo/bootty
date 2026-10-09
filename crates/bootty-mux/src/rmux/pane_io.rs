@@ -1035,7 +1035,17 @@ async fn locate_rmux_pane(rmux: &Rmux, pane_id: &str) -> Result<(RmuxPaneTarget,
             sort_order: None,
             reversed: false,
         })))
-        .await?;
+        .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                // Another session may close while we locate this stable pane.
+                if matches!(rmux.has_session(session).await, Ok(false)) {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         let Response::ListPanes(response) = response else {
             anyhow::bail!("rmux returned an unexpected list-panes response");
         };
