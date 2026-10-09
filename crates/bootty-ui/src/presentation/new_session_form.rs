@@ -95,6 +95,7 @@ pub struct NewSessionForm {
     pub model_options: Vec<bootty_agents::NativeModelOption>,
     pub model_error: Option<String>,
     pub models_loading: bool,
+    pub provider_permissions: Option<bootty_agents::NativePermissionMode>,
     generated_names: Option<bootty_agents::GeneratedSessionNames>,
     project_defaults: Vec<bootty_mux::repository::RegisteredProject>,
 }
@@ -116,6 +117,7 @@ impl NewSessionForm {
             model_options: Vec::new(),
             model_error: None,
             models_loading: false,
+            provider_permissions: None,
             generated_names: None,
             project_defaults: Vec::new(),
         };
@@ -125,11 +127,6 @@ impl NewSessionForm {
         }) {
             "codex".clone_into(&mut form.draft.provider);
         }
-        let provider = bootty_agents::AgentKind::ALL
-            .into_iter()
-            .find(|provider| provider.to_string() == form.draft.provider)
-            .unwrap_or(bootty_agents::AgentKind::Codex);
-        form.draft.permissions = form.draft.permissions.resolved(provider);
         if form.draft.isolated
             && form
                 .destination()
@@ -209,6 +206,7 @@ impl NewSessionForm {
                 .is_some_and(|provider| provider.enabled)
         {
             self.draft.provider.clone_from(provider);
+            self.reset_provider_permissions();
             self.draft.model_selection = None;
             self.model_options.clear();
         }
@@ -259,37 +257,8 @@ impl NewSessionForm {
                     NewSessionMode::Agent
                 }
             }
-            "provider" => {
-                let provider = match value {
-                    "Codex" => "codex",
-                    "Claude" => "claude",
-                    "Pi" => "pi",
-                    id => id,
-                };
-                if bootty_agents::AgentKind::ALL.into_iter().any(|kind| {
-                    kind.to_string() == provider
-                        && bootty_agents::NativeSessionConfig::supports_provider(kind)
-                }) && self
-                    .providers
-                    .provider(provider)
-                    .is_some_and(|provider| provider.enabled)
-                {
-                    if self.draft.provider != provider {
-                        self.draft.model_selection = None;
-                        self.model_options.clear();
-                        if provider == "pi"
-                            && self.draft.permissions == bootty_agents::NativePermissionMode::Auto
-                        {
-                            self.draft.permissions =
-                                bootty_agents::NativePermissionMode::FullAccess;
-                        }
-                    }
-                    provider.clone_into(&mut self.draft.provider);
-                }
-            }
+            "provider" => self.change_provider(value),
             "profile" => {
-                self.draft.model_selection = None;
-                self.model_options.clear();
                 let selected = self
                     .providers
                     .provider(&self.draft.provider)
@@ -300,6 +269,19 @@ impl NewSessionForm {
                             .find(|(id, profile)| profile_label(id, &profile.name) == value)
                     })
                     .map_or_else(String::new, |(id, _)| id.clone());
+                let previous = self.draft.profiles.get(&self.draft.provider).map_or_else(
+                    || {
+                        self.providers
+                            .provider(&self.draft.provider)
+                            .map_or("", |provider| provider.selected.as_str())
+                    },
+                    String::as_str,
+                );
+                if previous != selected {
+                    self.draft.model_selection = None;
+                    self.model_options.clear();
+                    self.reset_provider_permissions();
+                }
                 self.draft
                     .profiles
                     .insert(self.draft.provider.clone(), selected);
@@ -322,6 +304,30 @@ impl NewSessionForm {
             _ => {}
         }
         false
+    }
+
+    fn change_provider(&mut self, value: &str) {
+        let provider = match value {
+            "Codex" => "codex",
+            "Claude" => "claude",
+            "Pi" => "pi",
+            id => id,
+        };
+        if bootty_agents::AgentKind::ALL.into_iter().any(|kind| {
+            kind.to_string() == provider
+                && bootty_agents::NativeSessionConfig::supports_provider(kind)
+        }) && self
+            .providers
+            .provider(provider)
+            .is_some_and(|provider| provider.enabled)
+        {
+            if self.draft.provider != provider {
+                self.draft.model_selection = None;
+                self.model_options.clear();
+                self.reset_provider_permissions();
+            }
+            provider.clone_into(&mut self.draft.provider);
+        }
     }
 
     fn change_model_field(&mut self, field: &str, value: &str) {
@@ -555,9 +561,40 @@ impl NewSessionForm {
             return None;
         }
         let mut invocation = self.invocation(&self.draft.cwd).ok()?;
-        "agents.native.catalog".clone_into(&mut invocation.command);
+        "agents.native.catalog-info".clone_into(&mut invocation.command);
         invocation.arguments.truncate(6);
         Some(invocation)
+    }
+
+    const fn reset_provider_permissions(&mut self) {
+        self.draft.permissions = bootty_agents::NativePermissionMode::ProviderDefault;
+        self.provider_permissions = None;
+    }
+
+    /// Display the selected account policy while leaving inherited launch values untouched.
+    #[must_use]
+    pub fn permission_selection(&self) -> bootty_agents::NativePermissionMode {
+        if self.draft.permissions == bootty_agents::NativePermissionMode::ProviderDefault {
+            self.provider_permissions.unwrap_or(self.draft.permissions)
+        } else {
+            self.draft.permissions
+        }
+    }
+
+    pub fn set_provider_catalog(
+        &mut self,
+        catalog: Result<bootty_agents::NativeProviderCatalog, String>,
+    ) {
+        match catalog {
+            Ok(catalog) => {
+                self.provider_permissions = catalog.permissions;
+                self.set_model_catalog(Ok(catalog.models));
+            }
+            Err(error) => {
+                self.provider_permissions = None;
+                self.set_model_catalog(Err(error));
+            }
+        }
     }
 
     pub fn set_model_catalog(
@@ -990,13 +1027,10 @@ impl NewSessionForm {
             fields.push(choice(
                 "permissions",
                 "Permissions",
-                self.draft.permissions.label(),
+                self.permission_selection().label(),
                 bootty_agents::NativePermissionMode::ALL
                     .into_iter()
-                    .filter(|mode| {
-                        *mode != bootty_agents::NativePermissionMode::ProviderDefault
-                            && mode.supports(provider)
-                    })
+                    .filter(|mode| mode.supports(provider))
                     .map(|mode| mode.label().to_owned())
                     .collect(),
             ));

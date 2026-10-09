@@ -116,7 +116,7 @@ pub use native_commands::native_command_descriptors;
 pub use native_completions::{
     NativeCompletionCatalog, NativeCompletionKind, NativeCompletionOption,
 };
-pub use native_models::{NativeModelOption, NativeModelSelection};
+pub use native_models::{NativeModelOption, NativeModelSelection, NativeProviderCatalog};
 mod native_permissions;
 pub use native_permissions::{
     NativeApprovalDecision, NativePermissionMode, NativePermissionUpdate,

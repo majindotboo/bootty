@@ -26,6 +26,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         ("catalog", catalog_arguments(None), ResourceKind::Binding),
         (
+            "catalog-info",
+            catalog_arguments(None),
+            ResourceKind::Binding,
+        ),
+        (
             "catalog-completions",
             catalog_arguments(None),
             ResourceKind::Binding,
@@ -175,6 +180,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                 | "provider"
                 | "profiles"
                 | "catalog"
+                | "catalog-info"
                 | "names"
                 | "completions"
                 | "catalog-completions"

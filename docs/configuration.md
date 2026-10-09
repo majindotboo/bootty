@@ -934,6 +934,11 @@ the same account catalog as the composer. Retained drafts keep their
 explicit selection. `agents.codex.fast-mode` requests Codex's fast service tier;
 `agents.claude.fast-mode` enables Claude's fast mode. Pi has no fast-mode setting.
 
+New composers inherit the selected provider account's approval policy. The
+permissions control displays the effective policy reported by the provider;
+unknown policies remain inherited. Choosing an explicit policy overrides that
+default. Switching provider or account returns to that account's policy.
+
 Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.

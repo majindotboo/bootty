@@ -127,7 +127,7 @@ fn native_start_keeps_destination_profile_and_prompt_separate_from_argv(mut form
             "Fix 'quotes'; $HOME `uname`\nand preserve this line"
         ]
     );
-    assert_eq!(invocation.arguments[14], "supervised");
+    assert_eq!(invocation.arguments.get(14).map(String::as_str), None);
     assert_eq!(form.title(), "Fix 'quotes'; $HOME `uname`");
     assert!(form.spec(false).multiline);
     assert_eq!(form.spec(false).rows[0].label, "Start");
@@ -808,10 +808,10 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
         ) if arguments == invocation.arguments
     ));
     let catalog = form.model_catalog_invocation().unwrap();
-    assert_eq!(catalog.command, "agents.native.catalog");
+    assert_eq!(catalog.command, "agents.native.catalog-info");
     assert_eq!(catalog.arguments.len(), 6);
     assert_eq!(catalog.target, invocation.target);
-    form.change_field("profile", "Default");
+    form.change_field("profile", "Work (work)");
     assert!(form.draft.model_selection.is_none());
     assert_eq!(form.model_options, []);
 }
@@ -886,7 +886,7 @@ fn permission_choices_follow_provider_capabilities_and_use_the_shared_invocation
     form.change_field("provider", "Pi");
     assert_eq!(
         form.draft.permissions,
-        bootty_agents::NativePermissionMode::FullAccess
+        bootty_agents::NativePermissionMode::ProviderDefault
     );
     let spec = form.spec(false);
     let permissions = spec
@@ -1028,4 +1028,73 @@ fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: N
             .map(|value| &value.model),
         Some(&selection.model)
     );
+}
+
+#[rstest]
+#[case("provider", "Claude")]
+#[case("profile", "Work (work)")]
+fn permission_defaults_follow_the_selected_account_without_overriding_its_policy(
+    mut form: NewSessionForm,
+    #[case] field: &str,
+    #[case] value: &str,
+) {
+    use bootty_agents::{NativePermissionMode, NativeProviderCatalog};
+    form.change_text("Keep the draft");
+    form.set_provider_catalog(Ok(NativeProviderCatalog {
+        models: Vec::new(),
+        permissions: Some(NativePermissionMode::FullAccess),
+    }));
+    assert_eq!(
+        form.permission_selection(),
+        NativePermissionMode::FullAccess
+    );
+    assert_eq!(
+        form.draft.permissions,
+        NativePermissionMode::ProviderDefault
+    );
+    assert_eq!(
+        form.invocation(&form.draft.cwd).unwrap().arguments.get(14),
+        None
+    );
+    let spec = form.spec(false);
+    assert_eq!(
+        spec.fields
+            .iter()
+            .find(|field| field.id == "permissions")
+            .unwrap()
+            .value,
+        "Full access"
+    );
+    form.change_field("permissions", "Supervised");
+    // An asynchronous catalog refresh must preserve an explicit user choice.
+    form.set_provider_catalog(Ok(NativeProviderCatalog {
+        models: Vec::new(),
+        permissions: Some(NativePermissionMode::FullAccess),
+    }));
+    assert_eq!(
+        form.permission_selection(),
+        NativePermissionMode::Supervised
+    );
+    form.change_field(field, value);
+    assert_eq!(
+        form.draft.permissions,
+        NativePermissionMode::ProviderDefault
+    );
+    assert_eq!(
+        form.permission_selection(),
+        NativePermissionMode::ProviderDefault
+    );
+    form.set_provider_catalog(Ok(NativeProviderCatalog {
+        models: Vec::new(),
+        permissions: Some(NativePermissionMode::AutoAcceptEdits),
+    }));
+    assert_eq!(
+        form.permission_selection(),
+        NativePermissionMode::AutoAcceptEdits
+    );
+    assert_eq!(
+        form.invocation(&form.draft.cwd).unwrap().arguments.get(14),
+        None
+    );
+    assert_eq!(form.draft.prompt, "Keep the draft");
 }
