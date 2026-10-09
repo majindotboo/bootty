@@ -81,7 +81,7 @@ impl AgentKind {
     #[must_use]
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::Pi => "bot",
+            Self::Pi => "pi",
             Self::Codex => "openai",
             Self::Claude => "claude",
         }
@@ -323,6 +323,17 @@ impl AgentEventKind {
         match self {
             Self::Native => "native",
             Self::Hook => "hook",
+        }
+    }
+}
+
+impl AgentKind {
+    #[must_use]
+    pub const fn account_directory_variable(self) -> &'static str {
+        match self {
+            Self::Codex => "CODEX_HOME",
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+            Self::Pi => "PI_CODING_AGENT_DIR",
         }
     }
 }

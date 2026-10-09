@@ -9,7 +9,26 @@ fn launch(args: &[&str]) -> AgentLaunch {
         cwd: Some("/tmp/project".to_owned()),
         arguments: args.iter().map(|arg| (*arg).to_owned()).collect(),
         ephemeral: false,
+        account_directory: None,
     }
+}
+
+#[rstest]
+#[case("line one\nline two\tquoted '$HOME'", true)]
+#[case("embedded\0nul", false)]
+#[case("bounded", true)]
+fn literal_argument_validation_preserves_text(#[case] argument: &str, #[case] valid: bool) {
+    assert_eq!(launch(&[argument]).validate().is_ok(), valid);
+}
+
+#[rstest]
+#[case(vec!["x".repeat(8193)])]
+#[case(vec!["x".to_owned(); 65])]
+#[case(vec!["x".repeat(8192); 9])]
+fn argument_limits_remain_authoritative(#[case] arguments: Vec<String>) {
+    let mut launch = launch(&[]);
+    launch.arguments = arguments;
+    assert!(launch.validate().is_err());
 }
 #[rstest]
 #[case(AgentKind::Pi, false, vec!["--model", "model", "--session", "session"]) ]
@@ -39,6 +58,25 @@ fn session_launch_retains_configuration_but_never_prompts_or_secrets(
     let retained = serde_json::to_string(&launch.retained(provider)).unwrap();
     assert!(!retained.contains("secret"));
     assert!(!retained.contains("prompt"));
+}
+
+#[rstest]
+#[case(vec!["--extension", "/owned/QA questions.ts"])]
+#[case(vec!["-e", "/owned/QA questions.ts"])]
+#[case(vec!["--extension=/owned/QA questions.ts"])]
+fn pi_resume_preserves_configured_extensions_as_literal_arguments(#[case] extension: Vec<&str>) {
+    let mut args = extension.clone();
+    args.extend(["--api-key", "secret", "--session", "old", "prompt"]);
+    let captured = launch(&args);
+    assert_eq!(captured.retained(AgentKind::Pi).arguments, extension);
+    let mut expected = extension;
+    expected.extend(["--session", "captured-session"]);
+    assert_eq!(
+        captured
+            .session_arguments(AgentKind::Pi, "captured-session", false)
+            .unwrap(),
+        expected
+    );
 }
 #[rstest]
 #[case("--no-session")]
@@ -74,7 +112,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn posix_launch_preserves_literal_arguments(value in "[ -~]{0,80}") {
-        let launch = AgentLaunch { program: "/usr/bin/printf".to_owned(), cwd: None, arguments: vec!["%s".to_owned(), value.clone()], ephemeral: false };
+        let launch = AgentLaunch { program: "/usr/bin/printf".to_owned(), cwd: None, arguments: vec!["%s".to_owned(), value.clone()], ephemeral: false, account_directory: None };
         let command = launch.shell_command(AgentKind::Pi, LaunchShell::Posix).unwrap();
         let output = std::process::Command::new("/bin/sh").args(["-c", &command]).output().unwrap();
         prop_assert!(output.status.success());
