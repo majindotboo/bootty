@@ -1,23 +1,29 @@
 mod agents;
+mod native_agents;
 mod targets;
+mod terminal_agents;
 
 use agents::{AgentScopeIndex, AppCommandAgentExecutor};
 
 mod capture;
 mod clipboard;
+pub mod computer;
 mod files;
 mod forwards;
 mod git;
 mod jobs;
 mod links;
 mod mux;
+mod orchestration;
 mod pane_input;
 mod recovery;
 mod sessions;
 mod shell;
+mod surfaces;
 mod wsl;
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -35,7 +41,10 @@ use crate::{
     error_catalog::ErrorNotice,
     state::{AppEffect, AppState, ViewportSnapshot},
 };
-use bootty_agents::{AgentCommandExecutor, AgentService};
+use bootty_agents::{
+    AgentCommandExecutor, AgentService, NativeAgentService, OrchestrationService,
+    TerminalAgentService,
+};
 use bootty_control::{
     AppCommandReceiver, AppCommandSender, BoundAppCommandSender, Caller, CommandCancellation,
     CommandInvocation, CommandOutcome, CommandTarget, ControlEventSender, MutationClass,
@@ -123,6 +132,57 @@ struct ResolvedCommandContext {
 }
 
 pub enum PendingCommandResult {
+    NativePanelFocus {
+        target: CommandTarget,
+        command: Box<PendingAppCommand>,
+    },
+    NativePanelClose {
+        targets: Vec<CommandTarget>,
+        result_target: Option<CommandTarget>,
+        command: Box<PendingAppCommand>,
+        stopping: bool,
+    },
+    SessionCheckpointClose {
+        target: CommandTarget,
+        identity: String,
+        captured: Option<crate::state::SessionCheckpointTicket>,
+    },
+    SessionAgentAssociation {
+        scope: SpaceId,
+        session: String,
+        identity: String,
+        result: mpsc::Receiver<CommandOutcome>,
+        outcome: Box<CommandOutcome>,
+    },
+    SessionCheckpointCompletion {
+        target: CommandTarget,
+        identity: String,
+        captured: Option<crate::state::SessionCheckpointTicket>,
+        outcome: Box<CommandOutcome>,
+    },
+    SurfaceCreation {
+        request_id: u64,
+        command: Box<PendingAppCommand>,
+        restored: Option<Box<CommandOutcome>>,
+    },
+    SurfaceRestore {
+        request_id: u64,
+        choice: crate::commands::SurfaceCommand,
+        caller: Caller,
+        command: Box<PendingAppCommand>,
+    },
+    TerminalAgentRestore {
+        restore: Option<Box<bootty_agents::PreparedTerminalRestore>>,
+        exact: ExactMuxTarget,
+        start: mpsc::Receiver<CommandOutcome>,
+        acknowledged: bool,
+        history: Arc<str>,
+    },
+    TerminalAgent {
+        result: mpsc::Receiver<CommandOutcome>,
+        creation: mpsc::Receiver<CommandTarget>,
+        observed: Option<CommandTarget>,
+    },
     Forward {
         result: mpsc::Receiver<Result<forwards::ForwardResult, String>>,
     },
@@ -138,18 +198,22 @@ pub enum PendingCommandResult {
     },
     DitchCleanup {
         scope: SpaceId,
-        command: MuxCommand,
+        command: Box<MuxCommand>,
         membership: Option<Box<BindingMembershipMutation>>,
         result: mpsc::Receiver<bootty_mux::workflow::DitchCleanupOutcome>,
     },
     Mux {
         layout: Option<bootty_mux::workspace::PreparedPaneArrangement>,
         scope: SpaceId,
-        command: MuxCommand,
+        command: Box<MuxCommand>,
         membership: Option<Box<BindingMembershipMutation>>,
         result: mpsc::Receiver<MuxCommandResult>,
     },
     Outcome(mpsc::Receiver<CommandOutcome>),
+    NativeResume {
+        target: CommandTarget,
+        result: mpsc::Receiver<CommandOutcome>,
+    },
     /// An explicit create that succeeded, held until the first pane Bootty started for it runs.
     SessionStart {
         starting: StartingSession,
@@ -164,7 +228,9 @@ pub enum CommandDispatch {
 }
 
 pub struct PendingAppCommand {
+    pub(crate) creation_receipt: Option<mpsc::Sender<CommandTarget>>,
     pub(crate) label: String,
+    pub(crate) user_initiated_annotation_capture: bool,
     pub(crate) deadline: Instant,
     pub(crate) cancellation: CommandCancellation,
     pub(crate) response: Option<mpsc::Sender<CommandOutcome>>,
@@ -187,11 +253,36 @@ impl PendingAppCommand {
     }
 }
 
+fn user_initiated_annotation_capture(invocation: &CommandInvocation) -> bool {
+    invocation.command == "browser.capture"
+        && invocation.caller == Caller::Internal
+        && invocation.arguments.len() == 2
+}
+
 fn poll_command_result<T>(result: &mpsc::Receiver<T>) -> Poll<Result<T, mpsc::RecvError>> {
     match result.try_recv() {
         Ok(value) => Poll::Ready(Ok(value)),
         Err(mpsc::TryRecvError::Empty) => Poll::Pending,
         Err(mpsc::TryRecvError::Disconnected) => Poll::Ready(Err(mpsc::RecvError)),
+    }
+}
+
+fn publish_creation_receipt(
+    receipt: &mut Option<mpsc::Sender<CommandTarget>>,
+    outcome: &CommandOutcome,
+) {
+    let CommandOutcome::Success { value, .. } = outcome else {
+        return;
+    };
+    let target = value
+        .get("terminal")
+        .or_else(|| value.get("created"))
+        .and_then(|target| serde_json::from_value::<CommandTarget>(target.clone()).ok())
+        .filter(|target| target.kind == ResourceKind::Terminal);
+    if let Some(target) = target
+        && let Some(receipt) = receipt.take()
+    {
+        let _ = receipt.send(target);
     }
 }
 
@@ -204,6 +295,14 @@ pub struct CommandRuntime {
     receiver: AppCommandReceiver,
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
+    terminal_agents: Option<Arc<TerminalAgentService>>,
+    native_agents: Option<Arc<NativeAgentService>>,
+    native_agent_error: Option<String>,
+    native_panes: HashMap<String, (SpaceId, CommandTarget)>,
+    terminal_agent_error: Option<String>,
+    orchestration: Option<Arc<OrchestrationService>>,
+    orchestration_error: Option<String>,
+    orchestration_observed_revision: (u64, u64, u64),
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
     pending: Vec<PendingAppCommand>,
     jobs: Arc<bootty_host::jobs::JobRegistry>,
@@ -219,6 +318,12 @@ impl Drop for CommandRuntime {
         if let Some(agents) = &self.agent_service {
             agents.retire();
         }
+        if let Some(agents) = self.native_agents.take() {
+            std::thread::spawn(move || agents.shutdown());
+        }
+        if let Some(agents) = self.terminal_agents.take() {
+            std::thread::spawn(move || agents.shutdown());
+        }
     }
 }
 
@@ -233,9 +338,10 @@ impl CommandRuntime {
         events: ControlEventSender,
         agent_state: &std::path::Path,
     ) -> Self {
-        let (sender, receiver) = app_command_channel(64, repaint);
+        let (sender, receiver) = app_command_channel(64, repaint.clone());
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
+            creation_receipt: None,
             sender: sender.clone(),
         });
         let agents = Arc::new(
@@ -246,13 +352,62 @@ impl CommandRuntime {
             )
             .persisted_at(agent_state),
         );
-        Self::from_channel(
+        let (terminals, terminal_error) =
+            match TerminalAgentService::open(agent_state.with_extension("terminals.json")) {
+                Ok(service) => (Some(Arc::new(service)), None),
+                Err(mut error) => {
+                    error.truncate(error.floor_char_boundary(4096));
+                    (None, Some(error))
+                }
+            };
+        if let Some(terminals) = &terminals {
+            terminals.set_change_handler(repaint.clone());
+        }
+        let mut runtime = Self::from_channel(
             sender,
             receiver,
             Some(agents),
             Some(scope_index),
             Some(events),
-        )
+        );
+        runtime.terminal_agents.clone_from(&terminals);
+        runtime.terminal_agent_error = terminal_error;
+        match NativeAgentService::open(agent_state.with_extension("conversations.json")) {
+            Ok(service) => {
+                service.set_change_handler(repaint);
+                runtime.native_agents = Some(Arc::new(service));
+            }
+            Err(error) => runtime.native_agent_error = Some(error),
+        }
+        match OrchestrationService::open(agent_state.with_extension("runs.json")) {
+            Ok(service) => runtime.orchestration = Some(Arc::new(service)),
+            Err(mut error) => {
+                error.truncate(error.floor_char_boundary(4096));
+                runtime.orchestration_error = Some(error);
+            }
+        }
+        runtime.catalog = Arc::new(CommandCatalog::with_terminal_services(
+            runtime.agent_service.clone(),
+            terminals,
+            Arc::downgrade(&runtime.jobs),
+        ));
+        runtime
+    }
+
+    pub(crate) fn sync_terminal_tools_policy(&self, config: &bootty_config::config::BoottyConfig) {
+        if let Some(service) = &self.terminal_agents {
+            service.set_agent_spawning_enabled(config.agents.allow_spawn);
+            service.set_computer_capture_enabled(
+                config.computer.enabled && config.computer.capture_enabled,
+            );
+            for provider in bootty_agents::AgentKind::ALL {
+                let enabled = config
+                    .agents
+                    .provider(&provider.to_string())
+                    .is_some_and(|preferences| preferences.enabled);
+                service.set_provider_tools_enabled(provider, enabled);
+            }
+        }
     }
 
     fn from_channel(
@@ -280,6 +435,14 @@ impl CommandRuntime {
                 },
             )),
             agent_service: agents,
+            terminal_agents: None,
+            native_agents: None,
+            native_agent_error: None,
+            native_panes: HashMap::new(),
+            terminal_agent_error: None,
+            orchestration: None,
+            orchestration_error: None,
+            orchestration_observed_revision: (0, 0, 0),
             agent_scope_index,
             pending: Vec::new(),
             forwards: Vec::new(),
@@ -310,6 +473,12 @@ impl CommandRuntime {
         self.queued = Some(invocation);
     }
 
+    pub(crate) fn queue_if_empty(&mut self, invocation: CommandInvocation) {
+        if self.queued.is_none() {
+            self.queued = Some(invocation);
+        }
+    }
+
     pub(crate) fn clear_queue(&mut self) {
         self.queued = None;
     }
@@ -336,6 +505,73 @@ impl CommandRuntime {
 }
 
 impl AppState {
+    pub(crate) fn sync_pending_session_completion_scopes(&mut self) {
+        let mut pending = std::mem::take(&mut self.commands.pending);
+        let mut scopes = HashSet::new();
+        for command in &mut pending {
+            self.collect_pending_session_completion_scopes(&mut command.result, &mut scopes);
+        }
+        self.commands.pending = pending;
+        self.workspace.set_pending_session_completion_scopes(scopes);
+    }
+
+    fn collect_pending_session_completion_scopes(
+        &self,
+        pending: &mut PendingCommandResult,
+        scopes: &mut HashSet<SpaceId>,
+    ) {
+        match pending {
+            PendingCommandResult::Mux { scope, .. }
+            | PendingCommandResult::DitchCleanup { scope, .. }
+            | PendingCommandResult::SessionAgentAssociation { scope, .. } => {
+                scopes.insert(*scope);
+            }
+            PendingCommandResult::SessionStart { starting, .. } => {
+                scopes.insert(starting.scope());
+            }
+            PendingCommandResult::SessionCheckpointClose { target, .. }
+            | PendingCommandResult::SessionCheckpointCompletion { target, .. } => {
+                if let Ok((_, Some(exact))) = self.resolve_command_target(
+                    "session.close",
+                    Some(ResourceKind::Session),
+                    Some(target),
+                ) {
+                    scopes.insert(exact.scope());
+                }
+            }
+            PendingCommandResult::NativePanelFocus { command, .. }
+            | PendingCommandResult::NativePanelClose { command, .. }
+            | PendingCommandResult::SurfaceCreation { command, .. }
+            | PendingCommandResult::SurfaceRestore { command, .. } => {
+                self.collect_pending_session_completion_scopes(&mut command.result, scopes);
+            }
+            PendingCommandResult::TerminalAgentRestore { exact, .. } => {
+                scopes.insert(exact.scope());
+            }
+            PendingCommandResult::TerminalAgent {
+                creation, observed, ..
+            } => {
+                if let Some(target) = creation.try_iter().last() {
+                    *observed = Some(target);
+                }
+                if let Some(target) = observed
+                    && let Ok((_, Some(exact))) = self.resolve_command_target(
+                        "terminal.capture",
+                        Some(ResourceKind::Terminal),
+                        Some(target),
+                    )
+                {
+                    scopes.insert(exact.scope());
+                }
+            }
+            PendingCommandResult::Forward { .. }
+            | PendingCommandResult::Link { .. }
+            | PendingCommandResult::Clipboard { .. }
+            | PendingCommandResult::Outcome(_)
+            | PendingCommandResult::NativeResume { .. } => {}
+        }
+    }
+
     pub(crate) fn pane_arrangement_pending(&self) -> bool {
         self.commands.pending.iter().any(|pending| {
             matches!(&pending.result,
@@ -388,6 +624,18 @@ impl AppState {
         self.commands.catalog.agents()
     }
 
+    pub fn terminal_agent_service(&self) -> Option<Arc<TerminalAgentService>> {
+        self.commands.terminal_agents.clone()
+    }
+
+    pub fn native_agent_service(&self) -> Option<Arc<NativeAgentService>> {
+        self.commands.native_agents.clone()
+    }
+
+    pub fn orchestration_service(&self) -> Option<Arc<OrchestrationService>> {
+        self.commands.orchestration.clone()
+    }
+
     pub(crate) fn drain_app_commands(
         &mut self,
         viewport: ViewportSnapshot,
@@ -396,7 +644,7 @@ impl AppState {
         self.drain_pending_app_commands(Instant::now(), effects);
         let mut drained = 0_usize;
         for _ in 0..32 {
-            let request = match self.commands.receiver.try_recv() {
+            let mut request = match self.commands.receiver.try_recv() {
                 Ok(request) => request,
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             };
@@ -409,6 +657,8 @@ impl AppState {
                     || request.invocation.command.clone(),
                     |descriptor| descriptor.title,
                 );
+            let user_initiated_annotation_capture =
+                user_initiated_annotation_capture(&request.invocation);
             let now = Instant::now();
             let dispatch = if request.cancellation.is_cancelled() {
                 CommandDispatch::Complete(CommandOutcome::cancelled())
@@ -431,11 +681,14 @@ impl AppState {
             };
             match dispatch {
                 CommandDispatch::Complete(outcome) => {
+                    publish_creation_receipt(&mut request.creation_receipt, &outcome);
                     let _ = request.response.send(outcome);
                 }
                 CommandDispatch::Pending(result) => {
                     self.commands.pending.push(PendingAppCommand {
+                        creation_receipt: request.creation_receipt,
                         label,
+                        user_initiated_annotation_capture,
                         deadline: request.deadline,
                         cancellation: request.cancellation,
                         response: Some(request.response),
@@ -456,6 +709,13 @@ impl AppState {
                 .is_some_and(|binding| binding.mux().binding_generation() == *generation)
         });
         for mut pending in std::mem::take(&mut self.commands.pending) {
+            let focus_tab = pending.response.is_none()
+                && matches!(self.modal_dialog(), Some(crate::state::ModalDialog::NewSession(dialog))
+                    if dialog.is_creation_form())
+                && matches!(&pending.result, PendingCommandResult::Mux { scope, command, .. }
+                    if *scope == self.mux_scope() && matches!(command.as_ref(),
+                        MuxCommand::ActivateWindow { .. } | MuxCommand::ActivateWindowIndex { .. }
+                            | MuxCommand::ActivateLastWindow { .. }));
             // A caller with a response channel reports its own failure, including one that
             // completes later; converting its result must not leave a window notification.
             let previous_error = pending.response.is_some().then(|| self.last_error.clone());
@@ -467,6 +727,9 @@ impl AppState {
                 Poll::Pending => self.commands.pending.push(pending),
                 Poll::Ready(None) => {}
                 Poll::Ready(Some(outcome)) => {
+                    if focus_tab && matches!(outcome, CommandOutcome::Success { .. }) {
+                        effects.push(AppEffect::FocusTerminal);
+                    }
                     if let Some(response) = pending.response {
                         let _ = response.send(outcome);
                     } else if matches!(&outcome, CommandOutcome::Failed { code, .. } if code == "deadline_exceeded")
@@ -487,6 +750,17 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
     ) -> Poll<Option<CommandOutcome>> {
         if let Some(outcome) = pending.cancellation_outcome(now) {
+            if let PendingCommandResult::TerminalAgentRestore { restore, .. } = &mut pending.result
+            {
+                let preparation = restore.take();
+                std::thread::spawn(move || drop(preparation));
+            }
+            if let PendingCommandResult::SurfaceCreation { request_id, .. }
+            | PendingCommandResult::SurfaceRestore { request_id, .. } = &pending.result
+                && let Err(error) = self.finish_surface_creation(*request_id, &outcome, effects)
+            {
+                return Poll::Ready(Some(error));
+            }
             if let PendingCommandResult::Mux {
                 scope,
                 membership: Some(_),
@@ -498,7 +772,101 @@ impl AppState {
             }
             return Poll::Ready(Some(outcome));
         }
+        if let PendingCommandResult::SessionCheckpointClose {
+            target,
+            identity,
+            captured,
+        } = &mut pending.result
+        {
+            let dispatch = ready!(self.poll_session_checkpoint_close(
+                target,
+                identity,
+                captured,
+                (pending.deadline, pending.cancellation.clone())
+            ));
+            match dispatch {
+                CommandDispatch::Complete(outcome) => return Poll::Ready(Some(outcome)),
+                CommandDispatch::Pending(result) => {
+                    pending.result = result;
+                    return self.poll_pending_app_command(pending, now, effects);
+                }
+            }
+        }
+        if matches!(
+            pending.result,
+            PendingCommandResult::SessionAgentAssociation { .. }
+        ) {
+            return self.poll_terminal_agent_association(pending);
+        }
+        if let PendingCommandResult::SessionStart {
+            starting,
+            name,
+            outcome,
+        } = &mut pending.result
+        {
+            let outcome = ready!(self.poll_session_start(starting, name, outcome));
+            return match self.hold_until_session_checkpoint(
+                starting.scope(),
+                starting.session_id(),
+                outcome,
+            ) {
+                CommandDispatch::Complete(outcome) => Poll::Ready(Some(outcome)),
+                CommandDispatch::Pending(result) => {
+                    pending.result = result;
+                    Poll::Pending
+                }
+            };
+        }
+        if let PendingCommandResult::SessionCheckpointCompletion {
+            target,
+            identity,
+            captured,
+            outcome,
+        } = &mut pending.result
+        {
+            publish_creation_receipt(&mut pending.creation_receipt, outcome);
+            return self
+                .poll_session_checkpoint_completion(target, identity, captured, outcome)
+                .map(Some);
+        }
+        self.poll_started_pending_command(pending, now, effects)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Typed pending-result dispatch stays together; each asynchronous lifecycle has its own owner"
+    )]
+    fn poll_started_pending_command(
+        &mut self,
+        pending: &mut PendingAppCommand,
+        now: Instant,
+        effects: &mut Vec<AppEffect>,
+    ) -> Poll<Option<CommandOutcome>> {
         let outcome = match &mut pending.result {
+            PendingCommandResult::SessionCheckpointClose { .. }
+            | PendingCommandResult::SessionStart { .. }
+            | PendingCommandResult::SessionAgentAssociation { .. }
+            | PendingCommandResult::SessionCheckpointCompletion { .. } => {
+                return self.poll_pending_app_command(pending, now, effects);
+            }
+            PendingCommandResult::NativePanelClose { .. } => {
+                return self.poll_native_panel_close(pending, now, effects);
+            }
+            PendingCommandResult::NativePanelFocus { .. } => {
+                return self.poll_native_panel_focus(pending, now, effects);
+            }
+            PendingCommandResult::SurfaceCreation { .. } => {
+                return self.poll_surface_creation(pending, now, effects);
+            }
+            PendingCommandResult::SurfaceRestore { .. } => {
+                return self.poll_surface_restore(pending, now, effects);
+            }
+            PendingCommandResult::TerminalAgentRestore { .. } => {
+                return self.poll_restored_terminal_agent(pending);
+            }
+            PendingCommandResult::TerminalAgent { .. } => {
+                return Self::poll_terminal_agent(pending);
+            }
             PendingCommandResult::DitchCleanup {
                 scope,
                 command,
@@ -557,25 +925,30 @@ impl AppState {
                 membership,
                 result,
                 layout,
-            } => ready!(self.poll_pending_mux(
+            } => match ready!(self.poll_pending_mux(
                 *scope,
                 command,
                 membership.as_deref(),
                 layout.as_ref(),
-                result
-            )),
-            PendingCommandResult::Outcome(result) => match ready!(poll_command_result(result)) {
-                Ok(outcome) => outcome,
-                Err(mpsc::RecvError) => CommandOutcome::Failed {
-                    code: "command_worker_stopped".to_owned(),
-                    message: ErrorNotice::CommandWorkerStopped.to_string(),
-                },
+                result,
+                &mut pending.creation_receipt
+            )) {
+                CommandDispatch::Complete(outcome) => outcome,
+                CommandDispatch::Pending(result) => {
+                    pending.result = result;
+                    return Poll::Pending;
+                }
             },
-            PendingCommandResult::SessionStart {
-                starting,
-                name,
-                outcome,
-            } => ready!(self.poll_session_start(starting, name, outcome)),
+            PendingCommandResult::Outcome(result)
+            | PendingCommandResult::NativeResume { result, .. } => {
+                match ready!(poll_command_result(result)) {
+                    Ok(outcome) => outcome,
+                    Err(mpsc::RecvError) => CommandOutcome::Failed {
+                        code: "command_worker_stopped".to_owned(),
+                        message: ErrorNotice::CommandWorkerStopped.to_string(),
+                    },
+                }
+            }
         };
         Poll::Ready(Some(outcome))
     }
@@ -588,18 +961,22 @@ impl AppState {
         membership: Option<&BindingMembershipMutation>,
         layout: Option<&bootty_mux::workspace::PreparedPaneArrangement>,
         result: &mpsc::Receiver<MuxCommandResult>,
-    ) -> Poll<CommandOutcome> {
+        creation_receipt: &mut Option<mpsc::Sender<CommandTarget>>,
+    ) -> Poll<CommandDispatch> {
         let Ok(result) = ready!(poll_command_result(result)) else {
             if membership.is_some() {
                 self.workspace
                     .defer_binding_membership_reconciliation(scope);
             }
-            return Poll::Ready(CommandOutcome::Failed {
+            return Poll::Ready(CommandDispatch::Complete(CommandOutcome::Failed {
                 code: "backend_worker_stopped".to_owned(),
                 message: ErrorNotice::MuxCommandWorkerStopped.to_string(),
-            });
+            }));
         };
-        Poll::Ready(self.command_outcome_for_mux_result(scope, command, membership, result, layout))
+        let outcome =
+            self.command_outcome_for_mux_result(scope, command, membership, result, layout);
+        publish_creation_receipt(creation_receipt, &outcome);
+        Poll::Ready(self.hold_until_session_starts(scope, command, outcome))
     }
 
     pub(crate) fn dispatch_command(
@@ -608,6 +985,7 @@ impl AppState {
         viewport: ViewportSnapshot,
         effects: &mut Vec<AppEffect>,
     ) -> CommandOutcome {
+        let user_initiated_annotation_capture = user_initiated_annotation_capture(&invocation);
         let label = self
             .commands
             .catalog
@@ -632,14 +1010,19 @@ impl AppState {
             )
             || invocation.command.starts_with("pane.")
             || invocation.command.starts_with("session.")
-            || invocation.command == "link.open";
+            || invocation.command == "link.open"
+            || invocation.command.starts_with("browser.")
+            || invocation.command.starts_with("runs.")
+            || invocation.command.starts_with("computer.");
         let (deadline, cancellation) = executor::command_execution(None);
         let execution = asynchronous.then(|| (deadline, cancellation.clone()));
         match self.dispatch_command_with_execution(invocation, viewport, effects, execution) {
             CommandDispatch::Complete(outcome) => outcome,
             CommandDispatch::Pending(result) => {
                 self.commands.pending.push(PendingAppCommand {
+                    creation_receipt: None,
                     label,
+                    user_initiated_annotation_capture,
                     deadline,
                     cancellation,
                     response: None,
@@ -666,11 +1049,51 @@ impl AppState {
             Ok(resolved) => resolved,
             Err(outcome) => return self.reject_command(outcome),
         };
-        let (target, exact_target) = match self.resolve_command_target(
-            &resolved.invocation.command,
-            resolved.descriptor.target,
-            resolved.invocation.target.as_ref(),
-        ) {
+        match &resolved.executor {
+            CommandExecutor::Core(CoreCommandExecutor::Surface(command)) => {
+                return self.dispatch_surface_command(
+                    command.clone(),
+                    resolved.invocation,
+                    viewport,
+                    effects,
+                    execution,
+                );
+            }
+            CommandExecutor::Core(CoreCommandExecutor::Keybind(KeybindAction::Mux(action))) => {
+                let placement = match action {
+                    MuxKeyAction::NewTab => Some(crate::surface_creation::SurfacePlacement::Tab),
+                    MuxKeyAction::SplitPane(direction) => {
+                        Some(crate::surface_creation::SurfacePlacement::Split(*direction))
+                    }
+                    _ => None,
+                };
+                if let Some(placement) = placement {
+                    return self.open_surface_chooser(
+                        &resolved.invocation,
+                        placement,
+                        effects,
+                        execution,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if matches!(resolved.executor, CommandExecutor::NativeAgent) {
+            return self.dispatch_native_agent(resolved.invocation, effects, execution);
+        }
+        if resolved.invocation.command == "runs.create_for_session"
+            && let CommandExecutor::Core(CoreCommandExecutor::Orchestration(command)) =
+                &resolved.executor
+        {
+            // Native conversation targets belong to the agent owner, not backend session topology.
+            return self.dispatch_orchestration_command(
+                command.clone(),
+                resolved.invocation,
+                None,
+                execution,
+            );
+        }
+        let (target, exact_target) = match self.resolve_invocation_target(&resolved) {
             Ok(target) => target,
             Err(outcome) => return self.reject_command(outcome),
         };
@@ -705,13 +1128,71 @@ impl AppState {
                 context.exact_target.as_ref(),
                 execution,
             ),
-            CommandExecutor::UncomposedAgent => {
-                CommandDispatch::Complete(CommandOutcome::Unsupported {
-                    message: "native agent service is not composed for this app instance"
-                        .to_owned(),
-                })
+            CommandExecutor::NativeAgent => {
+                self.dispatch_native_agent(context.invocation, effects, execution)
             }
+            CommandExecutor::TerminalAgent => self.dispatch_terminal_agent(
+                context.invocation,
+                context.exact_target.as_ref(),
+                execution,
+            ),
+            CommandExecutor::UncomposedAgent => self.uncomposed_agent_outcome(),
         }
+    }
+
+    fn resolve_invocation_target(
+        &self,
+        resolved: &crate::commands::ResolvedCommandInvocation,
+    ) -> Result<(Option<CommandTarget>, Option<ExactMuxTarget>), CommandOutcome> {
+        let named_agent = resolved.invocation.command.starts_with("agents.")
+            && resolved.invocation.command.rsplit('.').next() == Some("start")
+            && resolved
+                .invocation
+                .arguments
+                .get(3)
+                .is_some_and(|name| !name.is_empty());
+        if resolved.invocation.command == "agents.spawn" && resolved.invocation.target.is_none() {
+            return Err(CommandOutcome::Denied {
+                message: "Agent spawning requires the exact captured parent terminal".to_owned(),
+            });
+        }
+        if resolved.invocation.command.starts_with("runs.")
+            && !matches!(
+                resolved.invocation.command.as_str(),
+                "runs.list" | "runs.read"
+            )
+            && resolved.invocation.target.is_none()
+        {
+            return Err(CommandOutcome::Denied {
+                message: "Run mutations require the captured Binding".to_owned(),
+            });
+        }
+        if named_agent && resolved.invocation.target.is_none() {
+            return Err(CommandOutcome::Denied {
+                message: "Named agent creation requires an explicit host destination".to_owned(),
+            });
+        }
+        let expected_target = if named_agent {
+            Some(ResourceKind::Binding)
+        } else {
+            resolved.descriptor.target
+        };
+        self.resolve_command_target(
+            &resolved.invocation.command,
+            expected_target,
+            resolved.invocation.target.as_ref(),
+        )
+    }
+
+    fn uncomposed_agent_outcome(&self) -> CommandDispatch {
+        if let Some(error) = &self.commands.terminal_agent_error {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: format!("Terminal agent owner could not start: {error}"),
+            });
+        }
+        CommandDispatch::Complete(CommandOutcome::Unsupported {
+            message: "native agent service is not composed for this app instance".to_owned(),
+        })
     }
 
     fn dispatch_core_command(
@@ -722,27 +1203,18 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let ResolvedCommandContext {
-            invocation,
-            exact_target,
-            planned_mux_command,
-            ..
-        } = context;
+        let invocation = context.invocation;
+        let exact_target = context.exact_target;
         let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
-        let scope = target_scope.unwrap_or_else(|| self.mux_scope());
-        let caller = invocation.caller;
         match executor {
-            CoreCommandExecutor::Recovery(action, arguments) => {
-                self.dispatch_recovery(action, &arguments, execution)
+            CoreCommandExecutor::Composer(action) => dispatch_composer(action, execution, effects),
+            CoreCommandExecutor::Surface(command) => {
+                self.dispatch_surface_command(command, invocation, viewport, effects, execution)
             }
-            CoreCommandExecutor::ShellPrompt(action, arguments) => exact_target.map_or_else(
-                || {
-                    CommandDispatch::Complete(CommandOutcome::Unavailable {
-                        message: "No terminal prompt is available".to_owned(),
-                    })
-                },
-                |exact| self.dispatch_shell_prompt(&exact, action, &arguments, execution),
-            ),
+            CoreCommandExecutor::Recovery(_, _) => self.dispatch_recovery(&invocation, execution),
+            CoreCommandExecutor::ShellPrompt(action, arguments) => {
+                self.dispatch_attached_shell_prompt(exact_target, action, &arguments, execution)
+            }
             CoreCommandExecutor::Forward(action, arguments) => {
                 self.dispatch_forward(action, &arguments, target_scope, execution)
             }
@@ -755,39 +1227,36 @@ impl AppState {
             CoreCommandExecutor::Theme(action, arguments) => {
                 self.dispatch_theme_command(action, &arguments, execution, effects)
             }
-            CoreCommandExecutor::CaptureTerminal(arguments, export) => {
-                let (Some(exact), Some(target)) = (exact_target, invocation.target) else {
-                    return self.reject_command(CommandOutcome::Unavailable {
-                        message: "Capture needs an attached terminal".to_owned(),
-                    });
-                };
-                self.dispatch_terminal_capture(&exact, target, &arguments, export, execution)
-            }
+            CoreCommandExecutor::CaptureTerminal(arguments, export) => self
+                .dispatch_captured_terminal(
+                    exact_target,
+                    invocation.target,
+                    &arguments,
+                    export,
+                    execution,
+                ),
             CoreCommandExecutor::WslList => self.dispatch_wsl_list(execution),
             CoreCommandExecutor::OpenLink(arguments) => {
-                let (Some(exact), Some(target)) = (exact_target, invocation.target) else {
-                    return self.reject_command(links::failure(
-                        "Link needs an attached terminal".to_owned(),
-                    ));
-                };
-                self.dispatch_link_open(target, &exact, &arguments, execution)
+                self.dispatch_attached_link(exact_target, invocation.target, &arguments, execution)
             }
-            CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => {
-                let Some(target) = invocation.target else {
-                    return self.reject_command(CommandOutcome::Unavailable {
-                        message: "clipboard paste requires a terminal".to_owned(),
-                    });
-                };
-                self.dispatch_clipboard_paste(scope, target, execution)
-            }
+            CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => self
+                .dispatch_attached_clipboard(
+                    target_scope.unwrap_or_else(|| self.mux_scope()),
+                    invocation.target,
+                    execution,
+                ),
             CoreCommandExecutor::Pane(action, arguments) => {
                 self.dispatch_pane_command(action, &arguments, exact_target, execution)
             }
-            CoreCommandExecutor::Session(action, arguments) => {
-                self.dispatch_session_command(action, &arguments, exact_target, execution)
-            }
+            CoreCommandExecutor::Session(action, arguments) => self.dispatch_session_with_caller(
+                action,
+                &arguments,
+                exact_target,
+                invocation.caller,
+                execution,
+            ),
             CoreCommandExecutor::File(action, arguments) => self.dispatch_file_action(
-                scope,
+                target_scope.unwrap_or_else(|| self.mux_scope()),
                 action,
                 &arguments,
                 invocation.target,
@@ -795,7 +1264,7 @@ impl AppState {
                 execution,
             ),
             CoreCommandExecutor::Git(action, arguments) => self.dispatch_git_action(
-                scope,
+                target_scope.unwrap_or_else(|| self.mux_scope()),
                 action,
                 arguments,
                 invocation.target,
@@ -807,8 +1276,8 @@ impl AppState {
             }
             CoreCommandExecutor::Keybind(action) => self.dispatch_resolved_keybind_command(
                 action,
-                planned_mux_command,
-                caller,
+                context.planned_mux_command,
+                invocation.caller,
                 viewport,
                 effects,
                 execution,
@@ -816,7 +1285,106 @@ impl AppState {
             CoreCommandExecutor::Dock(action, group) => {
                 Self::dispatch_dock_command(action, group, effects, execution)
             }
+            CoreCommandExecutor::Browser(action, page) => self.dispatch_browser_command(
+                action,
+                page,
+                invocation.target,
+                invocation.caller,
+                effects,
+                execution,
+            ),
+            CoreCommandExecutor::Orchestration(command) => self.dispatch_orchestration_command(
+                command,
+                invocation,
+                exact_target.as_ref(),
+                execution,
+            ),
+            CoreCommandExecutor::Computer(command) => {
+                self.dispatch_computer_command(command, execution)
+            }
         }
+    }
+
+    fn dispatch_attached_shell_prompt(
+        &mut self,
+        exact: Option<ExactMuxTarget>,
+        action: &'static str,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        exact.map_or_else(
+            || {
+                CommandDispatch::Complete(CommandOutcome::Unavailable {
+                    message: "No terminal prompt is available".to_owned(),
+                })
+            },
+            |exact| self.dispatch_shell_prompt(&exact, action, arguments, execution),
+        )
+    }
+
+    fn dispatch_session_with_caller(
+        &mut self,
+        action: crate::commands::SessionAction,
+        arguments: &[String],
+        target: Option<ExactMuxTarget>,
+        caller: Caller,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if matches!(
+            action,
+            crate::commands::SessionAction::Activity
+                | crate::commands::SessionAction::AcceptedInput
+        ) && caller != Caller::Internal
+        {
+            return CommandDispatch::Complete(CommandOutcome::Denied {
+                message: "Session activity requires an accepted host input receipt".to_owned(),
+            });
+        }
+        self.dispatch_session_command(action, arguments, target, execution)
+    }
+
+    fn dispatch_attached_clipboard(
+        &mut self,
+        scope: SpaceId,
+        target: Option<CommandTarget>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(target) = target else {
+            return self.reject_command(CommandOutcome::Unavailable {
+                message: "clipboard paste requires a terminal".to_owned(),
+            });
+        };
+        self.dispatch_clipboard_paste(scope, target, execution)
+    }
+
+    fn dispatch_attached_link(
+        &mut self,
+        exact: Option<ExactMuxTarget>,
+        target: Option<CommandTarget>,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (Some(exact), Some(target)) = (exact, target) else {
+            return self
+                .reject_command(links::failure("Link needs an attached terminal".to_owned()));
+        };
+        self.dispatch_link_open(target, &exact, arguments, execution)
+    }
+
+    fn dispatch_captured_terminal(
+        &mut self,
+        exact: Option<ExactMuxTarget>,
+        target: Option<CommandTarget>,
+        arguments: &[String],
+        export: bool,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (Some(exact), Some(target)) = (exact, target) else {
+            return self.reject_command(CommandOutcome::Unavailable {
+                message: "Capture needs an attached terminal".to_owned(),
+            });
+        };
+        self.dispatch_terminal_capture(&exact, target, arguments, export, execution)
     }
 
     fn dispatch_dock_command(
@@ -829,6 +1397,68 @@ impl AppState {
         effects.push(AppEffect::Dock(crate::commands::DockRequest::new(
             action,
             group,
+            execution,
+            Some(response),
+        )));
+        CommandDispatch::Pending(PendingCommandResult::Outcome(result))
+    }
+
+    fn dispatch_browser_command(
+        &self,
+        action: crate::commands::BrowserAction,
+        page: Option<u64>,
+        target: Option<CommandTarget>,
+        caller: Caller,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if matches!(
+            action,
+            crate::commands::BrowserAction::Capture
+                | crate::commands::BrowserAction::CaptureAnnotation(_)
+        ) {
+            let policy = self.config().computer;
+            let local_annotation = caller == Caller::Internal
+                && matches!(action, crate::commands::BrowserAction::CaptureAnnotation(_));
+            if !local_annotation && (!policy.enabled || !policy.capture_enabled) {
+                return CommandDispatch::Complete(CommandOutcome::Denied {
+                    message: "Computer capture is disabled in Bootty settings".into(),
+                });
+            }
+            if !cfg!(target_os = "macos") {
+                return CommandDispatch::Complete(CommandOutcome::Unsupported {
+                    message: "Browser page capture currently requires macOS".into(),
+                });
+            }
+            let (Some(page), Some(native_window), Some(target)) =
+                (page, self.native_computer_window, target)
+            else {
+                return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                    message: "The exact browser host window is unavailable".into(),
+                });
+            };
+            let (response, result) = mpsc::channel();
+            let mut request = crate::commands::BrowserRequest::capture(
+                page,
+                executor::command_execution(execution),
+                response,
+                native_window,
+                crate::gpui_workspace::browser_profile_directory()
+                    .with_file_name("computer-captures"),
+                bootty_computer::ComputerAccess::from_user_setting(
+                    local_annotation || (policy.enabled && policy.capture_enabled),
+                ),
+                target,
+            );
+            request.action = action;
+            effects.push(AppEffect::Browser(request));
+            return CommandDispatch::Pending(PendingCommandResult::Outcome(result));
+        }
+        let (response, result) = mpsc::channel();
+        effects.push(AppEffect::Browser(crate::commands::BrowserRequest::new(
+            action,
+            page,
+            target,
             execution,
             Some(response),
         )));
@@ -960,7 +1590,24 @@ impl AppState {
                 CommandDispatch::Complete(self.reload_config_command(effects))
             }
             SynchronousCommand::Sidebar(action) => {
-                if self.apply_sidebar_action(action)
+                let applied = self.apply_sidebar_action(action, effects);
+                if !applied
+                    && matches!(
+                        action,
+                        crate::app_actions::SidebarAction::ToggleGrouping
+                            | crate::app_actions::SidebarAction::SortManual
+                            | crate::app_actions::SidebarAction::SortRecentActivity
+                    )
+                {
+                    return CommandDispatch::Complete(CommandOutcome::Failed {
+                        code: "configuration_save_failed".to_owned(),
+                        message: self.last_error.as_ref().map_or_else(
+                            || "Could not save the session list view.".to_owned(),
+                            ErrorNotice::raw_message,
+                        ),
+                    });
+                }
+                if applied
                     && matches!(
                         action,
                         crate::app_actions::SidebarAction::FocusTerminal
@@ -1036,6 +1683,10 @@ impl AppState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One dispatch owns shared window policy, pane closure and exact mux action routing"
+    )]
     fn dispatch_resolved_keybind_command(
         &mut self,
         action: KeybindAction,
@@ -1058,9 +1709,6 @@ impl AppState {
         if matches!(action, KeybindAction::Mux(MuxKeyAction::ClosePane))
             && let Some(policy) = self.last_surface_close_policy()
         {
-            if let Err(error) = executor::begin_synchronous_command(execution) {
-                return CommandDispatch::Complete(command_outcome_for_mux_error(error));
-            }
             // This is a window policy, shared by every caller and backend. Other sessions
             // and Spaces must remain reachable when only the selected session becomes empty.
             let close_window = match policy {
@@ -1071,14 +1719,65 @@ impl AppState {
                 }
             };
             if close_window {
+                if let Err(error) = executor::begin_synchronous_command(execution) {
+                    return CommandDispatch::Complete(command_outcome_for_mux_error(error));
+                }
                 effects.push(AppEffect::CloseWindow);
+                effects.push(AppEffect::RequestRepaint);
+                return CommandDispatch::Complete(CommandOutcome::success());
             }
-            effects.push(AppEffect::RequestRepaint);
-            return CommandDispatch::Complete(CommandOutcome::success());
+        }
+        if matches!(
+            action,
+            KeybindAction::Mux(MuxKeyAction::ClosePane | MuxKeyAction::KillPane)
+        ) && let Some(
+            MuxCommand::ClosePane {
+                session_id,
+                pane_id: Some(pane),
+            }
+            | MuxCommand::KillPane {
+                session_id,
+                pane_id: Some(pane),
+            },
+        ) = &planned_mux_command
+        {
+            return self.dispatch_planned_pane_close(session_id, pane, execution);
+        }
+        let gui_tab_navigation = execution.is_none()
+            && matches!(self.modal_dialog(), Some(crate::state::ModalDialog::NewSession(dialog))
+                if dialog.is_creation_form())
+            && !matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau)
+            && matches!(
+                action,
+                KeybindAction::Mux(
+                    MuxKeyAction::NextTab
+                        | MuxKeyAction::PreviousTab
+                        | MuxKeyAction::LastTab
+                        | MuxKeyAction::SelectTab(_)
+                )
+            );
+        if matches!(
+            action,
+            KeybindAction::Mux(
+                MuxKeyAction::NewTab
+                    | MuxKeyAction::NextTab
+                    | MuxKeyAction::PreviousTab
+                    | MuxKeyAction::LastTab
+                    | MuxKeyAction::SelectTab(_)
+                    | MuxKeyAction::SplitPane(_)
+                    | MuxKeyAction::SelectPane(_)
+                    | MuxKeyAction::NextPane
+                    | MuxKeyAction::PreviousPane
+            )
+        ) && !gui_tab_navigation
+        {
+            effects.push(AppEffect::FocusTerminal);
         }
         let mut return_native_mux_focus = false;
         // Every mailbox caller needs the authoritative result, including nested native-agent commands.
-        if (execution.is_some() || matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau))
+        if (execution.is_some()
+            || matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau)
+            || gui_tab_navigation)
             && let KeybindAction::Mux(mux_action) = action
         {
             let process_local_action = self
@@ -1152,4 +1851,16 @@ impl AppState {
             |focused| serde_json::json!({ "focused": focused }),
         )
     }
+}
+
+fn dispatch_composer(
+    action: crate::gpui::CommandAction,
+    execution: Option<(Instant, CommandCancellation)>,
+    effects: &mut Vec<AppEffect>,
+) -> CommandDispatch {
+    let (sender, receiver) = mpsc::channel();
+    effects.push(AppEffect::ComposerAction(
+        crate::commands::ComposerRequest::new(action, execution, sender),
+    ));
+    CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
 }

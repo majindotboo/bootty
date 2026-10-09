@@ -25,7 +25,7 @@ use super::{
     font_features::{FontFeatureEditorEvent, FontFeatureEditorSnapshot, GpuiFontFeatureEditor},
     model::{
         SettingsCategory, SettingsContent, SettingsControl, SettingsIntent, SettingsPage,
-        SettingsPageItem, SettingsRow,
+        SettingsPageItem, SettingsRow, provider_kind_for_settings_row, provider_navigation_id,
     },
     search::{SearchIndex, SearchMatches},
 };
@@ -49,8 +49,14 @@ pub struct GpuiSettings {
     pub(crate) draft: crate::settings_session::SettingsSession,
     pub(super) content: SettingsContent,
     pub(super) category: SettingsCategory,
+    pub(super) theme_group: super::model::ThemeColorGroup,
+    pub(super) theme_branch: String,
+    pub(super) theme_preview_colors: [bootty_config::config::ColorConfig; 2],
     pub(super) search: String,
     pub(super) active_editor: Option<String>,
+    pub(super) expanded_providers: HashSet<String>,
+    pub(super) provider_catalogs:
+        HashMap<bootty_agents::AgentKind, super::provider_models::ProviderCatalog>,
     pub(super) focus: FocusHandle,
     pub(super) navbar_focus: FocusHandle,
     pub(super) content_focus: FocusHandle,
@@ -65,6 +71,7 @@ pub struct GpuiSettings {
     pub(super) list_state: ListState,
     pub(super) last_layout_font: Option<(gpui_kit::Font, gpui_kit::Pixels)>,
     pub(super) active_section: Option<String>,
+    pub(super) root_navigation_active: bool,
     pub(super) pending_section: Option<String>,
     pub(super) pending_content_focus: Option<(SettingsCategory, Option<String>)>,
     pub(super) choice_focus_handles: HashMap<String, FocusHandle>,
@@ -97,8 +104,16 @@ impl GpuiSettings {
             draft,
             content: snapshot,
             category: SettingsCategory::default(),
+            theme_group: super::model::ThemeColorGroup::default(),
+            theme_branch: "appearance.dark.colors".to_owned(),
+            theme_preview_colors: [
+                bootty_config::config::ColorConfig::default(),
+                bootty_config::config::ColorConfig::default(),
+            ],
             search: String::new(),
             active_editor: None,
+            expanded_providers: HashSet::new(),
+            provider_catalogs: HashMap::new(),
             focus: cx.focus_handle(),
             navbar_focus: cx
                 .focus_handle()
@@ -119,6 +134,7 @@ impl GpuiSettings {
             list_state,
             last_layout_font: None,
             active_section: None,
+            root_navigation_active: false,
             pending_section: None,
             pending_content_focus: None,
             choice_focus_handles: HashMap::new(),
@@ -156,6 +172,7 @@ impl GpuiSettings {
     pub fn select_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
         self.category = category;
         self.active_editor = None;
+        self.root_navigation_active = false;
         if let Some(entry) = self
             .navbar_entries
             .iter_mut()
@@ -302,6 +319,13 @@ impl GpuiSettings {
 
     pub fn apply_search(&mut self, query: &str, cx: &mut Context<Self>) {
         query.clone_into(&mut self.search);
+        if let Some(group) = super::ThemeColorGroup::for_setting(query) {
+            self.theme_group = group;
+        } else if let Some(group) = super::ThemeColorGroup::ALL.into_iter().find(|group| {
+            !query.is_empty() && group.label().to_lowercase().contains(&query.to_lowercase())
+        }) {
+            self.theme_group = group;
+        }
         let matches = self.search_index.matches(&self.content.pages, query);
         self.filter_table = matches.table;
         self.has_query = matches.has_query;
@@ -390,16 +414,23 @@ impl GpuiSettings {
     }
 
     fn update_active_section(&mut self, logical_index: usize) {
+        if self.category == SettingsCategory::Providers {
+            return;
+        }
+        if self.root_navigation_active {
+            if logical_index == 0 {
+                self.active_section = None;
+                return;
+            }
+            self.root_navigation_active = false;
+        }
         let visible = self.visible_page_item_indices();
         self.active_section = self.current_page().and_then(|page| {
             visible
                 .iter()
                 .take(logical_index.saturating_add(1))
                 .rev()
-                .find_map(|&index| match page.items.get(index) {
-                    Some(SettingsPageItem::SectionHeader { id, .. }) => Some(id.clone()),
-                    _ => None,
-                })
+                .find_map(|&index| page.items.get(index).and_then(navigation_section_id))
         });
     }
 
@@ -408,9 +439,11 @@ impl GpuiSettings {
             return;
         };
         let visible = self.visible_page_item_indices();
-        let Some(actual_index) = page.items.iter().position(
-            |item| matches!(item, SettingsPageItem::SectionHeader { id, .. } if id == section),
-        ) else {
+        let Some(actual_index) = page
+            .items
+            .iter()
+            .position(|item| navigation_section_id(item).as_deref() == Some(section))
+        else {
             return;
         };
         if let Some(logical_index) = visible.iter().position(|index| *index == actual_index) {
@@ -491,10 +524,15 @@ impl GpuiSettings {
         };
         let category = entry.category;
         let section_id = entry.section_id.clone();
+        let provider = entry.provider;
         let is_root = entry.is_root;
 
         if is_root && expand_collapsed_root {
             entry.expanded = true;
+        }
+        if let Some(provider) = provider {
+            self.expanded_providers
+                .insert(format!("agents.{provider}.enabled"));
         }
         self.active_section = section_id.clone();
         if focus_content {
@@ -504,8 +542,12 @@ impl GpuiSettings {
         if self.category != category {
             self.pending_section = section_id;
             self.select_category(category, cx);
+            self.root_navigation_active = is_root;
             return;
         }
+
+        // Keep an explicitly chosen page root selected until scrolling moves past its first item.
+        self.root_navigation_active = is_root;
 
         if let Some(section_id) = &section_id {
             self.scroll_to_section(section_id, cx);
@@ -669,12 +711,7 @@ impl GpuiSettings {
                     .get(page_index)?
                     .items
                     .iter()
-                    .position(|item| {
-                        matches!(
-                            item,
-                            SettingsPageItem::SectionHeader { id, .. } if id == section_id
-                        )
-                    })
+                    .position(|item| navigation_section_id(item).as_deref() == Some(section_id))
             })
             .filter(|index| visible.contains(index))
             .or_else(|| visible.first().copied());
@@ -919,7 +956,10 @@ impl GpuiSettings {
             })
     }
 
-    fn render_page(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
+    fn render_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.category == SettingsCategory::Theme {
+            return self.render_theme_settings(window, cx);
+        }
         let open_entity = cx.entity();
         let warning = self.content.write_error.clone();
         let page_content = self.render_current_page_items(window, cx);
@@ -1022,6 +1062,16 @@ fn settings_page_item_id(item: &SettingsPageItem, fallback_index: usize) -> Stri
         || format!("settings-page-item-index-{fallback_index}"),
         |identity| format!("settings-page-item-{identity}"),
     )
+}
+
+fn navigation_section_id(item: &SettingsPageItem) -> Option<String> {
+    match item {
+        SettingsPageItem::SectionHeader { id, .. } => Some(id.clone()),
+        SettingsPageItem::Dependent { parent, .. } => {
+            provider_kind_for_settings_row(parent).map(provider_navigation_id)
+        }
+        SettingsPageItem::Setting(_) => None,
+    }
 }
 
 /// Zed derives the page heading from the selected root navigation entry rather than a host scope
@@ -1151,7 +1201,9 @@ impl Render for GpuiSettings {
             .when(!cfg!(target_os = "macos"), |this| {
                 this.border_t_1().border_color(cx.theme().border)
             })
-            .child(self.render_nav(&search_input, window, cx))
+            .when(self.category != SettingsCategory::Theme, |this| {
+                this.child(self.render_nav(&search_input, window, cx))
+            })
             .child(self.render_page(window, cx))
     }
 }

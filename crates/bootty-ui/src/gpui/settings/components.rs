@@ -40,7 +40,8 @@ use super::{
         AnsiPalettePreset, ModifierRemap, ModifierRemapField, ModuleIntegrationStatus,
         ModuleIntegrationsSnapshot, ModuleSourceIntent, RemoteEditorSnapshot, RemoteTestState,
         ScalarValue, SettingsCategory, SettingsChoice, SettingsControl, SettingsIntent,
-        SettingsPageItem, SettingsRow, StatusSegmentsSnapshot,
+        SettingsPageItem, SettingsRow, StatusSegmentsSnapshot, provider_kind_for_settings_row,
+        provider_navigation_id,
     },
     picker::{
         render_compact_dropdown, render_dropdown, render_searchable_picker, uses_searchable_picker,
@@ -61,6 +62,7 @@ pub(super) struct NavBarEntry {
     pub(super) page_index: usize,
     pub(super) item_index: Option<usize>,
     pub(super) section_id: Option<String>,
+    pub(super) provider: Option<bootty_agents::AgentKind>,
     pub(super) focus_handle: FocusHandle,
 }
 
@@ -79,6 +81,9 @@ impl GpuiSettings {
         let mut entries = Vec::new();
 
         for (page_index, page) in self.content.pages.iter().enumerate() {
+            if page.category == SettingsCategory::Theme {
+                continue;
+            }
             let prior_root = prior.get(&(page.category, None));
             entries.push(NavBarEntry {
                 title: page.title.clone(),
@@ -89,30 +94,56 @@ impl GpuiSettings {
                 page_index,
                 item_index: None,
                 section_id: None,
+                provider: None,
                 focus_handle: prior_root.map_or_else(
                     || cx.focus_handle().tab_index(0).tab_stop(true),
                     |(_, focus_handle)| focus_handle.clone(),
                 ),
             });
             for (item_index, item) in page.items.iter().enumerate() {
-                let SettingsPageItem::SectionHeader { id, title, .. } = item else {
-                    continue;
-                };
-                let section_id = Some(id.clone());
-                let prior_section = prior.get(&(page.category, section_id.clone()));
-                entries.push(NavBarEntry {
-                    title: title.clone(),
-                    category: page.category,
-                    is_root: false,
-                    expanded: false,
-                    page_index,
-                    item_index: Some(item_index),
-                    section_id,
-                    focus_handle: prior_section.map_or_else(
-                        || cx.focus_handle().tab_index(0).tab_stop(true),
-                        |(_, focus_handle)| focus_handle.clone(),
-                    ),
-                });
+                match item {
+                    SettingsPageItem::SectionHeader { id, title, .. } => {
+                        let section_id = Some(id.clone());
+                        let prior_section = prior.get(&(page.category, section_id.clone()));
+                        entries.push(NavBarEntry {
+                            title: title.clone(),
+                            category: page.category,
+                            is_root: false,
+                            expanded: false,
+                            page_index,
+                            item_index: Some(item_index),
+                            section_id,
+                            provider: None,
+                            focus_handle: prior_section.map_or_else(
+                                || cx.focus_handle().tab_index(0).tab_stop(true),
+                                |(_, focus_handle)| focus_handle.clone(),
+                            ),
+                        });
+                    }
+                    SettingsPageItem::Dependent { parent, .. }
+                        if page.category == SettingsCategory::Providers
+                            && let Some(provider) = provider_kind_for_settings_row(parent)
+                            && let SettingsRow::Value { label, .. } = parent =>
+                    {
+                        let section_id = Some(provider_navigation_id(provider));
+                        let prior_section = prior.get(&(page.category, section_id.clone()));
+                        entries.push(NavBarEntry {
+                            title: label.clone(),
+                            category: page.category,
+                            is_root: false,
+                            expanded: false,
+                            page_index,
+                            item_index: Some(item_index),
+                            section_id,
+                            provider: Some(provider),
+                            focus_handle: prior_section.map_or_else(
+                                || cx.focus_handle().tab_index(0).tab_stop(true),
+                                |(_, focus_handle)| focus_handle.clone(),
+                            ),
+                        });
+                    }
+                    SettingsPageItem::Setting(_) | SettingsPageItem::Dependent { .. } => {}
+                }
             }
         }
         self.navbar_entries = entries;
@@ -136,7 +167,7 @@ impl GpuiSettings {
                         .unwrap_or(false)
                 },
             );
-            if included {
+            if included && (entry.is_root || entry.category == self.category) {
                 visible.push(index);
             }
             index = index.saturating_add(1);
@@ -215,7 +246,7 @@ impl GpuiSettings {
                     .flex_col()
                     .id("settings-ui-nav")
                     .debug_selector(|| "settings-navigation".to_owned())
-                    .role(Role::Tree)
+                    .role(Role::Group)
                     .aria_label(crate::i18n::t(cx, "settings-navigation"))
                     .flex_1()
                     .overflow_hidden()
@@ -252,9 +283,12 @@ impl GpuiSettings {
     fn render_navbar_entry(&self, entry_index: usize, cx: &Context<Self>) -> Option<AnyElement> {
         let entry = self.navbar_entries.get(entry_index)?;
         let page = self.content.pages.get(entry.page_index)?;
-        let selected = !entry.is_root
-            && page.category == self.category
-            && self.active_section.as_deref() == entry.section_id.as_deref();
+        let selected = page.category == self.category
+            && if entry.is_root {
+                self.active_section.is_none()
+            } else {
+                self.active_section.as_deref() == entry.section_id.as_deref()
+            };
         let selector = if entry.is_root {
             format!("settings-category-{}", page.category.id())
         } else {
@@ -264,9 +298,16 @@ impl GpuiSettings {
             )
         };
         let debug_selector = selector.clone();
-        let entity = cx.entity();
-        let expanded = entry.expanded || self.has_query;
-        let is_root = entry.is_root;
+        let disclosure = entry.is_root.then(|| {
+            Self::render_navbar_disclosure(
+                entry_index,
+                &selector,
+                entry.expanded || self.has_query,
+                cx,
+            )
+        });
+        let destination =
+            Self::render_navbar_destination(entry_index, entry, &selector, selected, cx);
 
         Some(
             div()
@@ -275,7 +316,7 @@ impl GpuiSettings {
                 .py_0p5()
                 .child(
                     div()
-                        .id(SharedString::from(selector.clone()))
+                        .id(SharedString::from(selector))
                         .debug_selector(move || debug_selector)
                         .absolute()
                         .inset_0(),
@@ -285,67 +326,93 @@ impl GpuiSettings {
                         .flex()
                         .items_center()
                         .w_full()
-                        .when(!is_root, gpui_kit::Styled::pl_8)
-                        .when(is_root, |row| {
-                            let entity = entity.clone();
-                            row.child(
-                                Button::new(SharedString::from(format!("expand-{selector}")))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(if expanded {
-                                        Icon::new(IconName::ChevronDown)
-                                    } else {
-                                        Icon::new(IconName::ChevronRight)
-                                    })
-                                    .accessibility_label(if expanded {
-                                        "Collapse"
-                                    } else {
-                                        "Expand"
-                                    })
-                                    .on_click(move |_, window, app| {
-                                        entity.update(app, |this, cx| {
-                                            this.toggle_and_focus_navbar_entry(
-                                                entry_index,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                            )
-                        })
-                        .child(
-                            gpui_kit::base::Button::new(SharedString::from(format!(
-                                "nav-{selector}"
-                            )))
-                            .child(Label::new(entry.title.clone()))
-                            .accessibility_label(entry.title.clone())
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .text_sm()
-                            .when(selected, |button| {
-                                let selector = format!(
-                                    "settings-active-section-{}",
-                                    entry.section_id.as_deref().unwrap_or_default()
-                                );
-                                button
-                                    .bg(cx.theme().list_active)
-                                    .debug_selector(move || selector)
-                            })
-                            .hover(|style| style.bg(cx.theme().list_hover))
-                            .flex_1()
-                            .justify_start()
-                            .track_focus(&entry.focus_handle)
-                            .selected(selected)
-                            .on_click(move |_, window, app| {
-                                entity.update(app, |this, cx| {
-                                    this.activate_navbar_entry(entry_index, true, true, window, cx);
-                                });
-                            }),
-                        ),
+                        .when(!entry.is_root, gpui_kit::Styled::pl_8)
+                        .when_some(disclosure, gpui_kit::ParentElement::child)
+                        .child(destination),
                 )
                 .into_any_element(),
         )
+    }
+
+    fn render_navbar_disclosure(
+        entry_index: usize,
+        selector: &str,
+        expanded: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let debug_selector = format!("settings-disclosure-{selector}");
+        Button::new(SharedString::from(format!("expand-{selector}")))
+            .ghost()
+            .xsmall()
+            .debug_selector(move || debug_selector)
+            .icon(if expanded {
+                Icon::new(IconName::ChevronDown)
+            } else {
+                Icon::new(IconName::ChevronRight)
+            })
+            .accessibility_label(if expanded { "Collapse" } else { "Expand" })
+            .on_click(move |_, window, app| {
+                entity.update(app, |this, cx| {
+                    this.toggle_and_focus_navbar_entry(entry_index, window, cx);
+                });
+            })
+            .into_any_element()
+    }
+
+    fn render_navbar_destination(
+        entry_index: usize,
+        entry: &NavBarEntry,
+        selector: &str,
+        selected: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        gpui_kit::base::Button::new(SharedString::from(format!("nav-{selector}")))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .when_some(entry.provider, |button, provider| {
+                button.child(crate::gpui::sized_icon(
+                    provider.icon(),
+                    crate::gpui::IconSize::Small,
+                    if selected {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    },
+                ))
+            })
+            .child(Label::new(entry.title.clone()))
+            .accessibility_label(entry.title.clone())
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_sm()
+            .when(selected, |button| {
+                let selector = if entry.is_root {
+                    format!("settings-active-category-{}", entry.category.id())
+                } else {
+                    format!(
+                        "settings-active-section-{}",
+                        entry.section_id.as_deref().unwrap_or_default()
+                    )
+                };
+                button
+                    .bg(cx.theme().list_active)
+                    .debug_selector(move || selector)
+            })
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .flex_1()
+            .justify_start()
+            .track_focus(&entry.focus_handle)
+            .selected(selected)
+            .on_click(move |_, window, app| {
+                entity.update(app, |this, cx| {
+                    this.activate_navbar_entry(entry_index, true, true, window, cx);
+                });
+            })
+            .into_any_element()
     }
 
     pub(super) fn render_page_item(
@@ -393,6 +460,9 @@ impl GpuiSettings {
             // (`settings_ui.rs:1270-1323`): the discriminating setting remains a normal row;
             // the active children form one indented, dashed group rather than independent rows.
             SettingsPageItem::Dependent { parent, children } => {
+                if provider_settings_kind(parent).is_some() {
+                    return self.render_provider_settings(parent, children, window, cx);
+                }
                 let has_children = !children.is_empty();
                 let parent_id = settings_row_identity(parent)
                     .map_or_else(|| format!("index-{item_index}"), str::to_owned);
@@ -460,8 +530,11 @@ impl GpuiSettings {
         let debug_selector = selector.clone();
         let label: SharedString = title.to_owned().into();
 
-        // Copied from Zed `SettingsSectionHeader`
-        // (`settings_ui/src/components/section_items.rs:31-60`).
+        let provider = id.strip_prefix("providers:").and_then(|id| {
+            bootty_agents::AgentKind::ALL
+                .into_iter()
+                .find(|provider| provider.to_string() == id)
+        });
         gpui_kit::div()
             .flex()
             .flex_col()
@@ -474,10 +547,27 @@ impl GpuiSettings {
             .px_8()
             .gap_1p5()
             .child(
-                Label::new(label)
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .font_family(cx.theme().mono_font_family.clone()),
+                gpui_kit::div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(provider, |this, provider| {
+                        this.child(crate::gpui::sized_icon(
+                            provider.icon(),
+                            crate::gpui::IconSize::Medium,
+                            cx.theme().foreground,
+                        ))
+                    })
+                    .child(
+                        Label::new(label)
+                            .text_sm()
+                            .text_color(if provider.is_some() {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD),
+                    ),
             )
             .child(
                 gpui_kit::div()
@@ -488,7 +578,219 @@ impl GpuiSettings {
             .into_any_element()
     }
 
-    fn render_setting(
+    fn render_provider_settings(
+        &self,
+        parent: &SettingsRow,
+        children: &[SettingsRow],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(provider) = provider_settings_kind(parent) else {
+            return gpui_kit::Empty.into_any_element();
+        };
+        let Some(id) = settings_row_identity(parent) else {
+            return gpui_kit::Empty.into_any_element();
+        };
+        let expanded = self.has_query || self.expanded_providers.contains(id);
+        let selector = format!("settings-provider-{provider}");
+        let debug_selector = selector.clone();
+        div()
+            .id(SharedString::from(selector))
+            .debug_selector(move || debug_selector)
+            .mx_8()
+            .mb_2()
+            .rounded_lg()
+            .overflow_hidden()
+            .child(self.render_provider_summary(parent, provider, expanded, window, cx))
+            .when(expanded, |content| {
+                content.child(self.render_provider_details(children, window, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_provider_summary(
+        &self,
+        parent: &SettingsRow,
+        provider: bootty_agents::AgentKind,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let SettingsRow::Value {
+            id,
+            label,
+            help,
+            value: ScalarValue::Bool(enabled),
+            ..
+        } = parent
+        else {
+            return gpui_kit::Empty.into_any_element();
+        };
+        let selected = id.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .p_1()
+            .pr_3()
+            .child(
+                Button::new(SharedString::from(format!(
+                    "settings-provider-expand-{provider}"
+                )))
+                .debug_selector(move || format!("settings-provider-expand-{provider}"))
+                .ghost()
+                .flex_1()
+                .min_w_0()
+                .h(gpui_kit::rems(3.0))
+                .px_3()
+                .accessibility_label(format!("Configure {label}"))
+                .toggled(expanded)
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(crate::gpui::sized_icon(
+                            if expanded {
+                                "chevron-down"
+                            } else {
+                                "chevron-right"
+                            },
+                            crate::gpui::IconSize::Small,
+                            cx.theme().muted_foreground,
+                        ))
+                        .child(crate::gpui::sized_icon(
+                            provider.icon(),
+                            crate::gpui::IconSize::Medium,
+                            cx.theme().foreground,
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .child(
+                                    div()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .truncate()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if *enabled {
+                                            help.clone()
+                                        } else {
+                                            format!("Disabled · {help}")
+                                        }),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let expanded = if this.expanded_providers.remove(&selected) {
+                        false
+                    } else {
+                        this.expanded_providers.insert(selected.clone());
+                        true
+                    };
+                    this.active_section = expanded.then(|| provider_navigation_id(provider));
+                    this.reset_list_state();
+                    cx.notify();
+                })),
+            )
+            .child(self.render_setting_control(parent, window, cx))
+            .into_any_element()
+    }
+
+    fn render_provider_details(
+        &self,
+        children: &[SettingsRow],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut details = div()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().muted.opacity(0.12));
+        let mut actions = div().flex().flex_wrap().items_center().gap_2();
+        for row in children {
+            if matches!(row, SettingsRow::Action { id, .. } if id.starts_with("agents.")) {
+                actions = actions.child(self.render_setting_control(row, window, cx));
+            } else if let SettingsRow::Notice {
+                text,
+                destructive: false,
+            } = row
+            {
+                details = details.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text.clone()),
+                );
+            } else {
+                details = details.child(self.render_provider_setting(row, window, cx));
+            }
+        }
+        details.child(actions).into_any_element()
+    }
+
+    fn render_provider_setting(
+        &self,
+        row: &SettingsRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let control = self.render_setting_control(row, window, cx);
+        let (SettingsRow::Value {
+            id, label, help, ..
+        }
+        | SettingsRow::Action {
+            id, label, help, ..
+        }) = row
+        else {
+            return self.render_setting(row, window, cx);
+        };
+        let selector = format!("settings-item-{id}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .min_w_0()
+            .child(
+                div()
+                    .id(SharedString::from(format!("settings-provider-help-{id}")))
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .when(!help.is_empty(), |column| {
+                        column.tooltip({
+                            let help = help.clone();
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(help.clone())
+                                    .build(window, cx)
+                            }
+                        })
+                    })
+                    .child(render_setting_label(id, label, Some(&self.draft), cx)),
+            )
+            .child(control)
+            .into_any_element()
+    }
+
+    pub(super) fn render_setting(
         &self,
         row: &SettingsRow,
         window: &mut Window,
@@ -533,6 +835,37 @@ impl GpuiSettings {
         } else {
             render_settings_item_layout(id, label, help, control, Some(&self.draft), cx)
         }
+    }
+
+    pub(super) fn render_theme_selector(
+        &self,
+        row: &SettingsRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let SettingsRow::Value {
+            id, label, help, ..
+        } = row
+        else {
+            return self.render_setting(row, window, cx);
+        };
+        let control = self.render_setting_control(row, window, cx);
+        let selector = format!("settings-item-{id}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .tooltip({
+                let help = help.clone();
+                move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(help.clone()).build(window, cx)
+                }
+            })
+            .child(render_setting_label(id, label, Some(&self.draft), cx))
+            .child(control)
+            .into_any_element()
     }
 
     fn render_setting_control(
@@ -639,7 +972,9 @@ impl GpuiSettings {
     ) -> Button {
         let entity = cx.entity();
         let intent = id.to_owned();
+        let selector = format!("settings-action-{id}");
         Button::new(SharedString::from(format!("settings-action-{id}")))
+            .debug_selector(move || selector)
             .label(button.to_owned())
             .outline()
             .small()
@@ -666,6 +1001,9 @@ impl GpuiSettings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(control) = self.render_provider_default(id, label, help, value, window, cx) {
+            return control;
+        }
         match control {
             SettingsControl::Toggle => Self::render_toggle(
                 id,
@@ -806,7 +1144,7 @@ impl GpuiSettings {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_searchable_picker(
+    pub(super) fn render_searchable_picker(
         selector: String,
         label: &str,
         help: &str,
@@ -838,7 +1176,7 @@ impl GpuiSettings {
         )
     }
 
-    fn render_color_control(
+    pub(super) fn render_color_control(
         id: &str,
         label: &str,
         value: &str,
@@ -2388,4 +2726,19 @@ fn remote_test_color(state: &RemoteTestState, cx: &gpui_kit::App) -> gpui_kit::H
         RemoteTestState::Passed => cx.theme().success,
         RemoteTestState::Idle | RemoteTestState::Testing => cx.theme().muted_foreground,
     }
+}
+
+fn provider_settings_kind(row: &SettingsRow) -> Option<bootty_agents::AgentKind> {
+    let SettingsRow::Value {
+        id,
+        control: SettingsControl::Toggle,
+        ..
+    } = row
+    else {
+        return None;
+    };
+    let key = id.strip_prefix("agents.")?.strip_suffix(".enabled")?;
+    bootty_agents::AgentKind::ALL
+        .into_iter()
+        .find(|kind| kind.to_string() == key)
 }

@@ -15,14 +15,14 @@ pub enum NewSessionEffect {
     ListProjects,
     ListWorktrees(String, Vec<String>),
     ToggleFavorite(String),
-    CreateWorktree(String, bootty_git::WorktreeRequest),
+    AddFavorite(String),
 }
 
 pub enum NewSessionOutcome {
     Projects(Vec<ProjectPickerEntry>),
     Worktrees(Vec<WorktreePickerEntry>),
     Favorite { path: String, favorite: bool },
-    CreatedWorktree(String),
+    ProjectAdded(String),
 }
 
 #[derive(Clone)]
@@ -35,6 +35,11 @@ pub struct NewSessionWorker {
     target: NewSessionTarget,
     repaint: RepaintHandle,
     task: Option<NewSessionTask>,
+    pending_target: Option<NewSessionTarget>,
+    registry: Option<(
+        bootty_mux::repository::WorkspaceRepository,
+        bootty_mux::controller::SpaceId,
+    )>,
 }
 
 impl NewSessionWorker {
@@ -45,6 +50,8 @@ impl NewSessionWorker {
             },
             repaint,
             task: None,
+            pending_target: None,
+            registry: None,
         };
         owner.start(NewSessionEffect::ListProjects);
         owner
@@ -55,6 +62,31 @@ impl NewSessionWorker {
             target: NewSessionTarget::Remote(remote),
             repaint,
             task: None,
+            pending_target: None,
+            registry: None,
+        };
+        owner.start(NewSessionEffect::ListProjects);
+        owner
+    }
+
+    pub(crate) fn registered(
+        remote: Option<RemoteConfig>,
+        repository: bootty_mux::repository::WorkspaceRepository,
+        scope: bootty_mux::controller::SpaceId,
+        repaint: RepaintHandle,
+    ) -> Self {
+        let target = remote.map_or_else(
+            || NewSessionTarget::Local {
+                home: project::home_dir(),
+            },
+            NewSessionTarget::Remote,
+        );
+        let mut owner = Self {
+            target,
+            repaint,
+            task: None,
+            pending_target: None,
+            registry: Some((repository, scope)),
         };
         owner.start(NewSessionEffect::ListProjects);
         owner
@@ -68,12 +100,36 @@ impl NewSessionWorker {
         matches!(&self.target, NewSessionTarget::Remote(_))
     }
 
+    pub(crate) fn retarget(
+        &mut self,
+        remote: Option<RemoteConfig>,
+        scope: bootty_mux::controller::SpaceId,
+    ) {
+        if let Some((_, held)) = &mut self.registry {
+            *held = scope;
+        }
+        let target = remote.map_or_else(
+            || NewSessionTarget::Local {
+                home: project::home_dir(),
+            },
+            NewSessionTarget::Remote,
+        );
+        if let Some(task) = &self.task {
+            task.cancellation.cancel();
+            self.pending_target = Some(target);
+        } else {
+            self.target = target;
+            self.start(NewSessionEffect::ListProjects);
+        }
+    }
+
     pub(crate) fn start(&mut self, effect: NewSessionEffect) {
         let (sender, receiver) = mpsc::channel();
         let cancellation = CommandCancellation::default();
         let runner = CancellableCommandRunner::new(cancellation.clone());
         let repaint = self.repaint.clone();
         let target = self.target.clone();
+        let registry = self.registry.clone();
         self.task = Some(NewSessionTask {
             receiver,
             cancellation,
@@ -89,8 +145,31 @@ impl NewSessionWorker {
             return;
         };
         std::thread::spawn(move || {
-            let _permit = permit;
-            let result = run_effect(&target, effect, &runner).map_err(|error| error.to_string());
+            let result = if matches!(effect, NewSessionEffect::ListProjects) {
+                if let Some((repository, scope)) = registry {
+                    repository
+                        .registered_projects()
+                        .map(|projects| {
+                            NewSessionOutcome::Projects(
+                                projects
+                                    .into_iter()
+                                    .filter(|project| project.scope == scope)
+                                    .map(|project| ProjectPickerEntry {
+                                        path: project.cwd,
+                                        favorite: false,
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .map_err(|error| error.to_string())
+                } else {
+                    run_effect(&target, effect, &runner).map_err(|error| error.to_string())
+                }
+            } else {
+                run_effect(&target, effect, &runner).map_err(|error| error.to_string())
+            };
+            // Publish completion only after another discovery may acquire the permit.
+            drop(permit);
             let _ = sender.send(result);
             repaint();
         });
@@ -110,6 +189,11 @@ impl NewSessionWorker {
             }
         };
         self.task = None;
+        if let Some(target) = self.pending_target.take() {
+            self.target = target;
+            self.start(NewSessionEffect::ListProjects);
+            return None;
+        }
         Some(result)
     }
 }
@@ -132,12 +216,12 @@ fn run_effect(
             let favorite = project::toggle_favorite_project_path(home.as_deref(), &path)?;
             NewSessionOutcome::Favorite { path, favorite }
         }
-        (NewSessionTarget::Local { .. }, NewSessionEffect::CreateWorktree(project, request)) => {
-            NewSessionOutcome::CreatedWorktree(
-                project::Git::new()
-                    .create_worktree(&project, &request)
-                    .map_err(anyhow::Error::msg)?,
-            )
+        (NewSessionTarget::Local { .. }, NewSessionEffect::AddFavorite(path)) => {
+            anyhow::ensure!(
+                std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).is_dir(),
+                "Choose an existing project directory"
+            );
+            NewSessionOutcome::ProjectAdded(path)
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ListProjects) => {
             NewSessionOutcome::Projects(bootty_mux::remote_space::list_remote_projects_with_runner(
@@ -157,16 +241,20 @@ fn run_effect(
             )?;
             NewSessionOutcome::Favorite { path, favorite }
         }
-        (NewSessionTarget::Remote(remote), NewSessionEffect::CreateWorktree(project, request)) => {
-            NewSessionOutcome::CreatedWorktree(
-                bootty_mux::remote_space::create_remote_worktree_request_with_runner(
-                    // Once started, observe completion rather than killing a Git mutation.
-                    remote,
-                    &project,
-                    &request,
-                    &bootty_host::SystemCommandRunner,
-                )?,
-            )
+        (NewSessionTarget::Remote(remote), NewSessionEffect::AddFavorite(path)) => {
+            let response = bootty_host::files::FileRequest::Resolve { path, base: None }
+                .execute_remote(
+                    &bootty_host::remote::RemoteHost::new(remote.clone()),
+                    runner.clone(),
+                )?;
+            let bootty_host::files::FileResponse::Location {
+                path,
+                is_directory: true,
+            } = response
+            else {
+                anyhow::bail!("Choose an existing project directory");
+            };
+            NewSessionOutcome::ProjectAdded(path)
         }
     })
 }

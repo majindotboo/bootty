@@ -20,19 +20,21 @@ pub struct SettingsCatalogPage {
 #[must_use]
 pub fn advanced_configuration_rows(
     config_path: &Path,
+    home: Option<&Path>,
     write_error: Option<&str>,
 ) -> Vec<SettingsRow> {
     let mut rows = vec![
         SettingsRow::Section("LOCATIONS".to_owned()),
-        read_only_path_row("config.path", "Config file", config_path),
+        read_only_path_row("config.path", "Config file", config_path, home),
     ];
     if let Some(directory) = config_path.parent() {
         rows.extend([
-            read_only_path_row("config.directory", "Config directory", directory),
+            read_only_path_row("config.directory", "Config directory", directory, home),
             read_only_path_row(
                 "config.themes-directory",
                 "Themes directory",
                 &directory.join("themes"),
+                home,
             ),
         ]);
     }
@@ -56,12 +58,15 @@ pub fn advanced_configuration_rows(
     rows
 }
 
-fn read_only_path_row(id: &str, label: &str, path: &Path) -> SettingsRow {
+fn read_only_path_row(id: &str, label: &str, path: &Path, home: Option<&Path>) -> SettingsRow {
     SettingsRow::Value {
         id: id.to_owned(),
         label: label.to_owned(),
         help: "Read-only location.".to_owned(),
-        value: ScalarValue::Text(path.display().to_string()),
+        value: ScalarValue::Text(bootty_git::project::display_path(
+            &path.to_string_lossy(),
+            home,
+        )),
         control: crate::gpui::SettingsControl::ReadOnly,
         enabled: true,
     }
@@ -208,7 +213,7 @@ const UI_FONT_FAMILY_DEPENDENCY: SettingsDependency = SettingsDependency {
     }],
 };
 
-const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
+const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 12] = [
     SettingsCatalogPage {
         category: SettingsCategory::General,
         id: SettingsCategory::General.id(),
@@ -220,6 +225,12 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
         id: SettingsCategory::Appearance.id(),
         label: SettingsCategory::Appearance.label(),
         search_terms: "appearance|theme|mode|colors|palette|font|cursor|mouse pointer",
+    },
+    SettingsCatalogPage {
+        category: SettingsCategory::Theme,
+        id: SettingsCategory::Theme.id(),
+        label: SettingsCategory::Theme.label(),
+        search_terms: "theme|colors|palette|light|dark|selection|cursor|sidebar|window",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Keymap,
@@ -246,6 +257,24 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
         search_terms: "terminal|session|shell|scrollback|copy on select|option as meta|environment|protocol",
     },
     SettingsCatalogPage {
+        category: SettingsCategory::Browser,
+        id: SettingsCategory::Browser.id(),
+        label: SettingsCategory::Browser.label(),
+        search_terms: "browser|search engine|cookies|site data|private",
+    },
+    SettingsCatalogPage {
+        category: SettingsCategory::Providers,
+        id: SettingsCategory::Providers.id(),
+        label: SettingsCategory::Providers.label(),
+        search_terms: "providers|agents|codex|claude|pi|account|profile|sign in|installation|update",
+    },
+    SettingsCatalogPage {
+        category: SettingsCategory::Permissions,
+        id: SettingsCategory::Permissions.id(),
+        label: SettingsCategory::Permissions.label(),
+        search_terms: "permissions|computer use|capture|screen recording|accessibility|input",
+    },
+    SettingsCatalogPage {
         category: SettingsCategory::Remotes,
         id: SettingsCategory::Remotes.id(),
         label: SettingsCategory::Remotes.label(),
@@ -259,7 +288,7 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 8] = [
     },
 ];
 
-/// The eight native-settings pages in sidebar order.
+/// The native-settings pages in sidebar order.
 #[must_use]
 pub const fn settings_catalog_pages() -> &'static [SettingsCatalogPage] {
     &SETTINGS_CATALOG_PAGES
@@ -304,12 +333,31 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
 #[must_use]
 pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
     match id {
+        id if id == "theme"
+            || id == "appearance.mode"
+            || id.starts_with("appearance.light.")
+            || id.starts_with("appearance.dark.")
+            || id.starts_with("colors.")
+            || matches!(
+                id,
+                "chrome.status-background"
+                    | "chrome.pane-divider-color"
+                    | "chrome.pane-focus-border-color"
+                    | "sidebar.background"
+                    | "sidebar.foreground"
+                    | "sidebar.selected"
+                    | "sidebar.hover"
+                    | "sidebar.border"
+            ) =>
+        {
+            SettingsCategory::Theme
+        }
         // General owns app-wide defaults. Backend choice controls the default binding for new
         // Spaces; panel and window choices deliberately stay on their dedicated pages.
         "multiplexer.backend" => SettingsCategory::General,
 
         // Appearance owns the visual language of the application, including interface text.
-        "appearance.mode" | "input.hide-mouse-pointer-while-typing" => SettingsCategory::Appearance,
+        "input.hide-mouse-pointer-while-typing" => SettingsCategory::Appearance,
         id if id.starts_with("font.") || id.starts_with("cursor.") => SettingsCategory::Appearance,
 
         // Terminal owns terminal behavior even though both controls originated in the key page.
@@ -331,10 +379,13 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
         _ => match legacy_page {
             "appearance" | "colors" | "text" => SettingsCategory::Appearance,
             "shell" => SettingsCategory::Terminal,
+            "browser" => SettingsCategory::Browser,
+            "permissions" => SettingsCategory::Permissions,
             "keys" => SettingsCategory::Keymap,
             "window" => SettingsCategory::WindowAndLayout,
             "panels" | "sidebar" | "status" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
+            "providers" => SettingsCategory::Providers,
             "general" => SettingsCategory::General,
             // Keep unknown schema pages accessible in Advanced.
             _ => SettingsCategory::Advanced,
@@ -357,7 +408,7 @@ pub fn settings_section<'a>(
             "multiplexer.backend" => "DEFAULT SPACE",
             _ => source_section,
         },
-        SettingsCategory::Appearance => match id {
+        SettingsCategory::Appearance | SettingsCategory::Theme => match id {
             "theme" | "appearance.mode" | "appearance.light.theme" | "appearance.dark.theme" => {
                 "THEME"
             }
@@ -367,7 +418,7 @@ pub fn settings_section<'a>(
             "chrome.status-background"
             | "chrome.pane-divider-color"
             | "chrome.pane-focus-border-color" => "WINDOW COLORS",
-            id if id.starts_with("sidebar.") => "FIXED DOCK COLORS",
+            id if id.starts_with("sidebar.") => "SIDEBAR COLORS",
             "font.ui-family" | "font.ui-size" | "font.ui-use-terminal-family" => "INTERFACE FONT",
             id if id.starts_with("font.ui-weights.") => "INTERFACE WEIGHTS",
             id if id.starts_with("font.") => "TERMINAL FONT",
@@ -379,7 +430,7 @@ pub fn settings_section<'a>(
             "chrome.left-dock-toggle"
             | "chrome.right-dock-toggle"
             | "chrome.panel-tab-style"
-            | "chrome.panel-tabs" => "FIXED DOCKS",
+            | "chrome.panel-tabs" => "SIDEBARS",
             "chrome.top-bar"
             | "chrome.bottom-bar"
             | "chrome.status-height"
@@ -404,7 +455,7 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "multiplexer.backend" => 30,
             _ => 100,
         },
-        SettingsCategory::Appearance => match id {
+        SettingsCategory::Appearance | SettingsCategory::Theme => match id {
             "theme" => 0,
             "appearance.mode" => 1,
             "appearance.light.theme" => 2,
@@ -451,10 +502,8 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Panels => match id {
             "chrome.left-dock-toggle" => 1,
             "chrome.right-dock-toggle" => 2,
-            "chrome.panel-tab-style" => 3,
-            "chrome.panel-tabs" => 4,
-            id if id.starts_with("chrome.dock-tabs.") => 10,
-            id if id.starts_with("chrome.terminal-tabs.") => 11,
+            "chrome.tabs-use-session-color" => 9,
+            id if id.starts_with("chrome.tabs.") => 10,
             "chrome.top-bar" => 20,
             "chrome.bottom-bar" => 21,
             "chrome.status-height" => 22,

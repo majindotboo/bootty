@@ -358,6 +358,90 @@ fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
 }
 
 #[rstest]
+#[case("codex", "Open Codex terminal", "openai")]
+#[case("claude", "Open Claude terminal", "claude")]
+#[case("pi", "Open Pi terminal", "pi")]
+fn palette_opens_provider_terminals_from_the_shared_catalog(
+    #[case] provider: &str,
+    #[case] title: &str,
+    #[case] icon: &str,
+) {
+    let catalog = bootty_ui::commands::CommandCatalog::default();
+    let localizer = bootty_ui::i18n::Localizer::new("en").unwrap();
+    let mut palette = CommandPaletteDialog::open_with_catalog(
+        &[],
+        CommandPaletteState::default(),
+        &localizer,
+        &catalog.list(),
+    );
+    assert!(
+        !palette
+            .spec()
+            .rows
+            .iter()
+            .any(|row| row.label.ends_with(" session history")),
+        "history queries need a view before they can be offered in the palette"
+    );
+    let command = format!("agents.{provider}.tab");
+    palette.apply(&DialogIntent::TextChanged {
+        dialog: DialogId::new(COMMAND_PALETTE_ID),
+        value: command.clone(),
+    });
+    let spec = palette.spec();
+    let row = spec
+        .rows
+        .iter()
+        .find(|row| row.enabled && row.label == title)
+        .expect("provider action is visible");
+    assert_eq!(row.icon.as_deref(), Some(icon));
+    assert!(bootty_gpui::has_icon(icon));
+    let action = row.action.clone().unwrap();
+    assert_eq!(
+        palette.apply(&DialogIntent::Activate {
+            dialog: DialogId::new(COMMAND_PALETTE_ID),
+            row: row.id.clone(),
+            action: action.id,
+            payload: action.payload,
+        }),
+        Some(CommandPaletteEvent::Invoke(command))
+    );
+}
+
+#[rstest]
+#[case("ui.composer.focus-provider")]
+#[case("ui.composer.focus-project")]
+fn palette_exposes_registered_composer_focus_commands(#[case] command: &str) {
+    let catalog = bootty_ui::commands::CommandCatalog::default();
+    let localizer = bootty_ui::i18n::Localizer::new("en").unwrap();
+    let mut palette = CommandPaletteDialog::open_with_catalog(
+        &[],
+        CommandPaletteState::default(),
+        &localizer,
+        &catalog.list(),
+    );
+    palette.apply(&DialogIntent::TextChanged {
+        dialog: DialogId::new(COMMAND_PALETTE_ID),
+        value: command.to_owned(),
+    });
+    let spec = palette.spec();
+    let row = spec
+        .rows
+        .iter()
+        .find(|row| row.enabled)
+        .expect("registered focus command");
+    let action = row.action.clone().unwrap();
+    assert_eq!(
+        palette.apply(&DialogIntent::Activate {
+            dialog: DialogId::new(COMMAND_PALETTE_ID),
+            row: row.id.clone(),
+            action: action.id,
+            payload: action.payload,
+        }),
+        Some(CommandPaletteEvent::Invoke(command.to_owned()))
+    );
+}
+
+#[rstest]
 fn palette_filter_selects_and_runs_its_first_visible_command() {
     let mut palette = CommandPaletteDialog::open(&[], CommandPaletteState::default()).unwrap();
 
@@ -505,5 +589,223 @@ fn right_dock_defaults_dispatch_and_resolve_a_tooltip_hint(cx: &mut TestAppConte
                 );
             })
             .unwrap();
+    }
+}
+
+#[rstest]
+#[case("close_surface", true)]
+#[case("kill_pane", false)]
+#[case("new_mux_tab", false)]
+fn native_surface_close_keeps_the_issued_conversation_target_and_explicit_terminal_actions(
+    #[case] command: &str,
+    #[case] mapped: bool,
+) {
+    use bootty_control::{CommandInvocation, CommandTarget, ResourceKind};
+    let catalog = bootty_ui::commands::CommandCatalog::default();
+    let native = CommandTarget {
+        kind: ResourceKind::Session,
+        handle: "native:pi:owned".to_owned(),
+        generation: 7,
+    };
+    let mut invocation = CommandInvocation::new(command, Vec::new(), Caller::Keybinding);
+    let close = bootty_ui::gpui_actions::native_conversation_close_invocation(
+        &invocation,
+        &catalog,
+        &native,
+    );
+    if mapped {
+        let close = close.expect("native close invocation");
+        assert_eq!(close.command, "agents.native.close");
+        assert_eq!(close.caller, Caller::Keybinding);
+        assert_eq!(close.target, Some(native));
+        assert!(!bootty_ui::gpui_actions::conversation_terminal_navigation(
+            &close, &catalog
+        ));
+    } else {
+        assert!(close.is_none());
+    }
+    invocation.target = Some(CommandTarget {
+        kind: ResourceKind::Pane,
+        handle: "captured-terminal-pane".to_owned(),
+        generation: 9,
+    });
+    assert!(
+        bootty_ui::gpui_actions::native_conversation_close_invocation(
+            &invocation,
+            &catalog,
+            &CommandTarget {
+                kind: ResourceKind::Session,
+                handle: "native:pi:owned".to_owned(),
+                generation: 7
+            }
+        )
+        .is_none(),
+        "Explicit backend close remains terminal-owned"
+    );
+}
+
+struct BrowserToolbarKeyProbe {
+    address: gpui_kit::Entity<gpui_kit::component::input::InputState>,
+    received: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl Render for BrowserToolbarKeyProbe {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::ParentElement as _;
+        div()
+            .key_context(WORKSPACE_KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &InvokeCommand, _, cx| {
+                this.received.borrow_mut().push("workspace");
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .key_context("BoottyBrowser")
+                    .on_action(cx.listener(
+                        |this, _: &bootty_ui::gpui_actions::CloseBrowserTab, _, cx| {
+                            this.received.borrow_mut().push("browser");
+                            cx.stop_propagation();
+                        },
+                    ))
+                    .child(gpui_kit::component::input::Input::new(&self.address)),
+            )
+    }
+}
+
+#[gpui_kit::test]
+fn browser_address_close_wins_over_selected_native_conversation_keybindings(
+    cx: &mut TestAppContext,
+) {
+    use bootty_config::config::MultiplexerBackendConfig;
+    use bootty_ui::{
+        commands::CommandCatalog,
+        gpui_actions::{key_bindings_for_native_conversation, replace_workspace_key_bindings},
+        keymap_runtime::KeymapRuntime,
+    };
+    use gpui_kit::{Focusable as _, component::input::InputState};
+
+    let file = assert_fs::NamedTempFile::new("config.toml").expect("keybinding config file");
+    std::fs::write(file.path(), "").expect("empty keybinding config");
+    let mut config = bootty_config::config::load_config_from_path(file.path())
+        .expect("load keybinding configuration");
+    config.input = input(&["cmd+w=close_surface", "ctrl+w=close_surface"]);
+    let catalog = std::sync::Arc::new(CommandCatalog::default());
+    let keymap = KeymapRuntime::new(&config, std::sync::Arc::clone(&catalog));
+    cx.update(|cx| {
+        bootty_gpui::init_theme(bootty_gpui::UiPalette::default(), cx);
+        replace_workspace_key_bindings(
+            key_bindings_for_native_conversation(
+                keymap.snapshot(),
+                MultiplexerBackendConfig::Native,
+                &catalog,
+            ),
+            cx,
+        )
+        .expect("install native conversation keybindings");
+    });
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.update(|cx| {
+        let received = Rc::clone(&received);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            cx.new(|cx| {
+                let address = cx.new(|cx| InputState::new(window, cx));
+                window.focus(&address.focus_handle(cx), cx);
+                BrowserToolbarKeyProbe { address, received }
+            })
+        })
+        .expect("open browser toolbar key probe")
+    });
+    cx.simulate_keystrokes(
+        *window,
+        if cfg!(target_os = "macos") {
+            "cmd-w"
+        } else {
+            "ctrl-w"
+        },
+    );
+    assert_eq!(received.borrow().as_slice(), ["browser"]);
+}
+
+#[rstest]
+#[case("new_tab", true)]
+#[case("split_right", true)]
+#[case("split_down", true)]
+#[case("terminal.create_tab", false)]
+#[case("next_tab", false)]
+fn focused_conversation_creation_captures_the_exact_parent_without_overriding_explicit_targets(
+    #[case] command: &str,
+    #[case] captured: bool,
+    #[values(Caller::Internal, Caller::Keybinding, Caller::BuiltinKeybinding)] caller: Caller,
+) {
+    use bootty_control::{CommandInvocation, CommandTarget, ResourceKind};
+    use bootty_ui::gpui_actions::{
+        conversation_terminal_navigation, native_surface_creation_invocation,
+    };
+    let catalog = bootty_ui::commands::CommandCatalog::default();
+    let focused = CommandTarget {
+        kind: ResourceKind::Session,
+        handle: "conversation-focused-right-pane".to_owned(),
+        generation: 13,
+    };
+    let mut original = CommandInvocation::from_action(command, caller);
+    let creation = native_surface_creation_invocation(&original, &catalog, &focused);
+    assert_eq!(creation.is_some(), captured);
+    if let Some(creation) = creation {
+        assert_eq!(creation.target, Some(focused.clone()));
+        assert_eq!(creation.command, original.command);
+        assert_eq!(creation.caller, caller);
+        assert!(
+            !conversation_terminal_navigation(&creation, &catalog),
+            "chooser preserves its conversation parent"
+        );
+    }
+    original.target = Some(CommandTarget {
+        kind: ResourceKind::Terminal,
+        handle: "explicit-issued-terminal".to_owned(),
+        generation: 17,
+    });
+    assert!(
+        native_surface_creation_invocation(&original, &catalog, &focused).is_none(),
+        "explicit creation destinations remain authoritative"
+    );
+}
+
+#[gpui_kit::test]
+fn native_agent_prefix_splits_are_host_actions_on_every_backend(cx: &mut TestAppContext) {
+    use bootty_config::config::MultiplexerBackendConfig as B;
+    use bootty_ui::{
+        commands::CommandCatalog,
+        gpui_actions::{key_bindings_for_native_conversation, replace_workspace_key_bindings},
+        keymap_runtime::KeymapRuntime,
+    };
+    let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
+    std::fs::write(file.path(), "[input]\npreset = \"bootty\"\n").unwrap();
+    let config = bootty_config::config::load_config_from_path(file.path()).unwrap();
+    let catalog = std::sync::Arc::new(CommandCatalog::default());
+    let keymap = KeymapRuntime::new(&config, catalog.clone());
+    for backend in [B::Native, B::Rmux, B::Tmux] {
+        cx.update(|cx| {
+            replace_workspace_key_bindings(
+                key_bindings_for_native_conversation(keymap.snapshot(), backend, &catalog),
+                cx,
+            )
+            .unwrap();
+        });
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.update(|cx| {
+            let received = received.clone();
+            cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                cx.new(|_| BindingProbe {
+                    focus,
+                    received,
+                    key_context: WORKSPACE_KEY_CONTEXT.into(),
+                })
+            })
+            .unwrap()
+        });
+        cx.simulate_keystrokes(*window, "ctrl-space v");
+        assert_eq!(received.borrow().as_slice(), ["split_right"], "{backend:?}");
     }
 }

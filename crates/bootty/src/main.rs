@@ -1,7 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(windows, feature(windows_process_exit_code_from))]
 
-use std::{process::ExitCode, sync::Arc};
+use std::{ffi::OsStr, io, path::PathBuf, process::ExitCode, sync::Arc};
 
 use anyhow::Result;
 use bootty::cli::{Cli, Command, EventCommand, RemoteSpaceCommand, TaskCommand};
@@ -25,6 +25,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
+    if let Some(connection) = agent_tool_stdio_connection()? {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        bootty_agents::tool_stdio(&connection, &mut stdin.lock(), &mut stdout.lock())
+            .map_err(|_| anyhow::anyhow!("Agent tool stdio transport failed"))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let identity = ApplicationIdentity::current();
     bootty_mux::rmux::prepare_local_rmux_daemon(identity)?;
     if let Some(code) = bootty_mux::rmux::run_embedded_rmux_daemon()? {
@@ -46,6 +54,28 @@ fn run() -> Result<ExitCode> {
     }
 
     run_command(&cli, backends)
+}
+
+fn agent_tool_stdio_connection() -> Result<Option<PathBuf>> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() != Some(OsStr::new("--agent-tool-stdio")) {
+        return Ok(None);
+    }
+    let connection = arguments.next().ok_or_else(|| {
+        anyhow::anyhow!("--agent-tool-stdio requires an absolute connection path")
+    })?;
+    if arguments.next().is_some() {
+        return Err(anyhow::anyhow!(
+            "--agent-tool-stdio accepts exactly one connection path"
+        ));
+    }
+    let connection = PathBuf::from(connection);
+    if !connection.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "--agent-tool-stdio requires an absolute connection path"
+        ));
+    }
+    Ok(Some(connection))
 }
 
 fn run_command(

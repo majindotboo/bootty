@@ -35,6 +35,8 @@ fn durable_keybinding_aliases_parse(#[case] binding: &str) {
 struct CommandDialogProbe {
     dialog: Entity<DialogView>,
     background_focus: FocusHandle,
+    render_full_surface: bool,
+    commands: Vec<String>,
     intents: Rc<RefCell<Vec<DialogIntent>>>,
     _subscription: Subscription,
 }
@@ -53,6 +55,8 @@ impl CommandDialogProbe {
         Self {
             dialog,
             background_focus: cx.focus_handle(),
+            render_full_surface: false,
+            commands: Vec::new(),
             intents,
             _subscription: subscription,
         }
@@ -75,15 +79,60 @@ fn terminal_find_spec() -> DialogSpec {
 
 impl Render for CommandDialogProbe {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog = self.dialog.clone();
+        let child = if self.render_full_surface {
+            // Match the accessibility-active DockSkin and SurfacePanel host nesting.
+            Some(
+                div()
+                    .id("tab-content")
+                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .size_full()
+                            .min_h_0()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .id("surface-agent-form")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .p_4()
+                                    .child(dialog),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        } else if self.dialog.read(cx).is_non_modal() {
+            Some(dialog.into_any_element())
+        } else {
+            None
+        };
         div()
             .size_full()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
             .track_focus(&self.background_focus)
-            .children(
-                self.dialog
-                    .read(cx)
-                    .is_non_modal()
-                    .then(|| self.dialog.clone()),
-            )
+            .key_context(bootty_ui::gpui_actions::WORKSPACE_KEY_CONTEXT)
+            .on_action(cx.listener(
+                |this, action: &bootty_ui::gpui_actions::InvokeCommand, _, cx| {
+                    this.commands.push(action.invocation().action_name());
+                    cx.stop_propagation();
+                },
+            ))
+            .children(child)
     }
 }
 
@@ -126,6 +175,46 @@ fn rooted_probe(
     cx: &TestAppContext,
     spec: DialogSpec,
 ) -> (Entity<CommandDialogProbe>, VisualTestContext) {
+    rooted_probe_with_size(cx, spec, 800.0, 600.0)
+}
+
+fn rooted_probe_with_size(
+    cx: &TestAppContext,
+    spec: DialogSpec,
+    width: f32,
+    height: f32,
+) -> (Entity<CommandDialogProbe>, VisualTestContext) {
+    rooted_probe_with_viewport(cx, spec, width, height, 16.0)
+}
+
+fn rooted_probe_with_viewport(
+    cx: &TestAppContext,
+    spec: DialogSpec,
+    width: f32,
+    height: f32,
+    rem_size: f32,
+) -> (Entity<CommandDialogProbe>, VisualTestContext) {
+    mounted_dialog_probe(cx, spec, width, height, rem_size, false)
+}
+
+fn full_surface_probe_with_viewport(
+    cx: &TestAppContext,
+    spec: DialogSpec,
+    width: f32,
+    height: f32,
+    rem_size: f32,
+) -> (Entity<CommandDialogProbe>, VisualTestContext) {
+    mounted_dialog_probe(cx, spec, width, height, rem_size, true)
+}
+
+fn mounted_dialog_probe(
+    cx: &TestAppContext,
+    spec: DialogSpec,
+    width: f32,
+    height: f32,
+    rem_size: f32,
+    render_full_surface: bool,
+) -> (Entity<CommandDialogProbe>, VisualTestContext) {
     let dialog_id = spec.id.clone();
     let slot = Rc::new(RefCell::new(None));
     let opened = Rc::clone(&slot);
@@ -135,12 +224,17 @@ fn rooted_probe(
             gpui_kit::WindowOptions {
                 window_bounds: Some(gpui_kit::WindowBounds::Windowed(Bounds {
                     origin: point(px(0.0), px(0.0)),
-                    size: gpui_kit::size(px(800.0), px(600.0)),
+                    size: gpui_kit::size(px(width), px(height)),
                 })),
                 ..Default::default()
             },
             move |window, cx| {
-                let probe = cx.new(|cx| CommandDialogProbe::with_spec(window, cx, spec));
+                window.set_rem_size(px(rem_size));
+                let probe = cx.new(|cx| {
+                    let mut probe = CommandDialogProbe::with_spec(window, cx, spec);
+                    probe.render_full_surface = render_full_surface;
+                    probe
+                });
                 opened.replace(Some(probe.clone()));
                 cx.new(|cx| Root::new(probe, window, cx))
             },
@@ -153,7 +247,7 @@ fn rooted_probe(
     visual.update(|window, cx| {
         probe.update(cx, |probe, cx| {
             probe.background_focus.focus(window, cx);
-            if probe.dialog.read(cx).is_non_modal() {
+            if probe.render_full_surface || probe.dialog.read(cx).is_non_modal() {
                 probe.dialog.read(cx).focus_handle(cx).focus(window, cx);
             } else {
                 probe.open_root_dialog(dialog_id, window, cx);
@@ -846,6 +940,244 @@ fn rooted_prompt_accepts_typed_input(cx: &TestAppContext) {
     });
 }
 
+fn native_agent_form_spec() -> DialogSpec {
+    use bootty_config::config::AgentProvidersConfig;
+    use bootty_control::{CommandTarget, ResourceKind};
+    use bootty_mux::controller::SpaceId;
+    use bootty_ui::presentation::new_session_form::{
+        NewSessionDraft, NewSessionForm, NewSessionMode, SessionDestination,
+    };
+
+    let scope = SpaceId::from_persistence(1);
+    let cwd = "/workspace/review-project";
+    let destination = SessionDestination {
+        scope,
+        label: "Current host".to_owned(),
+        icon: "folder".to_owned(),
+        color: [122, 162, 247],
+        cwd: cwd.to_owned(),
+        remote: None,
+        target: CommandTarget {
+            kind: ResourceKind::Binding,
+            handle: "test-binding".to_owned(),
+            generation: 1,
+        },
+        worktrees: false,
+    };
+    let form = NewSessionForm::new(
+        NewSessionDraft {
+            scope,
+            cwd: cwd.to_owned(),
+            mode: NewSessionMode::Agent,
+            prompt: String::new(),
+            applications: Vec::new(),
+            attachments: Vec::new(),
+            command: String::new(),
+            provider: "codex".to_owned(),
+            profiles: std::collections::BTreeMap::default(),
+            model_selection: None,
+            permissions: bootty_agents::NativePermissionMode::ProviderDefault,
+            isolated: false,
+            isolation_preference: false,
+            branch: String::new(),
+            folder: String::new(),
+            start_ref: String::new(),
+            suffix: "a123".to_owned(),
+            identity: "0123456789abcdef0123456789abcdef".to_owned(),
+            directories: std::collections::HashMap::default(),
+        },
+        vec![destination],
+        AgentProvidersConfig::default(),
+    );
+    let mut spec = form.spec(false);
+    "Agent".clone_into(&mut spec.title);
+    spec.fields
+        .retain(|field| matches!(field.id.as_str(), "provider" | "profile"));
+    spec.rows.retain(|row| row.id.0 != "choose-project");
+    spec.footer = Some("review-project".to_owned());
+    spec
+}
+
+#[gpui_kit::test]
+fn agent_composer_shows_discovery_and_retries_without_replacing_the_prompt(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.text = Some("Keep this draft".into());
+    spec.models_loading = true;
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec.clone(), 1200.0, 900.0, 24.0);
+    assert!(cx.debug_bounds("new-session-model-loading").is_some());
+    spec.models_loading = false;
+    spec.model_error = Some("Provider could not load models".into());
+    probe.update_in(&mut cx, |probe, window, cx| {
+        probe
+            .dialog
+            .update(cx, |dialog, cx| dialog.present(Some(spec), window, cx));
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("new-session-model-loading").is_none());
+    assert!(cx.debug_bounds("dialog-prompt-input").is_some());
+    click(&mut cx, "new-session-model-retry");
+    probe.update(&mut cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::Activate { action, .. } if action.0 == "reload-models"
+        )));
+    });
+}
+
+#[gpui_kit::test]
+fn agent_project_search_keeps_the_composer_and_selects_a_registered_project(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.text = Some("Keep the prompt and attachments".into());
+    spec.rows.push(DialogRow::action(
+        "choose-project",
+        "review-project…",
+        DialogAction::new("choose-project"),
+    ));
+    spec.projects = ["review-project", "agents"]
+        .into_iter()
+        .map(|name| bootty_git::ProjectPickerEntry {
+            path: format!("/workspace/{name}"),
+            favorite: false,
+        })
+        .collect();
+    spec.selected_project = Some("/workspace/review-project".into());
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200.0, 900.0, 24.0);
+    click(&mut cx, "new-session-header-project");
+    assert!(cx.debug_bounds("dialog-prompt-input").is_some());
+    cx.simulate_input("agents");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input(" more");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert!(probe.intents.borrow().contains(&DialogIntent::FieldChanged {
+            dialog: DialogId::new(bootty_ui::presentation::dialogs::NEW_SESSION_ID),
+            field: "project".into(), value: "/workspace/agents".into(),
+        }));
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::TextChanged { value, .. } if value.contains("Keep the prompt and attachments") && value.contains(" more")
+        )));
+        assert!(!probe.intents.borrow().iter().any(|intent| matches!(intent, DialogIntent::Activate { action, .. } if action.0 == "choose-project")));
+    });
+}
+
+#[gpui_kit::test]
+fn agent_composer_handles_cancel_from_child_controls(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.fields.push(bootty_gpui::DialogField {
+        id: "model".into(),
+        label: "Model".into(),
+        value: "openai/current".into(),
+        placeholder: String::new(),
+        kind: bootty_gpui::DialogFieldKind::Choice(vec!["openai/current".into()]),
+    });
+    spec.models.push(bootty_agents::NativeModelOption {
+        id: "openai/current".into(),
+        display_name: "Current model".into(),
+        reasoning_efforts: vec!["high".into()],
+        default_reasoning_effort: Some("high".into()),
+        is_default: true,
+        is_legacy: false,
+        is_favorite: false,
+    });
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200.0, 900.0, 24.0);
+    click(&mut cx, "model-picker-trigger");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert!(
+            !probe
+                .intents
+                .borrow()
+                .iter()
+                .any(|intent| matches!(intent, DialogIntent::Dismiss { .. }))
+        );
+    });
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert_eq!(
+            probe
+                .intents
+                .borrow()
+                .iter()
+                .filter(|intent| matches!(intent, DialogIntent::Dismiss { .. }))
+                .count(),
+            1
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn agent_composer_centers_in_a_tall_full_surface_and_keeps_prompt_focus(cx: &TestAppContext) {
+    let (probe, mut cx) =
+        full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200.0, 900.0, 24.0);
+
+    let composer = cx
+        .debug_bounds("dialog-prompt-panel")
+        .expect("mounted agent composer");
+    assert!(
+        composer.size.width > px(0.0) && composer.size.height > px(0.0),
+        "composer collapsed in its host: {composer:?}"
+    );
+    assert!(
+        composer.left() >= px(0.0),
+        "composer is clipped on the left"
+    );
+    assert!(
+        composer.right() <= px(1200.0),
+        "composer is clipped on the right: {composer:?}"
+    );
+    assert!(
+        composer.bottom() <= px(900.0),
+        "composer exceeds the window height: {composer:?}"
+    );
+    assert!(
+        composer.size.height < px(900.0),
+        "the tall viewport must leave room around the composer: {composer:?}"
+    );
+    assert!(
+        (px(599.0)..=px(601.0)).contains(&composer.center().x),
+        "composer is not horizontally centered: {composer:?}"
+    );
+    assert!(
+        (px(449.0)..=px(451.0)).contains(&composer.center().y),
+        "composer is not vertically centered: {composer:?}"
+    );
+    let input = cx
+        .debug_bounds("dialog-prompt-input")
+        .expect("visible agent prompt input");
+    assert!(
+        input.size.width > px(0.0) && input.size.height > px(0.0),
+        "prompt input collapsed: {input:?}"
+    );
+    assert!(
+        composer.contains(&input.center()),
+        "prompt is outside composer"
+    );
+    let provider = cx
+        .debug_bounds("dialog-field-choice-control-provider")
+        .expect("visible provider choice");
+    assert!(
+        provider.size.width > px(0.0) && provider.size.height > px(0.0),
+        "provider choice collapsed: {provider:?}"
+    );
+    assert!(
+        composer.contains(&provider.center()),
+        "provider choice is outside composer"
+    );
+
+    cx.simulate_input("run the tests");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(
+            intent,
+            DialogIntent::TextChanged { dialog, value }
+                if *dialog == DialogId::new(bootty_ui::presentation::dialogs::NEW_SESSION_ID)
+                    && value == "run the tests"
+        )));
+    });
+}
+
 #[gpui_kit::test]
 fn prompt_validation_is_visible_and_blocks_submit(cx: &TestAppContext) {
     let mut spec = DialogSpec::prompt("prompt", "Rename", "", "name…", DialogAction::new("submit"));
@@ -910,7 +1242,19 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         text: None,
         text_label: None,
         fields: Vec::new(),
+        spaces: Vec::new(),
+        applications: Vec::new(),
+        attachments: Vec::new(),
+        completion: None,
+        models: Vec::new(),
+        models_loading: false,
+        model_error: None,
+        projects: Vec::new(),
+        project_labels: std::collections::BTreeMap::new(),
+        selected_project: None,
+        selected_model: None,
         busy: false,
+        multiline: false,
         text_hint: None,
         rows: vec![
             DialogRow {
@@ -1033,5 +1377,202 @@ fn prompt_fields_edit_without_resetting_sibling_values(cx: &TestAppContext) {
                 .count(),
             1
         );
+    });
+}
+
+#[gpui_kit::test]
+fn attachment_pills_edit_delete_and_undo_in_the_prompt(cx: &TestAppContext) {
+    use assert_fs::prelude::*;
+    use pretty_assertions::assert_eq;
+    let file = assert_fs::NamedTempFile::new("notes.md").unwrap();
+    file.write_str("attachment contents").unwrap();
+    let path = file.path().to_owned();
+    let (probe, mut cx) =
+        full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
+    cx.simulate_input("Read ");
+    click(&mut cx, "dialog-prompt-attach");
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|_| Some(vec![path.clone()]));
+    cx.run_until_parked();
+    cx.simulate_input(" please");
+    cx.run_until_parked();
+    let latest_text = |cx: &mut VisualTestContext| {
+        probe.read_with(cx, |probe, _| {
+            probe
+                .intents
+                .borrow()
+                .iter()
+                .rev()
+                .find_map(|intent| match intent {
+                    DialogIntent::TextChanged { value, .. } => Some(value.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        })
+    };
+    assert_eq!(latest_text(&mut cx), "Read [notes.md] please");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "ctrl-a right right right right right delete"
+    } else {
+        "home right right right right right delete"
+    });
+    cx.run_until_parked();
+    assert_eq!(latest_text(&mut cx), "Read  please");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-z"
+    } else {
+        "ctrl-z"
+    });
+    cx.run_until_parked();
+    assert_eq!(latest_text(&mut cx), "Read [notes.md] please");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    probe.read_with(&cx, |probe, _| {
+        let intents = probe.intents.borrow();
+        let attachments = intents
+            .iter()
+            .rev()
+            .find_map(|intent| match intent {
+                DialogIntent::AttachmentsChanged { attachments, .. } => Some(attachments),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            attachments
+                .iter()
+                .map(|attachment| attachment.path.clone())
+                .collect::<Vec<_>>(),
+            vec![path]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn creation_prompt_keeps_configured_mux_shortcuts_without_typing_them(cx: &TestAppContext) {
+    use bootty_ui::{commands::CommandCatalog, gpui_actions, keymap_runtime::KeymapRuntime};
+    let file = assert_fs::NamedTempFile::new("config.toml").expect("private configuration");
+    std::fs::write(file.path(), "").expect("configuration");
+    let mut config = bootty_config::config::load_config_from_path(file.path()).unwrap();
+    config.input.keybind = vec!["alt+2=select_tab:2".into(), "cmd+t=new_tab".into()];
+    let catalog = std::sync::Arc::new(CommandCatalog::default());
+    let keymap = KeymapRuntime::new(&config, catalog.clone());
+    let (probe, mut cx) =
+        full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
+    cx.update(|_, cx| {
+        gpui_actions::replace_workspace_key_bindings(
+            gpui_actions::key_bindings_for_native_conversation(
+                keymap.snapshot(),
+                bootty_config::config::MultiplexerBackendConfig::Native,
+                &catalog,
+            ),
+            cx,
+        )
+        .expect("composer bindings");
+    });
+    cx.simulate_keystrokes("alt-2");
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+    probe.update(&mut cx, |probe, _| {
+        assert_eq!(probe.commands, ["select_tab:2", "new_tab"]);
+        assert!(
+            !probe
+                .intents
+                .borrow()
+                .iter()
+                .any(|intent| matches!(intent, DialogIntent::TextChanged { .. }))
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn composer_provider_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
+    let (probe, mut cx) =
+        full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
+    probe.update_in(&mut cx, |probe, window, cx| {
+        probe.dialog.update(cx, |dialog, cx| {
+            dialog.perform(
+                CommandAction::Focus(bootty_gpui::ComposerControl::Provider),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    probe.read_with(&cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent, DialogIntent::FieldChanged { field, .. } if field == "provider")), "focus action must reach the real menu and select a provider");
+    });
+}
+
+#[gpui_kit::test]
+fn composer_space_focus_reaches_a_single_available_space(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.fields.push(bootty_gpui::DialogField {
+        id: "host".into(),
+        label: "Space".into(),
+        value: "Current Space".into(),
+        placeholder: String::new(),
+        kind: bootty_gpui::DialogFieldKind::Choice(vec!["Current Space".into()]),
+    });
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200., 900., 16.);
+    probe.update_in(&mut cx, |probe, window, cx| {
+        probe.dialog.update(cx, |dialog, cx| {
+            dialog.perform(
+                CommandAction::Focus(bootty_gpui::ComposerControl::Space),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down enter");
+    cx.run_until_parked();
+    probe.read_with(&cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::FieldChanged { field, value, .. } if field == "host" && value == "Current Space"
+        )), "single-choice controls must remain reachable by the focus action");
+    });
+}
+
+#[gpui_kit::test]
+fn composer_model_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.fields.push(bootty_gpui::DialogField {
+        id: "model".into(),
+        label: "Model".into(),
+        value: "current".into(),
+        placeholder: String::new(),
+        kind: bootty_gpui::DialogFieldKind::Choice(vec!["current".into()]),
+    });
+    spec.models.push(bootty_agents::NativeModelOption {
+        id: "current".into(),
+        display_name: "Current model".into(),
+        reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
+        is_default: true,
+        is_legacy: false,
+        is_favorite: false,
+    });
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200., 900., 16.);
+    probe.update_in(&mut cx, |probe, window, cx| {
+        probe.dialog.update(cx, |dialog, cx| {
+            dialog.perform(
+                CommandAction::Focus(bootty_gpui::ComposerControl::Model),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    probe.read_with(&cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::FieldChanged { field, value, .. } if field == "model" && value == "current"
+        )), "focus action must open the model menu and accept its advertised selection");
     });
 }

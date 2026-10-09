@@ -22,8 +22,14 @@ pub struct SessionProgressView {
 
 /// A mux session for native sidebar presentation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent observed projection facts: activity, selection, attachment and progress"
+)]
 pub struct SessionView {
     pub id: String,
+    pub identity: Option<String>,
+    pub detached: bool,
     /// The backend's name, which is what every command and every membership record targets.
     pub name: String,
     /// The name bootty shows, free of any uniqueness suffix the backend name needed. Empty means

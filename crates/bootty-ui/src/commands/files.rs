@@ -5,8 +5,10 @@ command_actions! {
     FileAction {
         Browse => ("files.browse", "Browse Files", ["path"], Write),
         Open => ("files.open", "Open Document", ["path", "line", "column"], Write),
+        Complete => ("files.complete", "Find Files", ["base", "query"], Read),
         List => ("files.list", "List Directory", ["path", "offset"], Read),
         Read => ("files.read", "Read Document", ["path"], Read),
+        Source => ("files.source", "Open File Source", ["path", "root"], Read),
         Save => ("files.save", "Save Document Revision", ["path", "digest", "content_base64"], Write),
         Format => ("files.format", "Format Document", ["path", "content_base64"], Read),
     }
@@ -41,7 +43,7 @@ impl FileAction {
             id: id.to_owned(),
             title: title.to_owned(),
             description: format!(
-                "{title} on the target binding's host. Paths must be absolute; UTF-8 text documents are limited to 512 KiB. Image/video reads return seekable media metadata."
+                "{title} on the target binding's host. Paths must be absolute; UTF-8 text documents are limited to 512 KiB. Image/video reads return seekable media metadata. File sources return revision-checked metadata within their captured root."
             ),
             arguments: CompactSchema { arguments },
             mutation,
@@ -52,6 +54,10 @@ impl FileAction {
 
     pub(super) fn request(self, args: &[String]) -> Result<FileRequest, String> {
         match (self, args) {
+            (Self::Complete, [base, query]) => Ok(FileRequest::Complete {
+                base: base.clone(),
+                query: query.clone(),
+            }),
             (Self::List, [path, rest @ ..]) => Ok(FileRequest::List {
                 path: path.clone(),
                 offset: rest
@@ -62,6 +68,10 @@ impl FileAction {
                     .unwrap_or(0),
             }),
             (Self::Read, [path]) => Ok(FileRequest::Read { path: path.clone() }),
+            (Self::Source, [path, root]) => Ok(FileRequest::OpenReader {
+                path: path.clone(),
+                root: root.clone(),
+            }),
             (Self::Save, [path, digest, content]) => Ok(FileRequest::Save {
                 path: path.clone(),
                 expected_digest: digest.clone(),

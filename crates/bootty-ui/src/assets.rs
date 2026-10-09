@@ -1,25 +1,8 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use anyhow::Result;
-use gpui_kit::assets::Assets as ComponentAssets;
+use gpui_kit::assets::AllAssets as ComponentAssets;
 use gpui_kit::{AssetSource, SharedString, TextSystem};
-
-gpui_kit::assets::icon_assets!(
-    ControlIcons,
-    [
-        Square,
-        Keyboard,
-        Pencil,
-        TriangleAlert,
-        Circle,
-        Link,
-        ListFilter,
-        Play,
-        Pause,
-        Volume2,
-        VolumeX
-    ]
-);
 
 pub const MAPLE_MONO_NF_REGULAR: &[u8] = include_bytes!("../assets/fonts/MapleMono-NF-Regular.ttf");
 pub const MAPLE_MONO_VARIABLE: &[u8] = include_bytes!("../assets/fonts/MapleMono-wght.ttf");
@@ -43,6 +26,11 @@ pub const IBM_PLEX_SANS_LICENSE: &[u8] =
     include_bytes!("../assets/fonts/ibm-plex-sans/license.txt");
 
 const BOOTTY_ASSETS: &[(&str, &[u8])] = &[
+    ("icons/pi.svg", include_bytes!("../assets/icons/pi.svg")),
+    (
+        "icons/pi-LICENSE",
+        include_bytes!("../assets/icons/pi-LICENSE"),
+    ),
     (
         "icons/bootty.png",
         include_bytes!("../assets/bootty-mascot.png"),
@@ -113,10 +101,7 @@ impl AssetSource for BoottyAssets {
         if let Some((_, data)) = BOOTTY_ASSETS.iter().find(|(asset, _)| *asset == path) {
             return Ok(Some(Cow::Borrowed(*data)));
         }
-        if let Ok(Some(data)) = ComponentAssets.load(path) {
-            return Ok(Some(data));
-        }
-        ControlIcons.load(path)
+        ComponentAssets.load(path)
     }
 
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
@@ -128,12 +113,6 @@ impl AssetSource for BoottyAssets {
             .collect::<BTreeSet<_>>();
         assets.extend(
             ComponentAssets
-                .list(path)?
-                .into_iter()
-                .map(|asset| asset.to_string()),
-        );
-        assets.extend(
-            ControlIcons
                 .list(path)?
                 .into_iter()
                 .map(|asset| asset.to_string()),

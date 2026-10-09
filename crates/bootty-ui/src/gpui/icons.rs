@@ -1,4 +1,4 @@
-//! GPUI iconflow font loading and slug rendering.
+//! Shared GPUI Kit SVG icons and provider icon font rendering.
 
 use std::{
     borrow::Cow,
@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use ab_glyph::{Font as _, FontRef, PxScale};
+use ab_glyph::{Font as _, FontRef};
 use gpui_kit::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, LayoutId, Pixels, RenderImage, Style as GpuiStyle, Styled, Window, img, px,
@@ -45,12 +45,29 @@ pub fn sized_icon(slug: &str, size: IconSize, tint: Hsla) -> AnyElement {
     icon(slug, size.pixels(), tint)
 }
 
-/// Render an icon slug with its embedded font. Unknown slugs occupy no space.
+/// Render an icon slug from GPUI Kit or an embedded provider font. Unknown slugs occupy no space.
 #[must_use]
 pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
     if slug == "bootty" {
         return img("icons/bootty.png")
             .size(px(normalize_size(size)))
+            .flex_shrink_0()
+            .into_any_element();
+    }
+    if slug == "pi" {
+        return gpui_kit::svg()
+            .path("icons/pi.svg")
+            .size(px(normalize_size(size)))
+            .flex_shrink_0()
+            .text_color(tint)
+            .into_any_element();
+    }
+    if let Some(path) = lucide_path(slug) {
+        return gpui_kit::component::Icon::default()
+            .path(path)
+            .size(px(normalize_size(size)))
+            .flex_shrink_0()
+            .text_color(tint)
             .into_any_element();
     }
     let Some(resolved) = resolve(slug) else {
@@ -105,6 +122,7 @@ impl Element for IconElement {
         let mut style = GpuiStyle::default();
         style.size.width = self.size.into();
         style.size.height = self.size.into();
+        style.flex_shrink = 0.0;
         (window.request_layout(style, [], cx), ())
     }
 
@@ -114,10 +132,14 @@ impl Element for IconElement {
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-        rasterized_icon(self.resolved, f32::from(self.size), self.tint)
+        rasterized_icon(
+            self.resolved,
+            f32::from(self.size) * window.scale_factor(),
+            self.tint,
+        )
     }
 
     fn paint(
@@ -146,7 +168,16 @@ impl Element for IconElement {
 /// Return whether `slug` resolves to an icon in the embedded icon inventory.
 #[must_use]
 pub fn has_icon(slug: &str) -> bool {
-    resolve(slug).is_some()
+    matches!(slug, "pi" | "bootty") || lucide_path(slug).is_some() || resolve(slug).is_some()
+}
+
+fn lucide_path(slug: &str) -> Option<String> {
+    let slug = slug.strip_prefix("lucide:").unwrap_or(slug);
+    if slug.contains(':') || matches!(slug, "openai" | "claude" | "anthropic") {
+        return None;
+    }
+    let path = format!("icons/{slug}.svg");
+    gpui_kit::assets::AllAssets::get(&path).map(|_| path)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -188,7 +219,6 @@ fn resolve(slug: &str) -> Option<ResolvedIcon> {
 }
 
 fn rasterized_icon(resolved: ResolvedIcon, size: f32, tint: Hsla) -> Option<Arc<RenderImage>> {
-    const RASTER_SCALE: f32 = 2.0;
     type Key = (&'static str, char, u32, Hsla);
     static CACHE: OnceLock<Mutex<HashMap<Key, Arc<RenderImage>>>> = OnceLock::new();
 
@@ -198,11 +228,11 @@ fn rasterized_icon(resolved: ResolvedIcon, size: f32, tint: Hsla) -> Option<Arc<
         return Some(Arc::clone(image));
     }
 
-    let extent = (size * RASTER_SCALE).ceil().max(1.0).to_u32()?;
+    let extent = size.ceil().max(1.0).to_u32()?;
     let font = FontRef::try_from_slice(resolved.bytes).ok()?;
     let glyph = font
         .glyph_id(resolved.glyph)
-        .with_scale(PxScale::from(size * RASTER_SCALE));
+        .with_scale(crate::font_database::font_pixel_scale(&font, size));
     let outlined = font.outline_glyph(glyph)?;
     let bounds = outlined.px_bounds();
     let glyph_width = bounds.width().ceil().max(0.0).to_u32()?;

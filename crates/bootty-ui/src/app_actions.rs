@@ -24,7 +24,9 @@ pub enum AppAction {
     ReloadConfig,
     Ignore,
     NewWindow,
+    AddProject,
     NewMuxSession,
+    NewNativeAgentTab,
     SessionPicker,
     CommandPalette,
     Close,
@@ -41,7 +43,6 @@ pub enum AppAction {
     RenameSession,
     MoveSessionToSpace,
     RenameTab,
-    DitchSession,
     CreateSpace,
     CloseSpace,
     EditSpace,
@@ -66,6 +67,7 @@ pub enum TerminalFindAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeybindAction {
     OpenSetting(String),
+    SettleSession,
     App(AppAction),
     Mux(MuxKeyAction),
     Scroll(TerminalScrollAction),
@@ -131,6 +133,9 @@ impl Default for AppKeyBindings {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarAction {
+    ToggleGrouping,
+    SortManual,
+    SortRecentActivity,
     Ignore,
     PreviousSession,
     NextSession,
@@ -139,7 +144,10 @@ pub enum SidebarAction {
 }
 
 impl SidebarAction {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
+        Self::ToggleGrouping,
+        Self::SortManual,
+        Self::SortRecentActivity,
         Self::Ignore,
         Self::PreviousSession,
         Self::NextSession,
@@ -150,6 +158,9 @@ impl SidebarAction {
     #[must_use]
     pub const fn command_id(self) -> &'static str {
         match self {
+            Self::SortManual => "ui.sidebar.sort_manual",
+            Self::SortRecentActivity => "ui.sidebar.sort_recent_activity",
+            Self::ToggleGrouping => "ui.sidebar.toggle_grouping",
             Self::Ignore => "ui.sidebar.ignore",
             Self::PreviousSession => "ui.sidebar.previous_session",
             Self::NextSession => "ui.sidebar.next_session",
@@ -400,7 +411,9 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::ReloadConfig => Keybind::App(AppAction::ReloadConfig),
         Binding::Ignore => Keybind::App(AppAction::Ignore),
         Binding::NewWindow => Keybind::App(AppAction::NewWindow),
+        Binding::AddProject => Keybind::App(AppAction::AddProject),
         Binding::NewMuxSession => Keybind::App(AppAction::NewMuxSession),
+        Binding::NewNativeAgentTab => Keybind::App(AppAction::NewNativeAgentTab),
         Binding::SessionPicker => Keybind::App(AppAction::SessionPicker),
         Binding::CommandPalette => Keybind::App(AppAction::CommandPalette),
         Binding::CloseWindow => Keybind::App(AppAction::Close),
@@ -453,6 +466,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             Keybind::App(AppAction::ChangeAppearance(appearance_mode(choice)))
         }
         Binding::SwitchTheme => Keybind::App(AppAction::SwitchTheme),
+        Binding::SettleSession => Keybind::SettleSession,
         Binding::RenameSession => Keybind::App(AppAction::RenameSession),
         Binding::MoveSessionToSpace => Keybind::App(AppAction::MoveSessionToSpace),
         Binding::RenameTab => Keybind::App(AppAction::RenameTab),
@@ -462,7 +476,6 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::NextSpace => Keybind::App(AppAction::NextSpace),
         Binding::PreviousSpace => Keybind::App(AppAction::PreviousSpace),
         Binding::SelectSpace(index) => Keybind::App(AppAction::SelectSpace(index)),
-        Binding::DitchSession => Keybind::App(AppAction::DitchSession),
         Binding::ShowKeybinds => Keybind::App(AppAction::ShowKeybinds),
         terminal => return terminal_keybind_action(terminal),
     })

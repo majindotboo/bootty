@@ -88,6 +88,66 @@ fn project_row_ids_map_activation_across_groups() {
     ));
 }
 
+#[rstest::rstest]
+#[case::new(false)]
+#[case::favorite(true)]
+fn add_project_picker_registers_selected_directories_without_creating_a_session(
+    #[case] favorite: bool,
+) {
+    let path = "/projects/new";
+    let mut dialog = NewSessionDialog::from_projects_for_add(vec![project(path, favorite)]);
+    let spec = dialog.spec();
+    assert_eq!(spec.title, "Add Project");
+    assert_eq!(spec.hint.as_deref(), Some("Enter add   Esc close"));
+    let row = project_row(&spec, path);
+    let action = row.action.clone().expect("project add action");
+
+    assert_eq!(
+        dialog.apply(
+            &DialogIntent::Activate {
+                dialog: spec.id.clone(),
+                row: row.id.clone(),
+                action: action.id,
+                payload: action.payload,
+            },
+            &[],
+        ),
+        Some(NewSessionPickerEvent::AddProject {
+            path: path.to_owned(),
+        })
+    );
+}
+
+#[rstest::rstest]
+fn cancelling_add_project_does_not_request_a_bookmark() {
+    let mut dialog = NewSessionDialog::from_projects_for_add(vec![project("/projects/new", false)]);
+    let spec = dialog.spec();
+
+    assert_eq!(
+        dialog.apply(&DialogIntent::Dismiss { dialog: spec.id }, &[],),
+        Some(NewSessionPickerEvent::Close)
+    );
+}
+
+#[rstest::rstest]
+fn add_project_command_is_registered_for_the_shared_keybinding_path() {
+    use bootty_ui::{
+        app_actions::{AppAction, KeybindAction, keybind_action_for_name},
+        commands::CommandRegistry,
+    };
+
+    let command = CommandRegistry::core()
+        .describe("add_project")
+        .expect("add project command");
+
+    assert_eq!(command.title, "Add Project");
+    assert!(command.palette);
+    assert_eq!(
+        keybind_action_for_name("add_project"),
+        Some(KeybindAction::App(AppAction::AddProject))
+    );
+}
+
 #[test]
 fn local_picker_starts_with_async_loading_state() {
     let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
@@ -271,6 +331,12 @@ fn rename_dialogs_preserve_their_distinct_empty_name_policies(
     };
     let mut session = RenameSessionDialog::open("session".to_owned(), name.to_owned());
     let mut tab = RenameTabDialog::open("session".to_owned(), "tab".to_owned(), name.to_owned());
+    let target = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Session,
+        handle: "native:codex:1".to_owned(),
+        generation: 7,
+    };
+    let mut native = RenameTabDialog::open_native(target.clone(), name.to_owned());
     let submit = |spec: bootty_gpui::DialogSpec| {
         let row = &spec.rows[0];
         let action = row.action.clone().expect("submit action");
@@ -296,6 +362,15 @@ fn rename_dialogs_preserve_their_distinct_empty_name_policies(
             window_id: "tab".to_owned(),
             name: name.trim().to_owned()
         })
+    );
+    assert_eq!(native.spec().rows[0].enabled, session_name.is_some());
+    assert_eq!(native.spec().footer, None);
+    assert_eq!(
+        native.apply(&submit(native.spec())),
+        session_name.map(|name| RenameTabEvent::RenameNative {
+            target,
+            name: name.to_owned()
+        }),
     );
 }
 

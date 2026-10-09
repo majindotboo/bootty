@@ -9,15 +9,15 @@ use gpui_kit::{
 };
 
 use super::{
-    ChromeIntent, ChromePalette, ContextMenu, GpuiChrome, MenuRow, StatusAlignment,
-    StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress, StatusSegmentSnapshot,
-    StatusTabFocusMovement, TabBounds, TabContextAction, TabContextSnapshot, TabInsertionTarget,
-    color, tab_insertion_target,
+    ChromeIntent, ChromePalette, ContextMenu, GpuiChrome, MenuRow, NativeChromeAction,
+    StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress,
+    StatusSegmentSnapshot, StatusTabFocusMovement, TabBounds, TabContextAction, TabContextSnapshot,
+    TabInsertionTarget, color, tab_insertion_target,
 };
 use crate::gpui::{IconSize, Rgba, sized_icon};
 use gpui_kit::component::{
-    ActiveTheme as _, ElementExt as _, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, ElementExt as _, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     menu::ContextMenuExt,
 };
 
@@ -65,6 +65,8 @@ struct StatusBarStyle<'a> {
     key: &'a str,
     background: Rgba,
     segmented: bool,
+    navigation_hints: &'a [(String, gpui_kit::Keystroke)],
+    hint_modifiers: gpui_kit::Modifiers,
 }
 
 pub(super) struct RenderParams<'a> {
@@ -80,6 +82,8 @@ pub(super) struct RenderParams<'a> {
     pub(super) tab_bounds: TabBounds,
     pub(super) insertion_target: Option<&'a TabInsertionTarget>,
     pub(super) tab_focus_handles: &'a std::collections::HashMap<String, FocusHandle>,
+    pub(super) navigation_hints: &'a [(String, gpui_kit::Keystroke)],
+    pub(super) hint_modifiers: gpui_kit::Modifiers,
 }
 
 pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
@@ -96,6 +100,8 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
         tab_bounds,
         insertion_target,
         tab_focus_handles,
+        navigation_hints,
+        hint_modifiers,
     } = params;
     let has_tabs = snapshot
         .segments
@@ -115,6 +121,8 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
         key: &snapshot.key,
         background: snapshot.background,
         segmented: compact,
+        navigation_hints,
+        hint_modifiers,
     };
     for segment in &snapshot.segments {
         let target = match segment.align {
@@ -399,11 +407,13 @@ pub(super) fn dock_tabs(
         segment,
         chrome.snapshot.palette,
         StatusBarStyle {
-            tab_config: chrome.snapshot.layout.terminal_tabs,
+            tab_config: chrome.snapshot.layout.tabs,
             keymap_context: chrome.keymap_context(),
             key: &snapshot.key,
             background: snapshot.background,
             segmented: false,
+            navigation_hints: &chrome.navigation_hints,
+            hint_modifiers: chrome.hint_modifiers,
         },
         &chrome.tab_bounds,
         chrome.tab_drag.insertion_target(),
@@ -534,6 +544,7 @@ fn tab_strip(
         notch,
         end: tab_end_target(bar, segment.source_slot, insertion_target, colors, cx)
             .into_any_element(),
+        plus: Some(new_tab_button(bar, segment.source_slot, cx)),
     }
 }
 
@@ -574,7 +585,38 @@ fn tab_end_target(
         }))
 }
 
+/// The new-tab command opens the in-pane chooser at the current destination.
+fn new_tab_button(
+    bar: StatusBarStyle<'_>,
+    source_slot: usize,
+    cx: &Context<GpuiChrome>,
+) -> gpui_kit::AnyElement {
+    let id = format!("status-new-tab-{}-{source_slot}", bar.key);
+    let selector = id.clone();
+    Button::new(SharedString::from(id))
+        .debug_selector(move || selector)
+        .icon(IconName::Plus)
+        .ghost()
+        .xsmall()
+        .size_6()
+        .accessibility_label("New tab")
+        .tooltip("New tab")
+        .on_click(cx.listener(|_, _, _, cx| {
+            cx.emit(ChromeIntent::Command(
+                bootty_control::CommandInvocation::from_action(
+                    "new_tab",
+                    bootty_control::Caller::Internal,
+                ),
+            ));
+        }))
+        .into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One tab retains its shared pointer and keyboard behavior"
+)]
 fn render_tab(
     segment: &StatusSegmentSnapshot,
     items: &[StatusItemSnapshot],
@@ -591,6 +633,13 @@ fn render_tab(
     let label = tab_label(items);
     let tab_context = items.iter().find_map(|item| item.tab_context.clone());
     let activation = tab_activation(items, tab_context.as_ref());
+    let native_close = items.iter().find_map(|item| match &item.action {
+        Some(NativeChromeAction::FocusConversation(target)) => {
+            Some(native_tab_close_button(target.clone(), &label, cx))
+        }
+        Some(NativeChromeAction::SurfaceChooser(id)) => Some(surface_tab_close_button(*id, cx)),
+        _ => None,
+    });
     let source = items.first().and_then(|item| item.reorder_anchor.clone());
     let insertion_here = source.as_ref().is_some_and(|source| {
         matches!(insertion_target, Some(TabInsertionTarget::Before(before)) if before == source)
@@ -601,33 +650,35 @@ fn render_tab(
     ));
     let focus_id = tab_id(bar.key, segment.source_slot, key);
     let tab_focus = tab_focus_handles.get(&focus_id).cloned();
+    let shortcut = tab_ids
+        .iter()
+        .position(|id| id == &focus_id)
+        .and_then(|index| {
+            super::view::navigation_hint(
+                bar.navigation_hints,
+                bar.hint_modifiers,
+                "select_tab",
+                index.saturating_add(1),
+            )
+        });
     let focus_id_for_key = focus_id;
     let navigation_ids_for_key = tab_ids.clone();
     let activation_for_key = activation.clone();
-    let items = items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            render_item(
-                segment,
-                item,
-                bar,
-                colors,
-                Some(active),
-                ItemLayout {
-                    stretch: index.saturating_add(1) == items.len(),
-                },
-                cx,
-            )
-        })
-        .collect::<Vec<_>>();
+    let items = render_tab_items(segment, items, bar, colors, active, cx);
 
     let close = tab_close_button(
         tab_context.as_ref(),
         format!("status-tab-close-{}-{}-{key}", bar.key, segment.source_slot),
         &label,
+        crate::gpui::tabs::tab_foreground(
+            bar.tab_config.appearance,
+            active,
+            color(colors.tab_accent),
+            cx,
+        ),
         cx,
-    );
+    )
+    .or(native_close);
 
     let content = crate::gpui::tabs::content(
         div()
@@ -686,7 +737,8 @@ fn render_tab(
         }))
     })
     .map(|tab| tab_middle_close(tab, tab_context, cx))
-    .child(content);
+    .child(content)
+    .children(shortcut);
     measured_tab(tab, source, tab_bounds, cx)
 }
 
@@ -763,10 +815,79 @@ fn tab_activation(
         })
 }
 
+fn render_tab_items(
+    segment: &StatusSegmentSnapshot,
+    items: &[StatusItemSnapshot],
+    bar: StatusBarStyle<'_>,
+    colors: ChromePalette,
+    active: bool,
+    cx: &Context<GpuiChrome>,
+) -> Vec<gpui_kit::AnyElement> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            render_item(
+                segment,
+                item,
+                bar,
+                colors,
+                Some(active),
+                ItemLayout {
+                    stretch: index.saturating_add(1) == items.len(),
+                },
+                cx,
+            )
+        })
+        .collect()
+}
+
+fn native_tab_close_button(
+    target: bootty_control::CommandTarget,
+    label: &str,
+    cx: &Context<GpuiChrome>,
+) -> gpui_kit::AnyElement {
+    Button::new(SharedString::from(format!(
+        "native-tab-close-{}",
+        target.handle
+    )))
+    .icon(IconName::Close)
+    .ghost()
+    .xsmall()
+    .size_4()
+    .accessibility_label(format!("Close {label}"))
+    .tooltip(format!("Close {label}"))
+    .on_click(cx.listener(move |_, _, _, cx| {
+        cx.stop_propagation();
+        cx.emit(ChromeIntent::Status(StatusIntent::Action(
+            NativeChromeAction::CloseConversation(target.clone()),
+        )));
+    }))
+    .into_any_element()
+}
+
+fn surface_tab_close_button(id: u64, cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
+    Button::new(SharedString::from(format!("surface-tab-close-{id}")))
+        .icon(IconName::Close)
+        .ghost()
+        .xsmall()
+        .size_4()
+        .accessibility_label("Close New tab")
+        .tooltip("Close New tab")
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ChromeIntent::Status(StatusIntent::Action(
+                NativeChromeAction::CancelSurfaceChooser(id),
+            )));
+        }))
+        .into_any_element()
+}
+
 fn tab_close_button(
     tab_context: Option<&TabContextSnapshot>,
     id: String,
     label: &str,
+    foreground: gpui_kit::Hsla,
     cx: &Context<GpuiChrome>,
 ) -> Option<gpui_kit::AnyElement> {
     tab_context.and_then(|tab_context| {
@@ -775,7 +896,12 @@ fn tab_close_button(
             let window_id = tab_context.window_id.clone();
             Button::new(SharedString::from(id.clone()))
                 .icon(gpui_kit::component::IconName::Close)
-                .ghost()
+                .custom(
+                    ButtonCustomVariant::new(cx)
+                        .foreground(foreground)
+                        .hover(cx.theme().secondary_hover)
+                        .active(cx.theme().secondary_hover),
+                )
                 .xsmall()
                 .size_4()
                 .debug_selector(move || id)
@@ -925,7 +1051,7 @@ fn render_item(
         .items_center()
         .gap_1()
         .overflow_hidden()
-        .text_xs()
+        .when(!tab, gpui_kit::Styled::text_xs)
         .when(!tab, |element| element.text_color(color(foreground)))
         .when(!tab, |element| {
             element.bg(if bar.segmented && item.background.is_none() {
@@ -945,7 +1071,17 @@ fn render_item(
             element.border_b_1().border_color(color(colors.accent))
         })
         .when_some(item.icon.clone(), |element, icon| {
-            element.child(sized_icon(&icon, IconSize::Small, color(foreground)))
+            let tint = if tab {
+                crate::gpui::tabs::tab_foreground(
+                    bar.tab_config.appearance,
+                    active,
+                    color(colors.tab_accent),
+                    cx,
+                )
+            } else {
+                color(foreground)
+            };
+            element.child(sized_icon(&icon, IconSize::Small, tint))
         })
         .when_some(gauge, ParentElement::child)
         .child(

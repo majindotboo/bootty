@@ -4,6 +4,7 @@
 use std::{env, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use assert_fs::{TempDir, prelude::*};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::ApplicationIdentity;
 use bootty_host::ssh::SshRemote;
 use bootty_mux::tmux::TmuxControlRunner;
@@ -34,6 +35,15 @@ fn development_tmux_uses_a_distinct_server_namespace(directory: TempDir) {
         &directory,
         "argv-probe",
         "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+    );
+    executable(
+        &directory,
+        "ssh-probe",
+        &format!(
+            "#!/bin/sh\nfor line; do :; done\ncase \"$line\" in\n*uname*) printf 'Linux\\nx86_64\\n';;\n*remote-ping*) printf '{}:{}\\n';;\n*) printf '%s\\n' \"$line\";;\nesac\n",
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+            env!("CARGO_PKG_VERSION")
+        ),
     );
     let output =
         std::process::Command::new(std::env::current_exe().expect("current test executable"))
@@ -66,6 +76,9 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
         return;
     }
 
+    ApplicationIdentity::Development
+        .initialize_process()
+        .expect("isolated development identity");
     let fixture = PathBuf::from(env::var_os(FIXTURE_ENV).expect("fixture directory"));
     let argv_probe = fixture.join("argv-probe");
     let command = vec![
@@ -94,16 +107,30 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
         host: "remote.example".to_owned(),
         user: None,
         port: None,
-        program: argv_probe.to_string_lossy().into_owned(),
+        program: fixture.join("ssh-probe").to_string_lossy().into_owned(),
         args: Vec::new(),
     });
     let remote = TmuxControlRunner::for_remote(remote.into())
         .run("tmux", &command)
         .expect("remote tmux command");
     assert!(
-        !remote
+        remote
             .stdout
             .contains(ApplicationIdentity::Development.namespace())
     );
-    assert!(remote.stdout.contains("'tmux' 'kill-session' '-t' 'build'"));
+    let payload = remote
+        .stdout
+        .split_whitespace()
+        .last()
+        .expect("remote execution payload");
+    let command: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("encoded remote command"),
+    )
+    .expect("versioned remote command");
+    assert_eq!(
+        command,
+        serde_json::json!({"program": "tmux", "args": ["-L", ApplicationIdentity::Development.namespace(), "kill-session", "-t", "build"], "terminal": false})
+    );
 }

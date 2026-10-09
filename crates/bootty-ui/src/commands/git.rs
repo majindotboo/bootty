@@ -18,6 +18,25 @@ command_actions! {
         StashPush => ("git.stash-push", "Stash Git Changes", ["repository", "message", "include_untracked"], Write),
         StashApply => ("git.stash-apply", "Apply Git Stash", ["repository", "stash", "expected_commit"], Write),
         StashDrop => ("git.stash-drop", "Drop Git Stash", ["repository", "stash", "expected_commit"], Destructive),
+        GitHubRead => ("git.github.read", "Read Pull Request", ["repository", "number"], Read),
+        GitHubDiff => ("git.github.diff", "Read Pull Request File Diff", ["repository", "number", "request"], Read),
+        GitHubCreationContext => ("git.github.creation-context", "Prepare Pull Request", ["repository"], Read),
+        GitHubPublishBranch => ("git.github.publish-branch", "Publish Pull Request Branch", ["repository", "context"], Write),
+        GitHubCreate => ("git.github.create", "Create Pull Request", ["repository", "request"], Write),
+        GitHubCheckoutContext => ("git.github.checkout-context", "Prepare Pull Request Checkout", ["repository", "number", "head"], Read),
+        GitHubCheckout => ("git.github.checkout", "Check Out Pull Request Revision", ["repository", "request"], Write),
+        GitHubSearch => ("git.github.search", "Search Pull Requests", ["repository", "query"], Read),
+        GitHubReview => ("git.github.review", "Submit Pull Request Review", ["repository", "number", "review"], Write),
+        GitHubThread => ("git.github.thread", "Reply or Resolve Review Thread", ["repository", "number", "request"], Write),
+        GitHubComments => ("git.github.comments", "Read Review Thread Comments", ["repository", "number", "thread", "cursor"], Read),
+        GitHubAction => ("git.github.action", "Pull Request Action", ["repository", "number", "request"], Destructive),
+        GitHubMetadata => ("git.github.metadata", "Update Pull Request Metadata", ["repository", "number", "request"], Write),
+        GitHubViewed => ("git.github.viewed", "Pull Request Viewed Files", ["repository", "number", "cursor"], Read),
+        GitHubCandidates => ("git.github.candidates", "Pull Request Labels and Reviewers", ["repository", "kind", "page"], Read),
+        GitHubStack => ("git.github.stack", "Pull Request Stack", ["repository", "number"], Read),
+        GitHubMergeStatus => ("git.github.merge-status", "Stack Merge Status", ["repository", "request"], Read),
+        GitHubWorkflows => ("git.github.workflows", "Pull Request Workflow Approvals", ["repository", "number", "head"], Read),
+        GitHubActivity => ("git.github.activity", "Pull Request Activity", ["repository", "number", "cursor"], Read),
     }
 }
 
@@ -70,6 +89,9 @@ impl GitAction {
                 .ok_or_else(|| format!("Missing Git argument {index}"))
         };
         let root = arg(0)?;
+        if self.metadata().0.starts_with("git.github.") {
+            return self.execute_github(&git, root, args);
+        }
         match self {
             Self::Overview => serde_json::to_value(
                 git.overview(
@@ -131,6 +153,140 @@ impl GitAction {
             Self::Commit | Self::Amend => git
                 .commit_index(root, arg(1)?, self == Self::Amend)
                 .map(|()| serde_json::Value::Null),
+            _ => Err("GitHub commands require the GitHub host dispatcher".into()),
+        }
+    }
+    fn execute_github(
+        self,
+        git: &Git<impl CommandRunner>,
+        root: &str,
+        args: &[String],
+    ) -> Result<serde_json::Value, String> {
+        if matches!(self, Self::GitHubCheckoutContext | Self::GitHubCheckout) {
+            return self.execute_checkout(git, root, args);
+        }
+        let arg = |index: usize| {
+            args.get(index)
+                .map(String::as_str)
+                .ok_or_else(|| format!("Missing GitHub argument {index}"))
+        };
+        match self {
+            Self::GitHubCreationContext => {
+                serde_json::to_value(git.pull_request_creation_context(root)?)
+                    .map_err(|e| e.to_string())
+            }
+            Self::GitHubDiff => serde_json::to_value(git.github(root)?.file_diff(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                &serde_json::from_str(arg(2)?).map_err(|e| e.to_string())?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubPublishBranch => git
+                .publish_pull_request_branch(
+                    root,
+                    &serde_json::from_str(arg(1)?).map_err(|e| e.to_string())?,
+                )
+                .map(|()| serde_json::Value::Null),
+            Self::GitHubCreate => serde_json::to_value(git.create_pull_request(
+                root,
+                &serde_json::from_str(arg(1)?).map_err(|e| e.to_string())?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubStack => serde_json::to_value(
+                git.github(root)?
+                    .stack(arg(1)?.parse().map_err(|_| "Invalid pull request number")?)?,
+            )
+            .map_err(|e| e.to_string()),
+            Self::GitHubMergeStatus => {
+                serde_json::to_value(git.github(root)?.stack_merge_status(
+                    &serde_json::from_str(arg(1)?).map_err(|e| e.to_string())?,
+                )?)
+                .map_err(|e| e.to_string())
+            }
+            Self::GitHubWorkflows => serde_json::to_value(git.github(root)?.workflow_approvals(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                arg(2)?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubActivity => serde_json::to_value(git.github(root)?.activity(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                arg(2)?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubMetadata => git.github(root)?.metadata(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                &serde_json::from_str(arg(2)?).map_err(|e| e.to_string())?,
+            ),
+            Self::GitHubViewed => serde_json::to_value(git.github(root)?.viewed_files(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                arg(2)?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubCandidates => serde_json::to_value(git.github(root)?.candidates(
+                match arg(1)? {
+                    "labels" => bootty_git::github::CandidateKind::Labels,
+                    "reviewers" => bootty_git::github::CandidateKind::Reviewers,
+                    "teams" => bootty_git::github::CandidateKind::Teams,
+                    _ => return Err("Invalid candidate kind".into()),
+                },
+                arg(2)?.parse().map_err(|_| "Invalid candidate page")?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubComments => serde_json::to_value(git.github(root)?.thread_comments(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                arg(2)?,
+                arg(3)?,
+            )?)
+            .map_err(|e| e.to_string()),
+            Self::GitHubRead => serde_json::to_value(
+                git.github(root)?
+                    .read(arg(1)?.parse().map_err(|_| "Invalid pull request number")?)?,
+            )
+            .map_err(|e| e.to_string()),
+            Self::GitHubSearch => {
+                serde_json::to_value(git.github(root)?.search(arg(1)?)?).map_err(|e| e.to_string())
+            }
+            Self::GitHubReview => git.github(root)?.review(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                &serde_json::from_str(arg(2)?).map_err(|e| e.to_string())?,
+            ),
+            Self::GitHubThread => git.github(root)?.thread(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                &serde_json::from_str(arg(2)?).map_err(|e| e.to_string())?,
+            ),
+            Self::GitHubAction => git.github(root)?.action(
+                arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                &serde_json::from_str(arg(2)?).map_err(|e| e.to_string())?,
+            ),
+            _ => Err("Unknown GitHub command".into()),
+        }
+    }
+    fn execute_checkout(
+        self,
+        git: &Git<impl CommandRunner>,
+        root: &str,
+        args: &[String],
+    ) -> Result<serde_json::Value, String> {
+        let arg = |index: usize| {
+            args.get(index)
+                .map(String::as_str)
+                .ok_or_else(|| format!("Missing GitHub argument {index}"))
+        };
+        match self {
+            Self::GitHubCheckoutContext => {
+                serde_json::to_value(git.pull_request_checkout_context(
+                    root,
+                    arg(1)?.parse().map_err(|_| "Invalid pull request number")?,
+                    arg(2)?,
+                )?)
+                .map_err(|e| e.to_string())
+            }
+            Self::GitHubCheckout => git
+                .checkout_pull_request(
+                    root,
+                    &serde_json::from_str(arg(1)?).map_err(|e| e.to_string())?,
+                )
+                .map(|()| serde_json::Value::Null),
+            _ => Err("Unknown pull request checkout command".into()),
         }
     }
 }

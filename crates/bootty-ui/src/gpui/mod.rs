@@ -19,6 +19,7 @@ mod terminal_zoom;
 mod theme;
 mod theme_integration;
 
+pub use crate::gpui_model_picker::{ModelPickerEvent, ModelPickerView};
 pub use chrome::*;
 pub use config_editor::*;
 pub use dialogs::*;

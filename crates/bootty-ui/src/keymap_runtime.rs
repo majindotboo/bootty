@@ -33,6 +33,8 @@ pub enum KeymapFocus {
     Terminal,
     Sidebar,
     Command,
+    SurfaceChooser,
+    ComposerCompletion,
     #[default]
     Other,
 }
@@ -259,6 +261,8 @@ fn active_key_contexts(focus: KeymapFocus, backend: MultiplexerBackendConfig) ->
         }
         KeymapFocus::Sidebar => focused.add("Sidebar"),
         KeymapFocus::Command => focused.add("Command"),
+        KeymapFocus::SurfaceChooser => focused.add("SurfaceChooser"),
+        KeymapFocus::ComposerCompletion => focused.add("ComposerCompletion"),
         KeymapFocus::Other => return contexts,
     }
     if focus == KeymapFocus::Command {
@@ -673,6 +677,79 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         bindings.push(KeymapBindingSnapshot {
             context: KeymapContext::Command,
             keystrokes: keystrokes.to_owned(),
+            action: KeymapAction::command(command),
+            kind: KeymapBindingKind::Binding,
+            source: KeymapBindingSource::BuiltIn,
+        });
+    }
+    for (keystrokes, action) in [
+        ("arrow_up", "ui.surface.previous"),
+        ("k", "ui.surface.previous"),
+        ("ctrl+p", "ui.surface.previous"),
+        ("shift+tab", "ui.surface.previous"),
+        ("arrow_down", "ui.surface.next"),
+        ("j", "ui.surface.next"),
+        ("ctrl+n", "ui.surface.next"),
+        ("tab", "ui.surface.next"),
+        ("home", "ui.surface.first"),
+        ("g > g", "ui.surface.first"),
+        ("alt+<", "ui.surface.first"),
+        ("end", "ui.surface.last"),
+        ("shift+g", "ui.surface.last"),
+        ("alt+>", "ui.surface.last"),
+        ("enter", "ui.surface.confirm"),
+        ("ctrl+m", "ui.surface.confirm"),
+        ("ctrl+g", "ui.surface.cancel"),
+        ("escape", "ui.surface.cancel"),
+        ("a", "ui.surface.agent"),
+        ("t", "ui.surface.terminal"),
+        ("1", "ui.surface.claude"),
+        ("2", "ui.surface.codex"),
+        ("3", "ui.surface.pi"),
+        ("e", "ui.surface.edit_profiles"),
+    ] {
+        bindings.push(KeymapBindingSnapshot {
+            context: KeymapContext::SurfaceChooser,
+            keystrokes: keystrokes.to_owned(),
+            action: KeymapAction::command(action),
+            kind: KeymapBindingKind::Binding,
+            source: KeymapBindingSource::BuiltIn,
+        });
+    }
+    for (keystrokes, command) in [
+        ("arrow_up", "ui.composer.previous"),
+        ("ctrl+p", "ui.composer.previous"),
+        ("ctrl+k", "ui.composer.previous"),
+        ("alt+k", "ui.composer.previous"),
+        ("arrow_down", "ui.composer.next"),
+        ("ctrl+n", "ui.composer.next"),
+        ("ctrl+j", "ui.composer.next"),
+        ("alt+j", "ui.composer.next"),
+        ("enter", "ui.composer.confirm"),
+        ("tab", "ui.composer.confirm"),
+        ("escape", "ui.composer.cancel"),
+        ("ctrl+g", "ui.composer.cancel"),
+    ] {
+        bindings.push(KeymapBindingSnapshot {
+            context: KeymapContext::ComposerCompletion,
+            keystrokes: keystrokes.into(),
+            action: KeymapAction::command(command),
+            kind: KeymapBindingKind::Binding,
+            source: KeymapBindingSource::BuiltIn,
+        });
+    }
+    for (keystrokes, command) in [
+        ("ctrl+alt+s", "ui.composer.focus-space"),
+        ("ctrl+alt+v", "ui.composer.focus-provider"),
+        ("ctrl+alt+m", "ui.composer.focus-model"),
+        ("ctrl+alt+e", "ui.composer.focus-effort"),
+        ("ctrl+alt+p", "ui.composer.focus-project"),
+        ("ctrl+alt+w", "ui.composer.focus-worktree"),
+        ("ctrl+alt+a", "ui.composer.focus-permissions"),
+    ] {
+        bindings.push(KeymapBindingSnapshot {
+            context: KeymapContext::Global,
+            keystrokes: keystrokes.into(),
             action: KeymapAction::command(command),
             kind: KeymapBindingKind::Binding,
             source: KeymapBindingSource::BuiltIn,

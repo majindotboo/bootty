@@ -10,12 +10,45 @@ use gpui_kit::{
     RenderOnce, ScrollHandle, SharedString, Styled, Task, TextRun, Window, div, prelude::*, px,
     relative,
 };
+use num_traits::ToPrimitive as _;
 use std::{
     cell::Cell,
     collections::HashMap,
     rc::Rc,
     time::{Duration, Instant},
 };
+
+pub fn tab_foreground(appearance: TabAppearance, selected: bool, accent: Hsla, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    let background = if selected && appearance != TabAppearance::Underline {
+        theme.tokens.tab_active.mix_oklab(accent, 0.88)
+    } else {
+        theme.tab_bar
+    };
+    let preferred = if selected {
+        theme.foreground
+    } else {
+        theme.tab_foreground
+    };
+    let rgba = |value: Hsla| {
+        let value = value.to_rgb();
+        let [red, green, blue] = [value.r, value.g, value.b].map(|channel| {
+            (channel.clamp(0.0, 1.0) * 255.0)
+                .round()
+                .to_u8()
+                .unwrap_or_default()
+        });
+        super::Rgba::rgb(red, green, blue)
+    };
+    let foreground = super::theme::readable_color(rgba(background), rgba(preferred));
+    gpui_kit::Rgba {
+        r: f32::from(foreground.red) / 255.0,
+        g: f32::from(foreground.green) / 255.0,
+        b: f32::from(foreground.blue) / 255.0,
+        a: 1.0,
+    }
+    .into()
+}
 
 /// Keep tab fills quiet without changing primary buttons or other accent controls.
 pub fn tab(
@@ -26,23 +59,20 @@ pub fn tab(
     cx: &App,
 ) -> Tab {
     let theme = cx.theme();
-    let fill = accent.mix_oklab(theme.secondary, 0.18);
+    let fill = theme.tokens.tab_active.mix_oklab(accent, 0.88);
     let outline = accent.mix_oklab(theme.secondary, 0.6);
     let hover = theme.secondary_hover;
     let compact = matches!(appearance, TabAppearance::Pill | TabAppearance::Outline);
+    let foreground = tab_foreground(appearance, selected, accent, cx);
     Tab::new(id)
         .selected(selected)
         .relative()
         .flex_none()
-        .h(px(match appearance {
-            TabAppearance::Classic => 32.0,
-            TabAppearance::Underline => 30.0,
-            _ => 24.0,
-        }))
+        .h_7()
         .line_height(relative(1.25))
         .whitespace_nowrap()
         .text_sm()
-        .text_color(theme.tab_foreground)
+        .text_color(foreground)
         .when(compact, Styled::rounded_full)
         .when(appearance == TabAppearance::Segmented, |tab| {
             tab.rounded_sm()
@@ -55,7 +85,7 @@ pub fn tab(
         })
         .styles(|styles| {
             styles.selected(|style| {
-                let style = style.text_color(theme.foreground);
+                let style = style.text_color(foreground);
                 match appearance {
                     TabAppearance::Underline => style.border_color(outline),
                     TabAppearance::Outline => style.border_color(outline).bg(fill),
@@ -73,42 +103,43 @@ pub fn content(
     config: TabConfig,
 ) -> Div {
     let close = close.filter(|_| config.close_button != TabCloseButton::Hidden);
+    let close = close.map(|close| {
+        div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .when(config.close_button == TabCloseButton::Hover, |button| {
+                button
+                    .invisible()
+                    .group_hover(hover_group, gpui_kit::Styled::visible)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(close)
+    });
+    let (left, right) = match config.close_position {
+        TabClosePosition::Left => (close, None),
+        TabClosePosition::Right => (None, close),
+    };
     div()
         .h_full()
         .flex_1()
-        .relative()
         .flex()
         .items_center()
-        .justify_center()
         .min_w_0()
-        .px_3()
-        .when(close.is_some(), gpui_kit::Styled::px_4)
-        .child(content)
-        .when_some(close, |row, close| {
-            row.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .w_4()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(config.close_position == TabClosePosition::Left, |button| {
-                        button.left_0()
-                    })
-                    .when(config.close_position == TabClosePosition::Right, |button| {
-                        button.right_0()
-                    })
-                    .when(config.close_button == TabCloseButton::Hover, |button| {
-                        button
-                            .invisible()
-                            .group_hover(hover_group, gpui_kit::Styled::visible)
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(close),
-            )
-        })
+        .px_2()
+        .gap_1()
+        .when_some(left, ParentElement::child)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(content),
+        )
+        .when_some(right, ParentElement::child)
 }
 
 /// A single tab scroll owner, shared by mux and panel chrome.
@@ -120,6 +151,9 @@ pub struct ScrollableTabBar {
     pub tabs: Vec<ScrollableTab>,
     pub selected: Option<usize>,
     pub end: AnyElement,
+    /// Trailing new-tab affordance, placed right after the last tab. It moves to the right of the
+    /// notch when the first row ends at the camera cutout.
+    pub plus: Option<AnyElement>,
     pub notch: Option<NotchTabLayout>,
 }
 
@@ -128,11 +162,16 @@ pub struct NotchTabLayout {
     pub width: f32,
     pub inset: f32,
     pub height: f32,
+    /// Left edge of the region right of the notch, in tab-bar coordinates. Parks the new-tab
+    /// affordance past the cutout when the last tab reaches it.
+    pub right_edge: f32,
     pub wrap: bool,
 }
 
 impl NotchTabLayout {
-    fn first_row_tabs(self, widths: &[Pixels], gap: f32) -> (usize, f32) {
+    /// How many tabs land in the first (left-of-notch) row, the row width, and whether a trailing
+    /// affordance of `extra` width still fits after them.
+    fn first_row_tabs(self, widths: &[Pixels], gap: f32, extra: f32) -> (usize, f32, bool) {
         let mut count: usize = 0;
         let mut used = 4.0;
         for width in widths {
@@ -143,7 +182,8 @@ impl NotchTabLayout {
             used += width + gap;
             count = count.saturating_add(1);
         }
-        (count, (used - gap + 4.0).max(self.width))
+        let fits = count == widths.len() && used + extra <= self.width;
+        (count, (used - gap + 4.0).max(self.width), fits)
     }
 
     fn first_row(self, bar: Tabs) -> Div {
@@ -227,7 +267,7 @@ impl TabScrollState {
                 };
                 let text = window.text_system().shape_line(
                     title.clone(),
-                    px(rem * 0.75),
+                    px(rem * 0.875),
                     &[TextRun {
                         len: title.len(),
                         font: window.text_style().font(),
@@ -239,7 +279,7 @@ impl TabScrollState {
                     None,
                 );
                 let desired = px(rem
-                    .mul_add(2.5, f32::from(text.width))
+                    .mul_add(3.5, f32::from(text.width))
                     .clamp(rem * 4.0, rem * 15.0));
                 let width = self.widths.entry(item.id).or_insert_with(|| TabWidth {
                     title: title.clone(),
@@ -303,6 +343,10 @@ impl TabScrollState {
 }
 
 impl RenderOnce for ScrollableTabBar {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one tab-strip layout owns the notch split and the new-tab affordance"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, |_, _| TabScrollState::default());
         let selected = self
@@ -317,10 +361,12 @@ impl RenderOnce for ScrollableTabBar {
         let (mut tabs, widths) =
             state.update(cx, |state, cx| state.size_tabs(self.tabs, window, cx));
         let gap = tab_gap(self.config.appearance);
-        let (first_count, first_width) = self
+        let (first_count, first_width, plus_fits_first_row) = self
             .notch
             .filter(|notch| notch.wrap)
-            .map_or((0, 0.0), |notch| notch.first_row_tabs(&widths, gap));
+            .map_or((0, 0.0, false), |notch| {
+                notch.first_row_tabs(&widths, gap, NEW_TAB_WIDTH + 4.0)
+            });
         let target = state.update(cx, |state, _| state.reveal(selected, focused, first_count));
         let (scroll, edges, viewport_width) = {
             let state = state.read(cx);
@@ -331,8 +377,20 @@ impl RenderOnce for ScrollableTabBar {
             )
         };
         let rem = f32::from(window.rem_size());
+        let mut plus = self.plus;
+        let end = self.end;
+        let notch = self.notch;
+        let wrap = notch.is_some_and(|notch| notch.wrap);
+        let all_in_first_row = first_count == widths.len();
+        let plus_in_first_row = wrap && plus_fits_first_row;
+        let plus_in_scrolling_row = !wrap || !all_in_first_row;
+        let first_end = if plus_in_first_row {
+            take_or_empty(&mut plus)
+        } else {
+            gpui_kit::Empty.into_any_element()
+        };
         let second_tabs = tabs.split_off(first_count);
-        let first_row = self.notch.filter(|notch| notch.wrap).map(|notch| {
+        let first_row = notch.filter(|notch| notch.wrap).map(|notch| {
             let bar = make_bar(
                 format!("{}-first", self.id).into(),
                 self.config,
@@ -340,15 +398,19 @@ impl RenderOnce for ScrollableTabBar {
                 tabs,
                 self.selected.filter(|ix| *ix < first_count),
                 None,
-                gpui_kit::Empty.into_any_element(),
+                first_end,
                 rem,
             )
             .w(px(first_width))
             .flex_none();
             notch.first_row(bar)
         });
-        let has_scrolling_row =
-            self.notch.is_none_or(|notch| !notch.wrap) || !second_tabs.is_empty();
+        let has_scrolling_row = notch.is_none_or(|notch| !notch.wrap) || !second_tabs.is_empty();
+        let scroll_end = if plus_in_scrolling_row {
+            end_with_plus(take_or_empty(&mut plus), end)
+        } else {
+            end
+        };
         let bar = make_bar(
             self.id.clone(),
             self.config,
@@ -356,7 +418,7 @@ impl RenderOnce for ScrollableTabBar {
             second_tabs,
             self.selected.and_then(|ix| ix.checked_sub(first_count)),
             Some(&scroll),
-            self.end,
+            scroll_end,
             rem,
         );
         let scroll_row = ScrollRow {
@@ -367,21 +429,35 @@ impl RenderOnce for ScrollableTabBar {
             viewport_width,
             target,
         };
+        // The first row ends at the camera cutout: park the affordance right of the notch instead
+        // of clipping it behind the cutout.
+        let notch_plus = notch
+            .filter(|_| wrap && all_in_first_row && !plus_fits_first_row && plus.is_some())
+            .map(|notch| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(notch.right_edge))
+                    .h(px(notch.height))
+                    .flex()
+                    .items_center()
+                    .child(take_or_empty(&mut plus))
+            });
         div()
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
             .flex_none()
-            .when(self.notch.is_none(), Styled::h_full)
+            .when(notch.is_none(), Styled::h_full)
             .children(first_row)
             .when(has_scrolling_row, |column| {
                 column.child(
                     div()
                         .w_full()
                         .min_w_0()
-                        .when(self.notch.is_none(), Styled::h_full)
-                        .when_some(self.notch, |row, notch| {
+                        .when(notch.is_none(), Styled::h_full)
+                        .when_some(notch, |row, notch| {
                             row.h(px(notch.height))
                                 .when(!notch.wrap, |row| row.pl(px(notch.inset)))
                         })
@@ -389,13 +465,14 @@ impl RenderOnce for ScrollableTabBar {
                             div()
                                 .h_full()
                                 .min_w_0()
-                                .when_some(self.notch.filter(|notch| !notch.wrap), |row, notch| {
+                                .when_some(notch.filter(|notch| !notch.wrap), |row, notch| {
                                     row.w(px(notch.width))
                                 })
                                 .child(scroll_row),
                         ),
                 )
             })
+            .children(notch_plus)
     }
 }
 
@@ -408,6 +485,27 @@ const fn tab_gap(appearance: TabAppearance) -> f32 {
         TabAppearance::Segmented => 2.0,
         TabAppearance::Underline => 12.0,
     }
+}
+
+/// Reserved width for the trailing new-tab button when fitting the first notch row.
+const NEW_TAB_WIDTH: f32 = 24.0;
+
+fn take_or_empty(plus: &mut Option<AnyElement>) -> AnyElement {
+    plus.take()
+        .unwrap_or_else(|| gpui_kit::Empty.into_any_element())
+}
+
+/// Place the new-tab affordance ahead of the end-of-strip drop target.
+fn end_with_plus(plus: AnyElement, end: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .h_full()
+        .flex_grow(1.0)
+        .flex_shrink_0()
+        .child(plus)
+        .child(end)
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,3 +1,5 @@
+pub use bootty_mux::session_membership::SessionView as TaskView;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rgba {
     pub red: u8,
@@ -51,6 +53,10 @@ pub enum NativeChromeAction {
         session_id: String,
         window_id: String,
     },
+    FocusConversation(bootty_control::CommandTarget),
+    CloseConversation(bootty_control::CommandTarget),
+    SurfaceChooser(u64),
+    CancelSurfaceChooser(u64),
     ToggleKeepAwake,
 }
 
@@ -73,6 +79,8 @@ pub struct UsageMeterSnapshot {
     pub meter: crate::usage::QuotaMeter,
     pub provider: crate::usage::UsageProvider,
     pub label: String,
+    pub reset_at: Option<String>,
+    pub description: String,
     pub fill: Rgba,
     pub marker: Rgba,
     pub pace: Rgba,
@@ -95,8 +103,7 @@ pub struct ChromeLayout {
     pub right_dock_toggle: bool,
     pub panel_tab_style: bootty_config::config::PanelTabStyle,
     pub panel_tabs: bootty_config::config::PanelTabs,
-    pub dock_tabs: bootty_config::config::TabConfig,
-    pub terminal_tabs: bootty_config::config::TabConfig,
+    pub tabs: bootty_config::config::TabConfig,
     pub width: f32,
     pub height: f32,
     pub sidebar_position: SidebarPosition,
@@ -282,10 +289,21 @@ impl WindowDragGesture {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent sidebar presentation settings"
+)]
 pub struct SidebarSnapshot {
+    pub projects: Vec<bootty_mux::repository::RegisteredProject>,
+    pub project_target: Option<bootty_control::CommandTarget>,
     pub rows: Vec<SidebarRow>,
+    /// Supplied by the chrome clock; expiry does not require an idle timer.
+    pub now_utc: i64,
     pub footer: Vec<SidebarFooterItem>,
     pub title_visible: bool,
+    pub group_by_project: bool,
+    pub sort_order: bootty_config::config::SidebarSortOrder,
+    pub animate_working: bool,
     pub focused: bool,
     pub hovered_session: Option<SessionTarget>,
     pub dim_when_unfocused: f32,
@@ -301,13 +319,21 @@ pub struct SidebarSnapshot {
 pub struct SidebarRow {
     pub key: String,
     pub text: String,
+    pub secondary: Option<String>,
+    pub project: Option<SidebarProject>,
+    pub project_path: Option<String>,
+    pub branch: Option<String>,
+    pub agents: Vec<SidebarAgent>,
     pub trailing: Option<String>,
+    pub trailing_icon: Option<String>,
     pub trailing_color: Option<Rgba>,
-    /// Animate the trailing text with a shimmer while the row reports live work.
-    pub trailing_shimmer: bool,
+    /// Observed work state; grouping is independent of presentation icons.
+    pub working: bool,
+    pub needs_attention: bool,
     pub number: Option<usize>,
     pub indent: u16,
     pub tree: Option<String>,
+    pub artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
     pub color: Rgba,
@@ -319,12 +345,37 @@ pub struct SidebarRow {
     pub target: Option<SessionTarget>,
     pub reorder_anchor: Option<String>,
     pub context: Option<SessionContextSnapshot>,
+    pub task: Option<SidebarTask>,
+}
+
+/// Saved work and a captured Binding target, independent of the live session target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarTask {
+    pub identity: String,
+    pub native_conversation: Option<bootty_control::CommandTarget>,
+    pub state: bootty_mux::session_membership::SessionState,
+    pub binding: Option<bootty_control::CommandTarget>,
+    pub pending: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarProject {
+    pub name: String,
+    pub artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarAgent {
+    pub key: String,
+    pub icon: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
     Session,
+    DetachedSession,
     Detail,
     Progress {
         value: Option<u8>,
@@ -332,6 +383,13 @@ pub enum SidebarRowKind {
     },
     Ports(Vec<u16>),
     Other(String),
+}
+
+impl SidebarRowKind {
+    #[must_use]
+    pub const fn is_session(&self) -> bool {
+        matches!(self, Self::Session | Self::DetachedSession)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +407,7 @@ pub struct SidebarFooterItem {
     reason = "Each action has an independent availability condition"
 )]
 pub struct SessionContextSnapshot {
+    pub can_rename: bool,
     pub can_activate: bool,
     pub can_move_up: bool,
     pub can_move_down: bool,
@@ -367,7 +426,6 @@ pub enum SessionContextAction {
     Rename,
     MoveUp,
     MoveDown,
-    Ditch,
     MoveToSpace,
 }
 
@@ -473,6 +531,8 @@ pub enum ChromeIntent {
         to: SpaceKey,
     },
     ActivateSession(SessionTarget),
+    ReopenSession(SessionTarget),
+    RenameSavedSession(SessionTarget),
     OpenGitChanges(SessionTarget),
     AdoptSession(SessionTarget),
     SessionContext {

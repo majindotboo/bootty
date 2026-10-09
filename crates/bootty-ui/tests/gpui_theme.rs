@@ -79,7 +79,7 @@ fn custom_theme_switch_resets_editor_and_component_surfaces(cx: &TestAppContext)
         );
         assert_eq!(
             gpui_kit::component::Theme::global(cx).colors.skeleton,
-            gpui_kit::component::ThemeColor::dark().skeleton,
+            gpui_kit::component::Theme::global(cx).colors.button,
         );
 
         let light = UiPalette::from_terminal_colors(
@@ -96,15 +96,34 @@ fn custom_theme_switch_resets_editor_and_component_surfaces(cx: &TestAppContext)
         assert_component_color(component.colors.foreground, light.text);
         assert_component_color(component.colors.button_secondary_foreground, light.text);
         assert_component_color(component.colors.button_primary, light.primary);
-        assert_component_color(component.colors.button_primary_foreground, light.base);
-        assert_component_color(component.colors.group_box, light.surface);
-        assert_eq!(
-            component.colors.skeleton,
-            gpui_kit::component::ThemeColor::light().skeleton
+        assert_component_color(
+            component.colors.button_primary_foreground,
+            readable_color(light.primary, light.base),
         );
+        assert_component_color(component.colors.group_box, light.surface);
+        assert_component_color(component.colors.table_head, light.pane);
+        assert_component_color(component.colors.table_head_foreground, light.text);
+        assert_component_color(component.colors.table, light.base);
+        assert_component_color(
+            component.colors.link,
+            readable_color(light.base, light.accent),
+        );
+        assert_component_color(
+            component.colors.danger,
+            readable_color(light.base, light.destructive),
+        );
+        assert_component_color(
+            component.colors.warning,
+            readable_color(light.base, light.warning),
+        );
+        assert_component_color(
+            component.colors.success,
+            readable_color(light.base, light.success),
+        );
+        assert_eq!(component.colors.skeleton, component.colors.button);
         assert_eq!(
             component.colors.overlay,
-            gpui_kit::component::ThemeColor::light().overlay
+            component.colors.title_bar.opacity(0.6)
         );
     });
 }
@@ -125,11 +144,19 @@ fn component_chrome_colors_and_tokens_follow_the_bootty_palette(cx: &TestAppCont
         assert_component_color(theme.colors.title_bar_border, palette.border);
         assert_component_color(theme.colors.sidebar, palette.pane);
         assert_component_color(theme.colors.sidebar_accent, palette.element_selected);
+        assert!(theme.colors.selection.a > 0.0 && theme.colors.selection.a < 0.5);
+        assert_eq!(
+            gpui_kit::base::Theme::global(cx).tokens.colors.selection,
+            theme.colors.selection
+        );
         assert_component_color(theme.colors.status_bar, palette.mantle);
         assert_component_color(theme.colors.scrollbar_thumb, palette.border);
         assert_component_color(theme.colors.secondary_foreground, palette.text);
         assert_component_color(theme.tokens.button_primary.color, palette.primary);
-        assert_component_color(theme.colors.button_primary_foreground, palette.base);
+        assert_component_color(
+            theme.colors.button_primary_foreground,
+            readable_color(palette.primary, palette.base),
+        );
         assert_eq!(
             theme.colors.button_primary_hover,
             theme.colors.primary_hover
@@ -138,12 +165,49 @@ fn component_chrome_colors_and_tokens_follow_the_bootty_palette(cx: &TestAppCont
             theme.colors.button_primary_active,
             theme.colors.primary_active
         );
+        let distance = |left: gpui_kit::Hsla, right: gpui_kit::Hsla| {
+            rgba8(left)
+                .into_iter()
+                .zip(rgba8(right))
+                .map(|(left, right)| u32::from(left.abs_diff(right)))
+                .sum::<u32>()
+        };
+        assert!(
+            distance(theme.colors.primary_hover, theme.colors.primary)
+                < distance(theme.colors.primary_hover, theme.colors.foreground),
+            "Hover preserves the action color instead of washing it into the text color"
+        );
+        assert_eq!(
+            gpui_kit::base::Theme::global(cx).tokens.colors,
+            theme.semantic_tokens().colors,
+            "Styled components and Base primitives receive one color projection"
+        );
         assert_component_color(theme.colors.slider_bar, palette.muted);
         assert_component_color(theme.colors.slider_thumb, palette.text);
-        assert_eq!(
-            theme.colors.overlay,
-            gpui_kit::component::ThemeColor::dark().overlay
+        assert_component_color(theme.colors.ring, palette.border_strong);
+        assert!(!theme.focus_ring);
+        assert_component_color(theme.colors.table_row_border, palette.border_variant);
+        assert_component_color(theme.colors.table_active_border, palette.border_focused);
+        assert_component_color(theme.colors.drag_border, palette.border_focused);
+        assert_component_color(theme.colors.table_head, palette.pane);
+        assert_component_color(theme.colors.table_head_foreground, palette.text);
+        assert_component_color(
+            theme.colors.link,
+            readable_color(palette.base, palette.accent),
         );
+        assert_component_color(
+            theme.colors.danger,
+            readable_color(palette.base, palette.destructive),
+        );
+        assert_component_color(
+            theme.colors.warning,
+            readable_color(palette.base, palette.warning),
+        );
+        assert_component_color(
+            theme.colors.success,
+            readable_color(palette.base, palette.success),
+        );
+        assert_eq!(theme.colors.overlay, theme.colors.title_bar.opacity(0.6));
 
         assert_eq!(theme.tokens.tab_bar.color, theme.colors.tab_bar);
         assert_eq!(theme.tokens.tab.color, theme.colors.tab);
@@ -177,6 +241,9 @@ fn component_chrome_tokens_refresh_when_the_palette_changes(cx: &TestAppContext)
         assert_component_color(theme.tokens.scrollbar_thumb.color, palette.border);
         assert_component_color(theme.tokens.slider_bar.color, palette.muted);
         assert_component_color(theme.tokens.slider_thumb.color, palette.text);
+        assert_component_color(theme.colors.table_row_border, palette.border_variant);
+        assert_component_color(theme.colors.table_active_border, palette.border_focused);
+        assert_component_color(theme.colors.drag_border, palette.border_focused);
     });
 }
 
@@ -226,6 +293,22 @@ fn palette_exposes_distinct_control_state_roles() {
 }
 
 #[rstest]
+fn focused_border_stays_neutral_when_terminal_accent_changes() {
+    let background = Rgba::rgb(0x18, 0x1a, 0x1f);
+    let foreground = Rgba::rgb(0xe8, 0xea, 0xed);
+    let mut blue = [None; 16];
+    blue[4] = Some(Rgba::rgb(0x74, 0xb9, 0xff));
+    let mut red = [None; 16];
+    red[4] = Some(Rgba::rgb(0xf0, 0x70, 0x70));
+
+    let blue_palette = UiPalette::from_terminal_colors(Some(background), Some(foreground), blue);
+    let red_palette = UiPalette::from_terminal_colors(Some(background), Some(foreground), red);
+
+    assert_eq!(blue_palette.border_strong, red_palette.border_strong);
+    assert_ne!(blue_palette.border_focused, red_palette.border_focused);
+}
+
+#[rstest]
 fn terminal_derived_surfaces_follow_the_base_luminance() {
     let dark = UiPalette::from_terminal_colors(
         Some(Rgba::rgb(0x18, 0x1a, 0x1f)),
@@ -240,8 +323,10 @@ fn terminal_derived_surfaces_follow_the_base_luminance() {
 
     assert!(dark.mantle.red < dark.base.red);
     assert!(dark.surface.red > dark.base.red);
+    assert!(dark.border_strong.red > dark.border.red);
     assert!(light.mantle.red > light.base.red);
     assert!(light.surface.red < light.base.red);
+    assert!(light.border_strong.red < light.border.red);
 }
 
 #[rstest]
@@ -253,6 +338,40 @@ fn readable_color_preserves_a_preferred_hue_when_adjusting_contrast() {
     assert!(adjusted.green >= preferred.green);
     assert!(adjusted.blue >= preferred.blue);
     assert_ne!(adjusted, Rgba::rgb(u8::MAX, u8::MAX, u8::MAX));
+}
+
+#[rstest]
+#[case(Rgba::rgb(0xb8, 0xbc, 0x54), Rgba::rgb(0xaa, 0xaf, 0xb7))]
+#[case(Rgba::rgb(0x70, 0x70, 0x70), Rgba::rgb(0x99, 0x99, 0x99))]
+#[case(Rgba::rgb(0x28, 0x2b, 0x33), Rgba::rgb(0x70, 0x75, 0x80))]
+#[case(Rgba::rgb(0xf0, 0xf0, 0xf0), Rgba::rgb(0xaa, 0xaa, 0xaa))]
+fn adjusted_text_remains_readable_on_colored_tab_surfaces(
+    #[case] background: Rgba,
+    #[case] preferred: Rgba,
+) {
+    let luminance = |color: Rgba| {
+        [color.red, color.green, color.blue]
+            .into_iter()
+            .zip([0.2126, 0.7152, 0.0722])
+            .map(|(byte, weight)| {
+                let value = f64::from(byte) / 255.0;
+                weight
+                    * if value <= 0.04045 {
+                        value / 12.92
+                    } else {
+                        ((value + 0.055) / 1.055).powf(2.4)
+                    }
+            })
+            .sum::<f64>()
+    };
+    let adjusted = readable_color(background, preferred);
+    let first = luminance(background);
+    let second = luminance(adjusted);
+    let contrast = (first.max(second) + 0.05) / (first.min(second) + 0.05);
+    assert!(
+        contrast >= 4.5,
+        "contrast {contrast}: {background:?} / {adjusted:?}"
+    );
 }
 
 #[gpui_kit::test]

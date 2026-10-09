@@ -1,7 +1,7 @@
 use std::{path::Path, sync::mpsc, time::Instant};
 
 use bootty_config::config::{
-    AppearanceVariant, parse_theme_source,
+    AppearanceMode, AppearanceVariant, parse_theme_source,
     theme_file::{ThemeFile, import_theme, read_theme, save_theme},
 };
 use bootty_control::{CommandCancellation, CommandOutcome};
@@ -114,9 +114,19 @@ impl AppState {
             Err(error) => failure(error.to_string()),
             Ok(theme) => {
                 if self.theme_picker_restore_config.is_none() {
-                    self.theme_picker_restore_config = Some(self.config().clone());
+                    self.theme_picker_restore_config =
+                        Some((self.config().clone(), self.active_appearance_variant));
                 }
                 let mut config = self.config().clone();
+                let variant = if appearance == "light" {
+                    AppearanceVariant::Light
+                } else {
+                    AppearanceVariant::Dark
+                };
+                config.appearance.mode = match variant {
+                    AppearanceVariant::Light => AppearanceMode::Light,
+                    AppearanceVariant::Dark => AppearanceMode::Dark,
+                };
                 let branch = if appearance == "light" {
                     &mut config.appearance.light
                 } else {
@@ -125,7 +135,8 @@ impl AppState {
                 branch.theme = Some(theme.info.name);
                 branch.colors = theme.colors;
                 self.config_runtime.replace_preview_config(config);
-                self.publish_live_terminal_config(self.active_appearance_variant);
+                self.active_appearance_variant = variant;
+                self.publish_live_terminal_config(variant);
                 effects.push(AppEffect::RequestRepaint);
                 CommandOutcome::success()
             }

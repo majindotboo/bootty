@@ -21,8 +21,8 @@ fn accepts_provider_envelopes(#[case] json: &str) {
     );
     assert_eq!(meter.remaining_percent.to_bits(), 75.0_f64.to_bits());
     assert_eq!(meter.expected_remaining_percent, Some(50.0));
-    assert_eq!(meter.pace, "+25%");
-    assert_eq!(meter.reset, "2h30");
+    assert_eq!(meter.pace, "25% ahead of pace");
+    assert_eq!(meter.reset, "2h 30m");
     assert_eq!(meter.marker_tone, QuotaTone::Success);
 }
 
@@ -55,6 +55,28 @@ fn quota_warning_thresholds(#[case] used_percent: f64, #[case] expected: QuotaTo
     assert_eq!(meter.expected_remaining_percent, None);
     assert_eq!(meter.pace, "");
     assert_eq!(meter.reset, "");
+}
+
+#[rstest]
+#[case(30.0, "20% ahead of pace", QuotaTone::Success)]
+#[case(50.0, "On pace", QuotaTone::Muted)]
+#[case(60.0, "10% behind pace", QuotaTone::Warning)]
+#[case(100.0, "50% behind pace", QuotaTone::Critical)]
+fn quota_pacing_names_the_estimated_direction(
+    #[case] used_percent: f64,
+    #[case] pace: &str,
+    #[case] tone: QuotaTone,
+) {
+    let meter = UsageWindow {
+        label: "7d",
+        used_percent,
+        duration_secs: 604_800.0,
+        resets_at: Some(302_400),
+    }
+    .meter(0);
+    assert_eq!(meter.pace, pace);
+    assert_eq!(meter.pace_tone, tone);
+    assert_eq!(meter.reset, "3d 12h");
 }
 
 proptest! {

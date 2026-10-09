@@ -485,16 +485,20 @@ impl SettingsSession {
 
     #[must_use]
     pub fn string_list(&self, id: &str) -> Option<Vec<String>> {
-        let spec = self.writeback_schema().get(id)?;
-        self.writeback.string_array(&spec.path_parts())
+        let path = id.split('.').collect::<Vec<_>>();
+        self.writeback
+            .schema()
+            .allows_write_path(&path)
+            .then(|| self.writeback.string_array(&path))
+            .flatten()
     }
 
     pub fn set_string_list(&mut self, id: &str, values: &[String]) -> bool {
-        let Some(spec) = self.writeback_schema().get(id).cloned() else {
+        let path = id.split('.').collect::<Vec<_>>();
+        if !self.writeback.schema().allows_write_path(&path) {
             self.writeback.reject(format!("unknown setting {id}"));
             return false;
-        };
-        let path = spec.path_parts();
+        }
         if values.is_empty() {
             self.writeback.remove(&path);
         } else {

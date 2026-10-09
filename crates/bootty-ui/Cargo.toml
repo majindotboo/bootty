@@ -22,6 +22,8 @@ ab_glyph.workspace = true
 arboard.workspace = true
 async-channel.workspace = true
 bootty-agents = { path = "../bootty-agents" }
+bootty-browser = { path = "../bootty-browser" }
+bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }
 bootty-config = { path = "../bootty-config" }
 bootty-git = { path = "../bootty-git" }
@@ -42,6 +44,7 @@ png.workspace = true
 tempfile.workspace = true
 rustybuzz.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 smallvec.workspace = true
 starship-battery.workspace = true
 sysinfo.workspace = true

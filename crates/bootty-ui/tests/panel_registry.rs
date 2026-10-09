@@ -18,7 +18,7 @@ fn panel_registry_is_the_complete_singleton_command_catalog() {
         .iter()
         .filter_map(|panel| match panel.creation {
             PanelCreation::Command(action) => Some(action),
-            PanelCreation::Context => None,
+            PanelCreation::Browser | PanelCreation::Context => None,
         })
         .collect::<HashSet<_>>();
     assert_eq!(
@@ -32,4 +32,8 @@ fn panel_registry_is_the_complete_singleton_command_catalog() {
         .map(|panel| panel.name)
         .collect::<Vec<_>>();
     assert_eq!(contextual, vec!["bootty.terminal", "bootty.document"]);
+
+    assert!(PANELS.iter().any(|panel| {
+        panel.name == "bootty.browser.page" && panel.creation == PanelCreation::Browser
+    }));
 }

@@ -48,6 +48,14 @@ pub fn workspace_key_context(window_state_key: &str) -> String {
 #[action(namespace = bootty, no_json)]
 pub struct CycleApplicationWindow;
 
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = bootty, no_json)]
+pub struct CloseSettingsWindow;
+
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = bootty, no_json)]
+pub struct CloseBrowserTab;
+
 pub fn cycle_application_window(window: &mut Window, cx: &mut App) {
     let current = window.window_handle().window_id();
     let windows = cx.window_stack().unwrap_or_else(|| cx.windows());
@@ -79,7 +87,7 @@ impl WorkspaceBindingAction {
 struct WorkspaceBinding {
     keystrokes: String,
     action: WorkspaceBindingAction,
-    command_context: bool,
+    focus: KeymapFocus,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +103,33 @@ impl WorkspaceKeyBindings {
     }
 
     #[must_use]
+    pub(crate) fn navigation_hints(&self) -> Vec<(String, gpui_kit::Keystroke)> {
+        let mut seen = std::collections::HashSet::new();
+        self.bindings
+            .iter()
+            .rev()
+            .filter_map(|binding| {
+                if !seen.insert(&binding.keystrokes) {
+                    return None;
+                }
+                let WorkspaceBindingAction::Invoke(invocation) = &binding.action else {
+                    return None;
+                };
+                if !matches!(
+                    invocation.command.as_str(),
+                    "select_session" | "select_tab" | "select_space"
+                ) {
+                    return None;
+                }
+                Some((
+                    invocation.action_name(),
+                    gpui_kit::Keystroke::parse(&binding.keystrokes).ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn command_hints(
         &self,
         catalog: &CommandCatalog,
@@ -102,7 +137,7 @@ impl WorkspaceKeyBindings {
         let mut seen = std::collections::HashSet::new();
         let mut hints = Vec::new();
         for binding in self.bindings.iter().rev() {
-            if !binding.command_context || !seen.insert(&binding.keystrokes) {
+            if binding.focus != KeymapFocus::Command || !seen.insert(&binding.keystrokes) {
                 continue;
             }
             let WorkspaceBindingAction::Invoke(invocation) = &binding.action else {
@@ -237,6 +272,15 @@ fn load_workspace_key_bindings(
         KeyBindingContextPredicate::parse(&format!("{context} > Command"))
             .context("parse Bootty command key context")?
             .into();
+    let surface_context: Rc<KeyBindingContextPredicate> =
+        KeyBindingContextPredicate::parse(&format!("{context} > SurfaceChooser"))
+            .context("parse Bootty surface chooser key context")?
+            .into();
+    let composer_context: Rc<KeyBindingContextPredicate> =
+        // Match at the editor's dispatch node so its own arrow/Enter bindings yield.
+        KeyBindingContextPredicate::parse(&format!("{context} > ComposerCompletion > Input"))
+            .context("parse Bootty composer completion context")?
+            .into();
     bindings
         .bindings
         .iter()
@@ -245,8 +289,12 @@ fn load_workspace_key_bindings(
             KeyBinding::load(
                 &binding.keystrokes,
                 binding.action.into_action(),
-                Some(if binding.command_context {
+                Some(if binding.focus == KeymapFocus::Command {
                     command_context.clone()
+                } else if binding.focus == KeymapFocus::SurfaceChooser {
+                    surface_context.clone()
+                } else if binding.focus == KeymapFocus::ComposerCompletion {
+                    composer_context.clone()
                 } else {
                     workspace_context.clone()
                 }),
@@ -353,9 +401,126 @@ pub fn workspace_key_bindings(input: &InputConfig) -> Result<WorkspaceKeyBinding
             .map(|spec| WorkspaceBinding {
                 keystrokes: spec.keystrokes,
                 action: WorkspaceBindingAction::Invoke(spec.invocation),
-                command_context: false,
+                focus: KeymapFocus::Other,
             }),
     ))
+}
+
+/// Keep mux navigation available while the conversation composer owns text input.
+#[must_use]
+pub fn key_bindings_for_native_conversation(
+    snapshot: &KeymapSnapshot,
+    backend: MultiplexerBackendConfig,
+    catalog: &CommandCatalog,
+) -> WorkspaceKeyBindings {
+    let other = key_bindings_for_snapshot(snapshot, KeymapFocus::Other, backend, catalog);
+    let terminal = key_bindings_for_snapshot(snapshot, KeymapFocus::Terminal, backend, catalog);
+    // Native panels own input, so attachment backends cannot receive their terminal prefix.
+    let host = key_bindings_for_snapshot(
+        snapshot,
+        KeymapFocus::Terminal,
+        MultiplexerBackendConfig::Native,
+        catalog,
+    );
+    let mut seen = std::collections::HashSet::new();
+    let mut navigation = terminal
+        .bindings
+        .into_iter()
+        .rev()
+        .chain(host.bindings.into_iter().rev())
+        .filter(|binding| {
+            seen.insert(binding.keystrokes.clone())
+                && matches!(&binding.action, WorkspaceBindingAction::Invoke(invocation)
+                if conversation_terminal_navigation(invocation, catalog) || surface_creation_action(invocation,catalog))
+        })
+        .collect::<Vec<_>>();
+    navigation.reverse();
+    navigation.extend(other.bindings);
+    WorkspaceKeyBindings::new(navigation)
+}
+
+/// Map closing the shown conversation to its exact native target; the shared command closes its backend pane.
+#[must_use]
+pub fn native_conversation_close_invocation(
+    invocation: &CommandInvocation,
+    catalog: &CommandCatalog,
+    target: &bootty_control::CommandTarget,
+) -> Option<CommandInvocation> {
+    if invocation.target.is_some()
+        || !matches!(
+            catalog
+                .resolve(invocation.clone())
+                .map(|resolved| resolved.executor),
+            Ok(crate::commands::CommandExecutor::Core(
+                crate::commands::CoreCommandExecutor::Keybind(
+                    crate::app_actions::KeybindAction::Mux(
+                        crate::app_actions::MuxKeyAction::ClosePane
+                    )
+                )
+            ))
+        )
+    {
+        return None;
+    }
+    let mut close = CommandInvocation::new("agents.native.close", Vec::new(), invocation.caller);
+    close.target = Some(target.clone());
+    Some(close)
+}
+
+/// Capture the focused conversation as the parent of a targetless host tab or split request.
+#[must_use]
+pub fn native_surface_creation_invocation(
+    invocation: &CommandInvocation,
+    catalog: &CommandCatalog,
+    target: &bootty_control::CommandTarget,
+) -> Option<CommandInvocation> {
+    if invocation.target.is_some()
+        || target.kind != bootty_control::ResourceKind::Session
+        || !surface_creation_action(invocation, catalog)
+    {
+        return None;
+    }
+    let mut captured = invocation.clone();
+    captured.target = Some(target.clone());
+    Some(captured)
+}
+
+fn surface_creation_action(invocation: &CommandInvocation, catalog: &CommandCatalog) -> bool {
+    matches!(
+        catalog
+            .resolve(invocation.clone())
+            .map(|resolved| resolved.executor),
+        Ok(crate::commands::CommandExecutor::Core(
+            crate::commands::CoreCommandExecutor::Keybind(crate::app_actions::KeybindAction::Mux(
+                crate::app_actions::MuxKeyAction::NewTab
+                    | crate::app_actions::MuxKeyAction::SplitPane(_)
+            ))
+        ))
+    )
+}
+
+#[must_use]
+pub fn conversation_terminal_navigation(
+    invocation: &CommandInvocation,
+    catalog: &CommandCatalog,
+) -> bool {
+    if surface_creation_action(invocation, catalog) {
+        return false;
+    }
+    matches!(
+        catalog
+            .resolve(invocation.clone())
+            .map(|resolved| resolved.executor),
+        Ok(crate::commands::CommandExecutor::Core(
+            crate::commands::CoreCommandExecutor::Keybind(
+                crate::app_actions::KeybindAction::Mux(_)
+                    | crate::app_actions::KeybindAction::App(
+                        crate::app_actions::AppAction::FocusTerminal
+                    )
+            ) | crate::commands::CoreCommandExecutor::Pane(_, _)
+                | crate::commands::CoreCommandExecutor::Session(_, _)
+        ))
+    )
 }
 
 pub fn key_bindings_for_snapshot(
@@ -372,7 +537,7 @@ pub fn key_bindings_for_snapshot(
         .map(|keystrokes| WorkspaceBinding {
             keystrokes: keystrokes.to_owned(),
             action: WorkspaceBindingAction::Unbind,
-            command_context: false,
+            focus: KeymapFocus::Other,
         });
     // Mask component defaults before applying this window's editable Command bindings.
     // Otherwise removing a binding silently reveals the library's original shortcut.
@@ -382,7 +547,15 @@ pub fn key_bindings_for_snapshot(
         .map(|keystrokes| WorkspaceBinding {
             keystrokes: keystrokes.to_owned(),
             action: WorkspaceBindingAction::Unbind,
-            command_context: true,
+            focus: KeymapFocus::Command,
+        });
+    let surface_keys = ["tab", "shift-tab", "enter", "space", "escape"]
+        .into_iter()
+        .filter(move |_| focus == KeymapFocus::SurfaceChooser)
+        .map(|keystrokes| WorkspaceBinding {
+            keystrokes: keystrokes.to_owned(),
+            action: WorkspaceBindingAction::Unbind,
+            focus: KeymapFocus::SurfaceChooser,
         });
     let mut effective = Vec::new();
     for binding in snapshot
@@ -432,10 +605,15 @@ pub fn key_bindings_for_snapshot(
         effective.push(WorkspaceBinding {
             keystrokes,
             action,
-            command_context: focus == KeymapFocus::Command,
+            focus,
         });
     }
-    WorkspaceKeyBindings::new(terminal_keys.chain(command_keys).chain(effective))
+    WorkspaceKeyBindings::new(
+        terminal_keys
+            .chain(command_keys)
+            .chain(surface_keys)
+            .chain(effective),
+    )
 }
 
 fn gpui_keystroke(trigger: &BindingTrigger) -> Option<String> {

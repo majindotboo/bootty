@@ -17,7 +17,7 @@ pub const UI_RADIUS_LG: f32 = 8.0;
 
 /// Height of a regular compact control in the application chrome.
 pub const UI_CONTROL_HEIGHT: f32 = 28.0;
-/// Height of the tab bar container. Zed keeps the active tab one pixel above its bar.
+/// Height of the tab bar container.
 pub const UI_TAB_BAR_HEIGHT: f32 = 32.0;
 /// Height of a standard list row.
 pub const UI_ROW_HEIGHT: f32 = 28.0;
@@ -44,10 +44,9 @@ pub struct UiPalette {
     pub success: Rgba,
     pub destructive: Rgba,
 
-    // These names mirror the semantic roles used by Zed's UI components. They are derived from
-    // the same terminal palette as the legacy names above so a theme changes the whole chrome,
-    // not only the background and foreground.
+    // Semantic roles derive from one palette so a theme changes the whole chrome.
     pub border_variant: Rgba,
+    pub border_strong: Rgba,
     pub border_focused: Rgba,
     pub border_selected: Rgba,
     pub border_disabled: Rgba,
@@ -82,7 +81,7 @@ impl Default for UiPalette {
             pane: Rgba::rgb(0x24, 0x27, 0x2c),
             surface: Rgba::rgb(0x2c, 0x2f, 0x35),
             hover: Rgba::rgb(0x37, 0x3b, 0x43),
-            border: Rgba::rgb(0x4a, 0x4f, 0x59),
+            border: Rgba::rgb(0x2b, 0x2d, 0x31),
             text: Rgba::rgb(0xed, 0xf0, 0xf2),
             subtext: Rgba::rgb(0xce, 0xd3, 0xd8),
             muted: Rgba::rgb(0x93, 0x9a, 0xa3),
@@ -91,7 +90,8 @@ impl Default for UiPalette {
             warning: Rgba::rgb(0xe8, 0xb2, 0x6f),
             success: Rgba::rgb(0x79, 0xca, 0x9b),
             destructive: Rgba::rgb(0xe6, 0x8d, 0x91),
-            border_variant: Rgba::rgb(0x37, 0x3b, 0x43),
+            border_variant: Rgba::rgb(0x24, 0x26, 0x2a),
+            border_strong: Rgba::rgb(0x3b, 0x3d, 0x40),
             border_focused: Rgba::rgb(0x77, 0xb7, 0xdf),
             border_selected: Rgba::rgb(0x77, 0xb7, 0xdf),
             border_disabled: Rgba::rgb(0x2d, 0x30, 0x35),
@@ -115,7 +115,7 @@ impl Default for UiPalette {
             tab_bar: Rgba::rgb(0x13, 0x15, 0x18),
             tab_inactive: Rgba::rgb(0x1b, 0x1d, 0x21),
             tab_active: Rgba::rgb(0x1b, 0x1d, 0x21),
-            radius: UI_RADIUS_SM.to_u8().unwrap_or(0),
+            radius: UI_RADIUS_LG.to_u8().unwrap_or(0),
         }
     }
 }
@@ -150,8 +150,9 @@ impl UiPalette {
         self.pane = step(0.04);
         self.surface = step(0.08);
         self.hover = step(0.14);
-        self.border = step(0.21);
-        self.border_variant = step(0.14);
+        self.border = step(0.07);
+        self.border_variant = step(0.04);
+        self.border_strong = step(0.14);
         self.border_focused = readable_color(self.base, self.accent);
         self.border_selected = self.border_focused;
         self.border_disabled = mix(self.base, self.border, 0.45);
@@ -188,7 +189,8 @@ pub struct UiTheme {
     pub palette: UiPalette,
 }
 
-fn mix(a: Rgba, b: Rgba, b_weight: f32) -> Rgba {
+#[must_use]
+pub fn mix(a: Rgba, b: Rgba, b_weight: f32) -> Rgba {
     let weight = b_weight.clamp(0.0, 1.0);
     let channel = |a: u8, b: u8| {
         f32::mul_add(f32::from(b), weight, f32::from(a) * (1.0 - weight))
@@ -222,10 +224,12 @@ pub fn readable_color(background: Rgba, preferred: Rgba) -> Rgba {
         return preferred;
     }
 
-    let target = if is_dark(background) {
-        Rgba::rgb(u8::MAX, u8::MAX, u8::MAX)
+    let white = Rgba::rgb(u8::MAX, u8::MAX, u8::MAX);
+    let black = Rgba::rgb(0, 0, 0);
+    let target = if contrast_ratio(background, white) >= contrast_ratio(background, black) {
+        white
     } else {
-        Rgba::rgb(0, 0, 0)
+        black
     };
     let mut low = 0.0;
     let mut high = 1.0;
@@ -274,4 +278,19 @@ fn default_text_for(background: Rgba) -> Rgba {
 
 fn is_dark(color: Rgba) -> bool {
     luminance(color) < 0.5
+}
+
+/// Provider identity colors, independent of workspace accents.
+#[must_use]
+pub fn provider_color(provider: &str, cx: &gpui_kit::App) -> gpui_kit::Hsla {
+    use gpui_kit::component::ActiveTheme as _;
+    let dark = cx.theme().is_dark();
+    match provider.to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => gpui_kit::rgb(0x00d9_7757).into(),
+        "codex" | "openai" | "openai-codex" => {
+            gpui_kit::rgb(if dark { 0x00ff_ffff } else { 0x0000_0000 }).into()
+        }
+        "pi" => gpui_kit::rgb(if dark { 0x00f5_f5f5 } else { 0x000f_0f0f }).into(),
+        _ => cx.theme().foreground,
+    }
 }

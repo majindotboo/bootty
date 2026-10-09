@@ -1,41 +1,39 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui_kit::base::Tab;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     dock::{
         BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockPlacement, DockSkin,
         DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
         TabGroupRenderer,
     },
-    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    menu::{DropdownMenu as _, PopupMenuItem},
 };
 use gpui_kit::{
-    AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
-    Render, SharedString, Stateful, Styled, WeakEntity, Window, WindowControlArea, div, prelude::*,
-    px,
+    AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, FocusHandle, IntoElement,
+    ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window,
+    WindowControlArea, canvas, div, prelude::*, px,
 };
 
 use crate::{gpui::chrome::GpuiChrome, gpui_dock::WorkspaceDock};
+
+const DOCK_RESIZE_GUTTER: f32 = 8.0;
 
 pub struct WorkspaceDockSkin {
     kit: Rc<DockSkin>,
     area: WeakEntity<DockArea>,
     owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
-    always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
 }
 
 impl WorkspaceDockSkin {
     pub(crate) fn new(
         owner: WeakEntity<WorkspaceDock>,
         chrome: Entity<GpuiChrome>,
-        always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-        always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
         cx: &mut Context<DockArea>,
     ) -> Rc<Self> {
         let mut bottom_height = chrome.read(cx).dock_bottom_height();
@@ -52,8 +50,6 @@ impl WorkspaceDockSkin {
             area: cx.weak_entity(),
             owner,
             chrome,
-            always_show_tabs,
-            always_hide_tabs,
         })
     }
 }
@@ -66,10 +62,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         let area = self.area.clone();
         self.kit
             .frame(window, cx)
-            // Blank dock chrome is not a keyboard input destination.
-            .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
-                window.prevent_default();
-            })
             .on_drag_move::<DraggedDockResize>(|event, window, cx| {
                 let dock = event.drag(cx).0.clone();
                 dock.resize_to(event.event.position, window, cx);
@@ -87,9 +79,9 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             // Bottom segments belong below the terminals, within the side docks.
             .pb(self.chrome.read(cx).dock_bottom_height())
             .child(
-                self.chrome
-                    .clone()
-                    .cached(gpui_kit::StyleRefinement::default().absolute().size_full()),
+                // Chrome moves between the startup frame and the dock; its text and
+                // accessibility nodes must belong to the current frame.
+                div().absolute().size_full().child(self.chrome.clone()),
             )
             .when_some(self.owner.upgrade(), |frame, owner| {
                 frame.child(owner.read(cx).titlebar.clone())
@@ -210,7 +202,15 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             .size_full()
             .flex_col()
             .children(header)
-            .child(div().flex_1().min_h_0().w_full().child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    // Native child views paint and receive input above GPUI hitboxes.
+                    .when(placement.is_right(), |body| body.pl(px(DOCK_RESIZE_GUTTER)))
+                    .child(content),
+            )
             .child(handle)
             .into_any_element()
     }
@@ -230,8 +230,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             area: self.area.clone(),
             owner: self.owner.clone(),
             chrome: self.chrome.clone(),
-            always_show_tabs: self.always_show_tabs.clone(),
-            always_hide_tabs: self.always_hide_tabs.clone(),
         })
     }
 }
@@ -256,7 +254,7 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
                 .top_0()
                 .bottom_0()
                 .right_0()
-                .w(px(8.))
+                .w(px(DOCK_RESIZE_GUTTER))
                 .cursor_col_resize()
         })
         .when(placement.is_right(), |handle| {
@@ -264,7 +262,7 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
                 .top_0()
                 .bottom_0()
                 .left_0()
-                .w(px(8.))
+                .w(px(DOCK_RESIZE_GUTTER))
                 .cursor_col_resize()
         })
         .when(placement.is_bottom(), |handle| {
@@ -272,7 +270,7 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
                 .top_0()
                 .left_0()
                 .right_0()
-                .h(px(8.))
+                .h(px(DOCK_RESIZE_GUTTER))
                 .cursor_row_resize()
         })
         .child(
@@ -306,14 +304,13 @@ struct WorkspaceTabGroup {
     area: WeakEntity<DockArea>,
     owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
-    always_show_tabs: Rc<RefCell<HashSet<NodeId>>>,
-    always_hide_tabs: Rc<RefCell<HashSet<NodeId>>>,
 }
 
 pub struct WorkspaceTitleBar {
     chrome: Entity<GpuiChrome>,
     dock: WeakEntity<WorkspaceDock>,
     area: WeakEntity<DockArea>,
+    measured_height: Rc<Cell<Pixels>>,
 }
 
 impl WorkspaceTitleBar {
@@ -329,7 +326,29 @@ impl WorkspaceTitleBar {
             chrome,
             dock,
             area: area.downgrade(),
+            measured_height: Rc::new(Cell::new(px(crate::gpui::UI_TAB_BAR_HEIGHT))),
         }
+    }
+
+    pub(crate) fn height(&self) -> Pixels {
+        self.measured_height.get()
+    }
+
+    fn measure_height(&self) -> impl IntoElement {
+        let height = self.measured_height.clone();
+        let dock = self.dock.clone();
+        canvas(
+            move |bounds, _, cx| {
+                if height.replace(bounds.size.height) != bounds.size.height {
+                    cx.defer(move |cx| {
+                        _ = dock.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .inset_0()
     }
 }
 
@@ -384,10 +403,11 @@ impl Render for WorkspaceTitleBar {
                 )
             });
         let first_inset = inset + if show_left { 32.0 } else { 0.0 };
-        let notch = notch_span.map(|(left, _)| crate::gpui::tabs::NotchTabLayout {
+        let notch = notch_span.map(|(left, right)| crate::gpui::tabs::NotchTabLayout {
             width: (left - left_width - first_inset).max(0.0),
             inset: first_inset,
             height: crate::gpui::UI_TAB_BAR_HEIGHT,
+            right_edge: (right - left_width).max(0.0),
             wrap: self.chrome.read(cx).wrap_tabs_at_notch(),
         });
         let tabs = self
@@ -455,10 +475,11 @@ impl Render for WorkspaceTitleBar {
                     .children(tabs),
             )
             .child(controls)
+            .child(self.measure_height())
     }
 }
 
-fn group_placement(area: &DockArea, target: NodeId) -> Option<DockPlacement> {
+pub fn group_placement(area: &DockArea, target: NodeId) -> Option<DockPlacement> {
     [
         DockPlacement::Center,
         DockPlacement::Left,
@@ -523,31 +544,12 @@ fn panel_toggle(
 
 impl WorkspaceTabGroup {
     fn tabs_visible(&self, group: &TabGroupContext, cx: &App) -> bool {
-        use bootty_config::config::PanelTabs;
-        if group
-            .active_panel()
-            .is_some_and(|panel| terminal_panel_name(panel.panel_name(cx)))
-        {
-            return false;
-        }
-        if self.always_hide_tabs.borrow().contains(&group.node()) {
-            return false;
-        }
-        if self.always_show_tabs.borrow().contains(&group.node()) {
-            return true;
-        }
-        let placement = self
-            .area
-            .upgrade()
-            .and_then(|area| group_placement(area.read(cx), group.node()));
-        if !matches!(placement, Some(DockPlacement::Left | DockPlacement::Right)) {
-            return true;
-        }
-        match self.chrome.read(cx).dock_presentation().3 {
-            PanelTabs::Automatic => group.panels().iter().filter(|p| p.visible(cx)).count() > 1,
-            PanelTabs::Always => true,
-            PanelTabs::Never => false,
-        }
+        self.area.upgrade().is_some_and(|area| {
+            matches!(
+                group_placement(area.read(cx), group.node()),
+                Some(DockPlacement::Right)
+            )
+        })
     }
 
     fn render_tabs(
@@ -556,17 +558,8 @@ impl WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let placement = self
-            .area
-            .upgrade()
-            .and_then(|area| group_placement(area.read(cx), group.node()));
         let tab_config = self.chrome.read(cx).dock_tabs_config();
         let tab_accent = self.chrome.read(cx).tab_accent();
-        let style = if matches!(placement, Some(DockPlacement::Left | DockPlacement::Right)) {
-            self.chrome.read(cx).dock_presentation().2
-        } else {
-            bootty_config::config::PanelTabStyle::IconsAndText
-        };
         let visible = group
             .panels()
             .iter()
@@ -578,86 +571,130 @@ impl WorkspaceTabGroup {
             .iter()
             .position(|ix| *ix == group.active_ix())
             .unwrap_or(0);
+        let focuses = visible
+            .iter()
+            .filter_map(|ix| {
+                let panel = group.panels().get(*ix)?;
+                let id = format!("tool-tab-focus:{:?}", panel.panel_id(cx));
+                let state =
+                    window.use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true));
+                Some((*ix, state.read(cx).clone()))
+            })
+            .collect::<Vec<_>>();
         let tabs = visible
             .into_iter()
             .filter_map(|ix| {
                 let panel = group.panels().get(ix)?;
                 let id = format!("{:?}", panel.panel_id(cx));
+                let focus = focuses
+                    .iter()
+                    .find(|(candidate, _)| *candidate == ix)?
+                    .1
+                    .clone();
                 Some(crate::gpui::tabs::ScrollableTab {
                     id,
                     title: None,
-                    focus: None,
-                    tab: Self::render_group_tab(
-                        group, ix, style, tab_config, tab_accent, window, cx,
+                    focus: Some(focus.clone()),
+                    tab: self.render_group_tab(
+                        group, ix, tab_config, tab_accent, &focuses, &focus, window, cx,
                     )?,
                 })
             })
             .collect();
-        let target = group.clone();
-        crate::gpui::tabs::ScrollableTabBar {
-            id: format!("workspace-tabs-{:?}", group.node()).into(),
-            config: tab_config,
-            background: self.chrome.read(cx).panel_background(),
-            tabs,
-            selected: Some(selected),
-            notch: None,
-            end: div()
-                .id("after-tabs")
-                .h_full()
-                .flex_1()
-                .min_w_4()
-                .when(group.is_droppable(), |e| {
-                    e.on_drop(move |drag: &DragPanel, window, cx| {
-                        let ix = (drag.source() == target.node())
-                            .then(|| target.panels().len().saturating_sub(1));
-                        target.drop_panel(drag.clone(), ix, false, window, cx);
-                    })
-                })
-                .into_any_element(),
-        }
-        .into_any_element()
+        div()
+            .flex()
+            .items_center()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(crate::gpui::tabs::ScrollableTabBar {
+                        id: format!("workspace-tabs-{:?}", group.node()).into(),
+                        config: tab_config,
+                        background: self.chrome.read(cx).panel_background(),
+                        tabs,
+                        selected: Some(selected),
+                        notch: None,
+                        end: div().min_w_1().into_any_element(),
+                        plus: None,
+                    }),
+            )
+            .when(
+                self.area.upgrade().is_some_and(|area| {
+                    group_placement(area.read(cx), group.node()) == Some(DockPlacement::Right)
+                }),
+                |row| row.child(sidebar_tab_picker(self.owner.clone(), cx)),
+            )
+            .into_any_element()
     }
 }
 
 impl WorkspaceTabGroup {
+    fn activation_focus(
+        &self,
+        group: &TabGroupContext,
+        panel_focus: FocusHandle,
+        header_focus: &FocusHandle,
+        cx: &App,
+    ) -> FocusHandle {
+        self.area
+            .upgrade()
+            .filter(|area| {
+                group_placement(area.read(cx), group.node()) == Some(DockPlacement::Center)
+            })
+            .map_or_else(|| header_focus.clone(), |_| panel_focus)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_group_tab(
+        &self,
         group: &TabGroupContext,
         ix: usize,
-        style: bootty_config::config::PanelTabStyle,
         tab_config: bootty_config::config::TabConfig,
         accent: gpui_kit::Hsla,
+        focuses: &[(usize, FocusHandle)],
+        focus: &FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Tab> {
         let panel = group.panels().get(ix)?;
-        let terminal_panel = terminal_panel_name(panel.panel_name(cx));
         let id = panel.panel_id(cx);
+        let icon = self
+            .owner
+            .upgrade()
+            .and_then(|owner| owner.read(cx).browser_page_icon(id, cx))
+            .unwrap_or_else(|| panel_identity(panel.panel_name(cx)).1);
         let handle = PanelHandle::of(panel);
         let label = handle
             .and_then(|h| h.tab_name(cx))
             .unwrap_or_else(|| panel_identity(panel.panel_name(cx)).0.into());
         let title =
             handle.map_or_else(|| label.clone().into_any_element(), |h| h.title(window, cx));
-        let suffix = handle.and_then(|h| h.title_suffix(window, cx)).or_else(|| {
-            panel
-                .closable(cx)
-                .then(|| close_panel_tab(group, id, &label))
-        });
         let selected = !group.is_collapsed() && ix == group.active_ix();
+        let foreground =
+            crate::gpui::tabs::tab_foreground(tab_config.appearance, selected, accent, cx);
+        let suffix = handle.and_then(|h| h.title_suffix(window, cx)).or_else(|| {
+            (panel.closable(cx) && panel.panel_name(cx) != "bootty.sessions")
+                .then(|| close_panel_tab(self.owner.clone(), group, id, &label, foreground, cx))
+        });
         let hover_group = SharedString::from(format!("panel-tab-hover-{id:?}"));
         let title = div()
             .id(SharedString::from(format!("panel-tab-{id:?}")))
             .flex()
             .items_center()
-            .gap_2()
-            .when(style != bootty_config::config::PanelTabStyle::Text, |e| {
-                e.child(Icon::new(panel_identity(panel.panel_name(cx)).1).small())
-            })
-            .when(style != bootty_config::config::PanelTabStyle::Icons, |e| {
-                e.child(title)
-            });
+            .gap_1()
+            .child(Icon::new(icon).small().text_color(foreground).flex_none())
+            .child(title);
         let select = group.clone();
+        let activate_focus = self.activation_focus(group, panel.focus_handle(cx), focus, cx);
+        let click_focus = activate_focus.clone();
+        let keyboard_group = group.clone();
+        let keyboard_owner = self.owner.clone();
+        let click_owner = self.owner.clone();
+        let keyboard_focuses = focuses.to_vec();
+        let focus_color = cx.theme().primary;
         let tab = crate::gpui::tabs::tab(
             hover_group.clone(),
             tab_config.appearance,
@@ -666,9 +703,42 @@ impl WorkspaceTabGroup {
             cx,
         )
         .group(hover_group.clone())
+        .track_focus(focus)
+        .focusable()
+        .tab_index(0_isize)
+        .focus_visible(move |style| style.border_1().border_color(focus_color))
+        .on_key_down(move |event, window, cx| {
+            _ = keyboard_owner.update(cx, |dock, cx| dock.record_browser_interaction(cx));
+            let position = keyboard_focuses
+                .iter()
+                .position(|(candidate, _)| *candidate == ix)
+                .unwrap_or_default();
+            let next = match event.keystroke.key.as_str() {
+                "left" => Some(position.saturating_sub(1)),
+                "right" => Some(
+                    position
+                        .saturating_add(1)
+                        .min(keyboard_focuses.len().saturating_sub(1)),
+                ),
+                "home" => Some(0),
+                "end" => Some(keyboard_focuses.len().saturating_sub(1)),
+                "enter" | "space" => {
+                    keyboard_group.select_tab(ix, window, cx);
+                    activate_focus.focus(window, cx);
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    return;
+                }
+                _ => None,
+            };
+            if let Some(next) = next.and_then(|next| keyboard_focuses.get(next)) {
+                next.1.focus(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        })
         .accessibility_label(label.clone())
         .tooltip({
-            let label = label.clone();
             move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
             }
@@ -682,69 +752,46 @@ impl WorkspaceTabGroup {
         .selected(
             !group.is_collapsed() && group.active_panel().is_some_and(|p| p.panel_id(cx) == id),
         )
-        .on_click(move |_, window, cx| select.select_tab(ix, window, cx));
-        let drag = (!terminal_panel && group.is_draggable())
-            .then(|| group.drag_panel(ix, cx))
-            .flatten();
-        Some(
-            tab.when_some(drag, |tab, drag| {
-                tab.on_drag(drag, move |drag, offset, window, cx| {
-                    cx.stop_propagation();
-                    drag.set_drag_offset(offset);
-                    drag.set_preview_size(gpui_kit::size(
-                        px(f32::from(window.rem_size()) * 10.),
-                        px(crate::gpui::UI_TAB_BAR_HEIGHT),
-                    ));
-                    cx.new(|_| TabPreview(label.clone()))
-                })
-            })
-            .when(group.is_droppable(), |tab| {
-                let group = group.clone();
-                tab.drag_over::<DragPanel>(|tab, _, _, cx| {
-                    tab.border_l_2().border_color(cx.theme().drag_border)
-                })
-                .on_drop(move |drag: &DragPanel, window, cx| {
-                    group.drop_panel(drag.clone(), Some(ix), true, window, cx);
-                })
-            }),
-        )
+        .on_click(move |_, window, cx| {
+            _ = click_owner.update(cx, |dock, cx| dock.record_browser_interaction(cx));
+            select.select_tab(ix, window, cx);
+            click_focus.focus(window, cx);
+        });
+        Some(tab)
     }
 }
 
 fn close_panel_tab(
+    owner: WeakEntity<WorkspaceDock>,
     group: &TabGroupContext,
     id: gpui_kit::component::dock::PanelId,
     label: &str,
+    foreground: gpui_kit::Hsla,
+    cx: &App,
 ) -> AnyElement {
     let group = group.clone();
     Button::new("close-tab")
         .icon(IconName::Close)
-        .ghost()
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(foreground)
+                .hover(cx.theme().secondary_hover)
+                .active(cx.theme().secondary_hover),
+        )
         .xsmall()
         .size_4()
         .tooltip("Close tab")
         .accessibility_label(format!("Close {label}"))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            group.close(id, window, cx);
+            let closed = owner
+                .update(cx, |dock, cx| dock.close_tool_tab(id, window, cx))
+                .unwrap_or(false);
+            if !closed {
+                group.close(id, window, cx);
+            }
         })
         .into_any_element()
-}
-
-struct TabPreview(SharedString);
-impl Render for TabPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .w_40()
-            .h_8()
-            .px_3()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .bg(cx.theme().tab_active)
-            .text_color(cx.theme().tab_foreground)
-            .child(self.0.clone())
-    }
 }
 
 impl TabGroupRenderer for WorkspaceTabGroup {
@@ -777,9 +824,6 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             return div().into_any_element();
         }
         let tabs = self.render_tabs(group, window, cx);
-        let owner = self.owner.clone();
-        let always = self.always_show_tabs.borrow().contains(&group.node());
-        let menu_group = group.clone();
         let classic = self.chrome.read(cx).dock_tabs_config().appearance
             == bootty_config::config::TabAppearance::Classic;
         div()
@@ -798,9 +842,6 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             })
             .pr_1()
             .child(div().flex_1().min_w_0().h_full().child(tabs))
-            .context_menu(move |menu, window, cx| {
-                panel_menu(&owner, &menu_group, always, menu, window, cx)
-            })
             .into_any_element()
     }
 
@@ -811,7 +852,22 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let content = self.kit.render_active_panel(panel, group, window, cx);
+        let content = if window.is_a11y_active() && !group.is_collapsed() {
+            // Kit cached views omit accessibility registrations. Render directly until
+            // the pinned renderer can replay those nodes for assistive technology.
+            div()
+                .id("tab-content")
+                .size_full()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(panel)
+                .into_any_element()
+        } else {
+            self.kit.render_active_panel(panel, group, window, cx)
+        };
         if group
             .active_panel()
             .is_some_and(|panel| terminal_panel_name(panel.panel_name(cx)))
@@ -831,77 +887,7 @@ impl TabGroupRenderer for WorkspaceTabGroup {
                 .child(content)
                 .into_any_element();
         }
-        if self.tabs_visible(group, cx) {
-            return content;
-        }
-        let owner = self.owner.clone();
-        let group = group.clone();
-        let always = self.always_show_tabs.borrow().contains(&group.node());
-        let drag = group
-            .is_draggable()
-            .then(|| group.drag_panel(group.active_ix(), cx))
-            .flatten();
-        let drag_label = group
-            .active_panel()
-            .and_then(PanelHandle::of)
-            .and_then(|panel| panel.tab_name(cx))
-            .unwrap_or_else(|| "Panel".into());
-        // A tab-less native panel gets a full-width hover strip along its top edge, tty7-style.
-        // The strip reveals the drag pill without consuming layout space. Terminal leaves are
-        // excluded: their mux pane grips already own the top-center hover affordance.
-        let hover_group = SharedString::from(format!("hidden-panel-handle-{:?}", group.node()));
-        let handle = {
-            let pill = div()
-                .id("hidden-panel-drag-handle")
-                .mx_auto()
-                .mt_1()
-                .w(px(28.0))
-                .h(px(14.0))
-                .rounded(cx.theme().radius)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .opacity(0.0)
-                .group_hover(hover_group.clone(), |style| style.opacity(0.75))
-                .hover(|style| style.bg(cx.theme().secondary).opacity(1.0))
-                .child("•••")
-                .when_some(drag, |handle, drag| {
-                    let drag_label = drag_label.clone();
-                    handle.on_drag(drag, move |drag, offset, window, cx| {
-                        cx.stop_propagation();
-                        drag.set_drag_offset(offset);
-                        drag.set_preview_size(gpui_kit::size(
-                            px(f32::from(window.rem_size()) * 3.0),
-                            window.rem_size(),
-                        ));
-                        cx.new(|_| TabPreview(drag_label.clone()))
-                    })
-                });
-            div()
-                .id("hidden-panel-hover-strip")
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(22.0))
-                .group(hover_group)
-                .child(pill.context_menu(move |menu, window, cx| {
-                    panel_menu(&owner, &group, always, menu, window, cx)
-                }))
-        };
-        div()
-            .id("single-panel-content")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .size_full()
-            .child(content)
-            .child(handle)
-            .into_any_element()
+        content
     }
 
     fn render_drop_indicator(
@@ -919,114 +905,165 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let content = self.kit.render_empty(group, window, cx);
-        let owner = self.owner.clone();
-        let group = group.clone();
-        Some(
-            div()
-                .id("empty-group")
-                .size_full()
-                .children(content)
-                .context_menu(move |menu, window, cx| {
-                    group_menu(owner.clone(), &group, false, menu, window, cx)
-                })
-                .into_any_element(),
-        )
+        if self.tabs_visible(group, cx) {
+            return Some(empty_sidebar(&self.owner, cx));
+        }
+        self.kit.render_empty(group, window, cx)
     }
 }
 
-fn panel_menu(
+fn sidebar_tools() -> impl Iterator<Item = &'static crate::commands::PanelDescriptor> {
+    crate::commands::PANELS.iter().filter(|panel| {
+        matches!(
+            panel.creation,
+            crate::commands::PanelCreation::Command(
+                crate::commands::DockAction::Files
+                    | crate::commands::DockAction::Changes
+                    | crate::commands::DockAction::Diff
+            ) | crate::commands::PanelCreation::Browser
+        )
+    })
+}
+
+fn open_tool(
     owner: &WeakEntity<WorkspaceDock>,
-    group: &TabGroupContext,
-    always: bool,
-    menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let mut menu = menu;
-    if let Some(panel) = group.active_panel() {
-        if let Some(handle) = PanelHandle::of(panel) {
-            menu = handle.dropdown_menu(menu, window, cx);
-        }
-        if panel.closable(cx) {
-            let id = panel.panel_id(cx);
-            let group = group.clone();
-            menu = menu.item(
-                PopupMenuItem::new("Close panel")
-                    .on_click(move |_, window, cx| group.close(id, window, cx)),
-            );
-        }
-        if panel.zoomable(cx) {
-            let group = group.clone();
-            menu = menu.item(
-                PopupMenuItem::new(if group.is_zoomed() {
-                    "Restore pane"
-                } else {
-                    "Zoom pane"
-                })
-                .on_click(move |_, window, cx| group.toggle_zoom(window, cx)),
-            );
-        }
-    }
-    group_menu(owner.clone(), group, always, menu, window, cx)
+    action: crate::commands::DockAction,
+    window: &Window,
+    cx: &mut App,
+) {
+    _ = owner.update(cx, |dock, cx| {
+        dock.submit_command(
+            bootty_control::CommandInvocation::from_action(
+                action.command().action(),
+                bootty_control::Caller::Internal,
+            ),
+            window,
+            cx,
+        );
+    });
 }
 
-fn group_menu(
-    owner: WeakEntity<WorkspaceDock>,
-    group: &TabGroupContext,
-    always: bool,
-    menu: PopupMenu,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    // The locked terminal center offers no tab or panel management: no tab strip to force,
-    // no panel to add beside the mux window.
-    let terminal_locked = !group.panels().is_empty()
-        && group
-            .panels()
-            .iter()
-            .all(|panel| terminal_panel_name(panel.panel_name(cx)));
-    if terminal_locked {
-        return menu;
-    }
-    let node = group.node();
-    let toggle_owner = owner.clone();
-    let hide_owner = owner.clone();
-    let hidden = owner
-        .upgrade()
-        .is_some_and(|owner| owner.read(cx).always_hide_tabs.borrow().contains(&node));
-    menu.separator()
-        .item(
-            PopupMenuItem::new("Always show tabs")
-                .checked(always)
-                .on_click(move |_, window, cx| {
-                    _ = toggle_owner.update(cx, |owner, cx| {
-                        owner.invoke_action(
-                            crate::commands::DockAction::ToggleTabBar,
-                            Some(node),
-                            window,
-                            cx,
-                        );
-                    });
-                }),
-        )
-        .item(
-            PopupMenuItem::new("Always hide tabs")
-                .checked(hidden)
-                .on_click(move |_, window, cx| {
-                    _ = hide_owner.update(cx, |owner, cx| {
-                        owner.invoke_action(
-                            crate::commands::DockAction::ToggleHiddenTabs,
-                            Some(node),
-                            window,
-                            cx,
-                        );
-                    });
-                }),
-        )
-        .submenu("Add panel", window, cx, move |menu, _, _| {
-            WorkspaceDock::panel_menu(&owner, node, menu)
+fn open_browser(owner: &WeakEntity<WorkspaceDock>, window: &Window, cx: &mut App) {
+    _ = owner.update(cx, |dock, cx| {
+        dock.submit_command(
+            bootty_control::CommandInvocation::new(
+                "browser.new_tab",
+                Vec::new(),
+                bootty_control::Caller::Internal,
+            ),
+            window,
+            cx,
+        );
+    });
+}
+
+fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoElement {
+    let present = |action: crate::commands::DockAction, cx: &App| {
+        owner.upgrade().is_some_and(|owner| {
+            let dock = owner.read(cx);
+            action
+                .panel()
+                .is_some_and(|kind| dock.panel_present(kind, cx))
         })
+    };
+    let all_open = sidebar_tools().all(|panel| {
+        let crate::commands::PanelCreation::Command(action) = panel.creation else {
+            return false;
+        };
+        present(action, cx)
+    });
+    let menu_owner = owner;
+    Button::new("new-sidebar-tab")
+        .icon(IconName::Plus)
+        .ghost()
+        .small()
+        .size_6()
+        .accessibility_label("Open a tool")
+        .disabled(all_open)
+        .tooltip(if all_open {
+            "All tools are open"
+        } else {
+            "Open a tool"
+        })
+        .dropdown_menu(move |mut menu, _, cx| {
+            for panel in sidebar_tools() {
+                if matches!(panel.creation, crate::commands::PanelCreation::Browser) {
+                    let owner = menu_owner.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(panel.label)
+                            .icon(panel.icon.clone())
+                            .on_click(move |_, window, cx| open_browser(&owner, window, cx)),
+                    );
+                    continue;
+                }
+                let crate::commands::PanelCreation::Command(action) = panel.creation else {
+                    continue;
+                };
+                if menu_owner.upgrade().is_some_and(|owner| {
+                    let dock = owner.read(cx);
+                    action
+                        .panel()
+                        .is_some_and(|kind| dock.panel_present(kind, cx))
+                }) {
+                    continue;
+                }
+                let owner = menu_owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(panel.label)
+                        .icon(panel.icon.clone())
+                        .on_click(move |_, window, cx| {
+                            open_tool(&owner, action, window, cx);
+                        }),
+                );
+            }
+            menu
+        })
+}
+
+fn empty_sidebar(owner: &WeakEntity<WorkspaceDock>, cx: &App) -> AnyElement {
+    div()
+        .id("empty-tool-sidebar")
+        .debug_selector(|| "empty-tool-sidebar".to_owned())
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_6()
+        .child(
+            div()
+                .w_full()
+                .max_w_64()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .mb_2()
+                        .child("Open a tool"),
+                )
+                .children(sidebar_tools().map(|panel| {
+                    let creation = panel.creation;
+                    let owner = owner.clone();
+                    Button::new(SharedString::from(format!("empty-open-{}", panel.name)))
+                        .label(panel.label)
+                        .icon(panel.icon.clone())
+                        .outline()
+                        .w_full()
+                        .on_click(move |_, window, cx| match creation {
+                            crate::commands::PanelCreation::Command(action) => {
+                                open_tool(&owner, action, window, cx);
+                            }
+                            crate::commands::PanelCreation::Browser => {
+                                open_browser(&owner, window, cx);
+                            }
+                            crate::commands::PanelCreation::Context => {}
+                        })
+                })),
+        )
+        .into_any_element()
 }
 
 fn empty_terminal_view(

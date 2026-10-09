@@ -15,21 +15,38 @@ use gpui_kit::component::{
 const BUTTON_SIZE: f32 = 28.0;
 const BUTTON_GAP: f32 = 4.0;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Render captured Space and shortcut projections together"
+)]
 pub(super) fn render(
     spaces: &[SpaceSnapshot],
     transition: Option<SpaceTransition>,
     height: f32,
     background: Rgba,
     colors: ChromePalette,
+    navigation_hints: &[(String, gpui_kit::Keystroke)],
+    hint_modifiers: gpui_kit::Modifiers,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
     let controls_min_width = px((spaces.len().to_f32().unwrap_or(f32::MAX)).mul_add(
         BUTTON_GAP,
         (spaces.len().to_f32().unwrap_or(f32::MAX) + 1.0) * BUTTON_SIZE,
     ) + 8.0);
-    let buttons = spaces
-        .iter()
-        .map(|space| space_button(space, transition, colors, cx));
+    let buttons = spaces.iter().enumerate().map(|(index, space)| {
+        div()
+            .relative()
+            .child(space_button(space, transition, colors, cx))
+            .children(
+                super::view::navigation_hint(
+                    navigation_hints,
+                    hint_modifiers,
+                    "select_space",
+                    index.saturating_add(1),
+                )
+                .map(|hint| div().absolute().right_0().top_0().child(hint)),
+            )
+    });
     let create_owner = cx.weak_entity();
     div()
         .id("bootty-gpui-space-switcher")

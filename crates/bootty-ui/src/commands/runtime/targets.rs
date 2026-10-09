@@ -87,7 +87,7 @@ impl AppState {
         })
     }
 
-    pub(super) fn activate_terminal_target(
+    pub(crate) fn activate_terminal_target(
         &mut self,
         target: &ExactMuxTarget,
     ) -> Result<(), CommandOutcome> {
@@ -98,6 +98,11 @@ impl AppState {
         };
         let window = window.map(str::to_owned);
         let pane = pane.map(str::to_owned);
+        if scope != self.workspace.active_space_id() && !self.activate_space_from_ui(scope) {
+            return Err(CommandOutcome::Unavailable {
+                message: "The target Space could not be activated".to_owned(),
+            });
+        }
         self.workspace
             .activate_target(scope, &session, window.as_deref(), &self.repaint)
             .map_err(|error| CommandOutcome::Failed {
@@ -105,7 +110,8 @@ impl AppState {
                 message: error.to_string(),
             })?;
         if let Some(pane) = pane {
-            self.workspace.active.binding.focus_pane(&pane);
+            let binding = &mut self.workspace.active.binding;
+            binding.focus_pane(&pane);
         }
         self.sync_terminal_panes_now();
         (self.repaint)();
@@ -227,7 +233,14 @@ impl AppState {
                 )
             })
         } else {
-            anchor.pane_id.clone()
+            mux_window
+                .as_deref()
+                .and_then(|window| {
+                    binding
+                        .window_focused_pane(&session, window)
+                        .map(str::to_owned)
+                })
+                .or_else(|| anchor.pane_id.clone())
         };
         (Some(session), mux_window, pane)
     }
@@ -315,30 +328,86 @@ impl AppState {
 fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
-            command.starts_with("git.")
+            (command.starts_with("agents.")
+                && [
+                    ".start",
+                    ".resume",
+                    ".fork",
+                    ".account.login",
+                    ".account.logout",
+                    ".account.status",
+                    ".provider.status",
+                ]
+                .iter()
+                .any(|suffix| command.ends_with(suffix)))
+                || matches!(
+                    command,
+                    "runs.create" | "runs.dispatch" | "runs.cancel" | "runs.retry" | "runs.restart"
+                )
+                || command.starts_with("git.")
                 || command.starts_with("files.")
+                || command.starts_with("project.")
                 || matches!(
                     command,
                     "jobs.start"
+                        | "spaces.inspect"
+                        | "terminal.activities"
+                        | "new_tab"
                         | "transfers.start"
                         | "forwards.open"
                         | "history.search"
                         | "session.create"
+                        | "session.saved"
+                        | "session.set_title"
+                        | "session.pin"
+                        | "session.unpin"
+                        | "session.activity"
+                        | "session.settle"
+                        | "session.activate"
+                        | "session.snooze"
+                        | "session.unsnooze"
+                        | "session.hide"
+                        | "session.show"
+                        | "session.archive"
+                        | "session.unarchive"
+                        | "session.delete"
+                        | "session.restore"
+                        | "session.reopen"
                 )
         }
-        ResourceKind::Session => command.starts_with("pane.") || command == "session.close",
+        ResourceKind::Session => {
+            command.starts_with("pane.")
+                || matches!(
+                    command,
+                    "session.close" | "terminal.create_tab" | "settle_session" | "new_tab"
+                )
+                || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))
+        }
         // Terminal input and capture address the pane through the mux and never select it.
         ResourceKind::Terminal => {
             matches!(
                 command,
                 "link.open"
                     | "agents.focus"
+                    | "agents.spawn"
                     | "terminal.write"
                     | "terminal.paste"
                     | "terminal.submit"
                     | "terminal.capture"
+                    | "terminal.create_pane"
+                    | "new_tab"
+                    | "split_right"
+                    | "split_down"
                     | "pane.close"
             ) || command.ends_with(".acknowledge")
+                || matches!(
+                    command,
+                    "agents.claude.pane" | "agents.codex.pane" | "agents.pi.pane"
+                )
+                || (command.starts_with("agents.")
+                    && (command.ends_with(".associate")
+                        || command.ends_with(".restore")
+                        || command.ends_with(".restore.launch")))
                 || (command.starts_with("agents.")
                     && [
                         ".prompt",
@@ -351,6 +420,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                     .iter()
                     .any(|operation| command.ends_with(operation)))
         }
+        ResourceKind::Pane => matches!(command, "split_right" | "split_down"),
         _ => false,
     }
 }

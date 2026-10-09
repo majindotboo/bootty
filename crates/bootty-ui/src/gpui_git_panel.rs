@@ -1,6 +1,7 @@
 //! Native Changes and Diff panels; every Git operation enters the app command mailbox.
 
 mod diff;
+mod pull_request;
 
 pub use diff::GitDiffPanel;
 
@@ -12,7 +13,7 @@ use bootty_control::{
 };
 use bootty_git::changes::{ChangeGroup, RepositoryChanges, RepositoryOverview};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState},
@@ -61,6 +62,9 @@ pub struct GitChangesPanel {
     pending_directory: Option<String>,
     pending_read: Option<(&'static str, Vec<String>)>,
     messages: std::collections::HashMap<String, String>,
+    pull_requests: Option<Entity<pull_request::PullRequestView>>,
+    pull_request_subscription: Option<gpui_kit::Subscription>,
+    showing_pull_requests: bool,
 }
 
 pub struct OpenDiff;
@@ -68,7 +72,10 @@ impl EventEmitter<OpenDiff> for GitChangesPanel {}
 
 impl GitChangesPanel {
     pub(crate) fn has_pending_work(&self, cx: &App) -> bool {
-        self.mutating
+        self.pull_requests
+            .as_ref()
+            .is_some_and(|view| view.read(cx).has_draft(cx))
+            || self.mutating
             || self.error.is_some()
             || [
                 &self.message,
@@ -114,6 +121,7 @@ impl GitChangesPanel {
                 if weak
                     .update_in(cx, |this, window, cx| {
                         if (!this.active && !this.diff.read(cx).active)
+                            || this.showing_pull_requests
                             || !this.host_visible
                             || this.pending
                         {
@@ -167,6 +175,9 @@ impl GitChangesPanel {
             mutating: false,
             selected_diff: None,
             error: None,
+            pull_requests: None,
+            pull_request_subscription: None,
+            showing_pull_requests: false,
         }
     }
 
@@ -181,6 +192,18 @@ impl GitChangesPanel {
             return;
         }
         if self.context.directory != directory {
+            if self
+                .pull_requests
+                .as_ref()
+                .is_some_and(|view| view.read(cx).has_draft(cx))
+            {
+                self.error=Some("Submit or discard the current pull request review before changing repositories.".into());
+                cx.notify();
+                return;
+            }
+            self.pull_requests = None;
+            self.pull_request_subscription = None;
+            self.showing_pull_requests = false;
             self.messages.insert(
                 self.context.directory.clone(),
                 self.message.read(cx).value().to_string(),
@@ -208,6 +231,12 @@ impl GitChangesPanel {
     }
 
     pub(crate) fn refresh(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.showing_pull_requests {
+            if let Some(view) = &self.pull_requests {
+                view.update(cx, |view, cx| view.refresh(window, cx));
+            }
+            return;
+        }
         if !self.pending {
             self.request_inner("git.status", Vec::new(), false, window, cx);
         }
@@ -412,10 +441,15 @@ impl GitChangesPanel {
                     self.changes = Some(changes);
                     self.sync_tree(cx);
                 }
-                self.refresh_selected_diff(window, cx);
+                if !self.showing_pull_requests {
+                    self.refresh_selected_diff(window, cx);
+                }
             }
             "git.overview" => self.overview = Some(serde_json::from_value(value)?),
             "git.diff" | "git.commit-diff" => {
+                if self.showing_pull_requests {
+                    return Ok(());
+                }
                 let contents = value.as_str().unwrap_or_default().to_owned();
                 self.diff
                     .update(cx, |diff, cx| diff.show(diff_title, contents, window, cx));
@@ -958,7 +992,14 @@ impl GitChangesPanel {
                 .truncate()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("{} · {root}", self.context.host))
+                .child(format!(
+                    "{} · {}",
+                    self.context.host,
+                    root.trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or("Repository")
+                ))
                 .into_any_element(),
         ]
     }
@@ -995,6 +1036,81 @@ impl Panel for GitChangesPanel {
         crate::i18n::t(cx, "panel-changes")
     }
 }
+impl GitChangesPanel {
+    fn render_modes(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        div().child(
+            div()
+                .flex()
+                .gap_1()
+                .child(
+                    Button::new("show-local-changes")
+                        .label("Changes")
+                        .disabled(self.mutating)
+                        .selected(!self.showing_pull_requests)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.showing_pull_requests = false;
+                            this.refresh(window, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("show-pull-requests")
+                        .label("Pull requests")
+                        .disabled(self.mutating)
+                        .selected(self.showing_pull_requests)
+                        .icon(gpui_kit::assets::IconName::GitPullRequest)
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.pull_requests.is_none() {
+                                let view = cx.new(|cx| {
+                                    pull_request::PullRequestView::new(
+                                        this.context.clone(),
+                                        this.sender.clone(),
+                                        this.diff.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                this.pull_request_subscription =
+                                    Some(cx.subscribe(&view, |_, _, _: &OpenDiff, cx| {
+                                        cx.emit(OpenDiff);
+                                    }));
+                                view.update(cx, |view, cx| view.find(window, cx));
+                                this.pull_requests = Some(view);
+                            }
+                            this.showing_pull_requests = true;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+}
+
+impl GitChangesPanel {
+    fn render_commit_controls(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        div()
+            .flex()
+            .gap_2()
+            .child(
+                Button::new("commit")
+                    .label(crate::i18n::t(cx, "git-commit"))
+                    .small()
+                    .disabled(self.mutating)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
+            )
+            .child(
+                Button::new("amend")
+                    .label(crate::i18n::t(cx, "git-amend"))
+                    .small()
+                    .disabled(self.mutating)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
+            )
+    }
+}
+
 impl Render for GitChangesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut body = div()
@@ -1007,11 +1123,19 @@ impl Render for GitChangesPanel {
             .p_2()
             .overflow_hidden()
             .children(self.render_header(cx));
-        if let Some(error) = &self.error {
-            body = body.child(gpui_kit::component::alert::Alert::error(
+        body = body.child(self.render_modes(cx));
+        body = body.when_some(self.error.as_ref(), |body, error| {
+            body.child(gpui_kit::component::alert::Alert::error(
                 "git-error",
                 error.clone(),
-            ));
+            ))
+        });
+        if self.showing_pull_requests {
+            return body
+                .when_some(self.pull_requests.as_ref(), |body, view| {
+                    body.child(view.clone())
+                })
+                .into_any_element();
         }
         if self
             .changes
@@ -1068,27 +1192,8 @@ impl Render for GitChangesPanel {
             &self.message,
             Input::new(&self.message).disabled(self.mutating),
         ))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("commit")
-                        .label(crate::i18n::t(cx, "git-commit"))
-                        .small()
-                        .disabled(self.mutating)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.commit(false, window, cx)),
-                        ),
-                )
-                .child(
-                    Button::new("amend")
-                        .label(crate::i18n::t(cx, "git-amend"))
-                        .small()
-                        .disabled(self.mutating)
-                        .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
-                ),
-        )
+        .child(self.render_commit_controls(cx))
+        .into_any_element()
     }
 }
 

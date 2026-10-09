@@ -79,7 +79,10 @@ fn advertised_shell(override_shell: Option<String>, login_shell: Option<String>)
 #[cfg(target_os = "macos")]
 fn login_shell() -> String {
     selected_login_shell(
-        bootty_terminal::terminal_session::configured_user_shell(),
+        advertised_shell(
+            std::env::var(BOOTTY_SHELL_ENV).ok(),
+            configured_user_shell(),
+        ),
         std::env::var("SHELL").ok(),
     )
 }
@@ -93,26 +96,27 @@ fn selected_login_shell(configured: Option<String>, inherited: Option<String>) -
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-/// Run `<shell> -l -c env` and parse its output. A login shell sources the
-/// profile files where PATH is set (e.g. `.zprofile` with `brew shellenv`), so
-/// `-l` is enough to recover the user's PATH without the noise of an interactive
-/// shell. Null-delimited output keeps multi-line values intact.
+/// Load the same login and interactive startup files as a terminal. Tool PATH
+/// entries often live inside interactive-only guards. Frame the environment so
+/// shell greetings cannot become variable names; NUL preserves multiline values.
 #[cfg(target_os = "macos")]
 fn capture_login_env(shell: &str) -> Option<Vec<(String, String)>> {
-    // `env -0` (null-delimited) is unambiguous even when a value contains
-    // newlines; `printenv` lacks the option, but `env` from coreutils/BSD on
-    // macOS supports `-0`.
     let output = Command::new(shell)
-        .args(["-l", "-c", "/usr/bin/env -0"])
+        .args([
+            "-l",
+            "-i",
+            "-c",
+            r"printf '\036BOOTTY_ENV\037'; /usr/bin/env -0",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
 
-    Some(parse_login_environment(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    let output = String::from_utf8_lossy(&output.stdout);
+    let (_, environment) = output.split_once("\u{001e}BOOTTY_ENV\u{001f}")?;
+    Some(parse_login_environment(environment))
 }
 
 #[cfg(target_os = "macos")]

@@ -8,14 +8,10 @@ use std::{
     },
 };
 
-use crate::gpui::{ModuleIntegrationSnapshot, ModuleIntegrationStatus, ModuleIntegrationsSnapshot};
+use crate::gpui::ModuleIntegrationsSnapshot;
 use crate::settings_session::{
     AcceptedSettings, ModuleOutcome, RemoteOutcome, RemoteProfile, SettingsEffect, SettingsOutcome,
     SettingsWriteSource,
-};
-use bootty_agents::{
-    AgentIntegration, IntegrationStatus, agent_integrations, install_integration,
-    integration_status, uninstall_integration,
 };
 use bootty_config::config::{
     ConfigDocument, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
@@ -43,7 +39,6 @@ pub struct SettingsRuntime {
     catalog: Mutex<NativeSettingsCatalog>,
     catalog_generation: AtomicU64,
     published_catalog_generation: AtomicU64,
-    integration_lock: Arc<Mutex<()>>,
 }
 
 impl Default for SettingsRuntime {
@@ -58,7 +53,6 @@ impl Default for SettingsRuntime {
             catalog: Mutex::new(NativeSettingsCatalog::default()),
             catalog_generation: AtomicU64::new(0),
             published_catalog_generation: AtomicU64::new(0),
-            integration_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -227,62 +221,20 @@ impl SettingsRuntime {
 
     fn request_integration(
         &self,
-        config_path: PathBuf,
+        _config_path: PathBuf,
         identity: String,
-        module: String,
-        id: String,
-        install: bool,
+        _module: String,
+        _id: String,
+        _install: bool,
         repaint: &RepaintHandle,
     ) {
         let outcome_sender = self.remote_results_tx.clone();
-        let catalog_sender = self.catalog_results_tx.clone();
-        let integration_lock = Arc::clone(&self.integration_lock);
-        let generation = self
-            .catalog_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
         let repaint = Arc::clone(repaint);
         std::thread::spawn(move || {
-            let _guard = integration_lock.lock().ok();
-            let config_dir = config_path
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            let integration_dir = config_dir.join("integrations");
-            let home = bootty_git::home_dir();
-            let declaration = agent_integrations(&integration_dir)
-                .into_iter()
-                .find(|integration| {
-                    integration.provider.module() == identity
-                        && integration.declaration.module == module
-                        && integration.declaration.id == id
-                })
-                .map(|integration| integration.declaration);
-            let result = declaration.map_or_else(
-                || {
-                    Err(format!(
-                        "no native integration `{id}` declared by `{module}`"
-                    ))
-                },
-                |declaration| {
-                    if install {
-                        install_integration(&integration_dir, home.as_deref(), &declaration)
-                    } else {
-                        uninstall_integration(&integration_dir, home.as_deref(), &declaration)
-                    }
-                },
-            );
-            let outcome = SettingsOutcome::Module(match result {
-                Ok(()) => ModuleOutcome::IntegrationUpdated { identity },
-                Err(message) => ModuleOutcome::Failed {
-                    identity: Some(identity),
-                    message,
-                },
-            });
-            let _ = outcome_sender.send_blocking(outcome);
-            let _ = catalog_sender.send_blocking(CatalogResult {
-                generation,
-                catalog: load_native_settings_catalog(&config_path),
-            });
+            let _ = outcome_sender.send_blocking(SettingsOutcome::Module(ModuleOutcome::Failed {
+                identity: Some(identity),
+                message: "Agents use native terminals. Legacy integration files are preserved and are not installed or executed.".to_owned(),
+            }));
             repaint();
         });
     }
@@ -338,42 +290,8 @@ fn commit_document(
     }
 }
 
-fn load_native_settings_catalog(config_path: &Path) -> NativeSettingsCatalog {
-    let config_dir = config_path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let integration_rows = native_integration_rows(&config_dir);
-    NativeSettingsCatalog { integration_rows }
-}
-
-fn native_integration_rows(config_dir: &Path) -> Vec<ModuleIntegrationsSnapshot> {
-    let integration_dir = config_dir.join("integrations");
-    let home = bootty_git::home_dir();
-    agent_integrations(&integration_dir)
-        .into_iter()
-        .map(|integration| {
-            let AgentIntegration {
-                provider,
-                declaration,
-            } = integration;
-            let status = match integration_status(&integration_dir, home.as_deref(), &declaration) {
-                IntegrationStatus::Missing => ModuleIntegrationStatus::Missing,
-                IntegrationStatus::Partial => ModuleIntegrationStatus::Partial,
-                IntegrationStatus::Installed => ModuleIntegrationStatus::Installed,
-            };
-            ModuleIntegrationsSnapshot {
-                identity: provider.module().to_owned(),
-                error: None,
-                integrations: vec![ModuleIntegrationSnapshot {
-                    module: declaration.module,
-                    id: declaration.id,
-                    title: declaration.title,
-                    summary: declaration.summary,
-                    status,
-                }],
-            }
-        })
-        .collect()
+fn load_native_settings_catalog(_config_path: &Path) -> NativeSettingsCatalog {
+    NativeSettingsCatalog::default()
 }
 
 fn remote_config(profile: &RemoteProfile) -> Result<SshProfileConfig, String> {

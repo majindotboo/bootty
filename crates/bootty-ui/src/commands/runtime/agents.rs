@@ -10,8 +10,8 @@ use crate::{
 };
 use bootty_agents::{AgentCommandExecutor, AgentInvocation, AgentPaneResolver, AgentService};
 use bootty_control::{
-    AppCommandSendError, AppCommandSender, Caller, CommandCancellation, CommandInvocation,
-    CommandOutcome, ResourceKind,
+    AppCommandSendError, AppCommandSender, CommandCancellation, CommandInvocation, CommandOutcome,
+    CommandTarget, ResourceKind,
 };
 use bootty_mux::{
     executor,
@@ -29,6 +29,7 @@ use std::{
 #[derive(Clone)]
 pub(super) struct AppCommandAgentExecutor {
     pub sender: AppCommandSender,
+    pub creation_receipt: Option<mpsc::Sender<CommandTarget>>,
 }
 
 impl AgentCommandExecutor for AppCommandAgentExecutor {
@@ -39,24 +40,9 @@ impl AgentCommandExecutor for AppCommandAgentExecutor {
         cancellation: CommandCancellation,
     ) -> CommandOutcome {
         let nested_cancellation = CommandCancellation::new();
-        let receiver = match self.sender.for_caller(Caller::Internal).submit(
-            invocation,
-            deadline,
-            nested_cancellation.clone(),
-        ) {
+        let receiver = match self.queue_command(invocation, deadline, nested_cancellation.clone()) {
             Ok(receiver) => receiver,
-            Err(AppCommandSendError::Overloaded) => {
-                return CommandOutcome::Failed {
-                    code: "overloaded".to_owned(),
-                    message: "application command queue is overloaded".to_owned(),
-                };
-            }
-            Err(AppCommandSendError::Shutdown) => {
-                return CommandOutcome::Failed {
-                    code: "shutdown".to_owned(),
-                    message: "application command channel shut down".to_owned(),
-                };
-            }
+            Err(outcome) => return outcome,
         };
         loop {
             if cancellation.is_cancelled() {
@@ -79,6 +65,63 @@ impl AgentCommandExecutor for AppCommandAgentExecutor {
                 }
             }
         }
+    }
+
+    fn execute_pending(
+        &self,
+        invocation: CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+    ) -> CommandOutcome {
+        let receiver = match self.queue_command(invocation, deadline, cancellation.clone()) {
+            Ok(receiver) => receiver,
+            Err(outcome) => return outcome,
+        };
+        loop {
+            if cancellation.is_cancelled() {
+                return CommandOutcome::cancelled();
+            }
+            if Instant::now() >= deadline && cancellation.cancel() {
+                return CommandOutcome::deadline_exceeded();
+            }
+            // Once the owner accepts creation, retain its observed IDs beyond the pending deadline.
+            match receiver.recv_timeout(Duration::from_millis(5)) {
+                Ok(outcome) => return outcome,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return CommandOutcome::Failed {
+                        code: "shutdown".to_owned(),
+                        message: "application command response channel closed".to_owned(),
+                    };
+                }
+            }
+        }
+    }
+}
+
+impl AppCommandAgentExecutor {
+    fn queue_command(
+        &self,
+        invocation: CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+    ) -> Result<mpsc::Receiver<CommandOutcome>, CommandOutcome> {
+        let sender = self.sender.for_caller(invocation.caller);
+        let submitted = if let Some(receipt) = &self.creation_receipt {
+            sender.submit_observed_creation(invocation, deadline, cancellation, receipt.clone())
+        } else {
+            sender.submit(invocation, deadline, cancellation)
+        };
+        submitted.map_err(|error| match error {
+            AppCommandSendError::Overloaded => CommandOutcome::Failed {
+                code: "overloaded".to_owned(),
+                message: "application command queue is overloaded".to_owned(),
+            },
+            AppCommandSendError::Shutdown => CommandOutcome::Failed {
+                code: "shutdown".to_owned(),
+                message: "application command channel shut down".to_owned(),
+            },
+        })
     }
 }
 
@@ -253,7 +296,10 @@ impl AppState {
         CommandDispatch::Pending(PendingCommandResult::Outcome(result_receiver))
     }
 
-    fn agent_launch_context(&self, exact: &ExactMuxTarget) -> bootty_agents::AgentLaunchContext {
+    pub(super) fn agent_launch_context(
+        &self,
+        exact: &ExactMuxTarget,
+    ) -> bootty_agents::AgentLaunchContext {
         let scope = exact.scope();
         let (session, window, pane) = exact.ids();
         let mut context = bootty_agents::AgentLaunchContext {
@@ -273,7 +319,14 @@ impl AppState {
         } else {
             bootty_agents::LaunchShell::Posix
         };
-        context.cwd = agent_working_directory(binding.mux().all_sessions(), session, window, pane);
+        context.cwd = if matches!(exact, ExactMuxTarget::Binding(_)) {
+            binding
+                .mux()
+                .selected_session_anchor()
+                .and_then(|anchor| anchor.cwd.clone())
+        } else {
+            agent_working_directory(binding.mux().all_sessions(), session, window, pane)
+        };
         context
     }
 
@@ -298,7 +351,7 @@ impl AppState {
         };
         if action != AgentWorkspaceAction::List && matches!(outcome, CommandOutcome::Success { .. })
         {
-            self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal);
+            self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal, effects);
             effects.push(AppEffect::FocusTerminal);
         }
         CommandDispatch::Complete(outcome)
@@ -354,10 +407,13 @@ fn agent_working_directory(
     let session = sessions
         .iter()
         .find(|candidate| Some(candidate.id.as_str()) == session)?;
+    let Some(window) = window else {
+        return session.anchor.cwd.clone();
+    };
     let window = session
         .windows
         .iter()
-        .find(|candidate| Some(candidate.id.as_str()) == window)?;
+        .find(|candidate| candidate.id == window)?;
     let anchor = window
         .panes
         .iter()

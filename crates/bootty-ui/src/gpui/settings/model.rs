@@ -12,10 +12,14 @@ pub enum SettingsCategory {
     #[default]
     General,
     Appearance,
+    Theme,
     Keymap,
     WindowAndLayout,
     Panels,
     Terminal,
+    Browser,
+    Permissions,
+    Providers,
     Remotes,
     Advanced,
 }
@@ -27,10 +31,14 @@ impl SettingsCategory {
         match self {
             Self::General => "general",
             Self::Appearance => "appearance",
+            Self::Theme => "theme",
             Self::Keymap => "keymap",
             Self::WindowAndLayout => "window-and-layout",
             Self::Panels => "panels",
             Self::Terminal => "terminal",
+            Self::Browser => "browser",
+            Self::Permissions => "permissions",
+            Self::Providers => "providers",
             Self::Remotes => "remotes",
             Self::Advanced => "advanced",
         }
@@ -40,10 +48,14 @@ impl SettingsCategory {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
-            Self::Keymap => "Keymap",
+            Self::Theme => "Theme",
+            Self::Keymap => "Keyboard",
             Self::WindowAndLayout => "Window & Layout",
             Self::Panels => "Panels",
             Self::Terminal => "Terminal",
+            Self::Browser => "Browser",
+            Self::Permissions => "Permissions",
+            Self::Providers => "Providers",
             Self::Remotes => "Remotes",
             Self::Advanced => "Advanced",
         }
@@ -86,6 +98,28 @@ pub enum SettingsPageItem {
         parent: SettingsRow,
         children: Vec<SettingsRow>,
     },
+}
+
+/// Provider cards double as navigation sections without adding a second visible heading.
+pub(super) fn provider_kind_for_settings_row(
+    row: &SettingsRow,
+) -> Option<bootty_agents::AgentKind> {
+    let SettingsRow::Value {
+        id,
+        control: SettingsControl::Toggle,
+        ..
+    } = row
+    else {
+        return None;
+    };
+    let provider = id.strip_prefix("agents.")?.strip_suffix(".enabled")?;
+    bootty_agents::AgentKind::ALL
+        .into_iter()
+        .find(|kind| kind.to_string() == provider)
+}
+
+pub(super) fn provider_navigation_id(provider: bootty_agents::AgentKind) -> String {
+    format!("providers:{provider}")
 }
 
 /// One settings row. Custom editors project into the same small vocabulary as schema rows.
@@ -450,4 +484,126 @@ pub enum SettingsIntent {
     ReplaceFontFeatures(Vec<FontFeatureDraft>),
     Module(ModuleSourceIntent),
     TestRemote(RemoteTestIntent),
+}
+
+/// The part of the workspace whose colors are being edited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeColorGroup {
+    #[default]
+    Terminal,
+    Selection,
+    Cursor,
+    Palette,
+    Window,
+    Sidebar,
+    Graphics,
+}
+
+impl ThemeColorGroup {
+    pub const ALL: [Self; 7] = [
+        Self::Terminal,
+        Self::Selection,
+        Self::Cursor,
+        Self::Palette,
+        Self::Window,
+        Self::Sidebar,
+        Self::Graphics,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "Terminal",
+            Self::Selection => "Selection",
+            Self::Cursor => "Cursor and pointer",
+            Self::Palette => "ANSI palette",
+            Self::Window => "Window",
+            Self::Sidebar => "Sidebars",
+            Self::Graphics => "Terminal graphics",
+        }
+    }
+
+    /// Classify the original setting path; presentation never rewrites persistence identity.
+    #[must_use]
+    pub fn for_setting(id: &str) -> Option<Self> {
+        if matches!(
+            id,
+            "sidebar.background"
+                | "sidebar.foreground"
+                | "sidebar.hover"
+                | "sidebar.selected"
+                | "sidebar.border"
+        ) {
+            return Some(Self::Sidebar);
+        }
+        if matches!(
+            id,
+            "chrome.status-background"
+                | "chrome.pane-divider-color"
+                | "chrome.pane-focus-border-color"
+        ) {
+            return Some(Self::Window);
+        }
+        let leaf = id.rsplit('.').next()?;
+        match leaf {
+            "background" | "foreground" => Some(Self::Terminal),
+            "selection-background"
+            | "selection-foreground"
+            | "highlight-background"
+            | "highlight-foreground" => Some(Self::Selection),
+            "cursor" | "cursor-text" | "pointer-foreground" | "pointer-background" => {
+                Some(Self::Cursor)
+            }
+            "palette" | "palette-generate" | "palette-harmonious" => Some(Self::Palette),
+            "tektronix-background" | "tektronix-foreground" | "tektronix-cursor" => {
+                Some(Self::Graphics)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Project draft terminal colors without loading files or publishing application configuration.
+/// Missing overrides restore the selected theme's resolved colors.
+#[must_use]
+pub fn theme_colors_from_document(
+    document: &bootty_config::config::ConfigDocument,
+    prefix: &str,
+    base: &bootty_config::config::ColorConfig,
+) -> bootty_config::config::ColorConfig {
+    use bootty_config::color::Color;
+    let mut colors = base.clone();
+    for (leaf, slot) in [
+        ("background", &mut colors.background),
+        ("foreground", &mut colors.foreground),
+        ("cursor", &mut colors.cursor),
+        ("cursor-text", &mut colors.cursor_text),
+        ("pointer-foreground", &mut colors.pointer_foreground),
+        ("pointer-background", &mut colors.pointer_background),
+        ("selection-background", &mut colors.selection_background),
+        ("selection-foreground", &mut colors.selection_foreground),
+        ("highlight-background", &mut colors.highlight_background),
+        ("highlight-foreground", &mut colors.highlight_foreground),
+        ("tektronix-background", &mut colors.tektronix_background),
+        ("tektronix-foreground", &mut colors.tektronix_foreground),
+        ("tektronix-cursor", &mut colors.tektronix_cursor),
+    ] {
+        let mut path: Vec<_> = prefix.split('.').collect();
+        path.push(leaf);
+        if let Some(value) = document
+            .str_at(&path)
+            .and_then(|value| Color::from_hex(value).ok())
+        {
+            *slot = Some(value);
+        }
+    }
+    let mut path: Vec<_> = prefix.split('.').collect();
+    path.push("palette");
+    if let Some(palette) = document.string_array(&path) {
+        colors.palette = palette
+            .iter()
+            .filter_map(|value| Color::from_hex(value).ok())
+            .collect();
+    }
+    colors
 }

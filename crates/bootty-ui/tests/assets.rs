@@ -38,8 +38,26 @@ fn bundled_font_files_and_licenses_are_embedded() {
 }
 
 #[rstest]
-fn component_controls_load_their_real_svg_assets() {
-    let path = IconName::ChevronDown.path();
+#[case(IconName::ChevronDown.path())]
+#[case(gpui_kit::assets::IconName::ListFilter.path())]
+#[case(gpui_kit::assets::IconName::FolderPlus.path())]
+#[case(gpui_kit::assets::IconName::SquarePen.path())]
+#[case(gpui_kit::assets::IconName::NotebookText.path())]
+#[case(gpui_kit::assets::IconName::KeyRound.path())]
+#[case(gpui_kit::assets::IconName::MousePointerClick.path())]
+#[case(gpui_kit::assets::IconName::Archive.path())]
+#[case(gpui_kit::assets::IconName::ArchiveRestore.path())]
+#[case(gpui_kit::assets::IconName::Camera.path())]
+#[case(gpui_kit::assets::IconName::SquareCode.path())]
+#[case(gpui_kit::assets::IconName::Wrench.path())]
+#[case(gpui_kit::assets::IconName::Clock.path())]
+#[case(gpui_kit::assets::IconName::FolderInput.path())]
+#[case(gpui_kit::assets::IconName::List.path())]
+#[case(gpui_kit::assets::IconName::Pin.path())]
+#[case(gpui_kit::assets::IconName::PinOff.path())]
+#[case(gpui_kit::assets::IconName::Trash.path())]
+#[case(gpui_kit::assets::IconName::X.path())]
+fn component_controls_load_their_real_svg_assets(#[case] path: gpui_kit::SharedString) {
     let bytes = BoottyAssets
         .load(&path)
         .expect("load component control icon")
@@ -68,4 +86,20 @@ fn font_directory_listing_matches_asset_source_prefixes() {
 
     assert_eq!(lilex.len(), 5);
     assert_eq!(plex.len(), 5);
+}
+
+#[rstest]
+#[case("icons/pi.svg")]
+#[case("icons/pi-LICENSE")]
+fn pi_provider_artwork_is_embedded(#[case] path: &str) {
+    let assets = BoottyAssets;
+    let bytes = assets.load(path).unwrap().expect("embedded Pi artwork");
+    assert!(!bytes.is_empty());
+    assert!(
+        assets
+            .list("icons/")
+            .unwrap()
+            .iter()
+            .any(|asset| asset == path)
+    );
 }
