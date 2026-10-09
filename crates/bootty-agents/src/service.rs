@@ -648,6 +648,7 @@ impl AgentService {
             cwd,
             arguments,
             ephemeral: saved.is_some_and(|launch| launch.ephemeral),
+            account_directory: saved.and_then(|launch| launch.account_directory.clone()),
         };
         if let Err(error) = launch.validate() {
             return Err(failed("invalid_arguments", error));
