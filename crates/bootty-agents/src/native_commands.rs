@@ -27,7 +27,7 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ("catalog", catalog_arguments(None), ResourceKind::Binding),
         (
             "catalog-info",
-            catalog_arguments(None),
+            catalog_arguments(Some("refresh")),
             ResourceKind::Binding,
         ),
         (
@@ -111,6 +111,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         ("resume", vec!["id", "generation"], ResourceKind::Session),
         ("models", vec!["id", "generation"], ResourceKind::Session),
+        (
+            "models-info",
+            vec!["id", "generation"],
+            ResourceKind::Session,
+        ),
         ("provider", vec!["id", "generation"], ResourceKind::Session),
         ("profiles", vec!["id", "generation"], ResourceKind::Session),
         ("status", vec!["id", "generation"], ResourceKind::Session),
@@ -177,6 +182,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                 | "status"
                 | "activity"
                 | "models"
+                | "models-info"
                 | "provider"
                 | "profiles"
                 | "catalog"
@@ -201,6 +207,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                     required: !(matches!(
                         name,
                         "expected_account"
+                            | "refresh"
                             | "expected_title"
                             | "annotations"
                             | "attachments"

@@ -487,6 +487,126 @@ fn quoting_an_earlier_page_keeps_the_exact_live_conversation() {
 }
 
 #[rstest]
+fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_project() {
+    use bootty_agents::{NativeModelOption, NativePermissionMode, NativeProviderCatalog};
+
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("catalog-cache.json")).unwrap();
+    let captured = config(root.path()).unwrap();
+    let catalog = NativeProviderCatalog {
+        models: vec![NativeModelOption {
+            id: "model-a".to_owned(),
+            display_name: "Model A".to_owned(),
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            is_default: true,
+            is_legacy: false,
+            is_favorite: false,
+        }],
+        permissions: Some(NativePermissionMode::FullAccess),
+    };
+    service.cache_provider_catalog(&captured, &catalog).unwrap();
+    let mut preferences = bootty_config::config::AgentProviderConfig::default();
+    preferences.program.clone_from(&captured.program);
+    let mut invocation = bootty_control::CommandInvocation::new(
+        "agents.native.catalog-info",
+        vec![
+            "codex".to_owned(),
+            captured.cwd.to_str().unwrap().to_owned(),
+            captured.program.clone(),
+            "[]".to_owned(),
+            String::new(),
+            String::new(),
+        ],
+        bootty_control::Caller::Internal,
+    );
+    invocation.target = Some(bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Binding,
+        handle: "binding".to_owned(),
+        generation: 4,
+    });
+    service
+        .cache_provider_catalog_for_invocation(&captured, &invocation, &preferences, None, &catalog)
+        .unwrap();
+    assert_eq!(
+        service
+            .cached_provider_catalog(&captured)
+            .unwrap()
+            .permissions,
+        Some(NativePermissionMode::FullAccess)
+    );
+    let mut after_restart = invocation.clone();
+    after_restart.target = Some(bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Binding,
+        handle: "new-process-binding".to_owned(),
+        generation: 99,
+    });
+    assert_eq!(
+        service.cached_provider_catalog_for_invocation(&after_restart, &preferences, None),
+        Some(catalog.clone())
+    );
+    let mut refreshed = invocation.clone();
+    refreshed.arguments.push("refresh".to_owned());
+    assert_eq!(
+        service.cached_provider_catalog_for_invocation(&refreshed, &preferences, None),
+        Some(catalog.clone())
+    );
+    let mut changed_preferences = preferences.clone();
+    changed_preferences.default_model = "another-account-model".to_owned();
+    assert!(
+        service
+            .cached_provider_catalog_for_invocation(&invocation, &changed_preferences, None)
+            .is_none()
+    );
+    let mut changed_directory = invocation;
+    changed_directory.arguments[1] = "/another-project".to_owned();
+    assert!(
+        service
+            .cached_provider_catalog_for_invocation(&changed_directory, &preferences, None)
+            .is_none()
+    );
+
+    let mut changed_account = captured.clone();
+    changed_account.account_directory = Some(
+        root.path()
+            .join("another-account")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert!(service.cached_provider_catalog(&changed_account).is_none());
+    let mut changed_project = captured.clone();
+    changed_project.cwd = root.path().join("another-project");
+    assert!(service.cached_provider_catalog(&changed_project).is_none());
+    let mut changed_policy = captured.clone();
+    changed_policy.permissions = NativePermissionMode::FullAccess;
+    assert!(service.cached_provider_catalog(&changed_policy).is_none());
+
+    let mut refreshed_models = catalog.models.clone();
+    refreshed_models[0].is_favorite = true;
+    service
+        .cache_model_catalog(&captured, &refreshed_models)
+        .unwrap();
+    let retained = service.cached_provider_catalog(&captured).unwrap();
+    assert_eq!(retained.permissions, catalog.permissions);
+    assert!(retained.models[0].is_favorite);
+    service.shutdown().unwrap();
+    drop(service);
+
+    let stored = fs::read_to_string(root.path().join("catalog-cache.json")).unwrap();
+    assert!(!stored.contains(&captured.account_directory.clone().unwrap()));
+    let reopened = NativeAgentService::open(root.path().join("catalog-cache.json")).unwrap();
+    let restored = reopened.cached_provider_catalog(&captured).unwrap();
+    assert_eq!(restored.permissions, catalog.permissions);
+    assert_eq!(restored.models[0].id, "model-a");
+    assert!(restored.models[0].is_favorite);
+    assert_eq!(
+        reopened.cached_provider_catalog_for_invocation(&after_restart, &preferences, None),
+        Some(retained)
+    );
+    reopened.shutdown().unwrap();
+}
+
+#[rstest]
 #[case::completed("tool-completed", NativeToolStatus::Completed)]
 #[case::failed("tool-failed", NativeToolStatus::Failed)]
 #[case::declined("tool-declined", NativeToolStatus::Declined)]

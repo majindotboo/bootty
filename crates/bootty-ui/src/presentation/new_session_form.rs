@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::{path::PathBuf, sync::Arc};
 
-use bootty_config::config::{AgentProvidersConfig, RemoteConfig};
+use bootty_config::config::{AgentProviderConfig, AgentProvidersConfig, RemoteConfig};
 use bootty_control::{Caller, CommandInvocation, CommandTarget};
 use bootty_mux::controller::SpaceId;
 
@@ -96,6 +96,7 @@ pub struct NewSessionForm {
     pub model_error: Option<String>,
     pub models_loading: bool,
     pub provider_permissions: Option<bootty_agents::NativePermissionMode>,
+    provider_catalogs: HashMap<String, Result<bootty_agents::NativeProviderCatalog, String>>,
     generated_names: Option<bootty_agents::GeneratedSessionNames>,
     project_defaults: Vec<bootty_mux::repository::RegisteredProject>,
 }
@@ -118,6 +119,7 @@ impl NewSessionForm {
             model_error: None,
             models_loading: false,
             provider_permissions: None,
+            provider_catalogs: HashMap::new(),
             generated_names: None,
             project_defaults: Vec::new(),
         };
@@ -136,6 +138,10 @@ impl NewSessionForm {
         } else {
             form.draft.isolated = false;
         }
+        if form.draft.provider == "pi" {
+            form.draft.permissions = bootty_agents::NativePermissionMode::ProviderDefault;
+        }
+        form.hydrate_model_catalog();
         form
     }
 
@@ -173,6 +179,7 @@ impl NewSessionForm {
         self.worktree_parent = None;
         self.error = None;
         self.apply_project_defaults();
+        self.hydrate_model_catalog();
     }
 
     pub fn set_project_defaults(
@@ -181,6 +188,7 @@ impl NewSessionForm {
     ) {
         self.project_defaults = projects;
         self.apply_project_defaults();
+        self.hydrate_model_catalog();
     }
 
     fn project_settings(&self) -> Option<&bootty_mux::repository::ProjectSettings> {
@@ -248,6 +256,7 @@ impl NewSessionForm {
                 if !destination.worktrees {
                     self.draft.isolated = false;
                 }
+                self.hydrate_model_catalog();
                 return true;
             }
             "mode" => {
@@ -302,6 +311,9 @@ impl NewSessionForm {
             "folder" => value.clone_into(&mut self.draft.folder),
             "start-ref" => value.clone_into(&mut self.draft.start_ref),
             _ => {}
+        }
+        if matches!(field, "provider" | "profile") {
+            self.hydrate_model_catalog();
         }
         false
     }
@@ -545,6 +557,7 @@ impl NewSessionForm {
             );
         }
         if self.draft.mode == NewSessionMode::Agent
+            && self.draft.provider != "pi"
             && self.draft.permissions != bootty_agents::NativePermissionMode::ProviderDefault
         {
             invocation.arguments.resize(14, String::new());
@@ -557,13 +570,150 @@ impl NewSessionForm {
 
     #[must_use]
     pub fn model_catalog_invocation(&self) -> Option<CommandInvocation> {
-        if self.draft.mode != NewSessionMode::Agent {
+        self.model_catalog_invocation_for(&self.draft.provider)
+    }
+
+    #[must_use]
+    pub fn model_catalog_invocation_for(&self, provider_id: &str) -> Option<CommandInvocation> {
+        if self.draft.mode != NewSessionMode::Agent || self.draft.cwd.is_empty() {
             return None;
         }
-        let mut invocation = self.invocation(&self.draft.cwd).ok()?;
-        "agents.native.catalog-info".clone_into(&mut invocation.command);
-        invocation.arguments.truncate(6);
+        let destination = self.destination()?;
+        let provider = self
+            .providers
+            .provider(provider_id)
+            .filter(|provider| provider.enabled)?;
+        let selected = self
+            .draft
+            .profiles
+            .get(provider_id)
+            .map_or(provider.selected.as_str(), String::as_str);
+        let profile = if selected.is_empty() {
+            None
+        } else {
+            Some(provider.profiles.get(selected)?)
+        };
+        let arguments = profile.map_or_else(Vec::new, |profile| profile.arguments.clone());
+        let mut invocation = CommandInvocation::new(
+            "agents.native.catalog-info",
+            vec![
+                provider_id.to_owned(),
+                self.draft.cwd.clone(),
+                provider.program.clone(),
+                serde_json::to_string(&arguments).ok()?,
+                String::new(),
+                selected.to_owned(),
+            ],
+            Caller::Internal,
+        );
+        invocation.target = Some(destination.target.clone());
         Some(invocation)
+    }
+
+    /// Current provider first, followed by every enabled native provider for this exact target.
+    #[must_use]
+    pub fn model_catalog_invocations(&self) -> Vec<CommandInvocation> {
+        let mut providers = bootty_agents::AgentKind::ALL
+            .into_iter()
+            .filter(|kind| {
+                bootty_agents::NativeSessionConfig::supports_provider(*kind)
+                    && self
+                        .providers
+                        .provider(&kind.to_string())
+                        .is_some_and(|provider| provider.enabled)
+            })
+            .map(|kind| kind.to_string())
+            .collect::<Vec<_>>();
+        providers.sort_by_key(|provider| provider != &self.draft.provider);
+        providers
+            .iter()
+            .filter_map(|provider| self.model_catalog_invocation_for(provider))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn catalog_provider_preferences(&self, provider_id: &str) -> Option<&AgentProviderConfig> {
+        self.providers.provider(provider_id)
+    }
+
+    #[must_use]
+    pub fn cached_provider_catalog(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Option<Result<bootty_agents::NativeProviderCatalog, String>> {
+        self.provider_catalogs
+            .get(&catalog_invocation_key(invocation)?)
+            .cloned()
+    }
+
+    pub fn set_provider_catalog_for(
+        &mut self,
+        invocation: &CommandInvocation,
+        catalog: Result<bootty_agents::NativeProviderCatalog, String>,
+    ) {
+        let key = catalog_invocation_key(invocation);
+        if let Err(error) = &catalog
+            && matches!(self.cached_provider_catalog(invocation), Some(Ok(_)))
+        {
+            if self
+                .model_catalog_invocation()
+                .as_ref()
+                .and_then(catalog_invocation_key)
+                == key
+            {
+                self.model_error = Some(error.clone());
+            }
+            return;
+        }
+        if let Some(key) = &key {
+            self.provider_catalogs.insert(key.clone(), catalog.clone());
+        }
+        let current_key = self
+            .model_catalog_invocation()
+            .as_ref()
+            .and_then(catalog_invocation_key);
+        if current_key == key {
+            self.apply_provider_catalog(catalog);
+        }
+    }
+
+    pub fn set_favorite_models_for(
+        &mut self,
+        invocation: &CommandInvocation,
+        models: Vec<bootty_agents::NativeModelOption>,
+    ) {
+        let Some(key) = catalog_invocation_key(invocation) else {
+            return;
+        };
+        if let Some(Ok(catalog)) = self.provider_catalogs.get_mut(&key) {
+            catalog.models = models;
+            let catalog = catalog.clone();
+            let current_key = self
+                .model_catalog_invocation()
+                .as_ref()
+                .and_then(catalog_invocation_key);
+            if current_key.as_deref() == Some(key.as_str()) {
+                self.apply_provider_catalog(Ok(catalog));
+            }
+        }
+    }
+
+    pub fn hydrate_model_catalog(&mut self) {
+        let Some(invocation) = self.model_catalog_invocation() else {
+            self.model_options.clear();
+            self.provider_permissions = None;
+            self.model_error = None;
+            self.models_loading = false;
+            return;
+        };
+        if let Some(catalog) = self.cached_provider_catalog(&invocation) {
+            self.apply_provider_catalog(catalog);
+        } else {
+            self.model_options.clear();
+            self.provider_permissions = None;
+            self.model_error = None;
+            self.models_loading = true;
+        }
     }
 
     const fn reset_provider_permissions(&mut self) {
@@ -582,6 +732,17 @@ impl NewSessionForm {
     }
 
     pub fn set_provider_catalog(
+        &mut self,
+        catalog: Result<bootty_agents::NativeProviderCatalog, String>,
+    ) {
+        if let Some(invocation) = self.model_catalog_invocation() {
+            self.set_provider_catalog_for(&invocation, catalog);
+        } else {
+            self.apply_provider_catalog(catalog);
+        }
+    }
+
+    fn apply_provider_catalog(
         &mut self,
         catalog: Result<bootty_agents::NativeProviderCatalog, String>,
     ) {
@@ -1016,10 +1177,8 @@ impl NewSessionForm {
                 ));
             }
         }
-        if self.draft.mode == NewSessionMode::Agent {
-            let provider = if self.draft.provider == "pi" {
-                bootty_agents::AgentKind::Pi
-            } else if self.draft.provider == "claude" {
+        if self.draft.mode == NewSessionMode::Agent && self.draft.provider != "pi" {
+            let provider = if self.draft.provider == "claude" {
                 bootty_agents::AgentKind::Claude
             } else {
                 bootty_agents::AgentKind::Codex
@@ -1120,6 +1279,19 @@ fn directory_name(path: &str) -> &str {
 }
 fn profile_label(id: &str, name: &str) -> String {
     format!("{name} ({id})")
+}
+
+fn catalog_invocation_key(invocation: &CommandInvocation) -> Option<String> {
+    let mut identity = invocation.clone();
+    if identity.command == "agents.native.catalog-info"
+        && identity
+            .arguments
+            .get(6)
+            .is_some_and(|argument| argument == "refresh")
+    {
+        identity.arguments.truncate(6);
+    }
+    serde_json::to_string(&identity).ok()
 }
 
 fn model_label(

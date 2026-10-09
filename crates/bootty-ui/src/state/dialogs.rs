@@ -913,16 +913,19 @@ impl AppState {
     fn request_new_session_catalog(&mut self, invocation: bootty_control::CommandInvocation) {
         let now = std::time::Instant::now();
         let result = self.app_command_sender(Caller::Internal).submit(
-            invocation,
+            invocation.clone(),
             now.checked_add(std::time::Duration::from_secs(30))
                 .unwrap_or(now),
             bootty_control::CommandCancellation::new(),
         );
         if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
             match result {
-                Ok(receiver) => dialog.catalog_started(receiver),
+                Ok(receiver) => dialog.catalog_started(invocation, receiver),
                 Err(error) => {
-                    dialog.failed(format!("Provider catalog unavailable: {error:?}"));
+                    dialog.catalog_failed(
+                        &invocation,
+                        format!("Provider catalog unavailable: {error:?}"),
+                    );
                 }
             }
         }
@@ -1117,6 +1120,7 @@ impl AppState {
                 .flat_map(|space| self.workspace.registered_projects(space.id).cloned())
                 .collect(),
         );
+        self.seed_cached_provider_catalogs(&mut form);
         let dialog = if native_agent {
             let dialog = NewSessionDialog::open_native_form(form, &self.repaint);
             if let Some(request) = request {
@@ -1132,6 +1136,32 @@ impl AppState {
             )
         };
         self.show_overlay(ModalDialog::NewSession(Box::new(dialog)));
+    }
+    fn seed_cached_provider_catalogs(
+        &self,
+        form: &mut crate::presentation::new_session_form::NewSessionForm,
+    ) {
+        let Some(service) = self.native_agent_service() else {
+            return;
+        };
+        let remote = form
+            .destination()
+            .and_then(|destination| destination.remote.clone());
+        for invocation in form.model_catalog_invocations() {
+            let Some(provider_id) = invocation.arguments.first() else {
+                continue;
+            };
+            let Some(preferences) = form.catalog_provider_preferences(provider_id).cloned() else {
+                continue;
+            };
+            if let Some(catalog) = service.cached_provider_catalog_for_invocation(
+                &invocation,
+                &preferences,
+                remote.as_ref(),
+            ) {
+                form.set_provider_catalog_for(&invocation, Ok(catalog));
+            }
+        }
     }
     fn session_creation_draft(
         &self,

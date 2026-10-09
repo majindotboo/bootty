@@ -168,6 +168,7 @@ pub struct NativeAgentSessionView {
     attachment_previews: BTreeMap<String, Arc<gpui_kit::RenderImage>>,
     attachment_preview_attempts: BTreeSet<String>,
     models: Option<Vec<bootty_agents::NativeModelOption>>,
+    provider_permissions: Option<bootty_agents::NativePermissionMode>,
     model_picker: Option<Entity<models::ModelPickerState>>,
     model_picker_subscription: Option<Subscription>,
     annotations: Vec<Annotation>,
@@ -293,6 +294,7 @@ impl NativeAgentSessionView {
             attachment_previews: BTreeMap::new(),
             attachment_preview_attempts: BTreeSet::new(),
             models: None,
+            provider_permissions: None,
             model_picker: None,
             model_picker_subscription: None,
             annotations: Vec::new(),
@@ -555,6 +557,7 @@ impl NativeAgentSessionView {
             self.annotation_preview = None;
             self.attachment_preview_attempts.clear();
             self.models = None;
+            self.provider_permissions = None;
             self.model_picker = None;
             self.model_picker_subscription = None;
         }
@@ -2154,11 +2157,13 @@ impl NativeAgentSessionView {
             .items_center()
             .gap_2()
             .child(self.render_model_controls(cx))
-            .child(
-                div()
-                    .track_focus(&self.permissions_focus)
-                    .child(self.render_permission_control(cx)),
-            )
+            .when(self.record.config.provider != AgentKind::Pi, |row| {
+                row.child(
+                    div()
+                        .track_focus(&self.permissions_focus)
+                        .child(self.render_permission_control(cx)),
+                )
+            })
             .child(self.render_context_usage(cx))
             .when(
                 !self.provider_enabled() || self.cancellation_requested,

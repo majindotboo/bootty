@@ -931,13 +931,18 @@ and display names. It does not switch profiles or authorize another account.
 `default-model` and `default-effort` prefer advertised selections; empty values resolve
 to the provider's configured model and supported effort. The Settings pickers use
 the same account catalog as the composer. Retained drafts keep their
-explicit selection. `agents.codex.fast-mode` requests Codex's fast service tier;
+explicit selection. Model and permission catalogs persist under the captured
+provider settings, account, remote target and project directory; Bootty stores
+hashed cache identities, and changing that context selects a different entry.
+`agents.codex.fast-mode` requests Codex's fast service tier;
 `agents.claude.fast-mode` enables Claude's fast mode. Pi has no fast-mode setting.
 
 New composers inherit the selected provider account's approval policy. The
 permissions control displays the effective policy reported by the provider;
 unknown policies remain inherited. Choosing an explicit policy overrides that
 default. Switching provider or account returns to that account's policy.
+Pi does not advertise approval modes, so its composer hides the permissions
+control and submits the provider default.
 
 Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
