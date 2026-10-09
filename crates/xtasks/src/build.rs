@@ -31,7 +31,7 @@ pub fn run_with_features(args: &BuildArgs, development: bool) -> Result<()> {
     if development {
         command.args(["--features", "bootty-dev"]);
     }
-    command.args(["-p", "bootty", "--bin", "bootty"]);
+    command.args(["-p", "bootty", "--bins"]);
 
     if !args.static_linkage {
         let rustflags = if cfg!(windows) {

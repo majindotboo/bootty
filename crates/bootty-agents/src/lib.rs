@@ -138,3 +138,4 @@ pub use native_prompt::{
     MAX_NATIVE_PROMPT_TEXT_BYTES, NativeImageReference, NativePrompt, NativePromptAttachments,
     NativePromptImage,
 };
+pub mod voice;

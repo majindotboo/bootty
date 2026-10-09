@@ -13,6 +13,7 @@ pub mod pre_commit;
 mod process;
 pub mod release;
 pub mod signing;
+mod voice_runtime;
 
 pub use cli::run;
 pub(crate) use filesystem::{development_names, workspace_root};

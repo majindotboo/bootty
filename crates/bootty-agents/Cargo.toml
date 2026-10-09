@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 tempfile.workspace = true
 anstyle-parse.workspace = true
 base64.workspace = true
@@ -19,6 +20,9 @@ bootty-write = { path = "../bootty-write" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+ureq.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

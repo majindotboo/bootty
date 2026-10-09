@@ -42,6 +42,11 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
         bail!("expected built binary at {}", binary.display());
     }
     copy_file(&binary, &bundle_root.join("bootty.exe"))?;
+    copy_file(
+        &profile_dir.join("bootty-voice.exe"),
+        &bundle_root.join("bootty-voice.exe"),
+    )?;
+    crate::voice_runtime::bundle(&layout.target_root, &bundle_root)?;
 
     let host_daemon = layout
         .daemon_output_dir

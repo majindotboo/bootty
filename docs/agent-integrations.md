@@ -226,3 +226,16 @@ configuration and custom Lua or Luau files are preserved; custom scripts are
 reported as unsupported and are not executed. Existing ingress wire values
 remain accepted by the legacy library boundary, but primary terminal launch and
 activity do not depend on that ingress.
+
+## Dictation and voice
+
+Both composers use the bundled Pi audio host for microphone capture and playback
+on macOS, Linux and Windows. Dictation uses OpenAI Realtime transcription; voice
+uses the public `/v1/realtime/calls` endpoint with an `ask_agent` function. Voice
+prompts enter the current conversation's ordinary submission path, and only the
+agent's returned result is sent back for speech.
+
+Audio authentication reads `OPENAI_API_KEY`, then an API key in the captured
+Codex or Pi account store. ChatGPT subscription tokens are not API keys. Missing
+credentials stop before opening the microphone. Credentials never enter the GUI,
+command arguments, or error messages. There are no private Codex voice endpoints.

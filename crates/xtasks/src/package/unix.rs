@@ -33,7 +33,7 @@ fn build_application(args: Args, layout: &Layout, zig_path: &Path) -> Result<()>
     command
         .arg("build")
         .args(layout.cargo_profile_args())
-        .args(["-p", "bootty", "--bin", BINARY]);
+        .args(["-p", "bootty", "--bins"]);
     if args.dev {
         command.args(["--features", "bootty-dev"]);
     }
@@ -225,6 +225,11 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
     )?;
     filesystem::copy_executable(host_daemon, &macos.join(DAEMON))?;
     compile_computer_helper(&macos.join(COMPUTER))?;
+    filesystem::copy_executable(
+        &layout.target_root.join(layout.profile).join("bootty-voice"),
+        &macos.join("bootty-voice"),
+    )?;
+    crate::voice_runtime::bundle(&layout.target_root, &macos)?;
     copy_bundled_daemons(layout, &resources.join("daemons"))?;
     if layout.linkage == Linkage::Dynamic {
         copy_dynamic_libraries(&binary, &contents.join("Frameworks"), layout)?;
@@ -248,6 +253,10 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
 }
 
 fn compile_computer_helper(destination: &Path) -> Result<()> {
+    compile_swift_helper("crates/bootty-computer/native/main.swift", destination)
+}
+
+fn compile_swift_helper(source: &str, destination: &Path) -> Result<()> {
     let architecture = match env::consts::ARCH {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",
@@ -257,7 +266,7 @@ fn compile_computer_helper(destination: &Path) -> Result<()> {
         Command::new("xcrun")
             .args(["swiftc", "-O", "-parse-as-library", "-target"])
             .arg(format!("{architecture}-apple-macosx13.0"))
-            .args(["crates/bootty-computer/native/main.swift", "-o"])
+            .args([source, "-o"])
             .arg(destination),
     )
 }
@@ -360,7 +369,7 @@ fn info_plist(layout: &Layout, version: &str) -> String {
   </dict></array>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>A program running in Bootty would like to use your microphone.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Send speech to OpenAI for dictation and voice mode. Programs running in Bootty can also request microphone access.</string>
 </dict>
 </plist>
 "#,
@@ -409,6 +418,13 @@ fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Pa
             .arg(format!("=designated => identifier \"{helper_identifier}\""));
     }
     command::run(helper_sign.arg(macos.join(COMPUTER)))?;
+    for name in ["bootty-voice", "voice-host"] {
+        command::run(
+            Command::new("codesign")
+                .args(["--force", "--sign", &identity])
+                .arg(macos.join(name)),
+        )?;
+    }
     let mut sign = Command::new("codesign");
     sign.args(["--force", "--sign", &identity]);
     // A certificate-backed signature gets codesign's default designated requirement, which
@@ -442,6 +458,11 @@ fn package_linux(layout: &Layout, host_daemon: &Path) -> Result<()> {
         &bin.join(&layout.cli_name),
     )?;
     filesystem::copy_executable(host_daemon, &bin.join(DAEMON))?;
+    filesystem::copy_executable(
+        &layout.target_root.join(layout.profile).join("bootty-voice"),
+        &bin.join("bootty-voice"),
+    )?;
+    crate::voice_runtime::bundle(&layout.target_root, &bin)?;
     copy_bundled_daemons(layout, &root.join("share/bootty/daemons"))?;
     if layout.linkage == Linkage::Dynamic {
         copy_dynamic_libraries(&bin.join(&layout.cli_name), &root.join("lib"), layout)?;
