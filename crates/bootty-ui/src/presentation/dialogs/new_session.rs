@@ -11,6 +11,7 @@ use bootty_git::{
     discover_worktree_picker_entries, toggle_favorite_project_path,
 };
 use bootty_mux::RepaintHandle;
+use std::collections::HashSet;
 use std::path::Path;
 
 pub struct NewSessionDialog {
@@ -22,6 +23,7 @@ pub struct NewSessionDialog {
     launch: Option<PendingCreation>,
     catalog_request: Option<bootty_control::CommandInvocation>,
     catalog_reply: Option<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
+    existing_native_ids: HashSet<String>,
     naming: Option<PendingNames>,
     starting: bool,
     launch_direction: LaunchDirection,
@@ -160,6 +162,7 @@ impl NewSessionDialog {
             launch: None,
             catalog_request: None,
             catalog_reply: None,
+            existing_native_ids: HashSet::new(),
             naming: None,
             starting: false,
             launch_direction: LaunchDirection::Foreground,
@@ -197,7 +200,7 @@ impl NewSessionDialog {
         Self::form_with_worker(form, worker)
     }
 
-    const fn form_with_worker(
+    fn form_with_worker(
         form: crate::presentation::new_session_form::NewSessionForm,
         worker: NewSessionWorker,
     ) -> Self {
@@ -210,6 +213,7 @@ impl NewSessionDialog {
             launch: None,
             catalog_request: None,
             catalog_reply: None,
+            existing_native_ids: HashSet::new(),
             naming: None,
             starting: false,
             launch_direction: LaunchDirection::Foreground,
@@ -288,6 +292,23 @@ impl NewSessionDialog {
         });
     }
 
+    pub(crate) fn set_native_creation_baseline(&mut self, ids: HashSet<String>) {
+        self.existing_native_ids = ids;
+    }
+
+    pub(crate) fn matches_native_creation(
+        &self,
+        record: &bootty_agents::NativeSessionRecord,
+    ) -> bool {
+        self.draft().is_some_and(|draft| {
+            draft.mode == crate::presentation::new_session_form::NewSessionMode::Agent
+                && !self.existing_native_ids.contains(&record.id)
+                && record.config.provider.to_string() == draft.provider
+                && record.task_identity.as_deref() == Some(draft.identity.as_str())
+                && record.binding_id == draft.scope.persistence_value().to_string()
+        })
+    }
+
     /// Leave creation as soon as its persisted conversation owns a real mux pane.
     pub(crate) fn native_placed(
         &mut self,
@@ -297,7 +318,6 @@ impl NewSessionDialog {
         NewSessionPickerEvent,
         std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     )> {
-        let draft = self.draft()?;
         if matches!(
             record.snapshot.status,
             bootty_agents::NativeSessionStatus::Error | bootty_agents::NativeSessionStatus::Stopped
@@ -305,8 +325,7 @@ impl NewSessionDialog {
             .launch
             .as_ref()
             .is_none_or(|launch| launch.kind != CreationCommand::Session)
-            || record.task_identity.as_deref() != Some(draft.identity.as_str())
-            || record.binding_id != draft.scope.persistence_value().to_string()
+            || !self.matches_native_creation(record)
         {
             return None;
         }

@@ -856,20 +856,19 @@ impl AppState {
             }
             _ => None,
         };
-        let outcome = ready!(self.poll_pending_app_command(command, now, effects));
+        let outcome = self.poll_pending_app_command(command, now, effects);
+        // The committed pane is usable before provider association and checkpoint work finishes.
+        // Keep the external command pending, but attach its exact receipt immediately.
+        if let PendingCommandResult::TerminalAgent {
+            observed: Some(target),
+            ..
+        } = &command.result
+            && let Err(error) = self.finish_surface_target(*request_id, target.clone(), effects)
+        {
+            return Poll::Ready(Some(error));
+        }
+        let outcome = ready!(outcome);
         if let Some(outcome) = &outcome {
-            if let PendingCommandResult::TerminalAgent {
-                observed: Some(target),
-                ..
-            } = &command.result
-                && !matches!(outcome, CommandOutcome::Success { .. })
-            {
-                return Poll::Ready(Some(
-                    self.finish_surface_target(*request_id, target.clone(), effects)
-                        .err()
-                        .unwrap_or_else(|| outcome.clone()),
-                ));
-            }
             let receipt = accepted.as_ref().unwrap_or_else(|| {
                 if matches!(outcome, CommandOutcome::Success { .. }) {
                     outcome

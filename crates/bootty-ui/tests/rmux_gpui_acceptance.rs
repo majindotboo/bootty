@@ -55,7 +55,7 @@ struct EmbeddedDaemon {
 
 impl EmbeddedDaemon {
     fn start() -> Result<Self> {
-        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let endpoint = endpoint_path_for(ApplicationIdentity::for_process())?;
         let runtime = Builder::new_multi_thread()
             .enable_all()
             .worker_threads(1)
@@ -121,7 +121,6 @@ fn rmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
         .env(CHILD_ENV, "1")
         .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
-        .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", "/usr/bin:/bin")
         .env("SHELL", "/bin/sh")
         .env("ENV", "")

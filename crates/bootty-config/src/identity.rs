@@ -73,7 +73,10 @@ impl ApplicationIdentity {
     }
 
     pub fn for_process() -> Self {
-        PROCESS_IDENTITY.get().copied().unwrap_or(Self::Production)
+        PROCESS_IDENTITY
+            .get()
+            .copied()
+            .unwrap_or_else(Self::current)
     }
 
     ///

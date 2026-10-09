@@ -151,21 +151,17 @@ impl AppState {
 
     fn observe_native_creation(&mut self) {
         let placement = self.dialogs.current().and_then(|dialog| match dialog {
-            ModalDialog::NewSession(dialog) if dialog.is_in_flight() => {
-                let draft = dialog.draft()?;
-                self.native_agent_service()?
-                    .sessions()
-                    .into_iter()
-                    .find_map(|record| {
-                        if record.task_identity.as_deref() != Some(draft.identity.as_str())
-                            || record.binding_id != draft.scope.persistence_value().to_string()
-                        {
-                            return None;
-                        }
-                        let (_, terminal) = self.native_panel_target(&record)?;
-                        Some((record, terminal))
-                    })
-            }
+            ModalDialog::NewSession(dialog) if dialog.is_in_flight() => self
+                .native_agent_service()?
+                .sessions()
+                .into_iter()
+                .find_map(|record| {
+                    if !dialog.matches_native_creation(&record) {
+                        return None;
+                    }
+                    let (_, terminal) = self.native_panel_target(&record)?;
+                    Some((record, terminal))
+                }),
             _ => None,
         });
         if let Some((record, terminal)) = placement
@@ -661,6 +657,17 @@ impl AppState {
         self.dialogs.new_session_draft = retained;
     }
 
+    fn native_creation_baseline(&self) -> std::collections::HashSet<String> {
+        self.native_agent_service()
+            .map_or_else(std::collections::HashSet::new, |service| {
+                service
+                    .activities()
+                    .into_iter()
+                    .map(|record| record.id)
+                    .collect()
+            })
+    }
+
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
             NewSessionPickerEvent::Names { invocation, action } => {
@@ -670,6 +677,7 @@ impl AppState {
                 self.request_new_session_catalog(invocation);
             }
             NewSessionPickerEvent::Submit(invocation) => {
+                let existing_native_ids = self.native_creation_baseline();
                 let cancellation = bootty_control::CommandCancellation::new();
                 let now = std::time::Instant::now();
                 let result = self.app_command_sender(Caller::Internal).submit(
@@ -680,7 +688,10 @@ impl AppState {
                 );
                 if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
                     match result {
-                        Ok(receiver) => dialog.started(receiver),
+                        Ok(receiver) => {
+                            dialog.set_native_creation_baseline(existing_native_ids);
+                            dialog.started(receiver);
+                        }
                         Err(error) => dialog.failed(format!("Session could not start: {error:?}")),
                     }
                 }
