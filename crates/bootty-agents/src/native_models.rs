@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{AgentKind, NativeAgentSession, native_protocol::field};
+use crate::{AgentKind, NativeAgentSession, NativePermissionMode, native_protocol::field};
 
 /// Provider-advertised choices. IDs are wire selectors, never display labels.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -17,6 +17,14 @@ pub struct NativeModelOption {
     pub is_favorite: bool,
 }
 
+/// Catalog and effective permissions from the captured provider account and project.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NativeProviderCatalog {
+    pub models: Vec<NativeModelOption>,
+    /// Unrecognized policies remain inherited rather than being approximated.
+    pub permissions: Option<NativePermissionMode>,
+}
+
 /// Durable settings for the next prompt; access permissions remain separately owned.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -30,10 +38,27 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns invalid launch configuration, unsupported discovery, or provider errors.
     pub fn discover_models(
-        mut config: crate::NativeSessionConfig,
+        config: crate::NativeSessionConfig,
     ) -> Result<Vec<NativeModelOption>, String> {
-        // Catalog discovery submits no turns and creates no permission extension on either host.
-        config.permissions = crate::NativePermissionMode::ProviderDefault;
+        Self::start_discovery(config)?.model_catalog(false)
+    }
+
+    /// Read model choices and inherited permissions without starting a conversation.
+    /// # Errors
+    /// Returns invalid launch configuration, unsupported discovery, or provider errors.
+    pub fn discover_catalog(
+        config: crate::NativeSessionConfig,
+    ) -> Result<NativeProviderCatalog, String> {
+        let session = Self::start_discovery(config)?;
+        Ok(NativeProviderCatalog {
+            models: session.model_catalog(false)?,
+            permissions: session.configured_permissions(),
+        })
+    }
+
+    fn start_discovery(mut config: crate::NativeSessionConfig) -> Result<Self, String> {
+        // Discovery inherits the selected account and submits no turns or permission extensions.
+        config.permissions = NativePermissionMode::ProviderDefault;
         config.prepare_fresh_identity()?;
         let session = Self::start_with_clock(config, std::sync::Arc::new(std::time::Instant::now))?;
         match session.config.provider {
@@ -41,7 +66,50 @@ impl NativeAgentSession {
             AgentKind::Claude => session.initialize()?,
             AgentKind::Pi => {}
         }
-        session.model_catalog(false)
+        Ok(session)
+    }
+
+    fn configured_permissions(&self) -> Option<NativePermissionMode> {
+        match self.config.provider {
+            AgentKind::Codex => {
+                let response = self
+                    .rpc(
+                        "config/read",
+                        json!({"cwd":self.config.cwd,"includeLayers":false}),
+                    )
+                    .ok()?;
+                let config = field(&response, "config");
+                let approval = field(config, "approval_policy").as_str()?;
+                let sandbox = field(config, "sandbox_mode").as_str()?;
+                let reviewer = field(config, "approvals_reviewer")
+                    .as_str()
+                    .unwrap_or("user");
+                match (approval, sandbox, reviewer) {
+                    ("never", "danger-full-access", _) => Some(NativePermissionMode::FullAccess),
+                    ("untrusted", "read-only", _) => Some(NativePermissionMode::Supervised),
+                    ("on-request", "workspace-write", "user") => {
+                        Some(NativePermissionMode::AutoAcceptEdits)
+                    }
+                    ("on-request", "workspace-write", "auto_review") => {
+                        Some(NativePermissionMode::Auto)
+                    }
+                    _ => None,
+                }
+            }
+            AgentKind::Claude => {
+                let response = self.rpc("get_settings", json!({})).ok()?;
+                let permissions = field(field(&response, "effective"), "permissions");
+                match field(permissions, "defaultMode").as_str()? {
+                    "default" => Some(NativePermissionMode::Supervised),
+                    "acceptEdits" => Some(NativePermissionMode::AutoAcceptEdits),
+                    "auto" => Some(NativePermissionMode::Auto),
+                    "bypassPermissions" => Some(NativePermissionMode::FullAccess),
+                    _ => None,
+                }
+            }
+            // Pi does not advertise an approval policy in its native catalog protocol.
+            AgentKind::Pi => None,
+        }
     }
 
     /// Discover through the exact initialized provider process and captured account.

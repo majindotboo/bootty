@@ -290,6 +290,7 @@ impl AppState {
                 | "list"
                 | "activities"
                 | "catalog"
+                | "catalog-info"
                 | "names"
                 | "catalog-favorite"
                 | "catalog-completions"
@@ -1451,6 +1452,7 @@ impl AppState {
             let outcome = if matches!(
                 invocation.command.as_str(),
                 "agents.native.catalog"
+                    | "agents.native.catalog-info"
                     | "agents.native.catalog-favorite"
                     | "agents.native.catalog-completions"
                     | "agents.native.names"
@@ -2620,6 +2622,12 @@ fn query_launch_metadata(
                 || cancellation.is_cancelled() || Instant::now() >= deadline,
             )?;
             serde_json::to_value(names).map_err(|error| error.to_string())
+        } else if invocation.command == "agents.native.catalog-info" {
+            let config = discover_launch_config(invocation, captured)?;
+            let mut catalog = bootty_agents::NativeAgentSession::discover_catalog(config.clone())?;
+            service.mark_model_favorites(&config, &mut catalog.models);
+            service.cache_model_catalog(&config, &catalog.models)?;
+            serde_json::to_value(catalog).map_err(|error| error.to_string())
         } else if invocation.command == "agents.native.catalog-completions" {
             discover_launch_config(invocation, captured)
                 .and_then(bootty_agents::NativeAgentSession::discover_completions)

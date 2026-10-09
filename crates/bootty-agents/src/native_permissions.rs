@@ -92,16 +92,6 @@ impl NativePermissionMode {
         !matches!((self, provider), (Self::Auto, AgentKind::Pi))
     }
 
-    /// New composers choose an explicit policy; legacy wire values remain accepted.
-    #[must_use]
-    pub const fn resolved(self, provider: AgentKind) -> Self {
-        match (self, provider) {
-            (Self::ProviderDefault, AgentKind::Pi) => Self::FullAccess,
-            (Self::ProviderDefault, _) => Self::Supervised,
-            _ => self,
-        }
-    }
-
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {

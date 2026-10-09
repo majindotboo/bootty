@@ -46,7 +46,11 @@ for line in sys.stdin:
  elif method=='skills/list': reply(value,{'data':[{'cwd':os.getcwd(),'skills':[{'name':'project-skill','path':os.path.join(os.getcwd(),'SKILL.md'),'enabled':True,'description':'Project work','scope':'project'},{'name':'disabled','path':'/disabled','enabled':False}]}]})
  elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]})
  elif method=='model/list': reply(value,{'data':[{'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True}],'nextCursor':None})
- elif method=='config/read': reply(value,{'config':{'model':'available','model_reasoning_effort':'high'}})
+ elif method=='config/read':
+  settings={'model':'available','model_reasoning_effort':'high'}
+  if os.path.exists('codex-config.json'):
+   with open('codex-config.json') as source: settings.update(json.load(source))
+  reply(value,{'config':settings})
  elif method=='get_available_models': reply(value,{'models':[model]})
  elif method=='get_state': reply(value,{'sessionId':'thread','sessionFile':os.path.join(os.getcwd(),'session.jsonl'),'model':model,'thinkingLevel':effort,'isStreaming':False,'isCompacting':False})
  elif method=='get_messages': reply(value,{'messages':[]})
@@ -108,6 +112,41 @@ fn discovery_opens_no_conversation_and_submits_no_turn(#[case] provider: AgentKi
     assert!(!root.path().join("thread-started").exists());
     assert!(!root.path().join("prompt.json").exists());
     assert!(!root.path().join("session.jsonl").exists());
+}
+
+#[rstest]
+#[case(AgentKind::Codex, json!({"approval_policy":"never","sandbox_mode":"danger-full-access"}), Some(bootty_agents::NativePermissionMode::FullAccess))]
+#[case(AgentKind::Codex, json!({"approval_policy":"untrusted","sandbox_mode":"read-only"}), Some(bootty_agents::NativePermissionMode::Supervised))]
+#[case(AgentKind::Codex, json!({"approval_policy":"on-request","sandbox_mode":"workspace-write","approvals_reviewer":"user"}), Some(bootty_agents::NativePermissionMode::AutoAcceptEdits))]
+#[case(AgentKind::Codex, json!({"approval_policy":"on-request","sandbox_mode":"workspace-write","approvals_reviewer":"auto_review"}), Some(bootty_agents::NativePermissionMode::Auto))]
+#[case(AgentKind::Codex, json!({"approval_policy":"never","sandbox_mode":"workspace-write"}), None)]
+#[case(AgentKind::Claude, json!({"effective":{"permissions":{"defaultMode":"bypassPermissions"}}}), Some(bootty_agents::NativePermissionMode::FullAccess))]
+#[case(AgentKind::Claude, json!({"effective":{"permissions":{"defaultMode":"acceptEdits"}}}), Some(bootty_agents::NativePermissionMode::AutoAcceptEdits))]
+#[case(AgentKind::Claude, json!({"effective":{"permissions":{"defaultMode":"plan"}}}), None)]
+#[case(AgentKind::Pi, json!({}), None)]
+fn discovery_reports_the_captured_provider_policy_without_starting_a_conversation(
+    #[case] provider: AgentKind,
+    #[case] settings: Value,
+    #[case] expected: Option<bootty_agents::NativePermissionMode>,
+) {
+    let root = TempDir::new().unwrap();
+    let filename = if provider == AgentKind::Codex {
+        "codex-config.json"
+    } else {
+        "claude-settings.json"
+    };
+    fs::write(
+        root.path().join(filename),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    let mut config = config(root.path(), provider).unwrap();
+    config.permissions = bootty_agents::NativePermissionMode::Supervised;
+    let catalog = bootty_agents::NativeAgentSession::discover_catalog(config).unwrap();
+    assert_eq!(catalog.permissions, expected);
+    assert_eq!(catalog.models.len(), 1);
+    assert!(!root.path().join("thread-started").exists());
+    assert!(!root.path().join("prompt.json").exists());
 }
 
 #[rstest]

@@ -404,6 +404,7 @@ impl NewSessionDialog {
             self.catalog_request.clone_from(&request);
             self.catalog_reply = None;
             form.model_options.clear();
+            form.provider_permissions = None;
             form.model_error = None;
             form.models_loading = request.is_some();
             return request.map(NewSessionPickerEvent::Catalog);
@@ -413,7 +414,7 @@ impl NewSessionDialog {
             Err(std::sync::mpsc::TryRecvError::Empty) => return None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.catalog_reply = None;
-                form.set_model_catalog(Err("Provider catalog owner stopped".to_owned()));
+                form.set_provider_catalog(Err("Provider catalog owner stopped".to_owned()));
                 return None;
             }
         };
@@ -425,7 +426,7 @@ impl NewSessionDialog {
             outcome => Err(crate::commands::command_outcome_message(&outcome)
                 .unwrap_or_else(|| "Provider catalog unavailable".to_owned())),
         };
-        form.set_model_catalog(models);
+        form.set_provider_catalog(models);
         None
     }
 
