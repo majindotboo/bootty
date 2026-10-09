@@ -5,6 +5,7 @@
 mod dialogs;
 mod native_conversations;
 use native_conversations::NativeConversations;
+mod project_settings;
 mod settings_window;
 use dialogs::WorkspaceDialogs;
 
@@ -2317,6 +2318,13 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.close_dismissed_surface_form(window, cx);
+        if let Some(project) = self.state.take_project_settings() {
+            self.open_settings_window_target(
+                SettingsWindowTarget::Project(Box::new(project)),
+                window,
+                cx,
+            );
+        }
         let terminal_focus = (self.state.terminal_focused()
             && self.state.pending_new_surface().is_none())
         .then(|| {

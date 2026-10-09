@@ -17,6 +17,17 @@ use crate::presentation::dialogs::{
 };
 use bootty_mux::workspace::ScopedSessionTarget;
 impl AppState {
+    pub(crate) fn open_project_settings(
+        &mut self,
+        project: crate::presentation::project_editor::ProjectSettingsEditor,
+    ) {
+        self.dialogs.project_settings = Some(project);
+    }
+    pub(crate) const fn take_project_settings(
+        &mut self,
+    ) -> Option<crate::presentation::project_editor::ProjectSettingsEditor> {
+        self.dialogs.project_settings.take()
+    }
     /// Projects the accepted modal state without giving the renderer product ownership.
     pub fn dialog_projection(&mut self) -> Option<DialogProjection> {
         self.poll_accepted_creations();
