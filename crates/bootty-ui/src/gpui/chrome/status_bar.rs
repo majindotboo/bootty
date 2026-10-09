@@ -1093,16 +1093,7 @@ fn render_item(
             element.child(sized_icon(&icon, IconSize::Small, tint))
         })
         .when_some(gauge, ParentElement::child)
-        .child(
-            div()
-                .debug_selector({
-                    let id = format!("status-label-{}-{}", segment.source_slot, item.key);
-                    move || id
-                })
-                .min_w_0()
-                .truncate()
-                .child(item.text.clone()),
-        )
+        .child(status_item_label(segment.source_slot, item, tab, cx))
         .when(tab, |element| {
             element.when_some(progress, ParentElement::child)
         })
@@ -1110,6 +1101,27 @@ fn render_item(
             reorderable_item(element, source, item, colors, cx)
         });
     finish_item(element, segment, item, bar, tab, layout, cx)
+}
+
+fn status_item_label(
+    source_slot: usize,
+    item: &StatusItemSnapshot,
+    tab: bool,
+    cx: &Context<GpuiChrome>,
+) -> impl IntoElement {
+    div()
+        .debug_selector({
+            let id = format!("status-label-{source_slot}-{}", item.key);
+            move || id
+        })
+        .min_w_0()
+        .truncate()
+        .when(tab && item.key.ends_with(":index"), |element| {
+            element
+                .text_color(cx.theme().muted_foreground)
+                .font_weight(gpui_kit::FontWeight::BOLD)
+        })
+        .child(item.text.clone())
 }
 
 fn finish_item(
