@@ -180,6 +180,10 @@ impl DialogView {
                         return false;
                     };
                     picker.state.focus_handle(cx).focus(window, cx);
+                    window.dispatch_action(
+                        Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
+                        cx,
+                    );
                 }
                 ComposerControl::Model | ComposerControl::Provider => {
                     let Some(picker) = &self.model_picker else {
@@ -196,7 +200,7 @@ impl DialogView {
                     let Some(focus) = self.control_focus.get(control.field()) else {
                         return false;
                     };
-                    return crate::gpui::focus_control_child(focus, window, cx);
+                    return crate::gpui::activate_control_child(focus, window, cx);
                 }
             }
             return true;

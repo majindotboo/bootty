@@ -148,12 +148,20 @@ impl DialogView {
             .id(SharedString::from(selector_id))
             .debug_selector(move || debug_selector)
             .flex()
+            .flex_none()
+            .self_center()
             .rounded(cx.theme().radius)
             .hover(|style| style.bg(cx.theme().list_hover))
             .child(
                 Select::new(&picker.state)
                     .when(Self::is_agent_session_spec(spec), |select| {
-                        select.text_xl().h_auto().text_color(cx.theme().foreground)
+                        select
+                            .text_xl()
+                            .h_auto()
+                            .px_1()
+                            .py_0()
+                            .border_0()
+                            .text_color(cx.theme().foreground)
                     })
                     .appearance(false)
                     .placeholder(choice.label.trim_end_matches('…').to_owned())

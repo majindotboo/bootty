@@ -203,13 +203,21 @@ impl NativeAgentSessionView {
                     let Some(picker) = &self.model_picker else {
                         return false;
                     };
-                    return crate::gpui::focus_control_child(&picker.focus_handle(cx), window, cx);
+                    picker.update(cx, |picker, cx| picker.open(window, cx));
+                    return true;
                 }
                 crate::gpui::ComposerControl::Effort => {
-                    return crate::gpui::focus_control_child(&self.effort_focus, window, cx);
+                    return crate::gpui::activate_control_child(&self.effort_focus, window, cx);
                 }
                 crate::gpui::ComposerControl::Permissions => {
-                    return crate::gpui::focus_control_child(&self.permissions_focus, window, cx);
+                    if self.record.config.provider == bootty_agents::AgentKind::Pi {
+                        return false;
+                    }
+                    return crate::gpui::activate_control_child(
+                        &self.permissions_focus,
+                        window,
+                        cx,
+                    );
                 }
                 _ => return false,
             }

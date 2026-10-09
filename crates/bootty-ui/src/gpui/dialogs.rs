@@ -2082,9 +2082,6 @@ impl DialogView {
                 cx,
             ))
             .dropdown_menu(move |mut menu, _, _| {
-                if field.id == "reasoning" {
-                    menu = menu.label("Reasoning");
-                }
                 for value in &options {
                     let owner = owner.clone();
                     let dialog = dialog.clone();

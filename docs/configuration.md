@@ -947,6 +947,7 @@ control and submits the provider default.
 Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
-Their default shortcuts are Ctrl+Alt+S/V/M/E/P/W/A respectively.
+Their default shortcuts are Ctrl+Alt+S/M/E/P/W/A for space, model, effort,
+project, worktree, and permissions. Provider has no separate default binding.
 Provider and model share one picker; both focus commands open it. Control
 tooltips describe their purpose and show the active configured shortcut.

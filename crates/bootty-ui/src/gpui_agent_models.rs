@@ -405,9 +405,7 @@ impl NativeAgentSessionView {
             .accessibility_label("Reasoning for next message")
             .disabled(busy)
             .dropdown_menu(move |mut menu, window, _| {
-                menu = menu
-                    .min_w(gpui_kit::rems(12.).to_pixels(window.rem_size()))
-                    .label("Reasoning");
+                menu = menu.min_w(gpui_kit::rems(12.).to_pixels(window.rem_size()));
                 for effort in &efforts {
                     let selection = NativeModelSelection {
                         model: model_id.clone(),

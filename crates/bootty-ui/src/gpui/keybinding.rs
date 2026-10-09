@@ -180,3 +180,19 @@ pub fn focus_control_child(
     }
     false
 }
+
+/// Open a focused control through the toolkit's activation action.
+pub fn activate_control_child(
+    parent: &gpui_kit::FocusHandle,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> bool {
+    if !focus_control_child(parent, window, cx) {
+        return false;
+    }
+    window.dispatch_action(
+        Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
+        cx,
+    );
+    true
+}
