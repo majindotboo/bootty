@@ -152,6 +152,7 @@ proptest! {
             snoozed_until: seed.until.map(i64::from),
             deleted: false,
             last_activity_at: seed.activity.map(i64::from),
+            ..SessionState::default()
         };
         let expected = saved.clone();
         let sibling = session("sibling", "backend-2");
@@ -251,6 +252,7 @@ fn visibility_preserves_underlying_lifecycle_and_snooze(
         hidden,
         snoozed_until: Some(100),
         last_activity_at: Some(90),
+        ..SessionState::default()
     };
     assert_eq!(state.view(99), expected);
     assert_eq!(state.lifecycle, SessionLifecycle::Settled);

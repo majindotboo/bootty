@@ -486,6 +486,8 @@ pub struct SidebarConfig {
     pub group_by_project: bool,
     pub sort_order: SidebarSortOrder,
     pub animate_working: bool,
+    /// Inactive sessions settle after this many days; zero disables automatic settlement.
+    pub auto_settle_after_days: u16,
     pub position: SidebarPosition,
     pub background: Option<Color>,
     pub foreground: Option<Color>,

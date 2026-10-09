@@ -56,6 +56,7 @@ fn account_and_launch_preferences_round_trip(#[case] provider: &str) {
 }
 
 #[rstest]
+#[case("[agents.codex]\navailable-efforts = ['']")]
 #[case("[agents.codex]\nselected = 'missing'")]
 #[case("[agents.codex]\nprogram = '--not-a-program'")]
 #[case("[agents.unknown]\nenabled = true")]
@@ -68,4 +69,27 @@ fn invalid_provider_preferences_do_not_load(#[case] source: &str) {
     file.write_str(source).unwrap();
     load_config_from_path(file.path()).expect_err("invalid provider preferences");
     assert_eq!(std::fs::read_to_string(file.path()).unwrap(), source);
+}
+
+#[rstest]
+#[case("codex")]
+#[case("claude")]
+#[case("pi")]
+fn available_efforts_round_trip_through_the_provider_editor(#[case] provider: &str) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str(&format!(
+        "[agents.{provider}]\navailable-efforts = ['low', 'high']\n"
+    ))
+    .unwrap();
+    let config = load_config_from_path(file.path()).unwrap();
+    assert_eq!(
+        config.agents.provider(provider).unwrap().available_efforts,
+        ["low", "high"]
+    );
+    assert!(SettingsSchema::builtin().allows_write_path(&[
+        "agents",
+        provider,
+        "available-efforts"
+    ]));
 }

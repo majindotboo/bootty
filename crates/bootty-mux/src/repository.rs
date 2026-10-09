@@ -68,6 +68,7 @@ pub enum BindingMembershipMutation {
         display_name: String,
         explicit: bool,
         cwd: String,
+        initial_state: SessionState,
     },
     Rename {
         identity: String,
@@ -671,8 +672,8 @@ impl WorkspaceRepository {
         tx.execute(
             "INSERT INTO workspace_pending_binding_operations
                 (space_id, operation, identity, old_name, new_name,
-                 display_name, explicit, cwd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 display_name, explicit, cwd, initial_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, '{}'))
              ON CONFLICT(identity) DO UPDATE SET
                 space_id = excluded.space_id,
                 operation = excluded.operation,
@@ -680,7 +681,8 @@ impl WorkspaceRepository {
                 new_name = excluded.new_name,
                 display_name = excluded.display_name,
                 explicit = excluded.explicit,
-                cwd = excluded.cwd",
+                cwd = excluded.cwd,
+                initial_state = excluded.initial_state",
             params![
                 scope.persistence_value(),
                 stored.operation,
@@ -690,6 +692,7 @@ impl WorkspaceRepository {
                 stored.display_name,
                 stored.explicit,
                 stored.cwd,
+                stored.initial_state,
             ],
         )
         .map_err(|error| self.database_error("journal binding membership", error))?;
@@ -801,7 +804,7 @@ impl WorkspaceRepository {
     ) -> WorkspaceResult<Vec<PendingBindingMembershipMutation>> {
         let load = || -> rusqlite::Result<Vec<PendingBindingMembershipMutation>> {
             let mut statement = conn.prepare(
-                "SELECT operation, identity, old_name, new_name, display_name, explicit, cwd
+                "SELECT operation, identity, old_name, new_name, display_name, explicit, cwd, initial_state
                  FROM workspace_pending_binding_operations
                  WHERE space_id = ?1
                  ORDER BY identity",
@@ -1013,6 +1016,11 @@ impl WorkspaceRepository {
             let seed_projects = !user_tables(&conn)?.contains("workspace_projects");
             let tx = conn.transaction()?;
             create_workspace_schema(&tx)?;
+            if !table_columns(&tx, "workspace_pending_binding_operations")?
+                .contains("initial_state")
+            {
+                tx.execute_batch("ALTER TABLE workspace_pending_binding_operations ADD COLUMN initial_state TEXT NOT NULL DEFAULT '{}';")?;
+            }
             if !table_columns(&tx, "workspace_projects")?.contains("settings") {
                 tx.execute_batch("ALTER TABLE workspace_projects ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';")?;
             }
@@ -1100,7 +1108,7 @@ fn validate_pending_binding_operations(
         .collect::<HashSet<_>>();
     let mut statement = tx.prepare(
         "SELECT space_id, operation, identity, old_name, new_name,
-                display_name, explicit, cwd
+                display_name, explicit, cwd, initial_state
          FROM workspace_pending_binding_operations ORDER BY space_id, identity",
     )?;
     let mut pending_scopes = HashSet::new();
@@ -1137,8 +1145,16 @@ fn validate_binding_membership_mutation(
     let valid_text = |value: &str| !value.is_empty() && !value.contains('\0');
     let valid = match mutation {
         BindingMembershipMutation::Create {
-            display_name, cwd, ..
-        } => !display_name.contains('\0') && !cwd.contains('\0'),
+            display_name,
+            cwd,
+            initial_state,
+            ..
+        } => {
+            !display_name.contains('\0')
+                && !cwd.contains('\0')
+                && initial_state.snoozed_until.is_none_or(|until| until >= 0)
+                && initial_state.last_activity_at.is_none_or(|at| at >= 0)
+        }
         BindingMembershipMutation::Rename { display_name, .. } => valid_text(display_name),
         BindingMembershipMutation::Ditch { .. } => true,
     };
@@ -1155,6 +1171,7 @@ struct StoredBindingMembershipMutation<'a> {
     display_name: Option<&'a str>,
     explicit: Option<bool>,
     cwd: Option<&'a str>,
+    initial_state: Option<String>,
 }
 
 fn binding_membership_mutation_to_storage(
@@ -1167,6 +1184,7 @@ fn binding_membership_mutation_to_storage(
             display_name,
             explicit,
             cwd,
+            initial_state,
         } => StoredBindingMembershipMutation {
             operation: "create",
             identity,
@@ -1175,6 +1193,7 @@ fn binding_membership_mutation_to_storage(
             display_name: Some(display_name),
             explicit: Some(*explicit),
             cwd: Some(cwd),
+            initial_state: Some(serde_json::json!(initial_state).to_string()),
         },
         BindingMembershipMutation::Rename {
             identity,
@@ -1190,6 +1209,7 @@ fn binding_membership_mutation_to_storage(
             display_name: Some(display_name),
             explicit: Some(*explicit),
             cwd: None,
+            initial_state: None,
         },
         BindingMembershipMutation::Ditch { identity, old_name } => {
             StoredBindingMembershipMutation {
@@ -1200,11 +1220,16 @@ fn binding_membership_mutation_to_storage(
                 display_name: None,
                 explicit: None,
                 cwd: None,
+                initial_state: None,
             }
         }
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Decode the fixed journal columns at the SQLite boundary"
+)]
 fn binding_membership_mutation_from_storage(
     operation: &str,
     identity: String,
@@ -1213,6 +1238,7 @@ fn binding_membership_mutation_from_storage(
     display_name: Option<String>,
     explicit: Option<i64>,
     cwd: Option<String>,
+    initial_state: Option<String>,
 ) -> WorkspaceResult<BindingMembershipMutation> {
     let explicit = explicit
         .map(|value| {
@@ -1231,6 +1257,8 @@ fn binding_membership_mutation_from_storage(
             explicit: explicit
                 .ok_or_else(|| missing("create is missing its explicit-name state"))?,
             cwd: cwd.unwrap_or_default(),
+            initial_state: serde_json::from_str(initial_state.as_deref().unwrap_or("{}"))
+                .map_err(|_| missing("create has invalid initial state"))?,
         },
         "rename" if cwd.is_none() => BindingMembershipMutation::Rename {
             identity,
@@ -1274,7 +1302,8 @@ fn binding_membership_mutation_from_row(
         display_name,
         explicit,
         cwd,
-    ] = [0, 1, 2, 3, 4, 5, 6].map(|column| {
+        initial_state,
+    ] = [0, 1, 2, 3, 4, 5, 6, 7].map(|column| {
         offset
             .checked_add(column)
             .ok_or(rusqlite::Error::InvalidColumnIndex(offset))
@@ -1288,6 +1317,7 @@ fn binding_membership_mutation_from_row(
         row.get(display_name?)?,
         row.get(explicit?)?,
         row.get(cwd?)?,
+        row.get(initial_state?)?,
     )
     .map_err(|_| rusqlite::Error::InvalidQuery)
 }
@@ -1315,6 +1345,7 @@ fn apply_binding_membership_mutation(
             display_name,
             explicit,
             cwd,
+            initial_state,
         } => {
             // A create that already landed is not an error: reconciliation replays the same
             // mutation the commit path did, and both have to agree on the outcome.
@@ -1324,7 +1355,7 @@ fn apply_binding_membership_mutation(
                 display_name: display_name.clone(),
                 explicit: *explicit,
                 cwd: cwd.clone(),
-                state: SessionState::default(),
+                state: *initial_state,
                 terminal_snapshot: None,
             });
             sessions.observe_backend_name(identity, session_name);

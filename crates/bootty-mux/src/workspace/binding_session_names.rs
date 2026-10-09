@@ -133,6 +133,7 @@ impl WorkspaceRuntime {
             name: session_id.clone(),
             display_name,
             explicit: false,
+            initial_state: crate::session_membership::SessionState::default(),
         };
         let membership = self
             .begin_active_binding_membership_mutation(command, Some(&pending_name))?

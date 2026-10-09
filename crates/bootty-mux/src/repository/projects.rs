@@ -113,6 +113,21 @@ impl WorkspaceRepository {
         Ok(())
     }
 
+    /// Remove registration and defaults without touching files or saved sessions.
+    /// # Errors
+    /// Rejects malformed paths and persistence failures.
+    pub fn remove_project(&self, scope: SpaceId, cwd: &str) -> WorkspaceResult<()> {
+        validate_path(cwd)?;
+        let conn = open_db(&self.path)
+            .map_err(|error| self.database_error("open project registry", error))?;
+        conn.execute(
+            "DELETE FROM workspace_projects WHERE space_id = ?1 AND cwd = ?2",
+            params![scope.persistence_value(), cwd],
+        )
+        .map_err(|error| self.database_error("remove project", error))?;
+        Ok(())
+    }
+
     /// # Errors
     /// Validates the complete settings record before committing it atomically.
     pub fn configure_project(

@@ -30,6 +30,10 @@ pub struct SessionState {
     pub snoozed_until: Option<i64>,
     /// Absolute UTC seconds of accepted input; absent for work with no recorded activity.
     pub last_activity_at: Option<i64>,
+    /// Keep this session active even when the sidebar's inactivity interval has elapsed.
+    pub auto_settle_disabled: bool,
+    /// Launch directory and project assignment are separate facts.
+    pub projectless: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +54,7 @@ pub enum SessionStateChange {
     RestoreArchive,
     SnoozeUntil(i64),
     ClearSnooze,
+    SetAutoSettle(bool),
     SetHidden(bool),
     Delete,
     RestoreDeleted,
@@ -58,6 +63,17 @@ pub enum SessionStateChange {
 }
 
 impl SessionState {
+    #[must_use]
+    pub fn should_auto_settle(self, now: i64, idle_seconds: i64) -> bool {
+        idle_seconds > 0
+            && !self.auto_settle_disabled
+            && !self.pinned
+            && self.view(now) == SessionView::Active
+            && self.snoozed_until.is_none()
+            && self
+                .last_activity_at
+                .is_some_and(|at| at >= 0 && now.saturating_sub(at) >= idle_seconds)
+    }
     /// `now` is supplied by the caller as absolute UTC seconds; this owner never starts a timer.
     #[must_use]
     pub fn view(self, now: i64) -> SessionView {
@@ -276,6 +292,9 @@ impl SessionMembership {
             SessionStateChange::RestoreArchive => session.state.archived = false,
             SessionStateChange::SnoozeUntil(until) => session.state.snoozed_until = Some(until),
             SessionStateChange::ClearSnooze => session.state.snoozed_until = None,
+            SessionStateChange::SetAutoSettle(enabled) => {
+                session.state.auto_settle_disabled = !enabled;
+            }
             SessionStateChange::SetHidden(hidden) => session.state.hidden = hidden,
             SessionStateChange::Delete => session.state.deleted = true,
             SessionStateChange::RestoreDeleted => session.state.deleted = false,

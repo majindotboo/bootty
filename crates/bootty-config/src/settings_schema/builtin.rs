@@ -1389,8 +1389,25 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
     ]
 }
 
-fn sidebar_specs() -> [SettingSpec; 10] {
+fn sidebar_specs() -> [SettingSpec; 11] {
     [
+        spec(
+            &["sidebar", "auto-settle-after-days"],
+            "Auto-settle after",
+            "Settle inactive sessions after this many days. Zero disables auto-settle. Pinned, snoozed and busy sessions stay active.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Number {
+                range: 0.0..=90.0,
+                control: NumberControl::Edit,
+                precision: 0,
+                suffix: "days".into(),
+                display_scale: 1.0,
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Number(f32::from(config.sidebar.auto_settle_after_days))
+            }),
+        ),
         spec(
             &["sidebar", "group-by-project"],
             "Group sessions by project",
@@ -1735,6 +1752,7 @@ fn agent_provider_specs() -> impl Iterator<Item = SettingSpec> {
     [
         &["agents", "*", "enabled"][..],
         &["agents", "*", "program"][..],
+        &["agents", "*", "available-efforts"][..],
         &["agents", "*", "selected"][..],
         &["agents", "*", "profiles", "*", "name"][..],
         &["agents", "*", "profiles", "*", "directory"][..],

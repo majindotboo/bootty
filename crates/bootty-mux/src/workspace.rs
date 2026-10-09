@@ -57,7 +57,7 @@ pub use binding_windows::terminal_cwd_for_mux_command;
 pub use session_navigation::{BindingSessionGroup, ScopedSessionTarget};
 pub use session_requests::{
     PreparedSessionRequest, SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS,
-    SESSION_NAME_MAX_BYTES, SessionRequestError, StartingSession,
+    SESSION_NAME_MAX_BYTES, SavedSessionMetadata, SessionRequestError, StartingSession,
 };
 pub use space_summary::SpaceSummary;
 
@@ -116,6 +116,7 @@ pub struct PendingGeneratedName {
     display_name: String,
     /// Whether the user chose the name instead of Bootty generating it.
     explicit: bool,
+    initial_state: crate::session_membership::SessionState,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -797,6 +798,16 @@ impl WorkspaceRuntime {
                 settings: crate::repository::ProjectSettings::default(),
             });
         }
+        Ok(())
+    }
+
+    /// Remove only the captured Space's registration, preserving files and sessions.
+    /// # Errors
+    /// A failed commit leaves the live registry unchanged.
+    pub fn remove_project(&mut self, scope: SpaceId, cwd: &str) -> Result<()> {
+        self.repository.remove_project(scope, cwd)?;
+        self.projects
+            .retain(|project| project.scope != scope || project.cwd != cwd);
         Ok(())
     }
 
@@ -2081,6 +2092,10 @@ impl WorkspaceRuntime {
                     display_name: display_name(session_id),
                     explicit: naming.is_none_or(|naming| naming.explicit),
                     cwd: cwd.clone(),
+                    initial_state: naming
+                        .map_or_else(crate::session_membership::SessionState::default, |naming| {
+                            naming.initial_state
+                        }),
                 }),
             MuxCommand::RestoreSession {
                 session_id, tag, ..
@@ -2094,6 +2109,7 @@ impl WorkspaceRuntime {
                     display_name: saved.display_name.clone(),
                     explicit: saved.explicit,
                     cwd: saved.cwd.clone(),
+                    initial_state: saved.state,
                 }),
             MuxCommand::RenameSession { session_id, name } => {
                 let identity = self.session_identity(scope, session_id).ok_or_else(|| {

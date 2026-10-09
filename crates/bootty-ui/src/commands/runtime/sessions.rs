@@ -562,9 +562,17 @@ impl AppState {
             Err(outcome) => return self.reject_command(outcome),
         };
         let prepared = match saved {
-            Some((identity, title)) => self
-                .workspace
-                .begin_session_create_saved(scope, name, cwd, argv, identity, title),
+            Some((identity, title)) => self.workspace.begin_session_create_saved(
+                scope,
+                name,
+                cwd,
+                argv,
+                bootty_mux::workspace::SavedSessionMetadata {
+                    identity,
+                    title,
+                    projectless: arguments.get(5).is_some_and(|value| value == "true"),
+                },
+            ),
             None => self.workspace.begin_session_create(scope, name, cwd, argv),
         };
         let prepared = match prepared {

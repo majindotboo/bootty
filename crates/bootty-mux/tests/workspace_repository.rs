@@ -348,13 +348,20 @@ fn a_two_space_commit_is_atomic_when_the_second_space_fails(
 }
 
 #[rstest]
+#[case(false)]
+#[case(true)]
 fn a_remote_backend_success_is_recovered_after_its_metadata_commit_fails(
+    #[case] projectless: bool,
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
 ) {
     let (directory, mut repository) = repository.expect("workspace fixture");
     let binding = repository.spaces()[0].binding().clone();
     let scope = binding.mux_scope();
     let mutation = BindingMembershipMutation::Create {
+        initial_state: SessionState {
+            projectless,
+            ..SessionState::default()
+        },
         identity: "id-1".to_owned(),
         session_name: "created-name".to_owned(),
         display_name: "created-name".to_owned(),
@@ -412,6 +419,7 @@ fn a_remote_backend_success_is_recovered_after_its_metadata_commit_fails(
             .expect("read cleared mutations"),
         Vec::<bootty_mux::repository::PendingBindingMembershipMutation>::new()
     );
+    assert_eq!(sessions.get("id-1").unwrap().state.projectless, projectless);
     drop(repository);
 
     let reopened = LoadedRepository::open(&directory.path().join("config.toml"))
@@ -471,6 +479,7 @@ fn remote_rename_and_ditch_mutations_commit_binding_membership(
     );
 
     let replacement = BindingMembershipMutation::Create {
+        initial_state: SessionState::default(),
         identity: "id-2".to_owned(),
         session_name: "new-name".to_owned(),
         display_name: "new-name".to_owned(),
@@ -695,6 +704,7 @@ fn a_stranded_mutation_does_not_block_a_change_to_another_session(
     let (_directory, mut repository) = repository.expect("workspace fixture");
     let scope = repository.spaces()[0].binding().mux_scope();
     let stranded = BindingMembershipMutation::Create {
+        initial_state: SessionState::default(),
         identity: "stranded-id".to_owned(),
         session_name: "stranded-name".to_owned(),
         display_name: "stranded-name".to_owned(),
@@ -706,6 +716,7 @@ fn a_stranded_mutation_does_not_block_a_change_to_another_session(
         .expect("journal the first mutation");
 
     let next = BindingMembershipMutation::Create {
+        initial_state: SessionState::default(),
         identity: "next-id".to_owned(),
         session_name: "next-name".to_owned(),
         display_name: "next-name".to_owned(),
@@ -716,6 +727,7 @@ fn a_stranded_mutation_does_not_block_a_change_to_another_session(
         .begin_binding_membership_mutation(scope, &next)
         .expect("a stranded entry does not block the next change");
     let replacement = BindingMembershipMutation::Create {
+        initial_state: SessionState::default(),
         identity: "next-id".to_owned(),
         session_name: "replacement".to_owned(),
         display_name: "replacement".to_owned(),
@@ -876,6 +888,8 @@ fn saved_lifecycle_round_trips_through_membership_recovery(
         hidden: true,
         snoozed_until: Some(100),
         last_activity_at: Some(90),
+        projectless: true,
+        auto_settle_disabled: true,
     };
     let expected = SessionMembership::from_sessions(vec![saved]);
     repository.commit_binding_state(scope, &expected)?;
@@ -968,6 +982,7 @@ fn invalid_project_paths_do_not_change_the_registry(
     let (_directory, repository) = repository.expect("workspace fixture");
     let scope = repository.default_space().expect("default Space");
     assert!(repository.register_project(scope, path).is_err());
+    assert!(repository.remove_project(scope, path).is_err());
     assert!(repository.toggle_project_collapsed(scope, path).is_err());
     assert_eq!(repository.registered_projects().unwrap(), Vec::new());
 }
@@ -1018,4 +1033,41 @@ fn project_customization_survives_restart_and_failed_validation(
     let projects = reopened.registered_projects().unwrap();
     assert_eq!(projects[0].settings, settings);
     assert!(projects[0].collapsed);
+}
+
+#[rstest]
+fn removing_a_project_preserves_files_and_other_space_registration(
+    repository: anyhow::Result<(TempDir, LoadedRepository)>,
+) {
+    let (directory, mut repository) = repository.expect("workspace fixture");
+    let scope = repository.default_space().unwrap();
+    let other = repository
+        .create_space(
+            "Other",
+            "folder",
+            DEFAULT_SPACE_COLOR,
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let project = directory.child("project");
+    project.create_dir_all().unwrap();
+    let file = project.child("keep.txt");
+    file.write_str("keep this project").unwrap();
+    let cwd = project.path().to_str().unwrap();
+    repository.register_project(scope, cwd).unwrap();
+    repository.register_project(other.id(), cwd).unwrap();
+    let sessions = repository.sessions(scope).unwrap();
+    repository.remove_project(scope, cwd).unwrap();
+    repository.remove_project(scope, cwd).unwrap();
+    assert_eq!(repository.sessions(scope).unwrap(), sessions);
+    file.assert("keep this project");
+    drop(repository);
+    let reopened = LoadedRepository::open(&directory.path().join("config.toml")).unwrap();
+    let projects = reopened.registered_projects().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].scope, other.id());
+    assert_eq!(projects[0].cwd, cwd);
 }

@@ -32,6 +32,7 @@ impl Default for SidebarConfig {
             group_by_project: true,
             sort_order: SidebarSortOrder::Manual,
             animate_working: true,
+            auto_settle_after_days: 3,
             position: SidebarPosition::Left,
             background: None,
             foreground: None,

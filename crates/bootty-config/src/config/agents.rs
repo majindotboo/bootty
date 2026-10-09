@@ -20,6 +20,8 @@ pub struct AgentProviderConfig {
     pub program: String,
     pub default_model: String,
     pub default_effort: String,
+    /// Empty exposes every effort advertised by the selected model.
+    pub available_efforts: Vec<String>,
     pub fast_mode: bool,
     /// Empty selects the provider's existing account store and default launch preferences.
     pub selected: String,
@@ -33,6 +35,7 @@ impl Default for AgentProviderConfig {
             program: String::new(),
             default_model: String::new(),
             default_effort: String::new(),
+            available_efforts: Vec::new(),
             fast_mode: false,
             selected: String::new(),
             profiles: BTreeMap::new(),
@@ -53,6 +56,15 @@ impl AgentProviderConfig {
         {
             return Err(ConfigLoadError::new(
                 "Agent model and effort defaults must be bounded identifiers",
+            ));
+        }
+        if self.available_efforts.len() > 32
+            || self.available_efforts.iter().any(|effort| {
+                effort.is_empty() || effort.len() > 256 || effort.chars().any(char::is_control)
+            })
+        {
+            return Err(ConfigLoadError::new(
+                "Available efforts must be bounded identifiers",
             ));
         }
         if self.profiles.len() > 16

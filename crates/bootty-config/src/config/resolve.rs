@@ -240,6 +240,7 @@ fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
         group_by_project,
         sort_order,
         animate_working,
+        auto_settle_after_days,
         position,
         background,
         foreground,

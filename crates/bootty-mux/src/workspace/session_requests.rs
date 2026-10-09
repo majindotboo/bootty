@@ -23,6 +23,13 @@ pub const SESSION_ARGV_MAX_ELEMENTS: usize = 64;
 /// such as handing the pane a file to run.
 pub const SESSION_ARGV_MAX_BYTES: usize = 12 * 1024;
 
+#[derive(Clone, Copy)]
+pub struct SavedSessionMetadata<'a> {
+    pub identity: &'a str,
+    pub title: &'a str,
+    pub projectless: bool,
+}
+
 /// The first pane Bootty started for an explicit create, by the ids it had when the create
 /// landed. A session closed and recreated under the same name, or a replaced binding, is never
 /// mistaken for it.
@@ -195,10 +202,9 @@ impl WorkspaceRuntime {
         name: &str,
         cwd: &str,
         argv: Vec<String>,
-        identity: &str,
-        title: &str,
+        saved: SavedSessionMetadata<'_>,
     ) -> Result<PreparedSessionRequest, SessionRequestError> {
-        self.begin_session_create_request(scope, name, cwd, argv, Some((identity, title)))
+        self.begin_session_create_request(scope, name, cwd, argv, Some(saved))
     }
 
     fn begin_session_create_request(
@@ -207,13 +213,13 @@ impl WorkspaceRuntime {
         name: &str,
         cwd: &str,
         argv: Vec<String>,
-        saved: Option<(&str, &str)>,
+        saved: Option<SavedSessionMetadata<'_>>,
     ) -> Result<PreparedSessionRequest, SessionRequestError> {
         validate_session_name(name)?;
         validate_cwd(cwd)?;
         validate_argv(&argv)?;
         let naming = saved
-            .map(|(identity, title)| self.saved_create_metadata(scope, name, cwd, identity, title))
+            .map(|saved| self.saved_create_metadata(scope, name, cwd, saved))
             .transpose()?;
         let binding = self.live_binding(scope)?;
         // Bootty spawns a native pane itself, and its PTY layer starts in the home directory when
@@ -244,8 +250,8 @@ impl WorkspaceRuntime {
             cwd: cwd.to_owned(),
             tag: saved.map_or_else(
                 || binding.new_session_tag(),
-                |(identity, _)| crate::snapshot::MuxSessionTag {
-                    identity: Some(identity.to_owned()),
+                |saved| crate::snapshot::MuxSessionTag {
+                    identity: Some(saved.identity.to_owned()),
                     space: Some(binding.space_tag.clone()),
                 },
             ),
@@ -262,9 +268,13 @@ impl WorkspaceRuntime {
         scope: SpaceId,
         name: &str,
         cwd: &str,
-        identity: &str,
-        title: &str,
+        metadata: SavedSessionMetadata<'_>,
     ) -> Result<super::PendingGeneratedName, SessionRequestError> {
+        let SavedSessionMetadata {
+            identity,
+            title,
+            projectless,
+        } = metadata;
         if identity.is_empty() || identity.len() > 256 || identity.chars().any(char::is_control) {
             return Err(SessionRequestError::Invalid(
                 "saved identity must be 1–256 bytes without control characters".to_owned(),
@@ -303,6 +313,11 @@ impl WorkspaceRuntime {
                     "retry must use the saved project directory".to_owned(),
                 ));
             }
+            if saved.state.projectless != projectless {
+                return Err(SessionRequestError::Invalid(
+                    "retry must keep the saved project assignment".into(),
+                ));
+            }
         }
         let scopes = self
             .all_bindings()
@@ -327,6 +342,10 @@ impl WorkspaceRuntime {
                 |saved| saved.display_name.clone(),
             ),
             explicit: saved.is_none_or(|saved| saved.explicit),
+            initial_state: crate::session_membership::SessionState {
+                projectless,
+                ..crate::session_membership::SessionState::default()
+            },
         })
     }
 
@@ -408,8 +427,11 @@ impl WorkspaceRuntime {
                 &name,
                 &cwd,
                 Vec::new(),
-                identity,
-                &title,
+                SavedSessionMetadata {
+                    identity,
+                    title: &title,
+                    projectless: saved.state.projectless,
+                },
             );
         };
         validate_restore_snapshot(&saved_snapshot, binding.backend_policy.panes.topology)?;

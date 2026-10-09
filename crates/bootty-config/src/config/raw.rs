@@ -136,6 +136,7 @@ pub(super) struct SidebarPatch {
     pub(super) group_by_project: Option<bool>,
     pub(super) sort_order: Option<SidebarSortOrder>,
     pub(super) animate_working: Option<bool>,
+    pub(super) auto_settle_after_days: Option<u16>,
     pub(super) position: Option<SidebarPosition>,
     pub(super) background: Option<Color>,
     #[serde(rename = "fullscreen-background")]

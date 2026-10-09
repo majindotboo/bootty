@@ -199,7 +199,8 @@ pub(super) fn create_workspace_schema(tx: &Transaction<'_>) -> rusqlite::Result<
             new_name TEXT,
             display_name TEXT,
             explicit INTEGER,
-            cwd TEXT
+            cwd TEXT,
+            initial_state TEXT NOT NULL DEFAULT '{}'
         );",
     )
 }
