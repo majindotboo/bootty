@@ -534,7 +534,12 @@ impl ComposerCompletion {
                     menu.set_selected_index(Some(IndexPath::new(next)), window, cx);
                 });
             }
-            CommandAction::ToggleFavorite | CommandAction::Focus(_) => return false,
+            CommandAction::EffortDown
+            | CommandAction::EffortUp
+            | CommandAction::ToggleFavorite
+            | CommandAction::Focus(_)
+            | CommandAction::Dictate
+            | CommandAction::Voice => return false,
         }
         true
     }
@@ -609,7 +614,7 @@ impl EventEmitter<CompletionSelection> for ComposerCompletion {}
 impl Render for ComposerCompletion {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.active(window, cx) {
-            return div().into_any_element();
+            return div().hidden().into_any_element();
         }
         let owner = cx.weak_entity();
         if self.reset_selection {

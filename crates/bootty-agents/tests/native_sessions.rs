@@ -203,6 +203,10 @@ for line in sys.stdin:
  elif method == 'thread/read':
   with open('read.json','w') as output: json.dump(value,output)
   child=params.get('threadId',thread)
+  if child=='child-thread' and os.path.exists('child-read.json'):
+   with open('child-read.json') as source: response=json.load(source)
+   reply(ident,{'thread':response})
+   continue
   if os.path.exists('legacy-history'):
    with open('paged-history.json') as source: items=json.load(source)
    if os.path.exists('malformed-history') and len(items)>1: items[-1]=items[-2]
@@ -1689,6 +1693,14 @@ fn bounds_recent_transcript_across_all_stream_items() {
             <= 1024 * 1024
     );
     assert!(snapshot.transcript.iter().any(|item| item.id == "long-95"));
+    for item in snapshot
+        .transcript
+        .iter()
+        .filter(|item| item.role == "assistant")
+    {
+        assert_eq!(item.text, "界".repeat(6000));
+        assert_eq!(item.display_text(), item.text);
+    }
     assert!(
         snapshot
             .transcript
@@ -2283,6 +2295,70 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
         serde_json::from_slice(&fs::read(root.path().join("read.json")).unwrap()).unwrap();
     assert_eq!(request["method"], "thread/read");
     assert_eq!(request["params"]["threadId"], "child-thread");
+    session.stop();
+}
+
+#[rstest]
+#[case("active", "inProgress", NativeToolStatus::Running)]
+#[case("idle", "completed", NativeToolStatus::Completed)]
+#[case("idle", "failed", NativeToolStatus::Failed)]
+#[case("idle", "interrupted", NativeToolStatus::Interrupted)]
+#[case("notLoaded", "completed", NativeToolStatus::Completed)]
+#[case("notLoaded", "inProgress", NativeToolStatus::Interrupted)]
+#[case("systemError", "inProgress", NativeToolStatus::Failed)]
+fn child_reads_reconcile_status_without_claiming_its_writer(
+    #[case] thread_status: &str,
+    #[case] turn_status: &str,
+    #[case] expected: NativeToolStatus,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    fs::write(root.path().join("events.json"), json!([{
+        "method":"item/started", "params":{"threadId":"native-thread", "turnId":"turn-1", "item":{
+            "type":"subAgentActivity", "kind":"started", "agentThreadId":"child-thread",
+            "agentPath":"/root/history_audit"
+        }}
+    }]).to_string()).unwrap();
+    session.rpc("__barrier", json!({})).unwrap();
+    let response = |status: &str, turn: &str, text: &str| {
+        json!({
+            "id":"child-thread", "status":{"type":status}, "turns":[{
+                "id":"child-turn", "status":turn, "items":[{
+                    "id":"child-answer", "type":"agentMessage", "text":text
+                }]
+            }]
+        })
+    };
+    fs::write(
+        root.path().join("child-read.json"),
+        response(thread_status, turn_status, "Audit result").to_string(),
+    )
+    .unwrap();
+    let detail = session.read_subagent("child-thread").unwrap();
+    assert_eq!(detail.agent.status, expected);
+    assert_eq!(detail.transcript.last().unwrap().text, "Audit result");
+    let snapshot = session.snapshot();
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .find_map(|item| item.subagent.as_ref())
+            .unwrap()
+            .status,
+        expected
+    );
+
+    // A completed child can be given another turn while its read-only tab stays open.
+    fs::write(
+        root.path().join("child-read.json"),
+        response("active", "inProgress", "Follow-up audit").to_string(),
+    )
+    .unwrap();
+    let detail = session.read_subagent("child-thread").unwrap();
+    assert_eq!(detail.agent.status, NativeToolStatus::Running);
+    assert_eq!(detail.transcript.last().unwrap().text, "Follow-up audit");
+    assert!(!root.path().join("child-thread.writer").exists());
     session.stop();
 }
 

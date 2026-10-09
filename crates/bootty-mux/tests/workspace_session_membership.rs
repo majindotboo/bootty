@@ -176,6 +176,18 @@ proptest! {
     }
 
     #[test]
+    fn settling_snoozed_work_clears_the_wake_deadline(until in 0_i64..i64::MAX) {
+        use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange, SessionView};
+        let mut membership = SessionMembership::from_sessions(vec![session("saved", "backend")]);
+        membership.set_state("saved", SessionStateChange::SnoozeUntil(until));
+        membership.set_state("saved", SessionStateChange::SetLifecycle(SessionLifecycle::Settled));
+        let state = membership.get("saved").unwrap().state;
+        prop_assert_eq!(state.snoozed_until, None);
+        prop_assert!(!state.is_overdue(until));
+        prop_assert_eq!(state.view(until), SessionView::Settled);
+    }
+
+    #[test]
     fn pinning_promotes_saved_work_without_changing_order_or_visibility(seed in any::<SavedStateSeed>()) {
         use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange};
         let mut saved = session("saved", "backend");

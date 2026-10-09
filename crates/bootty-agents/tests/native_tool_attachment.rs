@@ -203,7 +203,10 @@ fn spawned_child_publishes_before_startup_and_retains_failure(#[case] reject_pla
                 ..ToolPolicy::own_terminal()
             },
             captures: Vec::new(),
-            spawn: Some(ToolSpawnContext { profile: None }),
+            spawn: Some(ToolSpawnContext {
+                profile: None,
+                providers: Vec::new(),
+            }),
         },
         &std::env::current_exe().unwrap(),
         commands.clone(),

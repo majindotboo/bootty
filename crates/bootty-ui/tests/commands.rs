@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+
 use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
@@ -4283,6 +4286,49 @@ fn invalid_saved_session_title_leaves_existing_metadata_unchanged(#[case] title:
 }
 
 #[rstest]
+#[case::current(true)]
+#[case::edited(false)]
+fn generated_saved_title_preserves_a_newer_manual_edit(#[case] current: bool) {
+    let directory = assert_fs::TempDir::new().expect("private workspace");
+    let mut state = native_state(directory.path());
+    open_native_session(&mut state, directory.path(), Instant::now());
+    let space = spaces_listing(&mut state).remove(0);
+    let original = saved_sessions(&mut state, &space).remove(0);
+    let identity = original["identity"].as_str().unwrap();
+    let expected = original["title"].as_str().unwrap();
+    if !current {
+        let outcome = submit_command(
+            &mut state,
+            session_request(
+                "session.set_title",
+                owned(&[identity, "Manual title"]),
+                space["target"].clone(),
+            ),
+            Instant::now(),
+        );
+        assert_eq!(failure_kind(&outcome), "success");
+    }
+    let outcome = submit_command(
+        &mut state,
+        session_request(
+            "session.set_title",
+            owned(&[identity, "Generated title", expected]),
+            space["target"].clone(),
+        ),
+        Instant::now(),
+    );
+    assert_eq!(failure_kind(&outcome), "success");
+    assert_eq!(
+        saved_sessions(&mut state, &space)[0]["title"],
+        if current {
+            "Generated title"
+        } else {
+            "Manual title"
+        }
+    );
+}
+
+#[rstest]
 fn failed_saved_title_commit_keeps_live_and_restarted_metadata_unchanged() {
     let directory = assert_fs::TempDir::new().expect("private workspace");
     let mut state = native_state(directory.path());
@@ -4707,6 +4753,41 @@ fn native_spawn_fixture_for_turn(
     enabled: bool,
     finished: bool,
 ) -> Result<NativeSpawnFixture, Box<dyn std::error::Error>> {
+    native_spawn_fixture_with_pi(enabled, finished, false)
+}
+
+#[cfg(unix)]
+fn configure_pi_child(
+    preferences: &mut bootty_config::config::AgentProviderConfig,
+    directory: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let child = directory.join("pi-terminal.py");
+    fs::write(
+        &child,
+        "#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.path.join(os.environ['PI_CODING_AGENT_DIR'],'launch.json'),'w') as out: json.dump({'argv':sys.argv,'account':os.environ['PI_CODING_AGENT_DIR']},out)\nprint('PI_CHILD_READY',flush=True)\nfor line in sys.stdin: pass\n",
+    )?;
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o700))?;
+    preferences.program = child.to_string_lossy().into_owned();
+    preferences.selected = "review".into();
+    let account = directory.join("pi-account");
+    fs::create_dir(&account)?;
+    preferences.profiles.insert(
+        "review".into(),
+        bootty_config::config::AgentProfileConfig {
+            name: "Review".into(),
+            directory: Some(account.to_string_lossy().into_owned()),
+            arguments: Vec::new(),
+        },
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn native_spawn_fixture_with_pi(
+    enabled: bool,
+    finished: bool,
+    pi: bool,
+) -> Result<NativeSpawnFixture, Box<dyn std::error::Error>> {
     let directory = assert_fs::TempDir::new()?;
     let (program, query_gate) = if finished {
         let (program, gate) = finished_claude_terminal_fixture(directory.path())?;
@@ -4719,6 +4800,11 @@ fn native_spawn_fixture_for_turn(
         MultiplexerBackendConfig::Native,
     );
     config.agents.allow_spawn = enabled;
+    config.agents.codex.enabled = false;
+    config.agents.pi.enabled = pi;
+    if pi {
+        configure_pi_child(&mut config.agents.pi, directory.path())?;
+    }
     config.agents.claude.selected = "work".to_owned();
     config.agents.claude.profiles.insert(
         "work".to_owned(),
@@ -5513,6 +5599,80 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
     ));
     let (repository, _) = WorkspaceRepository::open(&directory.path().join("config.toml")).unwrap();
     assert_eq!(repository.registered_projects().unwrap().len(), 1);
+    assert!(matches!(
+        submit_command(
+            &mut reopened,
+            invoke("project.remove", owned(&["/work/empty"])),
+            Instant::now()
+        ),
+        CommandOutcome::StaleTarget { .. }
+    ));
+    let current = submit_command(
+        &mut reopened,
+        CommandInvocation::new("resource.current", owned(&["binding"]), Caller::Socket),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = current else {
+        panic!("current binding")
+    };
+    let mut remove =
+        CommandInvocation::new("project.remove", owned(&["/work/empty"]), Caller::Socket);
+    remove.target = Some(serde_json::from_value(value["target"].clone()).unwrap());
+    assert!(matches!(
+        submit_command(&mut reopened, remove, Instant::now()),
+        CommandOutcome::Success { .. }
+    ));
+    assert_eq!(repository.registered_projects().unwrap(), Vec::new());
+}
+
+#[rstest]
+#[case(Caller::Keybinding)]
+#[case(Caller::CommandPalette)]
+#[case(Caller::Socket)]
+fn add_project_requests_a_system_folder_chooser_and_registers_any_location(#[case] caller: Caller) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = native_state(directory.path());
+    let outcomes = state
+        .app_command_sender(caller)
+        .submit(
+            CommandInvocation::from_action("add_project", caller),
+            Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("short deadline"),
+            CommandCancellation::new(),
+        )
+        .unwrap();
+    let effects = state.update_frame(frames::idle_frame(Instant::now()));
+    let outcome = outcomes.try_recv().unwrap();
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let target = effects
+        .iter()
+        .find_map(|effect| match effect {
+            bootty_ui::AppEffect::ChooseProjectDirectory(target) => Some(target.clone()),
+            _ => None,
+        })
+        .expect("local Add project opens the system folder chooser");
+    assert!(state.modal_dialog().is_none());
+    let mut invocation = CommandInvocation::new(
+        "project.register",
+        vec![directory.path().to_str().unwrap().to_owned()],
+        caller,
+    );
+    invocation.target = Some(target);
+    let outcome = submit_command(&mut state, invocation, Instant::now());
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let (repository, _) = WorkspaceRepository::open(&directory.path().join("config.toml")).unwrap();
+    assert_eq!(
+        repository.registered_projects().unwrap()[0].cwd,
+        directory.path().to_str().unwrap()
+    );
+    assert_eq!(state.mux().sessions(), []);
 }
 
 #[rstest]
@@ -5618,4 +5778,61 @@ fn close_surface_on_creation_preserves_the_underlying_workspace(
         !has_session
     );
     assert_eq!(state.last_error(), None);
+}
+
+#[cfg(unix)]
+#[rstest]
+fn terminal_child_uses_the_captured_other_provider_executable_and_account() {
+    let mut fixture = native_spawn_fixture_with_pi(true, false, true).unwrap();
+    let mut invocation = CommandInvocation::new("agents.spawn", vec![serde_json::json!({"kind":"agent","name":"pi-review","provider":"pi","prompt":"Review changes"}).to_string()], Caller::Socket);
+    invocation.target = Some(fixture.parent.clone());
+    let outcome = submit_command_from_caller(
+        &mut fixture.state,
+        &fixture.wakes,
+        Caller::Socket,
+        invocation,
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("Child: {outcome:?}");
+    };
+    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+    let service = fixture.state.terminal_agent_service().unwrap();
+    let child = service.record(&target).unwrap();
+    assert_eq!(child.provider, bootty_agents::AgentKind::Pi);
+    assert_eq!(
+        child.launch.program,
+        fixture
+            .directory
+            .path()
+            .join("pi-terminal.py")
+            .to_string_lossy()
+    );
+    let account = fixture.directory.path().join("pi-account");
+    assert_eq!(child.launch.account_directory.as_deref(), account.to_str());
+    let file = account.join("launch.json");
+    let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+    while !file.exists() {
+        fixture
+            .state
+            .update_frame(frames::idle_frame(Instant::now()));
+        fixture
+            .wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+    }
+    let launch: serde_json::Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(launch["account"], account.to_string_lossy().as_ref());
+    assert!(
+        launch["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "Review changes")
+    );
+    let (_, lease) = service.spawn_parent(&target).unwrap();
+    assert_eq!(lease.scope().provider, bootty_agents::AgentKind::Pi);
+    assert!(!lease.spawn_enabled());
+    service.revoke_terminal_tools(&fixture.parent);
+    assert!(!lease.enabled(None));
 }

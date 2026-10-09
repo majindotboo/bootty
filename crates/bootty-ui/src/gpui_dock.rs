@@ -179,6 +179,11 @@ pub struct WorkspaceDock {
     retained_panels: Vec<ContextPanels>,
     surfaces: surfaces::CenterSurfaces,
     centers: std::collections::BTreeMap<String, gpui_kit::component::dock::PanelState>,
+    subagents: Rc<
+        RefCell<
+            std::collections::BTreeMap<String, Entity<crate::gpui_subagent_panel::SubagentPanel>>,
+        >,
+    >,
     center_task: Option<String>,
     restored_agent_destination: Option<(String, String, String)>,
     document_context: Rc<RefCell<GitPanelContext>>,
@@ -211,7 +216,7 @@ impl Focusable for WorkspaceDock {
 }
 
 impl WorkspaceDock {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) fn new(
         context: GitPanelContext,
         owner: gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
@@ -272,6 +277,7 @@ impl WorkspaceDock {
             Rc::new(move |_, _, _| legacy_sessions.clone()),
             cx,
         );
+        let subagents = Self::subagent_panels(&area, cx);
         let panels = ContextPanels::new(context.clone(), sender.clone(), local_git, window, cx);
         panels.register(&area, cx);
         let agents = cx.new(|cx| {
@@ -306,6 +312,7 @@ impl WorkspaceDock {
             retained_panels: Vec::new(),
             surfaces,
             centers: std::collections::BTreeMap::new(),
+            subagents,
             center_task: None,
             restored_agent_destination: None,
             document_context,
@@ -617,6 +624,24 @@ impl WorkspaceDock {
         });
     }
 
+    pub(crate) fn update_subagents(
+        &self,
+        parents: Vec<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        for panel in self.subagents.borrow().values() {
+            let parent_id = panel.read(cx).parent_id().to_owned();
+            if let Some(parent) = parents
+                .iter()
+                .find(|parent| parent.read(cx).conversation_id() == parent_id)
+            {
+                panel.update(cx, |panel, cx| panel.attach_parent(parent.clone(), cx));
+            }
+        }
+        self.sessions
+            .update(cx, |sidebar, cx| sidebar.update_subagents(parents, cx));
+    }
+
     pub(crate) fn show_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pending) = &mut self.restoring {
             pending.panel = Some(InspectorPanel::Agents);
@@ -697,6 +722,72 @@ impl WorkspaceDock {
                 area.toggle_dock(DockPlacement::Right, window, cx);
             }
         });
+    }
+
+    fn subagent_panels(
+        area: &Entity<DockArea>,
+        cx: &mut App,
+    ) -> crate::gpui_subagent_panel::SubagentPanels {
+        let panels: crate::gpui_subagent_panel::SubagentPanels = Rc::default();
+        let held = panels.clone();
+        register_factory(
+            area,
+            "bootty.subagent",
+            Rc::new(move |info, _, cx| {
+                let panel = match info {
+                    PanelInfo::Panel(value) => value
+                        .get("key")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|key| {
+                            let existing = held.borrow().get(key).cloned();
+                            existing.or_else(|| {
+                                let panel =
+                                    crate::gpui_subagent_panel::SubagentPanel::restored(value, cx)?;
+                                held.borrow_mut().insert(key.to_owned(), panel.clone());
+                                Some(panel)
+                            })
+                        }),
+                    _ => None,
+                };
+                panel.map_or_else(
+                    || panel_handle(cx.new(crate::gpui_surface_chooser::SurfacePanel::unavailable)),
+                    panel_handle,
+                )
+            }),
+            cx,
+        );
+        panels
+    }
+
+    pub(crate) fn restore_full_view(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.area.read(cx).is_zoomed() {
+            self.area
+                .update(cx, |area, cx| area.set_zoomed_out(window, cx));
+        }
+    }
+
+    pub(crate) fn open_subagent(
+        &self,
+        key: String,
+        parent: Entity<crate::gpui_agent_session::NativeAgentSessionView>,
+        child: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self.subagents.borrow().get(&key).cloned();
+        let panel = existing.unwrap_or_else(|| {
+            let panel = cx.new(|cx| {
+                crate::gpui_subagent_panel::SubagentPanel::new(parent, child, key.clone(), cx)
+            });
+            self.subagents.borrow_mut().insert(key, panel.clone());
+            panel
+        });
+        let id = PanelId::from(panel.entity_id());
+        self.add_document_panel(panel_handle(panel.clone()), window, cx);
+        self.area.update(cx, |area, cx| {
+            area.select_panel(id, window, cx);
+        });
+        panel.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     pub(crate) fn open_document(
@@ -1364,6 +1455,16 @@ impl WorkspaceDock {
         {
             self.remove_tool(kind, window, cx);
             self.layout_changed(cx);
+        } else if let Some(panel) = self
+            .subagents
+            .borrow()
+            .values()
+            .find(|panel| PanelId::from(panel.entity_id()) == id)
+            .cloned()
+        {
+            self.area
+                .update(cx, |area, cx| area.remove_panel(panel, window, cx));
+            self.layout_changed(cx);
         } else {
             return false;
         }
@@ -1449,6 +1550,45 @@ impl WorkspaceDock {
         request.complete(outcome);
     }
 
+    fn toggle_full_view(
+        &self,
+        node: Option<NodeId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bootty_control::CommandOutcome {
+        let node = node.or_else(|| {
+            group_paths(self.area.read(cx))
+                .into_iter()
+                .find_map(|(path, node)| path.starts_with("right").then_some(node))
+        });
+        let Some(node) = node else {
+            return bootty_control::CommandOutcome::Unavailable {
+                message: "Open a right-hand panel first.".into(),
+            };
+        };
+        if crate::gpui_dock_skin::group_placement(self.area.read(cx), node)
+            != Some(DockPlacement::Right)
+        {
+            return bootty_control::CommandOutcome::Unavailable {
+                message: "Full view applies to a right-hand panel.".into(),
+            };
+        }
+        let zoomed = self.area.read(cx).is_zoomed();
+        self.area.update(cx, |area, cx| {
+            if zoomed {
+                area.set_zoomed_out(window, cx);
+            } else {
+                area.set_zoomed_in(node, window, cx);
+            }
+        });
+        if self.area.read(cx).is_zoomed() == zoomed {
+            return bootty_control::CommandOutcome::Unavailable {
+                message: "This panel cannot enter full view.".into(),
+            };
+        }
+        bootty_control::CommandOutcome::success()
+    }
+
     fn apply_action(
         &mut self,
         request: &crate::commands::DockRequest,
@@ -1515,12 +1655,24 @@ impl WorkspaceDock {
         match action {
             DockAction::ToggleLeft => self.toggle_dock(DockPlacement::Left, window, cx),
             DockAction::ToggleRight => self.toggle_dock(DockPlacement::Right, window, cx),
+            DockAction::ToggleFullView => {
+                return self.toggle_full_view(node, window, cx);
+            }
             DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs => {
                 return bootty_control::CommandOutcome::Unavailable {
                     message: "Tool tabs always remain visible.".into(),
                 };
             }
-            DockAction::Sidebar | DockAction::Spaces => self.show_sidebar(window, cx),
+            DockAction::Sidebar | DockAction::Spaces => {
+                self.sessions
+                    .update(cx, |sidebar, cx| sidebar.show_subagents(false, cx));
+                self.show_sidebar(window, cx);
+            }
+            DockAction::Subagents => {
+                self.sessions
+                    .update(cx, |sidebar, cx| sidebar.show_subagents(true, cx));
+                self.show_sidebar(window, cx);
+            }
             DockAction::Files => self.show_files(window, cx),
             DockAction::Changes => self.refresh(window, cx),
             DockAction::Diff => self.show_diff(window, cx),

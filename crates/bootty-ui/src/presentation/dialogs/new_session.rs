@@ -597,6 +597,11 @@ impl NewSessionDialog {
         let result = self.worker.as_mut()?.poll()?;
         let remote = self.is_remote();
         match result {
+            Ok(NewSessionOutcome::HomeDirectory(path)) => {
+                if let Some(form) = &mut self.form {
+                    form.set_no_project(path);
+                }
+            }
             Ok(NewSessionOutcome::Projects(projects)) => {
                 self.projects.clone_from(&projects);
                 if let Some(form) = &self.form
@@ -605,6 +610,7 @@ impl NewSessionDialog {
                         .destination()
                         .is_some_and(|destination| destination.worktrees)
                     && !form.draft.cwd.is_empty()
+                    && !form.draft.projectless
                     && let Some(worker) = &mut self.worker
                 {
                     worker.start(NewSessionEffect::ListWorktrees(
@@ -809,13 +815,17 @@ impl NewSessionDialog {
         };
         let mut spec = form.spec(self.is_in_flight());
         spec.projects.clone_from(&self.projects);
-        spec.selected_project = Some(form.draft.cwd.clone());
+        spec.selected_project = Some(if form.draft.projectless {
+            String::new()
+        } else {
+            form.draft.cwd.clone()
+        });
         if self.purpose == NewSessionPurpose::NativeAgentTab {
             "Agent".clone_into(&mut spec.title);
             spec.fields.retain(|field| {
                 matches!(
                     field.id.as_str(),
-                    "provider" | "profile" | "model" | "reasoning" | "permissions"
+                    "provider" | "profile" | "model" | "reasoning" | "permissions" | "fast-mode"
                 )
             });
             spec.rows.retain(|row| row.id.0 != "choose-project");
@@ -997,16 +1007,7 @@ impl NewSessionDialog {
             }
             DialogIntent::FieldChanged { field, value, .. } if !self.is_in_flight() => {
                 if field == "project" {
-                    if self.purpose == NewSessionPurpose::NativeAgentTab || self.worker_busy() {
-                        return None;
-                    }
-                    let project = self
-                        .projects
-                        .iter()
-                        .find(|project| project.path == *value)?
-                        .clone();
-                    self.empty_enter_armed = false;
-                    return self.activate_project(project, &[]);
+                    return self.change_project(value);
                 }
                 if field == "model-favorite" {
                     let form = self.form.as_ref()?;
@@ -1024,7 +1025,12 @@ impl NewSessionDialog {
                 if self.purpose == NewSessionPurpose::NativeAgentTab
                     && !matches!(
                         field.as_str(),
-                        "provider" | "profile" | "model" | "reasoning" | "permissions"
+                        "provider"
+                            | "profile"
+                            | "model"
+                            | "reasoning"
+                            | "permissions"
+                            | "fast-mode"
                     )
                 {
                     return None;
@@ -1074,6 +1080,28 @@ impl NewSessionDialog {
             }
             _ => None,
         }
+    }
+
+    fn change_project(&mut self, value: &str) -> Option<NewSessionPickerEvent> {
+        if self.purpose == NewSessionPurpose::NativeAgentTab || self.worker_busy() {
+            return None;
+        }
+        if value.is_empty() {
+            self.empty_enter_armed = false;
+            if let Some(worker) = &mut self.worker {
+                worker.start(NewSessionEffect::ResolveHome);
+            } else if let Some(form) = &mut self.form {
+                form.set_no_project(home_dir()?.to_str()?.to_owned());
+            }
+            return None;
+        }
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.path == value)?
+            .clone();
+        self.empty_enter_armed = false;
+        self.activate_project(project, &[])
     }
 
     fn start_form(&mut self, action: &str) -> Option<NewSessionPickerEvent> {

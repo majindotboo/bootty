@@ -434,6 +434,18 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
             CommandAction::Cancel,
             "Dismiss Composer Suggestions",
         ),
+        (
+            "effort-down",
+            CommandAction::EffortDown,
+            "Decrease thinking effort",
+        ),
+        (
+            "effort-up",
+            CommandAction::EffortUp,
+            "Increase thinking effort",
+        ),
+        ("dictate", CommandAction::Dictate, "Dictate into composer"),
+        ("voice", CommandAction::Voice, "Toggle voice mode"),
     ]
     .into_iter()
     .chain(
@@ -458,7 +470,14 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
                     mutation: MutationClass::Write,
                     arguments: CompactSchema::default(),
                     target: Some(ResourceKind::ApplicationWindow),
-                    palette: matches!(action, CommandAction::Focus(_)),
+                    palette: matches!(
+                        action,
+                        CommandAction::Focus(_)
+                            | CommandAction::EffortDown
+                            | CommandAction::EffortUp
+                            | CommandAction::Dictate
+                            | CommandAction::Voice
+                    ),
                 },
                 executor: CommandExecutorResolver::Composer(action),
             },

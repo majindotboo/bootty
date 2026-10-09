@@ -1018,7 +1018,10 @@ impl Panel for DocumentPanel {
                 .accessibility_label(crate::i18n::t(cx, "common-close"))
                 .tooltip(crate::i18n::t(cx, "common-close"))
                 .disabled(self.saving(cx))
-                .on_click(cx.listener(|this, _, window, cx| this.request_close(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.request_close(window, cx);
+                })),
         )
     }
     fn dropdown_menu(

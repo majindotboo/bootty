@@ -8,6 +8,8 @@ use serde_json::Value;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NativeSubagent {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<crate::AgentKind>,
     pub title: String,
     pub prompt: String,
     pub model: Option<String>,
@@ -147,6 +149,7 @@ impl NativeSessionSnapshot {
             self.subagent(
                 NativeSubagent {
                     id: id.into(),
+                    provider: Some(crate::AgentKind::Codex),
                     title,
                     prompt: text(field(item, "prompt"), 2048),
                     model: model(field(item, "model")),
@@ -253,6 +256,7 @@ impl NativeSessionSnapshot {
                 });
             self.subagent(
                 NativeSubagent {
+                    provider: Some(crate::AgentKind::Pi),
                     id: format!(
                         "{call}:{}",
                         field(row, "step")
@@ -290,6 +294,7 @@ impl NativeSessionSnapshot {
         self.subagent(
             NativeSubagent {
                 id: id.into(),
+                provider: Some(crate::AgentKind::Pi),
                 title: id.into(),
                 prompt: text(field(row, "description"), 2048),
                 model: model(field(row, "model")),
@@ -354,6 +359,7 @@ impl NativeSessionSnapshot {
         self.subagent(
             NativeSubagent {
                 id: id.into(),
+                provider: Some(crate::AgentKind::Claude),
                 title: text(title, 256),
                 prompt: text(field(&args, "prompt"), 2048),
                 model: model(field(&args, "model")),
@@ -374,7 +380,7 @@ impl crate::NativeAgentSession {
     /// Rejects unknown children, missing provider transcripts or mismatched read replies.
     pub fn read_subagent(&self, id: &str) -> Result<NativeSubagentDetail, String> {
         let snapshot = self.snapshot();
-        let agent = snapshot
+        let mut agent = snapshot
             .transcript
             .iter()
             .find_map(|item| item.subagent.as_ref().filter(|agent| agent.id == id))
@@ -383,6 +389,7 @@ impl crate::NativeAgentSession {
         if agent.owner_session != snapshot.session_id {
             return Err("This subagent belongs to the source conversation".into());
         }
+        let original = agent.clone();
         let thread = agent
             .thread_id
             .as_deref()
@@ -402,6 +409,64 @@ impl crate::NativeAgentSession {
         history.session_id = Some(thread.into());
         for turn in turns {
             history.history_turn(turn);
+        }
+        let status = match field(field(response, "status"), "type").as_str() {
+            Some("active") => Some(NativeToolStatus::Running),
+            Some("systemError") => Some(NativeToolStatus::Failed),
+            thread_status => match turns.last().and_then(|turn| field(turn, "status").as_str()) {
+                Some("completed") => Some(NativeToolStatus::Completed),
+                Some("failed") => Some(NativeToolStatus::Failed),
+                Some("interrupted") => Some(NativeToolStatus::Interrupted),
+                Some("inProgress") if thread_status == Some("notLoaded") => {
+                    Some(NativeToolStatus::Interrupted)
+                }
+                Some("inProgress") => Some(NativeToolStatus::Running),
+                _ if thread_status == Some("notLoaded") => Some(NativeToolStatus::Interrupted),
+                _ if thread_status == Some("idle") => Some(NativeToolStatus::Completed),
+                _ => None,
+            },
+        };
+        if let Some(status) = status {
+            agent.status = status;
+            agent.completed_at = if status == NativeToolStatus::Running {
+                None
+            } else {
+                turns
+                    .last()
+                    .and_then(|turn| field(turn, "completedAt").as_i64())
+                    .and_then(|time| time.checked_mul(1000))
+                    .or(agent.completed_at)
+            };
+            let mut current = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let changed = current.transcript.iter_mut().any(|item| {
+                let Some(child) = &mut item.subagent else {
+                    return false;
+                };
+                if child.id != id || child.owner_session != agent.owner_session {
+                    return false;
+                }
+                // A parent notification received during the read is newer than its reply.
+                if *child != original {
+                    agent.clone_from(child);
+                    return false;
+                }
+                if *child == agent {
+                    return false;
+                }
+                child.clone_from(&agent);
+                item.complete = status != NativeToolStatus::Running;
+                true
+            });
+            if changed {
+                current.changed();
+            }
+            drop(current);
+            if changed {
+                crate::native_session::publish_change(&self.change_handler);
+            }
         }
         Ok(NativeSubagentDetail {
             agent,

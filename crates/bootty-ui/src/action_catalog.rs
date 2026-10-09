@@ -190,6 +190,9 @@ command_catalog! {
     ToggleRightDock:
         "Toggle right dock", "Show or hide the right dock",
         "toggle_right_dock", "panel-right", Layout, shown, Write, ApplicationWindow, None;
+    TogglePanelFullView:
+        "Toggle panel full view", "Expand the right-hand panel or restore its prior layout",
+        "toggle_panel_full_view", "maximize", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSidebar:
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
@@ -211,6 +214,9 @@ command_catalog! {
     ExportTerminal:
         "Export Terminal", "Save retained terminal content as plain text, ANSI or HTML",
         "export_terminal", "download", Terminal, shown, Write, ApplicationWindow, None;
+    ShowSubagents:
+        "Show Subagents", "Browse subagents across conversations",
+        "show_subagents", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
     ShowAgents:
         "Show Agents", "Open agent attention, session and navigation controls",
         "show_agents", "bot", Application, hidden, Write, ApplicationWindow, DockGroup;

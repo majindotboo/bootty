@@ -955,6 +955,7 @@ dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "image",
+ "markdown",
  "png 0.18.1",
  "pretty_assertions",
  "proptest",

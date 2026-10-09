@@ -42,6 +42,7 @@ fn form() -> NewSessionForm {
     );
     NewSessionForm::new(
         NewSessionDraft {
+            projectless: false,
             scope: local,
             cwd: "/project/current".to_owned(),
             mode: NewSessionMode::Agent,
@@ -659,11 +660,10 @@ fn explicit_native_launcher_starts_without_a_prompt_and_keeps_account_and_termin
     let identity = form.draft.identity.clone();
     let mut dialog = ready_session_dialog(form, true).expect("discovery");
     let spec = dialog.spec();
-    assert!(
-        spec.fields
-            .iter()
-            .all(|field| matches!(field.id.as_str(), "provider" | "profile" | "permissions"))
-    );
+    assert!(spec.fields.iter().all(|field| matches!(
+        field.id.as_str(),
+        "provider" | "profile" | "permissions" | "fast-mode"
+    )));
     assert!(spec.fields.iter().any(|field| field.id == "permissions"));
     dialog.apply(
         &bootty_ui::gpui::DialogIntent::FieldChanged {
@@ -769,6 +769,10 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
     }
     form.set_model_catalog(Ok(catalog));
     form.change_field("model", model_label);
+    form.change_field("fast-mode", "true");
+    form.change_field("reasoning", "high");
+    // Changing model or effort keeps the chosen speed in the same captured launch.
+    form.change_field("model", model_label);
     form.change_field("reasoning", "high");
     let spec = form.spec(false);
     assert_eq!(
@@ -792,6 +796,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
     assert_eq!(invocation.arguments[10], "");
     let selected: bootty_agents::NativeModelSelection =
         serde_json::from_str(&invocation.arguments[11]).unwrap();
+    assert_eq!(selected.fast_mode, Some(true));
     assert_eq!(selected.model, "provider-model");
     assert_eq!(selected.reasoning_effort.as_deref(), Some("high"));
     let mut surface = invocation.clone();
@@ -970,8 +975,7 @@ fn permission_choices_reset_with_provider_and_use_the_shared_invocation(mut form
     let bootty_ui::gpui::DialogFieldKind::Choice(options) = &permissions.kind else {
         panic!("Permission menu")
     };
-    assert!(options.iter().any(|option| option == "Auto"));
-    assert!(options.iter().any(|option| option == "Supervised"));
+    assert_eq!(options, &["Supervised", "Auto-accept edits", "Full access"]);
     form.change_field("permissions", "Supervised");
     assert_eq!(
         form.invocation(&form.draft.cwd).unwrap().arguments[14],
@@ -1088,6 +1092,7 @@ fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: N
     assert!(form.draft.isolated);
     assert_eq!(form.draft.start_ref, "main");
     let selection = bootty_agents::NativeModelSelection {
+        fast_mode: None,
         model: "chosen".to_owned(),
         reasoning_effort: None,
     };
@@ -1301,4 +1306,30 @@ fn refreshing_a_warm_catalog_preserves_choices_on_failure(mut form: NewSessionFo
     assert_eq!(form.model_options[0].id, "current");
     assert!(!form.models_loading);
     assert_eq!(form.model_error.as_deref(), Some("Provider unavailable"));
+}
+
+#[rstest]
+#[case(NewSessionMode::Agent)]
+#[case(NewSessionMode::Terminal)]
+fn no_project_keeps_launch_directory_separate_from_assignment(
+    mut form: NewSessionForm,
+    #[case] mode: NewSessionMode,
+) {
+    form.draft.mode = mode;
+    form.set_no_project("/host/home".into());
+    form.set_worktree_available(true);
+    assert!(!form.worktree_available);
+    assert!(!form.draft.isolated);
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    assert_eq!(invocation.arguments[1], "/host/home");
+    assert_eq!(
+        invocation.arguments[if mode == NewSessionMode::Agent { 15 } else { 5 }],
+        "true"
+    );
+    assert_eq!(
+        form.shell_invocation(&form.draft.cwd).unwrap().arguments[5],
+        "true"
+    );
+    form.set_directory("/registered/project".into());
+    assert!(!form.draft.projectless);
 }

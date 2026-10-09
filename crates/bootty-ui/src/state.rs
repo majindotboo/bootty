@@ -2,6 +2,7 @@ pub mod agent_attention;
 mod clipboard;
 mod recovery;
 pub use recovery::SessionCheckpointTicket;
+mod settlement;
 mod themes;
 use bootty_mux::pane_layout::Divider;
 use std::{
@@ -195,6 +196,7 @@ pub struct OpenFilesRequest {
 /// Host actions requested by a frame update, applied by the active window adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppEffect {
+    CustomSnooze(bootty_control::CommandInvocation),
     OpenSurfaceChooser(crate::surface_creation::PendingNewSurface),
     OpenSurfaceAgentForm(crate::surface_creation::PendingNewSurface),
     CloseSurfaceChooser(u64),
@@ -243,6 +245,7 @@ pub enum AppEffect {
     OpenThemeSettings,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
+    ChooseProjectDirectory(bootty_control::CommandTarget),
     OpenGitChanges {
         scope: bootty_mux::controller::SpaceId,
         target: bootty_control::CommandTarget,
@@ -269,6 +272,7 @@ pub struct AppState {
     pub(crate) native_computer_window: Option<std::num::NonZeroU32>,
     pub(super) commands: CommandRuntime,
     pub(super) session_activity_receipt: std::cell::RefCell<Option<(CommandTarget, String, i64)>>,
+    last_settlement_check: Option<Instant>,
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
     pub(super) last_error: Option<ErrorNotice>,
@@ -451,6 +455,7 @@ impl AppState {
             localizer: crate::i18n::Localizer::new(&config.locale)?,
             commands,
             session_activity_receipt: std::cell::RefCell::new(None),
+            last_settlement_check: None,
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
             last_error: keymap_diagnostic.map(ErrorNotice::from_text),
@@ -1659,6 +1664,7 @@ impl AppState {
         let workspace_frame = self.advance_workspace_frame(now, window_focused);
         self.restore_terminal_agents(now);
         self.reconcile_agent_ownership();
+        self.poll_session_settlement(now, &mut effects);
         if let Some(after) = workspace_frame.next_wake {
             effects.push(AppEffect::RepaintAfter(after));
         }

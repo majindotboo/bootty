@@ -434,6 +434,9 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::FocusTerminal => Keybind::App(AppAction::FocusTerminal),
         Binding::ToggleSidebarFocus => Keybind::App(AppAction::ToggleSidebarFocus),
         Binding::ToggleSidebarVisibility => Keybind::App(AppAction::ToggleSidebarVisibility),
+        Binding::ShowSubagents => {
+            Keybind::App(AppAction::Dock(crate::commands::DockAction::Subagents))
+        }
         Binding::ShowAgents => Keybind::App(AppAction::Dock(crate::commands::DockAction::Agents)),
         Binding::ShowFiles => Keybind::App(AppAction::Dock(crate::commands::DockAction::Files)),
         Binding::ShowSidebar => Keybind::App(AppAction::Dock(crate::commands::DockAction::Sidebar)),
@@ -457,6 +460,9 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         }
         Binding::ToggleRightDock => {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleRight))
+        }
+        Binding::TogglePanelFullView => {
+            Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleFullView))
         }
         Binding::ShowSpaces => Keybind::App(AppAction::Dock(crate::commands::DockAction::Spaces)),
         Binding::ToggleHiddenTabs => Keybind::App(AppAction::Dock(

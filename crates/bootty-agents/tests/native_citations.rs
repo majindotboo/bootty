@@ -152,3 +152,53 @@ proptest! {
         prop_assert_eq!(saved.display_text(), item.display_text());
     }
 }
+
+#[rstest]
+#[case(
+    "Handled. :codex-annotation{index=\"1\"}",
+    "Handled. [Annotation 1](bootty-annotation:1)"
+)]
+#[case(
+    "` :codex-annotation{index=\"1\"} `",
+    "` :codex-annotation{index=\"1\"} `"
+)]
+#[case(
+    "```text\n:codex-annotation{index=\"1\"}\n```",
+    "```text\n:codex-annotation{index=\"1\"}\n```"
+)]
+#[case("\\:codex-annotation{index=\"1\"}", "\\:codex-annotation{index=\"1\"}")]
+#[case(
+    "[ :codex-annotation{index=\"1\"} ](https://example.com)",
+    "[ :codex-annotation{index=\"1\"} ](https://example.com)"
+)]
+#[case(":codex-annotation{index=\"0\"}", ":codex-annotation{index=\"0\"}")]
+#[case(
+    ":codex-annotation{index=\"1\"} 界 :codex-annotation{index=\"2\"}",
+    "[Annotation 1](bootty-annotation:1) 界 [Annotation 2](bootty-annotation:2)"
+)]
+fn assistant_annotation_references_render_without_rewriting_code(
+    #[case] text: &str,
+    #[case] expected: &str,
+) {
+    assert_eq!(response(text, "assistant").display_text(), expected);
+    assert_eq!(response(text, "user").display_text(), text);
+}
+
+#[rstest]
+fn annotation_envelopes_render_selected_text_and_user_comment() {
+    let text = "Before <response-annotations>[{\"text\":\"Selected text\",\"annotation\":\"Please fix it\",\"source\":{\"messageId\":\"earlier\"}}]</response-annotations> After";
+    let annotations = bootty_agents::response_annotations(text);
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0].text, "Selected text");
+    assert_eq!(annotations[0].annotation, "Please fix it");
+    assert_eq!(
+        response(text, "user").display_text(),
+        "Before \n\n**Annotation 1**\n\n> Selected text\n\nPlease fix it After"
+    );
+    let malformed = "<response-annotations>not json</response-annotations>";
+    assert_eq!(
+        bootty_agents::response_annotations(malformed),
+        Vec::<bootty_agents::NativeResponseAnnotation>::new()
+    );
+    assert_eq!(response(malformed, "user").display_text(), malformed);
+}

@@ -31,6 +31,7 @@ pub(super) struct LaunchContext {
     pub(super) binding_id: String,
     pub(super) cwd: Option<String>,
     pub(super) preferences: bootty_config::config::AgentProviderConfig,
+    pub(super) providers: Vec<(AgentKind, bootty_config::config::AgentProviderConfig)>,
     remote: bool,
     process_local: bool,
     pub(super) allow_spawn: bool,
@@ -271,6 +272,16 @@ impl AppState {
                     == bootty_mux::provider::PaneTopology::ProcessLocal
             }),
             allow_spawn: self.config().agents.allow_spawn,
+            providers: AgentKind::ALL
+                .into_iter()
+                .filter_map(|provider| {
+                    self.config()
+                        .agents
+                        .provider(&provider.to_string())
+                        .filter(|preferences| preferences.enabled)
+                        .map(|preferences| (provider, preferences.clone()))
+                })
+                .collect(),
             computer_capture: computer_capture::computer_launch_capture(
                 self.config().computer,
                 invocation.caller,
@@ -848,8 +859,43 @@ fn capture_spawn(
     captured.account_directory = Some(directory);
     captured.validate()?;
     launch.account_directory = captured.account_directory;
+    let mut providers = Vec::new();
+    for (candidate, preferences) in &context.providers {
+        let (child, profile) = if *candidate == provider {
+            (launch.clone(), (!id.is_empty()).then(|| id.to_owned()))
+        } else {
+            let invocation = CommandInvocation::new(
+                format!("{}.start", candidate.module()),
+                Vec::new(),
+                invocation.caller,
+            );
+            let mut child = prepare_launch(
+                &invocation,
+                *candidate,
+                "start",
+                launch.cwd.as_deref(),
+                preferences,
+            )?;
+            child.account_directory = Some(
+                effective_account_directory(*candidate, selected_profile(preferences, None)?)?
+                    .to_str()
+                    .ok_or("The account directory is not UTF-8")?
+                    .to_owned(),
+            );
+            (
+                child,
+                (!preferences.selected.is_empty()).then(|| preferences.selected.clone()),
+            )
+        };
+        providers.push(bootty_agents::ToolSpawnProvider {
+            provider: *candidate,
+            profile,
+            launch: bootty_agents::ToolSpawnLaunch::Terminal(child.retained(*candidate)),
+        });
+    }
     Ok(bootty_agents::ToolSpawnContext {
         profile: (!id.is_empty()).then(|| id.to_owned()),
+        providers,
     })
 }
 

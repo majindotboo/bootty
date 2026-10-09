@@ -20,6 +20,7 @@ claude='--input-format' in sys.argv
 identity=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--session-id')+1] if claude else None
 model={'provider':'configured','id':'available','name':'Available','reasoning':True,'thinkingLevelMap':{'xhigh':None,'max':'high'}}
 effort=sys.argv[sys.argv.index('--effort')+1] if '--effort' in sys.argv else 'medium'
+fast=any(json.loads(sys.argv[i+1]).get('fastMode',False) for i,arg in enumerate(sys.argv[:-1]) if arg=='--settings')
 def emit(value): print(json.dumps(value),flush=True)
 def reply(value,data):
  if claude: emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':data}})
@@ -28,7 +29,7 @@ def reply(value,data):
 for line in sys.stdin:
  value=json.loads(line)
  if claude and value['type']=='user':
-  with open('prompt.json','w') as output: json.dump({'params':value['message'],'model':model,'effort':effort},output)
+  with open('prompt.json','w') as output: json.dump({'params':value['message'],'model':model,'effort':effort,'fast':fast},output)
   emit({'type':'system','subtype':'init','session_id':identity,'cwd':os.getcwd()})
   emit(dict(value,isReplay=True))
   continue
@@ -60,15 +61,18 @@ for line in sys.stdin:
   model['contextWindow']=32768
   reply(value,model)
  elif method=='set_thinking_level': effort=params['level'];reply(value,{})
- elif method=='apply_flag_settings': effort=params['settings']['effortLevel'];reply(value,{})
+ elif method=='apply_flag_settings':
+  effort=params['settings'].get('effortLevel',effort)
+  fast=params['settings'].get('fastMode',fast)
+  reply(value,{})
  elif method=='interrupt': reply(value,{})
  elif method=='get_settings':
-  settings={'effective':{'effortLevel':effort}}
+  settings={'effective':{'effortLevel':effort,'fastMode':fast}}
   if os.path.exists('claude-settings.json'):
    with open('claude-settings.json') as source: settings=json.load(source)
   reply(value,settings)
  elif method in ['turn/start','prompt']:
-  with open('prompt.json','w') as output: json.dump({'params':params,'model':model,'effort':effort},output)
+  with open('prompt.json','w') as output: json.dump({'params':params,'model':model,'effort':effort,'fast':fast},output)
   if pi: reply(value,{'disposition':'handled'})
   else: reply(value,{'turn':{'id':'turn'}})
  else: raise Exception(method)
@@ -150,19 +154,22 @@ fn discovery_reports_the_captured_provider_policy_without_starting_a_conversatio
 }
 
 #[rstest]
-#[case(AgentKind::Codex, "available")]
-#[case(AgentKind::Pi, "configured/available")]
-#[case(AgentKind::Claude, "available")]
+#[case(AgentKind::Codex, "available", false)]
+#[case(AgentKind::Codex, "available", true)]
+#[case(AgentKind::Pi, "configured/available", false)]
+#[case(AgentKind::Claude, "available", false)]
+#[case(AgentKind::Claude, "available", true)]
 fn committed_selection_drives_the_next_provider_prompt(
     #[case] provider: AgentKind,
     #[case] model: &str,
+    #[case] fast: bool,
 ) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
     let service = NativeAgentService::open(&path).unwrap();
-    let record = service
-        .create("binding", "Session", config(root.path(), provider).unwrap())
-        .unwrap();
+    let mut launch = config(root.path(), provider).unwrap();
+    launch.fast_mode = provider != AgentKind::Pi && !fast;
+    let record = service.create("binding", "Session", launch).unwrap();
     let models = service.models(&record.target()).unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, model);
@@ -172,12 +179,14 @@ fn committed_selection_drives_the_next_provider_prompt(
         assert!(!models[0].reasoning_efforts.contains(&"xhigh".to_owned()));
     }
     let selection = NativeModelSelection {
+        fast_mode: Some(fast),
         model: model.to_owned(),
         reasoning_effort: Some("high".to_owned()),
     };
     service.configure(&record.target(), &selection).unwrap();
     let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(stored["records"][0]["config"]["model"], model);
+    assert_eq!(stored["records"][0]["config"]["fast_mode"], fast);
     assert_eq!(stored["records"][0]["config"]["reasoning_effort"], "high");
     assert!(!root.path().join("prompt.json").exists());
     service.prompt(&record.target(), "hello").unwrap();
@@ -190,11 +199,18 @@ fn committed_selection_drives_the_next_provider_prompt(
     if provider == AgentKind::Codex {
         assert_eq!(wire["params"]["model"], model);
         assert_eq!(wire["params"]["effort"], "high");
+        assert_eq!(
+            wire["params"]["serviceTier"],
+            if fast { json!("fast") } else { Value::Null }
+        );
         assert_eq!(wire["params"].get("approvalPolicy"), None);
         assert_eq!(wire["params"].get("sandboxPolicy"), None);
     } else {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["model"]["id"], "available");
+    }
+    if provider == AgentKind::Claude {
+        assert_eq!(wire["fast"], fast);
     }
     if provider == AgentKind::Pi {
         let snapshot = service
@@ -229,6 +245,7 @@ proptest! {
         let record = service.create("binding", "Session", config(root.path(), AgentKind::Codex).unwrap()).unwrap();
         let before: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let selection = NativeModelSelection {
+fast_mode: None,
             model: if invalid_model { selector.clone() } else { "available".to_owned() },
             reasoning_effort: if invalid_model { None } else { Some(selector) },
         };
@@ -258,6 +275,7 @@ fn failed_configuration_write_keeps_the_prior_prompt_settings() {
             .configure(
                 &record.target(),
                 &NativeModelSelection {
+                    fast_mode: Some(true),
                     model: "available".to_owned(),
                     reasoning_effort: Some("high".to_owned())
                 }
@@ -483,6 +501,7 @@ fn claude_discovery_keeps_launch_efforts_and_live_controls_offer_only_supported_
             .configure(
                 &record.target(),
                 &NativeModelSelection {
+                    fast_mode: None,
                     model: "available".to_owned(),
                     reasoning_effort: Some("max".to_owned()),
                 }

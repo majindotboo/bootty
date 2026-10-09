@@ -120,7 +120,7 @@ impl AppState {
             AppAction::Ignore => {}
             AppAction::NewWindow => effects.push(AppEffect::OpenWindow),
             AppAction::AddProject => {
-                self.open_add_project_dialog();
+                self.open_add_project_dialog(effects);
             }
             AppAction::NewMuxSession => {
                 self.open_new_mux_session_dialog();

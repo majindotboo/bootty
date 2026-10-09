@@ -157,6 +157,43 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(agent_provider_specs());
     specs.extend(agent_defaults_specs());
     specs.push(spec(
+        &["agents", "response-streaming"], "Response streaming",
+        "Show replies as they arrive, after each Markdown block finishes, or after the full response finishes.",
+        "general", "BEHAVIOR",
+        SettingKind::Choice { options: [("live", "Show text as it arrives"), ("paragraph", "Show finished paragraphs"), ("complete", "Show finished responses")].into_iter().map(|(token, label)| SettingOption { token: token.into(), label: label.into(), description: None }).collect() },
+        SettingDefault::Field(|config| SettingValue::Token(config.agents.response_streaming.token().into())),
+    ));
+    specs.push(spec(
+        &["agents", "collapse-composer-on-scroll"], "Collapse composer on scroll",
+        "Fold an empty conversation composer to one line while reading earlier messages. Click it to write a message.",
+        "general", "BEHAVIOR", SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.collapse_composer_on_scroll)),
+    ));
+    specs.push(spec(
+        &["agents", "send-shortcut"],
+        "Send shortcut",
+        "Enter sends by default; Shift+Enter inserts a newline. Choose Command/Control+Enter always, or only for multiline prompts. Use Command/Control+Enter (Shift with that shortcut enabled) for the opposite follow-up behavior.",
+        "general", "BEHAVIOR",
+        SettingKind::Choice { options: [
+            ("enter", "Enter"),
+            ("mod-enter-multiline", "Command/Control+Enter for multiline prompts"),
+            ("mod-enter", "Command/Control+Enter always"),
+        ].into_iter().map(|(token, label)| SettingOption {token: token.into(), label: label.into(), description: None}).collect() },
+        SettingDefault::Field(|config| SettingValue::Token(config.agents.send_shortcut.token().into())),
+    ));
+    specs.push(spec(
+        &["agents", "follow-up-behavior"],
+        "Follow-up behavior",
+        "Queue messages for the next turn or steer the active turn. Command+Enter (Control+Enter on other platforms) uses the opposite behavior for one message.",
+        "general", "BEHAVIOR",
+        SettingKind::Choice {
+            options: [("queue", "Queue"), ("steer", "Steer")].into_iter().map(|(token, label)| SettingOption {
+                token: token.into(), label: label.into(), description: None,
+            }).collect(),
+        },
+        SettingDefault::Field(|config| SettingValue::Token(config.agents.follow_up_behavior.token().into())),
+    ));
+    specs.push(spec(
         &["agents", "quick-model"],
         "Session naming model",
         "Codex model used to name sessions and worktrees from their first prompt.",

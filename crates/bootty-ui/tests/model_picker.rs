@@ -89,6 +89,7 @@ fn catalog_picker_filters_legacy_and_uses_numbered_selection(cx: &mut TestAppCon
     draw(visual);
     click(visual, "model-picker-trigger");
     assert!(visual.debug_bounds("model-option:openai/current").is_some());
+    assert!(visual.debug_bounds("model-fast-mode").is_none());
     assert!(visual.debug_bounds("model-option:openai/legacy").is_none());
     click(visual, "model-favorite:openai/current");
     assert_eq!(
@@ -166,4 +167,57 @@ fn click(visual: &mut gpui_kit::VisualTestContext, selector: &'static str) {
     let bounds = visual.debug_bounds(selector).expect(selector);
     visual.simulate_click(bounds.center(), Modifiers::none());
     draw(visual);
+}
+
+#[gpui_kit::test]
+fn fast_mode_is_a_shared_picker_control_and_pi_has_no_speed_control(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let collected = events.clone();
+    let retained = Rc::new(RefCell::new(None));
+    let captured = retained.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let picker = cx.new(|cx| {
+            ModelPickerView::new_with_providers(
+                AgentKind::Codex,
+                vec![model("current", false, false)],
+                Some("current"),
+                vec!["Codex".into(), "Pi".into()],
+                window,
+                cx,
+            )
+        });
+        *captured.borrow_mut() = Some(picker.clone());
+        cx.subscribe(&picker, move |_, _, event: &ModelPickerEvent, _| {
+            collected.borrow_mut().push(event.clone());
+        })
+        .detach();
+        let host = cx.new(|_| WorkspacePicker {
+            picker,
+            commands: Rc::default(),
+        });
+        gpui_kit::component::Root::new(host, window, cx)
+    });
+    visual.simulate_resize(size(px(800.), px(600.)));
+    draw(visual);
+    click(visual, "model-picker-trigger");
+    click(visual, "model-fast-mode");
+    assert_eq!(*events.borrow(), vec![ModelPickerEvent::FastMode(true)]);
+    retained
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .update(visual, |picker, cx| picker.set_fast_mode(true, cx));
+    draw(visual);
+    click(visual, "model-fast-mode");
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            ModelPickerEvent::FastMode(true),
+            ModelPickerEvent::FastMode(false)
+        ]
+    );
 }

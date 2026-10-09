@@ -279,6 +279,7 @@ impl SessionMembership {
                 session.state.lifecycle = lifecycle;
                 if lifecycle == SessionLifecycle::Settled {
                     session.state.pinned = false;
+                    session.state.snoozed_until = None;
                 }
             }
             SessionStateChange::SetPinned(pinned) => {

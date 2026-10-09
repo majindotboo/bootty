@@ -111,20 +111,28 @@ pub struct NativeToolCall {
 }
 
 impl NativeTranscriptItem {
-    /// Plain bounded presentation, including transcripts saved before ANSI sanitation.
+    /// Plain presentation, including transcripts saved before ANSI sanitation.
     #[must_use]
     pub fn display_text(&self) -> String {
-        bounded_text(
-            if self.role == "user" && (!self.citations.is_empty() || !self.attachments.is_empty()) {
-                crate::native_citations::display_prompt_citations(
-                    &self.text,
-                    &self.citations,
-                    &self.attachments,
-                )
-            } else {
-                self.text.clone()
-            },
-        )
+        let text = if self.role == "user"
+            && (!self.citations.is_empty() || !self.attachments.is_empty())
+        {
+            crate::native_citations::display_prompt_citations(
+                &self.text,
+                &self.citations,
+                &self.attachments,
+            )
+        } else {
+            self.text.clone()
+        };
+        let text = transcript_text(&self.role, text);
+        if self.role == "user" {
+            crate::native_annotations::display_user_annotations(text)
+        } else if self.role == "assistant" && self.tool.is_none() && self.subagent.is_none() {
+            crate::native_annotations::display_annotation_references(text)
+        } else {
+            text
+        }
     }
 }
 
@@ -410,7 +418,7 @@ impl NativeSessionSnapshot {
         if id.is_empty() || id.len() > 8192 {
             return;
         }
-        let text = bounded_text(text);
+        let text = transcript_text(role, text);
         if text.trim().is_empty() && matches!(role, "assistant" | "thinking" | "notice" | "custom")
         {
             if let Some(item) = self.transcript.iter_mut().find(|item| item.id == id) {
@@ -1032,14 +1040,27 @@ fn bounded_tool_input(name: &str, input: String) -> String {
     }
 }
 
-pub fn bounded_text(mut text: String) -> String {
-    const LIMIT: usize = 16 * 1024;
+fn transcript_text(role: &str, text: String) -> String {
+    if matches!(role, "user" | "assistant" | "thinking") {
+        // Conversation text uses the aggregate transcript budget; tool output has its own cap.
+        presentation_text(&text)
+    } else {
+        bounded_text(text)
+    }
+}
+
+fn presentation_text(text: &str) -> String {
     let mut parser = anstyle_parse::Parser::<anstyle_parse::Utf8Parser>::default();
     let mut presentation = TranscriptText(String::with_capacity(text.len()));
     for byte in text.bytes() {
         parser.advance(&mut presentation, byte);
     }
-    text = presentation.0;
+    presentation.0
+}
+
+pub fn bounded_text(mut text: String) -> String {
+    const LIMIT: usize = 16 * 1024;
+    text = presentation_text(&text);
     if text.len() > LIMIT {
         let mut end = LIMIT;
         while !text.is_char_boundary(end) {

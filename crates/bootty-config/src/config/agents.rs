@@ -4,6 +4,122 @@ use serde::{Deserialize, Serialize};
 
 use super::ConfigLoadError;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResponseStreaming {
+    #[default]
+    Live,
+    Paragraph,
+    Complete,
+}
+
+impl ResponseStreaming {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Paragraph => "paragraph",
+            Self::Complete => "complete",
+        }
+    }
+    #[must_use]
+    pub fn visible_text(self, text: &str, complete: bool) -> &str {
+        if complete || self == Self::Live {
+            return text;
+        }
+        if self == Self::Complete {
+            return "";
+        }
+        // Publish only completed Markdown blocks; never cut an unfinished fenced code block.
+        let mut fence = None;
+        let mut boundary = 0;
+        let mut offset: usize = 0;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if line.len().saturating_sub(trimmed.len()) <= 3 {
+                let marker = trimmed.as_bytes().first().copied();
+                if let Some(marker @ (b'`' | b'~')) = marker {
+                    let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
+                    if length >= 3 {
+                        let rest = trimmed.get(length..).unwrap_or_default();
+                        if fence
+                            .is_some_and(|(opening, count)| opening == marker && length >= count)
+                            && rest.trim().is_empty()
+                        {
+                            fence = None;
+                        } else if fence.is_none() && (marker != b'`' || !rest.contains('`')) {
+                            fence = Some((marker, length));
+                        }
+                    }
+                }
+            }
+            offset = offset.saturating_add(line.len());
+            if fence.is_none() && line.trim().is_empty() {
+                boundary = offset;
+            }
+        }
+        text.get(..boundary).unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComposerSendShortcut {
+    #[default]
+    Enter,
+    ModEnterMultiline,
+    ModEnter,
+}
+
+impl ComposerSendShortcut {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::ModEnterMultiline => "mod-enter-multiline",
+            Self::ModEnter => "mod-enter",
+        }
+    }
+
+    /// Returns the requested one-message follow-up override, or leaves Enter to the editor.
+    #[must_use]
+    pub const fn submission(self, multiline: bool, secondary: bool, shift: bool) -> Option<bool> {
+        if matches!(self, Self::ModEnter) || (matches!(self, Self::ModEnterMultiline) && multiline)
+        {
+            if secondary { Some(shift) } else { None }
+        } else if shift {
+            None
+        } else {
+            Some(secondary)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FollowUpBehavior {
+    #[default]
+    Queue,
+    Steer,
+}
+
+impl FollowUpBehavior {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+    #[must_use]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Queue => Self::Steer,
+            Self::Steer => Self::Queue,
+        }
+    }
+}
+
 /// Launch preferences only. Providers retain ownership of credentials and conversation history.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
@@ -130,6 +246,14 @@ pub struct AgentProvidersConfig {
     pub default_provider: String,
     #[serde(rename = "quick-model")]
     pub quick_model: String,
+    #[serde(rename = "follow-up-behavior")]
+    pub follow_up_behavior: FollowUpBehavior,
+    #[serde(rename = "send-shortcut")]
+    pub send_shortcut: ComposerSendShortcut,
+    #[serde(rename = "response-streaming")]
+    pub response_streaming: ResponseStreaming,
+    #[serde(rename = "collapse-composer-on-scroll")]
+    pub collapse_composer_on_scroll: bool,
     pub codex: AgentProviderConfig,
     pub claude: AgentProviderConfig,
     pub pi: AgentProviderConfig,
@@ -141,6 +265,10 @@ impl Default for AgentProvidersConfig {
             allow_spawn: false,
             default_provider: "codex".to_owned(),
             quick_model: "gpt-6-luna".to_owned(),
+            follow_up_behavior: FollowUpBehavior::default(),
+            send_shortcut: ComposerSendShortcut::default(),
+            response_streaming: ResponseStreaming::default(),
+            collapse_composer_on_scroll: true,
             codex: AgentProviderConfig::default(),
             claude: AgentProviderConfig::default(),
             pi: AgentProviderConfig::default(),

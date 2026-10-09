@@ -175,6 +175,79 @@ pub struct NativePrompt {
     history_context: Option<String>,
 }
 
+/// Private catalog payload. Restore attachment bytes through their owning store;
+/// never deserialize provider file paths or admitted images from a command.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SavedNativePrompt {
+    pub(crate) text: String,
+    authored_bytes: usize,
+    images: Vec<(NativeImageReference, Vec<u8>)>,
+    pub(crate) attachments: Vec<crate::NativeAttachmentReference>,
+    citations: Vec<crate::NativeResponseCitation>,
+    applications: Vec<crate::NativeApplicationMention>,
+}
+
+impl SavedNativePrompt {
+    pub(crate) fn preview_text(&self) -> String {
+        crate::native_citations::queued_prompt_preview(
+            &self.text,
+            &self.citations,
+            &self.attachments,
+        )
+    }
+
+    pub(crate) fn capture(prompt: &NativePrompt) -> Self {
+        Self {
+            text: prompt.text.clone(),
+            authored_bytes: prompt.authored_bytes,
+            images: prompt
+                .images
+                .iter()
+                .filter(|image| {
+                    !prompt
+                        .attachment_references
+                        .iter()
+                        .any(|attachment| attachment.id == image.reference.id)
+                })
+                .map(|image| (image.reference.clone(), image.png.clone()))
+                .collect(),
+            attachments: prompt.attachment_references.clone(),
+            citations: prompt.citations.clone(),
+            applications: prompt.applications.clone(),
+        }
+    }
+
+    pub(crate) fn restore(
+        &self,
+        attachments: NativePromptAttachments,
+    ) -> Result<NativePrompt, String> {
+        if self.images.len() > MAX_NATIVE_PROMPT_IMAGES {
+            return Err("Queued message has too many images".into());
+        }
+        let images = self
+            .images
+            .iter()
+            .map(|(reference, png)| {
+                NativePromptImage::from_host_png(reference.clone(), png.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        NativePrompt::new_with_context(
+            self.text.clone(),
+            images,
+            attachments,
+            self.citations.clone(),
+        )?
+        .with_attachment_ranges(
+            self.attachments
+                .iter()
+                .map(|attachment| (attachment.id.clone(), attachment.prompt_ranges.clone()))
+                .collect(),
+        )?
+        .with_applications(self.applications.clone())?
+        .with_authored_prefix(self.authored_bytes)
+    }
+}
+
 impl NativePrompt {
     /// # Errors
     /// Rejects an empty submission or the text/count/aggregate-image byte budgets.

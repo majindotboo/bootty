@@ -129,15 +129,34 @@ impl ErrorNotice {
 }
 
 fn technical_summary(message: &str) -> String {
+    let message = bootty_agents::native_error_message(message);
     let lower = message.to_ascii_lowercase();
+    if lower.contains("active writer") || lower.contains("open in another app") {
+        return "This conversation is open in another app. Close it there, then retry.".into();
+    }
+    if lower.contains("archived") {
+        return "This conversation is archived. Unarchive it to continue.".into();
+    }
+    if lower.contains("not logged in")
+        || lower.contains("sign in")
+        || lower.contains("unauthorized")
+    {
+        return "Sign in to the selected provider account, then retry.".into();
+    }
+    if lower.contains("api key") {
+        return "Configure an OpenAI API key to use dictation and voice.".into();
+    }
+    if lower.contains("rate limit") || lower.contains("usage limit") {
+        return "The provider's usage limit was reached. Retry when it resets.".into();
+    }
+    if lower.contains("microphone") || lower.contains("speech was detected") {
+        return "Check microphone access and the input device, then try recording again.".into();
+    }
     if lower.contains("command deadline expired") {
         return "The command took too long. Try again.".to_owned();
     }
     if lower.contains("rmux pane output ended: transportlost") {
         return "The terminal connection was lost. Try reopening this pane.".to_owned();
-    }
-    if lower.contains("rmux") {
-        return first_sentence(message);
     }
     if lower.contains("ssh") || lower.contains("connection") {
         return "Could not reach the remote workspace.".to_owned();
@@ -145,28 +164,6 @@ fn technical_summary(message: &str) -> String {
     if lower.contains("target is stale") {
         return "That pane or session no longer exists.".to_owned();
     }
-    // An unrecognized failure shows its own first line: a generic sentence would hide the only
-    // clue to what failed.
-    first_sentence(message)
-}
-
-/// The message's first line as a bounded sentence.
-fn first_sentence(message: &str) -> String {
-    const LIMIT: usize = 200;
-    let line = message.lines().next().unwrap_or_default().trim();
-    let mut chars = line.chars();
-    let Some(first) = chars.next() else {
-        return "The operation failed without a reason.".to_owned();
-    };
-    let mut sentence = first.to_uppercase().chain(chars).collect::<String>();
-    if sentence.chars().count() > LIMIT {
-        sentence = sentence
-            .chars()
-            .take(LIMIT)
-            .chain(std::iter::once('…'))
-            .collect();
-    } else if !sentence.ends_with(['.', '!', '?']) {
-        sentence.push('.');
-    }
-    sentence
+    // Untrusted provider and transport diagnostics remain available through details().
+    "Could not complete the operation. Try again.".into()
 }

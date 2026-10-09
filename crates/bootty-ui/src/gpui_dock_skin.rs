@@ -605,6 +605,9 @@ impl WorkspaceTabGroup {
             .flex()
             .items_center()
             .w_full()
+            .when(group.is_zoomed(), |row| {
+                row.pl(px(self.chrome.read(cx).window_controls_inset()))
+            })
             .min_w_0()
             .child(
                 div()
@@ -625,7 +628,34 @@ impl WorkspaceTabGroup {
                 self.area.upgrade().is_some_and(|area| {
                     group_placement(area.read(cx), group.node()) == Some(DockPlacement::Right)
                 }),
-                |row| row.child(sidebar_tab_picker(self.owner.clone(), cx)),
+                |row| {
+                    let owner = self.owner.clone();
+                    let node = group.node();
+                    let full = group.is_zoomed();
+                    row.child(
+                        Button::new("panel-full-view")
+                            .icon(if full {
+                                IconName::Minimize
+                            } else {
+                                IconName::Maximize
+                            })
+                            .ghost()
+                            .small()
+                            .accessibility_label(if full { "Restore view" } else { "Full view" })
+                            .tooltip(if full { "Restore view" } else { "Full view" })
+                            .on_click(move |_, window, cx| {
+                                _ = owner.update(cx, |owner, cx| {
+                                    owner.invoke_action(
+                                        crate::commands::DockAction::ToggleFullView,
+                                        Some(node),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    )
+                    .child(sidebar_tab_picker(self.owner.clone(), cx))
+                },
             )
             .into_any_element()
     }

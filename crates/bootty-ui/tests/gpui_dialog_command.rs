@@ -966,6 +966,7 @@ fn native_agent_form_spec() -> DialogSpec {
     };
     let form = NewSessionForm::new(
         NewSessionDraft {
+            projectless: false,
             scope,
             cwd: cwd.to_owned(),
             mode: NewSessionMode::Agent,
@@ -1246,6 +1247,7 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         attachments: Vec::new(),
         completion: None,
         models: Vec::new(),
+        available_efforts: Vec::new(),
         models_loading: false,
         model_error: None,
         projects: Vec::new(),
@@ -1390,6 +1392,7 @@ fn attachment_pills_edit_delete_and_undo_in_the_prompt(cx: &TestAppContext) {
         full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
     cx.simulate_input("Read ");
     click(&mut cx, "dialog-prompt-attach");
+    cx.simulate_keystrokes("down down enter");
     assert!(cx.did_prompt_for_paths());
     cx.simulate_path_prompt_response(|_| Some(vec![path.clone()]));
     cx.run_until_parked();
@@ -1593,10 +1596,31 @@ fn composer_control_shortcuts_open_and_select_without_an_extra_activation(cx: &T
         spec.fields.push(bootty_gpui::DialogField {
             id: field.into(),
             label: label.into(),
-            value: "First".into(),
+            value: if field == "reasoning" {
+                "Medium"
+            } else {
+                "Supervised"
+            }
+            .into(),
             placeholder: String::new(),
-            kind: bootty_gpui::DialogFieldKind::Choice(vec!["First".into(), "Second".into()]),
+            kind: bootty_gpui::DialogFieldKind::Choice(if field == "reasoning" {
+                vec!["Medium".into(), "High".into()]
+            } else {
+                vec!["Supervised".into(), "Full access".into()]
+            }),
         });
+        if field == "reasoning" {
+            spec.models.push(bootty_agents::NativeModelOption {
+                id: "current".into(),
+                display_name: "Current model".into(),
+                reasoning_efforts: vec!["medium".into(), "high".into()],
+                default_reasoning_effort: Some("medium".into()),
+                is_default: true,
+                is_favorite: false,
+                is_legacy: false,
+            });
+            spec.selected_model = Some("current".into());
+        }
         let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200., 900., 16.);
         probe.update_in(&mut cx, |probe, window, cx| {
             probe.dialog.update(cx, |dialog, cx| {
@@ -1604,22 +1628,87 @@ fn composer_control_shortcuts_open_and_select_without_an_extra_activation(cx: &T
             });
         });
         cx.run_until_parked();
-        probe.update_in(&mut cx, |_, window, _| {
-            assert!(
-                gpui_kit::base::test_support::snapshots(window)
-                    .iter()
-                    .any(|item| item.path().last()
-                        == Some(&gpui_kit::ElementId::from("popup-menu"))
-                        && item.visible()),
-                "{field} shortcut must open its menu"
-            );
-        });
-        cx.simulate_keystrokes("down enter");
+        if field == "reasoning" {
+            assert!(cx.debug_bounds("model-picker-content").is_some());
+            probe.read_with(&cx, |probe, _| {
+                assert!(
+                    probe.intents.borrow().is_empty(),
+                    "Opening effort must not change it"
+                );
+            });
+            cx.simulate_keystrokes("right enter");
+        } else {
+            probe.update_in(&mut cx, |_, window, _| {
+                assert!(
+                    gpui_kit::base::test_support::snapshots(window)
+                        .iter()
+                        .any(|item| item.path().last()
+                            == Some(&gpui_kit::ElementId::from("popup-menu"))
+                            && item.visible()),
+                    "Permissions shortcut must open its menu"
+                );
+            });
+            cx.simulate_keystrokes("down enter");
+        }
         cx.run_until_parked();
         probe.read_with(&cx, |probe, _| {
             assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-                DialogIntent::FieldChanged { field: changed, value, .. } if changed == field && value == "First"
-            )), "shortcut must open its menu and permit selection");
+                DialogIntent::FieldChanged { field: changed, value, .. } if changed == field && value == if field == "reasoning" { "high" } else { "Supervised" }
+            )), "{field} shortcut must permit selection; intents: {:?}", probe.intents.borrow());
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn effort_commands_skip_hidden_levels_and_stop_at_the_model_bounds(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.selected_model = Some("current".into());
+    spec.available_efforts = vec!["low".into(), "high".into()];
+    spec.fields.push(bootty_gpui::DialogField {
+        id: "reasoning".into(),
+        label: "Reasoning".into(),
+        value: "medium".into(),
+        placeholder: String::new(),
+        kind: bootty_gpui::DialogFieldKind::Choice(vec!["medium".into()]),
+    });
+    spec.models.push(bootty_agents::NativeModelOption {
+        id: "current".into(),
+        display_name: "Current model".into(),
+        reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+        default_reasoning_effort: Some("medium".into()),
+        is_default: true,
+        is_legacy: false,
+        is_favorite: false,
+    });
+    let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec.clone(), 1200., 900., 16.);
+    for (current, action, expected) in [
+        ("medium", CommandAction::EffortDown, Some("low")),
+        ("low", CommandAction::EffortUp, Some("high")),
+        ("high", CommandAction::EffortUp, None),
+        ("low", CommandAction::EffortDown, None),
+    ] {
+        spec.fields
+            .iter_mut()
+            .find(|field| field.id == "reasoning")
+            .unwrap()
+            .value = current.into();
+        probe.update_in(&mut cx, |probe, window, cx| {
+            probe.intents.borrow_mut().clear();
+            probe.dialog.update(cx, |dialog, cx| {
+                dialog.present(Some(spec.clone()), window, cx);
+                dialog.perform(action, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        probe.read_with(&cx, |probe, _| {
+            let intents = probe.intents.borrow();
+            let actual = intents.iter().find_map(|intent| match intent {
+                DialogIntent::FieldChanged { field, value, .. } if field == "reasoning" => {
+                    Some(value.as_str())
+                }
+                _ => None,
+            });
+            pretty_assertions::assert_eq!(actual, expected);
         });
     }
 }

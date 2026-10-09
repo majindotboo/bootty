@@ -67,6 +67,7 @@ pub struct NewSessionDraft {
     pub scope: SpaceId,
     pub cwd: String,
     pub mode: NewSessionMode,
+    pub projectless: bool,
     pub prompt: String,
     pub attachments: Vec<NewSessionAttachment>,
     pub applications: Vec<bootty_agents::NativeApplicationMention>,
@@ -153,6 +154,9 @@ impl NewSessionForm {
     }
 
     pub fn set_worktree_catalog(&mut self, worktrees: &[bootty_git::WorktreePickerEntry]) {
+        if self.draft.projectless {
+            return;
+        }
         self.worktree_parent = worktrees
             .iter()
             .find(|entry| !entry.is_new)
@@ -167,13 +171,24 @@ impl NewSessionForm {
     }
 
     pub const fn set_worktree_available(&mut self, available: bool) {
-        self.worktree_available = available;
+        self.worktree_available = available && !self.draft.projectless;
         if !available {
             self.draft.isolated = false;
         }
     }
 
     pub fn set_directory(&mut self, cwd: String) {
+        self.draft.projectless = false;
+        self.update_directory(cwd);
+    }
+
+    pub fn set_no_project(&mut self, cwd: String) {
+        self.draft.projectless = true;
+        self.draft.isolated = false;
+        self.update_directory(cwd);
+    }
+
+    fn update_directory(&mut self, cwd: String) {
         self.draft.cwd = cwd;
         self.worktree_available = false;
         self.worktree_parent = None;
@@ -192,6 +207,9 @@ impl NewSessionForm {
     }
 
     fn project_settings(&self) -> Option<&bootty_mux::repository::ProjectSettings> {
+        if self.draft.projectless {
+            return None;
+        }
         self.project_defaults
             .iter()
             .find(|project| project.scope == self.draft.scope && project.cwd == self.draft.cwd)
@@ -295,7 +313,7 @@ impl NewSessionForm {
                     .profiles
                     .insert(self.draft.provider.clone(), selected);
             }
-            "model" | "reasoning" => self.change_model_field(field, value),
+            "model" | "reasoning" | "fast-mode" => self.change_model_field(field, value),
             "permissions" => {
                 self.draft.permissions = bootty_agents::NativePermissionMode::from_choice(value)
                     .unwrap_or(self.draft.permissions);
@@ -343,17 +361,57 @@ impl NewSessionForm {
     }
 
     fn change_model_field(&mut self, field: &str, value: &str) {
+        let available = self
+            .providers
+            .provider(&self.draft.provider)
+            .map_or(&[][..], |provider| provider.available_efforts.as_slice());
+        let fast = self
+            .draft
+            .model_selection
+            .as_ref()
+            .and_then(|selection| selection.fast_mode);
         match field {
+            "fast-mode" => {
+                if self.draft.provider != "pi"
+                    && let Ok(fast) = value.parse::<bool>()
+                {
+                    if self.draft.model_selection.is_none()
+                        && let Some(model) =
+                            self.model_options.iter().find(|model| model.is_default)
+                    {
+                        self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                            model: model.id.clone(),
+                            reasoning_effort: model.default_reasoning_effort.clone(),
+                            fast_mode: Some(fast),
+                        });
+                    } else if let Some(selection) = &mut self.draft.model_selection {
+                        selection.fast_mode = Some(fast);
+                    }
+                }
+            }
             "model" => {
                 if let Some(option) = self.model_options.iter().find(|option| {
                     option.id == value || model_label(option, &self.model_options) == value
                 }) {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: option
                             .default_reasoning_effort
                             .clone()
-                            .filter(|effort| option.reasoning_efforts.contains(effort)),
+                            .filter(|effort| {
+                                option.reasoning_efforts.contains(effort)
+                                    && (available.is_empty() || available.contains(effort))
+                            })
+                            .or_else(|| {
+                                option
+                                    .reasoning_efforts
+                                    .iter()
+                                    .find(|effort| {
+                                        available.is_empty() || available.contains(effort)
+                                    })
+                                    .cloned()
+                            }),
                     });
                 }
             }
@@ -371,6 +429,7 @@ impl NewSessionForm {
                     .any(|effort| effort == value)
                 {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: Some(value.to_owned()),
                     });
@@ -500,6 +559,17 @@ impl NewSessionForm {
             }
         };
         self.append_native_options(&mut invocation)?;
+        if self.draft.projectless {
+            invocation.arguments.resize(
+                if self.draft.mode == NewSessionMode::Agent {
+                    15
+                } else {
+                    5
+                },
+                String::new(),
+            );
+            invocation.arguments.push("true".into());
+        }
         invocation.target = Some(destination.target.clone());
         Ok(invocation)
     }
@@ -724,7 +794,9 @@ impl NewSessionForm {
     /// Display the selected account policy while leaving inherited launch values untouched.
     #[must_use]
     pub fn permission_selection(&self) -> bootty_agents::NativePermissionMode {
-        if self.draft.permissions == bootty_agents::NativePermissionMode::ProviderDefault {
+        if self.draft.provider == "pi" {
+            bootty_agents::NativePermissionMode::ProviderDefault
+        } else if self.draft.permissions == bootty_agents::NativePermissionMode::ProviderDefault {
             self.provider_permissions.unwrap_or(self.draft.permissions)
         } else {
             self.draft.permissions
@@ -789,6 +861,10 @@ impl NewSessionForm {
                     .or_else(|| options.iter().find(|option| option.is_default))
                     .or_else(|| options.first())
                 {
+                    let available = self
+                        .providers
+                        .provider(&self.draft.provider)
+                        .map_or(&[][..], |provider| provider.available_efforts.as_slice());
                     let effort = self
                         .draft
                         .model_selection
@@ -799,11 +875,35 @@ impl NewSessionForm {
                                 .provider(&self.draft.provider)
                                 .map(|provider| &provider.default_effort)
                         })
-                        .filter(|effort| option.reasoning_efforts.contains(effort))
+                        .filter(|effort| {
+                            option.reasoning_efforts.contains(effort)
+                                && (available.is_empty() || available.contains(effort))
+                        })
                         .cloned()
-                        .or_else(|| option.default_reasoning_effort.clone())
-                        .or_else(|| option.reasoning_efforts.first().cloned());
+                        .or_else(|| {
+                            option
+                                .default_reasoning_effort
+                                .clone()
+                                .filter(|effort| available.is_empty() || available.contains(effort))
+                        })
+                        .or_else(|| {
+                            option
+                                .reasoning_efforts
+                                .iter()
+                                .find(|effort| available.is_empty() || available.contains(effort))
+                                .cloned()
+                        });
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        fast_mode: self
+                            .draft
+                            .model_selection
+                            .as_ref()
+                            .and_then(|selection| selection.fast_mode)
+                            .or_else(|| {
+                                self.providers
+                                    .provider(&self.draft.provider)
+                                    .map(|provider| provider.fast_mode)
+                            }),
                         model: option.id.clone(),
                         reasoning_effort: effort,
                     });
@@ -946,6 +1046,7 @@ impl NewSessionForm {
                 "[]".to_owned(),
                 self.draft.identity.clone(),
                 bounded_title(&format!("Terminal in {}", directory_name(&self.draft.cwd))),
+                self.draft.projectless.to_string(),
             ],
             Caller::Internal,
         );
@@ -1028,6 +1129,10 @@ impl NewSessionForm {
             spec.applications.clone_from(&self.draft.applications);
             spec.attachments.clone_from(&self.draft.attachments);
             spec.models.clone_from(&self.model_options);
+            spec.available_efforts = self
+                .providers
+                .provider(&self.draft.provider)
+                .map_or_else(Vec::new, |provider| provider.available_efforts.clone());
             spec.models_loading = self.models_loading;
             spec.selected_model = self
                 .draft
@@ -1058,15 +1163,7 @@ impl NewSessionForm {
         spec.fields.extend(self.provider_fields());
         spec.fields.extend(self.model_fields());
         spec.fields.extend(self.worktree_fields());
-        let destination_path = if self.draft.isolated {
-            self.worktree_parent.as_ref().map_or_else(
-                || self.draft.folder.clone(),
-                |parent| format!("{parent}/{}", self.draft.folder),
-            )
-        } else {
-            self.draft.cwd.clone()
-        };
-        spec.footer = Some(destination_path);
+        spec.footer = Some(self.destination_path());
         if let Some(row) = spec.rows.first_mut() {
             (if busy { "Starting…" } else { "Start" }).clone_into(&mut row.label);
             row.detail = self
@@ -1079,12 +1176,26 @@ impl NewSessionForm {
         }
         let mut project = DialogRow::action(
             "choose-project",
-            format!("{}…", directory_name(&self.draft.cwd)),
+            if self.draft.projectless {
+                "No project…".into()
+            } else {
+                format!("{}…", directory_name(&self.draft.cwd))
+            },
             DialogAction::new("choose-project"),
         );
         project.enabled = !busy;
         spec.rows.push(project);
         spec
+    }
+    fn destination_path(&self) -> String {
+        if self.draft.isolated {
+            self.worktree_parent.as_ref().map_or_else(
+                || self.draft.folder.clone(),
+                |parent| format!("{parent}/{}", self.draft.folder),
+            )
+        } else {
+            self.draft.cwd.clone()
+        }
     }
     fn provider_fields(&self) -> Vec<DialogField> {
         let mut fields = Vec::new();
@@ -1178,6 +1289,22 @@ impl NewSessionForm {
             }
         }
         if self.draft.mode == NewSessionMode::Agent && self.draft.provider != "pi" {
+            let fast = self
+                .draft
+                .model_selection
+                .as_ref()
+                .and_then(|selection| selection.fast_mode)
+                .unwrap_or_else(|| {
+                    self.providers
+                        .provider(&self.draft.provider)
+                        .is_some_and(|provider| provider.fast_mode)
+                });
+            fields.push(choice(
+                "fast-mode",
+                "Fast mode",
+                &fast.to_string(),
+                vec!["false".into(), "true".into()],
+            ));
             let provider = if self.draft.provider == "claude" {
                 bootty_agents::AgentKind::Claude
             } else {
@@ -1187,9 +1314,8 @@ impl NewSessionForm {
                 "permissions",
                 "Permissions",
                 self.permission_selection().label(),
-                bootty_agents::NativePermissionMode::ALL
-                    .into_iter()
-                    .filter(|mode| mode.supports(provider))
+                bootty_agents::NativePermissionMode::choices(provider)
+                    .iter()
                     .map(|mode| mode.label().to_owned())
                     .collect(),
             ));

@@ -26,6 +26,15 @@ pub(super) struct NativeConversations {
     created_terminal_focus: Option<CreatedTerminalFocus>,
 }
 
+impl NativeConversations {
+    pub(super) fn subagent_parents(&self) -> Vec<Entity<NativeAgentSessionView>> {
+        self.records
+            .iter()
+            .filter_map(|record| self.views.get(&record.id).cloned())
+            .collect()
+    }
+}
+
 struct CreatedTerminalFocus {
     target: CommandTarget,
     panel: gpui_kit::FocusHandle,
@@ -427,6 +436,8 @@ impl GpuiWorkspace {
             self.sync_browser_configuration(window, cx);
             if changed_session
                 && !self.state.native_resume_pending(&target)
+                && !record.snapshot.provider_archived()
+                && !record.snapshot.provider_writer_blocked()
                 && !record.snapshot.transport_lost
                 && matches!(
                     record.snapshot.status,
@@ -530,17 +541,7 @@ impl GpuiWorkspace {
         }
     }
 
-    pub(super) fn refresh_native_conversations(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_pending_permissions();
-        self.resume_lost_native_transports(cx);
-        self.focus_created_terminal(window, cx);
-        self.sync_selected_native_pane(window, cx);
-        self.sync_surface_form(cx);
-        self.observe_browser_annotations(window, cx);
+    fn sync_native_preferences(&self, window: &mut Window, cx: &mut Context<Self>) {
         for record in &self.native_conversations.records {
             if let Some(view) = self.native_conversations.views.get(&record.id) {
                 let enabled = self
@@ -555,10 +556,40 @@ impl GpuiWorkspace {
                         self.state.native_resume_pending(&record.target()),
                         cx,
                     );
+                    if let Some(provider) = self
+                        .state
+                        .config()
+                        .agents
+                        .provider(&record.config.provider.to_string())
+                    {
+                        view.set_available_efforts(&provider.available_efforts, cx);
+                    }
                     view.set_animate_working(self.state.config().sidebar.animate_working, cx);
+                    view.set_follow_up_behavior(self.state.config().agents.follow_up_behavior, cx);
+                    view.set_send_shortcut(self.state.config().agents.send_shortcut);
+                    view.set_presentation_preferences(
+                        self.state.config().agents.response_streaming,
+                        self.state.config().agents.collapse_composer_on_scroll,
+                        window,
+                        cx,
+                    );
                 });
             }
         }
+    }
+
+    pub(super) fn refresh_native_conversations(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_pending_permissions();
+        self.resume_lost_native_transports(cx);
+        self.focus_created_terminal(window, cx);
+        self.sync_selected_native_pane(window, cx);
+        self.sync_surface_form(cx);
+        self.observe_browser_annotations(window, cx);
+        self.sync_native_preferences(window, cx);
         let Some(service) = self.state.native_agent_service() else {
             if let Some(dock) = &self.tools {
                 dock.update(cx, |dock, _| dock.cancel_restored_agent_destination());
@@ -590,6 +621,29 @@ impl GpuiWorkspace {
                             view.update_record(record.clone(), window, cx);
                         });
                     }
+                }
+                let parents = this
+                    .native_conversations
+                    .records
+                    .iter()
+                    .filter(|record| {
+                        record
+                            .snapshot
+                            .transcript
+                            .iter()
+                            .any(|item| item.subagent.is_some())
+                            || this.native_conversations.records.iter().any(|child| {
+                                child
+                                    .spawn_parent
+                                    .as_ref()
+                                    .is_some_and(|parent| parent.handle == record.id)
+                            })
+                    })
+                    .filter(|record| !this.native_conversations.views.contains_key(&record.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for record in parents {
+                    this.ensure_native_conversation_view(record, window, cx);
                 }
                 this.sync_selected_native_pane(window, cx);
                 this.sync_related_conversations(cx);
@@ -753,8 +807,9 @@ impl GpuiWorkspace {
         }
         Some(self.native_mux_pane_view(pane, window, cx).map_or_else(
             || crate::gpui_terminal_panel::WorkspacePaneView::NativePlaceholder {
-                loading: self.native_conversations.refreshing
-                    || self.native_conversations.revision == 0,
+                loading: self.state.native_agent_service().is_some()
+                    && (self.native_conversations.refreshing
+                        || self.native_conversations.revision == 0),
                 background: cx.theme().background,
                 foreground: cx.theme().muted_foreground,
             },
@@ -864,11 +919,26 @@ impl GpuiWorkspace {
             .agents
             .provider(&record.config.provider.to_string())
             .is_some_and(|provider| provider.enabled);
+        let catalog = self
+            .state
+            .native_agent_service()
+            .and_then(|service| service.cached_provider_catalog(&record.config));
         let sender = self.state.app_command_sender(Caller::Internal);
         let view = cx.new(|cx| NativeAgentSessionView::new(record, sender, enabled, window, cx));
         view.update(cx, |view, cx| {
             view.set_completion_binding(binding, window, cx);
+            if let Some(catalog) = catalog {
+                view.set_cached_catalog(catalog, window, cx);
+            }
             view.set_animate_working(self.state.config().sidebar.animate_working, cx);
+            view.set_follow_up_behavior(self.state.config().agents.follow_up_behavior, cx);
+            view.set_send_shortcut(self.state.config().agents.send_shortcut);
+            view.set_presentation_preferences(
+                self.state.config().agents.response_streaming,
+                self.state.config().agents.collapse_composer_on_scroll,
+                window,
+                cx,
+            );
         });
         let subscription = cx.subscribe_in(&view, window, |this, _, event, window, cx| {
             this.handle_native_session_event(event, window, cx);
@@ -911,10 +981,49 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            OpenNativeSession::Speech { mode } => self.invoke_gpui_command(
+                CommandInvocation::from_action(
+                    if *mode == crate::gpui_speech::SpeechMode::Voice {
+                        "ui.composer.voice"
+                    } else {
+                        "ui.composer.dictate"
+                    },
+                    Caller::Internal,
+                ),
+                window,
+                cx,
+            ),
+            OpenNativeSession::Changes { target } => self.apply_chrome_intent(
+                crate::gpui::chrome::ChromeIntent::OpenGitChanges(target.clone()),
+                cx,
+            ),
             OpenNativeSession::SideChatCreated { source, record } => {
                 self.present_side_chat(source, record.as_ref().clone(), window, cx);
             }
+            OpenNativeSession::Subagent { source, id } => {
+                if let Some(record) = self
+                    .native_conversations
+                    .records
+                    .iter()
+                    .find(|record| record.target() == *source)
+                    && let Some(parent) = self.native_conversations.views.get(&record.id).cloned()
+                    && let Some(dock) = &self.tools
+                {
+                    dock.update(cx, |dock, cx| {
+                        dock.open_subagent(
+                            format!("{}:{id}", source.handle),
+                            parent,
+                            id.clone(),
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }
             OpenNativeSession::Related { target } => {
+                if let Some(dock) = &self.tools {
+                    dock.update(cx, |dock, cx| dock.restore_full_view(window, cx));
+                }
                 let mut invocation =
                     CommandInvocation::from_action("agents.native.focus", Caller::Internal);
                 invocation.target = Some(target.clone());
@@ -995,16 +1104,64 @@ impl GpuiWorkspace {
                             .side_chat
                             .as_ref()
                             .is_some_and(|fork| fork.source_id == record.id)
+                            || child
+                                .spawn_parent
+                                .as_ref()
+                                .is_some_and(|parent| parent.handle == record.id)
                     })
                     .map(|child| crate::gpui_agent_session::RelatedConversation {
                         target: child.target(),
                         title: child.title.clone(),
                         model: child.config.model.clone(),
                         status: child.snapshot.status,
+                        revision: child.snapshot.revision,
+                        subagent: child
+                            .spawn_parent
+                            .as_ref()
+                            .filter(|parent| parent.handle == record.id)
+                            .map(|_| host_subagent(child, &record.snapshot)),
                     })
                     .collect();
                 view.update(cx, |view, cx| view.set_related_conversations(related, cx));
             }
+        }
+    }
+
+    pub(super) fn sync_conversation_context(
+        &self,
+        snapshot: &crate::gpui::chrome::ChromeSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.shown_native_conversation_target(cx);
+        for record in &self.native_conversations.records {
+            let Some(view) = self.native_conversations.views.get(&record.id) else {
+                continue;
+            };
+            let binding = self.native_conversation_binding(record);
+            let context = snapshot
+                .sidebar
+                .as_ref()
+                .and_then(|sidebar| {
+                    sidebar.rows.iter().find(|row| {
+                        row.task.as_ref().is_some_and(|task| {
+                            Some(&task.identity) == record.task_identity.as_ref()
+                                && task.binding == binding
+                        })
+                    })
+                })
+                .map(|row| crate::gpui_agent_session::ConversationContext {
+                    project: row.project.as_ref().map(|project| project.name.clone()),
+                    branch: row.branch.clone(),
+                    diff: row.diff,
+                    target: row.target.clone(),
+                });
+            view.update(cx, |view, cx| {
+                view.set_speech_visible(
+                    shown.as_ref() == Some(&record.target()) && self.state.modal_dialog().is_none(),
+                    cx,
+                );
+                view.set_conversation_context(context, cx);
+            });
         }
     }
 
@@ -1186,5 +1343,49 @@ impl GpuiWorkspace {
                 browser.detach_annotations(target.clone(), annotations, window, cx);
             });
         }
+    }
+}
+
+fn host_subagent(
+    child: &NativeSessionRecord,
+    parent: &bootty_agents::NativeSessionSnapshot,
+) -> bootty_agents::NativeSubagentDetail {
+    use bootty_agents::{NativeSessionStatus, NativeToolStatus, NativeTurnOutcome};
+    let outcome = child.snapshot.first_turn.as_ref().map(|turn| turn.outcome);
+    let status = match child.snapshot.status {
+        NativeSessionStatus::Starting
+        | NativeSessionStatus::Working
+        | NativeSessionStatus::Waiting => NativeToolStatus::Running,
+        NativeSessionStatus::Error => NativeToolStatus::Failed,
+        NativeSessionStatus::Idle | NativeSessionStatus::Stopped => match outcome {
+            Some(NativeTurnOutcome::Succeeded) => NativeToolStatus::Completed,
+            Some(NativeTurnOutcome::Failed) => NativeToolStatus::Failed,
+            Some(NativeTurnOutcome::Interrupted) => NativeToolStatus::Interrupted,
+            _ if child.snapshot.status == NativeSessionStatus::Stopped => {
+                NativeToolStatus::Interrupted
+            }
+            _ => NativeToolStatus::Running,
+        },
+    };
+    let transcript = &child.snapshot.transcript;
+    bootty_agents::NativeSubagentDetail {
+        agent: bootty_agents::NativeSubagent {
+            id: child.id.clone(),
+            provider: Some(child.config.provider),
+            title: child.title.clone(),
+            prompt: transcript
+                .iter()
+                .find(|item| item.role == "user")
+                .map_or_else(String::new, |item| item.text.clone()),
+            model: child.config.model.clone(),
+            thread_id: None,
+            owner_session: parent.session_id.clone(),
+            status,
+            started_at: transcript.iter().find_map(|item| item.created_at),
+            completed_at: (status != NativeToolStatus::Running)
+                .then(|| transcript.iter().rev().find_map(|item| item.updated_at))
+                .flatten(),
+        },
+        transcript: transcript.clone(),
     }
 }

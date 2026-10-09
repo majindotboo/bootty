@@ -29,6 +29,9 @@ pub struct NativeProviderCatalog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeModelSelection {
+    /// Omission preserves speed for existing callers; explicit false selects normal speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
     pub model: String,
     pub reasoning_effort: Option<String>,
 }
@@ -284,6 +287,13 @@ impl NativeAgentSession {
             if field(field(&settings, "effective"), "effortLevel").as_str() != Some(effort.as_str())
             {
                 return Err("Claude did not accept the selected reasoning effort".to_owned());
+            }
+        }
+        if let Some(fast) = selection.fast_mode {
+            self.rpc("apply_flag_settings", json!({"settings":{"fastMode":fast}}))?;
+            let settings = self.rpc("get_settings", json!({}))?;
+            if field(field(&settings, "effective"), "fastMode").as_bool() != Some(fast) {
+                return Err("Claude did not accept the selected speed".to_owned());
             }
         }
         self.rpc("set_model", json!({"model":selection.model}))?;

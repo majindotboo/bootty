@@ -43,3 +43,42 @@ fn adjacent_pages_retain_loaded_turns_and_deduplicate_overlap(
     assert_eq!(next.at_latest, true);
     assert_eq!(next.has_newer, false);
 }
+
+#[rstest]
+#[case(
+    "assistant",
+    true,
+    "beginning and the complete reply",
+    "beginning and the complete reply"
+)]
+#[case(
+    "thinking",
+    true,
+    "beginning and the complete reply",
+    "beginning and the complete reply"
+)]
+#[case("assistant", false, "beginning and the complete reply", "cached")]
+#[case("user", true, "beginning and the complete reply", "cached")]
+#[case("tool", true, "beginning and the complete reply", "cached")]
+#[case("assistant", true, "a changed reply", "cached")]
+fn provider_history_recovers_only_matching_completed_truncated_replies(
+    #[case] role: &str,
+    #[case] complete: bool,
+    #[case] provider_text: &str,
+    #[case] expected: &str,
+) {
+    let mut history = page(&["first", "reply"], true).unwrap();
+    history.transcript[1].role = role.into();
+    history.transcript[1].text = provider_text.into();
+    let mut cached = history.transcript[1].clone();
+    cached.text = "beginning\n[This recent transcript view truncates output after 16 KiB]".into();
+    cached.complete = complete;
+    let merged = history.with_live_transcript(&[cached.clone()]);
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[0], history.transcript[0]);
+    let mut restored = cached;
+    if expected != "cached" {
+        restored.text = expected.into();
+    }
+    assert_eq!(merged[1], restored);
+}

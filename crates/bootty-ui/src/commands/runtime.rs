@@ -375,7 +375,11 @@ impl CommandRuntime {
         match NativeAgentService::open(agent_state.with_extension("conversations.json")) {
             Ok(service) => {
                 service.set_change_handler(repaint);
-                runtime.native_agents = Some(Arc::new(service));
+                let service = Arc::new(service);
+                if let Err(error) = service.start_followups() {
+                    runtime.native_agent_error = Some(error);
+                }
+                runtime.native_agents = Some(service);
             }
             Err(error) => runtime.native_agent_error = Some(error),
         }
@@ -1258,7 +1262,9 @@ impl AppState {
         let exact_target = context.exact_target;
         let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
         match executor {
-            CoreCommandExecutor::Composer(action) => dispatch_composer(action, execution, effects),
+            CoreCommandExecutor::Composer(action) => {
+                dispatch_composer(action, invocation.caller, execution, effects)
+            }
             CoreCommandExecutor::Surface(command) => {
                 self.dispatch_surface_command(command, invocation, viewport, effects, execution)
             }
@@ -1914,9 +1920,19 @@ impl AppState {
 
 fn dispatch_composer(
     action: crate::gpui::CommandAction,
+    caller: Caller,
     execution: Option<(Instant, CommandCancellation)>,
     effects: &mut Vec<AppEffect>,
 ) -> CommandDispatch {
+    if matches!(
+        action,
+        crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
+    ) && caller == Caller::Luau
+    {
+        return CommandDispatch::Complete(CommandOutcome::Denied {
+            message: "Recording requires a host caller".into(),
+        });
+    }
     let (sender, receiver) = mpsc::channel();
     effects.push(AppEffect::ComposerAction(
         crate::commands::ComposerRequest::new(action, execution, sender),

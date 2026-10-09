@@ -102,8 +102,18 @@ impl ToolProtocol {
             tools.push(json!({"name":"get_agent_activity","description":"Read accepted recent messages and tool lifecycle summaries in your exact captured conversation, most recent first. Text is bounded to 8 KiB per entry; older provider pages are not fetched.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":crate::MAX_NATIVE_ACTIVITY_ITEMS,"default":16}},"additionalProperties":false},"outputSchema":native_output_schema("get_agent_activity"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
             tools.push(json!({"name":"get_agent_status","description":"Read your exact Bootty conversation's accepted lifecycle, working state and pending approval/input flags.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("get_agent_status"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
             tools.push(json!({"name":"list_models","description":"List models and reasoning choices advertised by your exact provider account. Omit provider or use your current provider; other accounts are unavailable.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":[self.lease.scope().provider]}},"additionalProperties":false},"outputSchema":native_output_schema("list_models"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
-            tools.push(json!({"name":"list_providers","description":"List the provider captured by your conversation's host grant and its permission choices. Other providers and accounts are outside this grant.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_providers"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+
+            tools.push(json!({"name":"list_providers","description":"List the enabled providers and selected account IDs captured for this launch. Only these accounts can be used for child delegation. Paths and executables remain private.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_providers"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
             tools.push(json!({"name":"inspect_provider","description":"Read your captured provider's model, effort, fast mode and configured permissions. Account and executable paths are private. This does not change permissions or test authentication.","inputSchema":{"type":"object","properties":{"provider":{"type":"string","enum":[self.lease.scope().provider]}},"additionalProperties":false},"outputSchema":native_output_schema("inspect_provider"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+        }
+        if !self.lease.native_reads_enabled()
+            && self.lease.spawn_enabled()
+            && self
+                .lease
+                .spawn_context()
+                .is_some_and(|spawn| !spawn.providers.is_empty())
+        {
+            tools.push(json!({"name":"list_providers","description":"List the enabled providers and selected account IDs captured for this launch. Only these accounts can be used for child delegation. Paths and executables remain private.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_providers"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.enabled(None) {
             tools.push(json!({"name":"terminal_read", "description":"Read retained rendered state of your exact launched terminal, including history if requested.",
@@ -525,6 +535,23 @@ impl ToolProtocol {
         let Some(deadline) = now.checked_add(Duration::from_secs(5)) else {
             return tool_error("Tool deadline is unavailable");
         };
+        if name == "list_providers"
+            && self.lease.spawn_enabled()
+            && let Some(spawn) = self
+                .lease
+                .spawn_context()
+                .filter(|spawn| !spawn.providers.is_empty())
+        {
+            let providers = spawn.providers.iter().map(|candidate| {
+                let (model, effort, fast, permissions) = match &candidate.launch {
+                    crate::ToolSpawnLaunch::Native(config) => (config.model.as_deref(), config.reasoning_effort.as_deref(), config.fast_mode, config.permissions),
+                    crate::ToolSpawnLaunch::Terminal(_) => (None, None, false, crate::NativePermissionMode::ProviderDefault),
+                };
+                json!({"provider":candidate.provider,"profile":candidate.profile,"model":model,"reasoning_effort":effort,"fast_mode":fast,"permissions":permissions,"permission_modes":crate::NativePermissionMode::ALL.into_iter().filter(|mode| mode.supports(candidate.provider)).collect::<Vec<_>>()})
+            }).collect::<Vec<_>>();
+            let structured = json!({"providers":providers});
+            return json!({"content":[{"type":"text","text":structured.to_string()}],"structuredContent":structured,"isError":false});
+        }
         let outcome = self.lease.invoke_native(
             match name {
                 "get_agent_status" => NativeToolRead::Status,
@@ -632,7 +659,7 @@ fn native_output_schema(name: &str) -> Value {
                 "permissions":{"type":"string"},"permission_modes":{"type":"array","items":{"type":"string"}}},
                 "required":["provider","profile","model","reasoning_effort","fast_mode","permissions","permission_modes"]});
             if name == "list_providers" {
-                json!({"type":"object","properties":{"providers":{"type":"array","maxItems":1,"items":provider}},"required":["providers"]})
+                json!({"type":"object","properties":{"providers":{"type":"array","maxItems":3,"items":provider}},"required":["providers"]})
             } else {
                 provider
             }

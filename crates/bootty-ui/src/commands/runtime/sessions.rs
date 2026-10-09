@@ -94,6 +94,8 @@ impl AppState {
             };
             let result = if action == SessionAction::RegisterProject {
                 self.workspace.register_project(scope, cwd)
+            } else if action == SessionAction::RemoveProject {
+                self.workspace.remove_project(scope, cwd)
             } else {
                 self.workspace.toggle_project_collapsed(scope, cwd)
             };
@@ -134,6 +136,7 @@ impl AppState {
         if matches!(
             action,
             SessionAction::ListProjects
+                | SessionAction::RemoveProject
                 | SessionAction::RegisterProject
                 | SessionAction::EditProject
                 | SessionAction::ConfigureProject
@@ -213,6 +216,10 @@ impl AppState {
         self.dispatch_session_command_after_checkpoint(action, arguments, exact_target, execution)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One match owns session operation preparation"
+    )]
     fn dispatch_session_command_after_checkpoint(
         &mut self,
         action: SessionAction,
@@ -239,6 +246,7 @@ impl AppState {
                 | SessionAction::Unarchive
                 | SessionAction::Snooze
                 | SessionAction::Unsnooze
+                | SessionAction::AutoSettle
                 | SessionAction::Hide
                 | SessionAction::Show
                 | SessionAction::Delete
@@ -749,12 +757,28 @@ impl AppState {
                     "attachment": binding.session_attachment(&saved.identity).map(|session| &session.id) })
             }).collect::<Vec<_>>())
         } else if action == SessionAction::SetTitle {
-            let [identity, title] = arguments else {
-                return self.reject_command(CommandOutcome::Failed {
-                    code: "invalid_arguments".to_owned(),
-                    message: "session.set_title expects identity and title".to_owned(),
-                });
+            let (identity, title, expected) = match arguments {
+                [identity, title] => (identity, title, None),
+                [identity, title, expected] => (identity, title, Some(expected)),
+                _ => {
+                    return self.reject_command(CommandOutcome::Failed {
+                        code: "invalid_arguments".to_owned(),
+                        message:
+                            "session.set_title expects identity, title and optional expected_title"
+                                .to_owned(),
+                    });
+                }
             };
+            if expected.is_some_and(|expected| {
+                self.workspace
+                    .binding(scope)
+                    .and_then(|binding| binding.sessions().get(identity))
+                    .is_none_or(|saved| saved.label() != *expected)
+            }) {
+                return CommandDispatch::Complete(serialized_command_outcome(
+                    serde_json::json!({"identity": identity, "changed": false}),
+                ));
+            }
             match self.workspace.set_session_title(scope, identity, title) {
                 Ok(changed) => serialized_command_outcome(
                     serde_json::json!({"identity": identity, "title": title.trim(), "changed": changed}),
@@ -1161,6 +1185,12 @@ fn session_create_arguments(
         code: "invalid_arguments".to_owned(),
         message,
     };
+    if arguments
+        .get(5)
+        .is_some_and(|value| !matches!(value.as_str(), "true" | "false"))
+    {
+        return Err(invalid("projectless must be true or false".into()));
+    }
     let (name, cwd, argv, saved) = match arguments {
         [name, cwd] => (name.as_str(), cwd.as_str(), None, None),
         [name, cwd, argv] => (name.as_str(), cwd.as_str(), Some(argv), None),
@@ -1170,7 +1200,7 @@ fn session_create_arguments(
             Some(argv),
             Some((identity.as_str(), name.as_str())),
         ),
-        [name, cwd, argv, identity, title] => (
+        [name, cwd, argv, identity, title] | [name, cwd, argv, identity, title, _] => (
             name.as_str(),
             cwd.as_str(),
             Some(argv),
@@ -1231,6 +1261,18 @@ fn session_state_arguments(
     arguments: &[String],
     now: i64,
 ) -> Result<(&str, SessionStateChange), CommandOutcome> {
+    if action == SessionAction::AutoSettle {
+        return match arguments {
+            [identity, enabled] if matches!(enabled.as_str(), "true" | "false") => Ok((
+                identity,
+                SessionStateChange::SetAutoSettle(enabled == "true"),
+            )),
+            _ => Err(CommandOutcome::Failed {
+                code: "invalid_arguments".into(),
+                message: "session.auto_settle expects a saved identity and true or false".into(),
+            }),
+        };
+    }
     let invalid = || CommandOutcome::Failed {
         code: "invalid_arguments".to_owned(),
         message: format!(

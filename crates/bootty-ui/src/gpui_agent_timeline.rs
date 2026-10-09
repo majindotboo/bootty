@@ -4,18 +4,16 @@ use bootty_agents::{NativeToolStatus, NativeTranscriptItem};
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    shimmer::ShimmerText,
 };
 use gpui_kit::{
-    App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _, div, prelude::*,
+    App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div,
+    list, prelude::*,
 };
 use std::collections::BTreeMap;
-use std::ops::{Add as _, Sub as _};
 
 #[derive(Clone)]
 pub(super) enum TranscriptRow {
-    History {
-        direction: &'static str,
-    },
     Message {
         index: usize,
         id: String,
@@ -30,7 +28,6 @@ pub(super) enum TranscriptRow {
 impl TranscriptRow {
     pub(super) fn key(&self) -> String {
         match self {
-            Self::History { direction } => format!("history:{direction}"),
             Self::Message { id, .. } => format!("message:{id}"),
             Self::Work { id, .. } => format!("work:{id}"),
         }
@@ -60,6 +57,7 @@ pub(super) fn rows(
                 transcript,
                 start..end,
                 expanded,
+                end == transcript.len(),
                 working
                     && (end == transcript.len()
                         || transcript.get(start..end).is_some_and(|turn| {
@@ -89,10 +87,15 @@ fn append_turn(
     transcript: &[NativeTranscriptItem],
     range: std::ops::Range<usize>,
     expanded: &BTreeMap<String, bool>,
+    current_turn: bool,
     live: bool,
 ) {
     let indices = range
-        .filter(|ix| transcript.get(*ix).is_some_and(visible))
+        .filter(|ix| {
+            transcript
+                .get(*ix)
+                .is_some_and(|item| visible(item) && !(current_turn && item.subagent.is_some()))
+        })
         .collect::<Vec<_>>();
     let final_message = indices.iter().rev().copied().find(|ix| {
         transcript
@@ -133,7 +136,7 @@ fn append_turn(
         return;
     };
     let id = first.id.clone();
-    let open = expanded.get(&id).copied().unwrap_or(live);
+    let open = expanded.get(&id).copied().unwrap_or(false);
     let mut grouped = false;
     for index in indices {
         if members.binary_search(&index).is_ok() {
@@ -161,19 +164,11 @@ fn append_turn(
 
 impl NativeAgentSessionView {
     pub(super) fn refresh_timeline(&mut self) {
-        let mut new = rows(
+        let new = rows(
             &self.record.snapshot.transcript,
             &self.work_disclosures,
             super::is_busy(self.record.snapshot.status),
         );
-        if let Some(page) = &self.history_page {
-            if page.has_older {
-                new.insert(0, TranscriptRow::History { direction: "older" });
-            }
-            if page.has_newer {
-                new.push(TranscriptRow::History { direction: "newer" });
-            }
-        }
         let old_keys = self
             .timeline
             .iter()
@@ -244,17 +239,19 @@ impl NativeAgentSessionView {
         }
     }
 
-    // Index user turns in the gutter; the virtual list remains the scroll owner.
+    // All loaded turns fit one strip; the transcript remains the only scroll owner.
     pub(super) fn render_history_gutter(
         &self,
-        window: &gpui_kit::Window,
+        _: &gpui_kit::Window,
         cx: &Context<Self>,
     ) -> gpui_kit::Div {
+        use num_traits::ToPrimitive as _;
         let top = self.list.logical_scroll_top().item_ix;
         let active = self
             .history_turns
             .iter()
             .rposition(|(row, _, _)| *row <= top);
+        let count = self.history_turns.len().to_f32().unwrap_or(1.);
         div()
             .w(gpui_kit::rems(if self.history_turns.len() > 1 {
                 2.25
@@ -262,54 +259,33 @@ impl NativeAgentSessionView {
                 0.
             }))
             .flex_shrink_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .justify_center()
             .when(self.history_turns.len() > 1, |gutter| {
                 gutter.child(
                     div()
+                        .id("native-history-rail")
+                        .debug_selector(|| "native-history-rail".into())
                         .relative()
                         .flex()
                         .flex_col()
-                        .child(self.history_navigation(false, active, cx))
-                        .child(
-                            div()
-                                .id("native-history-rail")
-                                .debug_selector(|| "native-history-rail".into())
-                                .flex()
-                                .flex_col()
-                                .max_h(gpui_kit::rems(20.))
-                                .overflow_y_scroll()
-                                .track_scroll(&self.history_scroll)
-                                .children(self.history_turns.iter().enumerate().map(
-                                    |(ix, (_, id, preview))| {
-                                        self.history_turn(ix, id, preview, active, cx)
-                                    },
-                                )),
-                        )
-                        .child(self.history_navigation(true, active, cx))
+                        .h(gpui_kit::rems((count * 0.5).min(20.)))
+                        .max_h_full()
+                        .min_h_0()
+                        .children(self.history_turns.iter().enumerate().map(
+                            |(ix, (_, id, preview))| self.history_turn(ix, id, preview, active, cx),
+                        ))
                         .when_some(
                             self.hovered_turn
                                 .and_then(|ix| self.history_turns.get(ix).map(|turn| (ix, turn))),
                             |rail, (ix, (_, _, preview))| {
-                                let offset = self.history_scroll.bounds_for_item(ix).map_or(
-                                    gpui_kit::px(0.),
-                                    |bounds| {
-                                        bounds
-                                            .top()
-                                            .sub(self.history_scroll.bounds().top())
-                                            .add(self.history_scroll.offset().y)
-                                    },
-                                );
                                 rail.child(gpui_kit::deferred(
                                     div()
                                         .absolute()
                                         .left(gpui_kit::rems(2.25))
-                                        .top(
-                                            gpui_kit::rems(1.75)
-                                                .to_pixels(window.rem_size())
-                                                .add(offset),
-                                        )
+                                        .top(gpui_kit::relative(ix.to_f32().unwrap_or(0.) / count))
                                         .w(gpui_kit::rems(16.25))
                                         .p_3()
                                         .rounded_lg()
@@ -348,8 +324,9 @@ impl NativeAgentSessionView {
             })
             .ghost()
             .small()
-            .h(gpui_kit::rems(0.5))
-            .min_h(gpui_kit::rems(0.5))
+            .flex_1()
+            .min_h_0()
+            .border_0()
             .w(gpui_kit::rems(2.25))
             .p_0()
             .accessibility_label(format!(
@@ -359,8 +336,8 @@ impl NativeAgentSessionView {
             ))
             .child(
                 div()
-                    .h(gpui_kit::px(2.))
-                    .w(gpui_kit::px(if highlighted { 24. } else { 8. }))
+                    .h(gpui_kit::rems(0.125))
+                    .w(gpui_kit::rems(if highlighted { 1.5 } else { 0.5 }))
                     .rounded_full()
                     .bg(cx
                         .theme()
@@ -374,37 +351,6 @@ impl NativeAgentSessionView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.jump_to_turn(ix, cx);
             }))
-    }
-
-    fn history_navigation(&self, next: bool, active: Option<usize>, cx: &Context<Self>) -> Button {
-        use gpui_kit::component::Disableable as _;
-        use gpui_kit::component::IconName;
-        let target = if next {
-            active.map_or(Some(0), |ix| ix.checked_add(1))
-        } else {
-            active.and_then(|ix| ix.checked_sub(1))
-        };
-        let target = target.filter(|ix| *ix < self.history_turns.len());
-        Button::new(if next {
-            "history-next"
-        } else {
-            "history-previous"
-        })
-        .icon(if next {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronUp
-        })
-        .ghost()
-        .small()
-        .disabled(target.is_none())
-        .accessibility_label(if next { "Next turn" } else { "Previous turn" })
-        .tooltip(if next { "Next turn" } else { "Previous turn" })
-        .on_click(cx.listener(move |this, _, _, cx| {
-            if let Some(ix) = target {
-                this.jump_to_turn(ix, cx);
-            }
-        }))
     }
 
     fn jump_to_turn(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -454,37 +400,6 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> gpui_kit::AnyElement {
         match self.timeline.get(ix) {
-            Some(TranscriptRow::History { direction }) => {
-                use gpui_kit::component::Disableable as _;
-                let direction = *direction;
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .px_4()
-                    .py_1()
-                    .child(
-                        Button::new(SharedString::from(format!("load-history-{direction}")))
-                            .ghost()
-                            .small()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .disabled(self.pending.contains("history"))
-                            .label(if self.pending.contains("history") {
-                                "Loading turns…"
-                            } else if direction == "older" {
-                                "Load earlier turns"
-                            } else {
-                                "Load later turns"
-                            })
-                            .on_click(move |_, window, cx| {
-                                _ = owner.update(cx, |this, cx| {
-                                    this.command("history", vec![direction.into()], window, cx);
-                                });
-                            }),
-                    )
-                    .into_any_element()
-            }
             Some(TranscriptRow::Message { index, .. }) => {
                 self.render_message(*index, owner, window, cx)
             }
@@ -498,15 +413,43 @@ impl NativeAgentSessionView {
         }
     }
 
-    fn render_work_group(
+    pub(super) fn render_transcript(
         &self,
-        id: &str,
-        members: &[usize],
-        open: bool,
-        live: bool,
-        owner: gpui_kit::WeakEntity<Self>,
-        cx: &App,
-    ) -> gpui_kit::AnyElement {
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let owner = cx.weak_entity();
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .child(self.render_history_gutter(window, cx))
+            .child(div().flex_1().min_h_0().min_w_0().flex().flex_col().when(
+                !self.timeline.is_empty(),
+                |body| {
+                    body.child(
+                        list(self.list.clone(), move |ix, window, cx| {
+                            owner.upgrade().map_or_else(
+                                || div().into_any_element(),
+                                |owner| {
+                                    owner.read(cx).render_timeline_row(
+                                        ix,
+                                        owner.downgrade(),
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )
+                        })
+                        .with_sizing_behavior(gpui_kit::ListSizingBehavior::Auto)
+                        .size_full(),
+                    )
+                },
+            ))
+    }
+
+    fn work_group_summary(&self, members: &[usize], live: bool) -> String {
         let tools = members
             .iter()
             .filter_map(|ix| {
@@ -517,26 +460,46 @@ impl NativeAgentSessionView {
                     .and_then(|item| item.tool.as_ref())
             })
             .collect::<Vec<_>>();
-        let failed = tools
-            .iter()
-            .any(|tool| tool.status == NativeToolStatus::Failed);
-        let label = if live {
-            "Working"
-        } else if tools.is_empty() {
+        let label = if tools.is_empty() {
             "Thought process"
         } else {
             "Worked"
         };
-        let summary = if tools.is_empty() {
+        let active = tools
+            .iter()
+            .rev()
+            .find(|tool| tool.status == NativeToolStatus::Running);
+        if live && let Some(tool) = active {
+            let (_, detail) = super::tool_input_summary(tool);
+            format!("{} {}", super::tool_label(&tool.name), detail)
+                .trim()
+                .to_owned()
+        } else if tools.is_empty() {
             label.to_owned()
         } else {
-            format!(
-                "{label} · {} {}{}",
+            let count = format!(
+                "{} {}",
                 tools.len(),
                 if tools.len() == 1 { "tool" } else { "tools" },
-                if failed { " · Failed" } else { "" }
-            )
-        };
+            );
+            if live {
+                count
+            } else {
+                format!("{label} · {count}")
+            }
+        }
+    }
+
+    fn render_work_group(
+        &self,
+        id: &str,
+        members: &[usize],
+        open: bool,
+        live: bool,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let summary = self.work_group_summary(members, live);
         let key = id.to_owned();
         let content = Button::new(SharedString::from(format!("work-group:{id}")))
             .debug_selector({
@@ -559,11 +522,7 @@ impl NativeAgentSessionView {
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .text_color(if failed {
-                        cx.theme().danger
-                    } else {
-                        cx.theme().foreground.opacity(0.72)
-                    })
+                    .text_color(cx.theme().foreground.opacity(0.72))
                     .child(
                         gpui_kit::component::Icon::new(if open {
                             gpui_kit::component::IconName::ChevronDown
@@ -572,7 +531,19 @@ impl NativeAgentSessionView {
                         })
                         .small(),
                     )
-                    .child(summary),
+                    .map(|row| {
+                        if live
+                            && self.record.snapshot.status
+                                == bootty_agents::NativeSessionStatus::Working
+                        {
+                            row.child(
+                                ShimmerText::new(summary)
+                                    .id(SharedString::from(format!("work-shimmer:{id}"))),
+                            )
+                        } else {
+                            row.child(summary)
+                        }
+                    }),
             )
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| {

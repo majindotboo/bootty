@@ -35,6 +35,8 @@ mod gpui_model_picker;
 mod gpui_prompt_attachments;
 mod gpui_settings;
 mod gpui_settings_catalog;
+mod gpui_speech;
+mod gpui_subagent_panel;
 mod gpui_surface_chooser;
 mod gpui_terminal_panel;
 mod gpui_terminal_view;
@@ -93,3 +95,4 @@ mod gpui_sidebar_panel;
 pub use gpui_surface_chooser::{SurfaceCommand, SurfacePanel};
 
 pub use gpui_agent_session::NativeAgentSessionView;
+pub use gpui_subagent_panel::SubagentPanel;

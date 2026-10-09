@@ -7,6 +7,7 @@ mod native_conversations;
 use native_conversations::NativeConversations;
 mod project_settings;
 mod settings_window;
+mod snooze;
 use dialogs::WorkspaceDialogs;
 
 use crate::gpui_keymap_editor::editor_snapshot as keymap_editor_snapshot;
@@ -847,6 +848,7 @@ impl GpuiWorkspace {
         let hints = bindings.command_hints(&self.state.command_catalog());
         self.dialogs.view.update(cx, |view, cx| {
             view.set_command_keybindings(Some(hints), cx);
+            view.set_send_shortcut(self.state.config().agents.send_shortcut);
         });
         if let Err(error) = crate::gpui_actions::replace_workspace_key_bindings_for_context(
             &self.keymap_context,
@@ -1642,6 +1644,12 @@ impl GpuiWorkspace {
                     host,
                 } => self.open_git_changes(scope, target, directory, host, window, cx),
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
+                AppEffect::ChooseProjectDirectory(target) => {
+                    Self::choose_project_directory(target, window, cx);
+                }
+                AppEffect::CustomSnooze(invocation) => {
+                    Self::open_custom_snooze(invocation, window, cx);
+                }
                 AppEffect::OpenSettings => self.open_settings_window(window, cx),
                 AppEffect::OpenThemeSettings => {
                     self.open_settings_window_target(SettingsWindowTarget::Theme, window, cx);
@@ -1657,6 +1665,29 @@ impl GpuiWorkspace {
                         continue;
                     }
                     let action = request.action;
+                    if matches!(
+                        action,
+                        crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
+                    ) {
+                        let provider = match self.state.modal_dialog() {
+                            Some(crate::state::ModalDialog::NewSession(dialog))
+                                if dialog.draft().is_some_and(|draft| draft.provider == "pi") =>
+                            {
+                                "pi"
+                            }
+                            _ => "codex",
+                        };
+                        let preferences = self.state.config().agents.provider(provider).cloned();
+                        if let Some(preferences) = preferences {
+                            self.dialogs.creation_view.update(cx, |view, cx| {
+                                view.configure_speech_account(&preferences, provider, cx);
+                            });
+                        }
+                        let codex = self.state.config().agents.codex.clone();
+                        if let Some(view) = self.native_conversation_view(cx) {
+                            view.update(cx, |view, cx| view.configure_speech_account(&codex, cx));
+                        }
+                    }
                     if window.has_active_dialog(cx)
                         && matches!(
                             self.state.modal_dialog(),
@@ -2093,6 +2124,7 @@ impl GpuiWorkspace {
     fn sync_agents(&self, cx: &mut Context<Self>) {
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| {
+                tools.update_subagents(self.native_conversations.subagent_parents(), cx);
                 tools.update_agents(
                     self.state.agent_overview(),
                     self.state
@@ -3211,7 +3243,7 @@ impl GpuiWorkspace {
             },
             empty_message,
         };
-        if has_visible_indeterminate_progress && window.is_window_active() {
+        if has_visible_indeterminate_progress && window.is_visible() {
             self.schedule_repaint_after(
                 bootty_terminal::scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
                 cx,
@@ -3756,7 +3788,27 @@ impl GpuiWorkspace {
             viewport_height,
         );
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
+        self.sync_conversation_context(&chrome_snapshot, cx);
         self.decorate_dock_chrome(&mut chrome_snapshot, cx);
+        if self.new_session_surface(cx).is_some() {
+            if let Some(sidebar) = &mut chrome_snapshot.sidebar {
+                for row in &mut sidebar.rows {
+                    if row.kind.is_session() {
+                        row.active = false;
+                        row.current = false;
+                    }
+                }
+            }
+            for bar in [
+                &mut chrome_snapshot.top_status,
+                &mut chrome_snapshot.bottom_status,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bar.segments.retain(|segment| segment.surface != "windows");
+            }
+        }
         self.sync_key_bindings(window, cx);
         self.chrome_view.update(cx, |chrome, cx| {
             chrome.set_docked_status(docked_terminals, cx);

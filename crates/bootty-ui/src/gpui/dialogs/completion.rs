@@ -167,6 +167,30 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if action == CommandAction::Dictate {
+            if self
+                .spec
+                .as_ref()
+                .is_none_or(|spec| !Self::is_agent_session_spec(spec) || spec.busy)
+            {
+                return false;
+            }
+            self.speech.update(cx, |speech, cx| {
+                speech.toggle(crate::gpui_speech::SpeechMode::Dictation, window, cx);
+            });
+            return true;
+        }
+        if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
+            if window.has_active_dialog(cx) {
+                return false;
+            }
+            let Some(picker) = &self.model_picker else {
+                return false;
+            };
+            return picker.state.update(cx, |picker, cx| {
+                picker.change_effort(action == CommandAction::EffortUp, cx)
+            });
+        }
         if let CommandAction::Focus(control) = action {
             let Some(spec) = &self.spec else {
                 return false;
@@ -192,6 +216,14 @@ impl DialogView {
                     picker
                         .state
                         .update(cx, |picker, cx| picker.open(window, cx));
+                }
+                ComposerControl::Effort => {
+                    let Some(picker) = &self.model_picker else {
+                        return false;
+                    };
+                    picker
+                        .state
+                        .update(cx, |picker, cx| picker.open_reasoning(window, cx));
                 }
                 _ => {
                     if !spec.fields.iter().any(|field| field.id == control.field()) {

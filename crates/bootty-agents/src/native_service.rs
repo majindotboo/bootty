@@ -1,7 +1,10 @@
+#[path = "native_followups.rs"]
+mod followups;
 #[path = "native_fork.rs"]
 pub mod fork;
 #[path = "native_tool_activity.rs"]
 pub mod tool_activity;
+pub use followups::{NativeQueuedMessage, NativeQueuedMessageStatus};
 
 use std::{
     collections::BTreeMap,
@@ -28,7 +31,7 @@ use crate::{
         MAX_NATIVE_SESSION_ATTACHMENTS, NativeAttachmentStore,
     },
     native_protocol::bounded_text,
-    native_session::lock,
+    native_session::{NativePromptDelivery, lock},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,6 +58,8 @@ pub struct NativeSessionRecord {
     /// Exact spawning conversation; its live host grant is never restored with this record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_parent: Option<CommandTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_messages: Vec<NativeQueuedMessage>,
 }
 
 /// Creation can fail after a durable reservation exists. Its exact target remains retryable.
@@ -136,6 +141,8 @@ pub struct NativeSessionActivity {
     pub binding_id: String,
     pub task_identity: Option<String>,
     pub provider: crate::AgentKind,
+    #[serde(default)]
+    pub model: Option<String>,
     pub status: NativeSessionStatus,
     pub completed_turn: bool,
     pub first_turn: Option<crate::NativeTurnReceipt>,
@@ -167,6 +174,8 @@ struct Store {
     model_catalogs: BTreeMap<String, crate::NativeProviderCatalog>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     model_catalog_aliases: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    followups: Vec<followups::QueuedInput>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -203,6 +212,7 @@ pub struct NativeAgentService {
     publication: mpsc::SyncSender<()>,
     shutdown: Arc<AtomicBool>,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    followup_wake: Arc<followups::Wake>,
 }
 
 impl NativeAgentService {
@@ -237,6 +247,7 @@ impl NativeAgentService {
             return Err("Model favorites exceed 256 choices".to_owned());
         }
         validate_model_catalog_cache(&store)?;
+        followups::restore(&mut store)?;
         let mut identities = std::collections::BTreeSet::new();
         for record in &mut store.records {
             // Older catalogs assigned Pi a policy it never supported. Migrate before validation.
@@ -289,6 +300,7 @@ impl NativeAgentService {
         let change_handler = Arc::new(Mutex::new(None));
         let revision = Arc::new(AtomicU64::new(1));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let followup_wake = Arc::new(followups::Wake::default());
         let (publication, receiver) = mpsc::sync_channel(1);
         start_publication_worker(
             PublicationState {
@@ -299,6 +311,7 @@ impl NativeAgentService {
                 change_handler: Arc::clone(&change_handler),
                 revision: Arc::clone(&revision),
                 shutdown: Arc::clone(&shutdown),
+                followup_wake: Arc::clone(&followup_wake),
             },
             receiver,
         )?;
@@ -313,6 +326,7 @@ impl NativeAgentService {
             publication,
             shutdown,
             clock,
+            followup_wake,
         })
     }
 
@@ -546,6 +560,23 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
     ) -> Result<NativeSessionSnapshot, String> {
+        self.prompt_input_mode(target, prompt, NativePromptDelivery::Automatic)
+    }
+
+    fn prompt_idle_input(
+        &self,
+        target: &CommandTarget,
+        prompt: &crate::NativePrompt,
+    ) -> Result<NativeSessionSnapshot, String> {
+        self.prompt_input_mode(target, prompt, NativePromptDelivery::Idle)
+    }
+
+    fn prompt_input_mode(
+        &self,
+        target: &CommandTarget,
+        prompt: &crate::NativePrompt,
+        delivery: NativePromptDelivery,
+    ) -> Result<NativeSessionSnapshot, String> {
         // Provider waits hold no catalog mutation lease: interrupt/approval stay available.
         let session = self.resolve(target)?;
         let record = lock(&self.store)
@@ -554,23 +585,13 @@ impl NativeAgentService {
             .find(|record| record.target() == *target)
             .cloned()
             .ok_or("Native session target is stale")?;
-        let copied = record
-            .side_chat
-            .as_ref()
-            .and_then(|fork| fork.copied_transcript(&record.snapshot.transcript))
-            .unwrap_or_default();
-        for citation in prompt.citations() {
-            if copied.iter().any(|item| item.id == citation.message_id) {
-                citation.validate(copied)?;
-            } else {
-                session.validate_history_citation(citation)?;
-            }
-        }
+        Self::validate_prompt_citations(&record, prompt, &session)?;
         let selection = record
             .config
             .model
             .as_ref()
             .map(|model| crate::NativeModelSelection {
+                fast_mode: Some(record.config.fast_mode),
                 model: model.clone(),
                 reasoning_effort: record.config.reasoning_effort.clone(),
             });
@@ -586,7 +607,7 @@ impl NativeAgentService {
         let (prompt_with_history, history_identity) =
             self.side_chat_prompt(target, prompt, &session)?;
         let outcome =
-            session.send_prompt_input_with_selection(&prompt_with_history, selection.as_ref());
+            session.send_prompt_input_mode(&prompt_with_history, selection.as_ref(), delivery);
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
         let record = candidate
@@ -614,6 +635,26 @@ impl NativeAgentService {
             }
         })?;
         outcome.map(|()| snapshot)
+    }
+
+    fn validate_prompt_citations(
+        record: &NativeSessionRecord,
+        prompt: &crate::NativePrompt,
+        session: &NativeAgentSession,
+    ) -> Result<(), String> {
+        let copied = record
+            .side_chat
+            .as_ref()
+            .and_then(|fork| fork.copied_transcript(&record.snapshot.transcript))
+            .unwrap_or_default();
+        for citation in prompt.citations() {
+            if copied.iter().any(|item| item.id == citation.message_id) {
+                citation.validate(copied)?;
+            } else {
+                session.validate_history_citation(citation)?;
+            }
+        }
+        Ok(())
     }
 
     /// Discover choices from this conversation's exact live provider account.
@@ -891,6 +932,12 @@ impl NativeAgentService {
             .iter_mut()
             .find(|record| record.target() == *target)
             .ok_or("Native session target is unknown or stale")?;
+        if let Some(fast) = selection.fast_mode {
+            if fast && record.config.provider == crate::AgentKind::Pi {
+                return Err("Pi does not support fast mode".to_owned());
+            }
+            record.config.fast_mode = fast;
+        }
         record.config.model = Some(selection.model.clone());
         record
             .config
@@ -1073,7 +1120,32 @@ impl NativeAgentService {
             .find(|record| record.target() == *parent)
             .cloned()
             .ok_or_else(|| NativeCreationError::from("Spawning conversation changed".to_owned()))?;
-        let mut config = record.config;
+        let mut config = match tools.lease().spawn_launch() {
+            Some(crate::ToolSpawnLaunch::Native(config)) => config.as_ref().clone(),
+            Some(crate::ToolSpawnLaunch::Terminal(_)) => {
+                return Err("Native children require a captured native launch"
+                    .to_owned()
+                    .into());
+            }
+            None => record.config.clone(),
+        };
+        if config.cwd != record.config.cwd
+            || config
+                .remote
+                .as_ref()
+                .map(|remote| (&remote.host, &remote.daemon))
+                != record
+                    .config
+                    .remote
+                    .as_ref()
+                    .map(|remote| (&remote.host, &remote.daemon))
+        {
+            return Err(
+                "Native children must retain their parent's captured project and host"
+                    .to_owned()
+                    .into(),
+            );
+        }
         config.session_id = None;
         config.session_file = None;
         config.fresh_session_id = None;
@@ -1201,6 +1273,7 @@ impl NativeAgentService {
             attachments: Vec::new(),
             side_chat: None,
             spawn_parent: None,
+            queued_messages: Vec::new(),
         };
         if let Some(CreationOrigin::InitialMessage { attachments, .. }) = &origin {
             for path in attachments {
@@ -1521,7 +1594,12 @@ impl NativeAgentService {
     #[must_use]
     pub fn sessions(&self) -> Vec<NativeSessionRecord> {
         // The publication worker commits before replacing this immutable UI projection.
-        let mut records = lock(&self.store).records.clone();
+        let store = lock(&self.store);
+        let mut records = store.records.clone();
+        for record in &mut records {
+            record.queued_messages = followups::projection(&store, &record.id);
+        }
+        drop(store);
         let live = lock(&self.live);
         for record in &mut records {
             // Grants are live projections, never restored from the durable catalog.
@@ -1551,6 +1629,7 @@ impl NativeAgentService {
                 binding_id: record.binding_id.clone(),
                 task_identity: record.task_identity.clone(),
                 provider: record.config.provider,
+                model: record.config.model.clone(),
                 status: record.snapshot.status,
                 completed_turn: record.snapshot.completed_turn,
                 first_turn: record.snapshot.first_turn.clone(),
@@ -1763,6 +1842,9 @@ impl NativeAgentService {
         if candidate.records.len() == before {
             return Err("Native session target is unknown or stale".to_owned());
         }
+        candidate
+            .followups
+            .retain(|input| input.session != removed_id);
         self.commit(candidate)?;
         self.attachment_store.remove_session(&removed_id)
     }
@@ -1773,6 +1855,7 @@ impl NativeAgentService {
     /// Returns final catalog persistence failures after every owned process has been stopped.
     pub fn shutdown(&self) -> Result<(), String> {
         self.shutdown.store(true, Ordering::Release);
+        self.followup_wake.notify();
         let sessions = std::mem::take(&mut *lock(&self.live));
         for session in sessions.values() {
             session.stop();
@@ -1798,6 +1881,7 @@ impl NativeAgentService {
         write_private(&self.path, &bytes)?;
         *lock(&self.store) = candidate;
         publish(&self.revision, &self.change_handler);
+        self.followup_wake.notify();
         Ok(())
     }
 }
@@ -1873,6 +1957,7 @@ struct PublicationState {
     change_handler: Arc<Mutex<Option<NativeChangeHandler>>>,
     revision: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
+    followup_wake: Arc<followups::Wake>,
 }
 
 fn start_publication_worker(
@@ -1925,6 +2010,7 @@ fn start_publication_worker(
                     }
                 }
                 publish(&state.revision, &state.change_handler);
+                state.followup_wake.notify();
             }
         })
         .map_err(|error| error.to_string())?;

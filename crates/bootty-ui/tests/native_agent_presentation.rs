@@ -62,6 +62,7 @@ fn saved_record(status: &str) -> NativeSessionRecord {
         })).expect("saved public conversation"),
         side_chat: None,
         spawn_parent: None,
+        queued_messages: Vec::new(),
         attachments: Vec::new(),
     }
 }
@@ -72,7 +73,7 @@ fn restored_provider_history_is_visible_without_scrolling(cx: &mut TestAppContex
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
     });
-    let record = saved_record("idle");
+    let record = saved_record("working");
     let mailbox = std::sync::Arc::new(std::sync::Mutex::new(
         None::<bootty_control::AppCommandReceiver>,
     ));
@@ -288,6 +289,7 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
         }))
         .unwrap();
     record.attachments.push(reference.clone());
+    let imported = serde_json::to_value(&reference).unwrap();
     record
         .snapshot
         .transcript
@@ -317,6 +319,8 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
                     );
                     accepted.store(true, std::sync::atomic::Ordering::Relaxed);
                     serde_json::json!({"png":encoded})
+                } else if request.invocation.command == "agents.native.import" {
+                    imported.clone()
                 } else {
                     serde_json::json!([])
                 };
@@ -351,7 +355,54 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
     let preview = visual
         .debug_bounds("attachment-preview:restored-image")
         .expect("restored preview renders");
-    assert!(preview.size.width > px(0.) && preview.size.height > px(0.));
+    verify_image_viewer(visual, preview);
+    verify_draft_image_removal(visual, png.get_ref());
+}
+
+fn verify_draft_image_removal(visual: &mut gpui_kit::VisualTestContext, png: &[u8]) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("image.png");
+    std::fs::write(&path, png).unwrap();
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem {
+            entries: vec![gpui_kit::ClipboardEntry::ExternalPaths(
+                gpui_kit::ExternalPaths(std::iter::once(path).collect()),
+            )],
+        });
+    });
+    visual.simulate_keystrokes("cmd-v");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let remove = visual
+        .debug_bounds("remove-preview:restored-image")
+        .unwrap();
+    visual.simulate_click(remove.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    pretty_assertions::assert_eq!(visual.debug_bounds("remove-preview:restored-image"), None);
+    pretty_assertions::assert_eq!(visual.debug_bounds("attachment-image-viewer"), None);
+}
+
+fn verify_image_viewer(
+    visual: &mut gpui_kit::VisualTestContext,
+    preview: gpui_kit::Bounds<gpui_kit::Pixels>,
+) {
+    visual.simulate_click(preview.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let viewer = visual
+        .debug_bounds("attachment-image-viewer")
+        .expect("image opens in a viewer");
+    assert!(viewer.size.width > preview.size.width);
+    assert!(viewer.size.height > preview.size.height);
+    let close = visual.debug_bounds("close-image-preview").unwrap();
+    assert!(close.bottom() <= viewer.top());
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("attachment-image-viewer").is_none());
 }
 
 fn verify_responsive_fold(visual: &mut gpui_kit::VisualTestContext) {
@@ -535,18 +586,18 @@ fn working_turn_keeps_work_visible_and_shows_activity(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("native-working").is_some());
     assert!(
-        visual.debug_bounds("native-tool-heading-tool").is_some(),
-        "live work is expanded"
+        visual.debug_bounds("native-tool-heading-tool").is_none(),
+        "live work starts collapsed"
     );
     let fold = visual
         .debug_bounds("native-work-group-tool")
         .expect("live work log");
     visual.simulate_click(fold.center(), Modifiers::none());
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds("native-tool-heading-tool").is_none());
+    assert!(visual.debug_bounds("native-tool-heading-tool").is_some());
     assert!(
         visual.debug_bounds("native-working").is_some(),
-        "collapsing work keeps activity visible"
+        "opening work keeps activity visible"
     );
 }
 
@@ -1140,4 +1191,617 @@ fn disconnected_conversation_offers_an_exact_resume_without_submitting_its_draft
             .iter()
             .all(|call| call.command != "agents.native.prompt")
     );
+}
+
+#[gpui_kit::test]
+fn current_subagents_share_a_group_beside_working_and_can_open_individually(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("working");
+    for (id, status) in [("review", "running"), ("checks", "completed")] {
+        record.snapshot.transcript.push(serde_json::from_value(serde_json::json!({
+            "id": id, "role": "tool", "text": "Inspect the changes", "complete": status == "completed",
+            "subagent": {"id": id, "title": id, "prompt": "Review this change carefully.",
+                "model": "model", "thread_id": null, "owner_session": "provider-session",
+                "status": status, "started_at": null, "completed_at": null}
+        })).unwrap());
+    }
+    record.snapshot.transcript.push(serde_json::from_value(serde_json::json!({
+        "id": "copied-child", "role": "tool", "text": "A report copied from another conversation", "complete": true,
+        "subagent": {"id":"copied-child", "title":"Copied child", "prompt":"Copied history",
+            "status":"running", "owner_session":"another-provider-session"}
+    })).unwrap());
+    let (sender, _receiver) = bootty_control::app_command_channel(8, std::sync::Arc::new(|| {}));
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.update(|window, _| window.resize(size(px(1200.), px(900.))));
+    visual.run_until_parked();
+    let group = visual
+        .debug_bounds("subagent-group")
+        .expect("group near working indicator");
+    assert!(group.size.width < px(300.), "the track stays content-sized");
+    let progress = visual
+        .debug_bounds("native-progress-status")
+        .expect("parent progress");
+    pretty_assertions::assert_eq!(
+        group.center().y,
+        progress.center().y,
+        "subagents and progress share one row"
+    );
+    let reply_before = visual
+        .debug_bounds("native-message-reply")
+        .expect("parent reply");
+    visual.simulate_click(group.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("subagent-open:review").is_some());
+    assert!(visual.debug_bounds("subagent-open:checks").is_some());
+    assert!(visual.debug_bounds("subagent-open:copied-child").is_none());
+    pretty_assertions::assert_eq!(
+        visual.debug_bounds("native-message-reply"),
+        Some(reply_before),
+        "opening the popover does not move the conversation"
+    );
+}
+
+#[gpui_kit::test]
+fn another_writer_replaces_the_editor_with_exact_recovery_actions(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("stopped");
+    record.snapshot.provider_writer = bootty_agents::NativeProviderWriterState::Blocked;
+    let target = record.target();
+    let (sender, calls) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-writer-callout").is_some());
+    assert!(visual.debug_bounds("native-composer").is_none());
+    for (selector, command) in [
+        ("native-writer-retry", "agents.native.resume"),
+        ("native-writer-fork", "agents.native.fork"),
+    ] {
+        let bounds = visual.debug_bounds(selector).expect("actionable recovery");
+        visual.simulate_click(bounds.center(), Modifiers::none());
+        visual.run_until_parked();
+        let invocation = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|call| call.command == command)
+            .cloned()
+            .expect("action reaches command owner");
+        pretty_assertions::assert_eq!(invocation.target, Some(target.clone()));
+    }
+}
+
+#[gpui_kit::test]
+fn composer_accepts_folders_from_paste_and_platform_drop(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().to_owned();
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(
+        point(composer.left().add(px(30.)), composer.top().add(px(20.))),
+        Modifiers::none(),
+    );
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem {
+            entries: vec![gpui_kit::ClipboardEntry::ExternalPaths(
+                gpui_kit::ExternalPaths(std::iter::once(path.clone()).collect()),
+            )],
+        });
+    });
+    visual.simulate_keystrokes("cmd-v");
+    visual.run_until_parked();
+    visual.simulate_keystrokes("cmd-a cmd-c");
+    let text = visual
+        .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap();
+    assert!(
+        text.contains(path.to_str().unwrap()),
+        "pasted folder becomes prompt context: {text}"
+    );
+    visual.simulate_keystrokes("backspace");
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let position = composer.center();
+    visual.simulate_event(gpui_kit::FileDropEvent::Entered {
+        position,
+        paths: gpui_kit::ExternalPaths(std::iter::once(path.clone()).collect()),
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_event(gpui_kit::FileDropEvent::Submit { position });
+    visual.run_until_parked();
+    visual.simulate_keystrokes("cmd-a cmd-c");
+    let text = visual
+        .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap();
+    assert!(
+        text.contains(path.to_str().unwrap()),
+        "dropped folder becomes prompt context: {text}"
+    );
+}
+
+#[gpui_kit::test]
+fn turn_rail_keeps_every_marker_in_the_available_height(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    let user = record.snapshot.transcript[2].clone();
+    let reply = record.snapshot.transcript[4].clone();
+    record.snapshot.transcript.clear();
+    for ix in 0..128 {
+        let mut user = user.clone();
+        user.id = format!("turn-{ix}");
+        record.snapshot.transcript.push(user);
+        let mut reply = reply.clone();
+        reply.id = format!("reply-{ix}");
+        record.snapshot.transcript.push(reply);
+    }
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    for height in [600., 300.] {
+        visual.simulate_resize(size(px(1000.), px(height)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let rail = visual.debug_bounds("native-history-rail").unwrap();
+        for selector in [
+            "history-turn:turn-0",
+            "history-turn:turn-64",
+            "history-turn:turn-127",
+        ] {
+            let tick = visual.debug_bounds(selector).unwrap();
+            assert!(
+                tick.top() >= rail.top() && tick.bottom() <= rail.bottom().add(px(0.1)),
+                "{selector} fits the rail: {tick:?} in {rail:?}"
+            );
+        }
+    }
+    let first = visual.debug_bounds("history-turn:turn-0").unwrap();
+    visual.simulate_click(first.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-message-turn-0").is_some());
+}
+
+#[gpui_kit::test]
+fn first_live_user_message_keeps_a_readable_width(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("working");
+    record
+        .snapshot
+        .transcript
+        .retain(|item| item.role == "user");
+    let item = &mut record.snapshot.transcript[0];
+    item.complete = false;
+    item.text = "- Cmd+ and Cmd- should adjust all fonts together, including terminal text and UI text.\n- Leave the separate terminal and UI font actions unbound by default.".into();
+    let (sender, _receiver) = bootty_control::app_command_channel(8, std::sync::Arc::new(|| {}));
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    for (width, height) in [(600.0, 800.0), (1800.0, 1100.0)] {
+        visual.simulate_resize(size(px(width), px(height)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let message = visual
+            .debug_bounds("native-message-body-user")
+            .expect("initial user message");
+        assert!(
+            message.size.width > px(200.0),
+            "initial message has a readable width: {message:?}"
+        );
+        assert!(
+            message.size.height < px(180.0),
+            "initial message does not become a vertical strip: {message:?}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn working_composer_queues_by_default_and_command_enter_steers(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let inbox = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<bootty_control::AppCommandReceiver>,
+    ));
+    let queued = inbox.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        8,
+        std::sync::Arc::new(move || {
+            let inbox = queued.lock().unwrap();
+            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(request.invocation.command.clone());
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value: serde_json::Value::Null,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *inbox.lock().unwrap() = Some(receiver);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                saved_record("working"),
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("Follow up after this turn");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command == "agents.native.queue")
+    );
+    visual.simulate_input("Steer this turn");
+    visual.simulate_keystrokes("cmd-enter");
+    visual.run_until_parked();
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command == "agents.native.prompt")
+    );
+}
+
+#[gpui_kit::test]
+fn queued_drawer_stays_attached_and_keeps_actions_reachable_at_zoom(cx: &mut TestAppContext) {
+    use bootty_agents::{NativeQueuedMessage, NativeQueuedMessageStatus};
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("working");
+    record.queued_messages = [
+        ("next", NativeQueuedMessageStatus::Queued),
+        ("failed", NativeQueuedMessageStatus::Failed),
+        ("sending", NativeQueuedMessageStatus::Sending),
+    ]
+    .into_iter()
+    .map(|(id, status)| NativeQueuedMessage {
+        id: id.into(),
+        text: "A long queued follow-up that should stay readable without pushing its actions out of the pane".into(),
+        preview_text: "A long queued follow-up that should stay readable without pushing its actions out of the pane".into(),
+        attachments: Vec::new(),
+        status,
+    })
+    .collect();
+    let target = record.target();
+    let (sender, calls) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    verify_queue_drawer_geometry(visual);
+    let header = visual.debug_bounds("native-queued-header").unwrap();
+    visual.simulate_click(header.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-queued-row:next").is_none());
+    let header = visual.debug_bounds("native-queued-header").unwrap();
+    visual.simulate_click(header.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    for (operation, id, selector) in [
+        ("queue-steer", "next", "native-queue-steer:next"),
+        ("queue-retry", "failed", "native-queue-retry:failed"),
+        ("queue-cancel", "next", "native-queue-cancel:next"),
+    ] {
+        let bounds = visual.debug_bounds(selector).unwrap();
+        visual.simulate_click(bounds.center(), Modifiers::none());
+        visual.run_until_parked();
+        let invocation = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|call| call.command == format!("agents.native.{operation}"))
+            .cloned()
+            .expect("queue action reaches the conversation owner");
+        pretty_assertions::assert_eq!(invocation.target, Some(target.clone()));
+        pretty_assertions::assert_eq!(invocation.arguments.last().map(String::as_str), Some(id));
+    }
+    let sending = visual.debug_bounds("native-queue-cancel:sending").unwrap();
+    let before = calls.lock().unwrap().len();
+    visual.simulate_click(sending.center(), Modifiers::none());
+    visual.run_until_parked();
+    pretty_assertions::assert_eq!(calls.lock().unwrap().len(), before);
+}
+
+fn verify_queue_drawer_geometry(visual: &mut gpui_kit::VisualTestContext) {
+    for (width, font_size) in [(960., 16.), (400., 20.)] {
+        visual.update(|window, cx| {
+            gpui_kit::component::Theme::global_mut(cx).font_size = px(font_size);
+            window.refresh();
+        });
+        visual.simulate_resize(size(px(width), px(720.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let drawer = visual.debug_bounds("native-queue").unwrap();
+        let composer = visual.debug_bounds("native-composer").unwrap();
+        pretty_assertions::assert_eq!(
+            visual.debug_bounds("native-queue-label").unwrap().left(),
+            visual
+                .debug_bounds("native-queued-text:next")
+                .unwrap()
+                .left(),
+        );
+        assert!(drawer.left() > composer.left() && drawer.right() < composer.right());
+        assert!(
+            drawer.bottom() > composer.top(),
+            "drawer shares the composer's seam"
+        );
+        for selector in [
+            "native-queued-header",
+            "native-queue-steer:next",
+            "native-queue-retry:failed",
+            "native-queue-cancel:next",
+        ] {
+            let bounds = visual.debug_bounds(selector).expect("queue action");
+            assert!(bounds.left() >= drawer.left() && bounds.right() <= drawer.right());
+            assert!(
+                bounds.bottom() <= composer.top(),
+                "{selector} remains above the seam"
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn child_tabs_load_and_follow_provider_updates_until_hidden_or_closed(cx: &mut TestAppContext) {
+    use bootty_ui::SubagentPanel;
+    use gpui_kit::AppContext as _;
+    use gpui_kit::component::dock::{DockArea, DockLayout, DockSkin, PanelId, panel_handle};
+    use std::sync::{Arc, Mutex};
+
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let (record, reply) = subagent_record_and_reply();
+    let reply = Arc::new(Mutex::new(reply));
+    let (sender, reads) = subagent_command_sender(reply.clone());
+    let mut panels = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let parent = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        let child =
+            cx.new(|cx| SubagentPanel::new(parent.clone(), "review".into(), "audit".into(), cx));
+        let other =
+            cx.new(|cx| SubagentPanel::new(parent.clone(), "missing".into(), "other".into(), cx));
+        let area = cx.new(|cx| {
+            DockArea::new("child-test", None, window, cx).with_renderer(DockSkin::new(cx))
+        });
+        area.update(cx, |area, cx| {
+            area.set_center(
+                DockLayout::tabs()
+                    .panel_view(panel_handle(child.clone()), cx)
+                    .panel_view(panel_handle(other.clone()), cx),
+                window,
+                cx,
+            );
+        });
+        panels = Some((parent, child, other, area.clone()));
+        gpui_kit::component::Root::new(area, window, cx)
+    });
+    let (_parent, child, other, area) = panels.unwrap();
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        !reads.lock().unwrap().is_empty(),
+        "opening the child loads it without Refresh"
+    );
+    assert!(
+        visual
+            .debug_bounds("subagent-message:audit-answer")
+            .is_some()
+    );
+    assert!(
+        visual.debug_bounds("subagent-status:Completed").is_some(),
+        "the read reply replaces stale Working status"
+    );
+    reply.lock().unwrap()["agent"]["status"] = serde_json::json!("running");
+    let before = reads.lock().unwrap().len();
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        reads.lock().unwrap().len() > before,
+        "an idle child remains followed for later turns"
+    );
+    assert!(visual.debug_bounds("subagent-status:Running").is_some());
+
+    visual.update(|window, cx| {
+        area.update(cx, |area, cx| {
+            area.select_panel(PanelId::from(other.entity_id()), window, cx);
+        });
+    });
+    visual.run_until_parked();
+    let before = reads.lock().unwrap().len();
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(4));
+    visual.run_until_parked();
+    assert_eq!(
+        reads.lock().unwrap().len(),
+        before,
+        "hidden children stop polling"
+    );
+    visual.update(|window, cx| area.update(cx, |area, cx| area.remove_panel(child, window, cx)));
+    visual.run_until_parked();
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(4));
+    visual.run_until_parked();
+    assert_eq!(
+        reads.lock().unwrap().len(),
+        before,
+        "closed children stop polling"
+    );
+}
+
+fn subagent_command_sender(
+    response: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+) -> (bootty_control::AppCommandSender, CapturedCommands) {
+    use std::sync::{Arc, Mutex};
+    let mailbox = Arc::new(Mutex::new(None::<bootty_control::AppCommandReceiver>));
+    let inbox = mailbox.clone();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let captured = reads.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        16,
+        Arc::new(move || {
+            loop {
+                let next = inbox.lock().unwrap().as_ref().unwrap().try_recv();
+                let Ok(request) = next else {
+                    break;
+                };
+                let value = if request.invocation.command == "agents.native.subagent-read" {
+                    captured.lock().unwrap().push(request.invocation.clone());
+                    response.lock().unwrap().clone()
+                } else {
+                    serde_json::json!([])
+                };
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *mailbox.lock().unwrap() = Some(receiver);
+    (sender, reads)
+}
+
+fn subagent_record_and_reply() -> (NativeSessionRecord, serde_json::Value) {
+    let mut record = saved_record("idle");
+    let agent = serde_json::json!({
+        "id":"review", "title":"History audit", "prompt":"Review history", "thread_id":"child-thread",
+        "owner_session":"provider-session", "status":"running"
+    });
+    record.snapshot.transcript.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"subagent:review", "role":"subagent", "text":"", "complete":false, "subagent":agent
+        }))
+        .unwrap(),
+    );
+    let mut reply = serde_json::json!({
+        "agent":agent,
+        "transcript":[{"id":"audit-answer", "role":"assistant", "text":"The audit is finished", "complete":true}]
+    });
+    reply["agent"]["status"] = serde_json::json!("completed");
+    (record, reply)
 }

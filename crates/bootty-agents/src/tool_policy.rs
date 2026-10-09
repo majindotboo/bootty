@@ -208,18 +208,99 @@ impl NativeBrowserAttachment {
 #[derive(Clone, Debug)]
 pub struct ToolSpawnContext {
     pub profile: Option<String>,
+    pub providers: Vec<ToolSpawnProvider>,
+}
+
+impl ToolSpawnContext {
+    fn validate(&self) -> Result<(), String> {
+        if self.profile.as_ref().is_some_and(|profile| {
+            profile.is_empty() || profile.len() > 256 || profile.chars().any(char::is_control)
+        }) {
+            return Err("Spawn context requires a bounded captured profile ID".into());
+        }
+        if self.providers.len() > crate::AgentKind::ALL.len()
+            || self.providers.iter().enumerate().any(|(index, candidate)| {
+                self.providers
+                    .iter()
+                    .take(index)
+                    .any(|prior| prior.provider == candidate.provider)
+            })
+        {
+            return Err("Child providers must be a bounded distinct captured catalog".into());
+        }
+        for candidate in &self.providers {
+            candidate.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Launch configuration frozen by the host, never accepted from tool JSON.
+#[derive(Clone, Debug)]
+pub struct ToolSpawnProvider {
+    pub provider: crate::AgentKind,
+    pub profile: Option<String>,
+    pub launch: ToolSpawnLaunch,
+}
+
+#[derive(Clone, Debug)]
+pub enum ToolSpawnLaunch {
+    Terminal(crate::AgentLaunch),
+    Native(Box<crate::NativeSessionConfig>),
+}
+
+impl ToolSpawnProvider {
+    fn validate(&self) -> Result<(), String> {
+        if self.profile.as_ref().is_some_and(|profile| {
+            profile.is_empty() || profile.len() > 256 || profile.chars().any(char::is_control)
+        }) {
+            return Err("Child provider requires a bounded captured profile".into());
+        }
+        let account = match &self.launch {
+            ToolSpawnLaunch::Terminal(launch) => {
+                launch.validate()?;
+                launch.account_directory.as_ref()
+            }
+            ToolSpawnLaunch::Native(config) => {
+                config.validate_stored()?;
+                if config.provider != self.provider
+                    || config.profile != self.profile
+                    || config.session_id.is_some()
+                    || config.session_file.is_some()
+                {
+                    return Err(
+                        "Child configuration must be a fresh captured provider account".into(),
+                    );
+                }
+                config.account_directory.as_ref()
+            }
+        };
+        if account.is_none() {
+            return Err("Child provider account must be captured".into());
+        }
+        Ok(())
+    }
 }
 
 /// Host-only authority for a child. Its fields cannot be supplied over JSON or widened by callers.
 #[derive(Clone)]
 pub struct ToolChildAuthority {
     parent: ToolLease,
+    selected: Option<ToolSpawnProvider>,
 }
 
 impl ToolChildAuthority {
     #[must_use]
-    pub const fn scope(&self) -> &ToolScope {
-        &self.parent.scope
+    pub fn launch(&self) -> Option<&ToolSpawnLaunch> {
+        self.selected.as_ref().map(|selected| &selected.launch)
+    }
+    #[must_use]
+    pub fn scope(&self) -> ToolScope {
+        let mut scope = self.parent.scope.clone();
+        if let Some(selected) = &self.selected {
+            scope.provider = selected.provider;
+        }
+        scope
     }
 
     #[must_use]
@@ -241,13 +322,10 @@ impl ToolChildAuthority {
         let policy = state.policy.attenuate(ToolPolicy::own_terminal());
         let native_parent = state.native_session.clone();
         drop(state);
-        let mut child = ToolLease::issue(
-            self.parent.scope.clone(),
-            self.parent.caller,
-            policy,
-            Vec::new(),
-        )?;
+        let scope = self.scope();
+        let mut child = ToolLease::issue(scope, self.parent.caller, policy, Vec::new())?;
         child.native_parent = native_parent;
+        child.spawn_launch = self.selected.map(|selected| selected.launch);
         child.ancestor = Some(Box::new(self.parent));
         Ok(child)
     }
@@ -257,6 +335,7 @@ impl ToolChildAuthority {
 /// The host forwards this token unchanged to the final shared command mutation gate.
 pub struct ToolSpawnGuard {
     parent: ToolLease,
+    selected: Option<ToolSpawnProvider>,
     request_id: u64,
     cancellation: CommandCancellation,
 }
@@ -271,6 +350,7 @@ impl ToolSpawnGuard {
     pub fn authority(&self) -> ToolChildAuthority {
         ToolChildAuthority {
             parent: self.parent.clone(),
+            selected: self.selected.clone(),
         }
     }
 
@@ -342,6 +422,7 @@ pub struct ToolLease {
     spawn: Option<ToolSpawnContext>,
     pub(crate) ancestor: Option<Box<Self>>,
     native_parent: Option<CommandTarget>,
+    spawn_launch: Option<ToolSpawnLaunch>,
     pub(crate) state: Arc<Mutex<GrantState>>,
 }
 
@@ -429,14 +510,8 @@ impl ToolLease {
         captures: Vec<ToolCapturedCommand>,
         spawn: Option<ToolSpawnContext>,
     ) -> Result<Self, String> {
-        if spawn
-            .as_ref()
-            .and_then(|spawn| spawn.profile.as_ref())
-            .is_some_and(|profile| {
-                profile.is_empty() || profile.len() > 256 || profile.chars().any(char::is_control)
-            })
-        {
-            return Err("Spawn context requires a bounded captured profile ID".to_owned());
+        if let Some(spawn) = &spawn {
+            spawn.validate()?;
         }
         if scope.binding.kind != ResourceKind::Binding
             || scope.binding.handle.is_empty()
@@ -505,6 +580,7 @@ impl ToolLease {
             spawn,
             ancestor: None,
             native_parent: None,
+            spawn_launch: None,
             state: Arc::new(Mutex::new(GrantState {
                 spawned_terminals: Vec::new(),
                 terminal: None,
@@ -573,6 +649,11 @@ impl ToolLease {
     #[must_use]
     pub const fn spawn_context(&self) -> Option<&ToolSpawnContext> {
         self.spawn.as_ref()
+    }
+
+    #[must_use]
+    pub const fn spawn_launch(&self) -> Option<&ToolSpawnLaunch> {
+        self.spawn_launch.as_ref()
     }
 
     /// Bind exactly once after the host registered the successfully launched terminal in this Binding.
@@ -914,6 +995,7 @@ impl ToolLease {
         drop(state);
         Ok(ToolChildAuthority {
             parent: self.clone(),
+            selected: self.selected_spawn_provider(request)?.cloned(),
         })
     }
 
@@ -932,7 +1014,9 @@ impl ToolLease {
         cancellation: CommandCancellation,
     ) -> Result<ToolSpawnGuard, String> {
         drop(self.spawn_state(request)?);
-        self.begin_child_operation(cancellation)
+        let mut guard = self.begin_child_operation(cancellation)?;
+        guard.selected = self.selected_spawn_provider(request)?.cloned();
+        Ok(guard)
     }
 
     /// Track supervision under the same grant that created the child.
@@ -967,6 +1051,7 @@ impl ToolLease {
         drop(state);
         Ok(ToolSpawnGuard {
             parent: self.clone(),
+            selected: None,
             request_id,
             cancellation,
         })
@@ -981,7 +1066,11 @@ impl ToolLease {
             .spawn
             .as_ref()
             .ok_or("Spawning is unavailable for this launch")?;
-        request.validate_parent(self.scope.provider, spawn.profile.as_deref())?;
+        if spawn.providers.is_empty() {
+            request.validate_parent(self.scope.provider, spawn.profile.as_deref())?;
+        } else {
+            _ = self.selected_spawn_provider(request)?;
+        }
         let state = self.parent_state()?;
         // At most 128 shells per live grant, including queued creations. Resuming never
         // recovers write authority from history; it must come from a new accepted creation.
@@ -995,6 +1084,37 @@ impl ToolLease {
             return Err("This parent grant has reached its child terminal limit".into());
         }
         Ok(state)
+    }
+
+    fn selected_spawn_provider(
+        &self,
+        request: &ToolSpawnRequest,
+    ) -> Result<Option<&ToolSpawnProvider>, String> {
+        let ToolSpawnRequest::Agent {
+            provider, profile, ..
+        } = request
+        else {
+            return Ok(None);
+        };
+        let spawn = self
+            .spawn
+            .as_ref()
+            .ok_or("Spawning is unavailable for this launch")?;
+        if spawn.providers.is_empty() {
+            request.validate_parent(self.scope.provider, spawn.profile.as_deref())?;
+            return Ok(None);
+        }
+        spawn
+            .providers
+            .iter()
+            .find(|selected| {
+                selected.provider == *provider
+                    && profile
+                        .as_ref()
+                        .is_none_or(|profile| selected.profile.as_ref() == Some(profile))
+            })
+            .map(Some)
+            .ok_or_else(|| "This provider or account was not captured for child delegation".into())
     }
 
     fn parent_state(&self) -> Result<MutexGuard<'_, GrantState>, String> {

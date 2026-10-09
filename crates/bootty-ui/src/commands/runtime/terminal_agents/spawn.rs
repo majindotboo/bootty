@@ -104,7 +104,13 @@ fn prepare_child(
     else {
         return Ok(None);
     };
-    let mut launch = parent.clone();
+    let mut launch = match authority.launch() {
+        Some(bootty_agents::ToolSpawnLaunch::Terminal(launch)) => launch.clone(),
+        Some(bootty_agents::ToolSpawnLaunch::Native(_)) => {
+            return Err("Expected a captured terminal child launch".into());
+        }
+        None => parent.clone(),
+    };
     launch.arguments.extend(["--".to_owned(), prompt.clone()]);
     launch.validate()?;
     let executable =

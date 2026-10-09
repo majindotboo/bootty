@@ -63,6 +63,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             vec!["id", "generation", "request", "attachment"],
             ResourceKind::Session,
         ),
+        (
+            "regenerate-title",
+            vec!["id", "generation"],
+            ResourceKind::Session,
+        ),
         ("focus", vec![], ResourceKind::Session),
         ("close", vec![], ResourceKind::Session),
         (
@@ -70,24 +75,26 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             vec!["id", "generation", "terminal"],
             ResourceKind::Session,
         ),
-        (
-            "prompt",
-            vec![
-                "id",
-                "generation",
-                "prompt",
-                "annotations",
-                "attachments",
-                "citations",
-                "applications",
-                "authored_bytes",
-                "attachment_ranges",
-            ],
-            ResourceKind::Session,
-        ),
+        ("prompt", prompt_arguments(), ResourceKind::Session),
         (
             "import",
             vec!["id", "generation", "path"],
+            ResourceKind::Session,
+        ),
+        ("queue", prompt_arguments(), ResourceKind::Session),
+        (
+            "queue-cancel",
+            vec!["id", "generation", "message_id"],
+            ResourceKind::Session,
+        ),
+        (
+            "queue-retry",
+            vec!["id", "generation", "message_id"],
+            ResourceKind::Session,
+        ),
+        (
+            "queue-steer",
+            vec!["id", "generation", "message_id"],
             ResourceKind::Session,
         ),
         (
@@ -250,6 +257,20 @@ fn catalog_arguments(extra: Option<&'static str>) -> Vec<&'static str> {
         .take(6)
         .chain(extra)
         .collect()
+}
+
+fn prompt_arguments() -> Vec<&'static str> {
+    vec![
+        "id",
+        "generation",
+        "prompt",
+        "annotations",
+        "attachments",
+        "citations",
+        "applications",
+        "authored_bytes",
+        "attachment_ranges",
+    ]
 }
 
 fn launch_arguments() -> Vec<&'static str> {

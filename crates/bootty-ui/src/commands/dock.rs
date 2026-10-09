@@ -5,6 +5,7 @@ use crate::action_catalog::Command;
 pub enum DockAction {
     ToggleLeft,
     ToggleRight,
+    ToggleFullView,
     TogglePanel(bootty_config::config::PanelKind),
     CodexBar,
     Spaces,
@@ -15,6 +16,7 @@ pub enum DockAction {
     Changes,
     Diff,
     Agents,
+    Subagents,
 }
 
 impl DockAction {
@@ -62,6 +64,7 @@ impl DockAction {
             },
             Self::ToggleLeft => Command::ToggleLeftDock,
             Self::ToggleRight => Command::ToggleRightDock,
+            Self::ToggleFullView => Command::TogglePanelFullView,
             Self::CodexBar => Command::ShowCodexBar,
             Self::Spaces => Command::ShowSpaces,
             Self::ToggleHiddenTabs => Command::ToggleHiddenTabs,
@@ -71,6 +74,7 @@ impl DockAction {
             Self::Changes => Command::ShowChanges,
             Self::Diff => Command::ShowDiff,
             Self::Agents => Command::ShowAgents,
+            Self::Subagents => Command::ShowSubagents,
         }
     }
 
@@ -78,10 +82,12 @@ impl DockAction {
         [
             Self::ToggleLeft,
             Self::ToggleRight,
+            Self::ToggleFullView,
             Self::ToggleTabBar,
             Self::ToggleHiddenTabs,
             Self::CodexBar,
             Self::Spaces,
+            Self::Subagents,
         ]
         .into_iter()
         .chain(Self::PANELS)

@@ -1200,6 +1200,7 @@ impl AppState {
                     scope: destination.scope,
                     cwd: destination.cwd.clone(),
                     mode: NewSessionMode::Agent,
+                    projectless: false,
                     prompt: String::new(),
                     applications: Vec::new(),
                     attachments: Vec::new(),
@@ -1281,10 +1282,16 @@ impl AppState {
             })
             .collect()
     }
-    pub(super) fn open_add_project_dialog(&mut self) {
+    pub(super) fn open_add_project_dialog(&mut self, effects: &mut Vec<AppEffect>) {
         self.close_overlay_dialogs();
         let target = self
             .current_command_target_for("project.register", bootty_control::ResourceKind::Binding);
+        if self.active_multiplexer().remote.is_none() {
+            if let Some(target) = target {
+                effects.push(AppEffect::ChooseProjectDirectory(target));
+            }
+            return;
+        }
         self.show_overlay(ModalDialog::NewSession(Box::new(
             self.active_multiplexer()
                 .remote

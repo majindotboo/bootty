@@ -1,6 +1,6 @@
 //! Claude's owned NDJSON transport. Session intent and provider acknowledgement are separate facts.
 
-use std::path::PathBuf;
+use std::{collections::VecDeque, path::PathBuf};
 
 use serde_json::{Value, json};
 
@@ -21,12 +21,13 @@ enum Acknowledgement {
     Accepted,
 }
 
-/// One child, one exact provider session, and at most one submitted main-agent turn.
+/// One child and one exact provider session, including admitted active follow-ups.
 /// The host canonicalizes the captured directory before constructing this pure reducer.
 pub struct ClaudeProtocol {
     session_id: String,
     cwd: PathBuf,
     dispatch: Option<Dispatch>,
+    steering: VecDeque<Dispatch>,
     message_id: Option<String>,
     block_index: Option<u64>,
 }
@@ -40,9 +41,52 @@ impl ClaudeProtocol {
             session_id,
             cwd,
             dispatch: None,
+            steering: VecDeque::new(),
             message_id: None,
             block_index: None,
         })
+    }
+
+    /// Claude consumes urgent user input on its existing stream, then reports the
+    /// interrupted result before the replacement result. Keep both admissions.
+    pub fn steer(
+        &mut self,
+        snapshot: &mut NativeSessionSnapshot,
+        id: &str,
+        prompt: &crate::NativePrompt,
+    ) -> Result<Value, String> {
+        if snapshot.status != NativeSessionStatus::Working
+            || !self.accepted()
+            || snapshot.pending_user_item.is_some()
+        {
+            return Err("Wait for the previous message to reach the active turn".into());
+        }
+        // Bound admitted input until Claude reports its results; increase only
+        // when the transport offers an explicit backlog acknowledgement.
+        if self.steering.len() >= 16 || !valid_session_id(id) {
+            return Err("Claude has too many pending follow-ups".into());
+        }
+        let value = json!({"type":"user","uuid":id,"session_id":self.session_id,
+            "parent_tool_use_id":null,"priority":"now",
+            "message":{"role":"user","content":prompt.claude_content()?}});
+        snapshot.prompt_message(id, prompt)?;
+        snapshot.pending_user_item = Some(id.to_owned());
+        self.steering.push_back(Dispatch {
+            id: id.to_owned(),
+            acknowledgement: Acknowledgement::Pending,
+            image_count: prompt.image_count(),
+        });
+        snapshot.changed();
+        Ok(value)
+    }
+
+    pub fn retract_steer(&mut self, snapshot: &mut NativeSessionSnapshot, id: &str) {
+        self.steering.retain(|dispatch| dispatch.id != id);
+        snapshot.transcript.retain(|item| item.id != id);
+        if snapshot.pending_user_item.as_deref() == Some(id) {
+            snapshot.pending_user_item = None;
+        }
+        snapshot.changed();
     }
 
     /// Admission is provisional. Only the matching replayed user message accepts the turn.
@@ -140,10 +184,12 @@ impl ClaudeProtocol {
         snapshot.session_id.as_deref() == Some(self.session_id.as_str())
             && field(value, "session_id").as_str() == Some(self.session_id.as_str())
             && field(value, "parent_tool_use_id").is_null()
-            && self.dispatch.as_ref().is_some_and(|dispatch| {
-                field(value, "user_message_uuid")
-                    .as_str()
-                    .is_none_or(|id| id == dispatch.id)
+            && self.dispatch.is_some()
+            && field(value, "user_message_uuid").as_str().is_none_or(|id| {
+                self.dispatch
+                    .iter()
+                    .chain(&self.steering)
+                    .any(|dispatch| id == dispatch.id)
             })
     }
 
@@ -151,7 +197,7 @@ impl ClaudeProtocol {
         self.accepts(snapshot, value)
             && field(value, "type") == "user"
             && field(value, "isReplay") == true
-            && self.dispatch.as_ref().is_some_and(|dispatch| {
+            && self.dispatch.iter().chain(&self.steering).any(|dispatch| {
                 dispatch.image_count > 0
                     && field(value, "uuid").as_str() == Some(dispatch.id.as_str())
                     && field(field(value, "message"), "content")
@@ -166,8 +212,9 @@ impl ClaudeProtocol {
             && field(value, "isReplay") == true
             && self
                 .dispatch
-                .as_ref()
-                .is_some_and(|dispatch| field(value, "uuid").as_str() == Some(dispatch.id.as_str()))
+                .iter()
+                .chain(&self.steering)
+                .any(|dispatch| field(value, "uuid").as_str() == Some(dispatch.id.as_str()))
     }
 
     fn turn_event(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
@@ -202,7 +249,15 @@ impl ClaudeProtocol {
     }
 
     fn user_message(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
-        let Some(dispatch) = &mut self.dispatch else {
+        let Some(dispatch) = self
+            .dispatch
+            .iter_mut()
+            .chain(&mut self.steering)
+            .find(|dispatch| field(value, "uuid").as_str() == Some(dispatch.id.as_str()))
+        else {
+            if self.accepted() {
+                tool_results(snapshot, field(field(value, "message"), "content"));
+            }
             return;
         };
         if field(value, "isReplay") == true
@@ -217,14 +272,18 @@ impl ClaudeProtocol {
         {
             dispatch.acknowledgement = Acknowledgement::Accepted;
             snapshot.accept_first_turn(&dispatch.id);
-            snapshot.turn_id = Some(dispatch.id.clone());
+            if snapshot.turn_id.is_none() {
+                snapshot.turn_id = Some(dispatch.id.clone());
+            }
             snapshot.message(
                 dispatch.id.clone(),
                 "user",
                 crate::native_protocol::content_text(field(field(value, "message"), "content")),
                 true,
             );
-            snapshot.pending_user_item = None;
+            if snapshot.pending_user_item.as_deref() == Some(dispatch.id.as_str()) {
+                snapshot.pending_user_item = None;
+            }
         } else if self.accepted() {
             tool_results(snapshot, field(field(value, "message"), "content"));
         }
@@ -304,6 +363,15 @@ impl ClaudeProtocol {
         };
         if let Some(dispatch) = self.dispatch.take() {
             snapshot.finish_first_turn(&dispatch.id, outcome);
+        }
+        self.dispatch = self.steering.pop_front();
+        self.message_id = None;
+        self.block_index = None;
+        snapshot.requests.clear();
+        if let Some(dispatch) = &self.dispatch {
+            snapshot.turn_id = Some(dispatch.id.clone());
+            snapshot.status = NativeSessionStatus::Working;
+            return;
         }
         snapshot.completed_turn = outcome == NativeTurnOutcome::Succeeded;
         snapshot.status = if outcome == NativeTurnOutcome::Failed {
@@ -446,13 +514,21 @@ pub fn command(id: &str, method: &str, params: &Value) -> Result<Value, String> 
                 .as_object()
                 .filter(|settings| settings.len() == 1)
                 .ok_or("Invalid Claude model settings")?;
-            let effort = settings
-                .get("effortLevel")
-                .ok_or("Missing Claude effort setting")?;
-            if !effort.is_null()
-                && !matches!(effort.as_str(), Some("low" | "medium" | "high" | "xhigh"))
-            {
-                return Err("Claude cannot change to that effort in a running session".to_owned());
+            if let Some(fast) = settings.get("fastMode") {
+                if !fast.is_boolean() {
+                    return Err("Invalid Claude fast mode setting".to_owned());
+                }
+            } else {
+                let effort = settings
+                    .get("effortLevel")
+                    .ok_or("Missing Claude effort setting")?;
+                if !effort.is_null()
+                    && !matches!(effort.as_str(), Some("low" | "medium" | "high" | "xhigh"))
+                {
+                    return Err(
+                        "Claude cannot change to that effort in a running session".to_owned()
+                    );
+                }
             }
             json!({"subtype":method,"settings":settings})
         }

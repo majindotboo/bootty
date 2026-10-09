@@ -58,7 +58,7 @@ impl NativeAgentSessionView {
         }
         let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: true,
             prompt: Some("Attach".into()),
         });
@@ -66,7 +66,7 @@ impl NativeAgentSessionView {
             Ok(Ok(Some(paths))) => {
                 _ = owner.update_in(cx, |this, window, cx| {
                     for path in paths {
-                        this.import_attachment(path, None, window, cx);
+                        this.attach_path(path, window, cx);
                     }
                 });
             }
@@ -93,7 +93,7 @@ impl NativeAgentSessionView {
                 gpui_kit::ClipboardEntry::ExternalPaths(paths) => {
                     consumed = true;
                     for path in &paths.0 {
-                        self.import_attachment(path.clone(), None, window, cx);
+                        self.attach_path(path.clone(), window, cx);
                     }
                 }
                 gpui_kit::ClipboardEntry::Image(image) => {
@@ -150,6 +150,92 @@ impl NativeAgentSessionView {
             cx.notify();
         }
         consumed
+    }
+
+    pub(super) fn attach_path(&mut self, path: PathBuf, window: &Window, cx: &mut Context<Self>) {
+        let target = self.record.target();
+        let insertion = self.composer.read(cx).selected_range();
+        let revision = self.draft_revision;
+        self.attachment_imports = self.attachment_imports.saturating_add(1);
+        cx.spawn_in(window, async move |owner, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if !path.is_absolute() {
+                        return Err("Choose a local file or folder");
+                    }
+                    let metadata =
+                        std::fs::metadata(&path).map_err(|_| "Could not read the attachment")?;
+                    Ok::<_, &str>((path, metadata.is_dir()))
+                })
+                .await;
+            _ = owner.update_in(cx, |this, window, cx| {
+                this.attachment_imports = this.attachment_imports.saturating_sub(1);
+                if this.record.target() != target {
+                    return;
+                }
+                match result {
+                    Ok((path, true)) => {
+                        this.composer.update(cx, |input, cx| {
+                            if this.draft_revision == revision {
+                                input.set_selected_range(insertion, cx);
+                            } else {
+                                input.set_selected_range(
+                                    input.value().len()..input.value().len(),
+                                    cx,
+                                );
+                            }
+                            if let Err(error) = input.replace_with_token(
+                                crate::gpui_prompt_attachments::directory_token(&path),
+                                window,
+                                cx,
+                            ) {
+                                this.error = Some(error.to_string());
+                            }
+                            input.focus_handle(cx).focus(window, cx);
+                        });
+                        this.draft_revision = this.draft_revision.wrapping_add(1);
+                    }
+                    Ok((path, false)) => {
+                        this.composer.update(cx, |input, cx| {
+                            if this.draft_revision == revision {
+                                input.set_selected_range(insertion, cx);
+                            } else {
+                                input.set_selected_range(
+                                    input.value().len()..input.value().len(),
+                                    cx,
+                                );
+                            }
+                        });
+                        this.import_attachment(path, None, window, cx);
+                    }
+                    Err(error) => this.error = Some(error.into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn open_attachment(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preview) = self.attachment_previews.get(id) else {
+            return;
+        };
+        let name = self
+            .attachments
+            .iter()
+            .map(|attachment| &attachment.reference)
+            .chain(
+                self.record
+                    .snapshot
+                    .transcript
+                    .iter()
+                    .flat_map(|item| &item.attachments),
+            )
+            .find(|reference| reference.id == id)
+            .map_or("Image", |reference| reference.name.as_str());
+        crate::gpui_prompt_attachments::open_image(name.to_owned(), preview.clone(), window, cx);
     }
 
     pub(super) fn import_attachment(
@@ -278,15 +364,37 @@ impl NativeAgentSessionView {
                                 .rounded_md()
                                 .overflow_hidden()
                                 .child(
-                                    gpui_kit::img(preview.clone())
-                                        .size_full()
-                                        .object_fit(gpui_kit::ObjectFit::Contain),
+                                    Button::new(gpui_kit::SharedString::from(format!(
+                                        "open-preview:{id}"
+                                    )))
+                                    .ghost()
+                                    .p_0()
+                                    .size_full()
+                                    .accessibility_label(format!(
+                                        "View {}",
+                                        attachment.reference.name
+                                    ))
+                                    .child(
+                                        gpui_kit::img(preview.clone())
+                                            .size_full()
+                                            .object_fit(gpui_kit::ObjectFit::Contain),
+                                    )
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, window, cx| {
+                                            this.open_attachment(&id, window, cx);
+                                        }
+                                    })),
                                 )
                                 .child(
-                                    div().absolute().top_0().right_0().child(
+                                    div().absolute().top_0().right_0().occlude().child(
                                         Button::new(gpui_kit::SharedString::from(format!(
                                             "remove-preview:{id}"
                                         )))
+                                        .debug_selector({
+                                            let id = id.clone();
+                                            move || format!("remove-preview:{id}")
+                                        })
                                         .icon(IconName::Close)
                                         .xsmall()
                                         .ghost()
@@ -297,6 +405,7 @@ impl NativeAgentSessionView {
                                         .tooltip(format!("Remove {}", attachment.reference.name))
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
                                                 this.remove_attachment(&id, window, cx);
                                             }),
                                         ),
@@ -348,6 +457,12 @@ impl NativeAgentSessionView {
             .transcript
             .iter()
             .flat_map(|item| &item.attachments)
+            .chain(
+                self.record
+                    .queued_messages
+                    .iter()
+                    .flat_map(|message| &message.attachments),
+            )
             .filter(|reference| reference.kind == bootty_agents::NativeAttachmentKind::Image)
             .map(|reference| reference.id.clone())
             .collect::<BTreeSet<_>>();
@@ -396,7 +511,7 @@ impl NativeAgentSessionView {
                         if bytes.len() > limit {
                             return None;
                         }
-                        decode_annotation_preview(&bytes)
+                        decode_image_preview(&bytes, false)
                     })
                     .await;
                 _ = owner.update(cx, |this, cx| {
@@ -431,24 +546,38 @@ impl NativeAgentSessionView {
                     row.child(div().flex().flex_shrink_0().flex_wrap().gap_2().children(
                         item.attachments.iter().filter_map(|reference| {
                             self.attachment_previews.get(&reference.id).map(|preview| {
-                                div()
-                                    .id(gpui_kit::SharedString::from(format!(
-                                        "attachment-preview:{}",
-                                        reference.id
-                                    )))
-                                    .debug_selector({
-                                        let id = reference.id.clone();
-                                        move || format!("attachment-preview:{id}")
-                                    })
-                                    .w_20()
-                                    .h_20()
-                                    .rounded_md()
-                                    .overflow_hidden()
-                                    .child(
-                                        gpui_kit::img(preview.clone())
-                                            .size_full()
-                                            .object_fit(gpui_kit::ObjectFit::Contain),
-                                    )
+                                Button::new(gpui_kit::SharedString::from(format!(
+                                    "attachment-preview:{}",
+                                    reference.id
+                                )))
+                                .ghost()
+                                .p_0()
+                                .accessibility_label(format!("View {}", reference.name))
+                                .on_click({
+                                    let name = reference.name.clone();
+                                    let preview = preview.clone();
+                                    move |_, window, cx| {
+                                        crate::gpui_prompt_attachments::open_image(
+                                            name.clone(),
+                                            preview.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .debug_selector({
+                                    let id = reference.id.clone();
+                                    move || format!("attachment-preview:{id}")
+                                })
+                                .w_20()
+                                .h_20()
+                                .rounded_md()
+                                .overflow_hidden()
+                                .child(
+                                    gpui_kit::img(preview.clone())
+                                        .size_full()
+                                        .object_fit(gpui_kit::ObjectFit::Contain),
+                                )
                             })
                         }),
                     ))
@@ -522,7 +651,7 @@ pub fn attachment_preview(path: &std::path::Path) -> Option<Arc<gpui_kit::Render
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let mut pixels = reader.decode().ok()?.thumbnail(160, 160).into_rgba8();
+    let mut pixels = reader.decode().ok()?.thumbnail(1600, 1600).into_rgba8();
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }

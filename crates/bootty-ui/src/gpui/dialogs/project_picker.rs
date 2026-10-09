@@ -57,27 +57,31 @@ impl DialogView {
             self.project_picker = None;
             return;
         }
-        let projects = spec
-            .projects
-            .iter()
-            .map(|project| {
-                let label = spec
-                    .project_labels
-                    .get(&project.path)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        project
-                            .path
-                            .trim_end_matches(['/', '\\'])
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or(&project.path)
-                            .to_owned()
-                    });
-                ProjectChoice(project.clone(), label)
-            })
-            .collect::<Vec<_>>();
+        let projects = std::iter::once(ProjectChoice(
+            bootty_git::ProjectPickerEntry {
+                path: String::new(),
+                favorite: false,
+            },
+            "No project".into(),
+        ))
+        .chain(spec.projects.iter().map(|project| {
+            let label = spec
+                .project_labels
+                .get(&project.path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    project
+                        .path
+                        .trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(&project.path)
+                        .to_owned()
+                });
+            ProjectChoice(project.clone(), label)
+        }))
+        .collect::<Vec<_>>();
         let selected = spec.selected_project.clone();
         if let Some(picker) = &mut self.project_picker {
             picker.state.update(cx, |state, cx| {

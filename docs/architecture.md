@@ -304,6 +304,11 @@ identity. Its real backend pane carries the conversation identity and renders th
 The conversation catalog retains the resolved Bootty profile ID with the account directory;
 resume and fork reuse both even after profile preferences change. Older records keep
 their captured account without borrowing a current profile name.
+Accepted queued messages also live in this private catalog, with their owned
+attachment references. A conversation worker sends them in order when its exact
+provider is idle. Ambiguous deliveries after a restart require explicit retry;
+closing a view never drops accepted input. Urgent follow-ups use the active turn's
+provider transport, including Claude's stream-JSON `priority: "now"` input.
 Enter opens the conversation; Cmd+Enter leaves current focus alone. Cmd+N opens the
 start view. Two empty Enters create a shell; editing resets that confirmation.
 Codex can defer saving an empty provider thread until its first accepted turn.
@@ -370,9 +375,9 @@ resending its prompt, stealing focus or repeating error notifications. The trans
 user turns, with cached virtual-list measurements retained while streaming;
 copy actions and returning to the live tail act on that same transcript. Transcript
 refresh runs on a worker and follows service revisions, without an idle polling loop.
-Active-turn follow-ups use Codex's exact `turn/steer` acknowledgement or Pi's
-`steer` disposition; rejection preserves the active turn and the composer draft.
-Claude's transport currently admits prompts between turns. Context occupancy is
+Active-turn follow-ups use Codex's exact `turn/steer` acknowledgement, Claude's
+urgent input on its existing stream, or Pi's `steer` disposition. Rejection
+preserves the active turn and the composer draft. Context occupancy is
 shown only from reported token counts and provider-advertised capacity. File
 changes render the provider's diff rather than its raw JSON envelope.
 Pi history uses bounded seekable reads on its captured host and rejects files outside
@@ -495,8 +500,14 @@ captured conversation's persisted model, effort, fast mode and permission choice
 sixteen configured profile IDs and display names for that provider, alongside the
 retained profile ID. Names do not grant account access; paths and launch arguments
 stay with the host.
-The tool catalog covers only the attached provider/account; it does not broaden
-the launch grant or inspect authentication.
+At parent launch, the host captures enabled, available providers and each selected
+configured account for child delegation. `list_providers` exposes that frozen,
+path-free selection. `spawn_agent` can select one of those providers; tool arguments
+cannot replace its executable, account directory or launch configuration. Provider
+configuration changes take effect on a new parent launch. Children retain the
+parent Binding and revocation ancestor, and cannot delegate again. Model and
+profile inspection otherwise covers the attached provider/account and does not
+inspect authentication.
 
 Native conversations support local Codex, Pi and Claude on Unix. Resume keeps
 Codex's thread ID, Pi's exact session file or Claude's observed session UUID, plus

@@ -741,7 +741,8 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
     for (keystrokes, command) in [
         ("ctrl+alt+s", "ui.composer.focus-space"),
         ("ctrl+alt+m", "ui.composer.focus-model"),
-        ("ctrl+alt+e", "ui.composer.focus-effort"),
+        ("alt+,", "ui.composer.effort-down"),
+        ("alt+.", "ui.composer.effort-up"),
         ("ctrl+alt+p", "ui.composer.focus-project"),
         ("ctrl+alt+w", "ui.composer.focus-worktree"),
         ("ctrl+alt+a", "ui.composer.focus-permissions"),

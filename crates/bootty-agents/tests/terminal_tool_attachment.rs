@@ -166,7 +166,10 @@ fn capture_attachment(commands: &Arc<Commands>) -> Result<(ToolBridge, ToolLease
                     invocation
                 },
             }],
-            spawn: Some(ToolSpawnContext { profile: None }),
+            spawn: Some(ToolSpawnContext {
+                profile: None,
+                providers: Vec::new(),
+            }),
         },
         &std::env::current_exe().map_err(|error| error.to_string())?,
         commands.clone(),

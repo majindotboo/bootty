@@ -1,10 +1,16 @@
 //! Native navigation panels backed by the shared chrome projection.
 
 use crate::gpui::chrome::GpuiChrome;
+use crate::gpui_agent_session::{NativeAgentSessionView, subagent_avatar, subagent_label};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent, PanelInfo, PanelState};
+use gpui_kit::component::{
+    ActiveTheme as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+};
+use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement, Render, Styled, Window, div,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
+    Styled, Window, div,
 };
 
 fn panel_state(name: &str) -> PanelState {
@@ -18,6 +24,9 @@ fn panel_state(name: &str) -> PanelState {
 pub struct SessionsPanel {
     chrome: Entity<GpuiChrome>,
     focus: FocusHandle,
+    subagents: bool,
+    parents: Vec<Entity<NativeAgentSessionView>>,
+    observations: Vec<gpui_kit::Subscription>,
 }
 
 impl SessionsPanel {
@@ -26,7 +35,131 @@ impl SessionsPanel {
         Self {
             chrome,
             focus: cx.focus_handle(),
+            subagents: false,
+            parents: Vec::new(),
+            observations: Vec::new(),
         }
+    }
+    pub(crate) fn show_subagents(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.subagents != show {
+            self.subagents = show;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn update_subagents(
+        &mut self,
+        parents: Vec<Entity<NativeAgentSessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.parents == parents {
+            return;
+        }
+        self.observations = parents
+            .iter()
+            .map(|parent| cx.observe(parent, |_, _, cx| cx.notify()))
+            .collect();
+        self.parents = parents;
+        cx.notify();
+    }
+
+    fn render_subagents(&self, cx: &Context<Self>) -> impl IntoElement {
+        let groups = self
+            .parents
+            .iter()
+            .filter(|parent| !parent.read(cx).subagents().is_empty());
+        let empty = groups.clone().next().is_none();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .p_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("subagents-back")
+                            .ghost()
+                            .small()
+                            .label("Sessions")
+                            .icon(gpui_kit::component::IconName::ChevronLeft)
+                            .on_click(cx.listener(|this, _, _, cx| this.show_subagents(false, cx))),
+                    )
+                    .child(div().text_sm().child("Subagents")),
+            )
+            .child(
+                div()
+                    .id("subagents-hub")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_2()
+                    .when(empty, |view| {
+                        view.child(
+                            div()
+                                .p_2()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Subagents will appear here when an agent delegates work."),
+                        )
+                    })
+                    .children(groups.map(|parent| {
+                        let view = parent.read(cx);
+                        div()
+                            .mb_3()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(view.conversation_title().to_owned()),
+                            )
+                            .children(view.subagents().into_iter().map(|agent| {
+                                let owner = parent.clone();
+                                let id = agent.id.clone();
+                                let status = match agent.status {
+                                    bootty_agents::NativeToolStatus::Running => "Working…",
+                                    bootty_agents::NativeToolStatus::Completed => "Done",
+                                    bootty_agents::NativeToolStatus::Failed => "Failed",
+                                    bootty_agents::NativeToolStatus::Interrupted => "Interrupted",
+                                    bootty_agents::NativeToolStatus::Declined => "Declined",
+                                };
+                                Button::new(format!("hub-subagent:{}:{id}", parent.entity_id()))
+                                    .ghost()
+                                    .small()
+                                    .w_full()
+                                    .justify_start()
+                                    .child(subagent_avatar(agent, cx))
+                                    .accessibility_label(format!(
+                                        "Open subagent {}",
+                                        subagent_label(agent)
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .child(subagent_label(agent)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(status),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        owner.update(cx, |parent, cx| {
+                                            parent.open_subagent(id.clone(), cx);
+                                        });
+                                    })
+                            }))
+                    })),
+            )
     }
 }
 
@@ -57,6 +190,9 @@ impl Panel for SessionsPanel {
 }
 impl Render for SessionsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.subagents {
+            return self.render_subagents(cx).into_any_element();
+        }
         let content = self.chrome.update(cx, GpuiChrome::dock_sidebar);
         div()
             .track_focus(&self.focus)
@@ -67,5 +203,6 @@ impl Render for SessionsPanel {
             .size_full()
             .overflow_hidden()
             .children(content)
+            .into_any_element()
     }
 }

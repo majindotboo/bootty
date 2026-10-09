@@ -207,7 +207,7 @@ fn spawn(
                 vec![
                     provider.to_string(),
                     record.config.cwd.to_string_lossy().into_owned(),
-                    record.config.program.clone(),
+                    prepared.config.program.clone(),
                     "[]".into(),
                     name.clone(),
                     String::new(),
@@ -251,11 +251,18 @@ fn child_launch(
     authority: bootty_agents::ToolChildAuthority,
     commands: Arc<dyn AgentCommandExecutor>,
 ) -> Result<PreparedNativeLaunch, String> {
+    let config = match authority.launch() {
+        Some(bootty_agents::ToolSpawnLaunch::Native(config)) => config.as_ref().clone(),
+        Some(bootty_agents::ToolSpawnLaunch::Terminal(_)) => {
+            return Err("Expected a captured native child launch".into());
+        }
+        None => parent.config.clone(),
+    };
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let bridge = ToolBridge::prepare_child(authority, &executable, commands)?;
-    let tools = owner.retain_tool_attachment(parent.config.provider, bridge)?;
+    let tools = owner.retain_tool_attachment(config.provider, bridge)?;
     Ok(PreparedNativeLaunch {
-        config: parent.config.clone(),
+        config,
         tools: Some(tools),
         warnings: Vec::new(),
         spawn_parent: Some(parent.target()),

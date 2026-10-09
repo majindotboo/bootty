@@ -635,7 +635,11 @@ selection and terminal contents. Sessions are grouped into Pinned, Needs attenti
 Working, Sessions and Settled. Archive retains saved work; Delete permanently
 removes a closed session's saved record and requires confirmation.
 
-Choose **Project settings…** from a project's menu to open its settings page.
+Open **Settings → Projects** to add a registered folder, open its settings, or
+remove its registration. Removal preserves files and existing sessions.
+**Project settings…** in the sidebar opens the same page in a named, closeable
+settings tab. Switching tabs preserves drafts; closing an unsaved draft asks
+before discarding it.
 The page edits its name, icon or local image, default agent, and defaults for
 creating worktrees (branch prefix and starting ref).
 Project settings live in the workspace database and apply to new sessions.
@@ -655,6 +659,12 @@ manual order. The shared commands are `ui.sidebar.sort_manual` and
 `sidebar.animate-working` defaults to `true`. Turn off **Animate Working ring**
 on the Sidebar settings page to keep the Working ring still. Reduced motion also
 keeps it still. Changes apply when configuration reloads.
+
+`sidebar.auto-settle-after-days` defaults to `3`; set it to `0` to disable
+automatic settlement. **Auto-settle behavior** in a session's menu can keep that
+session active. Pinned, snoozed and busy sessions are excluded. Settlement keeps
+the terminal and history; accepted input returns the session to the active list.
+**Snooze → Custom…** chooses a future date and time in the local time zone.
 
 ## Workspace docks
 
@@ -935,6 +945,18 @@ conversations keep their account and report no profile ID.
 The root-only `list_profiles` tool lists the captured provider's configured IDs
 and display names. It does not switch profiles or authorize another account.
 
+The sidebar's **History** opens a full view of saved conversations across Codex,
+Claude and Pi on the captured host. Provider and project filters are inside the
+view. Opening a result resumes its original provider session and account rather
+than starting a new conversation.
+
+`agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
+turn wait for it to finish; `"steer"` sends them into the active turn instead.
+Command+Enter (Control+Enter on other platforms) uses the opposite behavior for
+one message. The queued messages appear above the composer and remain with the
+conversation when its tab closes. Failed or interrupted deliveries remain
+available for an explicit retry.
+
 `agents.default-provider` selects the provider for a fresh composer. Each provider's
 `default-model` and `default-effort` prefer advertised selections; empty values resolve
 to the provider's configured model and supported effort. The Settings pickers use
@@ -943,7 +965,11 @@ explicit selection. Model and permission catalogs persist under the captured
 provider settings, account, remote target and project directory; Bootty stores
 hashed cache identities, and changing that context selects a different entry.
 `agents.codex.fast-mode` requests Codex's fast service tier;
-`agents.claude.fast-mode` enables Claude's fast mode. Pi has no fast-mode setting.
+`agents.claude.fast-mode` enables Claude's fast mode. These are defaults for new
+conversations. Both composers expose **Fast mode** in the model menu; its bolt
+indicates the selected speed. Existing conversations save speed changes for the
+next turn without interrupting active work. Switching Fast mode off explicitly
+clears the provider's previous fast selection. Pi has no fast-mode setting.
 
 New composers inherit the selected provider account's approval policy. The
 permissions control displays the effective policy reported by the provider;
@@ -952,10 +978,30 @@ default. Switching provider or account returns to that account's policy.
 Pi does not advertise approval modes, so its composer hides the permissions
 control and submits the provider default.
 
+
+Provider settings include `agents.<provider>.available-efforts`, an array of effort identifiers.
+An empty array exposes all levels supported by each model. A nonempty array limits
+the picker and the Alt+, / Alt+. shortcuts to those levels, in the model's advertised
+order. The shortcuts decrease or increase effort without wrapping at either end.
+Their commands are `ui.composer.effort-down` and `ui.composer.effort-up`.
+
 Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
-Their default shortcuts are Ctrl+Alt+S/M/E/P/W/A for space, model, effort,
-project, worktree, and permissions. Provider has no separate default binding.
-Provider and model share one picker; both focus commands open it. Control
+Their default shortcuts are Ctrl+Alt+S/M/P/W/A for space, model,
+project, worktree, and permissions. Provider and effort have no separate default binding.
+Provider, model, and effort share one picker; their focus commands open it. Control
 tooltips describe their purpose and show the active configured shortcut.
+
+`agents.send-shortcut` accepts `"enter"` (default), `"mod-enter-multiline"`, or
+`"mod-enter"`. It applies to both the new-session and conversation composers.
+Shift+Enter inserts a newline with the default shortcut. When Command/Control+Enter
+is required, adding Shift uses the opposite follow-up behavior for that message.
+
+
+`agents.response-streaming` selects `"live"` (default), `"paragraph"`, or `"complete"`.
+Paragraph mode waits for completed Markdown blocks and keeps unfinished fenced
+code blocks together. Final replies always display in full.
+`agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer
+folds to one line while reading older turns, and opens when focused. Drafts and
+attachments keep the composer expanded.

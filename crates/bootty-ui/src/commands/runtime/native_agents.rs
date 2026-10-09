@@ -307,37 +307,22 @@ impl AppState {
         ) {
             return self.dispatch_native_start_or_list(service, invocation, execution);
         }
-        let binding_id = match service.binding_for_target(target) {
-            Ok(binding_id) => binding_id,
-            Err(error) => {
-                return CommandDispatch::Complete(CommandOutcome::StaleTarget { message: error });
-            }
-        };
-        if !self
-            .workspace
-            .all_bindings()
-            .any(|binding| binding.scope().persistence_value().to_string() == binding_id)
-        {
-            return CommandDispatch::Complete(CommandOutcome::StaleTarget {
-                message: "Conversation Space no longer exists".to_owned(),
-            });
+        if let Err(outcome) = self.native_conversation_binding(&service, target) {
+            return CommandDispatch::Complete(outcome);
         }
         if matches!(operation, "focus" | "close") {
             return self.dispatch_native_visibility(service, &invocation, effects, execution);
         }
-        if invocation.arguments.first() != Some(&target.handle)
-            || invocation
-                .arguments
-                .get(1)
-                .and_then(|value| value.parse::<u64>().ok())
-                != Some(target.generation)
-        {
+        if !native_operation_identity(&invocation, target) {
             return CommandDispatch::Complete(CommandOutcome::StaleTarget {
-                message: "Conversation identity or generation changed".to_owned(),
+                message: "Conversation identity or generation changed".into(),
             });
         }
         if let Err(outcome) = self.native_operation_enabled(&service, target, operation) {
             return CommandDispatch::Complete(outcome);
+        }
+        if operation == "regenerate-title" {
+            return self.dispatch_regenerate_title(service, &invocation, execution);
         }
         if operation == "profiles" {
             return CommandDispatch::Complete(self.native_profile_names(&service, target));
@@ -360,10 +345,174 @@ impl AppState {
         if operation == "fork" {
             return self.dispatch_native_fork(service, &invocation, execution);
         }
-        if matches!(operation, "resume" | "permissions") {
+        if matches!(operation, "resume" | "unarchive" | "permissions") {
             return self.dispatch_native_resume(service, &invocation, execution);
         }
         self.dispatch_native_operation(service, invocation, execution)
+    }
+
+    fn native_conversation_binding(
+        &self,
+        service: &NativeAgentService,
+        target: &CommandTarget,
+    ) -> Result<(), CommandOutcome> {
+        let binding_id = service
+            .binding_for_target(target)
+            .map_err(|message| CommandOutcome::StaleTarget { message })?;
+        if self
+            .workspace
+            .all_bindings()
+            .any(|binding| binding.scope().persistence_value().to_string() == binding_id)
+        {
+            Ok(())
+        } else {
+            Err(CommandOutcome::StaleTarget {
+                message: "Conversation Space no longer exists".into(),
+            })
+        }
+    }
+
+    fn dispatch_regenerate_title(
+        &self,
+        service: Arc<NativeAgentService>,
+        invocation: &CommandInvocation,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(record) = service
+            .sessions()
+            .into_iter()
+            .find(|record| Some(&record.target()) == invocation.target.as_ref())
+        else {
+            return CommandDispatch::Complete(CommandOutcome::StaleTarget {
+                message: "The conversation changed".into(),
+            });
+        };
+        let captured = match self.capture_native_destination(&record, invocation) {
+            Ok(captured) => captured,
+            Err(outcome) => return CommandDispatch::Complete(outcome),
+        };
+        let Some(preferences) = self
+            .config()
+            .agents
+            .provider("codex")
+            .filter(|preferences| preferences.enabled)
+            .cloned()
+        else {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "Enable Codex to use the configured quick model for titles.".into(),
+            });
+        };
+        let (deadline, cancellation) = executor::command_execution(execution);
+        let repaint = self.repaint.clone();
+        let commands = self.app_command_sender(Caller::Internal);
+        let saved = self.generated_title_invocation(&record);
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let config = if record.config.provider == AgentKind::Codex {
+                    record.config.clone()
+                } else {
+                    capture_child_provider(
+                        &captured,
+                        &record.config,
+                        AgentKind::Codex,
+                        &preferences,
+                        Caller::Internal,
+                    )?
+                };
+                let context = native_title_context(&service, &record)?;
+                let names = bootty_agents::generate_session_names(
+                    &config,
+                    &captured.quick_model,
+                    &context,
+                    || cancellation.is_cancelled() || Instant::now() >= deadline,
+                )?;
+                if Instant::now() >= deadline || !cancellation.try_start() {
+                    return Err("Title generation was cancelled".into());
+                }
+                let changed =
+                    service.rename_if_unchanged(&record.target(), &record.title, &names.title)?;
+                if changed && let Some(mut saved) = saved {
+                    if let Some(title) = saved.arguments.get_mut(1) {
+                        title.clone_from(&names.title);
+                    }
+                    let now = Instant::now();
+                    let outcome = commands
+                        .submit(
+                            saved,
+                            now.checked_add(std::time::Duration::from_secs(30))
+                                .unwrap_or(now),
+                            CommandCancellation::new(),
+                        )
+                        .map_err(|_| "The title could not be saved".to_owned())?
+                        .recv()
+                        .map_err(|_| "The title could not be saved".to_owned())?;
+                    if !matches!(outcome, CommandOutcome::Success { .. }) {
+                        return Err("The title could not be saved".into());
+                    }
+                }
+                Ok(json!({"title": names.title, "changed": changed}))
+            })();
+            let outcome = result.map_or_else(failure, serialized_command_outcome);
+            _ = sender.send(outcome);
+            repaint();
+        });
+        CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+    }
+
+    fn generated_title_invocation(
+        &self,
+        record: &NativeSessionRecord,
+    ) -> Option<CommandInvocation> {
+        let binding = self
+            .workspace
+            .all_bindings()
+            .find(|binding| binding.scope().persistence_value().to_string() == record.binding_id)?;
+        let identity = record.task_identity.as_ref()?;
+        let expected = binding.sessions().get(identity)?.label().to_owned();
+        self.saved_session_invocation(
+            binding.scope(),
+            "session.set_title",
+            vec![identity.clone(), String::new(), expected],
+        )
+    }
+
+    fn existing_saved_conversation(
+        &self,
+        service: &NativeAgentService,
+        invocation: &CommandInvocation,
+    ) -> Result<Option<CommandTarget>, CommandOutcome> {
+        let Some(saved) = invocation
+            .arguments
+            .get(16)
+            .filter(|value| !value.is_empty() && invocation.command == "agents.native.start")
+        else {
+            return Ok(None);
+        };
+        // Validate the captured destination even when another Space already owns the conversation.
+        self.native_launch_destination(invocation)?;
+        let entry: bootty_agents::TerminalHistoryEntry = serde_json::from_str(saved)
+            .map_err(|error| failure(format!("Invalid saved session: {error}")))?;
+        Ok(service
+            .sessions()
+            .into_iter()
+            .find(|record| {
+                record.config.remote.is_none()
+                    && record.config.provider == entry.provider
+                    && record
+                        .snapshot
+                        .session_id
+                        .as_ref()
+                        .or(record.config.session_id.as_ref())
+                        == Some(&entry.session_id)
+                    && record
+                        .config
+                        .account_directory
+                        .as_deref()
+                        .map(std::path::Path::new)
+                        == Some(entry.account_directory.as_path())
+            })
+            .map(|record| record.target()))
     }
 
     fn native_profile_names(
@@ -404,7 +553,7 @@ impl AppState {
             .unwrap_or_default();
         let (deadline, cancellation) = executor::command_execution(execution);
         let repaint = self.repaint.clone();
-        let activity = (operation == "prompt")
+        let activity = matches!(operation, "prompt" | "queue" | "queue-steer")
             .then(|| self.native_activity_invocation(&service, target))
             .flatten();
         let commands = self.commands.sender.clone();
@@ -485,10 +634,13 @@ impl AppState {
             if let Err(outcome) = self.native_operation_enabled(&service, target, "focus") {
                 return CommandDispatch::Complete(outcome);
             }
-            if matches!(
-                record.snapshot.status,
-                NativeSessionStatus::Stopped | NativeSessionStatus::Error
-            ) {
+            if !record.snapshot.provider_archived()
+                && !record.snapshot.provider_writer_blocked()
+                && matches!(
+                    record.snapshot.status,
+                    NativeSessionStatus::Stopped | NativeSessionStatus::Error
+                )
+            {
                 return self.dispatch_native_resume(service, invocation, execution);
             }
             if let Some((exact, _)) = self.native_panel_target(&record) {
@@ -891,44 +1043,6 @@ impl AppState {
         })
     }
 
-    fn existing_saved_conversation(
-        &self,
-        service: &NativeAgentService,
-        invocation: &CommandInvocation,
-    ) -> Result<Option<CommandTarget>, CommandOutcome> {
-        let Some(saved) = invocation
-            .arguments
-            .get(16)
-            .filter(|value| !value.is_empty() && invocation.command == "agents.native.start")
-        else {
-            return Ok(None);
-        };
-        // Validate the captured destination even when another Space already owns the conversation.
-        self.native_launch_destination(invocation)?;
-        let entry: bootty_agents::TerminalHistoryEntry = serde_json::from_str(saved)
-            .map_err(|error| failure(format!("Invalid saved session: {error}")))?;
-        Ok(service
-            .sessions()
-            .into_iter()
-            .find(|record| {
-                record.config.remote.is_none()
-                    && record.config.provider == entry.provider
-                    && record
-                        .snapshot
-                        .session_id
-                        .as_ref()
-                        .or(record.config.session_id.as_ref())
-                        == Some(&entry.session_id)
-                    && record
-                        .config
-                        .account_directory
-                        .as_deref()
-                        .map(std::path::Path::new)
-                        == Some(entry.account_directory.as_path())
-            })
-            .map(|record| record.target()))
-    }
-
     fn native_operation_enabled(
         &self,
         service: &NativeAgentService,
@@ -1083,7 +1197,11 @@ impl AppState {
         let (deadline, cancellation) = executor::command_execution(execution);
         let repaint = self.repaint.clone();
         let (sender, receiver) = mpsc::channel();
-        let focus_after_resume = invocation.command == "agents.native.focus";
+        let resume_action = match invocation.command.as_str() {
+            "agents.native.focus" => NativeResumeAction::Focus,
+            "agents.native.unarchive" => NativeResumeAction::Unarchive,
+            _ => NativeResumeAction::Resume,
+        };
         let target = record.target();
         std::thread::spawn(move || {
             if let Some(outcome) = permissions.and_then(|mode| {
@@ -1105,7 +1223,7 @@ impl AppState {
                 &record,
                 &launch_invocation,
                 (deadline, cancellation),
-                focus_after_resume,
+                resume_action,
             );
             let _ = sender.send(outcome);
             repaint();
@@ -1532,6 +1650,13 @@ impl AppState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeResumeAction {
+    Resume,
+    Focus,
+    Unarchive,
+}
+
 fn resume_native_session(
     service: &NativeAgentService,
     commands: &Arc<dyn AgentCommandExecutor>,
@@ -1539,7 +1664,7 @@ fn resume_native_session(
     record: &NativeSessionRecord,
     invocation: &CommandInvocation,
     execution: (Instant, CommandCancellation),
-    focus_after_resume: bool,
+    action: NativeResumeAction,
 ) -> CommandOutcome {
     let (deadline, cancellation) = execution;
     let captured = resume;
@@ -1601,31 +1726,57 @@ fn resume_native_session(
         return CommandOutcome::cancelled();
     }
     let result = terminal.zip(tools.as_ref()).map_or_else(
-        || service.resume(&record.target()),
+        || {
+            if action == NativeResumeAction::Unarchive {
+                service.unarchive(&record.target(), None)
+            } else {
+                service.resume(&record.target())
+            }
+        },
         |(terminal, tools)| {
-            bind_native_tools(captured, tools, terminal, &launch)
-                .and_then(|()| service.resume_with_tools(&record.target(), Arc::clone(tools)))
+            bind_native_tools(captured, tools, terminal, &launch).and_then(|()| {
+                if action == NativeResumeAction::Unarchive {
+                    service.unarchive(&record.target(), Some(Arc::clone(tools)))
+                } else {
+                    service.resume_with_tools(&record.target(), Arc::clone(tools))
+                }
+            })
         },
     );
     drop(launch_guard);
     drop(tools);
-    match result {
-        Ok(record) => {
-            if focus_after_resume {
-                let mut focus =
-                    CommandInvocation::from_action("agents.native.focus", invocation.caller);
-                focus.target = Some(record.target());
-                let outcome = commands.execute(focus, deadline, CommandCancellation::new());
-                if !matches!(outcome, CommandOutcome::Success { .. }) {
-                    return outcome;
-                }
-            }
-            CommandOutcome::Success {
-                value: json!(record),
-                warnings,
-            }
+    let record = match result {
+        Ok(record) => record,
+        Err(error) => match service.sessions().into_iter().find(|saved| {
+            saved.id == record.id
+                && (saved.snapshot.provider_archived() || saved.snapshot.provider_writer_blocked())
+        }) {
+            Some(saved) if action != NativeResumeAction::Unarchive => saved,
+            _ => return failure(error),
+        },
+    };
+    complete_native_resume(commands, invocation, action, &record, warnings, deadline)
+}
+
+fn complete_native_resume(
+    commands: &Arc<dyn AgentCommandExecutor>,
+    invocation: &CommandInvocation,
+    action: NativeResumeAction,
+    record: &NativeSessionRecord,
+    warnings: Vec<CommandWarning>,
+    deadline: Instant,
+) -> CommandOutcome {
+    if action == NativeResumeAction::Focus {
+        let mut focus = CommandInvocation::from_action("agents.native.focus", invocation.caller);
+        focus.target = Some(record.target());
+        let outcome = commands.execute(focus, deadline, CommandCancellation::new());
+        if !matches!(outcome, CommandOutcome::Success { .. }) {
+            return outcome;
         }
-        Err(error) => failure(error),
+    }
+    CommandOutcome::Success {
+        value: json!(record),
+        warnings,
     }
 }
 
@@ -2241,6 +2392,7 @@ fn prepare_native_launch(
         })
         .transpose()?;
     let mut config = captured_launch_config(captured, invocation, provider, launch)?;
+    resume_saved_launch(&mut config, invocation)?;
     config.fast_mode = captured.context.preferences.fast_mode && provider != AgentKind::Pi;
     if let Some(selection) = &selection {
         let options = if let Some(options) = service.cached_model_catalog(&config) {
@@ -2269,8 +2421,13 @@ fn prepare_native_launch(
         ephemeral: false,
         account_directory: config.account_directory.clone(),
     };
-    let (tools, warnings) = native_tools(commands, &launch_invocation, captured, &config, &launch)?;
     if let Some(selection) = selection {
+        if let Some(fast) = selection.fast_mode {
+            if fast && provider == AgentKind::Pi {
+                return Err("Pi does not support fast mode".into());
+            }
+            config.fast_mode = fast;
+        }
         config.model = Some(selection.model);
         config.reasoning_effort = selection.reasoning_effort;
     }
@@ -2300,12 +2457,55 @@ fn prepare_native_launch(
             "The provider account changed after capture; choose the task account again".to_owned(),
         );
     }
+    let (tools, warnings) = native_tools(commands, &launch_invocation, captured, &config, &launch)?;
     Ok(PreparedNativeLaunch {
         config,
         tools,
         warnings,
         spawn_parent: None,
     })
+}
+
+fn native_operation_identity(invocation: &CommandInvocation, target: &CommandTarget) -> bool {
+    invocation.arguments.first() == Some(&target.handle)
+        && invocation
+            .arguments
+            .get(1)
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(target.generation)
+}
+
+fn resume_saved_launch(
+    config: &mut NativeSessionConfig,
+    invocation: &CommandInvocation,
+) -> Result<(), String> {
+    if let Some(saved) = invocation
+        .arguments
+        .get(16)
+        .filter(|_| invocation.command == "agents.native.start")
+        .filter(|value| !value.is_empty())
+    {
+        let entry: bootty_agents::TerminalHistoryEntry = serde_json::from_str(saved)
+            .map_err(|error| format!("Invalid saved session: {error}"))?;
+        config.resume_saved(&entry)?;
+        let entries =
+            bootty_agents::terminal_provider_history(&bootty_agents::TerminalHistoryQuery {
+                provider: config.provider,
+                program: &config.program,
+                account_directory: &entry.account_directory,
+                cwd: Some(&entry.cwd),
+                limit: 200,
+            })?;
+        if !entries.iter().any(|candidate| {
+            candidate.session_id == entry.session_id && candidate.resume_id == entry.resume_id
+        }) {
+            return Err(
+                "The saved provider session is no longer available; refresh the session list"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn native_provider(id: &str) -> Option<AgentKind> {
@@ -2345,11 +2545,15 @@ fn native_tools(
         .ok_or("Native tools require the captured Binding")?;
     let executable = std::env::current_exe().map_err(|_| "Bootty tool executable unavailable")?;
     launch.validate()?;
-    let spawn = (captured.context.allow_spawn && launch.account_directory.is_some()).then(|| {
-        bootty_agents::ToolSpawnContext {
-            profile: config.profile.clone(),
-        }
-    });
+    let spawn = if captured.context.allow_spawn && launch.account_directory.is_some() {
+        Some(capture_native_children(
+            captured,
+            config,
+            invocation.caller,
+        )?)
+    } else {
+        None
+    };
     let bridge = ToolBridge::prepare(
         bootty_agents::ToolBridgeContext {
             scope: bootty_agents::ToolScope {
@@ -2374,6 +2578,69 @@ fn native_tools(
         .tools_owner
         .retain_tool_attachment(config.provider, bridge)?;
     Ok((Some(tools), Vec::new()))
+}
+
+fn capture_native_children(
+    captured: &NativeLaunch,
+    parent: &NativeSessionConfig,
+    caller: Caller,
+) -> Result<bootty_agents::ToolSpawnContext, String> {
+    let mut providers = Vec::new();
+    for (provider, preferences) in &captured.context.providers {
+        if !NativeSessionConfig::supports_provider(*provider) {
+            continue;
+        }
+        let config = if *provider == parent.provider {
+            parent.capture_child()?
+        } else {
+            // Unavailable providers stay outside this grant; configuring them takes effect on a new launch.
+            let Ok(config) =
+                capture_child_provider(captured, parent, *provider, preferences, caller)
+            else {
+                continue;
+            };
+            config
+        };
+        providers.push(bootty_agents::ToolSpawnProvider {
+            provider: *provider,
+            profile: config.profile.clone(),
+            launch: bootty_agents::ToolSpawnLaunch::Native(Box::new(config)),
+        });
+    }
+    Ok(bootty_agents::ToolSpawnContext {
+        profile: parent.profile.clone(),
+        providers,
+    })
+}
+
+fn capture_child_provider(
+    captured: &NativeLaunch,
+    parent: &NativeSessionConfig,
+    provider: AgentKind,
+    preferences: &bootty_config::config::AgentProviderConfig,
+    caller: Caller,
+) -> Result<NativeSessionConfig, String> {
+    let invocation =
+        CommandInvocation::new(format!("{}.start", provider.module()), Vec::new(), caller);
+    let launch = super::terminal_agents::prepare_launch(
+        &invocation,
+        provider,
+        "start",
+        parent.cwd.to_str(),
+        preferences,
+    )?;
+    let mut config = if let Some(remote) = &captured.remote {
+        NativeSessionConfig::capture_remote(provider, launch, remote.clone())?
+    } else {
+        NativeSessionConfig::from_launch(provider, launch)?
+    };
+    config.profile = (!preferences.selected.is_empty()).then(|| preferences.selected.clone());
+    config.model =
+        (!preferences.default_model.is_empty()).then(|| preferences.default_model.clone());
+    config.reasoning_effort =
+        (!preferences.default_effort.is_empty()).then(|| preferences.default_effort.clone());
+    config.fast_mode = preferences.fast_mode && provider != AgentKind::Pi;
+    config.capture_child()
 }
 
 fn bind_native_tools(
@@ -2402,7 +2669,18 @@ fn create_task_shell(
     let arg = |index| invocation.arguments.get(index).cloned().unwrap_or_default();
     let mut shell = CommandInvocation::new(
         "session.create",
-        vec![arg(4), arg(1), "[]".to_owned(), arg(6), arg(7)],
+        vec![
+            arg(4),
+            arg(1),
+            "[]".to_owned(),
+            arg(6),
+            arg(7),
+            if arg(15).is_empty() {
+                "false".into()
+            } else {
+                arg(15)
+            },
+        ],
         invocation.caller,
     );
     shell.target.clone_from(&invocation.target);
@@ -2420,6 +2698,31 @@ fn create_task_shell(
     }
 }
 
+fn native_title_context(
+    service: &NativeAgentService,
+    record: &NativeSessionRecord,
+) -> Result<String, String> {
+    let history;
+    let items = if record.snapshot.transcript.is_empty() {
+        history = service.read_history(&record.target(), "latest")?;
+        &history.transcript
+    } else {
+        &record.snapshot.transcript
+    };
+    // Match the existing quick-model input budget without assembling an unbounded transcript.
+    let context = items
+        .iter()
+        .filter(|item| matches!(item.role.as_str(), "user" | "assistant"))
+        .flat_map(|item| item.text.chars().chain(['\n', '\n']))
+        .take(8192)
+        .collect::<String>();
+    Ok(if context.trim().is_empty() {
+        record.title.clone()
+    } else {
+        context
+    })
+}
+
 fn invoke(
     service: &NativeAgentService,
     invocation: &CommandInvocation,
@@ -2431,13 +2734,16 @@ fn invoke(
     };
     let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
     let operation = invocation.command.strip_prefix("agents.native.");
+    if matches!(operation, Some("prompt" | "queue")) {
+        let result = submit_native_input(service, invocation, deadline, cancellation);
+        return complete_native_operation(service, target, operation, result);
+    }
     let result = match operation.unwrap_or_default() {
-        "prompt" => resolve_native_prompt(service, invocation, deadline, cancellation)
-            .and_then(|prompt| {
-                check_native_input(deadline, cancellation)?;
-                service.prompt_input(target, &prompt)
-            })
-            .and_then(|snapshot| serde_json::to_value(snapshot).map_err(|error| error.to_string())),
+        "queue-cancel" => service
+            .cancel_followup(target, arg(2))
+            .map(|()| Value::Null),
+        "queue-retry" => service.retry_followup(target, arg(2)).map(|()| Value::Null),
+        "queue-steer" => service.steer_followup(target, arg(2)).map(|()| Value::Null),
         "import" if invocation.caller == Caller::Internal => service
             .import_attachment(target, std::path::Path::new(arg(2)))
             .and_then(|reference| {
@@ -2521,9 +2827,50 @@ fn invoke(
         }
         _ => Err("Unknown native conversation operation".to_owned()),
     };
+    complete_native_operation(service, target, operation, result)
+}
+
+fn submit_native_input(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    deadline: Instant,
+    cancellation: &CommandCancellation,
+) -> Result<Value, String> {
+    let prompt = resolve_native_prompt(service, invocation, deadline, cancellation)?;
+    check_native_input(deadline, cancellation)?;
+    if !cancellation.try_start() {
+        return Err("Input submission was cancelled".into());
+    }
+    let target = invocation
+        .target
+        .as_ref()
+        .ok_or("Missing conversation target")?;
+    if invocation.command == "agents.native.queue" {
+        serde_json::to_value(service.queue_input(target, &prompt)?)
+    } else {
+        serde_json::to_value(service.prompt_input(target, &prompt)?)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn complete_native_operation(
+    service: &NativeAgentService,
+    target: &CommandTarget,
+    operation: Option<&str>,
+    result: Result<Value, String>,
+) -> CommandOutcome {
     match result {
         Ok(value) => serialized_command_outcome(value),
-        Err(error) => failure(error),
+        Err(error) => {
+            if operation == Some("prompt")
+                && let Some(record) = service.sessions().into_iter().find(|record| {
+                    record.target() == *target && record.snapshot.provider_writer_blocked()
+                })
+            {
+                return serialized_command_outcome(json!(record.snapshot));
+            }
+            failure(error)
+        }
     }
 }
 
@@ -2640,7 +2987,8 @@ fn check_native_input(deadline: Instant, cancellation: &CommandCancellation) -> 
     Ok(())
 }
 
-fn failure(message: String) -> CommandOutcome {
+fn failure(mut message: String) -> CommandOutcome {
+    message = bootty_agents::native_error_message(&message);
     CommandOutcome::Failed {
         code: "native_agent_failed".to_owned(),
         message,

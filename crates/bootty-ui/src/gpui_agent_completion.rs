@@ -7,6 +7,33 @@ use crate::{
 use gpui_kit::component::WindowExt as _;
 
 impl NativeAgentSessionView {
+    pub(crate) fn configure_speech_account(
+        &self,
+        codex: &bootty_config::config::AgentProviderConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let config = &self.record.config;
+        self.speech.update(cx, |speech, _| {
+            if matches!(
+                config.provider,
+                bootty_agents::AgentKind::Codex | bootty_agents::AgentKind::Pi
+            ) {
+                speech.set_captured_account(
+                    &config.provider.to_string(),
+                    config.program.clone(),
+                    config.account_directory.clone(),
+                );
+            } else {
+                speech.set_account(codex, "codex");
+            }
+        });
+    }
+    pub(crate) fn set_speech_visible(&self, visible: bool, cx: &mut Context<Self>) {
+        if !visible {
+            self.speech
+                .update(cx, super::super::gpui_speech::SpeechInput::stop);
+        }
+    }
     pub(crate) fn set_completion_binding(
         &mut self,
         binding: Option<CommandTarget>,
@@ -194,6 +221,36 @@ impl NativeAgentSessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if matches!(action, CommandAction::Dictate | CommandAction::Voice) {
+            if window.has_active_dialog(cx) {
+                return false;
+            }
+            let mode = if action == CommandAction::Dictate {
+                crate::gpui_speech::SpeechMode::Dictation
+            } else {
+                crate::gpui_speech::SpeechMode::Voice
+            };
+            if mode == crate::gpui_speech::SpeechMode::Voice
+                && !self.speech.read(cx).voice_active()
+                && (!self.can_prompt() || !self.composer.read(cx).value().trim().is_empty())
+            {
+                return false;
+            }
+            self.speech
+                .update(cx, |speech, cx| speech.toggle(mode, window, cx));
+            return true;
+        }
+        if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
+            if window.has_active_dialog(cx) {
+                return false;
+            }
+            let Some(picker) = &self.model_picker else {
+                return false;
+            };
+            return picker.update(cx, |picker, cx| {
+                picker.change_effort(action == CommandAction::EffortUp, cx)
+            });
+        }
         if let CommandAction::Focus(control) = action {
             if window.has_active_dialog(cx) {
                 return false;
@@ -207,7 +264,11 @@ impl NativeAgentSessionView {
                     return true;
                 }
                 crate::gpui::ComposerControl::Effort => {
-                    return crate::gpui::activate_control_child(&self.effort_focus, window, cx);
+                    let Some(picker) = &self.model_picker else {
+                        return false;
+                    };
+                    picker.update(cx, |picker, cx| picker.open_reasoning(window, cx));
+                    return true;
                 }
                 crate::gpui::ComposerControl::Permissions => {
                     if self.record.config.provider == bootty_agents::AgentKind::Pi {

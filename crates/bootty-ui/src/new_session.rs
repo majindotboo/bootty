@@ -12,6 +12,7 @@ use bootty_mux::controller::RepaintHandle;
 use crate::error_catalog::ErrorNotice;
 
 pub enum NewSessionEffect {
+    ResolveHome,
     ListProjects,
     ListWorktrees(String, Vec<String>),
     ToggleFavorite(String),
@@ -19,6 +20,7 @@ pub enum NewSessionEffect {
 }
 
 pub enum NewSessionOutcome {
+    HomeDirectory(String),
     Projects(Vec<ProjectPickerEntry>),
     Worktrees(Vec<WorktreePickerEntry>),
     Favorite { path: String, favorite: bool },
@@ -222,6 +224,32 @@ fn run_effect(
     runner: &CancellableCommandRunner,
 ) -> Result<NewSessionOutcome, anyhow::Error> {
     Ok(match (target, effect) {
+        (NewSessionTarget::Local { home }, NewSessionEffect::ResolveHome) => {
+            NewSessionOutcome::HomeDirectory(
+                home.as_ref()
+                    .and_then(|home| home.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("The host home directory is unavailable"))?
+                    .to_owned(),
+            )
+        }
+        (NewSessionTarget::Remote(remote), NewSessionEffect::ResolveHome) => {
+            let response = bootty_host::files::FileRequest::Resolve {
+                path: "~".into(),
+                base: None,
+            }
+            .execute_remote(
+                &bootty_host::remote::RemoteHost::new(remote.clone()),
+                runner.clone(),
+            )?;
+            let bootty_host::files::FileResponse::Location {
+                path,
+                is_directory: true,
+            } = response
+            else {
+                anyhow::bail!("The host home directory is unavailable")
+            };
+            NewSessionOutcome::HomeDirectory(path)
+        }
         (NewSessionTarget::Local { home }, NewSessionEffect::ListProjects) => {
             NewSessionOutcome::Projects(project::discover_project_picker_entries(home.as_deref()))
         }

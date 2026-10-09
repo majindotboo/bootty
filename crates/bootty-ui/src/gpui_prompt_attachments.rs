@@ -1,9 +1,13 @@
 //! File references are atomic editor content; the session owns attachment bytes.
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
     input::{InlineToken, InlineTokenContext},
 };
-use gpui_kit::{App, IntoElement, ParentElement as _, Styled as _, div};
+use gpui_kit::{
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, StyledImage as _,
+    div,
+};
 
 pub fn token(id: String, name: &str, bytes: u64) -> InlineToken {
     let name = name
@@ -48,7 +52,9 @@ pub fn render(
                 .into_any_element()
         } else {
             crate::gpui::sized_icon(
-                if context.token().id().starts_with("application:") {
+                if context.token().id().starts_with("directory:") {
+                    "folder"
+                } else if context.token().id().starts_with("application:") {
                     "app-window"
                 } else if context.token().id().starts_with("skill:") {
                     "sparkles"
@@ -96,4 +102,103 @@ pub fn size(bytes: u64) -> String {
         let tenths = bytes.saturating_mul(10) / (1024 * 1024);
         format!("{}.{:01} MB", tenths / 10, tenths % 10)
     }
+}
+
+/// A folder is referenced in the prompt, rather than uploaded recursively.
+pub fn directory_token(path: &std::path::Path) -> InlineToken {
+    let path_text = path.to_string_lossy();
+    let label =
+        bootty_git::project::display_path(&path_text, crate::strings::home_dir().as_deref());
+    InlineToken::new(
+        format!("directory:{path_text}"),
+        format!(
+            "{} ",
+            serde_json::Value::String(format!("{}/", path_text.trim_end_matches('/')))
+        ),
+    )
+    .with_label(format!("{}/", label.trim_end_matches('/')))
+}
+
+/// Uses Root's dialog lifetime, Escape dismissal and focus restoration.
+pub fn open_image(
+    name: String,
+    image: std::sync::Arc<gpui_kit::RenderImage>,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) {
+    use gpui_kit::component::WindowExt as _;
+    use num_traits::ToPrimitive as _;
+    use std::ops::{Div as _, Mul as _, Sub as _};
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let viewport = window.viewport_size();
+        let pixels = image.size(0);
+        let ratio = pixels
+            .width
+            .0
+            .to_f32()
+            .unwrap_or(1.)
+            .div(pixels.height.0.to_f32().unwrap_or(1.).max(1.));
+        let max_width = viewport
+            .width
+            .sub(gpui_kit::rems(4.).to_pixels(window.rem_size()))
+            .max(gpui_kit::px(1.));
+        let max_height = viewport
+            .height
+            .sub(gpui_kit::rems(8.).to_pixels(window.rem_size()))
+            .max(gpui_kit::px(1.));
+        let width = max_width.min(gpui_kit::px(f32::from(max_height).mul(ratio)));
+        let height = gpui_kit::px(f32::from(width).div(ratio.max(0.001)));
+        dialog
+            .w(width)
+            .close_button(false)
+            .p_0()
+            .bg(gpui_kit::Hsla::transparent_black())
+            .border_0()
+            .shadow_none()
+            .title(
+                div().flex().justify_end().child(
+                    Button::new("close-image-preview")
+                        .small()
+                        .ghost()
+                        .icon(gpui_kit::component::IconName::Close)
+                        .accessibility_label("Close image preview")
+                        .debug_selector(|| "close-image-preview".into())
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+            )
+            .margin_top(
+                viewport
+                    .height
+                    .sub(height)
+                    .div(2.)
+                    .sub(gpui_kit::rems(2.).to_pixels(window.rem_size()))
+                    .max(gpui_kit::px(0.)),
+            )
+            .footer(
+                div()
+                    .w_full()
+                    .py_2()
+                    .text_xs()
+                    .text_center()
+                    .text_color(cx.theme().foreground.opacity(0.8))
+                    .child(name.clone()),
+            )
+            .content({
+                let image = image.clone();
+                move |content, _, _| {
+                    content.child(
+                        div()
+                            .id("attachment-image-viewer")
+                            .debug_selector(|| "attachment-image-viewer".into())
+                            .w_full()
+                            .child(
+                                gpui_kit::img(image.clone())
+                                    .w_full()
+                                    .h(height)
+                                    .object_fit(gpui_kit::ObjectFit::Contain),
+                            ),
+                    )
+                }
+            })
+    });
 }

@@ -22,6 +22,13 @@ use crate::{
 };
 
 const FRAME_LIMIT: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub enum NativePromptDelivery {
+    Automatic,
+    Idle,
+    Steer,
+}
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 type PendingReplies = Arc<Mutex<BTreeMap<String, PendingReply>>>;
 struct PendingReply {
@@ -94,6 +101,18 @@ pub struct NativeSessionConfig {
 }
 
 impl NativeSessionConfig {
+    /// Capture a fresh child template without inheriting the parent's provider session.
+    /// # Errors
+    /// Rejects invalid captured configuration or unavailable fresh identity generation.
+    pub fn capture_child(&self) -> Result<Self, String> {
+        let mut config = self.clone();
+        config.session_id = None;
+        config.session_file = None;
+        config.fresh_session_id = None;
+        config.prepare_fresh_identity()?;
+        config.validate()?;
+        Ok(config)
+    }
     /// Keep the provider's saved handle, separate from Bootty's task identity.
     /// # Errors
     /// Rejects a saved conversation from another provider, account or directory.
@@ -721,6 +740,7 @@ impl NativeAgentSession {
             .model
             .as_ref()
             .map(|model| crate::NativeModelSelection {
+                fast_mode: Some(self.config.fast_mode),
                 model: model.clone(),
                 reasoning_effort: self.config.reasoning_effort.clone(),
             });
@@ -732,6 +752,15 @@ impl NativeAgentSession {
         prompt: &crate::NativePrompt,
         selection: Option<&crate::NativeModelSelection>,
     ) -> Result<(), String> {
+        self.send_prompt_input_mode(prompt, selection, NativePromptDelivery::Automatic)
+    }
+
+    pub(crate) fn send_prompt_input_mode(
+        &self,
+        prompt: &crate::NativePrompt,
+        selection: Option<&crate::NativeModelSelection>,
+        delivery: NativePromptDelivery,
+    ) -> Result<(), String> {
         if self.closing.load(Ordering::Acquire) {
             return Err("Native agent session is stopped".to_owned());
         }
@@ -742,6 +771,9 @@ impl NativeAgentSession {
                 prompt.clone()
             };
         let prompt = &resolved_prompt;
+        if matches!(delivery, NativePromptDelivery::Steer) {
+            return self.send_active_prompt(prompt);
+        }
         if self.config.provider == AgentKind::Codex
             && let Some(instructions) = prompt.compact_instructions()?
         {
@@ -751,7 +783,11 @@ impl NativeAgentSession {
             return self.compact_codex();
         }
         if self.snapshot().status == NativeSessionStatus::Working {
-            return self.send_active_prompt(prompt);
+            return if matches!(delivery, NativePromptDelivery::Automatic) {
+                self.send_active_prompt(prompt)
+            } else {
+                Err("The conversation started another turn before sending".into())
+            };
         }
         if self.config.provider == AgentKind::Pi {
             if let Some(selection) = selection {
@@ -834,10 +870,13 @@ impl NativeAgentSession {
             .session_id
             .ok_or("Agent has no native thread")?;
         let mut parameters = json!({"threadId":id,"input":prompt.codex_input()?,"model":selection.map(|selection| &selection.model),"effort":selection.and_then(|selection| selection.reasoning_effort.as_ref())});
-        if self.config.fast_mode
+        if let Some(fast) = selection
+            .and_then(|selection| selection.fast_mode)
+            .or_else(|| self.config.fast_mode.then_some(true))
             && let Some(parameters) = parameters.as_object_mut()
         {
-            parameters.insert("serviceTier".to_owned(), json!("fast"));
+            // A null tier clears Codex's sticky fast tier on later turns.
+            parameters.insert("serviceTier".to_owned(), json!(fast.then_some("fast")));
         }
         if let (Some(parameters), Some(policy)) = (
             parameters.as_object_mut(),
@@ -953,13 +992,16 @@ impl NativeAgentSession {
 
     // Steer the exact active turn; never interrupt/restart on an ambiguous rejection.
     fn send_active_prompt(&self, prompt: &crate::NativePrompt) -> Result<(), String> {
+        if self.config.provider == AgentKind::Claude {
+            return self.send_active_prompt_claude(prompt);
+        }
         let (method, parameters) = match self.config.provider {
             AgentKind::Codex => ("turn/steer", json!({"input":prompt.codex_input()?})),
             AgentKind::Pi => {
                 self.verify_pi_identity()?;
                 ("steer", prompt.pi_parameters()?)
             }
-            AgentKind::Claude => return Err("This provider cannot steer an active turn".to_owned()),
+            AgentKind::Claude => return self.send_active_prompt_claude(prompt),
         };
         let mut parameters = parameters
             .as_object()
@@ -1026,6 +1068,37 @@ impl NativeAgentSession {
         snapshot.changed();
         drop(snapshot);
         publish_change(&self.change_handler);
+        outcome
+    }
+
+    fn send_active_prompt_claude(&self, prompt: &crate::NativePrompt) -> Result<(), String> {
+        let id = crate::terminal_session_id()?;
+        let claude = self
+            .claude
+            .as_ref()
+            .ok_or("Claude protocol owner is absent")?;
+        let value = {
+            let mut protocol = lock(claude);
+            let mut snapshot = lock(&self.snapshot);
+            let now = Some(chrono::Utc::now().timestamp_millis());
+            snapshot
+                .with_message_times((now, now), |snapshot| protocol.steer(snapshot, &id, prompt))?
+        };
+        publish_change(&self.change_handler);
+        let outcome = write_frame_with_limit(
+            &self.stdin,
+            &self.closing,
+            &value,
+            if prompt.requires_large_envelope() {
+                crate::MAX_NATIVE_IMAGE_ENVELOPE_BYTES
+            } else {
+                FRAME_LIMIT
+            },
+        );
+        if outcome.is_err() {
+            lock(claude).retract_steer(&mut lock(&self.snapshot), &id);
+            publish_change(&self.change_handler);
+        }
         outcome
     }
 

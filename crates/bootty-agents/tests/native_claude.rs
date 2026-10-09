@@ -38,6 +38,8 @@ for line in sys.stdin:
   control(value)
  elif value['type']=='user':
   prompt=value['message']['content']
+  urgent=value.get('priority')=='now'
+  if urgent: result('aborted_streaming')
   with open('prompt.json','w') as output: json.dump(value,output)
   if prompt=='oversize': sys.stdout.write('x'*(1024*1024+1)+'\n');sys.stdout.flush();continue
   if prompt=='partial': sys.stdout.write('{"type":"result"}');sys.stdout.flush();break
@@ -572,4 +574,264 @@ fn claude_launch_uses_the_selected_permission_mode(
         bypass
     );
     session.stop();
+}
+
+#[rstest]
+fn active_follow_up_uses_claudes_live_stream_without_restarting() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("hold").unwrap();
+    barrier(&session).unwrap();
+    let initial = session.snapshot();
+    assert_eq!(initial.status, NativeSessionStatus::Working);
+    let launch = fs::read(root.path().join("launch.json")).unwrap();
+    session
+        .send_prompt("Follow this updated instruction")
+        .unwrap();
+    barrier(&session).unwrap();
+    let sent: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(sent["priority"], "now");
+    assert_eq!(sent["session_id"], SESSION);
+    assert_eq!(fs::read(root.path().join("launch.json")).unwrap(), launch);
+    let final_state = session.snapshot();
+    assert_eq!(final_state.status, NativeSessionStatus::Idle);
+    assert!(final_state.completed_turn);
+    assert!(final_state.error.is_none());
+    assert!(final_state.transcript.iter().any(|item| item.role == "user"
+        && item.text == "Follow this updated instruction"
+        && item.complete));
+    session.stop();
+}
+
+#[rstest]
+fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    service.start_followups().unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.prompt(&target, "hold").unwrap();
+    barrier(&service.resolve(&target).unwrap()).unwrap();
+    let first = service
+        .queue_input(
+            &target,
+            &bootty_agents::NativePrompt::text("Queued first").unwrap(),
+        )
+        .unwrap();
+    let discarded = service
+        .queue_input(
+            &target,
+            &bootty_agents::NativePrompt::text("Remove this").unwrap(),
+        )
+        .unwrap();
+    service.cancel_followup(&target, &discarded.id).unwrap();
+    let second = service
+        .queue_input(
+            &target,
+            &bootty_agents::NativePrompt::text("Queued second").unwrap(),
+        )
+        .unwrap();
+    let queued = service.sessions().remove(0).queued_messages;
+    assert_eq!(
+        queued.iter().map(|message| &message.id).collect::<Vec<_>>(),
+        vec![&first.id, &second.id]
+    );
+    assert_eq!(
+        service
+            .resolve(&target)
+            .unwrap()
+            .snapshot()
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user")
+            .count(),
+        1
+    );
+    service.shutdown().unwrap();
+    drop(service);
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    assert_eq!(service.sessions()[0].queued_messages.len(), 2);
+    let (sender, receiver) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    service.start_followups().unwrap();
+    let stopped = service.sessions().remove(0);
+    let resumed = service.resume(&stopped.target()).unwrap();
+    assert_eq!(
+        resumed.config.account_directory,
+        stopped.config.account_directory
+    );
+    loop {
+        let current = service.sessions().remove(0);
+        if current.queued_messages.is_empty()
+            && current.snapshot.status == NativeSessionStatus::Idle
+        {
+            break;
+        }
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("provider publication wakes the follow-up owner");
+    }
+    let current = service.sessions().remove(0);
+    let messages = current
+        .snapshot
+        .transcript
+        .iter()
+        .filter(|item| item.role == "user")
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(messages, vec!["hold", "Queued first", "Queued second"]);
+    let sent: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert!(
+        sent.get("priority").is_none(),
+        "queued follow-ups must not steer"
+    );
+    service.shutdown().unwrap();
+}
+
+#[rstest]
+#[case("notes.md", false)]
+#[case("screenshot.png", true)]
+fn queued_preview_retains_attachments_and_hides_only_image_tokens(
+    #[case] name: &str,
+    #[case] image: bool,
+) {
+    let root = TempDir::new().unwrap();
+    let catalog = root.path().join("native.json");
+    let service = NativeAgentService::open(&catalog).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let file = root.path().join(name);
+    if image {
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
+            .save(&file)
+            .unwrap();
+    } else {
+        fs::write(&file, "Review this note").unwrap();
+    }
+    let reference = service.import_attachment(&record.target(), &file).unwrap();
+    let attachments = service
+        .resolve_prompt_attachments(&record.target(), std::slice::from_ref(&reference.id))
+        .unwrap();
+    let token = format!("[{name}]");
+    let text = format!("{token} Review this; literal {token}");
+    let prompt =
+        bootty_agents::NativePrompt::new_with_context(text.clone(), vec![], attachments, vec![])
+            .unwrap()
+            .with_attachment_ranges(std::collections::BTreeMap::from([(
+                reference.id.clone(),
+                std::iter::once(0..token.len()).collect(),
+            )]))
+            .unwrap();
+    let queued = service.queue_input(&record.target(), &prompt).unwrap();
+    assert_eq!(queued.text, text);
+    assert_eq!(queued.attachments.len(), 1);
+    assert_eq!(queued.attachments[0].id, reference.id);
+    assert_eq!(
+        queued.preview_text,
+        if image {
+            format!(" Review this; literal {token}")
+        } else {
+            format!("{name} Review this; literal {token}")
+        }
+    );
+    assert_eq!(service.sessions()[0].queued_messages, vec![queued.clone()]);
+    service.shutdown().unwrap();
+    drop(service);
+    let restored = NativeAgentService::open(&catalog).unwrap();
+    assert_eq!(restored.sessions()[0].queued_messages, vec![queued]);
+    restored.shutdown().unwrap();
+}
+
+#[rstest]
+fn rejected_queued_steer_remains_recoverable_until_explicit_retry() {
+    use bootty_agents::{NativeAgentService, NativePrompt, NativeQueuedMessageStatus};
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let queued = service
+        .queue_input(
+            &record.target(),
+            &NativePrompt::text("Retain this instruction").unwrap(),
+        )
+        .unwrap();
+    assert!(
+        service
+            .steer_followup(&record.target(), &queued.id)
+            .is_err()
+    );
+    assert_eq!(
+        service.sessions()[0].queued_messages[0].status,
+        NativeQueuedMessageStatus::Failed
+    );
+    service.shutdown().unwrap();
+    drop(service);
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let (sender, receiver) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    service.start_followups().unwrap();
+    let stopped = service.sessions().remove(0);
+    let resumed = service.resume(&stopped.target()).unwrap();
+    assert!(
+        service
+            .cancel_followup(&record.target(), &queued.id)
+            .is_err(),
+        "stale generations cannot remove accepted input"
+    );
+    assert_eq!(
+        service.sessions()[0].queued_messages[0].status,
+        NativeQueuedMessageStatus::Failed
+    );
+    assert_eq!(
+        service
+            .resolve(&resumed.target())
+            .unwrap()
+            .snapshot()
+            .transcript,
+        Vec::new()
+    );
+    service
+        .retry_followup(&resumed.target(), &queued.id)
+        .unwrap();
+    loop {
+        let current = service.sessions().remove(0);
+        if current.queued_messages.is_empty()
+            && current.snapshot.status == NativeSessionStatus::Idle
+        {
+            break;
+        }
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("explicit retry reaches the provider");
+    }
+    let current = service.sessions().remove(0);
+    assert_eq!(
+        current
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user")
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Retain this instruction"]
+    );
+    service.shutdown().unwrap();
 }

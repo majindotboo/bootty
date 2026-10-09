@@ -322,6 +322,7 @@ pub struct SidebarRow {
     pub secondary: Option<String>,
     pub project: Option<SidebarProject>,
     pub project_path: Option<String>,
+    pub host: Option<String>,
     pub branch: Option<String>,
     pub agents: Vec<SidebarAgent>,
     pub trailing: Option<String>,
@@ -369,6 +370,7 @@ pub struct SidebarAgent {
     pub key: String,
     pub icon: String,
     pub description: String,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -520,6 +522,7 @@ pub enum TabContextAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChromeIntent {
     Command(bootty_control::CommandInvocation),
+    CustomSnooze(bootty_control::CommandInvocation),
     StartWindowDrag,
     ActivateSpace(SpaceKey),
     CreateSpace,

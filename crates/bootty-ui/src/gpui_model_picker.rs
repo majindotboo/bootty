@@ -6,6 +6,7 @@ use gpui_kit::component::{
     kbd::Kbd,
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     popover::Popover,
+    switch::Switch,
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement as _,
@@ -37,6 +38,8 @@ pub enum ModelPickerEvent {
     Select(String),
     SelectProvider(String),
     Favorite(String),
+    Reasoning(bootty_agents::NativeModelSelection),
+    FastMode(bool),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -255,17 +258,87 @@ impl ListDelegate for ModelList {
     }
 }
 
+// Popup focus, availability and the selected speed are independent facts.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ModelPickerView {
     list: Entity<ListState<ModelList>>,
     trigger_focus: FocusHandle,
+    reasoning_focus: FocusHandle,
+    focus_reasoning: bool,
     open: bool,
     enabled: bool,
     providers: Vec<String>,
     groups: Vec<String>,
+    reasoning_effort: Option<String>,
+    fast_mode: bool,
+    available_efforts: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ModelPickerView {
+    pub fn set_fast_mode(&mut self, fast: bool, cx: &mut Context<Self>) {
+        if self.fast_mode != fast {
+            self.fast_mode = fast;
+            cx.notify();
+        }
+    }
+    pub fn set_reasoning_effort(&mut self, value: Option<&str>, cx: &mut Context<Self>) {
+        if self.reasoning_effort.as_deref() != value {
+            self.reasoning_effort = value.map(str::to_owned);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_available_efforts(&mut self, efforts: &[String], cx: &mut Context<Self>) {
+        if self.available_efforts != efforts {
+            self.available_efforts = efforts.to_vec();
+            cx.notify();
+        }
+    }
+
+    fn reasoning_options(&self, model: &NativeModelOption) -> Vec<String> {
+        model
+            .reasoning_efforts
+            .iter()
+            .filter(|effort| {
+                self.available_efforts.is_empty() || self.available_efforts.contains(effort)
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn change_effort(&self, increase: bool, cx: &mut Context<Self>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let delegate = self.list.read(cx).delegate();
+        let Some(model) = delegate
+            .models
+            .iter()
+            .find(|model| delegate.current.as_ref() == Some(&model.id))
+        else {
+            return false;
+        };
+        let current = self.reasoning_selection(model);
+        let selection =
+            step_reasoning_effort(model, current.as_deref(), &self.available_efforts, increase);
+        if let Some(selection) = selection {
+            cx.emit(ModelPickerEvent::Reasoning(selection));
+        }
+        true
+    }
+
+    fn reasoning_selection(&self, model: &NativeModelOption) -> Option<String> {
+        self.reasoning_effort
+            .as_ref()
+            .and_then(|value| {
+                model.reasoning_efforts.iter().find(|effort| {
+                    *effort == value || crate::gpui_agent_session::reasoning_label(effort) == *value
+                })
+            })
+            .cloned()
+            .or_else(|| model.default_reasoning_effort.clone())
+    }
     pub fn new(
         provider: AgentKind,
         models: Vec<NativeModelOption>,
@@ -326,10 +399,15 @@ impl ModelPickerView {
         Self {
             list,
             trigger_focus: cx.focus_handle().tab_stop(true),
+            reasoning_focus: cx.focus_handle(),
+            focus_reasoning: false,
             open: false,
             enabled: true,
             providers,
             groups,
+            reasoning_effort: None,
+            fast_mode: false,
+            available_efforts: Vec::new(),
             _subscriptions: vec![events, dismiss, layout],
         }
     }
@@ -432,6 +510,7 @@ impl ModelPickerView {
             return;
         }
         self.open = true;
+        self.focus_reasoning = false;
         self.list.update(cx, |list, cx| {
             list.set_selected_index(Some(IndexPath::default()), window, cx);
             list.focus(window, cx);
@@ -439,8 +518,15 @@ impl ModelPickerView {
         cx.notify();
     }
 
+    pub(crate) fn open_reasoning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(window, cx);
+        self.focus_reasoning = true;
+        self.reasoning_focus.focus(window, cx);
+    }
+
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
+        self.focus_reasoning = false;
         self.trigger_focus.focus(window, cx);
         cx.notify();
     }
@@ -586,7 +672,11 @@ impl ModelPickerView {
     fn render_content(&self, _: &Window, cx: &Context<Self>) -> impl IntoElement {
         let delegate = self.list.read(cx).delegate();
         let rows = u8::try_from(delegate.rows.len().clamp(2, 7)).unwrap_or(7);
-        div()
+        let current = delegate
+            .models
+            .iter()
+            .find(|model| delegate.current.as_ref() == Some(&model.id));
+        let body = div()
             .debug_selector(|| "model-picker-content".into())
             .key_context("BoottyModelPicker")
             .on_action(cx.listener(Self::select_jump_action))
@@ -602,16 +692,162 @@ impl ModelPickerView {
                     .w_full()
                     .h_full()
                     .min_w_0(),
+            );
+        div()
+            .key_context("BoottyModelPicker")
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::base::actions::Confirm, window, cx| {
+                    if this.reasoning_focus.is_focused(window)
+                        && this.select_reasoning_key("enter", cx)
+                    {
+                        cx.stop_propagation();
+                    } else {
+                        cx.propagate();
+                    }
+                }),
             )
+            .flex()
+            .flex_col()
+            .child(body)
+            .when_some(
+                current.filter(|model| !model.reasoning_efforts.is_empty()),
+                |popup, model| popup.child(self.render_reasoning_options(model, cx)),
+            )
+            .when(delegate.provider != AgentKind::Pi, |popup| {
+                popup.child(
+                    div()
+                        .debug_selector(|| "model-fast-mode".into())
+                        .p_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Switch::new("model-fast-mode")
+                                .small()
+                                .label("Fast mode")
+                                .checked(self.fast_mode)
+                                .disabled(!self.enabled)
+                                .on_click(cx.listener(|_, fast, _, cx| {
+                                    cx.emit(ModelPickerEvent::FastMode(*fast));
+                                })),
+                        ),
+                )
+            })
             .on_key_down(
                 cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     // A nested picker consumes Escape before the enclosing composer dialog.
                     if event.keystroke.key == "escape" {
                         this.close(window, cx);
                         cx.stop_propagation();
+                    } else if this.reasoning_focus.is_focused(window)
+                        && this.select_reasoning_key(&event.keystroke.key, cx)
+                    {
+                        cx.stop_propagation();
                     }
                 }),
             )
+    }
+
+    fn render_reasoning_options(
+        &self,
+        model: &NativeModelOption,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.reasoning_selection(model);
+        let options = self.reasoning_options(model);
+        div()
+            .p_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(options.iter().map(|effort| {
+                let selection = bootty_agents::NativeModelSelection {
+                    fast_mode: None,
+                    model: model.id.clone(),
+                    reasoning_effort: Some(effort.clone()),
+                };
+                let button = Button::new(SharedString::from(format!("model-effort:{effort}")))
+                    .small()
+                    .ghost()
+                    .selected(selected.as_ref() == Some(effort))
+                    .disabled(!self.enabled)
+                    .label(crate::gpui_agent_session::reasoning_label(effort))
+                    .debug_selector({
+                        let effort = effort.clone();
+                        move || format!("model-effort:{effort}")
+                    })
+                    .accessibility_label(format!(
+                        "Reasoning effort: {}",
+                        crate::gpui_agent_session::reasoning_label(effort)
+                    ))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ModelPickerEvent::Reasoning(selection.clone()));
+                    }));
+                div()
+                    .id(SharedString::from(format!("model-effort-focus:{effort}")))
+                    .rounded_md()
+                    .focus_visible(|style| style.border_1().border_color(cx.theme().primary))
+                    .when(
+                        selected.as_ref().or_else(|| options.first()) == Some(effort),
+                        |row| row.track_focus(&self.reasoning_focus),
+                    )
+                    .child(button)
+            }))
+    }
+
+    fn select_reasoning_key(&self, key: &str, cx: &mut Context<Self>) -> bool {
+        let delegate = self.list.read(cx).delegate();
+        let Some(model) = delegate
+            .models
+            .iter()
+            .find(|model| delegate.current.as_ref() == Some(&model.id))
+        else {
+            return false;
+        };
+        let selected = self.reasoning_selection(model);
+        let options = self.reasoning_options(model);
+        let index = options
+            .iter()
+            .position(|effort| selected.as_ref() == Some(effort))
+            .unwrap_or(0);
+        let next = match key {
+            "enter" | "space" => index,
+            "right" | "down" => index
+                .saturating_add(1)
+                .checked_rem(options.len())
+                .unwrap_or(0),
+            "left" | "up" => index
+                .checked_sub(1)
+                .unwrap_or_else(|| options.len().saturating_sub(1)),
+            _ => return false,
+        };
+        let Some(effort) = options.get(next) else {
+            return false;
+        };
+        let selection = bootty_agents::NativeModelSelection {
+            fast_mode: None,
+            model: model.id.clone(),
+            reasoning_effort: Some(effort.clone()),
+        };
+        cx.emit(ModelPickerEvent::Reasoning(selection));
+        true
+    }
+
+    fn open_changed(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = open;
+        if open && self.focus_reasoning {
+            self.reasoning_focus.focus(window, cx);
+        } else if open {
+            self.list.update(cx, |list, cx| {
+                list.set_selected_index(Some(IndexPath::default()), window, cx);
+                list.focus(window, cx);
+            });
+        } else {
+            self.focus_reasoning = false;
+            self.trigger_focus.focus(window, cx);
+        }
+        cx.notify();
     }
 
     fn select_jump_action(
@@ -669,22 +905,14 @@ impl Render for ModelPickerView {
                 |model| model_group(delegate.provider, &model.id),
             )
         };
-        let icon = if integrated {
-            delegate.provider.icon()
-        } else {
-            current.map_or_else(
-                || delegate.provider.icon(),
-                |model| {
-                    group_icon(
-                        &model_group(delegate.provider, &model.id),
-                        delegate.provider,
-                    )
-                },
-            )
-        };
+        let icon = group_icon(&group, delegate.provider);
         let owner = cx.entity().downgrade();
         let content = cx.entity().downgrade();
-        let focus = self.list.read(cx).focus_handle(cx);
+        let focus = if self.focus_reasoning {
+            self.reasoning_focus.clone()
+        } else {
+            self.list.read(cx).focus_handle(cx)
+        };
         let picker = Popover::new("model-picker")
             .anchor(gpui_kit::Anchor::BottomLeft)
             .p_0()
@@ -708,26 +936,36 @@ impl Render for ModelPickerView {
                         crate::gpui::IconSize::Small,
                         crate::gpui::provider_color(&group, cx),
                     ))
+                    .children(
+                        (self.fast_mode && delegate.provider != AgentKind::Pi).then(|| {
+                            crate::gpui::sized_icon(
+                                "zap",
+                                crate::gpui::IconSize::Small,
+                                cx.theme().warning,
+                            )
+                        }),
+                    )
                     .child(
                         div()
                             .debug_selector(|| "model-picker-trigger".into())
                             .min_w_0()
                             .text_ellipsis()
                             .child(label),
+                    )
+                    .when_some(
+                        current.and_then(|model| self.reasoning_selection(model)),
+                        |button, effort| {
+                            button.child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::gpui_agent_session::reasoning_label(&effort)),
+                            )
+                        },
                     ),
             )
             .on_open_change(move |open, window, cx| {
                 _ = owner.update(cx, |this, cx| {
-                    this.open = *open;
-                    if *open {
-                        this.list.update(cx, |list, cx| {
-                            list.set_selected_index(Some(IndexPath::default()), window, cx);
-                            list.focus(window, cx);
-                        });
-                    } else {
-                        this.trigger_focus.focus(window, cx);
-                    }
-                    cx.notify();
+                    this.open_changed(*open, window, cx);
                 });
             })
             .content(move |_, window, cx| {
@@ -737,11 +975,29 @@ impl Render for ModelPickerView {
                     })
                     .unwrap_or_else(|_| gpui_kit::Empty.into_any_element())
             });
+        self.render_trigger(picker)
+    }
+}
+
+impl ModelPickerView {
+    fn render_trigger(&self, picker: impl IntoElement) -> gpui_kit::AnyElement {
         // Kit buttons own their focus handle; retain ours on their enclosing element.
-        div()
-            .min_w_0()
-            .track_focus(&self.trigger_focus)
-            .child(picker)
+        crate::gpui::with_composer_tooltip(
+            "model-picker-tooltip",
+            div()
+                .min_w_0()
+                .track_focus(&self.trigger_focus)
+                .child(picker),
+            if self.providers.is_empty() {
+                "Choose the model and reasoning effort for the next turn."
+            } else {
+                "Choose a provider, model and reasoning effort."
+            },
+            vec![crate::gpui::composer_focus_action(
+                crate::gpui::ComposerControl::Model,
+                self.trigger_focus.clone(),
+            )],
+        )
     }
 }
 
@@ -879,4 +1135,33 @@ fn favorite_button(model: &NativeModelOption, cx: &Context<ListState<ModelList>>
                 cx.emit(ModelPickerEvent::Favorite(id.clone()));
             });
         })
+}
+
+/// Step in provider-advertised order, skipping hidden levels and stopping at either end.
+#[must_use]
+fn step_reasoning_effort(
+    model: &NativeModelOption,
+    current: Option<&str>,
+    available: &[String],
+    increase: bool,
+) -> Option<bootty_agents::NativeModelSelection> {
+    let index = model
+        .reasoning_efforts
+        .iter()
+        .position(|effort| Some(effort.as_str()) == current);
+    let mut choices = model
+        .reasoning_efforts
+        .iter()
+        .enumerate()
+        .filter(|(_, effort)| available.is_empty() || available.contains(effort));
+    let next = if increase {
+        choices.find(|(candidate, _)| index.is_none_or(|index| *candidate > index))
+    } else {
+        choices.rfind(|(candidate, _)| index.is_none_or(|index| *candidate < index))
+    }?;
+    Some(bootty_agents::NativeModelSelection {
+        fast_mode: None,
+        model: model.id.clone(),
+        reasoning_effort: Some(next.1.clone()),
+    })
 }

@@ -21,12 +21,14 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     collapsible::Collapsible,
     input::{InputEvent, Textarea, TextareaState},
+    menu::DropdownMenu as _,
     scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
 };
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ListAlignment,
-    ListState, ParentElement, Render, Styled, Subscription, Window, div, list, prelude::*,
+    App, Context, Entity, EntityInputHandler as _, EventEmitter, FocusHandle, Focusable,
+    IntoElement, ListAlignment, ListState, ParentElement, Render, Styled, Subscription, Window,
+    div, prelude::*,
 };
 use image::{ImageFormat, ImageReader};
 use serde_json::Value;
@@ -40,6 +42,9 @@ use attachments::ComposerAttachment;
 pub use attachments::{attachment_preview, clipboard_png};
 #[path = "gpui_agent_models.rs"]
 mod models;
+#[path = "gpui_agent_subagents.rs"]
+mod subagents;
+pub use models::permission_choice_content;
 pub use models::reasoning_label;
 
 #[path = "gpui_agent_citations.rs"]
@@ -52,6 +57,11 @@ use timeline::TranscriptRow;
 #[path = "gpui_agent_requests.rs"]
 mod requests;
 use requests::{is_approval, is_claude_question};
+#[path = "gpui_agent_context.rs"]
+mod context_card;
+#[path = "gpui_agent_followups.rs"]
+mod followups;
+pub use context_card::ConversationContext;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AnnotationPreviewKey {
@@ -90,14 +100,20 @@ fn annotation_preview_key(
     })
 }
 
-fn decode_annotation_preview(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>> {
+fn decode_image_preview(bytes: &[u8], annotation: bool) -> Option<Arc<gpui_kit::RenderImage>> {
     let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(1600);
     limits.max_image_height = Some(1600);
     limits.max_alloc = Some(32 * 1024 * 1024);
     reader.limits(limits);
-    let mut pixels = reader.decode().ok()?.thumbnail(128, 80).into_rgba8();
+    let image = reader.decode().ok()?;
+    let mut pixels = if annotation {
+        image.thumbnail(128, 80)
+    } else {
+        image
+    }
+    .into_rgba8();
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -108,12 +124,22 @@ fn decode_annotation_preview(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>>
 
 #[derive(Clone)]
 pub enum OpenNativeSession {
+    Speech {
+        mode: crate::gpui_speech::SpeechMode,
+    },
+    Changes {
+        target: crate::gpui::chrome::SessionTarget,
+    },
     SideChatCreated {
         source: CommandTarget,
         record: Box<NativeSessionRecord>,
     },
     Related {
         target: CommandTarget,
+    },
+    Subagent {
+        source: CommandTarget,
+        id: String,
     },
     DetachAnnotation {
         target: CommandTarget,
@@ -142,6 +168,7 @@ enum ToolDiffs {
 struct WorkingIndicator {
     tick: Option<gpui_kit::Task<()>>,
     animate: bool,
+    subagents_expanded: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,17 +178,31 @@ enum ProviderAvailability {
     Resuming,
 }
 
+struct PresentationPreferences {
+    streaming: bootty_config::config::ResponseStreaming,
+    collapse_composer_on_scroll: bool,
+}
+
 pub struct NativeAgentSessionView {
     record: NativeSessionRecord,
     related: Vec<RelatedConversation>,
+    context_card: Option<ConversationContext>,
+    wide: bool,
+    speech: Entity<crate::gpui_speech::SpeechInput>,
+    _speech_subscription: Subscription,
+    spoken_response: Option<String>,
     focus: FocusHandle,
-    effort_focus: FocusHandle,
     permissions_focus: FocusHandle,
+    available_efforts: Vec<String>,
     sender: BoundAppCommandSender,
     composer: Entity<TextareaState>,
     completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
     completion_subscriptions: Vec<Subscription>,
     draft_revision: u64,
+    follow_up_behavior: bootty_config::config::FollowUpBehavior,
+    send_shortcut: bootty_config::config::ComposerSendShortcut,
+    presentation: PresentationPreferences,
+    queued_messages: followups::QueuedMessages,
     applications: Vec<bootty_agents::NativeApplicationMention>,
     attachments: Vec<ComposerAttachment>,
     attachment_imports: usize,
@@ -176,7 +217,7 @@ pub struct NativeAgentSessionView {
     annotation_preview: Option<AnnotationPreview>,
     transcript: BTreeMap<String, Entity<TextViewState>>,
     tool_diffs: BTreeMap<String, ToolDiffs>,
-    subagent_details: BTreeMap<String, Vec<Entity<TextViewState>>>,
+    subagent_details: BTreeMap<String, subagents::SubagentConversation>,
     transcript_subscriptions: BTreeMap<String, Vec<Subscription>>,
     message_focus: BTreeMap<String, FocusHandle>,
     expanded_messages: BTreeSet<String>,
@@ -192,7 +233,6 @@ pub struct NativeAgentSessionView {
     history_page: Option<bootty_agents::NativeHistoryPage>,
     history_live_snapshot: Option<NativeSessionSnapshot>,
     history_loaded: bool,
-    history_scroll: gpui_kit::ScrollHandle,
     hovered_turn: Option<usize>,
     work_disclosures: BTreeMap<String, bool>,
     working_indicator: WorkingIndicator,
@@ -203,7 +243,8 @@ pub struct NativeAgentSessionView {
     pending: BTreeSet<String>,
     cancellation_requested: bool,
     error: Option<String>,
-    _subscriptions: Vec<Subscription>,
+    dismissed_error: Option<String>,
+    subscriptions: Vec<Subscription>,
 }
 
 #[derive(Clone)]
@@ -212,6 +253,8 @@ pub struct RelatedConversation {
     pub title: String,
     pub model: Option<String>,
     pub status: NativeSessionStatus,
+    pub revision: u64,
+    pub subagent: Option<bootty_agents::NativeSubagentDetail>,
 }
 
 impl NativeAgentSessionView {
@@ -228,24 +271,15 @@ impl NativeAgentSessionView {
     ) -> Self {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(3, 10)
-                .submit_on_enter(true)
+                .auto_grow(1, 10)
                 .placeholder(format!(
                     "Message {}…",
                     provider_name(record.config.provider)
                 ))
         });
-        let subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
+        let subscription = cx.subscribe_in(&composer, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.draft_revision = this.draft_revision.wrapping_add(1);
-            }
-            if matches!(event, InputEvent::PressEnter { shift: false, .. })
-                && !this
-                    .completion
-                    .as_ref()
-                    .is_some_and(|completion| completion.read(cx).blocks_submission(window, cx))
-            {
-                this.send_prompt(window, cx);
             }
             cx.notify();
         });
@@ -277,17 +311,50 @@ impl NativeAgentSessionView {
                 this.sync_requests(window, cx);
             },
         );
+        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new(true));
+        let speech_subscription = cx.subscribe_in(
+            &speech,
+            window,
+            |this, _, event: &crate::gpui_speech::SpeechInputEvent, window, cx| match event {
+                crate::gpui_speech::SpeechInputEvent::Toggle(mode) => {
+                    cx.emit(OpenNativeSession::Speech { mode: *mode });
+                }
+                crate::gpui_speech::SpeechInputEvent::Error(error) => {
+                    crate::gpui_speech::notify_error(error, window, cx);
+                }
+                crate::gpui_speech::SpeechInputEvent::Final { text, mode } => {
+                    this.composer.update(cx, |input, cx| {
+                        input.replace_text_in_range(None, text, window, cx);
+                    });
+                    if *mode == crate::gpui_speech::SpeechMode::Voice {
+                        // Let the editor publish its revision before capturing the submitted draft.
+                        cx.defer_in(window, |this, window, cx| this.send_prompt(window, cx));
+                    }
+                }
+            },
+        );
         let mut this = Self {
             record,
             related: Vec::new(),
+            context_card: None,
+            wide: false,
+            speech,
+            _speech_subscription: speech_subscription,
+            spoken_response: None,
             focus: cx.focus_handle(),
-            effort_focus: cx.focus_handle(),
             permissions_focus: cx.focus_handle(),
             sender,
             composer,
             completion: None,
             completion_subscriptions: Vec::new(),
             draft_revision: 0,
+            follow_up_behavior: bootty_config::config::FollowUpBehavior::default(),
+            send_shortcut: bootty_config::config::ComposerSendShortcut::default(),
+            presentation: PresentationPreferences {
+                streaming: bootty_config::config::ResponseStreaming::default(),
+                collapse_composer_on_scroll: true,
+            },
+            queued_messages: followups::QueuedMessages::default(),
             applications: Vec::new(),
             attachments: Vec::new(),
             attachment_imports: 0,
@@ -296,6 +363,7 @@ impl NativeAgentSessionView {
             models: None,
             provider_permissions: None,
             model_picker: None,
+            available_efforts: Vec::new(),
             model_picker_subscription: None,
             annotations: Vec::new(),
             expanded_annotation: None,
@@ -318,10 +386,10 @@ impl NativeAgentSessionView {
             history_page: None,
             history_live_snapshot: None,
             history_loaded: false,
-            history_scroll: gpui_kit::ScrollHandle::new(),
             hovered_turn: None,
             work_disclosures: BTreeMap::new(),
             working_indicator: WorkingIndicator {
+                subagents_expanded: false,
                 tick: None,
                 animate: true,
             },
@@ -339,21 +407,70 @@ impl NativeAgentSessionView {
             pending: BTreeSet::new(),
             cancellation_requested: false,
             error: None,
-            _subscriptions: vec![subscription, citation_subscription, request_subscription],
+            dismissed_error: None,
+            subscriptions: vec![subscription, citation_subscription, request_subscription],
         };
         this.restore_initial_message(window, cx);
         this.configure_timeline(cx);
         this.sync_transcript(&[], window, cx);
         this.sync_requests(window, cx);
         this.load_attachment_previews(window, cx);
+        let owner = cx.weak_entity();
+        this.subscriptions
+            .push(cx.intercept_keystrokes(move |event, window, cx| {
+                let override_behavior = owner
+                    .read_with(cx, |this, cx| {
+                        if !this.composer.read(cx).focus_handle(cx).is_focused(window)
+                            || !event.keystroke.key.eq_ignore_ascii_case("enter")
+                            || event.keystroke.modifiers.alt
+                            || this.completion.as_ref().is_some_and(|completion| {
+                                completion.read(cx).blocks_submission(window, cx)
+                            })
+                        {
+                            return None;
+                        }
+                        this.send_shortcut.submission(
+                            this.composer.read(cx).value().contains('\n'),
+                            event.keystroke.modifiers.secondary(),
+                            event.keystroke.modifiers.shift,
+                        )
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(opposite) = override_behavior {
+                    _ = owner.update(cx, |this, cx| this.send_prompt_mode(opposite, window, cx));
+                    cx.stop_propagation();
+                }
+            }));
         this
     }
 
     fn configure_timeline(&self, cx: &Context<Self>) {
         self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
         let owner = cx.weak_entity();
-        self.list.set_scroll_handler(move |_, _, cx| {
-            _ = owner.update(cx, |_, cx| cx.notify());
+        self.list.set_scroll_handler(move |event, window, cx| {
+            let near_start = event.is_scrolled && event.visible_range.start <= 2;
+            let owner = owner.clone();
+            window.defer(cx, move |window, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    if near_start
+                        && matches!(
+                            this.record.snapshot.status,
+                            NativeSessionStatus::Idle
+                                | NativeSessionStatus::Working
+                                | NativeSessionStatus::Waiting
+                        )
+                        && !this.pending.contains("history")
+                        && this
+                            .history_page
+                            .as_ref()
+                            .is_some_and(|page| page.has_older)
+                    {
+                        this.command("history", vec!["older".into()], window, cx);
+                    }
+                    cx.notify();
+                });
+            });
         });
     }
 
@@ -457,7 +574,7 @@ impl NativeAgentSessionView {
                     let bytes = store
                         .load_image(&annotation, &conversation)
                         .map_err(|_| ())?;
-                    decode_annotation_preview(&bytes).ok_or(())
+                    decode_image_preview(&bytes, true).ok_or(())
                 })
                 .await;
             _ = owner.update(cx, |this, cx| {
@@ -531,7 +648,11 @@ impl NativeAgentSessionView {
             if record.snapshot == *current
                 && record.title == self.record.title
                 && record.config.permissions == self.record.config.permissions
+                && record.config.model == self.record.config.model
+                && record.config.reasoning_effort == self.record.config.reasoning_effort
+                && record.config.fast_mode == self.record.config.fast_mode
                 && record.permissions_pending == self.record.permissions_pending
+                && record.queued_messages == self.record.queued_messages
             {
                 return;
             }
@@ -540,12 +661,12 @@ impl NativeAgentSessionView {
             self.pending.clear();
             self.cancellation_requested = false;
             self.error = None;
+            self.dismissed_error = None;
         }
-        if record.generation != self.record.generation || is_busy(record.snapshot.status) {
-            self.history_page = None;
-            self.history_live_snapshot = None;
+        if record.generation != self.record.generation {
             self.history_loaded = false;
-        } else if let Some(page) = &self.history_page {
+        }
+        if let Some(page) = &self.history_page {
             self.history_live_snapshot = Some(record.snapshot.clone());
             record.snapshot.transcript =
                 history_transcript(&record.snapshot.transcript, record.side_chat.as_ref(), page);
@@ -554,12 +675,19 @@ impl NativeAgentSessionView {
         self.restore_initial_message(window, cx);
         let generation_changed = previous.generation != self.record.generation;
         if generation_changed {
+            self.speech
+                .update(cx, super::gpui_speech::SpeechInput::stop);
             self.annotation_preview = None;
             self.attachment_preview_attempts.clear();
-            self.models = None;
-            self.provider_permissions = None;
-            self.model_picker = None;
-            self.model_picker_subscription = None;
+            if previous.config.account_directory != self.record.config.account_directory
+                || previous.config.program != self.record.config.program
+                || previous.config.arguments != self.record.config.arguments
+            {
+                self.models = None;
+                self.provider_permissions = None;
+                self.model_picker = None;
+                self.model_picker_subscription = None;
+            }
         }
         if !is_busy(self.record.snapshot.status) {
             self.cancellation_requested = false;
@@ -570,9 +698,28 @@ impl NativeAgentSessionView {
             self.refresh_timeline();
         }
         self.sync_requests(window, cx);
+        if matches!(
+            self.record.snapshot.status,
+            NativeSessionStatus::Stopped | NativeSessionStatus::Error
+        ) {
+            self.speech
+                .update(cx, super::gpui_speech::SpeechInput::stop);
+        }
         self.load_attachment_previews(window, cx);
         self.load_models(window, cx);
         self.sync_model_picker(window, cx);
+        if self.speech.read(cx).voice_active()
+            && self.record.snapshot.status == NativeSessionStatus::Idle
+            && previous.snapshot.status != NativeSessionStatus::Idle
+            && let Some(response) = self.record.snapshot.transcript.iter().rev().find(|item| {
+                item.role == "assistant" && item.complete && !item.text.trim().is_empty()
+            })
+            && self.spoken_response.as_ref() != Some(&response.id)
+        {
+            self.spoken_response = Some(response.id.clone());
+            let text: String = response.text.chars().take(8192).collect();
+            self.speech.update(cx, |speech, cx| speech.speak(text, cx));
+        }
         if generation_changed && let Some(annotation_id) = self.expanded_annotation {
             self.load_annotation_preview(annotation_id, window, cx);
         }
@@ -585,6 +732,7 @@ impl NativeAgentSessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.retain_subagent_details();
         let current = self
             .record
             .snapshot
@@ -625,19 +773,13 @@ impl NativeAgentSessionView {
         }
         self.tool_disclosures
             .retain(|id, _| current.contains(id.as_str()));
-        self.subagent_details.retain(|id, _| {
-            self.record
-                .snapshot
-                .transcript
-                .iter()
-                .any(|item| item.subagent.as_ref().is_some_and(|agent| agent.id == *id))
-        });
         for item in &self.record.snapshot.transcript {
             if let Some(state) = self.transcript.get(&item.id) {
-                if previous
-                    .get(item.id.as_str())
-                    .is_none_or(|old| old.text != item.text || old.citations != item.citations)
-                {
+                if previous.get(item.id.as_str()).is_none_or(|old| {
+                    old.text != item.text
+                        || old.citations != item.citations
+                        || old.complete != item.complete
+                }) {
                     if self
                         .selected_response
                         .as_ref()
@@ -646,11 +788,16 @@ impl NativeAgentSessionView {
                         self.selected_response = None;
                     }
                     state.update(cx, |state, cx| {
-                        state.set_text(&transcript_markdown(item), cx);
+                        state.set_text(&streamed_markdown(item, self.presentation.streaming), cx);
                     });
                 }
             } else {
-                let state = cx.new(|cx| TextViewState::markdown(&transcript_markdown(item), cx));
+                let state = cx.new(|cx| {
+                    TextViewState::markdown(
+                        &streamed_markdown(item, self.presentation.streaming),
+                        cx,
+                    )
+                });
                 let focus = cx.focus_handle();
                 let mut subscriptions = vec![
                     cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
@@ -681,6 +828,22 @@ impl NativeAgentSessionView {
             }
         }
         self.sync_tool_diffs(&previous, window, cx);
+    }
+
+    fn retain_subagent_details(&mut self) {
+        self.subagent_details.retain(|id, _| {
+            self.record
+                .snapshot
+                .transcript
+                .iter()
+                .any(|item| item.subagent.as_ref().is_some_and(|agent| agent.id == *id))
+                || self.related.iter().any(|related| {
+                    related
+                        .subagent
+                        .as_ref()
+                        .is_some_and(|detail| detail.agent.id == *id)
+                })
+        });
     }
 
     fn sync_tool_diffs(
@@ -773,7 +936,7 @@ impl NativeAgentSessionView {
         if self.pending.contains(&pending) {
             return;
         }
-        let submitted_draft = (operation == "prompt").then(|| SubmittedPrompt {
+        let submitted_draft = matches!(operation, "prompt" | "queue").then(|| SubmittedPrompt {
             text: self.composer.read(cx).value().to_string(),
             revision: self.draft_revision,
             annotations: self.annotations.clone(),
@@ -789,19 +952,17 @@ impl NativeAgentSessionView {
         let target = self.record.target();
         invocation.arguments = vec![self.record.id.clone(), self.record.generation.to_string()];
         invocation.arguments.extend(arguments);
-        let receiver = match self.sender.submit(
+        let Ok(receiver) = self.sender.submit(
             invocation,
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .unwrap_or_else(Instant::now),
             CommandCancellation::new(),
-        ) {
-            Ok(receiver) => receiver,
-            Err(error) => {
-                self.error = Some(format!("Could not send agent command: {error:?}"));
-                cx.notify();
-                return;
-            }
+        ) else {
+            self.error =
+                Some("Could not send the request. Reopen this conversation and retry.".into());
+            cx.notify();
+            return;
         };
         self.pending.insert(pending.clone());
         self.error = None;
@@ -822,10 +983,19 @@ impl NativeAgentSessionView {
                         if operation == "interrupt" {
                             this.cancellation_requested = is_busy(this.record.snapshot.status);
                         }
-                        if let Some(draft) = submitted_draft {
+                        if value.get("provider_writer").and_then(Value::as_str) != Some("blocked")
+                            && let Some(draft) = submitted_draft
+                        {
                             this.clear_submitted_draft(draft, target, window, cx);
                         }
-                        this.accept_command_result(&operation, value, window, cx);
+                        if operation == "subagent-read" {
+                            this.accept_subagent_read(&pending, value, cx);
+                        } else {
+                            this.accept_command_result(&operation, value, window, cx);
+                        }
+                    }
+                    Ok(_) | Err(_) if operation == "subagent-read" => {
+                        this.subagent_read_error(&pending);
                     }
                     Ok(outcome) => {
                         this.error = Some(
@@ -833,8 +1003,11 @@ impl NativeAgentSessionView {
                                 .unwrap_or_else(|| "Agent command failed".to_owned()),
                         );
                     }
-                    Err(error) => {
-                        this.error = Some(format!("Agent command did not complete: {error}"));
+                    Err(_) => {
+                        this.error = Some(
+                            "Could not send the request. Reopen this conversation and retry."
+                                .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -853,7 +1026,10 @@ impl NativeAgentSessionView {
     ) {
         if operation == "history" {
             match serde_json::from_value::<bootty_agents::NativeHistoryPage>(value) {
-                Ok(page) => {
+                Ok(mut page) => {
+                    if let Some(loaded) = &self.history_page {
+                        page.retain_loaded(loaded);
+                    }
                     if self.history_live_snapshot.is_none() {
                         self.history_live_snapshot = Some(self.record.snapshot.clone());
                     }
@@ -868,10 +1044,24 @@ impl NativeAgentSessionView {
                     );
                     let previous =
                         std::mem::replace(&mut self.record.snapshot.transcript, transcript);
+                    let has_older = page.has_older;
                     self.history_page = Some(page);
                     self.sync_transcript(&previous, window, cx);
+                    // Fill the turn index through bounded provider pages without moving the viewport.
+                    if has_older
+                        && matches!(
+                            self.record.snapshot.status,
+                            NativeSessionStatus::Idle
+                                | NativeSessionStatus::Working
+                                | NativeSessionStatus::Waiting
+                        )
+                    {
+                        self.command("history", vec!["older".into()], window, cx);
+                    }
                 }
-                Err(error) => self.error = Some(format!("Could not read earlier history: {error}")),
+                Err(_) => {
+                    self.error = Some("Could not read earlier history. Scroll up to retry.".into());
+                }
             }
         } else if operation == "fork" {
             if let Ok(record) = serde_json::from_value::<NativeSessionRecord>(value) {
@@ -881,23 +1071,6 @@ impl NativeAgentSessionView {
                 });
             } else {
                 self.error = Some("The side chat did not return its session identity".into());
-            }
-        } else if operation == "subagent-read" {
-            match serde_json::from_value::<bootty_agents::NativeSubagentDetail>(value) {
-                Ok(detail) => {
-                    let states = detail
-                        .transcript
-                        .iter()
-                        .filter(|item| !item.text.is_empty())
-                        .map(|item| {
-                            cx.new(|cx| TextViewState::markdown(&transcript_markdown(item), cx))
-                        })
-                        .collect();
-                    self.subagent_details.insert(detail.agent.id, states);
-                }
-                Err(error) => {
-                    self.error = Some(format!("Could not read the subagent transcript: {error}"));
-                }
             }
         } else {
             self.accept_result(value, window, cx);
@@ -956,9 +1129,19 @@ impl NativeAgentSessionView {
     }
 
     fn send_prompt(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.send_prompt_mode(false, window, cx);
+    }
+
+    fn send_prompt_mode(&mut self, opposite: bool, window: &Window, cx: &mut Context<Self>) {
+        if self.speech.read(cx).dictating() {
+            self.speech
+                .update(cx, super::gpui_speech::SpeechInput::finish_dictation);
+            return;
+        }
         if !self.provider_enabled()
             || !self.can_prompt()
             || self.pending.contains("prompt")
+            || self.pending.contains("queue")
             || self.pending.contains("configure")
             || self.attachment_imports > 0
         {
@@ -995,7 +1178,21 @@ impl NativeAgentSessionView {
             || !self.active_citations(cx).is_empty()
         {
             match self.prompt_arguments(message, authored_bytes, cx) {
-                Ok(arguments) => self.command("prompt", arguments, window, cx),
+                Ok(arguments) => {
+                    let behavior = if opposite {
+                        self.follow_up_behavior.opposite()
+                    } else {
+                        self.follow_up_behavior
+                    };
+                    let operation = if is_busy(self.record.snapshot.status)
+                        && behavior == bootty_config::config::FollowUpBehavior::Queue
+                    {
+                        "queue"
+                    } else {
+                        "prompt"
+                    };
+                    self.command(operation, arguments, window, cx);
+                }
                 Err(error) => {
                     self.error = Some(error);
                     cx.notify();
@@ -1005,14 +1202,50 @@ impl NativeAgentSessionView {
     }
 
     fn can_prompt(&self) -> bool {
+        if self.record.snapshot.provider_writer_blocked() {
+            return false;
+        }
         (self.record.snapshot.status == NativeSessionStatus::Idle
             && !self.record.permissions_pending
             && !self.resuming())
-            || (self.record.snapshot.status == NativeSessionStatus::Working
-                && matches!(
-                    self.record.config.provider,
-                    AgentKind::Codex | AgentKind::Pi
-                ))
+            || self.record.snapshot.status == NativeSessionStatus::Working
+            || (self.record.snapshot.status == NativeSessionStatus::Waiting
+                && self.follow_up_behavior == bootty_config::config::FollowUpBehavior::Queue)
+    }
+
+    pub(crate) fn set_follow_up_behavior(
+        &mut self,
+        behavior: bootty_config::config::FollowUpBehavior,
+        cx: &mut Context<Self>,
+    ) {
+        if self.follow_up_behavior != behavior {
+            self.follow_up_behavior = behavior;
+            cx.notify();
+        }
+    }
+
+    pub(crate) const fn set_send_shortcut(
+        &mut self,
+        shortcut: bootty_config::config::ComposerSendShortcut,
+    ) {
+        self.send_shortcut = shortcut;
+    }
+
+    pub(crate) fn set_presentation_preferences(
+        &mut self,
+        streaming: bootty_config::config::ResponseStreaming,
+        collapse: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.presentation.streaming != streaming {
+            self.presentation.streaming = streaming;
+            self.sync_transcript(&[], window, cx);
+        }
+        if self.presentation.collapse_composer_on_scroll != collapse {
+            self.presentation.collapse_composer_on_scroll = collapse;
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_animate_working(&mut self, animate: bool, cx: &mut Context<Self>) {
@@ -1056,8 +1289,9 @@ impl NativeAgentSessionView {
         }
     }
 
-    fn render_working(
+    fn render_activity(
         &self,
+        busy: bool,
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
@@ -1077,7 +1311,7 @@ impl NativeAgentSessionView {
         };
         let animate = self.record.snapshot.status != NativeSessionStatus::Waiting
             && self.working_indicator.animate
-            && window.is_window_active()
+            && window.is_visible()
             && !cx.reduce_motion();
         div()
             .id("native-working")
@@ -1093,22 +1327,46 @@ impl NativeAgentSessionView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .text_sm()
                     .text_color(cx.theme().foreground.opacity(0.72))
-                    .child(if animate {
-                        gpui_kit::component::spinner::Spinner::new()
-                            .icon(gpui_kit::assets::IconName::LoaderCircle)
-                            .color(cx.theme().foreground.opacity(0.72))
-                            .ease(|value| value)
-                            .small()
-                            .into_any_element()
-                    } else {
-                        gpui_kit::component::Icon::new(gpui_kit::assets::IconName::LoaderCircle)
-                            .small()
-                            .into_any_element()
+                    .when(busy, |row| {
+                        row.child(
+                            div()
+                                .id("native-progress-status")
+                                .debug_selector(|| "native-progress-status".into())
+                                .min_w_0()
+                                .h_7()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(if animate {
+                                    gpui_kit::component::spinner::Spinner::new()
+                                        .icon(gpui_kit::assets::IconName::LoaderCircle)
+                                        .color(cx.theme().foreground.opacity(0.72))
+                                        .ease(|value| value)
+                                        .small()
+                                        .into_any_element()
+                                } else {
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::assets::IconName::LoaderCircle,
+                                    )
+                                    .small()
+                                    .into_any_element()
+                                })
+                                .map(|row| {
+                                    if animate {
+                                        row.child(
+                                            gpui_kit::component::shimmer::ShimmerText::new(label)
+                                                .id("native-working-label"),
+                                        )
+                                    } else {
+                                        row.child(label)
+                                    }
+                                }),
+                        )
                     })
-                    .child(label),
+                    .child(self.render_subagent_group(cx)),
             )
     }
 
@@ -1223,7 +1481,19 @@ impl NativeAgentSessionView {
                     .truncate()
                     .child(name.to_owned()),
             )
-            .child(div().flex_1().min_w_0().truncate().child(summary))
+            .child(div().flex_1().min_w_0().truncate().map(|row| {
+                if item
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.status == bootty_agents::NativeToolStatus::Running)
+                {
+                    row.child(gpui_kit::component::shimmer::ShimmerText::new(summary).id(
+                        gpui_kit::SharedString::from(format!("tool-shimmer:{}", item.id)),
+                    ))
+                } else {
+                    row.child(summary)
+                }
+            }))
             .when_some(status, |row, status| {
                 row.child(
                     div()
@@ -1296,7 +1566,6 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
-                        TranscriptRow::History { .. } => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -1321,12 +1590,11 @@ impl NativeAgentSessionView {
                         .child(gpui_kit::component::spinner::Spinner::new().small())
                         .child("Loading changes…"),
                 ),
-                ToolDiffs::Failed(error) => body.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(format!("Could not show the file diff: {error}")),
-                ),
+                ToolDiffs::Failed(error) => {
+                    body.child(div().text_sm().text_color(cx.theme().danger).child(
+                        crate::error_catalog::ErrorNotice::from_text(error.as_str()).to_string(),
+                    ))
+                }
                 ToolDiffs::Ready(files) => body.children(files.iter().map(|(path, view, rows)| {
                     div()
                         .w_full()
@@ -1405,9 +1673,25 @@ impl NativeAgentSessionView {
         let open = self.tool_disclosures.get(&id).copied().unwrap_or(false);
         let header = subagent_header(agent, open, cx);
         let read_owner = owner.clone();
+        let tab_owner = owner.clone();
+        let tab_id = agent.id.clone();
         let child_id = agent.id.clone();
         let pending = self.pending.contains(&format!("subagent-read:{child_id}"));
         let content = div()
+            .child(
+                Button::new(format!("subagent-tab:{tab_id}"))
+                    .ghost()
+                    .small()
+                    .label("Open in tab")
+                    .on_click(move |_, _, cx| {
+                        _ = tab_owner.update(cx, |this, cx| {
+                            cx.emit(OpenNativeSession::Subagent {
+                                source: this.record.target(),
+                                id: tab_id.clone(),
+                            });
+                        });
+                    }),
+            )
             .pl_5()
             .py_2()
             .flex()
@@ -1453,6 +1737,7 @@ impl NativeAgentSessionView {
             .when_some(self.subagent_details.get(&agent.id), |view, states| {
                 view.children(
                     states
+                        .states
                         .iter()
                         .map(|state| TextView::new(state).selectable(true)),
                 )
@@ -1563,9 +1848,12 @@ impl NativeAgentSessionView {
                 move || format!("native-message-body-{id}")
             })
             .min_w_0()
-            .block()
+            .flex()
+            .flex_col()
             .when(user, |row| {
-                row.max_w(gpui_kit::relative(0.8)).p_2().rounded(cx.theme().radius)
+                // Rich-text lists have no intrinsic width. Give their wrapping
+                // layout the same bounded lane as other user message content.
+                row.w_full().max_w(gpui_kit::relative(0.8)).p_2().rounded(cx.theme().radius)
                     .bg(bubble_background).text_color(cx.theme().accent_foreground)
             })
             .when(matches!(item.role.as_str(), "notice" | "thinking" | "reasoning"), |row| {
@@ -1617,7 +1905,7 @@ impl NativeAgentSessionView {
         let id = id.to_owned();
         TextView::new(state)
             .selectable(true)
-            .on_link_click(move |url, _, _, cx| {
+            .on_link_click(move |url, _, window, cx| {
                 if let Some(ix) = url
                     .strip_prefix("bootty-citation:")
                     .and_then(|ix| ix.parse::<usize>().ok())
@@ -1634,6 +1922,13 @@ impl NativeAgentSessionView {
                         if let Some(message) = message {
                             this.reveal_response(&message, cx);
                         }
+                    });
+                } else if let Some(ix) = url
+                    .strip_prefix("bootty-annotation:")
+                    .and_then(|ix| ix.parse::<usize>().ok())
+                {
+                    _ = owner.update(cx, |this, cx| {
+                        this.open_response_annotation(&id, ix, window, cx);
                     });
                 } else {
                     cx.open_url(url);
@@ -1743,12 +2038,28 @@ impl NativeAgentSessionView {
         related: Vec<RelatedConversation>,
         cx: &mut Context<Self>,
     ) {
+        for child in &related {
+            if let Some(detail) = &child.subagent
+                && self
+                    .related
+                    .iter()
+                    .find(|old| old.target == child.target)
+                    .is_none_or(|old| old.revision != child.revision)
+            {
+                self.accept_subagent_detail(detail.clone(), cx);
+            }
+        }
         self.related = related;
         cx.notify();
     }
 
     fn render_related_conversations(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        div().px_4().when(!self.related.is_empty(), |view| {
+        let related = self
+            .related
+            .iter()
+            .filter(|related| related.subagent.is_none())
+            .collect::<Vec<_>>();
+        div().px_4().when(!related.is_empty(), |view| {
             view.child(
                 Collapsible::new()
                     .open(false)
@@ -1756,14 +2067,14 @@ impl NativeAgentSessionView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("Side chats · {}", self.related.len())),
+                            .child(format!("Side chats · {}", related.len())),
                     )
                     .content(
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .children(self.related.iter().map(|related| {
+                            .children(related.into_iter().map(|related| {
                                 let target = related.target.clone();
                                 let state = match related.status {
                                     NativeSessionStatus::Working => "Working…",
@@ -2049,10 +2360,186 @@ impl NativeAgentSessionView {
             )
     }
 
+    fn render_writer_callout(&self, cx: &Context<Self>) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
+            .id("native-writer-callout")
+            .debug_selector(|| "native-writer-callout".into())
+            .w_full()
+            .max_w(gpui_kit::rems(48.0))
+            .p_4()
+            .rounded_xl()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(crate::gpui::sized_icon(
+                "lock",
+                crate::gpui::IconSize::Small,
+                cx.theme().muted_foreground,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child("This is open in another app")
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Close it there to continue here."),
+                    ),
+            )
+            .child(
+                Button::new("native-writer-retry")
+                    .debug_selector(|| "native-writer-retry".into())
+                    .label("Retry")
+                    .ghost()
+                    .small()
+                    .loading(self.resuming())
+                    .disabled(!self.provider_enabled() || self.resuming())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.command("resume", vec![], window, cx);
+                    })),
+            )
+            .child(
+                Button::new("native-writer-fork")
+                    .debug_selector(|| "native-writer-fork".into())
+                    .label("Fork chat")
+                    .ghost()
+                    .small()
+                    .disabled(!self.provider_enabled() || self.pending.contains("fork"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.command("fork", vec![], window, cx);
+                    })),
+            )
+    }
+
+    fn render_error_recovery(&self, cx: &Context<Self>) -> impl IntoElement {
+        div().when_some(
+            self.error
+                .as_ref()
+                .filter(|_| !self.record.snapshot.provider_writer_blocked())
+                .or_else(|| {
+                    (!self.record.snapshot.transport_lost
+                        && !self.record.snapshot.provider_archived()
+                        && !self.record.snapshot.provider_writer_blocked())
+                    .then_some(
+                        self.record
+                            .snapshot
+                            .error
+                            .as_ref()
+                            .filter(|error| self.dismissed_error.as_ref() != Some(*error)),
+                    )
+                    .flatten()
+                }),
+            |body, error| {
+                body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            div().flex_1().child(
+                                crate::error_catalog::ErrorNotice::from_text(error.as_str())
+                                    .to_string(),
+                            ),
+                        )
+                        .child(
+                            Button::new("conversation-recover-error")
+                                .ghost()
+                                .small()
+                                .label(
+                                    if self.record.snapshot.status == NativeSessionStatus::Error {
+                                        "Retry"
+                                    } else {
+                                        "Dismiss"
+                                    },
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.error = None;
+                                    this.dismissed_error.clone_from(&this.record.snapshot.error);
+                                    if this.record.snapshot.status == NativeSessionStatus::Error {
+                                        this.command("resume", Vec::new(), window, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            },
+        )
+    }
+
+    fn render_collapsed_composer(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        div().flex().child(
+            Button::new("expand-composer")
+                .ghost()
+                .w_full()
+                .max_w(gpui_kit::rems(48.))
+                .justify_start()
+                .label(format!(
+                    "Message {}…",
+                    provider_name(self.record.config.provider)
+                ))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                })),
+        )
+    }
+
     fn render_composer(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
-        let owner = cx.weak_entity();
-        let token_owner = owner.clone();
-        let token_click_owner = owner.clone();
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .justify_center()
+            .px_4()
+            .py_3()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(gpui_kit::rems(48.))
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_queued_messages(cx))
+                    .child(
+                        // An opaque base hides the drawer seam beneath the translucent editor.
+                        div()
+                            .relative()
+                            .w_full()
+                            .min_w_0()
+                            .rounded_xl()
+                            .bg(cx.theme().background)
+                            .child(self.render_composer_body(window, cx)),
+                    ),
+            )
+    }
+
+    fn render_composer_body(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
+        if self.record.snapshot.provider_writer_blocked() {
+            return div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .child(self.render_writer_callout(cx));
+        }
+        if self.presentation.collapse_composer_on_scroll
+            && !self.list.is_following_tail()
+            && self.composer.read(cx).value().is_empty()
+            && !self.composer.read(cx).focus_handle(cx).is_focused(window)
+            && self.attachments.is_empty()
+            && self.annotations.is_empty()
+        {
+            return self.render_collapsed_composer(cx);
+        }
         let composer = div()
             .id("native-composer")
             .debug_selector(|| "native-composer".into())
@@ -2067,60 +2554,69 @@ impl NativeAgentSessionView {
             .flex_col()
             .gap_2()
             .p_3()
+            .pb_2()
             .rounded_xl()
             .bg(cx.theme().muted.opacity(0.35))
             .border_1()
             .border_color(cx.theme().border)
+            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
+                style.border_color(cx.theme().ring).bg(cx.theme().accent)
+            })
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    cx.stop_propagation();
+                    for path in &paths.0 {
+                        this.attach_path(path.clone(), window, cx);
+                    }
+                }),
+            )
             .when(!self.attachments.is_empty(), |body| {
                 body.child(self.render_attachments(cx))
             })
             .when(!self.annotations.is_empty(), |body| {
                 body.child(self.render_annotations(cx))
             })
-            .child(
-                Textarea::new(&self.composer)
-                    .token(move |context, window, cx| {
-                        token_owner.upgrade().map_or_else(
-                            || div().into_any_element(),
-                            |owner| {
-                                owner.update(cx, |this, cx| {
-                                    this.render_prompt_token(context, window, cx)
-                                })
-                            },
-                        )
-                    })
-                    .on_token_click(move |event, window, cx| {
-                        _ = token_click_owner.update(cx, |this, cx| {
-                            this.open_citation_token(
-                                event.token().id(),
-                                event.bounds().bottom_left(),
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-                    .appearance(false)
-                    .bordered(false)
-                    .on_paste(move |item, window, cx| {
-                        owner
-                            .update(cx, |this, cx| this.paste_attachments(item, window, cx))
-                            .unwrap_or(false)
-                    })
-                    .aria_label(format!(
-                        "Message to {}",
-                        provider_name(self.record.config.provider)
-                    )),
-            )
+            .child(self.render_composer_input(cx))
             .child(self.render_composer_controls(cx))
             .children(self.completion.clone());
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .justify_center()
-            .px_4()
-            .py_3()
-            .child(composer)
+        div().w_full().min_w_0().child(composer)
+    }
+
+    fn render_composer_input(&self, cx: &Context<Self>) -> Textarea {
+        let owner = cx.weak_entity();
+        let token_owner = owner.clone();
+        let token_click_owner = owner.clone();
+        Textarea::new(&self.composer)
+            .token(move |context, window, cx| {
+                token_owner.upgrade().map_or_else(
+                    || div().into_any_element(),
+                    |owner| {
+                        owner.update(cx, |this, cx| this.render_prompt_token(context, window, cx))
+                    },
+                )
+            })
+            .on_token_click(move |event, window, cx| {
+                _ = token_click_owner.update(cx, |this, cx| {
+                    this.open_attachment(event.token().id(), window, cx);
+                    this.open_citation_token(
+                        event.token().id(),
+                        event.bounds().bottom_left(),
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .appearance(false)
+            .bordered(false)
+            .on_paste(move |item, window, cx| {
+                owner
+                    .update(cx, |this, cx| this.paste_attachments(item, window, cx))
+                    .unwrap_or(false)
+            })
+            .aria_label(format!(
+                "Message to {}",
+                provider_name(self.record.config.provider)
+            ))
     }
 
     #[expect(
@@ -2128,9 +2624,13 @@ impl NativeAgentSessionView {
         reason = "One footer owns the adjacent composer controls"
     )]
     fn render_composer_controls(&self, cx: &Context<Self>) -> impl IntoElement {
-        let send_pending = self.pending.contains("prompt");
-        let send_label = if self.record.snapshot.status == NativeSessionStatus::Working {
-            "Steer agent"
+        let send_pending = self.pending.contains("prompt") || self.pending.contains("queue");
+        let send_label = if is_busy(self.record.snapshot.status) {
+            if self.follow_up_behavior == bootty_config::config::FollowUpBehavior::Queue {
+                "Queue message"
+            } else {
+                "Steer agent"
+            }
         } else {
             "Send message"
         };
@@ -2148,6 +2648,11 @@ impl NativeAgentSessionView {
                 self.record.snapshot.status,
                 NativeSessionStatus::Stopped | NativeSessionStatus::Error
             );
+        let resume_operation = if self.record.snapshot.provider_archived() {
+            "unarchive"
+        } else {
+            "resume"
+        };
         let options = div()
             .id("native-composer-options")
             .flex_1()
@@ -2156,15 +2661,21 @@ impl NativeAgentSessionView {
             .flex()
             .items_center()
             .gap_2()
-            .child(self.render_model_controls(cx))
             .when(self.record.config.provider != AgentKind::Pi, |row| {
                 row.child(
-                    div()
-                        .track_focus(&self.permissions_focus)
-                        .child(self.render_permission_control(cx)),
+                    crate::gpui::with_composer_tooltip(
+                        "native-permissions-tooltip",
+                        div()
+                            .track_focus(&self.permissions_focus)
+                            .child(self.render_permission_control(cx)),
+                        "Permissions for the next turn. Existing approval requests keep their captured permissions.",
+                        vec![crate::gpui::composer_focus_action(
+                            crate::gpui::ComposerControl::Permissions,
+                            self.permissions_focus.clone(),
+                        )],
+                    ),
                 )
             })
-            .child(self.render_context_usage(cx))
             .when(
                 !self.provider_enabled() || self.cancellation_requested,
                 |row| {
@@ -2191,35 +2702,93 @@ impl NativeAgentSessionView {
             .items_center()
             .justify_start()
             .gap_2()
+            .child(
+                Button::new("native-attach")
+                    .debug_selector(|| "native-attach".into())
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .small()
+                    .accessibility_label("Add to message")
+                    .tooltip("Add to message")
+                    .disabled(inactive || !self.provider_enabled())
+                    .dropdown_menu({
+                        let owner = cx.weak_entity();
+                        move |menu, _, _| {
+                            let files = owner.clone();
+                            let reference = owner.clone();
+                            let paste = owner.clone();
+                            menu.label("Add to message")
+                                .item(
+                                    gpui_kit::component::menu::PopupMenuItem::new("Attach files…")
+                                        .icon(gpui_kit::assets::IconName::Paperclip)
+                                        .on_click(move |_, window, cx| {
+                                            _ = files.update(cx, |this, cx| {
+                                                this.choose_attachments(window, cx);
+                                            });
+                                        }),
+                                )
+                                .item(
+                                    gpui_kit::component::menu::PopupMenuItem::new(
+                                        "Reference files and folders…",
+                                    )
+                                    .icon(IconName::Folder)
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = reference.update(cx, |this, cx| {
+                                                this.composer.focus_handle(cx).focus(window, cx);
+                                                this.composer.update(cx, |input, cx| {
+                                                    input.replace_text_in_range(
+                                                        None, "@", window, cx,
+                                                    );
+                                                });
+                                            });
+                                        },
+                                    ),
+                                )
+                                .separator()
+                                .item(
+                                    gpui_kit::component::menu::PopupMenuItem::new(
+                                        "Paste image or text",
+                                    )
+                                    .icon(gpui_kit::assets::IconName::Clipboard)
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            _ = paste.update(cx, |this, cx| {
+                                                this.composer.focus_handle(cx).focus(window, cx);
+                                                window.dispatch_action(
+                                                    Box::new(gpui_kit::component::input::Paste),
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                )
+                        }
+                    }),
+            )
             .child(options)
             .child(
                 div()
                     .flex()
-                    .flex_shrink_0()
+                    .min_w_0()
                     .items_center()
                     .gap_2()
+                    .child(self.render_context_usage(cx))
                     .child(
-                        Button::new("native-attach")
-                            .debug_selector(|| "native-attach".into())
-                            .child(crate::gpui::sized_icon(
-                                "paperclip",
-                                crate::gpui::IconSize::Small,
-                                cx.theme().foreground,
-                            ))
-                            .ghost()
-                            .small()
-                            .accessibility_label("Attach files")
-                            .tooltip("Attach files")
-                            .disabled(inactive || !self.provider_enabled())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_attachments(window, cx);
-                            })),
+                        div()
+                            .id("native-model-control-scroll")
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_x_scroll()
+                            .child(self.render_model_controls(cx)),
                     )
+                    .child(self.speech.clone())
                     .when(interruptible, |row| {
                         row.child(
                             Button::new("native-interrupt")
                                 .debug_selector(|| "native-interrupt".into())
-                                .label("Interrupt")
+                                .accessibility_label("Interrupt")
+                                .tooltip("Interrupt")
                                 .icon(IconName::Pause)
                                 .small()
                                 .ghost()
@@ -2234,15 +2803,20 @@ impl NativeAgentSessionView {
                         row.child(
                             Button::new("native-resume")
                                 .debug_selector(|| "native-resume".into())
-                                .label("Resume")
+                                .label(if self.record.snapshot.provider_archived() {
+                                    "Unarchive and resume"
+                                } else {
+                                    "Resume"
+                                })
                                 .small()
                                 .primary()
-                                .loading(self.pending.contains("resume"))
+                                .loading(self.pending.contains(resume_operation))
                                 .disabled(
-                                    !self.provider_enabled() || self.pending.contains("resume"),
+                                    !self.provider_enabled()
+                                        || self.pending.contains(resume_operation),
                                 )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.command("resume", vec![], window, cx);
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.command(resume_operation, vec![], window, cx);
                                 })),
                         )
                     })
@@ -2276,33 +2850,14 @@ impl NativeAgentSessionView {
             )
     }
 
-    fn render_context_usage(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        use gpui_kit::component::{popover::Popover, progress::ProgressCircle};
+    fn render_context_usage(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        use gpui_kit::component::{progress::ProgressCircle, tooltip::Tooltip};
         let Some(usage) = self.record.snapshot.usage.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
-        let counters = usage.get("last").unwrap_or(usage);
-        let used = counters
-            .get("totalTokens")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                let input = counters.get("input").and_then(Value::as_u64)?;
-                Some(["output", "cacheRead", "cacheWrite"].into_iter().fold(
-                    input,
-                    |tokens, field| {
-                        tokens.saturating_add(
-                            counters.get(field).and_then(Value::as_u64).unwrap_or(0),
-                        )
-                    },
-                ))
-            });
-        let Some(used) = used else {
-            return div();
+        let Some((used, limit)) = context_tokens(usage) else {
+            return div().into_any_element();
         };
-        let limit = usage
-            .get("modelContextWindow")
-            .and_then(Value::as_u64)
-            .filter(|limit| *limit > 0);
         let percent = limit.map(|limit| {
             u16::try_from(
                 used.saturating_mul(100)
@@ -2316,37 +2871,75 @@ impl NativeAgentSessionView {
             percent.map_or_else(|| format!("{used} tokens"), |percent| format!("{percent}%"));
         let details = limit.map_or_else(
             || format!("{used} tokens used"),
-            |limit| format!("Context: {used} / {limit} tokens"),
+            |limit| {
+                format!(
+                    "{}k / {}k tokens used",
+                    used.saturating_add(500).checked_div(1000).unwrap_or(0),
+                    limit.saturating_add(500).checked_div(1000).unwrap_or(0)
+                )
+            },
         );
         let color = if percent.is_some_and(|percent| percent >= 90) {
             cx.theme().danger
         } else {
             cx.theme().muted_foreground
         };
-        div().child(
-            Popover::new("native-context-usage")
-                .max_w(gpui_kit::rems(20.))
-                .trigger(
-                    Button::new("native-context-trigger")
-                        .ghost()
-                        .small()
-                        .accessibility_label(details.clone())
+        let accessible = percent.map_or_else(
+            || details.clone(),
+            |percent| {
+                format!(
+                    "Context window: {percent}% used, {}% left; {details}",
+                    100u16.saturating_sub(percent)
+                )
+            },
+        );
+        div()
+            .id("native-context-usage")
+            .tooltip(move |window, cx| {
+                let details = details.clone();
+                Tooltip::element(move |_, cx| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .p_2()
+                        .text_sm()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    ProgressCircle::new("native-context-ring")
-                                        .value(f32::from(percent.unwrap_or(0)))
-                                        .color(color)
-                                        .size(gpui_kit::px(16.)),
-                                )
-                                .child(label),
-                        ),
-                )
-                .content(move |_, _, _| div().p_3().text_sm().child(details.clone())),
-        )
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Context window"),
+                        )
+                        .when_some(percent, |body, percent| {
+                            body.child(format!(
+                                "{percent}% used ({}% left)",
+                                100u16.saturating_sub(percent)
+                            ))
+                        })
+                        .child(details.clone())
+                })
+                .build(window, cx)
+            })
+            .child(
+                Button::new("native-context-trigger")
+                    .ghost()
+                    .small()
+                    .accessibility_label(accessible)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                ProgressCircle::new("native-context-ring")
+                                    .value(f32::from(percent.unwrap_or(0)))
+                                    .color(color)
+                                    .size(gpui_kit::px(16.)),
+                            )
+                            .when(percent.is_none(), |row| row.child(label)),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -2362,8 +2955,7 @@ fn history_transcript(
     fork: Option<&bootty_agents::NativeSideChat>,
     page: &bootty_agents::NativeHistoryPage,
 ) -> Vec<NativeTranscriptItem> {
-    // Both sources are bounded. The copied prefix belongs before the first provider page,
-    // while older provider pages remain reachable through their existing cursors.
+    // Loaded provider pages remain in the view; live items replace their earlier snapshots.
     let prefix = fork
         .filter(|_| !page.has_older)
         .and_then(|fork| fork.copied_transcript(live))
@@ -2376,8 +2968,8 @@ fn history_transcript(
                 .iter()
                 .any(|provider| provider.id == item.id)
         })
-        .chain(&page.transcript)
         .cloned()
+        .chain(page.with_live_transcript(live))
         .collect()
 }
 impl NativeAgentSessionView {
@@ -2420,8 +3012,10 @@ impl NativeAgentSessionView {
         if matches!(
             self.record.config.provider,
             AgentKind::Codex | AgentKind::Pi
-        ) && self.record.snapshot.status == NativeSessionStatus::Idle
-            && self.record.pending_initial_message.is_none()
+        ) && matches!(
+            self.record.snapshot.status,
+            NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) && self.record.pending_initial_message.is_none()
             && !self.pending.contains("prompt")
             && self
                 .record
@@ -2437,18 +3031,34 @@ impl NativeAgentSessionView {
 }
 impl Render for NativeAgentSessionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let busy = self.record.snapshot.transport_lost
+            || self.record.snapshot.status == NativeSessionStatus::Starting
+            || is_busy(self.record.snapshot.status)
+            || self.pending.contains("prompt");
         self.load_models(window, cx);
         self.load_history(window, cx);
         self.sync_activity_tick(window, cx);
-        let owner = cx.weak_entity();
+        let enabled = self.provider_enabled()
+            && !matches!(
+                self.record.snapshot.status,
+                NativeSessionStatus::Starting
+                    | NativeSessionStatus::Stopped
+                    | NativeSessionStatus::Error
+            );
+        self.speech
+            .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
+        let wide = self.wide;
         div()
             .id(gpui_kit::SharedString::from(self.record.id.clone()))
+            .relative()
             .track_focus(&self.focus)
             .size_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
+            .when(wide, |view| view.pr(gpui_kit::rems(20.)))
+            .child(self.render_context_geometry(cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
@@ -2466,70 +3076,59 @@ impl Render for NativeAgentSessionView {
                     }
                 }),
             )
-            .when_some(
-                self.error.as_ref().or_else(|| {
-                    (!self.record.snapshot.transport_lost)
-                        .then_some(self.record.snapshot.error.as_ref())
-                        .flatten()
-                }),
-                |body, error| {
-                    body.child(
-                        div()
-                            .px_4()
-                            .py_2()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(error.clone()),
-                    )
-                },
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .flex()
-                    .child(self.render_history_gutter(window, cx))
-                    .child(div().flex_1().min_h_0().min_w_0().flex().flex_col().when(
-                        !self.timeline.is_empty(),
-                        |body| {
-                            body.child(
-                                list(self.list.clone(), move |ix, window, cx| {
-                                    owner.upgrade().map_or_else(
-                                        || div().into_any_element(),
-                                        |owner| {
-                                            owner.read(cx).render_timeline_row(
-                                                ix,
-                                                owner.downgrade(),
-                                                window,
-                                                cx,
-                                            )
-                                        },
-                                    )
-                                })
-                                .with_sizing_behavior(gpui_kit::ListSizingBehavior::Auto)
-                                .size_full(),
-                            )
-                        },
-                    )),
-            )
+            .when(self.record.snapshot.provider_archived(), |body| {
+                body.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("This conversation is archived in Codex. Unarchive it to continue."),
+                )
+            })
+            .child(self.render_transcript(window, cx))
             .when(self.needs_jump_to_latest(), |body| {
                 body.child(Self::render_jump_to_latest(cx))
             })
             .when(!self.record.snapshot.requests.is_empty(), |body| {
                 body.child(self.requests.clone())
             })
-            .when(
-                self.record.snapshot.transport_lost
-                    || self.record.snapshot.status == NativeSessionStatus::Starting
-                    || is_busy(self.record.snapshot.status)
-                    || self.pending.contains("prompt"),
-                |body| body.child(self.render_working(window, cx)),
-            )
-            .child(self.render_related_conversations(cx))
+            .when(busy || !self.subagents().is_empty(), |body| {
+                body.child(self.render_activity(busy, window, cx))
+            })
+            .when(!wide, |body| {
+                body.child(self.render_related_conversations(cx))
+            })
+            .child(self.render_error_recovery(cx))
             .child(self.render_composer(window, cx))
             .child(self.render_selection_toolbar(window, cx))
+            .when(wide, |body| body.child(self.render_context_card(cx)))
     }
+}
+
+fn context_tokens(usage: &Value) -> Option<(u64, Option<u64>)> {
+    let counters = usage.get("last").unwrap_or(usage);
+    let used = counters
+        .get("totalTokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            let input = counters.get("input").and_then(Value::as_u64)?;
+            Some(
+                ["output", "cacheRead", "cacheWrite"]
+                    .into_iter()
+                    .fold(input, |tokens, field| {
+                        tokens.saturating_add(
+                            counters.get(field).and_then(Value::as_u64).unwrap_or(0),
+                        )
+                    }),
+            )
+        });
+    let used = used?;
+    let limit = usage
+        .get("modelContextWindow")
+        .and_then(Value::as_u64)
+        .filter(|limit| *limit > 0);
+    Some((used, limit))
 }
 
 fn is_tool_output(role: &str) -> bool {
@@ -2717,6 +3316,18 @@ fn transcript_markdown(item: &NativeTranscriptItem) -> String {
     }
 }
 
+fn streamed_markdown(
+    item: &NativeTranscriptItem,
+    streaming: bootty_config::config::ResponseStreaming,
+) -> String {
+    let text = transcript_markdown(item);
+    if item.role == "assistant" && item.tool.is_none() {
+        streaming.visible_text(&text, item.complete).to_owned()
+    } else {
+        text
+    }
+}
+
 fn parse_tool_diffs(
     input: &str,
     cwd: &std::path::Path,
@@ -2835,6 +3446,58 @@ impl gpui_kit::component::dock::Panel for NativeAgentSessionView {
     }
 }
 
+pub fn subagent_label(agent: &bootty_agents::NativeSubagent) -> String {
+    let title = agent.title.trim();
+    let label = if title.is_empty() || title.starts_with("/root/") || title == agent.id {
+        agent
+            .prompt
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map_or(title, str::trim)
+    } else {
+        title
+    };
+    if label.is_empty() {
+        return "Subagent".into();
+    }
+    label.chars().take(80).collect()
+}
+
+pub fn subagent_avatar(agent: &bootty_agents::NativeSubagent, cx: &App) -> gpui_kit::Div {
+    let index = agent
+        .id
+        .bytes()
+        .fold(14_695_981_039_346_656_037_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        })
+        .wrapping_rem(5);
+    let color = match index {
+        0 => cx.theme().chart_1,
+        1 => cx.theme().chart_2,
+        2 => cx.theme().chart_3,
+        3 => cx.theme().chart_4,
+        _ => cx.theme().chart_5,
+    };
+    let initials = subagent_label(agent)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    div()
+        .size_6()
+        .flex_none()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(color.opacity(0.18))
+        .text_color(color)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .child(initials)
+}
+
 fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) -> gpui_kit::Div {
     let status = match agent.status {
         bootty_agents::NativeToolStatus::Running => "Working…",
@@ -2843,18 +3506,7 @@ fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) 
         bootty_agents::NativeToolStatus::Interrupted => "Interrupted",
         bootty_agents::NativeToolStatus::Declined => "Declined",
     };
-    let title = if agent.title.is_empty() {
-        agent
-            .prompt
-            .lines()
-            .next()
-            .unwrap_or("Agent")
-            .chars()
-            .take(80)
-            .collect()
-    } else {
-        agent.title.clone()
-    };
+    let title = subagent_label(agent);
     let elapsed = agent
         .started_at
         .map(|started| {
@@ -2880,11 +3532,7 @@ fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) 
             crate::gpui::IconSize::Small,
             cx.theme().muted_foreground,
         ))
-        .child(crate::gpui::sized_icon(
-            "bot",
-            crate::gpui::IconSize::Small,
-            cx.theme().muted_foreground,
-        ))
+        .child(subagent_avatar(agent, cx))
         .child(div().flex_1().min_w_0().text_ellipsis().child(title))
         .when_some(agent.model.clone(), |view, model| {
             view.child(

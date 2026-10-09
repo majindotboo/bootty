@@ -10,8 +10,6 @@ pub(super) struct NewModelPicker {
 impl DialogView {
     pub(super) fn sync_new_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(spec) = &self.spec else {
-            self.control_focus
-                .insert("provider", self.provider_focus.clone());
             return;
         };
         let Some(provider_field) = spec.fields.iter().find(|field| field.id == "provider") else {
@@ -20,8 +18,7 @@ impl DialogView {
                 .insert("provider", self.provider_focus.clone());
             return;
         };
-        let provider = provider_field.value.clone();
-        let Some(kind) = provider_kind(&provider) else {
+        let Some(kind) = provider_kind(&provider_field.value) else {
             self.model_picker = None;
             self.control_focus
                 .insert("provider", self.provider_focus.clone());
@@ -29,7 +26,7 @@ impl DialogView {
         };
         let providers = match &provider_field.kind {
             DialogFieldKind::Choice(providers) => providers.clone(),
-            DialogFieldKind::Text | DialogFieldKind::Color => vec![provider],
+            DialogFieldKind::Text | DialogFieldKind::Color => vec![provider_field.value.clone()],
         };
         let selected = spec.selected_model.clone().or_else(|| {
             spec.models
@@ -37,6 +34,15 @@ impl DialogView {
                 .find(|model| model.is_default)
                 .map(|model| model.id.clone())
         });
+        let effort = spec
+            .fields
+            .iter()
+            .find(|field| field.id == "reasoning")
+            .map(|field| field.value.as_str());
+        let fast = spec
+            .fields
+            .iter()
+            .any(|field| field.id == "fast-mode" && field.value == "true");
         if let Some(picker) = &self.model_picker {
             picker.state.update(cx, |picker, cx| {
                 picker.set_provider_models(
@@ -50,6 +56,9 @@ impl DialogView {
                     window,
                     cx,
                 );
+                picker.set_reasoning_effort(effort, cx);
+                picker.set_fast_mode(fast, cx);
+                picker.set_available_efforts(&spec.available_efforts, cx);
             });
             self.control_focus
                 .insert("provider", picker.state.focus_handle(cx));
@@ -65,30 +74,53 @@ impl DialogView {
                 cx,
             )
         });
-        let subscription = cx.subscribe_in(
-            &state,
-            window,
-            |this, _, event: &ModelPickerEvent, _, cx| {
-                let Some(spec) = &this.spec else {
-                    return;
-                };
-                let (field, value) = match event {
-                    ModelPickerEvent::Select(id) => ("model", id),
-                    ModelPickerEvent::SelectProvider(provider) => ("provider", provider),
-                    ModelPickerEvent::Favorite(id) => ("model-favorite", id),
-                };
-                cx.emit(DialogIntent::FieldChanged {
-                    dialog: spec.id.clone(),
-                    field: field.into(),
-                    value: value.clone(),
-                });
-            },
-        );
+        state.update(cx, |picker, cx| {
+            picker.set_reasoning_effort(effort, cx);
+            picker.set_fast_mode(fast, cx);
+            picker.set_available_efforts(&spec.available_efforts, cx);
+        });
+        let subscription = cx.subscribe_in(&state, window, |this, _, event, _, cx| {
+            this.new_model_picker_changed(event, cx);
+        });
         self.control_focus
             .insert("provider", state.focus_handle(cx));
         self.model_picker = Some(NewModelPicker {
             state,
             _subscription: subscription,
+        });
+    }
+
+    fn new_model_picker_changed(&self, event: &ModelPickerEvent, cx: &mut Context<Self>) {
+        let Some(spec) = &self.spec else {
+            return;
+        };
+        let (field, value) = match event {
+            ModelPickerEvent::FastMode(fast) => {
+                cx.emit(DialogIntent::FieldChanged {
+                    dialog: spec.id.clone(),
+                    field: "fast-mode".into(),
+                    value: fast.to_string(),
+                });
+                return;
+            }
+            ModelPickerEvent::Reasoning(selection) => {
+                if let Some(effort) = &selection.reasoning_effort {
+                    cx.emit(DialogIntent::FieldChanged {
+                        dialog: spec.id.clone(),
+                        field: "reasoning".into(),
+                        value: effort.clone(),
+                    });
+                }
+                return;
+            }
+            ModelPickerEvent::Select(id) => ("model", id),
+            ModelPickerEvent::SelectProvider(provider) => ("provider", provider),
+            ModelPickerEvent::Favorite(id) => ("model-favorite", id),
+        };
+        cx.emit(DialogIntent::FieldChanged {
+            dialog: spec.id.clone(),
+            field: field.into(),
+            value: value.clone(),
         });
     }
 

@@ -25,13 +25,40 @@ pub fn display_prompt_citations(
     citations: &[NativeResponseCitation],
     attachments: &[crate::NativeAttachmentReference],
 ) -> String {
+    display_prompt(text, citations, attachments, false)
+}
+
+pub fn queued_prompt_preview(
+    text: &str,
+    citations: &[NativeResponseCitation],
+    attachments: &[crate::NativeAttachmentReference],
+) -> String {
+    display_prompt(text, citations, attachments, true)
+}
+
+fn display_prompt(
+    text: &str,
+    citations: &[NativeResponseCitation],
+    attachments: &[crate::NativeAttachmentReference],
+    omit_images: bool,
+) -> String {
     let mut replacements = citations
         .iter()
         .enumerate()
         .filter_map(|(ix, citation)| {
             let range = citation.prompt_range.as_ref()?;
-            (text.get(range.clone()) == Some("[quote]"))
-                .then(|| (range.clone(), citation_label(citation, ix)))
+            (text.get(range.clone()) == Some("[quote]")).then(|| {
+                let label = if omit_images {
+                    if citation.comment.trim().is_empty() {
+                        citation.quote.clone()
+                    } else {
+                        citation.comment.clone()
+                    }
+                } else {
+                    citation_label(citation, ix)
+                };
+                (range.clone(), label)
+            })
         })
         .chain(attachments.iter().flat_map(|attachment| {
             attachment
@@ -41,6 +68,12 @@ pub fn display_prompt_citations(
                     text.get((*range).clone()) == Some(format!("[{}]", attachment.name).as_str())
                 })
                 .map(move |range| {
+                    if omit_images && attachment.kind == crate::NativeAttachmentKind::Image {
+                        return (range.clone(), String::new());
+                    }
+                    if omit_images {
+                        return (range.clone(), attachment.name.clone());
+                    }
                     let fence = "`".repeat(
                         attachment
                             .name

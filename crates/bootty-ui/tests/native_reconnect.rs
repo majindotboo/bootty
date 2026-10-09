@@ -26,6 +26,7 @@ fn record() -> NativeSessionRecord {
         .unwrap_or_else(|error| panic!("public saved conversation: {error}")),
         side_chat: None,
         spawn_parent: None,
+        queued_messages: Vec::new(),
         attachments: Vec::new(),
     };
     record.snapshot.transport_lost = true;

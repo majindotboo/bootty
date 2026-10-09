@@ -4,6 +4,8 @@ mod commands;
 mod events;
 mod integration;
 mod launch;
+mod native_annotations;
+pub use native_annotations::{NativeResponseAnnotation, response_annotations};
 mod native_attachments;
 mod native_citations;
 mod native_claude;
@@ -99,7 +101,7 @@ pub use tool_bridge::{
 pub use tool_policy::{
     NativeBrowserAccess, NativeBrowserAttachment, ToolCapture, ToolCapturedCommand,
     ToolChildAuthority, ToolLaunchGuard, ToolLease, ToolPolicy, ToolScope, ToolSpawnContext,
-    ToolSpawnGuard,
+    ToolSpawnGuard, ToolSpawnLaunch, ToolSpawnProvider,
 };
 pub use tool_spawn::{ToolChildControlRequest, ToolChildOperation, ToolSpawnRequest};
 
@@ -127,8 +129,8 @@ pub use native_protocol::{
     NativeTranscriptItem, NativeTurnOutcome, NativeTurnReceipt, native_error_message,
 };
 pub use native_service::{
-    NativeAgentService, NativeCreationError, NativeProviderInfo, NativeSessionActivity,
-    NativeSessionRecord,
+    NativeAgentService, NativeCreationError, NativeProviderInfo, NativeQueuedMessage,
+    NativeQueuedMessageStatus, NativeSessionActivity, NativeSessionRecord,
 };
 pub use native_session::{
     NativeAgentSession, NativeChangeHandler, NativeRemote, NativeSessionConfig,

@@ -169,6 +169,15 @@ impl Host {
         allow_spawn: bool,
         backend: MultiplexerBackendConfig,
     ) -> TestResult<Self> {
+        Self::new_with_child_provider(enabled, allow_spawn, backend, None)
+    }
+
+    fn new_with_child_provider(
+        enabled: bool,
+        allow_spawn: bool,
+        backend: MultiplexerBackendConfig,
+        child: Option<AgentKind>,
+    ) -> TestResult<Self> {
         let directory = assert_fs::TempDir::new()?;
         let program = provider(directory.path())?;
         let config_path = directory.path().join("config.toml");
@@ -204,6 +213,31 @@ impl Host {
                 arguments: vec!["--model".to_owned(), "fixture-model".to_owned()],
             },
         );
+        if let Some(child) = child {
+            let program = pi_child_provider(directory.path())?;
+            let preferences = match child {
+                AgentKind::Pi => &mut config.agents.pi,
+                AgentKind::Claude => &mut config.agents.claude,
+                AgentKind::Codex => &mut config.agents.codex,
+            };
+            preferences.enabled = true;
+            preferences.program = program;
+            preferences.selected = "child-account".into();
+            preferences.profiles.insert(
+                "child-account".into(),
+                AgentProfileConfig {
+                    name: "Child account".into(),
+                    directory: Some(
+                        directory
+                            .path()
+                            .join("child-account")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    arguments: Vec::new(),
+                },
+            );
+        }
         let providers = config.agents.clone();
         let (wake, wakes) = mpsc::channel();
         let repaint = wake.clone();
@@ -1155,6 +1189,7 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
     let cwd = host.directory.path().to_string_lossy().into_owned();
     let form = NewSessionForm::new(
         NewSessionDraft {
+            projectless: false,
             scope,
             cwd: cwd.clone(),
             mode: NewSessionMode::Agent,
@@ -1896,8 +1931,30 @@ fn saved_native_task_keyboard_selection_restores_its_terminal_checkpoint(
     assert_ne!(retained["attachment"], Value::Null);
     let resumed = open_saved_native(&mut host, &saved_record)
         .map_err(|error| format!("Resume captured conversation: {error}"))?;
-    success(host.native_tool(&resumed, "terminal_read", json!({}))?)?;
+    wait_for_native_terminal_read(&mut host, &resumed)?;
     Ok(())
+}
+
+// Restoring topology accepts the worker before its display stream is ready. Wait on
+// worker wakeups, rather than assuming the next command can already capture it.
+fn wait_for_native_terminal_read(
+    host: &mut Host,
+    record: &NativeSessionRecord,
+) -> TestResult<Value> {
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .ok_or("Deadline")?;
+    loop {
+        match host.native_tool(record, "terminal_read", json!({}))? {
+            CommandOutcome::Failed { code, message }
+                if code == "terminal_capture_failed" && message == "Terminal is still starting" =>
+            {
+                host.wakes
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            }
+            outcome => return success(outcome),
+        }
+    }
 }
 
 fn open_saved_native(
@@ -2416,6 +2473,7 @@ fn attach_sibling_tui(
             captures: Vec::new(),
             spawn: Some(ToolSpawnContext {
                 profile: Some("terminal-profile".to_owned()),
+                providers: Vec::new(),
             }),
         },
         &std::env::current_exe()?,
@@ -3652,5 +3710,101 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
             .any(|record| record.id == selected_agent
                 && record.task_identity == parent.task_identity)
     );
+    Ok(())
+}
+
+fn pi_child_provider(directory: &Path) -> TestResult<String> {
+    let program = directory.join("pi-child.py");
+    fs::write(
+        &program,
+        r"#!/usr/bin/env python3
+import json,os,sys
+account=os.environ['PI_CODING_AGENT_DIR']
+os.makedirs(account,exist_ok=True)
+session='pi-child-'+str(os.getpid())
+file=os.path.join(account,session+'.jsonl')
+with open(file,'w') as output: output.write(json.dumps({'type':'session','id':session,'version':3})+'\n')
+with open(os.path.join(account,'launch.json'),'w') as output: json.dump({'argv':sys.argv,'account':account},output)
+messages=[]
+def emit(value): print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ value=json.loads(line);kind=value['type'];data={}
+ if kind=='get_state': data={'sessionId':session,'sessionFile':file,'isStreaming':False,'isCompacting':False}
+ elif kind=='get_commands': data={'commands':[{'name':'__bootty_checkpoint'}]}
+ elif kind=='switch_session': data={'cancelled':False}
+ elif kind=='get_messages': data={'messages':messages}
+ elif kind=='get_available_models': data={'models':[]}
+ elif kind=='prompt':
+  if value['message']=='/__bootty_checkpoint': data={'disposition':'handled'}
+  else:
+   user={'role':'user','content':value['message'],'timestamp':1}
+   answer={'role':'assistant','content':[{'type':'text','text':'Pi child completed'}],'timestamp':2,'stopReason':'stop'}
+   emit({'type':'agent_start'})
+   for message in [user,answer]: emit({'type':'message_end','message':message})
+   messages.extend([user,answer]);emit({'type':'agent_end','messages':[answer],'willRetry':False});emit({'type':'agent_settled'});data={'disposition':'started'}
+ emit({'type':'response','id':value['id'],'command':kind,'success':True,'data':data})
+",
+    )?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
+    Ok(program.to_string_lossy().into_owned())
+}
+
+#[rstest]
+fn native_child_uses_the_captured_other_provider_account_and_protocol() -> TestResult<()> {
+    let mut host = Host::new_with_child_provider(
+        true,
+        true,
+        MultiplexerBackendConfig::Native,
+        Some(AgentKind::Pi),
+    )?;
+    let binding = host.binding(false)?;
+    let created = host.start(
+        &binding,
+        "cross-provider-parent",
+        "cross-provider-parent-id",
+        "parent work",
+    )?;
+    let parent = record(&created)?;
+    let child = success(host.native_tool(
+        &parent,
+        "spawn_agent",
+        json!({"name":"pi-reviewer","provider":"pi","prompt":"Review the implementation"}),
+    )?)?;
+    let child = host.spawned_record(&child)?;
+    assert_eq!(child.config.provider, AgentKind::Pi);
+    assert_eq!(child.spawn_parent, Some(parent.target()));
+    assert_eq!(child.config.profile.as_deref(), Some("child-account"));
+    assert_eq!(child.config.cwd, parent.config.cwd);
+    assert_ne!(child.config.program, parent.config.program);
+    assert_ne!(
+        child.config.account_directory,
+        parent.config.account_directory
+    );
+    let account = host.directory.path().join("child-account");
+    let launch: Value = serde_json::from_slice(&fs::read(account.join("launch.json"))?)?;
+    assert_eq!(launch["account"], account.to_string_lossy().as_ref());
+    assert!(
+        launch["argv"]
+            .as_array()
+            .ok_or("argv")?
+            .iter()
+            .any(|argument| argument == "rpc")
+    );
+    let snapshot = host
+        .state
+        .native_agent_service()
+        .ok_or("owner")?
+        .resolve(&child.target())?
+        .snapshot();
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .any(|item| item.text.contains("Pi child completed"))
+    );
+    host.state
+        .native_agent_service()
+        .ok_or("owner")?
+        .stop(&parent.target())?;
     Ok(())
 }

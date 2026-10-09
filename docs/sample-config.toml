@@ -149,6 +149,8 @@ group-by-project = true
 sort-order = "manual"
 # Rotate the Working ring unless reduced motion is enabled.
 animate-working = true
+# Settle inactive sessions after three days; zero disables auto-settle.
+auto-settle-after-days = 3
 # Sessions colors layer on top of the active theme.
 # Any unset slot falls back to the theme-derived value.
 # background = "#11131a"
@@ -466,10 +468,15 @@ button = "none"
 default-provider = "codex"
 allow-spawn = false
 quick-model = "gpt-6-luna"
+follow-up-behavior = "queue" # queue | steer; Command/Control+Enter uses the opposite
+send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
+response-streaming = "live" # live | paragraph | complete
+collapse-composer-on-scroll = true
 
 [agents.codex]
 default-model = "" # Resolves the advertised recommended model.
 default-effort = "" # Resolves the model's supported default.
+available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
 fast-mode = false
 enabled = true
 program = ""
@@ -478,6 +485,7 @@ selected = ""
 [agents.claude]
 default-model = "" # Resolves the advertised recommended model.
 default-effort = "" # Resolves the model's supported default.
+available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
 fast-mode = false
 enabled = true
 program = ""
@@ -486,6 +494,7 @@ selected = ""
 [agents.pi]
 default-model = "" # Resolves the advertised recommended model.
 default-effort = "" # Resolves the model's supported default.
+available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
 enabled = true
 program = ""
 selected = ""

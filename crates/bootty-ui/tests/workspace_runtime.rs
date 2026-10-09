@@ -1563,6 +1563,7 @@ fn one_frame_recovers_active_and_inactive_binding_membership(directory: assert_f
                     display_name: name.to_owned(),
                     explicit: true,
                     cwd: String::new(),
+                    initial_state: bootty_mux::session_membership::SessionState::default(),
                 },
             )
             .expect("journal interrupted membership operation");
@@ -4395,7 +4396,8 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
     } = saved_lifecycle_workspace(directory.path(), attached);
     let spaces = listed_spaces(&mut state);
     let binding = spaces[0].2.clone();
-    let sibling_before = saved_metadata_listing(&mut state, binding.clone())[1].clone();
+    let initial = saved_metadata_listing(&mut state, binding.clone());
+    let sibling_before = initial[1].clone();
     let original_scope = state.mux_scope();
     if inactive {
         let other = SpaceId::from_persistence(spaces[1].1.parse().expect("Other scope"));
@@ -4417,7 +4419,7 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
     assert_eq!(deleted[1], sibling_before);
     assert_eq!(
         deleted[0]["state"],
-        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":true, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":null})
+        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":true, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":initial[0]["state"]["last_activity_at"], "auto_settle_disabled":false, "projectless":false})
     );
     assert_eq!(deleted[0]["attachment"].is_string(), attached);
     // A Binding for another Space cannot mutate the identity despite sharing a backend.
@@ -4443,7 +4445,7 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
     let restored = saved_metadata_listing(&mut state, binding);
     assert_eq!(
         restored[0]["state"],
-        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":false, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":null})
+        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":false, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":null, "auto_settle_disabled":false, "projectless":false})
     );
     assert_eq!(restored[1], sibling_before);
     assert_eq!(creates.load(Ordering::SeqCst), 0);

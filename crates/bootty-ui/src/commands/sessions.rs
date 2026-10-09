@@ -6,12 +6,13 @@ use bootty_mux::workspace::{
 command_actions! {
     SessionAction {
         ListProjects => ("project.list", "List registered projects", [], Read),
+        RemoveProject => ("project.remove", "Remove project registration", ["cwd"], Write),
         RegisterProject => ("project.register", "Register project", ["cwd"], Write),
         EditProject => ("project.edit", "Project settings", ["cwd"], Read),
         ConfigureProject => ("project.configure", "Configure project", ["cwd", "settings"], Write),
         ToggleProjectCollapsed => ("project.toggle_collapsed", "Toggle project disclosure", ["cwd"], Write),
         ListSaved => ("session.saved", "List saved sessions", [], Read),
-        SetTitle => ("session.set_title", "Edit session title", ["identity", "title"], Write),
+        SetTitle => ("session.set_title", "Edit session title", ["identity", "title", "expected_title"], Write),
         Pin => ("session.pin", "Pin session", ["identity"], Write),
         Unpin => ("session.unpin", "Unpin session", ["identity"], Write),
         Activity => ("session.activity", "Record accepted session activity", ["identity", "at"], Write),
@@ -23,12 +24,13 @@ command_actions! {
         Unarchive => ("session.unarchive", "Restore archived session", ["identity"], Write),
         Snooze => ("session.snooze", "Snooze session", ["identity", "until"], Write),
         Unsnooze => ("session.unsnooze", "Clear session snooze", ["identity"], Write),
+        AutoSettle => ("session.auto_settle", "Set auto-settle behavior", ["identity", "enabled"], Write),
         Hide => ("session.hide", "Hide session", ["identity"], Write),
         Show => ("session.show", "Show hidden session", ["identity"], Write),
         Delete => ("session.delete", "Delete saved session", ["identity"], Destructive),
         Restore => ("session.restore", "Restore deleted session", ["identity"], Write),
         Reopen => ("session.reopen", "Reopen saved session", ["identity"], Write),
-        Create => ("session.create", "Create Session", ["name", "cwd", "argv", "identity", "title"], Write),
+        Create => ("session.create", "Create Session", ["name", "cwd", "argv", "identity", "title", "projectless"], Write),
         CreateTab => ("terminal.create_tab", "Create Terminal Tab", ["argv", "cwd"], Write),
         CreatePane => ("terminal.create_pane", "Create Terminal Pane", ["direction", "argv", "cwd"], Write),
         Close => ("session.close", "Close Session", [], Destructive),
@@ -48,12 +50,14 @@ impl SessionAction {
             .copied()
             .map(|name| {
                 let mut argument = super::argument(name, ValueType::String);
-                argument.required = if self == Self::CreatePane {
+                argument.required = if self == Self::SetTitle {
+                    name != "expected_title"
+                } else if self == Self::CreatePane {
                     name != "cwd"
                 } else if self == Self::CreateTab {
                     name == "argv"
                 } else if self == Self::Create {
-                    !matches!(name, "argv" | "identity" | "title")
+                    !matches!(name, "argv" | "identity" | "title" | "projectless")
                 } else {
                     name != "argv"
                 };
@@ -65,12 +69,13 @@ impl SessionAction {
             .collect();
         let (description, target) = match self {
             Self::ListProjects => ("List projects registered on the exact Space's host, including empty projects.".to_owned(), Some(ResourceKind::Binding)),
+            Self::RemoveProject => ("Remove registration and project defaults from the exact Space, preserving files and saved sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::RegisterProject => ("Register an absolute project path on the exact Space's host without starting a session.".to_owned(), Some(ResourceKind::Binding)),
             Self::EditProject => ("Edit the registered project's name, icon and new-session defaults.".to_owned(), Some(ResourceKind::Binding)),
             Self::ConfigureProject => ("Commit project settings JSON on the exact Space; applies to new sessions and worktrees.".to_owned(), Some(ResourceKind::Binding)),
             Self::ToggleProjectCollapsed => ("Toggle the registered project's sidebar disclosure without changing its sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::ListSaved => ("List saved identities, purpose titles, project directories and observed attachments in the exact Space. Attachment is not agent or process status.".to_owned(), Some(ResourceKind::Binding)),
-            Self::SetTitle => ("Edit the saved purpose title without changing the backend name or starting/stopping any terminal. The title must be 1–256 bytes without control characters.".to_owned(), Some(ResourceKind::Binding)),
+            Self::SetTitle => ("Edit the saved purpose title without changing the backend name or starting/stopping any terminal. The title must be 1–256 bytes without control characters. An optional expected_title prevents a delayed generated title from replacing a newer edit.".to_owned(), Some(ResourceKind::Binding)),
             Self::Pin => ("Pin saved work, mark it active and clear its snooze. Preserve its identity, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::Unpin => ("Remove the saved pin while preserving lifecycle, visibility, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::Activity => ("Record accepted input at non-negative absolute UTC seconds no later than the host clock. Preserve newer activity, identity, manual order and attachment.".to_owned(), Some(ResourceKind::Binding)),
@@ -82,6 +87,7 @@ impl SessionAction {
             Self::Unarchive => ("Restore archived work with its previous lifecycle, visibility and snooze.".to_owned(), Some(ResourceKind::Binding)),
             Self::Snooze => ("Snooze saved work until non-negative absolute UTC seconds. Its previous lifecycle and attachment remain unchanged.".to_owned(), Some(ResourceKind::Binding)),
             Self::Unsnooze => ("Clear the saved snooze deadline while preserving lifecycle and visibility.".to_owned(), Some(ResourceKind::Binding)),
+            Self::AutoSettle => ("Enable inactivity-based settlement or keep the saved session active. enabled is true or false. Never closes its terminal.".to_owned(), Some(ResourceKind::Binding)),
             Self::Hide => ("Hide saved work while preserving lifecycle, snooze and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::Show => ("Show hidden saved work while preserving lifecycle and snooze.".to_owned(), Some(ResourceKind::Binding)),
             Self::Delete => ("Permanently remove a closed session's saved record and terminal checkpoint from this Space. Close live sessions first; use Archive to retain recoverable work. Native agent history, worktrees and branches remain.".to_owned(), Some(ResourceKind::Binding)),

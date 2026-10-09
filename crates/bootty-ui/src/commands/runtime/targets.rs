@@ -333,6 +333,10 @@ const CROSS_BINDING_NATIVE_DISCOVERY: [&str; 5] = [
     "agents.native.names",
 ];
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One exhaustive table owns cross-binding command authority"
+)]
 fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
         ResourceKind::Binding => {
@@ -375,6 +379,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.activate"
                         | "session.snooze"
                         | "session.unsnooze"
+                        | "session.auto_settle"
                         | "session.hide"
                         | "session.show"
                         | "session.archive"

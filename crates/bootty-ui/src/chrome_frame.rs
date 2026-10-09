@@ -141,7 +141,7 @@ pub fn prepare(
                 detached: true,
                 name: saved.backend_name.clone(),
                 display_name: saved.label().to_owned(),
-                cwd: (!saved.cwd.is_empty()).then(|| saved.cwd.clone()),
+                cwd: (!saved.state.projectless && !saved.cwd.is_empty()).then(|| saved.cwd.clone()),
                 ..SessionView::default()
             });
         }
@@ -286,14 +286,24 @@ fn session_view(
         display_name,
         active: session.active,
         selected,
-        cwd: session
+        cwd: if session
             .tag
             .identity
             .as_deref()
             .and_then(|identity| state.workspace.active.binding.sessions().get(identity))
-            .filter(|saved| !saved.cwd.is_empty())
-            .map(|saved| saved.cwd.clone())
-            .or_else(|| session.anchor.cwd.clone()),
+            .is_some_and(|saved| saved.state.projectless)
+        {
+            None
+        } else {
+            session
+                .tag
+                .identity
+                .as_deref()
+                .and_then(|identity| state.workspace.active.binding.sessions().get(identity))
+                .filter(|saved| !saved.cwd.is_empty())
+                .map(|saved| saved.cwd.clone())
+                .or_else(|| session.anchor.cwd.clone())
+        },
         pane_id: session.anchor.pane_id.clone(),
         pane_pid: session.anchor.pane_pid,
         process: session.anchor.process.clone(),
@@ -830,6 +840,7 @@ fn empty_project_row(
         secondary: None,
         project: None,
         project_path: Some(project.cwd.clone()),
+        host: None,
         branch: None,
         agents: Vec::new(),
         trailing: None,
@@ -867,6 +878,11 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             secondary: None,
             project: None,
             project_path: None,
+            host: state
+                .active_multiplexer()
+                .remote
+                .as_ref()
+                .map(bootty_mux::RemoteTarget::label),
             branch: None,
             agents: Vec::new(),
             trailing: None,
@@ -891,38 +907,45 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             context: None,
             task: None,
         });
-        rows.extend(unclaimed.into_iter().map(|session| SidebarRow {
-            key: session.session_id.clone(),
-            text: session.name,
-            secondary: None,
-            project: None,
-            project_path: None,
-            branch: None,
-            agents: Vec::new(),
-            trailing: None,
-            trailing_icon: None,
-            trailing_color: None,
-            working: false,
-            needs_attention: false,
-            number: None,
-            indent: 2,
-            tree: None,
-            artwork: None,
-            icon: Some("bootty".to_owned()),
-            diff: None,
-            color: palette.text,
-            dim_color: palette.muted,
-            kind: SidebarRowKind::Other("unassigned".to_owned()),
-            active: false,
-            current: false,
-            selectable: true,
-            target: Some(SessionTarget {
-                scope,
-                session_id: session.session_id,
-            }),
-            reorder_anchor: None,
-            context: None,
-            task: None,
+        rows.extend(unclaimed.into_iter().map(|session| {
+            SidebarRow {
+                key: session.session_id.clone(),
+                text: session.name,
+                secondary: None,
+                project: None,
+                project_path: None,
+                host: state
+                    .active_multiplexer()
+                    .remote
+                    .as_ref()
+                    .map(bootty_mux::RemoteTarget::label),
+                branch: None,
+                agents: Vec::new(),
+                trailing: None,
+                trailing_icon: None,
+                trailing_color: None,
+                working: false,
+                needs_attention: false,
+                number: None,
+                indent: 2,
+                tree: None,
+                artwork: None,
+                icon: Some("bootty".to_owned()),
+                diff: None,
+                color: palette.text,
+                dim_color: palette.muted,
+                kind: SidebarRowKind::Other("unassigned".to_owned()),
+                active: false,
+                current: false,
+                selectable: true,
+                target: Some(SessionTarget {
+                    scope,
+                    session_id: session.session_id,
+                }),
+                reorder_anchor: None,
+                context: None,
+                task: None,
+            }
         }));
     }
     rows
@@ -999,7 +1022,7 @@ fn sidebar_rows(
         let project = cwd
             .and_then(|cwd| cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
             .filter(|name| !name.is_empty())
-            .unwrap_or("Terminal");
+            .unwrap_or("No project");
         let group = cwd.unwrap_or("").to_owned();
         let base = sidebar_session_base(state, session, index, sessions.len(), palette);
         let artwork = cwd.and_then(|cwd| {
@@ -1037,7 +1060,7 @@ fn sidebar_rows(
         let title = session_title(name, project, facts.branch.as_deref(), explicit_title);
         let mut row = SidebarRow {
             text: title.to_owned(),
-            project: (!grouped).then(|| SidebarProject {
+            project: Some(SidebarProject {
                 name: project.to_owned(),
                 artwork,
             }),
@@ -1106,11 +1129,22 @@ fn sidebar_native_activity(
                 && activity.task_identity == session.identity
         })
         .collect::<Vec<_>>();
+    if let (Some(task), Some(activity)) = (
+        row.task.as_mut().filter(|task| !task.state.deleted),
+        matching.last(),
+    ) {
+        task.native_conversation = Some(bootty_control::CommandTarget {
+            kind: bootty_control::ResourceKind::Session,
+            handle: activity.id.clone(),
+            generation: activity.generation,
+        });
+    }
     row.agents
         .extend(matching.iter().map(|activity| SidebarAgent {
             key: activity.id.clone(),
             icon: activity.provider.icon().to_owned(),
             description: format!("{} · {:?}", activity.provider, activity.status),
+            model: activity.model.clone(),
         }));
     let priority = |activity: &&bootty_agents::NativeSessionActivity| {
         if activity.approval {
@@ -1169,6 +1203,7 @@ fn sidebar_agent(activity: &bootty_agents::TerminalAgentActivity) -> SidebarAgen
     SidebarAgent {
         key: activity.target.handle.clone(),
         icon: activity.provider.icon().to_owned(),
+        model: None,
         description: format!(
             "{:?} · {:?}{}",
             activity.provider,
@@ -1242,12 +1277,23 @@ fn terminal_activities(
     session_id: &str,
     window_id: Option<&str>,
 ) -> Vec<bootty_agents::TerminalAgentActivity> {
+    terminal_activities_in_scope(state, state.mux_scope(), session_id, window_id)
+}
+
+pub fn terminal_activities_in_scope(
+    state: &AppState,
+    scope: bootty_mux::controller::SpaceId,
+    session_id: &str,
+    window_id: Option<&str>,
+) -> Vec<bootty_agents::TerminalAgentActivity> {
     use bootty_control::ResourceKind;
     let Some(agents) = state.terminal_agent_service() else {
         return Vec::new();
     };
-    let scope = state.mux_scope();
-    let mux = state.mux();
+    let Some(binding_runtime) = state.workspace.binding(scope) else {
+        return Vec::new();
+    };
+    let mux = binding_runtime.mux();
     let Some(session) = mux.backend_session_by_id_or_name(session_id) else {
         return Vec::new();
     };
@@ -1290,6 +1336,11 @@ fn sidebar_session_base(
         secondary: None,
         project: None,
         project_path: session.cwd.clone(),
+        host: state
+            .active_multiplexer()
+            .remote
+            .as_ref()
+            .map(bootty_mux::RemoteTarget::label),
         branch: None,
         agents: Vec::new(),
         trailing: None,
@@ -1765,6 +1816,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
     ) || (matches!(intent, ChromeIntent::ActivateSpace(_))
         && state.config().default_open_behavior != OpenBehavior::NewWindow);
     let handled = match intent {
+        ChromeIntent::CustomSnooze(invocation) => {
+            effects.push(AppEffect::CustomSnooze(invocation));
+            true
+        }
         ChromeIntent::Command(invocation) => {
             state.dispatch_command(
                 invocation,

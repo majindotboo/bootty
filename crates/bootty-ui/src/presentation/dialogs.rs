@@ -1321,6 +1321,7 @@ impl DitchSessionDialog {
             applications: Vec::new(),
             attachments: Vec::new(),
             models: Vec::new(),
+            available_efforts: Vec::new(),
             projects: Vec::new(),
             project_labels: std::collections::BTreeMap::new(),
             selected_project: None,

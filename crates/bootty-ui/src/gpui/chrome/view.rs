@@ -47,6 +47,7 @@ pub struct GpuiChrome {
     sidebar_drag_focus: Option<FocusHandle>,
     pub(super) sidebar_drag_order: Option<(String, Option<String>)>,
     pub(super) sidebar_attention_only: bool,
+    pub(super) sidebar_settled_shelf: sidebar::SettledShelf,
     pub(super) sidebar_reconcile_hover: bool,
     pub(super) sidebar_reveal_current: Rc<Cell<bool>>,
     pub(super) sidebar_animation_epoch: std::time::Instant,
@@ -127,6 +128,7 @@ impl GpuiChrome {
             sidebar_drag_focus: None,
             sidebar_drag_order: None,
             sidebar_attention_only: false,
+            sidebar_settled_shelf: sidebar::SettledShelf::default(),
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
             sidebar_animation_epoch: std::time::Instant::now(),
@@ -260,6 +262,7 @@ impl GpuiChrome {
                     self.sidebar_project.as_deref(),
                     self.sidebar_task_view,
                     self.sidebar_attention_only,
+                    self.sidebar_settled_shelf,
                     self.sidebar_drag_order.as_ref(),
                     &self.snapshot.titlebar,
                     self.pointer_hovered_session.as_ref(),
@@ -686,6 +689,32 @@ impl GpuiChrome {
                 })
             };
         let content = self.render_status_bars(cx);
+        let render_sidebar = |sidebar: &super::SidebarSnapshot, cx: &Context<Self>| {
+            sidebar::render(
+                sidebar,
+                &self.sidebar_search,
+                self.sidebar_project.as_deref(),
+                self.sidebar_task_view,
+                self.sidebar_attention_only,
+                self.sidebar_settled_shelf,
+                self.sidebar_drag_order.as_ref(),
+                &titlebar,
+                pointer_hovered_session.as_ref(),
+                &spaces,
+                transition,
+                &layout,
+                sidebar_header_height,
+                false,
+                colors,
+                &self.sidebar_row_bounds,
+                &self.sidebar_scroll,
+                &self.sidebar_reveal_current,
+                sidebar_reconcile_hover,
+                &self.navigation_hints,
+                self.hint_modifiers,
+                cx,
+            )
+        };
         let body_row = div()
             .flex_1()
             .min_w_0()
@@ -698,62 +727,14 @@ impl GpuiChrome {
                 sidebar
                     .as_ref()
                     .filter(|_| layout.sidebar_position == SidebarPosition::Left),
-                |element, sidebar| {
-                    element.child(sidebar::render(
-                        sidebar,
-                        &self.sidebar_search,
-                        self.sidebar_project.as_deref(),
-                        self.sidebar_task_view,
-                        self.sidebar_attention_only,
-                        self.sidebar_drag_order.as_ref(),
-                        &titlebar,
-                        pointer_hovered_session.as_ref(),
-                        &spaces,
-                        transition,
-                        &layout,
-                        sidebar_header_height,
-                        false,
-                        colors,
-                        &self.sidebar_row_bounds,
-                        &self.sidebar_scroll,
-                        &self.sidebar_reveal_current,
-                        sidebar_reconcile_hover,
-                        &self.navigation_hints,
-                        self.hint_modifiers,
-                        cx,
-                    ))
-                },
+                |element, sidebar| element.child(render_sidebar(sidebar, cx)),
             )
             .child(content)
             .when_some(
                 sidebar
                     .as_ref()
                     .filter(|_| layout.sidebar_position == SidebarPosition::Right),
-                |element, sidebar| {
-                    element.child(sidebar::render(
-                        sidebar,
-                        &self.sidebar_search,
-                        self.sidebar_project.as_deref(),
-                        self.sidebar_task_view,
-                        self.sidebar_attention_only,
-                        self.sidebar_drag_order.as_ref(),
-                        &titlebar,
-                        pointer_hovered_session.as_ref(),
-                        &spaces,
-                        transition,
-                        &layout,
-                        sidebar_header_height,
-                        false,
-                        colors,
-                        &self.sidebar_row_bounds,
-                        &self.sidebar_scroll,
-                        &self.sidebar_reveal_current,
-                        sidebar_reconcile_hover,
-                        &self.navigation_hints,
-                        self.hint_modifiers,
-                        cx,
-                    ))
-                },
+                |element, sidebar| element.child(render_sidebar(sidebar, cx)),
             );
         div()
             .flex_1()
@@ -894,6 +875,35 @@ pub(super) fn popup_session_menu(
     };
     let mut snooze = task.map_or_else(Vec::new, |task| sidebar::saved_snooze_menu(task, now));
     for row in GpuiChrome::menu_rows(context) {
+        if matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.archive" | "session.unarchive"))
+            && let Some(task) = task
+            && !task.state.deleted
+        {
+            let task = task.clone();
+            let owner = owner.clone();
+            menu = menu.submenu("Auto-settle behavior", window, cx, move |mut menu, _, _| {
+                for (label, enabled) in [("Use inactivity setting", true), ("Keep active", false)] {
+                    let mut invocation = bootty_control::CommandInvocation::new(
+                        "session.auto_settle",
+                        vec![task.identity.clone(), enabled.to_string()],
+                        bootty_control::Caller::Internal,
+                    );
+                    invocation.target.clone_from(&task.binding);
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(enabled != task.state.auto_settle_disabled)
+                            .disabled(task.pending)
+                            .on_click(move |_, _, cx| {
+                                _ = owner.update(cx, |_, cx| {
+                                    cx.emit(ChromeIntent::Command(invocation.clone()));
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        }
         if matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.hide" | "session.show"))
             && !snooze.is_empty()
         {

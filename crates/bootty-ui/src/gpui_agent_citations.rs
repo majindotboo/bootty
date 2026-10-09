@@ -75,6 +75,61 @@ pub(super) struct ResponseSelection {
 }
 
 impl NativeAgentSessionView {
+    pub(super) fn open_response_annotation(
+        &self,
+        message_id: &str,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::{WindowExt as _, text::TextView};
+        let Some(position) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .position(|item| item.id == message_id)
+        else {
+            return;
+        };
+        let Some(annotation) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .take(position)
+            .rev()
+            .filter(|item| item.role == "user")
+            .find_map(|item| {
+                let annotations = bootty_agents::response_annotations(&item.text);
+                if annotations.is_empty() {
+                    None
+                } else {
+                    Some(annotations)
+                }
+            })
+            .and_then(|annotations| {
+                ix.checked_sub(1)
+                    .and_then(|ix| annotations.get(ix))
+                    .cloned()
+            })
+        else {
+            return;
+        };
+        let mut quote = String::new();
+        for line in annotation.text.lines() {
+            quote.push_str("> ");
+            quote.push_str(line);
+            quote.push('\n');
+        }
+        let content = format!("{quote}\n{}", annotation.annotation);
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(format!("Annotation {ix}"))
+                .child(TextView::markdown("response-annotation", content.clone()).selectable(true))
+        });
+    }
+
     pub(super) fn observe_response_selection(
         message_id: String,
         state: &Entity<TextViewState>,

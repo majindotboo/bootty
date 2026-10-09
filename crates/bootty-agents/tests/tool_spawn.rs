@@ -61,6 +61,7 @@ fn spawn_lease(binding: CommandTarget, policy: ToolPolicy) -> Result<ToolLease, 
         Vec::new(),
         Some(ToolSpawnContext {
             profile: Some("work".to_owned()),
+            providers: Vec::new(),
         }),
     )
 }
@@ -827,4 +828,88 @@ fn dropping_a_pending_spawn_guard_cancels_the_unaccepted_queue_request(binding: 
     assert!(parent.begin_spawn(&request).is_err());
     drop(guards);
     assert!(parent.begin_spawn(&request).is_ok());
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Pi)]
+fn captured_provider_delegation_keeps_account_and_ancestor_authority(
+    binding: CommandTarget,
+    #[case] provider: AgentKind,
+) {
+    let launch = bootty_agents::AgentLaunch {
+        program: format!("/host/{provider}"),
+        cwd: Some("/project".into()),
+        arguments: vec!["--captured".into()],
+        ephemeral: false,
+        account_directory: Some(format!("/accounts/{provider}")),
+    };
+    let parent = ToolLease::issue_with_spawn(
+        ToolScope {
+            provider: AgentKind::Claude,
+            binding: binding.clone(),
+        },
+        Caller::Socket,
+        spawning_policy(),
+        Vec::new(),
+        Some(ToolSpawnContext {
+            profile: Some("work".into()),
+            providers: vec![bootty_agents::ToolSpawnProvider {
+                provider,
+                profile: Some("selected".into()),
+                launch: bootty_agents::ToolSpawnLaunch::Terminal(launch.clone()),
+            }],
+        }),
+    )
+    .unwrap();
+    parent.bind(&binding, parent_terminal()).unwrap();
+    let request = ToolSpawnRequest::Agent {
+        name: "child".into(),
+        title: None,
+        provider,
+        profile: None,
+        prompt: "Review changes".into(),
+    };
+    let guard = parent.begin_spawn(&request).unwrap();
+    let bridge = ToolBridge::prepare_child(
+        guard.authority(),
+        Path::new("/host/bootty-dev"),
+        Arc::new(record(Arc::default())),
+    )
+    .unwrap();
+    assert_eq!(bridge.lease().scope().provider, provider);
+    assert_eq!(bridge.lease().scope().binding, binding);
+    let Some(bootty_agents::ToolSpawnLaunch::Terminal(captured)) = bridge.lease().spawn_launch()
+    else {
+        panic!("captured terminal launch missing")
+    };
+    assert_eq!(captured.account_directory, launch.account_directory);
+    assert_eq!(captured.program, launch.program);
+    assert_eq!(captured.arguments, launch.arguments);
+    bridge.lease().bind(&binding, child_terminal()).unwrap();
+    assert_eq!(bridge.lease().spawn_enabled(), false);
+    let forged = ToolSpawnRequest::Agent {
+        name: "child".into(),
+        title: None,
+        provider,
+        profile: Some("other-account".into()),
+        prompt: "Review changes".into(),
+    };
+    assert!(parent.authorize_spawn(&forged).is_err());
+    let protocol = ToolProtocol::new(parent.clone());
+    let response = call(
+        &protocol,
+        "list_providers",
+        &json!({}),
+        &record(Arc::default()),
+    )
+    .unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"]["providers"][0]["provider"],
+        json!(provider)
+    );
+    assert!(!response.to_string().contains("/accounts/"));
+    parent.revoke();
+    assert_eq!(bridge.lease().enabled(None), false);
 }

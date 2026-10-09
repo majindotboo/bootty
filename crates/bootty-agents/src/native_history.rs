@@ -17,6 +17,23 @@ pub struct NativeHistoryPage {
 }
 
 impl NativeHistoryPage {
+    /// Preserve live updates and recover completed replies truncated by older Bootty versions.
+    #[must_use]
+    pub fn with_live_transcript(&self, live: &[NativeTranscriptItem]) -> Vec<NativeTranscriptItem> {
+        self.transcript
+            .iter()
+            .filter(|item| !live.iter().any(|current| current.id == item.id))
+            .cloned()
+            .chain(live.iter().map(|current| {
+                let mut item = current.clone();
+                if let Some(provider) = recovered_reply(current, &self.transcript) {
+                    item.text.clone_from(&provider.text);
+                }
+                item
+            }))
+            .collect()
+    }
+
     /// Retain already loaded turns while admitting an adjacent provider page.
     pub fn retain_loaded(&mut self, loaded: &Self) {
         let incoming_ids = self
@@ -300,6 +317,14 @@ impl NativeAgentSession {
             .iter()
             .any(|item| item.id == citation.message_id)
         {
+            let quotes = lock(&self.history_quotes);
+            if live.transcript.iter().any(|item| {
+                item.id == citation.message_id
+                    && recovered_reply(item, &quotes.transcript).is_some()
+            }) {
+                return citation.validate(&quotes.transcript);
+            }
+            drop(quotes);
             return citation.validate(&live.transcript);
         }
         citation.validate(&lock(&self.history_quotes).transcript)
@@ -365,6 +390,30 @@ impl NativeAgentSession {
         }
         Err("The response exceeds the side-chat history lookback limit".into())
     }
+}
+
+fn recovered_reply<'a>(
+    current: &NativeTranscriptItem,
+    history: &'a [NativeTranscriptItem],
+) -> Option<&'a NativeTranscriptItem> {
+    // Older completed caches carried this presentation marker into durable snapshots.
+    // Recover only an exact prefix from the provider; live edits and authored prompts win.
+    if !current.complete || !matches!(current.role.as_str(), "assistant" | "thinking") {
+        return None;
+    }
+    let (prefix, _) = current
+        .text
+        .split_once("\n[This recent transcript view truncates output after 16 KiB]")?;
+    history.iter().find(|item| {
+        item.id == current.id
+            && item.role == current.role
+            && item.complete
+            && item.text.len() > prefix.len()
+            && item.text.starts_with(prefix)
+            && !item
+                .text
+                .contains("[This recent transcript view truncates output after 16 KiB]")
+    })
 }
 
 fn legacy_history_cursor(offset: usize, entry: &serde_json::Value) -> String {
