@@ -139,7 +139,7 @@ fn technical_summary(message: &str) -> String {
         return "The terminal connection was lost. Try reopening this pane.".to_owned();
     }
     if lower.contains("rmux") {
-        return "The terminal is unavailable. Try reconnecting.".to_owned();
+        return first_sentence(message);
     }
     if lower.contains("ssh") || lower.contains("connection") {
         return "Could not reach the remote workspace.".to_owned();

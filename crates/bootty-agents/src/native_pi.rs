@@ -298,6 +298,15 @@ impl NativeAgentSession {
             message_item(&mut snapshot, message, true);
         }
         snapshot.restore_image_references(&previous);
+        // History retains the last failed response even when the resumed process is ready.
+        snapshot.error = messages
+            .iter()
+            .rev()
+            .find(|message| field(message, "role") == "assistant")
+            .and_then(assistant_failure);
+        if snapshot.error.is_some() {
+            snapshot.completed_turn = false;
+        }
         snapshot.changed();
         let result = snapshot.clone();
         drop(snapshot);
@@ -404,6 +413,17 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
     Ok(())
 }
 
+fn assistant_failure(message: &Value) -> Option<String> {
+    (field(message, "role") == "assistant" && field(message, "stopReason") == "error").then(|| {
+        bounded_text(
+            field(message, "errorMessage")
+                .as_str()
+                .unwrap_or("Pi run failed")
+                .to_owned(),
+        )
+    })
+}
+
 fn ingest_message(snapshot: &mut NativeSessionSnapshot, value: &Value) {
     let complete = field(value, "type") == "message_end";
     let message = field(value, "message");
@@ -458,12 +478,18 @@ fn message_content(snapshot: &mut NativeSessionSnapshot, message: &Value, comple
                 capture_usage(snapshot, usage);
             }
             let blocks = content.as_array().into_iter().flatten();
-            let text = blocks
+            let mut text = blocks
                 .clone()
                 .filter(|block| field(block, "type") == "text")
                 .filter_map(|block| field(block, "text").as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+            if let Some(error) = assistant_failure(message) {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&error);
+            }
             let thinking = blocks
                 .filter(|block| field(block, "type") == "thinking")
                 .filter_map(|block| field(block, "thinking").as_str())
