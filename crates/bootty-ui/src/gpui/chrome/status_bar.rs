@@ -711,7 +711,16 @@ fn render_tab(
     .selected(active)
     .accessibility_label(label)
     .when(insertion_here, |element| {
-        element.border_l_2().border_color(color(colors.accent))
+        element.child(
+            div()
+                .absolute()
+                .left_0()
+                .top_1()
+                .bottom_1()
+                .w_px()
+                .bg(color(colors.accent))
+                .rounded_none(),
+        )
     })
     .when_some(tab_focus.clone(), |element, focus| {
         element.track_focus(&focus).focusable().tab_index(0_isize)

@@ -1525,7 +1525,6 @@ fn composer_space_focus_reaches_a_single_available_space(cx: &TestAppContext) {
             );
         });
     });
-    cx.simulate_keystrokes("space");
     cx.run_until_parked();
     cx.simulate_keystrokes("down enter");
     cx.run_until_parked();
@@ -1574,4 +1573,53 @@ fn composer_model_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
             DialogIntent::FieldChanged { field, value, .. } if field == "model" && value == "current"
         )), "focus action must open the model menu and accept its advertised selection");
     });
+}
+
+#[gpui_kit::test]
+fn composer_control_shortcuts_open_and_select_without_an_extra_activation(cx: &TestAppContext) {
+    for (control, field, label) in [
+        (
+            bootty_gpui::ComposerControl::Effort,
+            "reasoning",
+            "Reasoning",
+        ),
+        (
+            bootty_gpui::ComposerControl::Permissions,
+            "permissions",
+            "Permissions",
+        ),
+    ] {
+        let mut spec = native_agent_form_spec();
+        spec.fields.push(bootty_gpui::DialogField {
+            id: field.into(),
+            label: label.into(),
+            value: "First".into(),
+            placeholder: String::new(),
+            kind: bootty_gpui::DialogFieldKind::Choice(vec!["First".into(), "Second".into()]),
+        });
+        let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200., 900., 16.);
+        probe.update_in(&mut cx, |probe, window, cx| {
+            probe.dialog.update(cx, |dialog, cx| {
+                dialog.perform(CommandAction::Focus(control), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        probe.update_in(&mut cx, |_, window, _| {
+            assert!(
+                gpui_kit::base::test_support::snapshots(window)
+                    .iter()
+                    .any(|item| item.path().last()
+                        == Some(&gpui_kit::ElementId::from("popup-menu"))
+                        && item.visible()),
+                "{field} shortcut must open its menu"
+            );
+        });
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        probe.read_with(&cx, |probe, _| {
+            assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+                DialogIntent::FieldChanged { field: changed, value, .. } if changed == field && value == "First"
+            )), "shortcut must open its menu and permit selection");
+        });
+    }
 }
